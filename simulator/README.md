@@ -27,18 +27,24 @@ The implemented slices provide:
   signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
 - hosted UART output for the BIOS numeric printer, complete-task `ABORT`, and
   the stable execution-token behavior needed by source-defined `DEFER`/`IS`;
-  and
+- a memory-backed canonical foreground data/return stack with exact downward
+  cell geometry, retained continuation slots, `SP@`/`SP!` and `RP@`/`RP!`; and
 - an exact-record bootstrap loader that supplies a shadowable `REQUIRE` before
   KDOS exists, with nested budgets, cycle detection, and registry-only failure
   cleanup.
 
-This is deliberately not yet a complete MegaForth environment. Task stacks
-are not yet backed by the sparse memory substrate. Persistent compiler state,
-`CATCH`/`THROW`, the BIOS evaluator surfaces, tasks, clocks, complete UART/MMIO
-service, media, and an ordinary complete KDOS load also remain. The simulator
-does not execute ROMs, MP64 binaries, or MF64 native dictionaries, and it makes
-no machine-timing, interrupt, snapshot, RTL, or hardware claim. Those remain
-the architectural emulator's and physical implementation's responsibility.
+This is deliberately not yet a complete MegaForth environment. Additional
+task stack arenas and scheduling remain pending. Persistent compiler state,
+the BIOS evaluator surfaces, clocks, complete UART/MMIO service, media, and an
+ordinary complete KDOS load also remain. The simulator does not execute ROMs,
+MP64 binaries, or MF64 native dictionaries, and it makes no machine-timing,
+interrupt, snapshot, RTL, or hardware claim. Those remain the architectural
+emulator's and physical implementation's responsibility.
+
+The current stack bounds enforce the canonical mapped Bank 0 halves. Live
+`HERE`/heap collision policy is part of the pending KDOS allocator work, so
+this slice does not yet claim complete dictionary-versus-stack overflow
+fidelity.
 
 ## Run it
 
@@ -90,10 +96,30 @@ a precompiled caller, and checks guest body bytes, stable execution tokens,
 `ABORT`, numeric UART output, and unsigned byte-string comparison. This is a
 staged source-load proof, not yet a claim that complete `kdos.f` loads.
 
+The first exception proof then evaluates byte-exact `kdos.f` logical lines
+618 through 675 from the same revision. It installs the ordinary KDOS
+per-context `HANDLER` tables and source-defined `CATCH`/`THROW`; the simulator
+does not substitute host exception words. Acceptance covers normal completion,
+zero and nonzero throws, nested rethrow, exact data/return-stack restoration,
+and unwinding through an active loop and deferred `DOES>` action. `ABORT`
+remains the distinct noncatchable BIOS reset path. This focused seam is not a
+claim that the intervening allocator source has loaded yet.
+
+A host-side budget or implementation error that escapes a dispatch which has
+observed `RP@` marks that execution context non-reusable. The registration is
+kept for the complete dispatch because unchanged KDOS pops a saved handler
+cell immediately before restoring the `HANDLER` variable. This conservative,
+fail-closed boundary covers that one-operation cleanup window and prevents a
+stale guest handler from reviving abandoned continuations. Transactional
+context recovery belongs to the pending evaluator/rollback slice. Ordinary
+source `THROW` never crosses that host boundary, and guest `RP!` remains a raw
+aligned restore within its caller-owned stack span.
+
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next slice advances to exact memory-backed stack pointers, `CATCH`/`THROW`,
-and evaluator rollback before extending the unchanged KDOS source frontier.
+The next slices extend the contiguous unchanged KDOS prefix and then add the
+persistent evaluator state and numeric dictionary rollback required by its
+checked source-loader surface.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

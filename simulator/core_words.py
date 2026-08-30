@@ -51,6 +51,12 @@ def _two_over(context: ExecutionContext) -> None:
     context.data.push(second)
 
 
+def _question_dup(context: ExecutionContext) -> None:
+    value = context.data.peek()
+    if value != 0:
+        context.data.push(value)
+
+
 def _pick(context: ExecutionContext) -> None:
     offset = context.data.pop()
     context.data.push(context.data.peek(offset))
@@ -181,6 +187,27 @@ def _c_comma(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.dictionary.c_comma(context.data.pop())
 
 
+def _cells(context: ExecutionContext) -> None:
+    context.data.push(context.data.pop() << 3)
+
+
+def _stack_pointer_fetch(context: ExecutionContext) -> None:
+    pointer = context.data.pointer
+    context.data.push(pointer)
+
+
+def _return_stack_pointer_fetch(context: ExecutionContext) -> None:
+    context.data.push(context.returns.capture_pointer())
+
+
+def _push_one(context: ExecutionContext) -> None:
+    context.data.push(1)
+
+
+def _push_zero(context: ExecutionContext) -> None:
+    context.data.push(0)
+
+
 def _tick(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     name = runtime.parse_input_word()
     word = runtime.find(name) if name else None
@@ -278,6 +305,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b">R", DirectiveKind.TO_R),
         (b"R>", DirectiveKind.R_FROM),
         (b"R@", DirectiveKind.R_FETCH),
+        (b"SP!", DirectiveKind.SP_STORE),
+        (b"RP!", DirectiveKind.RP_STORE),
         (b"DO", DirectiveKind.DO),
         (b"?DO", DirectiveKind.QUESTION_DO),
         (b"LOOP", DirectiveKind.LOOP),
@@ -299,6 +328,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"2DUP", _two_dup),
         (b"2DROP", _two_drop),
         (b"2OVER", _two_over),
+        (b"?DUP", _question_dup),
         (b"PICK", _pick),
         (b"+", _add),
         (b"*", _multiply),
@@ -323,6 +353,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"ALLOT", lambda context: _allot(runtime, context)),
         (b",", lambda context: _comma(runtime, context)),
         (b"C,", lambda context: _c_comma(runtime, context)),
+        (b"CELLS", _cells),
+        (b"SP@", _stack_pointer_fetch),
+        (b"RP@", _return_stack_pointer_fetch),
+        (b"NCORES", _push_one),
+        (b"COREID", _push_zero),
+        (b"TASK-ID", _push_zero),
         (b"'", lambda context: _tick(runtime, context)),
         (b">BODY", lambda context: _to_body(runtime, context)),
         (b"COMPARE", lambda context: _compare(runtime, context)),

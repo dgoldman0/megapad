@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import pytest
 
-from shared.cells import MASK64, TRUE
+from shared.cells import CELL_BYTES, MASK64, TRUE
 from simulator.errors import ExecutionError, SourceError, StepBudgetExceeded
-from simulator.ir import Branch, BranchZero, InstallDoes, Loop, QuestionDo
-from simulator.memory import SparseAddressSpace
+from simulator.ir import (
+    Branch,
+    BranchZero,
+    InstallDoes,
+    Loop,
+    QuestionDo,
+    RestoreDataStackPointer,
+    RestoreReturnStackPointer,
+)
+from simulator.memory import AddressClass, SparseAddressSpace
 from simulator.runtime import (
     ColonDefinition,
     ConstantDefinition,
     CreatedDefinition,
+    DirectiveKind,
     DoesBodyRef,
     MegaForthRuntime,
 )
-from simulator.stacks import ReturnStackShapeError
+from simulator.stacks import ReturnStackShapeError, StackPointerError
 
 
 def test_runtime_owns_a_default_address_space_or_uses_the_injected_one() -> None:
@@ -29,6 +38,92 @@ def test_runtime_owns_a_default_address_space_or_uses_the_injected_one() -> None
 
     with pytest.raises(TypeError, match="SparseAddressSpace"):
         MegaForthRuntime(memory=object())  # type: ignore[arg-type]
+
+
+def test_main_context_uses_the_exact_cell_aligned_bank0_stack_halves() -> None:
+    runtime = MegaForthRuntime()
+    bank0 = next(
+        region
+        for region in runtime.memory.regions
+        if region.kind is AddressClass.BANK0
+    )
+
+    assert runtime.main_context.data.pointer == bank0.base + bank0.size // 2
+    assert runtime.main_context.returns.pointer == bank0.limit
+    assert runtime.main_context.data.pointer % CELL_BYTES == 0
+    assert runtime.main_context.returns.pointer % CELL_BYTES == 0
+
+
+def test_compiled_stack_pointer_restores_are_explicit_ir_operations() -> None:
+    runtime = MegaForthRuntime()
+    runtime.define_directive("DSP-RESTORE", DirectiveKind.SP_STORE)
+    runtime.define_directive("RSP-RESTORE", DirectiveKind.RP_STORE)
+    runtime.evaluate(
+        b": RESTORE-DATA DSP-RESTORE DROP 77 ; "
+        b": ESCAPE RSP-RESTORE 42 ; "
+        b": CALL-ESCAPE RP@ ESCAPE 99 ;"
+    )
+
+    restore_data = runtime.find("RESTORE-DATA")
+    escape = runtime.find("ESCAPE")
+    assert restore_data is not None
+    assert escape is not None
+    assert isinstance(restore_data.implementation, ColonDefinition)
+    assert isinstance(escape.implementation, ColonDefinition)
+    assert any(
+        isinstance(operation, RestoreDataStackPointer)
+        for operation in restore_data.implementation.operations
+    )
+    assert any(
+        isinstance(operation, RestoreReturnStackPointer)
+        for operation in escape.implementation.operations
+    )
+
+    context = runtime.main_context
+    context.data.push(11)
+    saved_data_pointer = context.data.pointer
+    context.data.push(22)
+    context.data.push(saved_data_pointer)
+    runtime.execute("RESTORE-DATA", context=context)
+    assert context.data.snapshot() == (77,)
+
+    context.data.clear()
+    runtime.execute("CALL-ESCAPE", context=context)
+    assert context.data.snapshot() == (42,)
+    assert context.returns.snapshot() == ()
+
+
+def test_out_of_bounds_rp_restore_preserves_argument_and_context_usability() -> None:
+    runtime = MegaForthRuntime()
+    runtime.define_directive("RSP-RESTORE", DirectiveKind.RP_STORE)
+    runtime.evaluate(b": BAD-RSP RSP-RESTORE ;")
+    context = runtime.main_context
+    invalid_pointer = 0
+    context.data.push(invalid_pointer)
+
+    with pytest.raises(StackPointerError, match="caller-owned stack span"):
+        runtime.execute("BAD-RSP", context=context)
+
+    assert context.data.snapshot() == (invalid_pointer,)
+    assert context.returns.snapshot() == ()
+    assert context.reusable
+
+
+def test_in_span_rp_restore_does_not_require_a_prior_rp_fetch() -> None:
+    runtime = MegaForthRuntime()
+    runtime.define_directive("RSP-RESTORE", DirectiveKind.RP_STORE)
+    runtime.evaluate(b": RAW-RSP RSP-RESTORE ;")
+    context = runtime.main_context
+
+    # Entering RAW-RSP places its root continuation in this slot.  RP! is a
+    # raw machine-compatible restore and must not require an RP@ registration.
+    root_pointer = context.returns.empty_pointer - CELL_BYTES
+    context.data.push(root_pointer)
+    runtime.execute("RAW-RSP", context=context)
+
+    assert context.data.snapshot() == ()
+    assert context.returns.snapshot() == ()
+    assert context.reusable
 
 
 def test_created_word_pushes_its_body_in_every_dispatch_path() -> None:

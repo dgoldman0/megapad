@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Callable, TypeAlias
 
-from shared.cells import u64
+from shared.cells import CELL_BYTES, u64
 from simulator.dictionary import Dictionary, Word
 from simulator.errors import (
     ExecutionError,
@@ -30,13 +30,15 @@ from simulator.ir import (
     Loop,
     Operation,
     QuestionDo,
+    RestoreDataStackPointer,
+    RestoreReturnStackPointer,
     RPeek,
     RPop,
     RPush,
     Return,
     Unloop,
 )
-from simulator.memory import SparseAddressSpace
+from simulator.memory import AddressClass, SparseAddressSpace
 from simulator.source import SourceBuffer, SourceCursor, SourceLocation
 from simulator.stacks import DataStack, ReturnStack
 
@@ -47,6 +49,30 @@ class ExecutionContext:
 
     data: DataStack = field(default_factory=DataStack)
     returns: ReturnStack = field(default_factory=ReturnStack)
+    _host_control_fault: str | None = field(default=None, init=False, repr=False)
+
+    @property
+    def reusable(self) -> bool:
+        """Whether another public dispatch can safely use this context."""
+
+        return self._host_control_fault is None
+
+    @property
+    def host_control_fault(self) -> str | None:
+        """Explain why a host escape made this context non-reusable."""
+
+        return self._host_control_fault
+
+    def _require_reusable(self) -> None:
+        if self._host_control_fault is not None:
+            raise ExecutionError(
+                "execution context is not reusable after a host escape across "
+                f"an RP@-observing dispatch: {self._host_control_fault}"
+            )
+
+    def _mark_host_control_fault(self, error: BaseException) -> None:
+        if self._host_control_fault is None:
+            self._host_control_fault = type(error).__name__
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +154,8 @@ class DirectiveKind(Enum):
     UNLOOP = auto()
     BRACKET_TICK = auto()
     DOES = auto()
+    SP_STORE = auto()
+    RP_STORE = auto()
     PAREN_COMMENT = auto()
     BACKSLASH_COMMENT = auto()
     PROVIDED = auto()
@@ -227,7 +255,39 @@ class MegaForthRuntime:
             start_address=dictionary_start,
             memory=self.memory,
         )
-        self.main_context = ExecutionContext()
+        bank0 = next(
+            (
+                region
+                for region in self.memory.regions
+                if region.kind is AddressClass.BANK0
+            ),
+            None,
+        )
+        if bank0 is None:
+            raise ValueError("hosted runtime requires a mapped Bank 0")
+        data_empty = bank0.base + bank0.size // 2
+        return_empty = bank0.limit
+        if (
+            data_empty <= bank0.base
+            or return_empty <= data_empty
+            or data_empty % CELL_BYTES
+            or return_empty % CELL_BYTES
+        ):
+            raise ValueError(
+                "Bank 0 must provide cell-aligned data and return stack halves"
+            )
+        self.main_context = ExecutionContext(
+            data=DataStack(
+                memory=self.memory,
+                floor=bank0.base,
+                empty_pointer=data_empty,
+            ),
+            returns=ReturnStack(
+                memory=self.memory,
+                floor=data_empty,
+                empty_pointer=return_empty,
+            ),
+        )
         self._numeric_base = 10
         self._provided: set[bytes] = set()
         self._active_input_states: list[_EvaluationState] = []
@@ -295,6 +355,13 @@ class MegaForthRuntime:
         self._numeric_base = u64(base)
 
     def new_context(self) -> ExecutionContext:
+        """Return an unbacked host scratch context.
+
+        The canonical one-core guest stack geometry belongs to
+        :attr:`main_context`.  Additional guest tasks will require explicit,
+        caller-owned stack arenas rather than silently aliasing that storage.
+        """
+
         return ExecutionContext()
 
     def find(self, name: bytes | str) -> Word | None:
@@ -406,6 +473,7 @@ class MegaForthRuntime:
         active_context = self.main_context if context is None else context
         if not isinstance(active_context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
+        active_context._require_reusable()
 
         meter, starting_steps = self._meter_for_public_call(step_budget)
         state: _EvaluationState | None = None
@@ -446,6 +514,7 @@ class MegaForthRuntime:
         active_context = self.main_context if context is None else context
         if not isinstance(active_context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
+        active_context._require_reusable()
         word = self._resolve_word(name_or_xt)
         meter, starting_steps = self._meter_for_public_call(step_budget)
         self._execute_guarded(word, active_context, meter)
@@ -586,6 +655,10 @@ class MegaForthRuntime:
             entry_ip = len(compiler.operations) + 2
             compiler.operations.append(InstallDoes(entry_ip))
             compiler.operations.append(Return())
+        elif kind is DirectiveKind.SP_STORE:
+            compiler.operations.append(RestoreDataStackPointer())
+        elif kind is DirectiveKind.RP_STORE:
+            compiler.operations.append(RestoreReturnStackPointer())
         else:
             raise AssertionError(f"unhandled directive {kind}")
 
@@ -597,18 +670,25 @@ class MegaForthRuntime:
     ) -> None:
         """Execute atomically with respect to internal return-stack state."""
 
+        context._require_reusable()
         return_snapshot = context.returns.snapshot()
+        capture_checkpoint = context.returns.pointer_capture_checkpoint()
         self._active_meters.append(meter)
         try:
             self._execute_top(word, context, meter)
-        except ForthAbort:
+        except ForthAbort as exc:
             # ABORT deliberately cleared the complete task.  Restoring the
             # pre-dispatch return stack would resurrect caller continuations.
+            if context.returns.has_pointer_captures_after(capture_checkpoint):
+                context._mark_host_control_fault(exc)
             raise
-        except BaseException:
+        except BaseException as exc:
+            if context.returns.has_pointer_captures_after(capture_checkpoint):
+                context._mark_host_control_fault(exc)
             context.returns.restore(return_snapshot)
             raise
         finally:
+            context.returns.restore_pointer_captures(capture_checkpoint)
             active = self._active_meters.pop()
             if active is not meter:
                 raise AssertionError("active semantic step-meter stack is corrupted")
@@ -722,6 +802,14 @@ class MegaForthRuntime:
                     source_xt=current.xt,
                     entry_ip=operation.entry_ip,
                 )
+                ip += 1
+            elif isinstance(operation, RestoreDataStackPointer):
+                context.data.restore_from_top()
+                ip += 1
+            elif isinstance(operation, RestoreReturnStackPointer):
+                pointer = context.data.peek()
+                context.returns.set_pointer(pointer)
+                context.data.pop()
                 ip += 1
             elif isinstance(operation, Return):
                 continuation = context.returns.pop_continuation()

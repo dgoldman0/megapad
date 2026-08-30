@@ -5,11 +5,14 @@ from __future__ import annotations
 import pytest
 
 from shared.cells import MASK64
+from simulator.memory import SparseAddressSpace
 from simulator.stacks import (
     Continuation,
     DataStack,
     ReturnStack,
     ReturnStackShapeError,
+    StackOverflow,
+    StackPointerError,
     StackUnderflow,
 )
 
@@ -176,3 +179,212 @@ def test_return_stack_restore_rejects_untrusted_entry_shapes() -> None:
         stack.restore([])  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="cells or continuations"):
         stack.restore((object(),))  # type: ignore[arg-type]
+
+
+def test_backed_data_stack_uses_downward_little_endian_guest_cells() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = DataStack(
+        [0x0102_0304_0506_0708, -1],
+        memory=memory,
+        floor=0x40,
+        empty_pointer=0x100,
+    )
+
+    assert stack.backed
+    assert stack.floor == 0x40
+    assert stack.empty_pointer == 0x100
+    assert stack.capacity == 24
+    assert stack.pointer == 0xF0
+    assert memory.read_bytes(0xF0, 16) == (
+        bytes.fromhex("ffffffffffffffff")
+        + bytes.fromhex("0807060504030201")
+    )
+    assert stack.snapshot() == (0x0102_0304_0506_0708, MASK64)
+
+
+def test_backed_data_stack_reads_raw_mutations_and_retains_popped_bytes() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = DataStack(
+        memory=memory,
+        floor=0x40,
+        empty_pointer=0x100,
+    )
+    stack.push(7)
+    occupied = stack.pointer
+
+    memory.write64(occupied, 9)
+    assert stack.peek() == 9
+    assert stack.pop() == 9
+    assert stack.pointer == 0x100
+    assert memory.read64(occupied) == 9
+
+    stack.set_pointer(occupied)
+    assert stack.snapshot() == (9,)
+
+
+def test_sp_store_restores_pointer_from_tos_without_normally_popping_it() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = DataStack(
+        memory=memory,
+        floor=0x40,
+        empty_pointer=0x100,
+    )
+    stack.push(0xAA)
+    saved_pointer = stack.pointer
+    stack.push(0xBB)
+    stack.push(saved_pointer)
+    sp_store_slot = stack.pointer
+
+    stack.restore_from_top()
+
+    assert stack.pointer == saved_pointer
+    assert stack.snapshot() == (0xAA,)
+    assert memory.read64(sp_store_slot) == saved_pointer
+
+
+@pytest.mark.parametrize("stack_type", [DataStack, ReturnStack])
+def test_backed_stack_pointer_bounds_alignment_overflow_and_clear(stack_type) -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = stack_type(
+        memory=memory,
+        floor=0xE0,
+        empty_pointer=0x100,
+    )
+
+    for value in range(4):
+        stack.push(value)
+    retained = stack.pointer
+    assert retained == 0xE0
+    with pytest.raises(StackOverflow):
+        stack.push(4)
+
+    stack.clear()
+    assert stack.pointer == 0x100
+    assert stack.depth() == 0
+    stack.set_pointer(retained)
+    assert stack.snapshot() == (0, 1, 2, 3)
+
+    for invalid in (0xD8, 0x101, 0x108):
+        with pytest.raises(StackPointerError):
+            stack.set_pointer(invalid)
+    assert stack.pointer == retained
+
+
+def test_backed_return_stack_recovers_typed_continuation_after_rp_restore() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = ReturnStack(
+        memory=memory,
+        floor=0x100,
+        empty_pointer=0x180,
+    )
+    stack.push(7)
+    continuation = stack.push_continuation(xt=0x1234, ip=5, root=True)
+    saved_pointer = stack.pointer
+
+    raw_cookie = memory.read64(saved_pointer)
+    assert raw_cookie != continuation.xt
+    assert stack.pop_continuation() == continuation
+    assert stack.snapshot() == (7,)
+
+    stack.set_pointer(saved_pointer)
+    assert stack.snapshot() == (7, continuation)
+    assert stack.pop_continuation() == continuation
+    assert stack.pop() == 7
+
+
+def test_raw_overwrite_invalidates_retained_continuation_metadata() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = ReturnStack(
+        memory=memory,
+        floor=0x100,
+        empty_pointer=0x180,
+    )
+    stack.push_continuation(xt=0x1234, ip=5)
+    address = stack.pointer
+
+    memory.write64(address, 0xBEEF)
+
+    assert stack.peek() == 0xBEEF
+    with pytest.raises(ReturnStackShapeError, match="return.*user cell"):
+        stack.pop_continuation()
+    assert stack.pop() == 0xBEEF
+
+
+def test_writing_the_semantic_xt_does_not_preserve_continuation_metadata() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = ReturnStack(
+        memory=memory,
+        floor=0x100,
+        empty_pointer=0x180,
+    )
+    continuation = stack.push_continuation(xt=0x1234, ip=5)
+    address = stack.pointer
+
+    memory.write64(address, continuation.xt)
+
+    assert stack.peek() == continuation.xt
+    with pytest.raises(ReturnStackShapeError, match="return.*user cell"):
+        stack.pop_continuation()
+
+
+def test_rp_capture_registration_survives_until_host_checkpoint_restore() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = ReturnStack(
+        memory=memory,
+        floor=0x100,
+        empty_pointer=0x180,
+    )
+    stack.push_continuation(xt=0x10, ip=0, root=True)
+    stack.push(0xAA)
+    checkpoint = stack.pointer_capture_checkpoint()
+    captured = stack.capture_pointer()
+    stack.push_continuation(xt=0x20, ip=1)
+
+    stack.set_pointer(captured)
+    assert stack.pop() == 0xAA
+    assert stack.has_pointer_captures_after(checkpoint)
+
+    nested_checkpoint = stack.pointer_capture_checkpoint()
+    stack.capture_pointer()
+    assert stack.has_pointer_captures_after(nested_checkpoint)
+    stack.restore_pointer_captures(nested_checkpoint)
+    assert not stack.has_pointer_captures_after(nested_checkpoint)
+    assert stack.has_pointer_captures_after(checkpoint)
+
+    stack.restore_pointer_captures(checkpoint)
+    assert not stack.has_pointer_captures_after(checkpoint)
+
+
+def test_backed_return_stack_host_restore_rewrites_mutated_loop_and_types() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = ReturnStack(
+        memory=memory,
+        floor=0x100,
+        empty_pointer=0x180,
+    )
+    stack.push(7)
+    stack.enter_do(limit=4, index=1)
+    continuation = stack.push_continuation(xt=8, ip=9)
+    checkpoint = stack.snapshot()
+
+    assert checkpoint == (7, 4, 1, continuation)
+    assert stack.pop_continuation() == continuation
+    assert stack.loop() is True
+    stack.push(99)
+    stack.restore(checkpoint)
+
+    assert stack.snapshot() == checkpoint
+    assert stack.pop_continuation() == continuation
+    assert stack.i() == 1
+
+
+def test_unbacked_stacks_reject_guest_pointer_operations() -> None:
+    data = DataStack([1])
+    returns = ReturnStack()
+
+    with pytest.raises(RuntimeError, match="unbacked data stack"):
+        _ = data.pointer
+    with pytest.raises(RuntimeError, match="unbacked data stack"):
+        data.restore_from_top()
+    with pytest.raises(RuntimeError, match="unbacked return stack"):
+        returns.set_pointer(0)

@@ -112,6 +112,16 @@ class InstallDoes:
         object.__setattr__(self, "entry_ip", _target(self.entry_ip))
 
 
+@dataclass(frozen=True, slots=True)
+class RestoreDataStackPointer:
+    """Install the data-stack pointer stored in the current top cell."""
+
+
+@dataclass(frozen=True, slots=True)
+class RestoreReturnStackPointer:
+    """Consume and install one return-stack pointer."""
+
+
 Operation: TypeAlias = (
     Literal
     | Call
@@ -126,6 +136,8 @@ Operation: TypeAlias = (
     | Loop
     | Unloop
     | InstallDoes
+    | RestoreDataStackPointer
+    | RestoreReturnStackPointer
 )
 
 
@@ -139,6 +151,8 @@ __all__ = [
     "Loop",
     "Operation",
     "QuestionDo",
+    "RestoreDataStackPointer",
+    "RestoreReturnStackPointer",
     "Return",
     "RPeek",
     "RPop",
