@@ -356,6 +356,10 @@ class RichTerminalSessionPolicy:
         retained_policy: RetainedPolicy | None = None,
     ) -> RichTerminalSessionConfig:
         """Bind selected geometry without weakening the declared maxima."""
+        if retained_policy is not None and not isinstance(
+            retained_policy, RetainedPolicy
+        ):
+            raise TypeError("retained_policy must be RetainedPolicy or None")
         selected: dict[str, int] = {}
         for name, value, maximum in (
             ("cols", cols, self.max_cols),
@@ -370,8 +374,13 @@ class RichTerminalSessionPolicy:
             if not 1 <= normalized <= maximum:
                 raise ValueError(f"{name} exceeds rich-terminal policy")
             selected[name] = int(normalized)
+        max_payload = max(32, 12 + 8 * self.max_cols)
         transaction_bytes = self.maximum_transaction_bytes
         if retained_policy is not None:
+            max_payload = max(
+                max_payload,
+                retained_policy.client_to_terminal_max_payload,
+            )
             transaction_bytes = max(
                 transaction_bytes,
                 retained_policy.max_retained_transaction_bytes,
@@ -395,7 +404,7 @@ class RichTerminalSessionPolicy:
                 geometry_events=self.geometry_events,
             ),
             terminal_config=TerminalConfig(
-                max_payload=max(32, 12 + 8 * self.max_cols),
+                max_payload=max_payload,
                 max_transaction_bytes=transaction_bytes,
                 terminal_receive_credit=transaction_bytes,
                 max_cells=self.max_cols * self.max_rows,

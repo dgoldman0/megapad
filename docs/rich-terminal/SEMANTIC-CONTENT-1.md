@@ -307,10 +307,10 @@ minima, and pass a target-Forth byte oracle. Akashic's real collection operation
 counts and UTF-8 bytes must also be included in the Desktop caller-owned arena
 derivation.
 
-The session configuration must derive its transport `max_payload` from both the
-CELL row requirement and the retained client-to-terminal payload policy. The
-current CELL-only derivation can otherwise make a valid bit-9 retained policy
-fail discovery and quietly select CELL fallback. The real largest Pad/Daybook
-collection must fit the negotiated payload and the guest's current 8 KiB TX
-staging before advertisement. `MANDATORY_CAPABILITIES` remains the base `0x3f`;
-collection support belongs only to the additive `RET_CAPS` negotiation.
+The session configuration derives its transport `max_payload` from both the CELL
+row requirement and the retained client-to-terminal payload policy. This keeps
+an otherwise valid retained policy from failing discovery and quietly selecting
+CELL fallback. The real largest Pad/Daybook collection must fit the negotiated
+payload and the guest's current 8 KiB TX staging before advertisement.
+`MANDATORY_CAPABILITIES` remains the base `0x3f`; collection support belongs
+only to the additive `RET_CAPS` negotiation.

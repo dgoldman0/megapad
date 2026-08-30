@@ -1371,7 +1371,7 @@ def test_rich_terminal_policy_derives_full_maximum_geometry_contract():
     assert config.driver_limits.pending_outbound_events == 256
 
 
-def test_rich_terminal_policy_derives_transport_from_retained_atomic_frame():
+def test_rich_terminal_policy_derives_transport_from_retained_bounds():
     product = _rich_terminal_policy()
     retained = RetainedPolicy(
         features=RetainedFeature.CORE,
@@ -1395,7 +1395,7 @@ def test_rich_terminal_policy_derives_transport_from_retained_atomic_frame():
         minimum_presentation_interval_us=0,
         total_sample_slots=0,
         total_utf8_bytes=320_000,
-        client_to_terminal_max_payload=3_212,
+        client_to_terminal_max_payload=8_192,
         terminal_to_client_max_payload=64,
         base_max_transaction_bytes=10_570_616,
     )
@@ -1403,12 +1403,25 @@ def test_rich_terminal_policy_derives_transport_from_retained_atomic_frame():
     config = product.configuration(100, 32, retained_policy=retained)
 
     assert config.retained_policy is retained
+    assert config.terminal_config.max_payload == 8_192
     assert config.terminal_config.max_transaction_bytes == 10_570_616
     assert config.terminal_config.terminal_receive_credit == 10_570_616
     assert config.terminal_config.max_feed_bytes == 10_574_712
     assert config.host_limits.retained_publication_bytes == 10_574_712
     assert config.host_limits.egress.high_bytes == 21_149_424
     assert config.host_limits.egress.low_bytes == 10_574_712
+
+
+def test_rich_terminal_policy_checks_retained_policy_before_derivation():
+    with pytest.raises(
+        TypeError,
+        match="retained_policy must be RetainedPolicy or None",
+    ):
+        _rich_terminal_policy().configuration(
+            100,
+            32,
+            retained_policy=object(),  # type: ignore[arg-type]
+        )
 
 
 def test_rich_terminal_policy_configuration_attaches_real_host_port():
