@@ -405,14 +405,16 @@ the ordinary authoritative UIDL action path. The MegaPad model, code-native
 Pygame compositor, shared viewer transport, exact offer acknowledgement, and
 revision-bound hit map carry that same control identity end to end.
 
-A recorded reference-sink journey at Akashic `eedcfb9` with MegaPad `4f074ae`
+A recorded reference-sink journey at Akashic `d24540e` with MegaPad `c7045d6`
 shows the complete Desk, Pad File-menu activation/open/close, a real Pad edit,
-and a real Daybook task addition through this path. Its evidence boundary is
-explicitly `pygame.display.flip()`: it proves exact host display-API submission
-and acknowledgement, not hardware scanout or panel refresh. This rerun
-qualifies the Akashic implementation containing the eleven retained-delta and
-admission optimizations through `e754ac1` and two subsequent cold-source
-compatibility corrections in exact `eedcfb9` for that journey.
+a real Daybook task addition and date navigation, and the ordinary
+Daybook-to-Pad shared-resource handoff through this path. Its evidence boundary
+is explicitly `pygame.display.flip()`: it proves exact host display-API
+submission and acknowledgement, not UART delivery, hardware scanout, or panel
+refresh. The task's unique marker disappeared from Daybook tile 2 after normal
+`Right` input and reappeared with the Daybook heading in Pad tile 0 after
+Daybook's normal `Ctrl+O` capability route. This qualifies those exact
+committed heads for the selected Desk/Pad/Daybook checkpoint.
 
 Against the earlier `3404fe9`/`8941782` baseline, post-first-offer decoded
 traffic fell from 1,386 frames / 190,131 bytes to 221 frames / 24,541 bytes,
@@ -442,12 +444,11 @@ reaching roughly 1--2 average CPI is a separate MegaPad RTL/ASIC concern. The
 functional emulator may remain instruction-level while its deterministic
 virtual-cycle model continues to drive devices, scheduling, and replay.
 
-The current Pygame acceptance runner also stops after the Daybook task and
-does not exercise the separately implemented ordinary Daybook-to-Pad
-shared-resource handoff. If that handoff remains part of this checkpoint, its
-display-backed evidence is still open. Other object kinds, resources, series,
-full semantic replay, retained resize, physical UART delivery, and a hardware
-panel sink likewise remain unqualified.
+The current Pygame acceptance runner continues through the ordinary
+Daybook-to-Pad shared-resource handoff and closes the selected software/viewer
+checkpoint. Other object kinds, resources, series, full semantic replay,
+retained resize, physical UART delivery, and a hardware panel sink remain
+separate and unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
 
@@ -509,8 +510,8 @@ checkpoint.
 The current contract evolves in place; do not add a numbered successor,
 parallel legacy path, Sound Lab fixture, applet-specific scene, or
 renderer-reservation markup. The reference Pygame/Desktop journey above has
-crossed the earlier semantic-control and display-sink gate, and the exact
-`eedcfb9`/`4f074ae` current-head reference journey is recorded. The remaining
-shared-resource step, reset/resize and other production cases, sustained
-cadence, persistence, physical UART, and hardware-panel qualification remain
-separate sequential work under the resource gate.
+crossed the semantic-control, ordinary shared-resource, and selected
+display-sink gates, and the exact `d24540e`/`c7045d6` reference journey is
+recorded. Reset/resize and other production cases, sustained cadence,
+persistence, physical UART, and hardware-panel qualification remain separate
+sequential work under the resource gate.

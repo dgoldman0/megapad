@@ -157,6 +157,15 @@ no bytes to the physical RTL TX pin. Emulator/native viewer success is not
 physical-UART evidence and proves neither baud timing nor board-level
 backpressure.
 
+The later reference journey at Akashic `d24540e` with MegaPad `c7045d6`
+closes the selected Desk/Pad/Daybook software/viewer checkpoint, including
+Daybook navigation and the ordinary shared-source handoff into Pad. It finished
+at 783,434 decoded bytes after twelve acknowledged offers, with every scripted
+input authorized only after the exact complete post-`pygame.display.flip()`
+offer acknowledgement. Those bytes still crossed the in-process enhanced host
+port, not the RTL TX pin, so this success does not change physical UART status
+from **OPEN** or qualify an e-paper panel.
+
 The recorded `eedcfb9`/`4f074ae` reference journey makes the consequence
 quantifiable, although it is not physical-link evidence. At 8N1, 115,200 baud
 has a nominal payload ceiling of 11,520 bytes/s. Its 744,222-byte first offer
