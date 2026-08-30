@@ -14,12 +14,11 @@ from dataclasses import dataclass
 import struct
 from typing import Callable, Optional
 
+from shared.cells import MASK64, SIGN64, s64, u64
+
 # ---------------------------------------------------------------------------
 #  Constants
 # ---------------------------------------------------------------------------
-
-MASK64 = (1 << 64) - 1
-SIGN64 = 1 << 63
 
 # Condition codes (shared by BR / LBR / SKIP)
 CC_AL   = 0x0  # always
@@ -227,19 +226,6 @@ ExternalPhyResponsePlan = Callable[
     [ExternalPhyWordRequest],
     Optional[ExternalPhyWordResponse],
 ]
-
-# ---------------------------------------------------------------------------
-#  Helpers
-# ---------------------------------------------------------------------------
-
-def u64(v: int) -> int:
-    """Mask to unsigned 64 bits."""
-    return v & MASK64
-
-def s64(v: int) -> int:
-    """Interpret a 64-bit value as signed."""
-    v = u64(v)
-    return v - (1 << 64) if v >= SIGN64 else v
 
 # ---------------------------------------------------------------------------
 #  FP16 / bfloat16 conversion helpers

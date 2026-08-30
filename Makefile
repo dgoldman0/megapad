@@ -16,6 +16,7 @@
 #   make test-failures         Show only failures
 #   make test-kill             Kill stuck background run
 #   make test-quick            Quick BIOS+CPU smoke test     (~3 sec)
+#   make test-simulator        Focused hosted-simulator units (no accel build)
 #
 # Real-network tests (requires TAP — see tests/test_live_net.py):
 #   make test-net       All live-net tests against TAP device
@@ -35,6 +36,7 @@ PYTEST   := -m pytest tests/
 PYTEST_CONFIG_ARGS := -o addopts=
 PYTEST_ARGS := $(PYTEST_CONFIG_ARGS) --tb=long
 TEST_PATH ?= tests/
+SIMULATOR_TEST_PATH ?= tests/simulator/
 SANITIZER ?= address-undefined
 SANITIZE_BUILD_ROOT ?= $(CURDIR)/build/sanitizers
 SANITIZE_TEST_PATHS ?= \
@@ -58,6 +60,20 @@ endef
 .PHONY: runtime-paths
 runtime-paths:
 	@$(RUNTIME_PATHS) all
+
+# --- Hosted source simulator ---
+# This target intentionally does not depend on accel.  Simulator units are
+# seconds-scale semantic checks and must not compile or execute the exact MP64
+# backend merely to prove backend-independent behavior.
+.PHONY: test-simulator
+test-simulator:
+	@set -eu; \
+	$(RESOLVE_TEST_PATHS) \
+	exec $(TEST_SUPERVISOR) foreground \
+		--state "$$pid_file" --status "$$status_file" -- \
+		env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= \
+			$(VENV_PY) -m pytest $(SIMULATOR_TEST_PATH) \
+			$(PYTEST_CONFIG_ARGS) --tb=long $(if $(K),-k "$(K)",)
 
 # --- C++ accelerator ---
 .PHONY: accel accel-clean
