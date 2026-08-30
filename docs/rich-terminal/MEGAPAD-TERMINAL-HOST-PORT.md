@@ -215,6 +215,36 @@ idle boundary; hard attachment/link reset also restores 115,200. The exact
 current APT-1 negotiation grammar has no rate field, so a silent divisor write
 or an emulator-only setting is not a conforming dual-rate implementation.
 
+### 4.2 Bounded guest-phase observation
+
+The shared-session host exposes an opt-in diagnostic observer for profiling
+already-running guest code. `start_phase_profile` accepts the current machine
+generation, one aligned mapped RAM or external-memory cell, and a positive
+caller-selected record bound. MegaPad does not know an Akashic word name or
+phase vocabulary; the profiling client resolves the guest variable and
+interprets its packed value. Start is rejected before machine startup, during
+or after shutdown, or across a generation change.
+
+The observed 64-bit cell uses a client-defined low-byte phase and high-56-bit
+sequence. While enabled, the shared owner reads it immediately after each
+retired-instruction batch under the same scheduler lock. A recorded change is
+therefore bounded by the exact cumulative instruction counts before and after
+that batch. A sequence jump reports how many intervening transitions were
+coalesced; it does not invent their phases or divide the interval among them.
+The observer retains the first caller-bounded records, counts later dropped
+records and transitions, and has a host safety ceiling of 65,536 records.
+
+This is not a cycle counter, an `INSTRET` CSR, or a guest ABI. It does not alter
+deterministic virtual timing. Disabled sessions perform no guest-memory reads;
+an enabled observer adds one read per nonempty execution batch. An invalid
+event or read failure freezes only the diagnostic record and never pauses or
+fails the guest. Reset and shutdown discard it. `phase_profile` returns a
+bounded copy without another guest read, and `stop_phase_profile` atomically
+freezes, returns, and removes the observer. Performance conclusions must retain
+the raw intervals, generation, coalescing, overflow, and error fields rather
+than presenting batch-bounded attribution as exact per-word instruction
+accounting.
+
 ## 5. Terminal consumption
 
 Terminal code polls accepted batches outside scheduler settlement. Polling
