@@ -7,7 +7,6 @@ from .driver import (
     DriverStatus,
     RichTerminalDriver,
 )
-from .megapad import MegapadRichTerminalHost
 from .server import TerminalConfig, TerminalSessionError, TerminalState
 from .testing import FakeTerminalHost
 from .transport import (
@@ -44,7 +43,6 @@ __all__ = [
     "GeometryRecord",
     "HostPortLimits",
     "IngressRecord",
-    "MegapadRichTerminalHost",
     "RichTerminalDriver",
     "ResizeRecord",
     "ScheduledEventPoll",

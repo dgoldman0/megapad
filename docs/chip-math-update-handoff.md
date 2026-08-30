@@ -712,7 +712,7 @@ Primary files:
 
 - `asm.py`
 - `cli.py`
-- `megapad64.py`
+- `emulator/megapad64.py`
 - new `tests/test_tacc_isa.py`
 
 Work:
@@ -752,10 +752,10 @@ with focused contract tests.
 
 Primary files:
 
-- `system.py`
-- `megapad64.py`
+- `emulator/system.py`
+- `emulator/megapad64.py`
 - `emulator/accel/mp64_accel.cpp`
-- `accel_wrapper.py` where system routing requires it
+- `emulator/accel_wrapper.py` where system routing requires it
 - new `tests/test_full_core_tile_engine.py`
 - `tests/test_native_microcore.py`
 - focused updates to `tests/test_system.py`
@@ -814,9 +814,9 @@ follow their engine's private or cluster-shared ownership domain.
 
 Primary files:
 
-- `system.py`
-- `megapad64.py`
-- `accel_wrapper.py`
+- `emulator/system.py`
+- `emulator/megapad64.py`
+- `emulator/accel_wrapper.py`
 - `emulator/accel/mp64_accel.cpp`
 - `tests/test_full_core_tile_engine.py`
 - `tests/test_native_system_state.py`
@@ -887,7 +887,7 @@ reset, cluster disable, and privileged recovery.
 Primary files:
 
 - `emulator/accel/mp64_accel.cpp`
-- `accel_wrapper.py` if binding changes are required
+- `emulator/accel_wrapper.py` if binding changes are required
 - `tests/test_native_mex_oracle.py`
 - `tests/test_native_batch_boundaries.py`
 - `tests/test_accel_wrapper_fallback.py`
@@ -948,7 +948,7 @@ Python oracle.
 Primary files:
 
 - `emulator/accel/mp64_accel.cpp`
-- `system.py`
+- `emulator/system.py`
 - `tests/test_full_core_tile_engine.py`
 - `tests/test_phase3_reduced_core_execution.py`
 - `tests/test_native_system_state.py`

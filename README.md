@@ -210,7 +210,7 @@ is implemented in the emulator; its physical DMA/I2S bridge remains pending.
 │         BIOS (bios.asm)         │  ← Subroutine-threaded Forth,
 │  360 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
-│         Hardware / Emulator     │  ← megapad64.py + devices.py
+│         Hardware / Emulator     │  ← emulator/megapad64.py + emulator/devices.py
 └─────────────────────────────────┘
 ```
 
@@ -397,17 +397,17 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 
 | File | Purpose |
 |------|---------|
-| `megapad64.py` | CPU and tile-engine emulator, including extended operations and FP16/BF16 |
+| `emulator/megapad64.py` | CPU and tile-engine emulator, including extended operations and FP16/BF16 |
 | `emulator/accel/` | Optional multi-source pybind11 execution kernel |
-| `accel_wrapper.py` | Drop-in Python wrapper for the C++ CPU core |
-| `system.py` | SoC integration and batched execution |
+| `emulator/accel_wrapper.py` | Drop-in Python wrapper for the C++ CPU core |
+| `emulator/system.py` | SoC integration and batched execution |
 | `bios.asm` | Forth BIOS in assembly: boot, devices, multicore, and checked crypto |
 | `bios.rom` | Pre-assembled BIOS binary |
 | `kdos.f` | Bank 0 KDOS core: compute, storage, scheduler, UI, modules, crypto, and multicore |
 | `networking.f` | Userland Ethernet-through-TLS module, sockets, and UDP data-port transport |
 | `cli.py` | CLI, boot modes, headless TCP terminal, and debug monitor |
 | `asm.py` | Two-pass assembler with listing output |
-| `devices.py` | MMIO device models |
+| `emulator/devices.py` | MMIO device models |
 | `audio_sinks.py` | Explicit opt-in audio playback adapters |
 | `nic_backends.py` | Loopback, UDP-tunnel, and Linux TAP NIC backends |
 | `data_sources.py` | Simulated network data sources |

@@ -113,7 +113,7 @@ def test_dual_rate_is_sequenced_after_real_tx_and_real_line_idle() -> None:
 
     architecture = _read(ROOT / "docs" / "architecture.md")
     wire = _read(RICH_DOCS / "APT-1-WIRE.md")
-    python_uart = _read(ROOT / "devices.py")
+    python_uart = _read(ROOT / "emulator" / "devices.py")
     native_uart = _read(ROOT / "emulator" / "accel" / "mp64_uart.h")
 
     assert "tx_ready = 1       # always ready in emulator" in python_uart

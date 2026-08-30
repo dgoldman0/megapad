@@ -338,7 +338,7 @@ For ISA integration (per Appendix B):
 
 For ISA path (full cores, target implementation per Appendix B):
 
-- New dispatch case in `megapad64.py` for EXT.CRYPTO (FB) sub-ops
+- New dispatch case in `emulator/megapad64.py` for EXT.CRYPTO (FB) sub-ops
   0x10–0x1F.  Uses `hashlib.sha256()` / `hashlib.sha384()` /
   `hashlib.sha512()` internally.
 - State in ACC0–ACC3; message block in tile memory at TSRC0.
@@ -448,7 +448,7 @@ et al. (already required for the no-hardware case).
 
 ### Emulator implementation notes
 
-- New dispatch case in `megapad64.py` CPU loop for opcode 0xF9.
+- New dispatch case in `emulator/megapad64.py` CPU loop for opcode 0xF9.
 - Sub-op switch: Python `memory[dst:dst+ln] = memory[src:src+ln]`
   (CMOVE), `bytearray` ops for COMPARE/SEARCH.
 - Update GPRs in-place to match post-transfer state.
@@ -616,7 +616,7 @@ entries and replacement cursors.
 | Layer | Status | Notes |
 |-------|--------|-------|
 | RTL (`mp64_dict.v` plus coherence fabric) | Deferred | Must implement the locked 256×4 replacement/coherence contract |
-| Python emulator (`megapad64.py`) | Implemented | Exact bounded reference model |
+| Python emulator (`emulator/megapad64.py`) | Implemented | Exact bounded reference model |
 | C++ accelerator (`mp64_accel.cpp`) | Implemented | Exact native parity model |
 | BIOS/KDOS | Implemented | Demand fill, caller-backed index, atomic rollback |
 | Qualification | Focused green | 15 host parity cases and 21 BIOS/definition/boot cases; RTL and broad acceptance deferred |
@@ -757,7 +757,7 @@ two can be gated out (micro-cores unlikely to need scatter/gather).
 
 #### Emulator implementation notes
 
-- New sub-op cases in `megapad64.py` ALU dispatch:
+- New sub-op cases in `emulator/megapad64.py` ALU dispatch:
   - `POPCNT`: `bin(x).count('1')`
   - `CLZ`: `64 - x.bit_length()` (handle 0 → 64)
   - `CTZ`: `(x & -x).bit_length() - 1` (handle 0 → 64)
@@ -888,7 +888,7 @@ useless.  Each core gets its own small ring buffer (~256 entries ×
 write {PC, TOS, DSP, RSP, timestamp} into a dual-port BRAM ring.  MMIO
 reads drain from the read port.  ~1 BRAM36 per core.
 **Emulator:** Append to a Python `deque(maxlen=256)` on each SEP
-dispatch in `megapad64.py`.  Expose via a virtual MMIO read.
+dispatch in `emulator/megapad64.py`.  Expose via a virtual MMIO read.
 
 ---
 
@@ -1016,7 +1016,7 @@ the SoC fabric where the other MMIO decode logic already lives.
 
 ### Emulator implementation notes
 
-- `megapad64.py` already decodes OUT/INP family (0x9).  Add a
+- `emulator/megapad64.py` already decodes OUT/INP family (0x9).  Add a
   `port_map` dict mapping port number → (device, register_offset).
 - OUT N: read `memory[R[xsel]]`, increment R[xsel], write byte to
   `port_map[N].device` at the configured register offset.
@@ -1338,7 +1338,7 @@ All computation stays in C++ — zero Python callbacks.  This is the
 entire point: the WOTS accelerator eliminates the 9.6M Python
 round-trips that make SPHINCS+ signing slow in the emulator.
 
-#### Python fallback (devices.py)
+#### Python fallback (emulator/devices.py)
 
 `WotsChainAccel` MMIO device with the same register interface.
 Uses the existing Python `SHA3Device` internally.  Only used when
@@ -1348,8 +1348,8 @@ the C++ accelerator is not available.
 
 - `mp64_accel.cpp`: add `WotsChain` to `CPUState`, handle MMIO
   offsets 0x8A0–0x8BF in `sys_read8`/`sys_write8`.
-- `system.py`: create `WotsChainAccel`, register on bus.
-- `accel_wrapper.py`: sync `WotsChain` state (seed/adrs/input
+- `emulator/system.py`: create `WotsChainAccel`, register on bus.
+- `emulator/accel_wrapper.py`: sync `WotsChain` state (seed/adrs/input
   pointers only — result is read from C++ state).
 
 ### 7.11  Future: Parallel SHAKE Engines
@@ -1469,10 +1469,10 @@ Files changed: `mp64_bus.v`, `mp64_pkg.vh` (`IRQX_BUS`, `CSR_BUS_ERR`),
 
 ### Emulator Solution
 
-- `devices.py`: `BusError` exception class; `DeviceBus.read8()` /
+- `emulator/devices.py`: `BusError` exception class; `DeviceBus.read8()` /
   `write8()` raise `BusError` on unmapped MMIO offsets (was: silent
   0xFF / drop).
-- `system.py`: `_patched_read8()` / `_patched_write8()` catch
+- `emulator/system.py`: `_patched_read8()` / `_patched_write8()` catch
   `BusError` and convert to `TrapError(IVEC_BUS_FAULT)`.
 
 ### Tests
@@ -1837,7 +1837,7 @@ Family fully packed.  All 16 sub-ops allocated.
 
 ### A.7  Emulator Dispatch Reference
 
-Quick-reference for `megapad64.py` implementation:
+Quick-reference for `emulator/megapad64.py` implementation:
 
 ```python
 # --- EXT.STRING (F9) ---
@@ -2507,7 +2507,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 - [x] ISA encoding designed (opcodes 89, 8B)
 - [x] RTL implemented (`mp64_cpu.v` decode bypass)
-- [x] Emulator implemented (`megapad64.py`)
+- [x] Emulator implemented (`emulator/megapad64.py`)
 - [x] Assembler support (`asm.py`)
 - [x] IO OUT bug fixed (LDXA opcode 8F collision)
 - [x] Smoke tests passing
@@ -2529,7 +2529,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 - [x] ISA encoding designed (F9 00–04)
 - [x] RTL implemented (`mp64_string.v`)
-- [x] Emulator implemented (`megapad64.py`)
+- [x] Emulator implemented (`emulator/megapad64.py`)
 - [x] Assembler support
 - [x] BIOS words using hardware: CMOVE, CMOVE>, FILL, MOVE, COMPARE
 - [x] Tests passing
@@ -2551,7 +2551,7 @@ REX-extended register indices for GF.CMOV, and CSR read/write for acc.)*
 
 - [x] 4e. Bitfield ALU — ISA encoding designed (Appendix A.4)
 - [x] 4e. Bitfield ALU — RTL implemented (`mp64_bitfield.v`, Tier 1/2 generate, 49/49 assertions)
-- [x] 4e. Bitfield ALU — emulator implementation (`megapad64.py _exec_muldiv` sub 0x8–0xF)
+- [x] 4e. Bitfield ALU — emulator implementation (`emulator/megapad64.py _exec_muldiv` sub 0x8–0xF)
 - [x] 4e. Bitfield ALU — C++ accelerator (`mp64_accel.cpp` case 0x8–0xF with __builtin intrinsics)
 - [x] 4e. Bitfield ALU — tests (`test_bitfield_alu` — POPCNT/CLZ/CTZ/BITREV/BEXT/BDEP/RORI/BSWAP)
 - [x] 4e. Bitfield ALU — assembler (`asm.py` MULDIV_SUB extended, RORI 3-byte form)

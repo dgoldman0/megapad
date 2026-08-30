@@ -746,7 +746,7 @@ Each feature gets:
    new module or datapath
 2. **Integration test**: added to `tb_multicore_smoke.v` or a new
    `tb_extended_tpu.v` that runs in full SoC context
-3. **Emulator parity**: matching implementation in `megapad64.py` so
+3. **Emulator parity**: matching implementation in `emulator/megapad64.py` so
    software can be developed in parallel with RTL
 4. **BIOS Forth words**: thin wrappers (TSHUFFLE, TPACK, TAES-ENC, etc.)
    added to the BIOS dictionary as each feature lands

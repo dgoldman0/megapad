@@ -97,12 +97,12 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 └──────────────────────┬───────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────┐
-│                    system.py                              │
+│                emulator/system.py                        │
 │       MegapadSystem — 16-core heterogeneous SoC          │
 │                                                          │
 │  ┌──────────────┐    ┌────────────────────────────┐  │
-│  │  megapad64.py │    │       devices.py          │  │
-│  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
+│  │ megapad64.py │    │ devices.py                 │  │
+│  │   CPU core   │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
 │  │  32 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
 │  │  full ISA     │    │ ┌─────────┐ ┌───────┐        │  │
@@ -134,13 +134,13 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 
 | File | Lines | Role |
 |---|---|---|
-| `megapad64.py` | — | CPU core — 32×64-bit GPRs (R0–R31 via REX), all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
+| `emulator/megapad64.py` | — | CPU core — 32×64-bit GPRs (R0–R31 via REX), all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
 | `emulator/accel/` | — | Multi-source C++ execution kernel (pybind11), including host DBT support |
-| `accel_wrapper.py` | — | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
+| `emulator/accel_wrapper.py` | — | Drop-in Python wrapper; `emulator/system.py` tries this first, falls back to `emulator/megapad64.py` |
 | `asm.py` | — | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
+| `emulator/devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
 | `nic_backends.py` | — | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
-| `system.py` | — | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
+| `emulator/system.py` | — | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | — | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
 | `bios.asm` | — | Forth BIOS v1.0 — subroutine-threaded interpreter, 481 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile/TACC, I-cache, cooperative multitasking) |
 | `tests/test_megapad64.py` | — | CPU + tile engine test suite |
@@ -868,7 +868,7 @@ unchanged. Namespaced artifacts live in the UID-owned, mode-`0700` directory
 | **CPython + C++ accel -n 8** | **8 workers** | **~23 s** | **104×** |
 
 The C++ accelerator (`emulator/accel/`) reimplements the CPU step loop as a
-multi-source pybind11 execution kernel. `system.py` imports it automatically
+multi-source pybind11 execution kernel. `emulator/system.py` imports it automatically
 when available and falls back to pure Python if not. The accelerator handles
 single-core and multicore execution (C++ for the active core, Python for device I/O
 and MMIO dispatch).

@@ -73,15 +73,15 @@ with optional SDL2 display in the emulator.
 
 ### Commit 2: FramebufferDevice in emulator
 
-- `devices.py`: `FramebufferDevice` class (~150 lines)
+- `emulator/devices.py`: `FramebufferDevice` class (~150 lines)
   - MMIO register read/write for all 10 registers
   - 256-entry palette table (default: grayscale ramp)
   - `tick()` method increments vsync counter when enabled
   - No display output — purely register-level
-- `system.py`: Wire `FramebufferDevice` at MMIO offset `0x0A00`
+- `emulator/system.py`: Wire `FramebufferDevice` at MMIO offset `0x0A00`
   - Add `fb` attribute to `MegapadSystem`
   - Register in MMIO dispatch
-- `devices.py`: Add `FB_BASE = 0x0A00` constant
+- `emulator/devices.py`: Add `FB_BASE = 0x0A00` constant
 - Tests: `TestFramebuffer` in `test_system.py`
   - Register read/write for all CSRs
   - Palette write sequence (idx then data)
@@ -259,8 +259,8 @@ depend only on 2.  Documentation is last.
 
 | File | Change | Est. Lines |
 |------|--------|-----------|
-| `devices.py` (2,348 → ~2,500) | Add `FramebufferDevice` | +150 |
-| `system.py` (921 → ~940) | Wire FB device | +15 |
+| `emulator/devices.py` (2,348 → ~2,500) | Add `FramebufferDevice` | +150 |
+| `emulator/system.py` (921 → ~940) | Wire FB device | +15 |
 | `bios.asm` (11,596 → ~11,800) | 15 framebuffer BIOS words | +200 |
 | `kdos.f` (9,085 → ~9,135) | §20 Module system | +50 |
 | `graphics.f` (new) | Graphics module for disk | +300 |

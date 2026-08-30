@@ -98,12 +98,12 @@ counts below remain historical.
 |-----------|------:|------------|
 | `bios.asm` | 15,203 | 396 dictionary entries |
 | `kdos.f` | 11,815 | 962 colon defs, 523 vars/constants, §1–§20 |
-| `megapad64.py` | 3,315 | Full CPU + extended tile + FP16/BF16 |
+| `emulator/megapad64.py` | 3,315 | Full CPU + extended tile + FP16/BF16 |
 | `emulator/accel/mp64_accel.cpp` | 3,295 | C++ CPU core (pybind11, ~63× speedup) |
 | `emulator/accel/*.h` | 2,436 | Crypto, FB, NIC, timer C++ device accel |
-| `accel_wrapper.py` | 897 | Drop-in C++ ↔ Python bridge |
-| `system.py` | 1,018 | Multi-core SoC (up to 16 cores + clusters) |
-| `devices.py` | 2,542 | 18 device classes |
+| `emulator/accel_wrapper.py` | 897 | Drop-in C++ ↔ Python bridge |
+| `emulator/system.py` | 1,018 | Multi-core SoC (up to 16 cores + clusters) |
+| `emulator/devices.py` | 2,542 | 18 device classes |
 | `cli.py` | 1,557 | Interactive monitor/debugger |
 | `display.py` | 1,872 | Pygame GUI: terminal + graphics + debug |
 | `asm.py` | 909 | Two-pass assembler (full ISA + EXT) |
@@ -298,14 +298,14 @@ buffers, §19 Hash tables, §20 Module system.
 
 ### Emulator — ✅ DONE
 
-- `megapad64.py`: 3,315 lines — full ISA including EXT.STRING, EXT.DICT,
+- `emulator/megapad64.py`: 3,315 lines — full ISA including EXT.STRING, EXT.DICT,
   64-lane tile engine with FP16/BF16, BIST, I-cache model
-- `accel_wrapper.py`: 897 lines — transparent C++ ↔ Python bridge
+- `emulator/accel_wrapper.py`: 897 lines — transparent C++ ↔ Python bridge
 - `emulator/accel/mp64_accel.cpp`: 3,295 lines + 2,436 lines headers — C++ fast
   path (~63× speedup), crypto device integration, pybind11
-- `system.py`: 1,018 lines — multi-core SoC wiring (up to 16 cores +
+- `emulator/system.py`: 1,018 lines — multi-core SoC wiring (up to 16 cores +
   micro-clusters), device bus, IRQ routing
-- `devices.py`: 2,542 lines — 18 device classes (UART, Timer, Storage,
+- `emulator/devices.py`: 2,542 lines — 18 device classes (UART, Timer, Storage,
   SysInfo, NIC, Mailbox, Spinlock, KEM, CRC, NTT, Framebuffer, CppFBProxy,
   CppTimerProxy, RTC, PortBridgeCSR, checked WotsChainAccel and CppWotsProxy,
   DeviceBus, plus
@@ -443,12 +443,12 @@ Compiler Item 49      STC Compiler Checks                     ✅ DONE
 | `autoexec.f` | 47 | ✅ Boot script: DHCP + userland + REQUIRE |
 | `tools.f` | 1,534 | ✅ Loadable tools module |
 | `graphics.f` | 64 | ✅ Graphics module |
-| `megapad64.py` | 3,315 | ✅ Full CPU + extended tile + FP16/BF16 |
+| `emulator/megapad64.py` | 3,315 | ✅ Full CPU + extended tile + FP16/BF16 |
 | `emulator/accel/mp64_accel.cpp` | 3,295 | ✅ C++ CPU core (pybind11, ~63× speedup) |
 | `emulator/accel/*.h` | 2,436 | ✅ Crypto, FB, NIC, timer C++ devices |
-| `accel_wrapper.py` | 897 | ✅ Drop-in C++ ↔ Python wrapper |
-| `system.py` | 1,018 | ✅ Multi-core SoC (16 cores + clusters) |
-| `devices.py` | 2,542 | ✅ 18 device classes |
+| `emulator/accel_wrapper.py` | 897 | ✅ Drop-in C++ ↔ Python wrapper |
+| `emulator/system.py` | 1,018 | ✅ Multi-core SoC (16 cores + clusters) |
+| `emulator/devices.py` | 2,542 | ✅ 18 device classes |
 | `cli.py` | 1,557 | ✅ Interactive monitor/debugger |
 | `display.py` | 1,872 | ✅ Pygame GUI: terminal + graphics + debug |
 | `asm.py` | 909 | ✅ Two-pass assembler (full ISA + EXT) |

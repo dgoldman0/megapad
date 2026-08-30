@@ -248,7 +248,7 @@ complete; Akashic refactoring is a separate task in a user-selected worktree.
 
 **Phase 3: Scheduler & Preemption** (✅ complete — v0.5)
 - 6 BIOS timer/interrupt words: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
-- IVT slot 7 (IVEC_TIMER) wired with IRQ delivery in system.py
+- IVT slot 7 (IVEC_TIMER) wired with IRQ delivery in emulator/system.py
 - Task descriptor: 6-cell (48 bytes) — status, priority, xt, dsp, rsp, name
 - Task registry: up to 8 tasks, cooperative scheduling via SCHEDULE
 - TASK, SPAWN, KILL, RESTART, BG — task lifecycle management

@@ -235,8 +235,8 @@ rather than four isolated cores that happen to share a bus port.
    round-robin among 3–4 micro-cores, single bus port output.
 6. **Update main bus arbiter** — weighted round-robin, per-port BW
    limit registers, parameterized port count.
-7. **Emulator side:** `megapad64.py` gets a `micro=True` flag that
-   traps MUL/DIV.  `system.py` takes `num_major` and `num_micro`
+7. **Emulator side:** `emulator/megapad64.py` gets a `micro=True` flag that
+   traps MUL/DIV.  `emulator/system.py` takes `num_major` and `num_micro`
    params, instantiates clusters.
 8. **Tests:** extend `TestMicroCore` with cluster-level tests — shared
    I-cache hits, intra-cluster arbitration, QoS interaction.

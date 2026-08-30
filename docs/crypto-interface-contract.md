@@ -1225,8 +1225,8 @@ fixtures in:
 - `rtl/sim/tb_cpu_micro.v`; and
 - `rtl/sim/tb_cpu_smoke.v`.
 
-The implementation cutover updates `asm.py`, `megapad64.py`,
-`emulator/accel/mp64_accel.cpp`, `accel_wrapper.py`, `rtl/pkg/mp64_pkg.vh`,
+The implementation cutover updates `asm.py`, `emulator/megapad64.py`,
+`emulator/accel/mp64_accel.cpp`, `emulator/accel_wrapper.py`, `rtl/pkg/mp64_pkg.vh`,
 `rtl/pkg/mp64_cpu_funcs.vh`, `rtl/crypto/mp64_crc_isa.v`, both CPU decoders,
 cluster arbitration/state, native snapshots, and runtime instruction-length
 classification together. Full-core and microcore SKIP paths use

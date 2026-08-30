@@ -1194,7 +1194,7 @@ key coroutine-local state such as exception chains.
 The bus-fault handler now captures and displays the **T register**
 (pre-interrupt X/P state), giving the programmer visibility into which
 register pair was active when a fault occurred.  The MMIO routing in
-`system.py` was also deduplicated (Phase 7 prep) to reduce dispatch
+`emulator/system.py` was also deduplicated (Phase 7 prep) to reduce dispatch
 overhead.
 
 ### Boot Sequence
@@ -1292,9 +1292,9 @@ DMA, and reliability specifications.
 
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
-| CPU emulator | `megapad64.py` | — | Full ISA + extended tile engine implementation |
-| System glue | `system.py` | — | Heterogeneous SoC, MMIO, mailbox IPI, spinlocks, shared native execution state |
-| Devices | `devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
+| CPU emulator | `emulator/megapad64.py` | — | Full ISA + extended tile engine implementation |
+| System glue | `emulator/system.py` | — | Heterogeneous SoC, MMIO, mailbox IPI, spinlocks, shared native execution state |
+| Devices | `emulator/devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
 | BIOS | `bios.asm` | — | Forth interpreter, boot, multicore, 481 dictionary words |
 | OS core | `kdos.f` | — | Bank 0 buffers, kernels, TUI, FS, crypto, module loading, PQC, multicore |
 | Networking | `networking.f` | — | Userland Ethernet through TLS, sockets, and UDP data-port transport |

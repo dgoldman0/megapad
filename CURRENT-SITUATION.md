@@ -84,7 +84,7 @@
   registered via TX_RING_BASE MMIO).
 - **UART device registers** — TX_FLUSH (`+0x06`, W) and TX_RING_BASE
   (`+0x08`–`+0x0F`, W, 64-bit LE) added to the UART MMIO block.
-- **Python batch callbacks** — `on_tx_batch(data)` in `devices.py`;
+- **Python batch callbacks** — `on_tx_batch(data)` in `emulator/devices.py`;
   `cli.py` uses `os.write` for console, `sendall` for headless TCP.
 - **New Forth word** — `TX-FLUSH` (dictionary entry #87).
 
@@ -183,9 +183,9 @@ line or test counts as current qualification evidence.
 | KDOS core (Bank 0) | `kdos.f` | ~8,100 |
 | Networking (userland) | `networking.f` | ~7,500 |
 | Tools | `tools.f` | 990 |
-| CPU emulator | `megapad64.py` | 3,002 |
-| SoC | `system.py` | 1,018 |
-| Devices | `devices.py` | 2,542 |
+| CPU emulator | `emulator/megapad64.py` | 3,002 |
+| SoC | `emulator/system.py` | 1,018 |
+| Devices | `emulator/devices.py` | 2,542 |
 | CLI | `cli.py` | 1,557 |
 | C++ accel | `emulator/accel/mp64_accel.cpp` | 3,295 |
 | Assembler | `asm.py` | 909 |
