@@ -154,3 +154,25 @@ def test_unloop_rejects_continuation_without_partial_removal() -> None:
         stack.unloop()
 
     assert stack.snapshot() == (7, continuation)
+
+
+def test_return_stack_restores_an_exact_ordered_snapshot() -> None:
+    stack = ReturnStack()
+    stack.push(7)
+    stack.enter_do(limit=4, index=1)
+    checkpoint = stack.snapshot()
+
+    stack.loop()
+    stack.push_continuation(xt=8, ip=9)
+    stack.restore(checkpoint)
+
+    assert stack.snapshot() == (7, 4, 1)
+
+
+def test_return_stack_restore_rejects_untrusted_entry_shapes() -> None:
+    stack = ReturnStack()
+
+    with pytest.raises(TypeError, match="snapshot must be a tuple"):
+        stack.restore([])  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="cells or continuations"):
+        stack.restore((object(),))  # type: ignore[arg-type]

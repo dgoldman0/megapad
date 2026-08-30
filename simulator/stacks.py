@@ -205,6 +205,30 @@ class ReturnStack:
 
         return tuple(self._entries)
 
+    def restore(self, snapshot: tuple[ReturnEntry, ...]) -> None:
+        """Restore an earlier snapshot after an aborted semantic dispatch.
+
+        The dispatcher has no resumable instruction pointer when execution
+        raises.  Restoring the complete ordered stack therefore prevents a
+        budget abort or primitive failure from leaving internal
+        continuations and partially advanced loop frames in a reusable task
+        context.
+        """
+
+        if not isinstance(snapshot, tuple):
+            raise TypeError("return stack snapshot must be a tuple")
+        entries: list[ReturnEntry] = []
+        for entry in snapshot:
+            if isinstance(entry, Continuation):
+                entries.append(entry)
+            elif isinstance(entry, int):
+                entries.append(u64(entry))
+            else:
+                raise TypeError(
+                    "return stack snapshot entries must be cells or continuations"
+                )
+        self._entries = entries
+
     def _peek_entry(self, offset: int, operation: str) -> ReturnEntry:
         self._require(offset + 1, operation)
         return self._entries[-1 - offset]
