@@ -22,7 +22,10 @@ The first runnable slice provides:
   storage; and
 - BIOS-compatible unaligned `@`, `!`, and `+!` access and byte `FILL` over that
   shared address space, plus the arithmetic and comparison words needed by the
-  next unchanged Akashic source slice.
+  next unchanged Akashic source slice; and
+- an exact-record bootstrap loader that supplies a shadowable `REQUIRE` before
+  KDOS exists, with nested budgets, cycle detection, and registry-only failure
+  cleanup.
 
 This is deliberately not yet a complete MegaForth environment. Dictionary
 bodies and task stacks are not yet backed by the sparse memory substrate.
@@ -55,7 +58,7 @@ runtime.execute("TWICE", context=context)
 assert context.data.snapshot() == (42,)
 ```
 
-## First real-source proof
+## Real-source proofs
 
 The conformance test loads a byte-for-byte snapshot of unchanged
 `akashic/utils/uint-range.f` from Akashic revision
@@ -65,11 +68,20 @@ fixture is revision- and SHA-256-bound; it is test input, not a simulator-side
 rewrite. This proves only the source and runtime semantics exercised by that
 module.
 
-The immediate next source proof loads unchanged
-`akashic/utils/memory-span.f` and exercises its complete caller-owned set API,
-rather than adding a host-native substitute. Its temporary pre-KDOS dependency
-loader is a narrow bootstrap surface that KDOS's real `REQUIRE` must later
-shadow; it is not evidence for the KDOS module loader.
+The second proof loads a byte-identical snapshot of unchanged
+`akashic/utils/memory-span.f` at the same revision. Its real
+`REQUIRE uint-range.f` resolves through the narrow bootstrap loader, and all
+26 definitions are compiled from source. Acceptance exercises the scalar span
+predicates and complete inline, caller-owned set API, including raw layout,
+capacity bounds, adjacency without coalescing, overlapping `PUSH`, disjoint
+`ADD`, malformed geometry, failure atomicity, borrowed bytes, and `CLEAR`.
+There is no simulator-side memory-span substitute.
+
+The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
+or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
+The next slice builds the dictionary-body and defining-word spine needed to
+load the first unchanged KDOS source prefix, before advancing to exact
+stack-backed exceptions and evaluator rollback.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

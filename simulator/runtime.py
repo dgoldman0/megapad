@@ -197,6 +197,22 @@ class MegaForthRuntime:
     def provided_modules(self) -> frozenset[bytes]:
         return frozenset(self._provided)
 
+    def revoke_provided_module(self, module_id: bytes) -> None:
+        """Discard one provisional bootstrap publication after load failure.
+
+        This narrow host seam exists because source commonly executes
+        ``PROVIDED`` before a later dependency.  The pre-KDOS loader must be
+        able to roll back only the failed outer publication while retaining
+        dependencies that completed successfully.  KDOS later shadows both
+        source words with its ordinary registry implementation.
+        """
+
+        if not isinstance(module_id, bytes):
+            raise TypeError("module ID must be bytes")
+        if not module_id:
+            raise ValueError("module ID must not be empty")
+        self._provided.discard(module_id)
+
     @property
     def numeric_base(self) -> int:
         """Current unsigned cell used by the BIOS-compatible number parser."""
