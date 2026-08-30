@@ -219,11 +219,15 @@ or an emulator-only setting is not a conforming dual-rate implementation.
 
 The shared-session host exposes an opt-in diagnostic observer for profiling
 already-running guest code. `start_phase_profile` accepts the current machine
-generation, one aligned mapped RAM or external-memory cell, and a positive
-caller-selected record bound. MegaPad does not know an Akashic word name or
-phase vocabulary; the profiling client resolves the guest variable and
+generation, one complete eight-byte cell wholly contained in mapped RAM or
+external memory, and a positive caller-selected record bound. The address need
+not be naturally aligned: MegaPad Forth `VARIABLE` data fields follow their
+variable-length dictionary headers, and the architecture's 64-bit memory
+operations support such addresses. MegaPad does not know an Akashic word name
+or phase vocabulary; the profiling client resolves the guest variable and
 interprets its packed value. Start is rejected before machine startup, during
-or after shutdown, or across a generation change.
+or after shutdown, across a generation change, or when any byte of the cell
+falls outside one admitted memory region.
 
 The observed 64-bit cell uses a client-defined low-byte phase and high-56-bit
 sequence. While enabled, the shared owner reads it immediately after each

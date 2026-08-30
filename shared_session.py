@@ -803,8 +803,6 @@ class SharedMachine:
     def _phase_profile_address_valid(self, address: int) -> bool:
         """Restrict diagnostics to regions that may hold Forth variables."""
 
-        if address & 7:
-            return False
         system = self.session.system
         ram_size = int(system.ram_size)
         if 0 <= address and address + 8 <= ram_size:
@@ -908,7 +906,7 @@ class SharedMachine:
                 raise RuntimeError("phase profile is already configured")
             if not self._phase_profile_address_valid(normalized_address):
                 raise ValueError(
-                    "phase profile address must be an aligned RAM or "
+                    "phase profile address must name a complete RAM or "
                     "external-memory cell"
                 )
             event = _wire_integer(

@@ -247,11 +247,12 @@ def _phase_event(sequence: int, phase: int) -> int:
 class _PhaseEventCPU:
     def __init__(self, value: int):
         self.value = value
+        self.address = 0x100
         self.reads = 0
         self.read_error: Exception | None = None
 
     def mem_read64(self, address: int) -> int:
-        assert address == 0x100
+        assert address == self.address
         self.reads += 1
         if self.read_error is not None:
             raise self.read_error
@@ -489,19 +490,25 @@ def test_phase_profile_records_exact_batch_bounds_and_bounded_coalescing():
     assert server.dispatch("phase_profile", {})["status"] == "disabled"
 
 
-def test_phase_profile_rejects_unsafe_addresses_and_excessive_capacity():
+def test_phase_profile_accepts_unaligned_cell_but_rejects_unsafe_spans():
     session = _PhaseEventSession([])
     machine = SharedMachine(session)
     _mark_phase_machine_running(machine)
 
-    with pytest.raises(ValueError, match="aligned RAM"):
-        machine.start_phase_profile(0x101, 4, generation=1)
-    with pytest.raises(ValueError, match="aligned RAM"):
+    session.system.cpu.address = 0x101
+    started = machine.start_phase_profile(0x101, 4, generation=1)
+    assert started["address"] == 0x101
+    assert session.system.cpu.reads == 1
+    machine.stop_phase_profile()
+
+    with pytest.raises(ValueError, match="complete RAM"):
+        machine.start_phase_profile(0xFF9, 4, generation=1)
+    with pytest.raises(ValueError, match="complete RAM"):
         machine.start_phase_profile(0x1_000, 4, generation=1)
     with pytest.raises(ValueError, match="between 1 and 65536"):
         machine.start_phase_profile(0x100, 65_537, generation=1)
 
-    assert session.system.cpu.reads == 0
+    assert session.system.cpu.reads == 1
 
 
 def test_phase_profile_start_is_live_and_generation_bound():
