@@ -227,6 +227,13 @@ def _c_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(runtime.memory.read8(context.data.pop()))
 
 
+def _count(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    length = runtime.memory.read8(address)
+    context.data.push(address + 1)
+    context.data.push(length)
+
+
 def _store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
@@ -274,6 +281,27 @@ def _variable(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
 
 def _here(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(runtime.dictionary.here)
+
+
+def _latest(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(runtime.dictionary.latest)
+
+
+def _dictionary_rollback(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    saved_latest = context.data.peek()
+    saved_here = context.data.peek(1)
+    try:
+        runtime.dictionary.rollback_to(saved_here, saved_latest)
+    except (TypeError, ValueError, RuntimeError) as exc:
+        # Keep the pair available when validation fails.  The pending
+        # DICT-FAULT-XT! slice will route this failure through the guest fault
+        # callback; until then it remains an explicit hosted execution error.
+        raise ExecutionError(f"DICT-ROLLBACK rejected checkpoint: {exc}") from None
+    context.data.pop()
+    context.data.pop()
 
 
 def _dictionary_base_fetch(
@@ -412,6 +440,13 @@ def _carriage_return(runtime: MegaForthRuntime, _context: ExecutionContext) -> N
     runtime.write_uart_bytes(b"\r\n")
 
 
+def _uppercase_character(context: ExecutionContext) -> None:
+    value = context.data.pop()
+    if ord("a") <= value <= ord("z"):
+        value -= ord("a") - ord("A")
+    context.data.push(value)
+
+
 def _semantic_noop(_context: ExecutionContext) -> None:
     """A source-visible capability toggle with no hosted native backend."""
 
@@ -451,6 +486,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"DO", DirectiveKind.DO),
         (b"?DO", DirectiveKind.QUESTION_DO),
         (b"LOOP", DirectiveKind.LOOP),
+        (b"LEAVE", DirectiveKind.LEAVE),
         (b"UNLOOP", DirectiveKind.UNLOOP),
         (b"[']", DirectiveKind.BRACKET_TICK),
         (b"DOES>", DirectiveKind.DOES),
@@ -500,6 +536,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b">", _signed_greater),
         (b"@", lambda context: _fetch(runtime, context)),
         (b"C@", lambda context: _c_fetch(runtime, context)),
+        (b"COUNT", lambda context: _count(runtime, context)),
         (b"!", lambda context: _store(runtime, context)),
         (b"+!", lambda context: _plus_store(runtime, context)),
         (b"FILL", lambda context: _fill(runtime, context)),
@@ -508,6 +545,11 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"CREATE", lambda context: _create(runtime, context)),
         (b"VARIABLE", lambda context: _variable(runtime, context)),
         (b"HERE", lambda context: _here(runtime, context)),
+        (b"LATEST", lambda context: _latest(runtime, context)),
+        (
+            b"DICT-ROLLBACK",
+            lambda context: _dictionary_rollback(runtime, context),
+        ),
         (
             b"DICT-BASE@",
             lambda context: _dictionary_base_fetch(runtime, context),
@@ -544,6 +586,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"ABORT", _abort),
         (b".", lambda context: _dot(runtime, context)),
         (b"CR", lambda context: _carriage_return(runtime, context)),
+        (b"UCHAR", _uppercase_character),
         (b"TRUE", lambda context: context.data.push(-1)),
         (b"FALSE", _push_zero),
         (b"I", _i),

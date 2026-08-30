@@ -129,6 +129,7 @@ class Dictionary:
                 )
             self._active_limit = containing_region.limit
         self._here = self._start_address
+        self._numeric_rollback_floor = self._start_address
         self._definitions: list[Word] = []
         self._bindings: dict[bytes, list[Word]] = {}
         self._by_xt: dict[int, Word] = {}
@@ -153,6 +154,23 @@ class Dictionary:
         """Return the newest live word, or ``None`` for an empty dictionary."""
 
         return self._definitions[-1] if self._definitions else None
+
+    @property
+    def numeric_rollback_floor(self) -> int:
+        """Return the lowest HERE accepted by the source-visible rollback ABI."""
+
+        return self._numeric_rollback_floor
+
+    def protect_current_prefix_from_numeric_rollback(self) -> None:
+        """Keep the current dictionary prefix below every numeric checkpoint.
+
+        The hosted runtime calls this once after installing its semantic BIOS
+        vocabulary, mirroring native ``kernel_data_end``.  Opaque host-owned
+        checkpoints retain their separate lineage rules.
+        """
+
+        if self._here > self._numeric_rollback_floor:
+            self._numeric_rollback_floor = self._here
 
     def define(
         self,
@@ -322,19 +340,102 @@ class Dictionary:
         elif seal.tail is not None:
             raise ValueError("invalid empty-dictionary checkpoint")
 
-        removed = self._definitions[seal.depth :]
+        self._publish_rollback(depth=seal.depth, here=seal.here)
+
+    def rollback_to(self, saved_here: int, saved_latest: int) -> None:
+        """Restore one source-visible contiguous dictionary checkpoint.
+
+        Unlike :meth:`rollback`, this is the numeric BIOS ABI used by Forth
+        ``MARKER`` and ``FORGET``.  The caller has no opaque host seal, so the
+        live linked-definition history and the reclaimed ``HERE`` interval
+        jointly establish the checkpoint's lineage before anything mutates.
+
+        A valid pair may include an ``ALLOT`` gap before the first definition
+        it removes.  Every removed header must nevertheless lie in
+        ``[saved_here, current_here)``, while no retained header may occupy
+        that interval.  Guest dictionary bytes are deliberately not erased.
+        """
+
+        target_here = _address(saved_here, label="saved HERE")
+        target_latest = _address(saved_latest, label="saved LATEST")
+        if not self._start_address <= target_here <= self._active_limit:
+            raise ValueError("saved HERE is outside the dictionary region")
+        if target_here < self._numeric_rollback_floor:
+            raise ValueError("saved HERE is below the protected dictionary prefix")
+        if target_here > self._here:
+            raise ValueError("saved HERE is ahead of the active dictionary")
+
+        # Native rollback proves ancestry by walking the guest-visible links,
+        # not by trusting an accelerator or side table.  Hosted metadata has
+        # no representation for a manually spliced chain, so require the live
+        # links to describe the complete semantic definition order exactly.
+        if self._memory is not None:
+            cursor = self.latest
+            for word in reversed(self._definitions):
+                if cursor != word.header_address:
+                    raise ValueError("live dictionary link history is inconsistent")
+                cursor = self._memory.read64(cursor)
+            if cursor != 0:
+                raise ValueError("live dictionary link history is inconsistent")
+
+        if target_latest == 0:
+            target_depth = 0
+        else:
+            target_depth = next(
+                (
+                    index + 1
+                    for index, word in enumerate(self._definitions)
+                    if word.header_address == target_latest
+                ),
+                -1,
+            )
+            if target_depth < 0:
+                raise ValueError("saved LATEST is not a live dictionary ancestor")
+
+        for word in self._definitions[target_depth:]:
+            if not target_here <= word.header_address < self._here:
+                raise ValueError(
+                    "removed dictionary header is outside the reclaimed interval"
+                )
+        for word in self._definitions[:target_depth]:
+            if target_here <= word.header_address < self._here:
+                raise ValueError(
+                    "retained dictionary header is inside the reclaimed interval"
+                )
+
+        self._publish_rollback(depth=target_depth, here=target_here)
+
+    def _publish_rollback(self, *, depth: int, here: int) -> None:
+        """Remove a prevalidated definition suffix without touching its bytes."""
+
+        removed = self._definitions[depth:]
+        removed_bindings: dict[bytes, list[Word]] = {}
+        for word in removed:
+            removed_bindings.setdefault(word.name.upper(), []).append(word)
+            if self._by_xt.get(word.xt) is not word:
+                raise RuntimeError("dictionary execution-token history is inconsistent")
+
+        # Prove every binding suffix before removing the first entry.  Public
+        # operations preserve these invariants, but this keeps a detected
+        # metadata inconsistency atomic too.
+        for key, words in removed_bindings.items():
+            bindings = self._bindings.get(key)
+            if bindings is None or len(bindings) < len(words):
+                raise RuntimeError("dictionary binding history is inconsistent")
+            suffix = bindings[-len(words) :]
+            if any(binding is not word for binding, word in zip(suffix, words)):
+                raise RuntimeError("dictionary binding history is inconsistent")
+
         for word in reversed(removed):
             key = word.name.upper()
             bindings = self._bindings[key]
-            if bindings[-1] is not word:
-                raise RuntimeError("dictionary binding history is inconsistent")
             bindings.pop()
             if not bindings:
                 del self._bindings[key]
             del self._by_xt[word.xt]
 
-        del self._definitions[seal.depth :]
-        self._here = seal.here
+        del self._definitions[depth:]
+        self._here = here
 
     def _checked_advance(self, width: int, *, operation: str) -> int:
         if self._here > MASK64 - width:

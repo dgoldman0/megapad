@@ -16,6 +16,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE_DIRECTORY = Path(__file__).with_name("fixtures")
 PREFIX_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-39-69.f"
+PARSE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-71-115.f"
+ALLOCATOR_FIXTURE = FIXTURE_DIRECTORY / "kdos-allocator-116-545.f"
+SNAPSHOT_FIXTURE = FIXTURE_DIRECTORY / "kdos-snapshots-546-617.f"
 EXCEPTION_FIXTURE = FIXTURE_DIRECTORY / "kdos-exceptions-618-675.f"
 
 MEGAPAD_REVISION = "ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c"
@@ -25,6 +28,73 @@ PREFIX_FIRST_LINE = 39
 PREFIX_LAST_LINE = 69
 PREFIX_SHA256 = "e3918ffeab18446da9e9b190b4d0b82382a3ed5e9fcc220680b5164ab261d01c"
 PREFIX_GIT_BLOB = "ecef2fef19b54559367f1a162a97558776ab6ee8"
+PREFIX_DEFINITIONS = (b".R", b"DEFER", b"IS", b"SAMESTR?")
+
+PARSE_FIRST_LINE = 71
+PARSE_LAST_LINE = 115
+PARSE_SHA256 = "a59c8811eef09b2a1bd31b5c0801b68a29cf1434c67bdc17a63d15e60d69a99c"
+PARSE_GIT_BLOB = "fbfea6100b2dff8925dde073a7bd35a3f88544dc"
+PARSE_DEFINITIONS = (
+    b"NAMEBUF",
+    b"PATHBUF",
+    b"PN-LEN",
+    b"PARSE-NAME",
+    b"NEEDS",
+    b"ASSERT",
+    b".DEPTH",
+    b"0>=",
+)
+
+ALLOCATOR_FIRST_LINE = 116
+ALLOCATOR_LAST_LINE = 545
+ALLOCATOR_SHA256 = "0a7d819a0a17ab96378771f69e6ca3dbf2bc2570028977a713bcba0742e22106"
+ALLOCATOR_GIT_BLOB = "46dcb6e2c82d57904f7d92d43292bf3670ba5347"
+ALLOCATOR_DEFINITIONS = (
+    b"/ALLOC-HDR",
+    b"ALLOC-MAGIC",
+    b"HEAP-BASE",
+    b"HEAP-FREE",
+    b"HEAP-INIT",
+    b"?DICT-ROOM",
+    b"MEM-SIZE",
+    b"MICRO-CORE?",
+    b"FULL-CORE?",
+    b"N-FULL-CORES",
+    b"A-PREV",
+    b"A-CURR",
+    b"A-SIZE",
+    b"HEAP-GUARD",
+    b"LATE-DICT-RESERVE",
+    b"HEAP-SETUP",
+    b"(LINK-PREV!)",
+    b"?CORE0",
+    b"(BANK0-ALLOCATE)",
+    b"(COALESCE)",
+    b"(BANK0-FREE)",
+    b"R-BLK",
+    b"R-OLD",
+    b"R-NEW",
+    b"(TRY-GROW)",
+    b"(BANK0-RESIZE)",
+    b"HEAP-FREE-BYTES",
+    b"HEAP-FRAG",
+    b"HEAP-LARGEST",
+    b"HEAP-CHECK",
+    b".HEAP",
+    b"HEAP-VERIFY",
+)
+
+SNAPSHOT_FIRST_LINE = 546
+SNAPSHOT_LAST_LINE = 617
+SNAPSHOT_SHA256 = "9380a7828dfaae383501cee5566f058b783c85ce450763e091d52e7d19c17d56"
+SNAPSHOT_GIT_BLOB = "3a78ac1da4d8df75dfa0d31bd3b49dee029592ea"
+SNAPSHOT_DEFINITIONS = (
+    b"MARKER",
+    b"(ENTRY>NAME)",
+    b"FG-A",
+    b"FG-L",
+    b"FORGET",
+)
 
 EXCEPTION_FIRST_LINE = 618
 EXCEPTION_LAST_LINE = 675
@@ -66,38 +136,64 @@ def _verified_slice(
 
 
 def _load_exceptions() -> MegaForthRuntime:
-    prefix = _verified_slice(
-        PREFIX_FIXTURE,
-        first_line=PREFIX_FIRST_LINE,
-        last_line=PREFIX_LAST_LINE,
-        sha256=PREFIX_SHA256,
-        git_blob=PREFIX_GIT_BLOB,
-    )
-    exceptions = _verified_slice(
-        EXCEPTION_FIXTURE,
-        first_line=EXCEPTION_FIRST_LINE,
-        last_line=EXCEPTION_LAST_LINE,
-        sha256=EXCEPTION_SHA256,
-        git_blob=EXCEPTION_GIT_BLOB,
+    slices = (
+        (
+            PREFIX_FIXTURE,
+            PREFIX_FIRST_LINE,
+            PREFIX_LAST_LINE,
+            PREFIX_SHA256,
+            PREFIX_GIT_BLOB,
+            PREFIX_DEFINITIONS,
+        ),
+        (
+            PARSE_FIXTURE,
+            PARSE_FIRST_LINE,
+            PARSE_LAST_LINE,
+            PARSE_SHA256,
+            PARSE_GIT_BLOB,
+            PARSE_DEFINITIONS,
+        ),
+        (
+            ALLOCATOR_FIXTURE,
+            ALLOCATOR_FIRST_LINE,
+            ALLOCATOR_LAST_LINE,
+            ALLOCATOR_SHA256,
+            ALLOCATOR_GIT_BLOB,
+            ALLOCATOR_DEFINITIONS,
+        ),
+        (
+            SNAPSHOT_FIXTURE,
+            SNAPSHOT_FIRST_LINE,
+            SNAPSHOT_LAST_LINE,
+            SNAPSHOT_SHA256,
+            SNAPSHOT_GIT_BLOB,
+            SNAPSHOT_DEFINITIONS,
+        ),
+        (
+            EXCEPTION_FIXTURE,
+            EXCEPTION_FIRST_LINE,
+            EXCEPTION_LAST_LINE,
+            EXCEPTION_SHA256,
+            EXCEPTION_GIT_BLOB,
+            EXCEPTION_DEFINITIONS,
+        ),
     )
 
     runtime = MegaForthRuntime()
-    runtime.evaluate(
-        prefix,
-        source_name=(
-            f"kdos.f@{MEGAPAD_REVISION}:"
-            f"{PREFIX_FIRST_LINE}-{PREFIX_LAST_LINE}"
-        ),
-    )
-    result = runtime.evaluate(
-        exceptions,
-        source_name=(
-            f"kdos.f@{MEGAPAD_REVISION}:"
-            f"{EXCEPTION_FIRST_LINE}-{EXCEPTION_LAST_LINE}"
-        ),
-    )
+    for fixture, first, last, sha256, git_blob, definitions in slices:
+        source = _verified_slice(
+            fixture,
+            first_line=first,
+            last_line=last,
+            sha256=sha256,
+            git_blob=git_blob,
+        )
+        result = runtime.evaluate(
+            source,
+            source_name=f"kdos.f@{MEGAPAD_REVISION}:{first}-{last}",
+        )
+        assert tuple(word.name for word in result.definitions) == definitions
 
-    assert tuple(word.name for word in result.definitions) == EXCEPTION_DEFINITIONS
     worker_handlers = runtime.find("_HANDLERS")
     task_handlers = runtime.find("_TASK-HANDLERS")
     assert worker_handlers is not None

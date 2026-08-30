@@ -163,6 +163,7 @@ class DirectiveKind(Enum):
     DO = auto()
     QUESTION_DO = auto()
     LOOP = auto()
+    LEAVE = auto()
     UNLOOP = auto()
     BRACKET_TICK = auto()
     DOES = auto()
@@ -213,6 +214,7 @@ class _IfFrame:
 class _DoFrame:
     body_target: int
     question_index: int | None = None
+    leave_indices: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -332,6 +334,7 @@ class MegaForthRuntime:
             from simulator.core_words import install_core
 
             install_core(self)
+            self.dictionary.protect_current_prefix_from_numeric_rollback()
 
     @property
     def provided_modules(self) -> frozenset[bytes]:
@@ -751,10 +754,28 @@ class MegaForthRuntime:
             frame = compiler.controls.pop()
             assert isinstance(frame, _DoFrame)
             compiler.operations.append(Loop(frame.body_target))
+            exit_target = len(compiler.operations)
             if frame.question_index is not None:
                 compiler.operations[frame.question_index] = QuestionDo(
-                    len(compiler.operations)
+                    exit_target
                 )
+            for leave_index in frame.leave_indices:
+                compiler.operations[leave_index] = Branch(exit_target)
+        elif kind is DirectiveKind.LEAVE:
+            frame = next(
+                (
+                    control
+                    for control in reversed(compiler.controls)
+                    if isinstance(control, _DoFrame)
+                ),
+                None,
+            )
+            if frame is None:
+                self._compile_error(state, "LEAVE has no matching DO")
+            assert isinstance(frame, _DoFrame)
+            compiler.operations.append(Unloop())
+            compiler.operations.append(Branch(0))
+            frame.leave_indices.append(len(compiler.operations) - 1)
         elif kind is DirectiveKind.UNLOOP:
             compiler.operations.append(Unloop())
         elif kind is DirectiveKind.BRACKET_TICK:

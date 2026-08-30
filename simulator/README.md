@@ -11,7 +11,7 @@ The implemented slices provide:
 - byte-oriented source parsing, comments, `PROVIDED`, colon definitions, and
   `IF`/`ELSE`/`THEN`, `BEGIN`/`UNTIL`/`AGAIN`,
   `BEGIN`/`WHILE`/`REPEAT`, `EXIT`, `DO`/`?DO`/`LOOP`, and `UNLOOP`
-  compilation;
+  compilation, including `LEAVE` through intervening conditionals;
 - wrapping 64-bit cells, full-width Forth flags, newest-definition lookup,
   stable numeric execution tokens, compile-time binding, and ordinary
   source-parsing `CONSTANT` definitions;
@@ -30,6 +30,8 @@ The implemented slices provide:
   next unchanged Akashic source slice;
 - memory-backed linked dictionary headers and CREATE-family bodies, including
   signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
+- numeric `HERE`/`LATEST` checkpoint rollback with live-ancestry and contiguous
+  reclaimed-zone validation, binding restoration, and stale-byte retention;
 - hosted UART output for the BIOS numeric printer, complete-task `ABORT`, and
   the stable execution-token behavior needed by source-defined `DEFER`/`IS`;
 - active-line `WORD` with its transient counted string at `HERE`, forward
@@ -55,9 +57,12 @@ emulator's and physical implementation's responsibility.
 The current stack bounds enforce the canonical mapped Bank 0 halves, and the
 ordinary KDOS `?DICT-ROOM` guard now observes the live stack and heap. BIOS
 dictionary emitters still enforce only their containing memory region; they do
-not yet route every publication through the KDOS dictionary-fault hook.
-Complete automatic dictionary-versus-stack/heap overflow fidelity therefore
-remains pending even though the source-defined allocator itself is present.
+not yet route every publication through the KDOS dictionary-fault hook. Valid
+`DICT-ROLLBACK` checkpoints have their source-visible behavior, but rejection
+remains a hosted execution error with the pair intact until `DICT-FAULT-XT!`
+installs the ordinary guest callback. Complete automatic
+dictionary-versus-stack/heap overflow fidelity therefore remains pending even
+though the source-defined allocator itself is present.
 
 ## Run it
 
@@ -138,15 +143,21 @@ Qualification also pins, but does not endorse, the current invalid-size
 failure is recorded as an
 [open KDOS contract discrepancy](../docs/kdos-reference.md#11-memory-allocator).
 
-The first exception proof then evaluates byte-exact `kdos.f` logical lines
-618 through 675 from the same revision. It installs the ordinary KDOS
-per-context `HANDLER` tables and source-defined `CATCH`/`THROW`; the simulator
-does not substitute host exception words. Acceptance covers normal completion,
-zero and nonzero throws, nested rethrow, exact data/return-stack restoration,
-and unwinding through an active loop and deferred `DOES>` action. `ABORT`
-remains the distinct noncatchable BIOS reset path. It remains a separately
-qualified island because the dictionary snapshot source between the allocator
-and exception sections has not loaded yet.
+The next exact block, logical lines 546 through 617, loads KDOS's ordinary
+`MARKER` and `FORGET` definitions. Acceptance checks their live dictionary
+header access, numeric `HERE`/`LATEST` checkpoint bodies, self-removal,
+case-insensitive lookup, shadow restoration, stale guest bytes, execution-token
+invalidation, and address reuse. The same path exercises source-compiled
+`LEAVE`; neither operation is replaced with a hosted whole-word substitute.
+
+The now-contiguous loader then evaluates byte-exact logical lines 618 through
+675 from the same revision. It installs the ordinary KDOS per-context `HANDLER`
+tables and source-defined `CATCH`/`THROW`; the simulator does not substitute
+host exception words. Acceptance covers normal completion, zero and nonzero
+throws, nested rethrow, exact data/return-stack restoration, and unwinding
+through an active loop and deferred `DOES>` action. `ABORT` remains the
+distinct noncatchable BIOS reset path. Loading the intervening snapshot block
+absorbs the former exception island into the monotonic frontier.
 
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
@@ -162,10 +173,8 @@ aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–545 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, and the complete Bank-0 allocator section; line 70 is blank |
-| 546–617 | Next uncovered frontier | Line 546 is blank; dictionary snapshots begin at line 547 |
-| 618–675 | Qualified semantic island | Source-defined exception handling used to validate real stack unwinding |
-| 676 onward | Pending | Not yet a simulator source-load claim |
+| 39–675 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, Bank-0 allocator, dictionary snapshots, and source-defined exception handling; line 70 is blank |
+| 676 onward | Next uncovered frontier | Not yet a simulator source-load claim |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -177,9 +186,10 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next slices extend the contiguous unchanged KDOS prefix and then add the
-persistent evaluator state and numeric dictionary rollback required by its
-checked source-loader surface.
+The next source boundary installs KDOS's dictionary-fault callback and captures
+the BIOS task entry points through logical line 719. Later slices continue the
+same contiguous unchanged prefix toward the persistent evaluator and ordinary
+checked module-loader surface.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work
