@@ -29,6 +29,7 @@ struct UARTDevice {
 
     static constexpr uint32_t UART_BASE = 0x0000;
     static constexpr uint32_t UART_END = 0x0010;
+    static constexpr uint8_t UART_CAP_TX_RING_BATCH = 1u << 0;
     static constexpr uint64_t TX_RING_CAPACITY = 4096;
 
     void init() {
@@ -104,6 +105,8 @@ struct UARTDevice {
                 return baud_lo;
             case 0x05:
                 return baud_hi;
+            case 0x07:
+                return UART_CAP_TX_RING_BATCH;
             default:
                 return 0;
         }

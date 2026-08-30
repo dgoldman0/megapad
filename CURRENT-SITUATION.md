@@ -75,15 +75,18 @@
 
 ## 1. Recent changes
 
-### UART TX ring buffer (2026-03-07)
+### UART TX backend selection (updated 2026-08-30)
 
-- **BIOS ring buffer** — 4096-byte RAM-resident TX ring buffer.  `EMIT`
-  appends to the buffer (fast RAM write); the buffer auto-flushes on
-  overflow or explicit `TX-FLUSH`.  `KEY` and `BYE` flush before
-  blocking/halting.  R19 holds the ring descriptor pointer (set at boot,
-  registered via TX_RING_BASE MMIO).
-- **UART device registers** — TX_FLUSH (`+0x06`, W) and TX_RING_BASE
-  (`+0x08`–`+0x0F`, W, 64-bit LE) added to the UART MMIO block.
+- **One-time capability selection** — BIOS reads UART_CAPS (`+0x07`) at boot.
+  Python/native advertise `TX_RING_BATCH`, preserving the 4096-byte RAM ring,
+  automatic overflow flush, and host batch callbacks. Integrated RTL reports
+  zero and uses ready-polled TX_DATA instead.
+- **Physical flush semantics** — Direct-mode `TX-FLUSH` waits for both the RTL
+  FIFO and shifter to become idle. `KEY` and `BYE` flush before blocking or
+  halting. R19 remains the emulator ring descriptor pointer.
+- **UART device registers** — TX_FLUSH (`+0x06`, W), UART_CAPS (`+0x07`, R),
+  and TX_RING_BASE (`+0x08`–`+0x0F`, W, 64-bit LE) are implemented by the
+  emulator; RTL implements CAPS=0 alongside architectural TX/STATUS.
 - **Python batch callbacks** — `on_tx_batch(data)` in `devices.py`;
   `cli.py` uses `os.write` for console, `sendall` for headless TCP.
 - **New Forth word** — `TX-FLUSH` (dictionary entry #87).

@@ -83,6 +83,7 @@ from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
     NIC_BASE, SECTOR_SIZE, UART, Timer, Storage, SystemInfo,
     NetworkDevice, Device, DeviceBus, BusError,
+    UART_CAP_TX_RING_BATCH,
     STORAGE_CMD_READ, STORAGE_CMD_WRITE, STORAGE_CMD_FLUSH,
     STORAGE_RESULT_MEDIA_FAILURE, STORAGE_RESULT_FLUSH_FAILURE,
     STORAGE_RESULT_MEDIA_REMOVED, STORAGE_RESULT_UNSUPPORTED,
@@ -169,6 +170,10 @@ def _next_line_chunk(data: bytes, pos: int) -> bytes:
 # ---------------------------------------------------------------------------
 
 class TestUART(unittest.TestCase):
+    def test_tx_ring_capability(self):
+        uart = UART()
+        self.assertEqual(uart.read8(0x07), UART_CAP_TX_RING_BATCH)
+
     def test_tx_callback(self):
         uart = UART()
         out = []
@@ -1919,6 +1924,29 @@ class TestBIOS(unittest.TestCase):
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, ["65 EMIT"])
         self.assertIn("A", text)
+
+    def test_all_bios_byte_writers_use_direct_uart_fallback(self):
+        sys, buf = self._boot_bios()
+        caps_addr = self.__class__._bios_labels["var_uart_caps"]
+        sys.cpu.mem[caps_addr:caps_addr + 8] = (0).to_bytes(8, "little")
+        ring_addr = sys.cpu.regs[19]
+        sys.cpu.mem[ring_addr:ring_addr + 8] = (0).to_bytes(8, "little")
+        # Recreate a cold capability-zero boot: no host ring is registered.
+        sys.uart._tx_ring_base = 0
+
+        text = self._run_forth(sys, buf, [
+            "66 EMIT CR",
+            'S" direct-string" TYPE CR',
+            "HEX AB . DECIMAL TX-FLUSH",
+        ])
+
+        self.assertIn("B\r\n", text)
+        self.assertIn("direct-string\r\n", text)
+        self.assertIn("AB ", text)
+        self.assertEqual(
+            int.from_bytes(sys.cpu.mem[ring_addr:ring_addr + 8], "little"),
+            0,
+        )
 
     # -- HEX / DECIMAL / BASE --
 

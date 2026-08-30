@@ -140,8 +140,11 @@ class Device:
 #   0x04  BAUD_LO       (RW) — baud rate low byte (cosmetic in emulator)
 #   0x05  BAUD_HI       (RW) — baud rate high byte
 #   0x06  TX_FLUSH      (W)  — writing any value drains the TX ring buffer
+#   0x07  CAPS          (R)  — bit 0: host TX-ring batching is available
 #   0x08–0x0F  TX_RING_BASE (W)  — 64-bit base address of TX ring descriptor
 #                                   (written byte-by-byte, LE, by BIOS at boot)
+
+UART_CAP_TX_RING_BATCH = 1 << 0
 
 class UART(Device):
     """Emulated serial console — connects to the CLI's terminal."""
@@ -207,6 +210,8 @@ class UART(Device):
             return self.baud_lo
         elif offset == 0x05:
             return self.baud_hi
+        elif offset == 0x07:
+            return UART_CAP_TX_RING_BATCH
         return 0
 
     def write8(self, offset: int, value: int):

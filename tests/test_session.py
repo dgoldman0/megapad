@@ -12,7 +12,7 @@ import pytest
 
 from cli import MegapadCLI, main as cli_main
 from dev_session import run_scenario
-from devices import UART
+from devices import UART, UART_CAP_TX_RING_BATCH
 from display import VirtualTerminal
 from nic_backends import LoopbackBackend
 from rich_terminal import (
@@ -185,6 +185,7 @@ def test_native_uart_rx_status_and_batched_tx():
     system.uart.inject_input("Aé")
     state = system.cpu._cs
 
+    assert state.uart_read8(0x07) == UART_CAP_TX_RING_BATCH
     assert state.uart_read8(0x02) & 0x02
     assert state.uart_read8(0x01) == ord("A")
     assert state.uart_read8(0x01) == 0xC3

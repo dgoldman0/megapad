@@ -139,23 +139,28 @@ after the machine boundary.
 
 ### 4.1 Physical UART status and evidence boundary
 
-Physical UART TX status is **OPEN**. The Python and native accelerator UARTs
-implement BIOS writes to `TX_FLUSH` at `+06` and the RAM ring descriptor at
-`+08` through `+0F` by copying a complete batch directly into host storage.
-They report TX ready/empty without elapsed line time, and their `BAUD_LO` and
-`BAUD_HI` bytes do not pace TX or RX. The enhanced host port and viewer consume
-those completed batches in process.
+Software-to-RTL UART TX path is **IMPLEMENTED; BOARD EVIDENCE OPEN**. BIOS
+reads `UART_CAPS` at `+07` once during boot. Every BIOS byte writer -- including
+`EMIT`, `TYPE`, `CR`/LF, boot strings, and diagnostics -- uses one
+capability-aware routine. Python and the native accelerator advertise bit 0,
+`TX_RING_BATCH`, so that routine retains the existing RAM-ring path and
+`TX-FLUSH` at `+06` still publishes one completed host batch. This keeps the
+enhanced host port's batching, admission, and ownership behavior unchanged.
 
-The integrated `mp64_uart` RTL instead implements only `TX_DATA`, `RX_DATA`,
-`STATUS`, and `CONTROL` at `+00` through `+03`. It has a real 8N1 shift path
-fixed by the SoC instance to 115,200 baud, but it has no ring descriptor,
-`TX_FLUSH`, or DMA reader. BIOS `EMIT` writes only the caller-owned RAM ring and
-BIOS `TX-FLUSH` writes `+06`; `rich-terminal.f` reaches that same path through
-`TYPE TX-FLUSH`. Consequently the emulator and native viewer can carry APT and
-exercise the model/compositor, while the current BIOS rich-terminal path sends
-no bytes to the physical RTL TX pin. Emulator/native viewer success is not
-physical-UART evidence and proves neither baud timing nor board-level
-backpressure.
+Integrated `mp64_uart` RTL reports zero capabilities. The same BIOS therefore
+polls STATUS bit 0 (`TX_READY`) and writes each ordinary ANSI or APT byte to
+`TX_DATA` at `+00`; direct-mode `TX-FLUSH` waits for STATUS bit 5. RTL bit 5 now
+means FIFO empty and shifter inactive, including completion of the final stop
+bit. The SoC instance remains fixed to real 8N1 serialization at 115,200 baud.
+The FIFO also handles a same-cycle bus push and shifter pop without losing or
+duplicating its count.
+
+This closes the source/BIOS/RTL design seam, but does not prove attached-board
+transmission. The current board flow has no accepted deployable BIOS image,
+bitstream, or captured pin waveform, and the Genesys-2 measurement target does
+not fit the default internal-memory contract. Emulator/native viewer success
+still proves neither real baud timing, board-level backpressure, USB-UART
+wiring, nor a panel controller.
 
 The later reference journey at Akashic `d24540e` with MegaPad `c7045d6`
 closes the selected Desk/Pad/Daybook software/viewer checkpoint, including
@@ -163,8 +168,8 @@ Daybook navigation and the ordinary shared-source handoff into Pad. It finished
 at 783,434 decoded bytes after twelve acknowledged offers, with every scripted
 input authorized only after the exact complete post-`pygame.display.flip()`
 offer acknowledgement. Those bytes still crossed the in-process enhanced host
-port, not the RTL TX pin, so this success does not change physical UART status
-from **OPEN** or qualify an e-paper panel.
+port, not an attached RTL TX pin, so the run does not close board evidence or
+qualify an e-paper panel.
 
 The recorded `eedcfb9`/`4f074ae` reference journey makes the consequence
 quantifiable, although it is not physical-link evidence. At 8N1, 115,200 baud
@@ -177,8 +182,8 @@ seconds, 245 ms, and 0--69 ms respectively.
 
 Those figures are arithmetic lower bounds from decoded guest-to-terminal wire
 bytes, not measurements. They omit terminal replies, scheduling gaps,
-backpressure, composition, and panel refresh, and the physical TX seam above
-is still open. They do show the likely division of labor: after first load, a
+backpressure, composition, and panel refresh, and the physical link remains
+unmeasured. They do show the likely division of labor: after first load, a
 100 MHz implementation at even a four-clock floor projects the 69.0--123.0M
 post-first instruction intervals to at least 2.76--4.92 seconds before longer
 operations or stalls, so guest execution would still dominate their current
@@ -189,23 +194,21 @@ independently remain refresh-bound. Retained deltas, coalescing, faster
 negotiated transport, and the exact post-refresh acknowledgement rule address
 different terms of that latency budget.
 
-The physical TX seam is closed before any faster-rate work. The preferred
-unreleased-system direction is for the architectural BIOS path to poll real
-`TX_READY` and write `TX_DATA` directly, keeping host batching behind the
-emulator boundary instead of retaining guest-visible ring-only registers. If
-the ring is retained instead, a real bounded DMA reader and its completion and
-fault semantics must exist in the RTL. Either route must first prove ordinary
-ANSI and APT bytes on the physical pin at 115,200 baud.
+The 115,200 software/RTL path is implemented before any faster-rate work. The
+architectural BIOS path polls real `TX_READY` and writes `TX_DATA`; the optional
+capability keeps guest ring batching confined to backends that implement it.
+No RTL DMA reader or ring fault protocol is implied. Attached hardware must
+still prove ordinary ANSI and APT bytes on the physical pin at 115,200 baud.
 
-Only after that baseline works may MegaPad add the optional 1,000,000-baud
-profile. At the current 100 MHz SoC clock its integer divisor is exactly 100;
+Only after that baseline is measured may MegaPad add the optional
+1,000,000-baud profile. At the current 100 MHz SoC clock its integer divisor is
+exactly 100;
 115,200 uses divisor 868 (approximately 115,207 baud). The existing two stored
 baud bytes cannot encode either 115,200 or 1,000,000 as a numeric rate and are
 not a suitable control. A two-value rate-profile selector is the smaller
 interface; an arbitrary divisor design instead needs shadow registers plus one
-atomic apply operation. In both designs the status boundary must mean physical
-line idle (FIFO empty and shifter idle), not the RTL's current FIFO-only
-`TX_EMPTY` bit.
+atomic apply operation. The implemented status boundary already means physical
+line idle (FIFO empty and shifter idle).
 
 Reset, ANSI, probe/offer/accept, and the future rate-switch exchange start at
 115,200. The faster profile is explicitly advertised and accepted, then
@@ -272,8 +275,8 @@ acknowledgement. It does not justify a MegaPad opcode, cached executable, cycle
 claim, or emulator timing shortcut.
 
 The successful observer run still used the in-process enhanced host port and
-`pygame.display.flip()`. It did not traverse the RTL UART or an e-paper panel,
-so physical UART status remains **OPEN** and no transport-rate or panel-cadence
+`pygame.display.flip()`. It did not traverse an attached RTL UART or e-paper
+panel, so board evidence remains open and no transport-rate or panel-cadence
 decision follows from it.
 
 ## 5. Terminal consumption

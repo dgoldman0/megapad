@@ -97,14 +97,26 @@ boot:
     ldi64 r11, tx_ring
     mov   r19, r11
 
+    ; Discover the emulator-only batching extension once.  Real RTL reports
+    ; zero and uses the architectural TX_READY/TX_DATA path; the emulator
+    ; reports bit 0 and retains the existing RAM-ring batch behavior.
+    ldi64 r11, 0xFFFF_FF00_0000_0007  ; UART_CAPS
+    ld.b  r12, r11
+    andi  r12, 0x01                    ; TX_RING_BATCH
+    ldi64 r11, var_uart_caps
+    str   r11, r12
+
     ; RAM survives a warm reset.  Discard any interrupted output batch before
-    ; registering the descriptor with the freshly reset UART.
+    ; conditionally registering it with the freshly reset UART.
     ldi   r1, 0
     str   r19, r1
 
-    ; Register TX ring buffer with UART (write descriptor addr to UART+0x08)
+    cmpi  r12, 0
+    breq  .boot_uart_ready
+    ; Register TX ring buffer with UART (write descriptor addr to UART+0x08).
     ldi64 r11, 0xFFFF_FF00_0000_0008
     str r11, r19
+.boot_uart_ready:
 
     ; Phase 3: JIT NEXT/EXIT dispatch registers
     ; (ldi64 can't target R16+ — EXT prefix conflict; use mov)
@@ -634,7 +646,7 @@ interp_no_rsp_overflow:
 ;  I/O Primitives
 ; =====================================================================
 
-; emit_char: write byte R1 to TX ring buffer  [SEP dispatch — Phase 1]
+; emit_char: write byte R1 to the selected UART path [SEP dispatch — Phase 1]
 ; R19 = persistent pointer to tx_ring descriptor (+0=head, +8=buf[4096])
 ; Preserves all registers (R11 saved/restored on R15 stack).
 emit_char:
@@ -659,10 +671,24 @@ emit_char:
 ; is already DMA-friendly by design.
 ; --------------------------------------------------------------------------
 
-; ring_write: append byte R1 to the TX ring buffer.
+; ring_write: write byte R1 through the boot-selected UART path.
+;
+; This is the one callable byte writer used by EMIT, TYPE, CR/LF, boot strings,
+; and diagnostics.  Keeping the capability branch here is mandatory: callers
+; that bypass the SEP EMIT wrapper must work on real RTL where the host batching
+; extension is absent and the RAM ring was never registered.
 ; R19 = persistent descriptor pointer (+0=head, +8=buf[4096]).
 ; Clobbers: R11 only.  Preserves R0, R7, R9, R12, R13, R14, R15.
 ring_write:
+    ldi64 r11, var_uart_caps
+    ldn   r11, r11
+    andi  r11, 0x01
+    cmpi  r11, 0
+    breq  uart_write_direct
+
+; Host batching path. The capability probe guarantees that the descriptor was
+; registered before any caller can reach this label.
+ring_write_batch:
     ldn r11, r19              ; r11 = head
     add r11, r19              ; r11 = &tx_ring + head
     addi r11, 8              ; r11 = &tx_ring_buf[head]
@@ -682,15 +708,40 @@ rw_overflow:
     st.b r11, r11            ; write to UART TX_FLUSH (value ignored)
     ret.l
 
-; tx_flush: flush TX ring buffer to host.
+uart_write_direct:
+    ; Hardware path: hold the caller's byte in R1 while polling FIFO space.
+    ; Only R11 is temporary, matching every existing ring_write caller.
+    ldi64 r11, 0xFFFF_FF00_0000_0002  ; UART_STATUS
+    ld.b  r11, r11
+    andi  r11, 0x01                    ; TX_READY
+    cmpi  r11, 0
+    breq  uart_write_direct
+    ldi64 r11, 0xFFFF_FF00_0000_0000  ; UART_TX_DATA
+    st.b  r11, r1
+    ret.l
+
+; tx_flush: publish an emulator ring batch or wait for physical line idle.
 ; Safe to call from any context (SEP routines, subroutines).
 ; Clobbers: R11 only.
 tx_flush:
+    ldi64 r11, var_uart_caps
+    ldn   r11, r11
+    andi  r11, 0x01
+    cmpi  r11, 0
+    breq  txf_direct
     ldn r11, r19              ; head
     cmpi r11, 0
     breq txf_done             ; nothing to flush
     ldi64 r11, 0xFFFF_FF00_0000_0006
     st.b r11, r11            ; trigger MMIO flush
+    br txf_done
+txf_direct:
+    ; TX_EMPTY is architectural line idle: FIFO empty and shifter inactive.
+    ldi64 r11, 0xFFFF_FF00_0000_0002  ; UART_STATUS
+    ld.b  r11, r11
+    andi  r11, 0x20                    ; TX_EMPTY
+    cmpi  r11, 0
+    breq  txf_direct
 txf_done:
     ret.l
 
@@ -22882,6 +22933,10 @@ var_base:
 var_here:
     .dq 0
 var_latest:
+    .dq 0
+; UART_CAPS captured once at boot. Bit 0 selects the emulator's host-side
+; TX-ring batching extension; zero selects architectural TX_READY/TX_DATA.
+var_uart_caps:
     .dq 0
 ; Optional external dictionary interval.  A zero limit disables the interval;
 ; DICT-BOUNDS! publishes only a validated pair.  Keep these cells after

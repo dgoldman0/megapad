@@ -193,54 +193,58 @@ layer converts to `TrapError(IVEC_BUS_FAULT)`.
 ## UART (Serial Port)
 
 The UART provides terminal I/O — it is how the user types at the Forth REPL
-and sees output. The table records the current emulator/native host facade used
-by BIOS. Offsets `+00` through `+03` have corresponding RTL registers; the
-batching offsets `+04` through `+0F` do not currently exist in the integrated
-RTL and must not be treated as a common hardware contract.
+and sees output. Offsets `+00` through `+03` are the common byte interface.
+`UART_CAPS` at `+07` selects an optional backend extension once at boot; the
+batch registers remain emulator/native-only and are not a hardware contract.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
 | TX_DATA | `+0x00` | W | Write a byte to transmit. |
 | RX_DATA | `+0x01` | R | Read next byte from receive FIFO. |
-| STATUS | `+0x02` | R | **bit 0:** TX ready. **bit 1:** RX data available. **bit 5:** TX empty. The emulator reports ready and empty immediately; RTL derives bits 0 and 5 from its TX FIFO. |
+| STATUS | `+0x02` | R | **bit 0:** TX ready. **bit 1:** RX data available. **bit 5:** TX line idle. The emulator reports ready and idle immediately; RTL bit 5 requires both an empty FIFO and an inactive shifter. |
 | CONTROL | `+0x03` | RW | **bit 0:** RX IRQ enable.  **bit 1:** TX IRQ enable. |
 | BAUD_LO | `+0x04` | RW | Stored emulator byte only; it does not pace TX or RX and has no RTL register. |
 | BAUD_HI | `+0x05` | RW | Stored emulator byte only; it does not pace TX or RX and has no RTL register. |
-| TX_FLUSH | `+0x06` | W | Drain the TX ring buffer (triggers batch output callback). |
+| TX_FLUSH | `+0x06` | W | Emulator/native batching extension: drain the TX ring and trigger its batch callback. |
+| UART_CAPS | `+0x07` | R | **bit 0:** `TX_RING_BATCH`. Emulator/native return 1; RTL returns 0 and uses the common byte interface. |
 | TX_RING_BASE | `+0x08`–`+0x0F` | W | 64-bit LE pointer to the TX ring descriptor in RAM. |
 
 **BIOS words:** `KEY` reads from RX_DATA (blocking), `KEY?` checks STATUS bit
-1, and the current `EMIT` appends only to a 4096-byte TX ring in RAM. The ring
-is flushed automatically when full or explicitly through `TX-FLUSH`.
+1, and BIOS captures `UART_CAPS` once at boot. Every BIOS byte-output helper --
+`EMIT`, `TYPE`, `CR`/LF, boot strings, and diagnostics -- converges on one
+capability-aware writer. With `TX_RING_BATCH`, that writer retains the
+4096-byte RAM ring and `TX-FLUSH` publishes its host batch. Without that bit,
+the writer polls `TX_READY` and writes `TX_DATA`; `TX-FLUSH` waits for physical
+line idle.
 
-### Current physical-TX gap
+### Physical-TX implementation and evidence boundary
 
-Physical UART TX status is **OPEN**. The Python and native accelerator devices
-implement `TX_FLUSH` and `TX_RING_BASE` by copying the BIOS ring into a host
-batch; their TX path is untimed and their stored baud bytes are inert. The
-emulator rich-terminal viewer consumes those in-process batches directly, so
-successful emulator/native rendering is not evidence of physical-UART byte
-delivery, baud timing, or line backpressure.
+Software-to-RTL UART TX path is **IMPLEMENTED; BOARD EVIDENCE OPEN**. Python
+and the native accelerator advertise `TX_RING_BATCH`, preserving the existing
+RAM-ring batch and enhanced-host behavior. Integrated RTL reports zero
+capabilities, so the same BIOS instead uses architectural `TX_READY` and
+`TX_DATA`. Ordinary ANSI, boot/diagnostic text, and `rich-terminal.f` APT
+output all pass through the common byte writer; an explicit `TX-FLUSH` waits
+until the RTL FIFO and shifter are both idle.
 
-The integrated `mp64_uart` RTL has only `TX_DATA`, `RX_DATA`, `STATUS`, and
-`CONTROL`. Its SoC instance fixes a real 8N1 serializer at 115,200 baud and has
-no ring registers or DMA interface. Because BIOS `EMIT` never writes
-`TX_DATA`, and both BIOS `TX-FLUSH` and `rich-terminal.f` ultimately write the
-unimplemented `+06` register, the current physical RTL TX pin receives none of
-that output. RTL `TX_EMPTY` is also only FIFO-empty; it may assert while the
-shift register is still transmitting and is not a physical line-idle boundary.
+The SoC instance retains a real 8N1 serializer fixed at 115,200 baud. At the
+100 MHz clock its integer divisor is 868, approximately 115,207 baud. The TX
+FIFO accounts a simultaneous bus push and shifter pop as no net count change,
+so ready-polled bursts do not lose the coincident byte.
 
-Close this seam at 115,200 before changing rate. The preferred direction for
-the unreleased architecture is a BIOS hardware path that polls `TX_READY` and
-writes `TX_DATA`, while emulator batching remains a host implementation detail.
-Retaining the guest-visible ring instead requires a real bounded DMA reader,
-completion behavior, and fault semantics in RTL. Either design must first show
-ordinary ANSI and APT bytes on the physical pin.
+This implementation is not an attached-board result. The repository's current
+board wrapper still needs a deployable BIOS-provisioning/boot flow and a target
+whose memory contract fits; no checked-in bitstream or physical capture proves
+the selected BIOS, pin constraint, USB-UART bridge, receiver, or panel. A logic
+analyzer or independent receiver must still show byte-exact ordinary ANSI and
+APT traffic, ready backpressure, 8N1 timing, and final line idle at the real TX
+pin before physical UART evidence is closed.
 
 ### Dual-rate direction
 
-After physical TX works, a baseline 115,200 / fast 1,000,000 baud selector is
-feasible without a clock change. At the current 100 MHz clock the integer
+After attached-board physical TX is measured, a
+baseline 115,200 / fast 1,000,000 baud selector is feasible without a clock
+change. At the current 100 MHz clock the integer
 divisors are 868 (approximately 115,207 baud) and exactly 100. The current two
 emulator baud bytes cannot represent either rate numerically, so they must not
 be promoted as the control. Prefer an atomic two-profile selector; if arbitrary

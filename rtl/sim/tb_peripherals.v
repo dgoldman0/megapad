@@ -12,12 +12,14 @@
 //     6. Disable stops counter
 //     7. Compare register byte-write LE
 //   UART:
-//     8. TX write → shift register → TX pin waveform (8N1)
-//     9. TX status (tx_ready when FIFO not full)
+//     8. Capability/status baseline
+//     9. TX write → exact TX pin byte (8N1)
 //    10. RX pin → shift register → FIFO → read byte
 //    11. UART loopback (TX→RX)
 //    12. Status register reporting
 //    13. IRQ generation
+//        TX stress also covers line-idle, >FIFO ready polling, and a
+//        deliberately coincident FIFO push/pop.
 //   Disk:
 //    14. Register write/readback (sector, DMA base, sec_count)
 //    15. Status register (present bit)
@@ -158,6 +160,58 @@ module tb_peripherals;
         end
     endtask
 
+    task uart_write_ready(input [7:0] d);
+        reg [7:0] s;
+        begin
+            s = 8'd0;
+            while (!s[0])
+                uart_read(UART_STATUS, s);
+            uart_write(UART_TX, d);
+        end
+    endtask
+
+    // Capture one 8N1 byte from the physical pin. The falling edge is sampled
+    // at a negedge, then each data bit is read near the middle of its bit cell.
+    task uart_capture_tx_byte(output [7:0] d);
+        integer bit_index;
+        begin
+            while (uart_tx !== 1'b0)
+                @(negedge clk);
+            repeat(4) @(posedge clk);
+            for (bit_index = 0; bit_index < 8; bit_index = bit_index + 1) begin
+                repeat(8) @(posedge clk);
+                d[bit_index] = uart_tx;
+            end
+            repeat(8) @(posedge clk);
+        end
+    endtask
+
+    // Queue one byte on the exact clock that the UART moves the previous FIFO
+    // head into its shifter. The queue must retain one byte after both events.
+    task uart_write_on_pop(input [7:0] d);
+        begin
+            while (!(u_uart.tx_tick && !u_uart.tx_active
+                     && !u_uart.tx_fifo_empty))
+                @(negedge clk);
+            uart_req = 1'b1;
+            uart_addr = UART_TX;
+            uart_wdata = d;
+            uart_wen = 1'b1;
+            @(posedge clk);
+            #1;
+            if (u_uart.tx_count === 5'd1) begin
+                $display("  PASS: coincident TX push/pop preserves FIFO count");
+                pass_count = pass_count + 1;
+            end else begin
+                $display("  FAIL: coincident TX push/pop count = %0d (expected 1)",
+                         u_uart.tx_count);
+                fail_count = fail_count + 1;
+            end
+            uart_req = 1'b0;
+            uart_wen = 1'b0;
+        end
+    endtask
+
     task disk_write(input [5:0] a, input [7:0] d);
         begin
             @(posedge clk);
@@ -206,6 +260,10 @@ module tb_peripherals;
     // Main test sequence
     // ========================================================================
     reg [7:0] rd8;
+    reg [7:0] uart_tx_exact;
+    reg [7:0] uart_coincident_capture [0:2];
+    reg [7:0] uart_burst_capture [0:31];
+    integer uart_burst_index;
 
     initial begin
         $dumpfile("tb_peripherals.vcd");
@@ -371,15 +429,21 @@ module tb_peripherals;
         // status[0] = tx_ready (FIFO not full), status[5] = tx_empty
         check1("UART tx_ready", rd8[0], 1'b1);
         check1("UART tx_empty", rd8[5], 1'b1);
+        uart_read(UART_CAPS, rd8);
+        check8("UART RTL capabilities", rd8, 8'd0);
 
-        // === TEST 9: UART TX write + shift out ===
+        // === TEST 9: UART TX exact pin byte + true line idle ===
         test_num = 9;
-        $display("\n=== TEST %0d: UART TX write + shift ===", test_num);
-        // Write 'A' (0x41) to TX
-        uart_write(UART_TX, 8'h41);
-        // DIVISOR=8: each bit takes 8 clocks, 10 bits total = 80 + margin
-        repeat(100) @(posedge clk);
-        // TX should be idle high now
+        $display("\n=== TEST %0d: UART TX exact byte + line idle ===", test_num);
+        fork
+            uart_capture_tx_byte(uart_tx_exact);
+            uart_write_ready(8'h41);
+        join
+        check8("UART TX decoded byte", uart_tx_exact, 8'h41);
+        while (!u_uart.tx_line_idle)
+            @(posedge clk);
+        uart_read(UART_STATUS, rd8);
+        check1("UART tx_empty after final stop bit", rd8[5], 1'b1);
         check1("UART TX idle after send", uart_tx, 1'b1);
 
         // === TEST 10: UART TX captures start bit ===
@@ -407,6 +471,56 @@ module tb_peripherals;
         end
         // Wait for byte to finish transmitting
         repeat(100) @(posedge clk);
+
+        // === TEST 10A: FIFO push and shifter pop on the same clock ===
+        $display("\n=== TEST %0dA: UART coincident push/pop ===", test_num);
+        fork
+            begin : capture_coincident_bytes
+                integer capture_index;
+                for (capture_index = 0; capture_index < 3;
+                     capture_index = capture_index + 1)
+                    uart_capture_tx_byte(
+                        uart_coincident_capture[capture_index]);
+            end
+            begin : drive_coincident_bytes
+                uart_write_ready(8'h11);
+                while (!u_uart.tx_active)
+                    @(posedge clk);
+                uart_read(UART_STATUS, rd8);
+                check1("UART tx_empty is low while shifter is active",
+                       rd8[5], 1'b0);
+                uart_write_ready(8'h22);
+                uart_write_on_pop(8'h33);
+            end
+        join
+        check8("coincident byte 0", uart_coincident_capture[0], 8'h11);
+        check8("coincident byte 1", uart_coincident_capture[1], 8'h22);
+        check8("coincident byte 2", uart_coincident_capture[2], 8'h33);
+
+        // === TEST 10B: burst larger than FIFO with TX_READY polling ===
+        $display("\n=== TEST %0dB: UART ready-polled burst ===", test_num);
+        fork
+            begin : drive_uart_burst
+                for (uart_burst_index = 0; uart_burst_index < 32;
+                     uart_burst_index = uart_burst_index + 1)
+                    uart_write_ready(8'h80 + uart_burst_index[7:0]);
+            end
+            begin : capture_uart_burst
+                integer capture_index;
+                for (capture_index = 0; capture_index < 32;
+                     capture_index = capture_index + 1)
+                    uart_capture_tx_byte(uart_burst_capture[capture_index]);
+            end
+        join
+        for (uart_burst_index = 0; uart_burst_index < 32;
+             uart_burst_index = uart_burst_index + 1)
+            check8("ready-polled burst byte",
+                   uart_burst_capture[uart_burst_index],
+                   8'h80 + uart_burst_index[7:0]);
+        while (!u_uart.tx_line_idle)
+            @(posedge clk);
+        uart_read(UART_STATUS, rd8);
+        check1("UART burst reaches physical line idle", rd8[5], 1'b1);
 
         // === TEST 11: UART RX — drive 8N1 frame and read byte ===
         test_num = 11;

@@ -92,7 +92,7 @@ dominant even with an almost ideal positive cache.
 
 ## Boot Sequence
 
-1. **Hardware init**: RSP = `ram_size`, DSP = `ram_size / 2`, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled.  The TX ring buffer address is written to UART TX_RING_BASE (`+0x08`).
+1. **Hardware init**: RSP = `ram_size`, DSP = `ram_size / 2`, UART base → R8, TX ring descriptor pointer → R19, subroutine pointers → R4/R5/R6, timer enabled. BIOS captures `UART_CAPS` (`+0x07`) once. If `TX_RING_BATCH` is set it writes R19 to `TX_RING_BASE` (`+0x08`); otherwise it selects ready-polled `TX_DATA`.
 2. **IVT install**: Bus-fault handler registered via CSR 0x20.
 3. **Forth variables and private arena**: `STATE` = 0, `BASE` = 10, reserve
    and scrub `NUM_CORES × 16` bytes above `dict_free` for CRC owner records,
@@ -316,7 +316,7 @@ or erase the last status and diagnostics.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 70 | `EMIT` | `( c -- )` | | Append character to TX ring buffer (auto-flushed at 4096 bytes) |
+| 70 | `EMIT` | `( c -- )` | | Emit through the selected ring-batch or ready-polled TX path |
 | 71 | `KEY` | `( -- c )` | | Flush TX buffer, then blocking read one character from UART RX |
 | 72 | `KEY?` | `( -- flag )` | | True if a character is available (non-blocking) |
 | 73 | `CR` | `( -- )` | | Emit CR+LF |
@@ -333,7 +333,7 @@ or erase the last status and diagnostics.
 | 84 | `.ZSTR` | `( addr -- )` | | Print NUL-terminated string |
 | 85 | `WORDS` | `( -- )` | | List all dictionary word names |
 | 86 | `BYE` | `( -- )` | | Flush TX buffer, print "Bye!" and halt the CPU |
-| 87 | `TX-FLUSH` | `( -- )` | | Explicitly drain the TX ring buffer to the host |
+| 87 | `TX-FLUSH` | `( -- )` | | Publish the emulator ring batch, or wait for physical line idle |
 
 ### String & Parsing (8 words)
 
@@ -1037,7 +1037,7 @@ WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
 
 | Base Address | Device | Registers |
 |---|---|---|
-| `0xFFFF_FF00_0000_0000` | UART | TX=+0, RX=+1, STATUS=+2 |
+| `0xFFFF_FF00_0000_0000` | UART | TX=+0, RX=+1, STATUS=+2, CAPS=+7; emulator ring flush=+6 and base=+8..+F |
 | `0xFFFF_FF00_0000_0100` | Timer | COUNT=+0..+3, COMPARE=+4..+7, CTRL=+8, STATUS=+9 |
 | `0xFFFF_FF00_0000_0200` | Storage | CMD=+0, STATUS=+1, SECTOR=+2..+5, DMA=+6..+D, SEC_COUNT=+E, TOTAL=+11..+14, RESULT=+15, COMPLETE=+16..+19, MEDIA_GEN=+1A..+1D, CAPS=+1E, TRANSFERRED=+1F, EXPECTED_MEDIA_GEN=+20..+23, GUARDED_CMD=+24 |
 | `0xFFFF_FF00_0000_0300` | System Info | Exact 112-byte window; `NUM_CORES`=+10, `CRYPTO_CAPS`=+60, `NUM_BUS_PORTS`=+68 |

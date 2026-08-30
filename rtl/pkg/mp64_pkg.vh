@@ -452,6 +452,8 @@ localparam [3:0] UART_TX      = 4'h0;
 localparam [3:0] UART_RX      = 4'h1;
 localparam [3:0] UART_STATUS  = 4'h2;
 localparam [3:0] UART_CONTROL = 4'h3;
+localparam [3:0] UART_CAPS    = 4'h7;
+localparam [7:0] UART_CAP_TX_RING_BATCH = 8'h01;
 
 // --- Timer registers ---
 localparam [3:0] TIMER_COUNT  = 4'h0;

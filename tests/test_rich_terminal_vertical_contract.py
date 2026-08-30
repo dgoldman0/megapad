@@ -80,8 +80,8 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
     ]
 
 
-def test_open_bios_to_rtl_tx_seam_is_not_hidden_by_emulator_batching() -> None:
-    """Force the known physical-path mismatch to remain explicit until fixed."""
+def test_bios_selects_real_rtl_tx_without_losing_emulator_batching() -> None:
+    """Pin the closed software/RTL seam without claiming attached hardware."""
 
     architecture = _read(ROOT / "docs" / "architecture.md")
     host_port = _read(RICH_DOCS / "MEGAPAD-TERMINAL-HOST-PORT.md")
@@ -91,21 +91,35 @@ def test_open_bios_to_rtl_tx_seam_is_not_hidden_by_emulator_batching() -> None:
     rtl_pkg = _read(ROOT / "rtl" / "pkg" / "mp64_pkg.vh")
     rtl_soc = _read(ROOT / "rtl" / "soc" / "mp64_soc.v")
 
+    assert "0xFFFF_FF00_0000_0007  ; UART_CAPS" in bios
+    assert "var_uart_caps" in bios
+    assert "uart_write_direct:" in bios
+    assert "ring_write_batch:" in bios
+    assert "0xFFFF_FF00_0000_0000  ; UART_TX_DATA" in bios
+    assert "0xFFFF_FF00_0000_0002  ; UART_STATUS" in bios
+    assert "txf_direct:" in bios
     assert "ldi64 r11, ring_write" in bios
+    assert bios.count("ldi64 r11, ring_write") == 7
+    for direct_caller in ("print_str:", "print_hex_byte:", "print_crlf:"):
+        caller = bios[bios.index(direct_caller):]
+        caller = caller[:caller.index("ret.l") + len("ret.l")]
+        assert "ldi64 r11, ring_write" in caller
     assert "0xFFFF_FF00_0000_0006" in bios
     assert "0xFFFF_FF00_0000_0008" in bios
     assert "TYPE TX-FLUSH" in guest
 
-    assert "UART_TX_FLUSH" not in rtl_pkg
-    assert "UART_TX_RING" not in rtl_pkg
+    assert "UART_CAPS" in rtl_pkg
+    assert "UART_CAP_TX_RING_BATCH" in rtl_pkg
     assert "addr == UART_TX" in rtl_uart
-    assert "addr == 4'h6" not in rtl_uart
+    assert "UART_CAPS:    rdata <= 8'd0" in rtl_uart
+    assert "wire tx_line_idle = tx_fifo_empty && !tx_active" in rtl_uart
+    assert "case ({tx_push, tx_pop})" in rtl_uart
     assert ".BAUD_RATE (115200)" in rtl_soc
 
-    assert "Physical UART TX status is **OPEN**" in architecture
-    assert "Physical UART TX status is **OPEN**" in host_port
-    assert "Emulator/native viewer success is not" in host_port
-    assert "physical-UART evidence" in host_port
+    status = "Software-to-RTL UART TX path is **IMPLEMENTED; BOARD EVIDENCE OPEN**"
+    assert status in architecture
+    assert status in host_port
+    assert "does not prove attached-board" in host_port
 
 
 def test_dual_rate_is_sequenced_after_real_tx_and_real_line_idle() -> None:
@@ -123,7 +137,7 @@ def test_dual_rate_is_sequenced_after_real_tx_and_real_line_idle() -> None:
     assert "baud_lo = value" in native_uart
     assert "baud_hi = value" in native_uart
 
-    assert "After physical TX works" in architecture
+    assert "After attached-board physical TX is measured" in architecture
     assert "baseline 115,200 / fast 1,000,000 baud selector" in architecture
     assert "FIFO-and-shifter-idle boundary" in architecture
     assert "contains no baud-rate field" in wire

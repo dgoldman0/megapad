@@ -159,6 +159,8 @@ parameter [3:0] UART_TX      = 4'h0;
 parameter [3:0] UART_RX      = 4'h1;
 parameter [3:0] UART_STATUS  = 4'h2;
 parameter [3:0] UART_CONTROL = 4'h3;
+parameter [3:0] UART_CAPS    = 4'h7;
+parameter [7:0] UART_CAP_TX_RING_BATCH = 8'h01;
 
 // Timer registers
 parameter [3:0] TIMER_COUNT  = 4'h0;  // +0..+3 (32-bit)

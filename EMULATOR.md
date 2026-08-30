@@ -248,20 +248,20 @@ restore it.
 |---|---|---|---|
 | `+0x00` | TX_DATA | W | Write a byte → host output |
 | `+0x01` | RX_DATA | R | Read next byte from input buffer |
-| `+0x02` | STATUS | R | bit 0: TX ready (always 1), bit 1: RX data available |
+| `+0x02` | STATUS | R | bit 0: TX ready, bit 1: RX data available, bit 5: TX line idle (ready/idle are immediate in the emulator) |
 | `+0x03` | CONTROL | RW | bit 0: RX IRQ enable, bit 1: TX IRQ enable |
 | `+0x04` | BAUD_LO | RW | Baud rate low (cosmetic) |
 | `+0x05` | BAUD_HI | RW | Baud rate high (cosmetic) |
 | `+0x06` | TX_FLUSH | W | Drain the TX ring buffer (triggers batch callback) |
+| `+0x07` | UART_CAPS | R | bit 0: `TX_RING_BATCH` (set by Python/native emulators) |
 | `+0x08`–`+0x0F` | TX_RING_BASE | W | 64-bit LE pointer to the TX ring descriptor in RAM |
 
 > **Hardware note:** The TX ring buffer is an *emulator-side* optimisation —
 > it converts per-byte MMIO traps (expensive Python round-trips) into fast
-> RAM writes plus a single flush.  On real hardware MMIO stores are single
-> bus cycles, so the speedup disappears.  To be useful on FPGA/ASIC the SoC
-> would need a DMA engine wired to TX_FLUSH that reads from the ring
-> descriptor and feeds the UART TX FIFO.  The buffer layout is already
-> DMA-friendly by design.
+> RAM writes plus a single flush. BIOS discovers it through `UART_CAPS` once
+> at boot. Integrated RTL reports zero capabilities, so BIOS instead polls
+> architectural `TX_READY`, writes `TX_DATA`, and makes `TX-FLUSH` wait for
+> FIFO-and-shifter idle. No RTL ring DMA is required.
 
 ### Timer
 
@@ -371,7 +371,10 @@ provides an interactive REPL over UART.
 
 1. Initialise RSP (R15 ← ram_size) and DSP (R14 ← ram_size / 2)
 2. Check COREID (CSR 0x20) — secondary cores branch to worker loop
-3. Set up UART base in R8, TX ring descriptor pointer in R19, subroutine pointers in R4/R5/R6.  Register the ring buffer with the UART (write R19 to TX_RING_BASE).
+3. Set up UART base in R8, TX ring descriptor pointer in R19, and subroutine
+   pointers in R4/R5/R6. Read `UART_CAPS` once: register R19 with
+   `TX_RING_BASE` when `TX_RING_BATCH` exists, otherwise select the
+   ready-polled `TX_DATA` path.
 4. Enable timer, install IVT for bus fault handler
 5. Initialise Forth variables, reserve and scrub `NUM_CORES × 16` bytes above
    `dict_free` for checked CRC owner records, then set `HERE` to the resulting

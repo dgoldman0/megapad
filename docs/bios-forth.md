@@ -206,14 +206,18 @@ COUNTER @ .               \ fetch and print: 42
 
 ## Input & Output (18 words)
 
-I/O goes through the UART.  `EMIT` appends one byte to a 4096-byte TX ring
-buffer in RAM (auto-flushed when full); `KEY` waits for one byte (and flushes
-the TX buffer first so prompts appear before blocking).  The number-printing
-words all produce human-readable ASCII output.
+I/O goes through the UART. BIOS reads `UART_CAPS` once at boot. Every BIOS
+byte-output helper uses the same capability-aware routine, including `EMIT`,
+`TYPE`, `CR`/LF, boot strings, and diagnostics. Emulator/native backends
+advertise `TX_RING_BATCH`, so that routine appends to the existing 4096-byte
+RAM ring. RTL reports no batching capability, so it polls `TX_READY` and writes
+`TX_DATA`. `KEY` waits for one byte and flushes output first so prompts appear
+before blocking. The number-printing words all produce human-readable ASCII
+output.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `EMIT` | `( c -- )` | Append one character to the TX ring buffer (flushed automatically when full, or by `TX-FLUSH`). |
+| `EMIT` | `( c -- )` | Emit one character through the selected ring-batch or ready-polled TX path. |
 | `KEY` | `( -- c )` | Flush the TX buffer, then wait for and return one character from the UART. |
 | `KEY?` | `( -- flag )` | True if a character is available (non-blocking check). |
 | `CR` | `( -- )` | Emit a carriage-return + line-feed (newline). |
@@ -226,7 +230,7 @@ words all produce human-readable ASCII output.
 | `ACCEPT` | `( addr n -- actual )` | Read up to *n* characters from the UART into addr.  Returns actual count.  Handles backspace. |
 | `WORDS` | `( -- )` | Print all words in the dictionary. |
 | `BYE` | `( -- )` | Flush the TX buffer and halt the CPU (exit Forth). |
-| `TX-FLUSH` | `( -- )` | Explicitly drain the TX ring buffer to the host. |
+| `TX-FLUSH` | `( -- )` | Publish the emulator ring batch, or wait for physical FIFO-and-shifter idle. |
 | `CYCLES` | `( -- u )` | Read the free-running cycle counter (for timing). |
 | `MS` | `( n -- )` | Delay approximately *n* milliseconds. |
 | `HEX` | `( -- )` | Set numeric output base to 16. |

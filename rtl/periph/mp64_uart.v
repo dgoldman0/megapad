@@ -65,12 +65,16 @@ module mp64_uart #(
     reg [3:0]  tx_wr_ptr, tx_rd_ptr;
     reg [4:0]  tx_count;
     wire       tx_full  = (tx_count == 5'd16);
-    wire       tx_empty = (tx_count == 5'd0);
+    wire       tx_fifo_empty = (tx_count == 5'd0);
 
     // TX shift register
     reg [9:0]  tx_shift;    // start bit + 8 data + stop bit
     reg [3:0]  tx_bit_cnt;
     reg        tx_active;
+
+    wire tx_push = req && wen && addr == UART_TX && !tx_full;
+    wire tx_pop = tx_tick && !tx_active && !tx_fifo_empty;
+    wire tx_line_idle = tx_fifo_empty && !tx_active;
 
     assign tx = tx_active ? tx_shift[0] : 1'b1;  // idle high
 
@@ -87,11 +91,19 @@ module mp64_uart #(
                 tx_fifo[tx_rst_i] <= 8'd0;
         end else begin
             // FIFO write (from register interface)
-            if (req && wen && addr == UART_TX && !tx_full) begin
+            if (tx_push) begin
                 tx_fifo[tx_wr_ptr] <= wdata;
                 tx_wr_ptr <= tx_wr_ptr + 1;
-                tx_count  <= tx_count + 1;
             end
+
+            // A bus push can coincide with the baud tick that moves one
+            // queued byte into the shifter. Account that as no net count
+            // change instead of allowing two nonblocking assignments to race.
+            case ({tx_push, tx_pop})
+                2'b10: tx_count <= tx_count + 1;
+                2'b01: tx_count <= tx_count - 1;
+                default: tx_count <= tx_count;
+            endcase
 
             // TX shift register
             if (tx_tick) begin
@@ -101,13 +113,12 @@ module mp64_uart #(
                     if (tx_bit_cnt == 4'd9) begin
                         tx_active <= 1'b0;
                     end
-                end else if (!tx_empty) begin
+                end else if (!tx_fifo_empty) begin
                     // Load next byte from FIFO
                     tx_shift   <= {1'b1, tx_fifo[tx_rd_ptr], 1'b0};  // stop, data, start
                     tx_bit_cnt <= 4'd0;
                     tx_active  <= 1'b1;
                     tx_rd_ptr  <= tx_rd_ptr + 1;
-                    tx_count   <= tx_count - 1;
                 end
             end
         end
@@ -207,13 +218,13 @@ module mp64_uart #(
     // ========================================================================
     // Status register
     // ========================================================================
-    wire [7:0] status = {2'b0, tx_empty, 3'b0, rx_avail, !tx_full};
-    //                    bit7:6=0, bit5=tx_empty, bit4:2=0, bit1=rx_avail, bit0=tx_ready
+    wire [7:0] status = {2'b0, tx_line_idle, 3'b0, rx_avail, !tx_full};
+    //                    bit7:6=0, bit5=line idle, bit4:2=0, bit1=rx_avail, bit0=tx_ready
 
     // ========================================================================
     // Interrupt generation
     // ========================================================================
-    assign irq = (control[0] & rx_avail) | (control[1] & tx_empty);
+    assign irq = (control[0] & rx_avail) | (control[1] & tx_line_idle);
 
     // ========================================================================
     // Register read mux
@@ -226,6 +237,9 @@ module mp64_uart #(
                 UART_RX:      rdata <= rx_avail ? rx_fifo[rx_rd_ptr] : 8'd0;
                 UART_STATUS:  rdata <= status;
                 UART_CONTROL: rdata <= control;
+                // RTL exposes the architectural byte path only. The emulator
+                // advertises its host-side TX-ring batching extension here.
+                UART_CAPS:    rdata <= 8'd0;
                 default:      rdata <= 8'd0;
             endcase
         end
