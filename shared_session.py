@@ -11,6 +11,7 @@ import stat
 import threading
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,36 @@ from session import (
 
 DEFAULT_SOCKET = shared_session_socket()
 MAX_REQUEST_BYTES = 1 << 20
+
+_PHASE_EVENT_PHASE_MASK = 0xFF
+_PHASE_EVENT_SEQUENCE_SHIFT = 8
+_PHASE_PROFILE_SCHEMA = "megapad.guest-phase-events"
+_PHASE_PROFILE_MAX_EVENTS = 65_536
+
+
+@dataclass
+class _PhaseEventProfile:
+    address: int
+    max_events: int
+    machine_generation: int
+    batch_step_bound: int
+    started_steps: int
+    started_batches: int
+    initial_event: int
+    last_event: int
+    last_sample_steps: int
+    last_sample_batches: int
+    status: str = "active"
+    sample_attempts: int = 1
+    successful_samples: int = 1
+    observed_transitions: int = 0
+    coalesced_transitions: int = 0
+    dropped_records: int = 0
+    dropped_transitions: int = 0
+    stopped_steps: int | None = None
+    stopped_batches: int | None = None
+    error: dict[str, str] | None = None
+    transitions: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _wire_object(data, name: str, fields: tuple[str, ...]) -> Mapping[str, Any]:
@@ -760,6 +791,249 @@ class SharedMachine:
         self.started_at = time.time()
         self._stopping = False
         self._thread: threading.Thread | None = None
+        self._phase_profile: _PhaseEventProfile | None = None
+
+    @staticmethod
+    def _phase_event_fields(event: int) -> tuple[int, int]:
+        return (
+            event >> _PHASE_EVENT_SEQUENCE_SHIFT,
+            event & _PHASE_EVENT_PHASE_MASK,
+        )
+
+    def _phase_profile_address_valid(self, address: int) -> bool:
+        """Restrict diagnostics to regions that may hold Forth variables."""
+
+        if address & 7:
+            return False
+        system = self.session.system
+        ram_size = int(system.ram_size)
+        if 0 <= address and address + 8 <= ram_size:
+            return True
+        if not int(system.ext_mem_size):
+            return False
+        return int(system.ext_mem_base) <= address and address + 8 <= int(
+            system.ext_mem_end
+        )
+
+    def _phase_profile_snapshot_locked(self) -> dict:
+        profile = self._phase_profile
+        if profile is None:
+            return {
+                "schema": _PHASE_PROFILE_SCHEMA,
+                "schema_version": 1,
+                "status": "disabled",
+                "machine_generation": self._reset_generation,
+                "current_steps": self.total_steps,
+                "current_batches": self.total_batches,
+            }
+
+        initial_sequence, initial_phase = self._phase_event_fields(
+            profile.initial_event
+        )
+        last_sequence, last_phase = self._phase_event_fields(profile.last_event)
+        return {
+            "schema": _PHASE_PROFILE_SCHEMA,
+            "schema_version": 1,
+            "status": profile.status,
+            "machine_generation": profile.machine_generation,
+            "address": profile.address,
+            "encoding": "u64-sequence-high56-phase-low8",
+            "batch_step_bound": profile.batch_step_bound,
+            "max_events": profile.max_events,
+            "started_steps": profile.started_steps,
+            "started_batches": profile.started_batches,
+            "current_steps": self.total_steps,
+            "current_batches": self.total_batches,
+            "last_sample_steps": profile.last_sample_steps,
+            "last_sample_batches": profile.last_sample_batches,
+            "stopped_steps": profile.stopped_steps,
+            "stopped_batches": profile.stopped_batches,
+            "initial": {
+                "event": profile.initial_event,
+                "sequence": initial_sequence,
+                "phase": initial_phase,
+            },
+            "last": {
+                "event": profile.last_event,
+                "sequence": last_sequence,
+                "phase": last_phase,
+            },
+            "sample_attempts": profile.sample_attempts,
+            "successful_samples": profile.successful_samples,
+            "observed_transitions": profile.observed_transitions,
+            "coalesced_transitions": profile.coalesced_transitions,
+            "dropped_records": profile.dropped_records,
+            "dropped_transitions": profile.dropped_transitions,
+            "error": None if profile.error is None else dict(profile.error),
+            "transitions": [dict(item) for item in profile.transitions],
+        }
+
+    def start_phase_profile(
+        self,
+        address: int,
+        max_events: int,
+        *,
+        generation: int,
+    ) -> dict:
+        """Observe one packed guest phase cell without changing guest state."""
+
+        normalized_generation = _wire_integer(
+            generation,
+            "phase profile generation",
+            minimum=0,
+        )
+        normalized_address = _wire_integer(
+            address,
+            "phase profile address",
+            minimum=0,
+            maximum=UINT64_MAX,
+        )
+        normalized_capacity = _wire_integer(
+            max_events,
+            "phase profile max_events",
+            minimum=1,
+            maximum=_PHASE_PROFILE_MAX_EVENTS,
+        )
+        with self.condition:
+            thread = self._thread
+            if thread is None or self._stopping or not thread.is_alive():
+                raise RuntimeError("phase profile requires a running machine")
+            if normalized_generation != self._reset_generation:
+                raise RuntimeError(
+                    "stale phase profile generation "
+                    f"{normalized_generation}; current generation is "
+                    f"{self._reset_generation}"
+                )
+            if self._phase_profile is not None:
+                raise RuntimeError("phase profile is already configured")
+            if not self._phase_profile_address_valid(normalized_address):
+                raise ValueError(
+                    "phase profile address must be an aligned RAM or "
+                    "external-memory cell"
+                )
+            event = _wire_integer(
+                self.session.system.cpu.mem_read64(normalized_address),
+                "phase profile event",
+                minimum=0,
+                maximum=UINT64_MAX,
+            )
+            self._phase_profile = _PhaseEventProfile(
+                address=normalized_address,
+                max_events=normalized_capacity,
+                machine_generation=self._reset_generation,
+                batch_step_bound=int(self.session.batch_steps),
+                started_steps=self.total_steps,
+                started_batches=self.total_batches,
+                initial_event=event,
+                last_event=event,
+                last_sample_steps=self.total_steps,
+                last_sample_batches=self.total_batches,
+            )
+            return self._phase_profile_snapshot_locked()
+
+    def phase_profile(self) -> dict:
+        """Return a bounded copy without performing another guest read."""
+
+        with self.lock:
+            return self._phase_profile_snapshot_locked()
+
+    def stop_phase_profile(self) -> dict:
+        """Freeze and remove the observer, returning its final snapshot."""
+
+        with self.condition:
+            profile = self._phase_profile
+            if profile is None:
+                return self._phase_profile_snapshot_locked()
+            if profile.status == "active":
+                profile.status = "stopped"
+                profile.stopped_steps = self.total_steps
+                profile.stopped_batches = self.total_batches
+            result = self._phase_profile_snapshot_locked()
+            self._phase_profile = None
+            return result
+
+    def _sample_phase_profile(
+        self,
+        step_lower_bound: int,
+        step_upper_bound: int,
+        *,
+        source: str,
+        batch_index: int | None,
+    ) -> None:
+        """Sample after one exact guest retirement interval under the lock."""
+
+        profile = self._phase_profile
+        if profile is None or profile.status != "active":
+            return
+
+        profile.sample_attempts += 1
+        try:
+            event = _wire_integer(
+                self.session.system.cpu.mem_read64(profile.address),
+                "phase profile event",
+                minimum=0,
+                maximum=UINT64_MAX,
+            )
+        except Exception as exc:
+            # Diagnostics must never pause or fail the running guest.  Freeze
+            # this profile so a bad address cannot cause repeated reads.
+            profile.status = "read_error"
+            profile.stopped_steps = step_upper_bound
+            profile.stopped_batches = self.total_batches
+            profile.error = {
+                "kind": type(exc).__name__,
+                "message": str(exc),
+            }
+            return
+
+        profile.successful_samples += 1
+        profile.last_sample_steps = step_upper_bound
+        profile.last_sample_batches = self.total_batches
+        if event == profile.last_event:
+            return
+
+        previous_sequence, previous_phase = self._phase_event_fields(
+            profile.last_event
+        )
+        sequence, phase = self._phase_event_fields(event)
+        if sequence <= previous_sequence:
+            profile.status = "invalid_event"
+            profile.stopped_steps = step_upper_bound
+            profile.stopped_batches = self.total_batches
+            profile.error = {
+                "kind": "sequence_regression",
+                "message": (
+                    f"phase sequence {sequence} did not advance beyond "
+                    f"{previous_sequence}"
+                ),
+            }
+            return
+
+        sequence_delta = sequence - previous_sequence
+        coalesced = sequence_delta - 1
+        profile.observed_transitions += sequence_delta
+        profile.coalesced_transitions += coalesced
+        transition = {
+            "machine_generation": profile.machine_generation,
+            "sample_index": profile.successful_samples - 1,
+            "source": source,
+            "batch_index": batch_index,
+            "step_lower_bound": step_lower_bound,
+            "step_upper_bound": step_upper_bound,
+            "previous_event": profile.last_event,
+            "previous_sequence": previous_sequence,
+            "previous_phase": previous_phase,
+            "event": event,
+            "sequence": sequence,
+            "phase": phase,
+            "coalesced_transitions": coalesced,
+        }
+        if len(profile.transitions) < profile.max_events:
+            profile.transitions.append(transition)
+        else:
+            profile.dropped_records += 1
+            profile.dropped_transitions += sequence_delta
+        profile.last_event = event
 
     def start(self):
         with self.lock:
@@ -779,6 +1053,7 @@ class SharedMachine:
     def stop(self):
         with self.condition:
             self._stopping = True
+            self._phase_profile = None
             self.condition.notify_all()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=3.0)
@@ -818,8 +1093,15 @@ class SharedMachine:
                         self.last_stop_reason = stats.system_stop_reason
                         executed = stats.instructions_executed
                         if executed > 0:
+                            step_lower_bound = self.total_steps
                             self.total_steps += executed
                             self.total_batches += 1
+                            self._sample_phase_profile(
+                                step_lower_bound,
+                                self.total_steps,
+                                source="run_batch",
+                                batch_index=self.total_batches,
+                            )
                         elif not self.session.last_batch_made_progress:
                             # A bounded host queue can remain legitimately
                             # blocked until a client supplies input or another
@@ -1308,11 +1590,19 @@ class SharedMachine:
                     raise
                 stop_reason = stats.system_stop_reason
                 cycles += stats.system_cycles_advanced
-                executed += stats.instructions_executed
-                if stats.instructions_executed == 0:
+                batch_executed = stats.instructions_executed
+                executed += batch_executed
+                if batch_executed == 0:
                     break
+                step_lower_bound = self.total_steps
+                self.total_steps += batch_executed
+                self._sample_phase_profile(
+                    step_lower_bound,
+                    self.total_steps,
+                    source="step",
+                    batch_index=None,
+                )
             self.last_stop_reason = stop_reason
-            self.total_steps += executed
             return {
                 "executed": executed,
                 "cycles": cycles,
@@ -1324,6 +1614,7 @@ class SharedMachine:
         with self.condition:
             if paused is not None and not isinstance(paused, bool):
                 raise TypeError("reset paused must be a boolean or null")
+            self._phase_profile = None
             try:
                 self.session.reset()
                 if self._host_profile_enabled:
@@ -2098,6 +2389,23 @@ class SessionServer:
             return self.machine.forth(names)
         if method == "peek":
             return self.machine.peek(params["address"], params.get("count", 1))
+        if method == "start_phase_profile":
+            params = _wire_object(
+                params,
+                "phase profile start",
+                ("generation", "address", "max_events"),
+            )
+            return self.machine.start_phase_profile(
+                params["address"],
+                params["max_events"],
+                generation=params["generation"],
+            )
+        if method == "phase_profile":
+            _wire_object(params, "phase profile snapshot", ())
+            return self.machine.phase_profile()
+        if method == "stop_phase_profile":
+            _wire_object(params, "phase profile stop", ())
+            return self.machine.stop_phase_profile()
         if method == "pause":
             return self.machine.pause()
         if method == "resume":

@@ -240,6 +240,101 @@ class _RunLoopSession:
         )
 
 
+def _phase_event(sequence: int, phase: int) -> int:
+    return (sequence << 8) | phase
+
+
+class _PhaseEventCPU:
+    def __init__(self, value: int):
+        self.value = value
+        self.reads = 0
+        self.read_error: Exception | None = None
+
+    def mem_read64(self, address: int) -> int:
+        assert address == 0x100
+        self.reads += 1
+        if self.read_error is not None:
+            raise self.read_error
+        return self.value
+
+
+class _PhaseEventSystem:
+    def __init__(self, value: int):
+        self.cpu = _PhaseEventCPU(value)
+        self.ram_size = 0x1_000
+        self.ext_mem_size = 0
+        self.ext_mem_base = 0
+        self.ext_mem_end = 0
+        self.all_halted = False
+        self.all_idle_or_halted = False
+        self.uart = _RunLoopUART()
+
+
+class _PhaseEventSession:
+    def __init__(
+        self,
+        events: list[tuple[int, int]],
+        *,
+        initial_event: int = 0,
+    ):
+        self.system = _PhaseEventSystem(initial_event)
+        self.events = list(events)
+        self.batch_steps = 17
+        self.rich_terminal_enabled = False
+        self.rich_terminal_failure = None
+        self.rich_terminal_lost = False
+        self.rich_terminal_work_pending = False
+        self.last_batch_made_progress = True
+        self.closed = False
+        self.resets = 0
+
+    def boot(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+    def reset(self):
+        self.resets += 1
+
+    def run_batch_stats(self, steps):
+        assert steps in {1, self.batch_steps}
+        if not self.events:
+            self.system.all_halted = True
+            self.system.all_idle_or_halted = True
+            self.last_batch_made_progress = False
+            return SystemRunStats(
+                instructions_executed=0,
+                system_cycles_advanced=0,
+                per_core_instructions=(0,),
+                per_core_cycles=(0,),
+                system_stop_reason="all_halted",
+            )
+        instructions, event = self.events.pop(0)
+        self.system.cpu.value = event
+        if not self.events:
+            self.system.all_halted = True
+            self.system.all_idle_or_halted = True
+        return SystemRunStats(
+            instructions_executed=instructions,
+            system_cycles_advanced=instructions,
+            per_core_instructions=(instructions,),
+            per_core_cycles=(instructions,),
+            system_stop_reason=(
+                "all_halted" if self.system.all_halted else "instruction_limit"
+            ),
+        )
+
+
+def _mark_phase_machine_running(
+    machine: SharedMachine,
+    *,
+    generation: int = 1,
+) -> None:
+    machine._reset_generation = generation
+    machine._thread = threading.current_thread()
+
+
 def test_shared_owner_services_rich_terminal_work_after_guest_halt():
     session = _RunLoopSession(remain_pending=False)
     machine = SharedMachine(session, idle_sleep_s=0.005)
@@ -274,6 +369,257 @@ def test_shared_owner_waits_on_zero_progress_host_backpressure():
         assert not machine.paused
     finally:
         machine.stop()
+
+
+def test_phase_profile_disabled_run_performs_no_guest_reads():
+    session = _PhaseEventSession([(17, _phase_event(1, 3))])
+    machine = SharedMachine(session, idle_sleep_s=0.005)
+
+    machine.start()
+    try:
+        wait_until(lambda: machine.total_steps == 17)
+        assert session.system.cpu.reads == 0
+        assert machine.phase_profile()["status"] == "disabled"
+        assert session.system.cpu.reads == 0
+    finally:
+        machine.stop()
+
+
+def test_phase_profile_run_loop_samples_after_exact_step_accounting():
+    session = _PhaseEventSession([(17, _phase_event(3, 5))])
+    machine = SharedMachine(session, idle_sleep_s=0.005)
+    machine.paused = True
+
+    machine.start()
+    try:
+        started = machine.start_phase_profile(0x100, 4, generation=1)
+        assert started["machine_generation"] == 1
+        with machine.condition:
+            machine.paused = False
+            machine.condition.notify_all()
+        wait_until(lambda: machine.total_steps == 17)
+        assert machine.phase_profile()["transitions"] == [
+            {
+                "machine_generation": 1,
+                "sample_index": 1,
+                "source": "run_batch",
+                "batch_index": 1,
+                "step_lower_bound": 0,
+                "step_upper_bound": 17,
+                "previous_event": _phase_event(0, 0),
+                "previous_sequence": 0,
+                "previous_phase": 0,
+                "event": _phase_event(3, 5),
+                "sequence": 3,
+                "phase": 5,
+                "coalesced_transitions": 2,
+            }
+        ]
+    finally:
+        machine.stop()
+
+
+def test_phase_profile_records_exact_batch_bounds_and_bounded_coalescing():
+    session = _PhaseEventSession([], initial_event=_phase_event(7, 0))
+    machine = SharedMachine(session)
+    _mark_phase_machine_running(machine, generation=3)
+    machine.total_steps = 100
+    machine.total_batches = 4
+    server = SessionServer(machine, "unused.sock")
+
+    started = server.dispatch(
+        "start_phase_profile",
+        {"generation": 3, "address": 0x100, "max_events": 1},
+    )
+    assert started["status"] == "active"
+    assert started["machine_generation"] == 3
+    assert started["initial"] == {
+        "event": _phase_event(7, 0),
+        "sequence": 7,
+        "phase": 0,
+    }
+
+    session.system.cpu.value = _phase_event(10, 3)
+    machine.total_steps = 117
+    machine.total_batches = 5
+    machine._sample_phase_profile(
+        100,
+        117,
+        source="run_batch",
+        batch_index=5,
+    )
+    session.system.cpu.value = _phase_event(11, 0)
+    machine.total_steps = 134
+    machine.total_batches = 6
+    machine._sample_phase_profile(
+        117,
+        134,
+        source="run_batch",
+        batch_index=6,
+    )
+
+    reads_before_snapshot = session.system.cpu.reads
+    snapshot = server.dispatch("phase_profile", {})
+    assert session.system.cpu.reads == reads_before_snapshot
+    assert snapshot["observed_transitions"] == 4
+    assert snapshot["coalesced_transitions"] == 2
+    assert snapshot["dropped_records"] == 1
+    assert snapshot["dropped_transitions"] == 1
+    assert snapshot["transitions"] == [
+        {
+            "machine_generation": 3,
+            "sample_index": 1,
+            "source": "run_batch",
+            "batch_index": 5,
+            "step_lower_bound": 100,
+            "step_upper_bound": 117,
+            "previous_event": _phase_event(7, 0),
+            "previous_sequence": 7,
+            "previous_phase": 0,
+            "event": _phase_event(10, 3),
+            "sequence": 10,
+            "phase": 3,
+            "coalesced_transitions": 2,
+        }
+    ]
+
+    stopped = server.dispatch("stop_phase_profile", {})
+    assert stopped["status"] == "stopped"
+    assert stopped["stopped_steps"] == 134
+    assert server.dispatch("phase_profile", {})["status"] == "disabled"
+
+
+def test_phase_profile_rejects_unsafe_addresses_and_excessive_capacity():
+    session = _PhaseEventSession([])
+    machine = SharedMachine(session)
+    _mark_phase_machine_running(machine)
+
+    with pytest.raises(ValueError, match="aligned RAM"):
+        machine.start_phase_profile(0x101, 4, generation=1)
+    with pytest.raises(ValueError, match="aligned RAM"):
+        machine.start_phase_profile(0x1_000, 4, generation=1)
+    with pytest.raises(ValueError, match="between 1 and 65536"):
+        machine.start_phase_profile(0x100, 65_537, generation=1)
+
+    assert session.system.cpu.reads == 0
+
+
+def test_phase_profile_start_is_live_and_generation_bound():
+    session = _PhaseEventSession([])
+    machine = SharedMachine(session)
+    server = SessionServer(machine, "unused.sock")
+
+    with pytest.raises(RuntimeError, match="running machine"):
+        machine.start_phase_profile(0x100, 4, generation=0)
+
+    _mark_phase_machine_running(machine, generation=3)
+    with pytest.raises(RuntimeError, match="stale phase profile generation"):
+        machine.start_phase_profile(0x100, 4, generation=2)
+    with pytest.raises(ValueError, match="fields are not exact"):
+        server.dispatch(
+            "start_phase_profile",
+            {"address": 0x100, "max_events": 4},
+        )
+
+    machine._stopping = True
+    with pytest.raises(RuntimeError, match="running machine"):
+        machine.start_phase_profile(0x100, 4, generation=3)
+    machine._stopping = False
+    machine._thread = threading.Thread()
+    with pytest.raises(RuntimeError, match="running machine"):
+        machine.start_phase_profile(0x100, 4, generation=3)
+
+    assert session.system.cpu.reads == 0
+
+
+def test_phase_profile_read_failure_freezes_only_the_observer():
+    session = _PhaseEventSession([], initial_event=_phase_event(1, 0))
+    machine = SharedMachine(session)
+    _mark_phase_machine_running(machine)
+    machine.start_phase_profile(0x100, 4, generation=1)
+    session.system.cpu.read_error = RuntimeError("diagnostic read failed")
+
+    machine.total_steps = 17
+    machine.total_batches = 1
+    machine._sample_phase_profile(
+        0,
+        17,
+        source="run_batch",
+        batch_index=1,
+    )
+    reads_after_failure = session.system.cpu.reads
+    machine.total_steps = 34
+    machine.total_batches = 2
+    machine._sample_phase_profile(
+        17,
+        34,
+        source="run_batch",
+        batch_index=2,
+    )
+
+    snapshot = machine.phase_profile()
+    assert session.system.cpu.reads == reads_after_failure
+    assert snapshot["status"] == "read_error"
+    assert snapshot["last_sample_steps"] == 0
+    assert snapshot["stopped_steps"] == 17
+    assert snapshot["error"] == {
+        "kind": "RuntimeError",
+        "message": "diagnostic read failed",
+    }
+    assert machine.last_error is None
+    assert not machine.paused
+
+    stopped = machine.stop_phase_profile()
+    assert stopped["status"] == "read_error"
+    assert stopped["stopped_steps"] == 17
+
+
+def test_phase_profile_reset_and_machine_stop_discard_observer_state():
+    session = _PhaseEventSession([], initial_event=_phase_event(1, 0))
+    machine = SharedMachine(session)
+    _mark_phase_machine_running(machine)
+    machine.status = lambda **_kwargs: {
+        "phase_profile_configured": machine._phase_profile is not None
+    }
+    machine.start_phase_profile(0x100, 4, generation=1)
+
+    reset = machine.reset(paused=True)
+    assert reset == {"phase_profile_configured": False}
+    assert session.resets == 1
+    assert machine.phase_profile()["status"] == "disabled"
+
+    machine.start_phase_profile(0x100, 4, generation=2)
+    machine.stop()
+    assert machine._phase_profile is None
+    assert session.closed
+
+
+def test_phase_profile_samples_each_explicit_step_after_accounting():
+    session = _PhaseEventSession(
+        [
+            (1, _phase_event(1, 3)),
+            (1, _phase_event(2, 0)),
+        ]
+    )
+    machine = SharedMachine(session)
+    machine.paused = True
+    _mark_phase_machine_running(machine)
+    machine.status = lambda **_kwargs: {"steps": machine.total_steps}
+    machine.start_phase_profile(0x100, 4, generation=1)
+
+    result = machine.step(2)
+
+    assert result["executed"] == 2
+    assert result["status"] == {"steps": 2}
+    assert [
+        (
+            item["source"],
+            item["batch_index"],
+            item["step_lower_bound"],
+            item["step_upper_bound"],
+        )
+        for item in machine.phase_profile()["transitions"]
+    ] == [("step", None, 0, 1), ("step", None, 1, 2)]
 
 
 def test_snapshot_wire_round_trip():
