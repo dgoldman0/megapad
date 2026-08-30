@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from shared.cells import CELL_BYTES, forth_flag, s64, u64
 from simulator.errors import ExecutionError, ForthAbort
+from simulator.memory import MMIO_BASE
+from simulator.platform import SYSINFO_NUM_CORES, SYSINFO_NUM_FULL
 from simulator.runtime import (
     CreatedDefinition,
     DirectiveKind,
@@ -30,6 +32,24 @@ def _swap(context: ExecutionContext) -> None:
 
 def _over(context: ExecutionContext) -> None:
     context.data.push(context.data.peek(1))
+
+
+def _rotate(context: ExecutionContext) -> None:
+    top = context.data.pop()
+    middle = context.data.pop()
+    bottom = context.data.pop()
+    context.data.push(middle)
+    context.data.push(top)
+    context.data.push(bottom)
+
+
+def _reverse_rotate(context: ExecutionContext) -> None:
+    top = context.data.pop()
+    middle = context.data.pop()
+    bottom = context.data.pop()
+    context.data.push(top)
+    context.data.push(bottom)
+    context.data.push(middle)
 
 
 def _two_dup(context: ExecutionContext) -> None:
@@ -80,6 +100,17 @@ def _multiply(context: ExecutionContext) -> None:
     context.data.push(u64(left * right))
 
 
+def _signed_divide(context: ExecutionContext) -> None:
+    divisor = s64(context.data.pop())
+    dividend = s64(context.data.pop())
+    if divisor == 0 or (dividend == -(1 << 63) and divisor == -1):
+        raise ExecutionError("signed division trapped on zero or overflow")
+    quotient = abs(dividend) // abs(divisor)
+    if (dividend < 0) != (divisor < 0):
+        quotient = -quotient
+    context.data.push(quotient)
+
+
 def _minimum(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
@@ -87,6 +118,14 @@ def _minimum(context: ExecutionContext) -> None:
     # branch uses the architectural unsigned G/LE conditions.  Preserve the
     # executable BIOS behavior used by unchanged source.
     context.data.push(left if left <= right else right)
+
+
+def _maximum(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    # See _minimum: the checked-in BIOS currently compares these cells as
+    # unsigned even though the reference describes signed MIN/MAX.
+    context.data.push(left if left > right else right)
 
 
 def _one_minus(context: ExecutionContext) -> None:
@@ -101,6 +140,12 @@ def _and(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
     context.data.push(left & right)
+
+
+def _or(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    context.data.push(left | right)
 
 
 def _right_shift(context: ExecutionContext) -> None:
@@ -119,8 +164,18 @@ def _equal(context: ExecutionContext) -> None:
     context.data.push(forth_flag(left == right))
 
 
+def _not_equal(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    context.data.push(forth_flag(left != right))
+
+
 def _zero_equal(context: ExecutionContext) -> None:
     context.data.push(forth_flag(context.data.pop() == 0))
+
+
+def _zero_not_equal(context: ExecutionContext) -> None:
+    context.data.push(forth_flag(context.data.pop() != 0))
 
 
 def _zero_less(context: ExecutionContext) -> None:
@@ -137,6 +192,12 @@ def _unsigned_greater(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
     context.data.push(forth_flag(left > right))
+
+
+def _signed_less(context: ExecutionContext) -> None:
+    right = s64(context.data.pop())
+    left = s64(context.data.pop())
+    context.data.push(forth_flag(left < right))
 
 
 def _signed_less_equal(context: ExecutionContext) -> None:
@@ -215,6 +276,24 @@ def _here(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(runtime.dictionary.here)
 
 
+def _dictionary_base_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.dictionary_base)
+
+
+def _dictionary_limit_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.dictionary_limit)
+
+
+def _tile_align(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
+    runtime.dictionary.allot((-runtime.dictionary.here) & 63)
+
+
 def _allot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.dictionary.allot(context.data.pop())
 
@@ -249,12 +328,16 @@ def _return_stack_pointer_fetch(context: ExecutionContext) -> None:
     context.data.push(context.returns.capture_pointer())
 
 
-def _push_one(context: ExecutionContext) -> None:
-    context.data.push(1)
-
-
 def _push_zero(context: ExecutionContext) -> None:
     context.data.push(0)
+
+
+def _sysinfo_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    offset: int,
+) -> None:
+    context.data.push(runtime.memory.read64(MMIO_BASE + offset))
 
 
 def _tick(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -325,6 +408,10 @@ def _dot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.write_uart_bytes(rendered + b" ")
 
 
+def _carriage_return(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
+    runtime.write_uart_bytes(b"\r\n")
+
+
 def _semantic_noop(_context: ExecutionContext) -> None:
     """A source-visible capability toggle with no hosted native backend."""
 
@@ -350,6 +437,11 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"IF", DirectiveKind.IF),
         (b"ELSE", DirectiveKind.ELSE),
         (b"THEN", DirectiveKind.THEN),
+        (b"BEGIN", DirectiveKind.BEGIN),
+        (b"UNTIL", DirectiveKind.UNTIL),
+        (b"AGAIN", DirectiveKind.AGAIN),
+        (b"WHILE", DirectiveKind.WHILE),
+        (b"REPEAT", DirectiveKind.REPEAT),
         (b"EXIT", DirectiveKind.EXIT),
         (b">R", DirectiveKind.TO_R),
         (b"R>", DirectiveKind.R_FROM),
@@ -376,6 +468,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"DROP", _drop),
         (b"SWAP", _swap),
         (b"OVER", _over),
+        (b"ROT", _rotate),
+        (b"-ROT", _reverse_rotate),
         (b"2DUP", _two_dup),
         (b"2DROP", _two_drop),
         (b"2OVER", _two_over),
@@ -384,17 +478,23 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"+", _add),
         (b"-", _subtract),
         (b"*", _multiply),
+        (b"/", _signed_divide),
         (b"MIN", _minimum),
+        (b"MAX", _maximum),
         (b"1+", _one_plus),
         (b"1-", _one_minus),
         (b"AND", _and),
+        (b"OR", _or),
         (b"RSHIFT", _right_shift),
         (b"INVERT", _invert),
         (b"=", _equal),
+        (b"<>", _not_equal),
         (b"0=", _zero_equal),
+        (b"0<>", _zero_not_equal),
         (b"0<", _zero_less),
         (b"U<", _unsigned_less),
         (b"U>", _unsigned_greater),
+        (b"<", _signed_less),
         (b"<=", _signed_less_equal),
         (b">=", _signed_greater_equal),
         (b">", _signed_greater),
@@ -408,6 +508,15 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"CREATE", lambda context: _create(runtime, context)),
         (b"VARIABLE", lambda context: _variable(runtime, context)),
         (b"HERE", lambda context: _here(runtime, context)),
+        (
+            b"DICT-BASE@",
+            lambda context: _dictionary_base_fetch(runtime, context),
+        ),
+        (
+            b"DICT-LIMIT@",
+            lambda context: _dictionary_limit_fetch(runtime, context),
+        ),
+        (b"TALIGN", lambda context: _tile_align(runtime, context)),
         (b"ALLOT", lambda context: _allot(runtime, context)),
         (b",", lambda context: _comma(runtime, context)),
         (b"C,", lambda context: _c_comma(runtime, context)),
@@ -417,7 +526,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"WORD", lambda context: _word(runtime, context)),
         (b"SP@", _stack_pointer_fetch),
         (b"RP@", _return_stack_pointer_fetch),
-        (b"NCORES", _push_one),
+        (
+            b"NCORES",
+            lambda context: _sysinfo_fetch(runtime, context, SYSINFO_NUM_CORES),
+        ),
+        (
+            b"N-FULL",
+            lambda context: _sysinfo_fetch(runtime, context, SYSINFO_NUM_FULL),
+        ),
         (b"COREID", _push_zero),
         (b"TASK-ID", _push_zero),
         (b"'", lambda context: _tick(runtime, context)),
@@ -427,6 +543,9 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"JIT-OFF", _semantic_noop),
         (b"ABORT", _abort),
         (b".", lambda context: _dot(runtime, context)),
+        (b"CR", lambda context: _carriage_return(runtime, context)),
+        (b"TRUE", lambda context: context.data.push(-1)),
+        (b"FALSE", _push_zero),
         (b"I", _i),
         (b"J", _j),
         (b"EXECUTE", _execute),

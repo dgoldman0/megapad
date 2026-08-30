@@ -151,6 +151,11 @@ class DirectiveKind(Enum):
     IF = auto()
     ELSE = auto()
     THEN = auto()
+    BEGIN = auto()
+    UNTIL = auto()
+    AGAIN = auto()
+    WHILE = auto()
+    REPEAT = auto()
     EXIT = auto()
     TO_R = auto()
     R_FROM = auto()
@@ -210,7 +215,18 @@ class _DoFrame:
     question_index: int | None = None
 
 
-_ControlFrame: TypeAlias = _IfFrame | _DoFrame
+@dataclass(frozen=True, slots=True)
+class _BeginFrame:
+    body_target: int
+
+
+@dataclass(frozen=True, slots=True)
+class _WhileFrame:
+    body_target: int
+    branch_index: int
+
+
+_ControlFrame: TypeAlias = _IfFrame | _DoFrame | _BeginFrame | _WhileFrame
 
 
 @dataclass(slots=True)
@@ -259,7 +275,12 @@ class MegaForthRuntime:
     ) -> None:
         if memory is not None and not isinstance(memory, SparseAddressSpace):
             raise TypeError("memory must be a SparseAddressSpace or None")
-        self.memory = SparseAddressSpace() if memory is None else memory
+        if memory is None:
+            from simulator.platform import create_one_core_address_space
+
+            self.memory = create_one_core_address_space()
+        else:
+            self.memory = memory
         self.dictionary = Dictionary(
             start_address=dictionary_start,
             memory=self.memory,
@@ -298,6 +319,11 @@ class MegaForthRuntime:
             ),
         )
         self._numeric_base = 10
+        # These are the source-visible optional user-dictionary bounds, not
+        # Dictionary's ordinary containing-memory ceiling.  Bank-0 source
+        # starts with the BIOS interval disabled, represented by two zeros.
+        self._dictionary_base = 0
+        self._dictionary_limit = 0
         self._provided: set[bytes] = set()
         self._active_input_states: list[_EvaluationState] = []
         self._active_meters: list[_StepMeter] = []
@@ -332,6 +358,18 @@ class MegaForthRuntime:
         """Current unsigned cell used by the BIOS-compatible number parser."""
 
         return self._numeric_base
+
+    @property
+    def dictionary_base(self) -> int:
+        """Return the active BIOS user-dictionary base, or zero when off."""
+
+        return self._dictionary_base
+
+    @property
+    def dictionary_limit(self) -> int:
+        """Return the active BIOS user-dictionary limit, or zero when off."""
+
+        return self._dictionary_limit
 
     @property
     def uart_output(self) -> bytes:
@@ -661,6 +699,33 @@ class MegaForthRuntime:
                 Branch(target) if frame.has_else else BranchZero(target)
             )
             compiler.controls.pop()
+        elif kind is DirectiveKind.BEGIN:
+            compiler.controls.append(_BeginFrame(len(compiler.operations)))
+        elif kind is DirectiveKind.UNTIL:
+            frame = self._require_begin_frame(state, owner="UNTIL")
+            compiler.controls.pop()
+            compiler.operations.append(BranchZero(frame.body_target))
+        elif kind is DirectiveKind.AGAIN:
+            frame = self._require_begin_frame(state, owner="AGAIN")
+            compiler.controls.pop()
+            compiler.operations.append(Branch(frame.body_target))
+        elif kind is DirectiveKind.WHILE:
+            frame = self._require_begin_frame(state, owner="WHILE")
+            compiler.controls.pop()
+            compiler.operations.append(BranchZero(0))
+            compiler.controls.append(
+                _WhileFrame(
+                    body_target=frame.body_target,
+                    branch_index=len(compiler.operations) - 1,
+                )
+            )
+        elif kind is DirectiveKind.REPEAT:
+            frame = self._require_while_frame(state)
+            compiler.controls.pop()
+            compiler.operations.append(Branch(frame.body_target))
+            compiler.operations[frame.branch_index] = BranchZero(
+                len(compiler.operations)
+            )
         elif kind is DirectiveKind.EXIT:
             compiler.operations.append(Return())
         elif kind is DirectiveKind.TO_R:
@@ -1028,6 +1093,35 @@ class MegaForthRuntime:
         assert isinstance(frame, _IfFrame)
         if frame.has_else and not allow_else:
             self._compile_error(state, "IF already has an ELSE")
+        return frame
+
+    def _require_begin_frame(
+        self,
+        state: _EvaluationState,
+        *,
+        owner: str,
+    ) -> _BeginFrame:
+        compiler = state.compiler
+        assert compiler is not None
+        if not compiler.controls or not isinstance(
+            compiler.controls[-1],
+            _BeginFrame,
+        ):
+            self._compile_error(state, f"{owner} has no matching BEGIN")
+        frame = compiler.controls[-1]
+        assert isinstance(frame, _BeginFrame)
+        return frame
+
+    def _require_while_frame(self, state: _EvaluationState) -> _WhileFrame:
+        compiler = state.compiler
+        assert compiler is not None
+        if not compiler.controls or not isinstance(
+            compiler.controls[-1],
+            _WhileFrame,
+        ):
+            self._compile_error(state, "REPEAT has no matching WHILE")
+        frame = compiler.controls[-1]
+        assert isinstance(frame, _WhileFrame)
         return frame
 
     def _compile_error(self, state: _EvaluationState, message: str) -> None:

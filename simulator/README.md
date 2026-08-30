@@ -9,7 +9,9 @@ semantics directly instead of executing MP64 instructions.
 The implemented slices provide:
 
 - byte-oriented source parsing, comments, `PROVIDED`, colon definitions, and
-  `IF`/`ELSE`/`THEN`, `EXIT`, `DO`/`?DO`/`LOOP`, and `UNLOOP` compilation;
+  `IF`/`ELSE`/`THEN`, `BEGIN`/`UNTIL`/`AGAIN`,
+  `BEGIN`/`WHILE`/`REPEAT`, `EXIT`, `DO`/`?DO`/`LOOP`, and `UNLOOP`
+  compilation;
 - wrapping 64-bit cells, full-width Forth flags, newest-definition lookup,
   stable numeric execution tokens, compile-time binding, and ordinary
   source-parsing `CONSTANT` definitions;
@@ -20,6 +22,9 @@ The implemented slices provide:
 - a sparse 64-bit address space with distinct Bank 0, external, VRAM, HBW, and
   reserved MMIO classes, plus a caller-bounded allocator for hosted runtime
   storage;
+- a read-only one-full-core SysInfo profile whose direct MMIO registers and
+  BIOS topology words share the same service and report the actual sparse
+  memory geometry;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access and byte `FILL` over that
   shared address space, plus the arithmetic and comparison words needed by the
   next unchanged Akashic source slice;
@@ -31,7 +36,10 @@ The implemented slices provide:
   `CMOVE`, byte fetch, stack depth, and compiled/interpret-state `."` plus the
   supported compile-state `ABORT"` path;
 - a memory-backed canonical foreground data/return stack with exact downward
-  cell geometry, retained continuation slots, `SP@`/`SP!` and `RP@`/`RP!`; and
+  cell geometry, retained continuation slots, `SP@`/`SP!` and `RP@`/`RP!`;
+- the unchanged source-defined KDOS Bank-0 heap, including lazy setup,
+  first-fit allocation, sorted free/coalescing, resize, statistics, structural
+  verification, and its dictionary/stack/heap proximity guard; and
 - an exact-record bootstrap loader that supplies a shadowable `REQUIRE` before
   KDOS exists, with nested budgets, cycle detection, and registry-only failure
   cleanup.
@@ -44,10 +52,12 @@ MP64 binaries, or MF64 native dictionaries, and it makes no machine-timing,
 interrupt, snapshot, RTL, or hardware claim. Those remain the architectural
 emulator's and physical implementation's responsibility.
 
-The current stack bounds enforce the canonical mapped Bank 0 halves. Live
-`HERE`/heap collision policy is part of the pending KDOS allocator work, so
-this slice does not yet claim complete dictionary-versus-stack overflow
-fidelity.
+The current stack bounds enforce the canonical mapped Bank 0 halves, and the
+ordinary KDOS `?DICT-ROOM` guard now observes the live stack and heap. BIOS
+dictionary emitters still enforce only their containing memory region; they do
+not yet route every publication through the KDOS dictionary-fault hook.
+Complete automatic dictionary-versus-stack/heap overflow fidelity therefore
+remains pending even though the source-defined allocator itself is present.
 
 ## Run it
 
@@ -113,14 +123,30 @@ decision that unsigned comparison is the desired final API. Interpret-state
 compile path; native BIOS currently emits orphan code for that malformed use
 rather than providing useful interpreter semantics.
 
+The contiguous proof now advances in one capability-sized block through
+logical line 545. Byte-exact lines 116 through 545 compile all 32 definitions
+in KDOS's Bank-0 allocator section. Acceptance reaches `MEM-SIZE` through its
+ordinary direct SysInfo `@`, checks the one-core classification words, exact
+heap header geometry and idempotent setup, pre-setup invalid-request rejection,
+minimum/aligned splitting, sorted free and bidirectional coalescing, shrink,
+adjacent in-place growth, fallback allocate-copy-free, failure preservation,
+live statistics, exact `.HEAP` output, and corruption detection. The hosted
+`RegionAllocator` is not substituted for this path; allocator links, sizes,
+canaries, payloads, and mutations remain guest-visible KDOS memory.
+Qualification also pins, but does not endorse, the current invalid-size
+`RESIZE` result of `0 -1`; its difference from the OOM path's original-address
+failure is recorded as an
+[open KDOS contract discrepancy](../docs/kdos-reference.md#11-memory-allocator).
+
 The first exception proof then evaluates byte-exact `kdos.f` logical lines
 618 through 675 from the same revision. It installs the ordinary KDOS
 per-context `HANDLER` tables and source-defined `CATCH`/`THROW`; the simulator
 does not substitute host exception words. Acceptance covers normal completion,
 zero and nonzero throws, nested rethrow, exact data/return-stack restoration,
 and unwinding through an active loop and deferred `DOES>` action. `ABORT`
-remains the distinct noncatchable BIOS reset path. This focused seam is not a
-claim that the intervening allocator source has loaded yet.
+remains the distinct noncatchable BIOS reset path. It remains a separately
+qualified island because the dictionary snapshot source between the allocator
+and exception sections has not loaded yet.
 
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
@@ -136,8 +162,8 @@ aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–115 | Contiguous qualified frontier | Ordinary KDOS bootstrap and utility source; line 70 is blank |
-| 116–617 | Next uncovered frontier | Filled forward from line 116 as BIOS and allocator dependencies land |
+| 39–545 | Contiguous qualified frontier | Ordinary bootstrap, parsing utilities, and the complete Bank-0 allocator section; line 70 is blank |
+| 546–617 | Next uncovered frontier | Line 546 is blank; dictionary snapshots begin at line 547 |
 | 618–675 | Qualified semantic island | Source-defined exception handling used to validate real stack unwinding |
 | 676 onward | Pending | Not yet a simulator source-load claim |
 

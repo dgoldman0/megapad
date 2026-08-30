@@ -113,6 +113,15 @@ the 32 KiB `LATE-DICT-RESERVE`, leaving room for late system-mode modules.
 | `.HEAP` | `( -- )` | Print Bank 0 heap statistics: total, free, largest block. |
 | `MEM-SIZE` | `( -- n )` | Return total RAM in bytes (from SysInfo MMIO). |
 
+> **Open `RESIZE` failure-address discrepancy.** The private Bank 0 source
+> contract says a failed resize returns the original address with a nonzero
+> `ior`, and the allocation/OOM failure path does. Its current early rejection
+> of a zero, negative, or unroundable size instead returns `0 -1` while leaving
+> the original allocation live. `RESIZE` and `DMA-RESIZE` inherit that split
+> behavior. This note records the mismatch without deciding which result is the
+> intended public contract; callers must treat the address as undefined when
+> `ior` is nonzero until the source, reference, and tests are resolved together.
+
 ---
 
 ### §1.2 Exception Handling
