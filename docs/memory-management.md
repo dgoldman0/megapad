@@ -207,6 +207,9 @@ freed. An interior subspan can therefore be admitted, and a double free can
 make a free-list node point to itself. This is an open source/contract gap;
 callers must pass each valid owned allocation exactly once. `XMEM-FREE` and
 `.XMEM` report the unused bump tail only, not bytes available in the free list.
+The floor constrains bulk reset only: free-list insertion does not compare a
+span with `XMEM-FLOOR`, so it is not an ownership barrier for persistent XBUF
+or dictionary-index storage.
 
 **Floor protection:** `XMEM-FLOOR` is the lowest address to which the bump
 allocator may reset. Before userland it protects persistent kernel XMEM

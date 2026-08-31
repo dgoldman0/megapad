@@ -243,7 +243,8 @@ def test_xmem_free_validation_preflights_before_guest_memory_writes() -> None:
         (EXTERNAL_BASE, 0, b"XMEM-FREE: block too small"),
         (EXTERNAL_BASE - 16, 16, b"XMEM-FREE: addr below base"),
         (EXTERNAL_BASE + 128, 16, b"XMEM-FREE: exceeds limit"),
-        (EXTERNAL_BASE + 48, 17, b"XMEM-FREE: above high water"),
+        (EXTERNAL_BASE + 113, 1, b"XMEM-FREE: exceeds limit"),
+        (EXTERNAL_BASE + 49, 1, b"XMEM-FREE: above high water"),
         (EXTERNAL_BASE + 64, 16, b"XMEM-FREE: above high water"),
     )
     for address, size, message in failures:
@@ -265,6 +266,21 @@ def test_xmem_source_accepts_interior_and_double_free_list_nodes() -> None:
     assert _execute(runtime, "XMEM-FREE-BLOCK", interior, 1) == ()
     assert _pointer(runtime, "XMEM-FL") == interior
     assert runtime.memory.read64(interior + 8) == interior
+
+
+def test_public_xmem_double_free_creates_a_self_link() -> None:
+    runtime = _small_xmem(128)
+    address, status = _execute(runtime, "ALLOCATE", 1)
+    assert status == 0
+
+    assert _execute(runtime, "FREE", address) == ()
+    assert _pointer(runtime, "XMEM-FL") == EXTERNAL_BASE
+    assert runtime.memory.read64(EXTERNAL_BASE) == 32
+    assert runtime.memory.read64(EXTERNAL_BASE + 8) == 0
+
+    assert _execute(runtime, "FREE", address) == ()
+    assert _pointer(runtime, "XMEM-FL") == EXTERNAL_BASE
+    assert runtime.memory.read64(EXTERNAL_BASE + 8) == EXTERNAL_BASE
 
 
 def test_public_allocate_free_and_resize_use_xmem_prefix_and_preserve_data() -> None:
@@ -295,12 +311,13 @@ def test_xmem_resize_oom_returns_original_address_without_mutation() -> None:
     runtime = _small_xmem(64)
     address, status = _execute(runtime, "ALLOCATE", 20)
     assert status == 0
-    runtime.memory.write_bytes(address, b"retained on allocation failure")
+    payload = bytes(range(24))
+    runtime.memory.write_bytes(address, payload)
     here = _pointer(runtime, "XMEM-HERE")
 
     assert _execute(runtime, "RESIZE", address, 64) == (address, MASK64)
     assert _pointer(runtime, "XMEM-HERE") == here
-    assert runtime.memory.read_bytes(address, 30) == b"retained on allocation failure"
+    assert runtime.memory.read_bytes(address, len(payload)) == payload
     assert _pointer(runtime, "XMEM-FL") == 0
 
 
@@ -414,6 +431,10 @@ def test_xmem_pointer_and_free_list_are_shared_across_contexts() -> None:
     assert peer.data.snapshot() == ()
     assert _pointer(runtime, "XMEM-FL") == EXTERNAL_BASE
     assert _execute(runtime, "XMEM-ALLOT", 16) == (EXTERNAL_BASE,)
+
+    separate = _small_xmem(128)
+    assert _pointer(separate, "XMEM-HERE") == EXTERNAL_BASE
+    assert _pointer(separate, "XMEM-FL") == 0
 
 
 def test_next_contiguous_frontier_stops_at_dictionary_power_words(

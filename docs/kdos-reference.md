@@ -819,6 +819,7 @@ ledger, alignment/overlap validation, or double-free detection. An interior
 span can be returned and a repeated free can create a self-linked node. Public
 `FREE` also treats every nonzero address at or above `MEM-SIZE` as XMEM and
 reads the prefix first, so its contract is restricted to allocator results.
+`XMEM-FLOOR` protects bulk reset only and is not checked by free insertion.
 Raw XMEM allocation, free, alignment, and reset are unsynchronized and lack
 the intended core-0 guard; XMEM `FREE` is likewise unguarded, while `RESIZE`
 writes shared scratch before its nested allocation guard. These discrepancies

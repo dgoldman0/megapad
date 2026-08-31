@@ -761,9 +761,11 @@ Load-time `XMEM-INIT` is one-shot. A present region starts the bump pointer at
 `(base,size)=(0,0)`. Positive raw requests are rounded to 16 bytes, search the
 LIFO free list by first fit, split only when a 16-byte tail remains, and then
 fall back to the bump tail. Rejected checked allocation returns `(0,-1)` and
-the aborting form publishes its source message; both preserve allocator state.
-Returned spans are normalized and preflighted against the configured limit and
-current high-water mark before free-list metadata is written. `XMEM-RESET`
+the aborting form publishes its source message; both preserve the bump pointer
+and free-list topology, although a completed failed search leaves the shared
+`FL-NEED`, `FL-PREV`, and `FL-CURR` scratch changed. Returned spans are
+normalized and preflighted against the configured limit and current high-water
+mark before free-list metadata is written. `XMEM-RESET`
 restores the floor (or base), clears the list, and neither wipes storage nor
 revokes old addresses. `XMEM-FREE` and `.XMEM` count only the unused bump tail,
 not recyclable list nodes.
@@ -783,6 +785,9 @@ manufactured interior subspan can be admitted and a repeated free can create
 a self-linked node. `FREE` classifies every nonzero address at or above
 `MEM-SIZE` as XMEM and reads its prefix before validation; qualification is
 therefore limited to zero or pointers returned by the corresponding allocator.
+`XMEM-FLOOR` constrains reset only; free insertion does not consult it, so a
+forged span can reclaim persistent XBUF or dictionary-index storage below the
+floor.
 `XBUF` allocation precedes constant publication and floor advancement, so a
 later dictionary fault can leak an unprotected block. These are open KDOS
 contract gaps, not simulator-side repairs.
@@ -799,6 +804,10 @@ self-guarded.
 The qualified geometry has a positive signed size below the next physical
 window and a nonwrapping base-plus-size. `XMEM?` uses signed `0>`, and
 `XMEM-TALIGN` can advance beyond a non-64-byte-aligned configured limit. The
+public size guard also admits `0x7fff_ffff_ffff_fff0` before adding its
+eight-byte prefix even though subsequent 16-byte normalization cannot remain
+positive; ordinary sub-VRAM geometry rejects that request before the edge can
+mutate state. The
 hosted and executable-emulator constructors interpret configured size zero as
 no external region, while the current RTL parameter interprets zero as the
 maximum window up to VRAM; the normal emulator session profile separately
