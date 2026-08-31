@@ -456,12 +456,13 @@ boundary as immutable `TextAreaDraw`, `TextGridDraw`, and `TabSetDraw` values.
 That projection preserves exact owner/region authority, independent sibling
 roots, stable item identities, logical viewport and selection state, and
 deterministic draw order without choosing pixels or hit geometry. The shared
-physical viewer wire now carries those exact draw values, using canonical STX1
+viewer wire now carries those exact draw values, using canonical STX1
 bytes instead of defining another semantic-item schema. The Pygame sink now
 paints text-area, grid, and tabset roots over the mandatory complete CELL base,
 leaves the cursor overlay last, and derives immutable enabled-TAB hit geometry
-from that exact paint pass. An accepted physical offer therefore authorizes TAB
-ACTIVATE through the existing exact-revision path. Text/grid item input remains
+from that exact paint pass. An accepted selected-sink offer therefore
+authorizes TAB ACTIVATE through the existing exact-revision path. Text/grid
+item input remains
 deferred because the current event cannot name content revision, item key, and
 scalar offset. Bit 9 remains unadvertised until a synchronized Akashic core
 UIDL/canonical-widget producer and an ordinary application journey exercise
@@ -540,6 +541,6 @@ Cases 9 and 10 are focused seconds-scale units for the current functional
 slice, not full renderer qualification. A CELL-only snapshot round trip, one
 isolated glyph-run overlay, or even a complete GLYPH_RUN-only screen cannot be
 cited as Desk/Pad/Daybook semantic-rich-rendering acceptance. That acceptance
-also requires a real semantic control, its physical revision acknowledgement,
+also requires a real semantic control, its exact selected-sink acknowledgement,
 and revision-bound normalized activation through the ordinary application
 lifecycle.

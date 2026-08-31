@@ -494,11 +494,14 @@ canonical STX1 item pass, so fail-closed reassertion does not add another item
 scan. The reference Pygame sink now paints all three root kinds from the
 complete CELL base, renders persistent TEXT_AREA selection/caret state, and
 publishes only enabled TAB children in the same-pass immutable hit map. TAB
-activation therefore reuses the exact physically acknowledged revision path
+activation therefore reuses the exact selected-sink-acknowledged revision path
 already used by menus. TEXT_AREA and TEXT_GRID item-addressed pointer input
 remain deferred because the current event cannot name an STX1 item revision,
-key, or scalar offset. Bit 9 remains unadvertised until the Akashic producer and
-ordinary Desk/Pad/Daybook journey supply these values end to end.
+key, or scalar offset. Bit 9 remains unadvertised until an Akashic core
+UIDL/canonical-widget producer supplies these values and an ordinary
+application journey exercises them end to end. Desk, Pad, and Daybook remain
+unchanged clients with automatic residual coverage; none supplies a collection
+provider.
 
 The guest CONTROL writer is now extended in place rather than split into a
 second encoder. It accepts retained mask `0x33f`, requires bit 8 whenever bit 9
@@ -514,9 +517,12 @@ retained-transaction minima before accepting bit 9. A focused target-Forth
 oracle locks the resulting 152-byte CONTROL payload and complete APT frame. No
 host or product policy advertises bit 9 yet.
 
-The remaining advertisement work is above this transport seam: Akashic must
-produce and account for the canonical collection bodies through its ordinary
-UIDL lifecycle, and the real Desk/Pad/Daybook journey must pass end to end.
+The remaining advertisement work is above this transport seam: an Akashic core
+UIDL type or canonical reusable widget must automatically produce and account
+for the canonical collection bodies through its ordinary lifecycle, and a
+representative ordinary application journey must pass end to end. The real
+Desk/Pad/Daybook journey remains the unchanged menu-plus-residual regression
+witness rather than a source of applet-owned collection code.
 Session configuration already chooses `max_payload` from the greater of the
 CELL-row and retained client-to-terminal requirements, preventing an otherwise
 valid retained policy from silently falling back during discovery. The real
@@ -542,9 +548,10 @@ Daybook-to-Pad shared-resource route. At least one ordinary semantic control
 from that composition must also be projected as a control, visibly rendered
 through the selected rich renderer, and activated through normalized input
 bound to its exact displayed revision. That revision becomes input-eligible
-only after the complete composite containing the control is physically
-presented and exactly acknowledged; the resulting ordinary application state
-change must then be visible. CELL remains complete fallback, but a frame whose
+only after the complete composite containing the control crosses the selected
+sink's documented completion boundary and is exactly acknowledged; the
+resulting ordinary application state change must then be visible. CELL remains
+complete fallback, but a frame whose
 substantive Desk/editor/calendar pixels came only from CELL does not prove the
 rich renderer. Wire bytes, accepted model state, an immutable composite, a
 GLYPH_RUN-only screen, or one isolated glyph-run overlay do not complete the

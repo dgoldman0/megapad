@@ -120,9 +120,9 @@ foreign host, or changed UCTX fails closed without touching wire state.
 
 Only LIVE bindings may emit model/resource/series changes. OPENING becomes LIVE
 only after `RET_RESULT(OWNER_OPEN,RET_OK)`. Host-owned pre-shutdown quiesce first
-makes projection stale, synchronously detaches every semantic source callback,
+makes projection stale, synchronously detaches every core projection source,
 and records enough exact owner state for allocation-free retryable retirement.
-If callback detachment cannot be proven, application shutdown and state free
+If source detachment cannot be proven, application shutdown and state free
 must not run. DROPPING remains authoritative until matching successful
 TX_RESULT. After successful drop, the wire binding becomes TOMBSTONED and the
 internal token is stale; it is never rebound to a new UCTX. A later UCTX gets a
@@ -402,10 +402,11 @@ backpressured, or failed status; it never retains arbitrary application stack
 addresses or silently drops state.
 
 Before arbitrary application shutdown, the host must quiesce the binding and
-synchronously detach every semantic source callback. Quiesce records the exact
-retryable owner-retirement obligation without depending on later application
-state. If local callback detachment cannot be proven, shutdown and state free
-must not proceed. Final host detach scrubs remaining UCTX/CINST/region references
+synchronously detach every core UIDL/canonical-widget projection source.
+Quiesce records the exact retryable owner-retirement obligation without
+depending on later application state. If local source detachment cannot be
+proven, shutdown and state free must not proceed. Final host detach scrubs
+remaining UCTX/CINST/region references
 before those objects are freed; wire acknowledgement may retire the independent
 bounded tombstone afterward under the exact owner rules.
 

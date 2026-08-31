@@ -1530,7 +1530,7 @@ The minimum Akashic journey is:
    domain with the surrounding PRESENT commits;
 7. append explicit and uniform i64 samples without local-clock extrapolation;
 8. deliver one `CONTROL_EVENT ACTIVATE` for an exact visible/enabled menu item
-   tied to the physically acknowledged current global revision;
+   tied to the exact selected-sink-acknowledged current global revision;
 9. accept a resize and transmit a real PRESENT CELL_REPLACE using exactly the
    canonical full-width row spans; then use RET_LAYOUT_START followed by at
    least one separate RET_LAYOUT_CONTINUE transaction before reveal at the new
@@ -1591,7 +1591,7 @@ Implementations must share byte-exact vectors for:
 - byte-exact CONTROL DEFINE/REPLACE/DROP and EVENT payloads, canonical menu
   hierarchy/kind/state/bounds/string rejection, independent CONTROL high-water,
   shared object/UTF-8 quota exhaustion, and refusal to emit activation before
-  the exact visible/enabled view revision is physically acknowledged;
+  the exact visible/enabled view revision is selected-sink acknowledged;
 - explicit/uniform series append, ring eviction, replace, and timestamp errors;
 - resize layout hiding/reveal and reset CELL-first replay, including a valid
   crossed CELL/PRESENT COMMIT and crossed OWNER_DROP each settled by old-epoch
