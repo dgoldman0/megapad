@@ -120,6 +120,15 @@ CPU trap (vector `IVEC_DIV_ZERO`).
 > work until BIOS, emulator, simulator, tests, and this reference are resolved
 > together.
 
+> **Open signed-`MOD` overflow edge.** The native executable guards signed
+> division for `INT64_MIN / -1`, but its signed-`MOD` path performs that same
+> division in C++ without the overflow guard. That operand pair therefore has
+> no qualified native result. The hosted simulator currently produces the
+> mathematical remainder zero, but this note does not decide whether the
+> eventual architecture should return zero or trap. Current KDOS
+> `RAND-RANGE` qualification requires a positive signed divisor and cannot
+> reach this edge.
+
 **Example — computing an average:**
 ```forth
 : AVG  ( a b -- avg )  + 2 / ;

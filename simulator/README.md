@@ -24,7 +24,8 @@ The implemented slices provide:
   storage;
 - a read-only one-full-core SysInfo profile whose direct MMIO registers and
   BIOS topology words share the same service and report the actual sparse
-  memory geometry, now advertising only the admitted CRC capability bit;
+  memory geometry, now advertising the admitted `0x7` crypto profile: CRC,
+  checked SHA3/SHAKE streaming, and raw Keccak-f[1600];
 - fail-closed construction for injected address spaces: their SysInfo
   capability qword must be readable and may advertise only admitted services;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access and byte `FILL` over that
@@ -48,6 +49,14 @@ The implemented slices provide:
 - a routed per-runtime AES-128/256-GCM service shared by BIOS words and direct
   virtual MMIO, backed by a portable AES/GHASH value model and exact native
   command, status, fault, and incremental guest-transfer semantics;
+- a routed per-runtime SHA3/SHAKE/raw-Keccak service shared by checked BIOS
+  words and direct virtual MMIO, with complete caller-span preflight,
+  `(COREID,TASK-ID)` transaction ownership, staged publication, and a portable
+  24-round Keccak-f[1600] value model;
+- a per-runtime deterministic TRNG-window model whose reproducible stream is
+  derived from an explicit host-injected seed, with the native supplemental
+  seed and latched-unusable lifecycle but no hardware-entropy or
+  cryptographic-randomness claim;
 - active-line `WORD` with its transient counted string at `HERE`, forward
   `CMOVE`, byte fetch, stack depth, and compiled/interpret-state `."` plus the
   supported compile-state `ABORT"` path;
@@ -231,6 +240,47 @@ dictionary state. Bad-tag multi-block decrypt also leaves previously streamed
 plaintext published. These cases remain explicit findings rather than hidden
 host substitutions or hard-coded simulator capacities.
 
+Byte-exact logical lines 1072 through 1216 load the complete unchanged KDOS
+SHA3/SHAKE and random-helper section and its 26 ordinary source definitions.
+The one-core SysInfo profile now reports `CRYPTO_CAPS = 0x7`: bit 0 is the
+admitted reflected/raw CRC service, bit 1 is checked SHA3/SHAKE streaming, and
+bit 2 is raw Keccak-f[1600]. Bit 3 remains clear because the hosted WOTS chain
+has not been admitted. Acceptance covers SHA3-256, SHA3-512, SHAKE128,
+SHAKE256, segmented and rate-boundary input, multi-window squeeze, cleanup and
+ownership failures, in-place raw permutations, direct-MMIO access shapes, and
+terminal state/error compatibility. The service completes semantic operations
+synchronously; it does not claim an observable BUSY interval, round or bus
+latency, backpressure, timeout cadence, interrupt delivery, physical spinlock
+arbitration, RTL timing, or constant-time host execution.
+
+All checked SHA input, output, and raw-state spans pass through the same
+`CALLER-SPAN-STATUS` boundary before their first transfer. A nonempty Bank-0
+span must begin at or above the hosted static/dictionary rollback floor and
+end no higher than the active caller's future result-cell boundary
+(`DSP-8`). External, HBW, and VRAM spans must fit wholly in one mapped region.
+The transaction owner remains the BIOS `(COREID,TASK-ID)` pair; every current
+pre-scheduler guest dispatch therefore uses `(0,0)`. An unbacked host scratch
+context borrows the canonical foreground stack boundary rather than creating
+an unbounded guest span.
+
+`RANDOM`, `RANDOM8`, and `SEED-RNG` reach one per-runtime decoded TRNG window.
+Its bytes are a repeatable SHA-256-derived stream from an explicit injected
+seed, not host, physical, or cryptographically secure entropy. Equal seeds and
+guest read/seed schedules reproduce exactly; separate runtimes do not share
+pool position. Guest seed writes supplement only future bytes while usable and
+cannot recover a latched failure.
+
+Two unchanged-source limitations are now pinned rather than repaired in host
+code. `.SHA3` uses `0 DO`, so only a positive, nonwrapping readable length is
+qualified; zero or negative lengths can enter a wrapping/nonterminating loop.
+`RAND-RANGE` is meaningful only for a positive signed maximum, faults for a
+zero divisor, gives no useful range contract for a negative maximum, and uses
+modulo reduction rather than rejection sampling, so its result is biased in
+general. SHAKE's safe positive chunk sizes do not resolve the separate
+[open `MIN` signedness discrepancy](../docs/bios-forth.md); the simulator
+continues to record that mismatch without deciding whether the public word
+should be signed or unsigned.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -246,8 +296,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–1071 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics plus the complete unchanged KDOS AES source section in its documented safe input domain; line 70 is blank |
-| 1072 onward | Next uncovered frontier | SHA-3/SHAKE begins at line 1072; its preamble/constants compile through line 1100 and `CALLER-SPAN-STATUS` is the next missing primitive at line 1102 |
+| 39–1216 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, and the complete unchanged KDOS SHA3/SHAKE/TRNG-helper section in their documented safe input domains; line 70 is blank |
+| 1217 onward | Next uncovered frontier | Unified crypto begins at line 1217; its alias and checked SHA-256 constants precede the next genuinely missing BIOS primitive, `SHA256-INIT`, at line 1241 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -259,7 +309,8 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins SHA-3/SHAKE. Later slices continue the same
+The next source boundary begins unified crypto at line 1217. Its first actual
+semantic-BIOS gap is `SHA256-INIT` at line 1241; later slices continue the same
 contiguous unchanged prefix toward the persistent evaluator, ordinary checked
 module-loader surface, and deterministic cooperative task scheduler.
 

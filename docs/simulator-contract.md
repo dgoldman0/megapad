@@ -98,6 +98,19 @@ two's-complement values.  False is zero and true is
 `0xffffffffffffffff`.  Memory is byte addressed and little endian, including
 unaligned loads and stores.
 
+The current executable BIOS implements scalar `MIN` as an unsigned comparison,
+while the public Forth descriptions call it signed. That remains an
+[open documentation/implementation discrepancy](bios-forth.md), not a hosted
+simulator decision about the eventual public contract. Source qualification
+records which input domain is insensitive to the mismatch and does not silently
+replace the executable behavior.
+
+Signed `MOD` is likewise not qualified for the single operand pair
+`(INT64_MIN, -1)`: the current native C++ path omits signed division's overflow
+guard, while the hosted primitive deterministically produces remainder zero.
+That observation does not choose a permanent result-or-trap contract. The
+qualified positive-divisor domain of KDOS `RAND-RANGE` excludes the edge.
+
 The simulator exposes a sparse 64-bit logical address space with the same
 source-visible address classes as the machine: Bank 0, external memory, HBW,
 VRAM, and MMIO.  Host pointers never enter a guest cell.  Dynamic addresses
@@ -145,10 +158,12 @@ are required semantics.  JIT controls may be semantic no-ops only when their
 documented effect is purely optimization.  Capability and status words must
 report the simulator's actual support.
 
-The initial profile advertises one full core and crypto capability bit 0 for
-the admitted semantic reflected/raw CRC service. It advertises no additional
-cores, accelerator timing, other crypto bits, devices, or sinks until their
-public contracts have an implementation and differential evidence.
+The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
+the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
+streaming, and bit 2 is raw Keccak-f[1600]. Bit 3 remains clear because the
+hosted WOTS chain is not admitted. It advertises no additional cores,
+accelerator timing, other crypto bits, devices, or sinks until their public
+contracts have an implementation and differential evidence.
 
 ## 5. Scheduling and time
 
@@ -242,6 +257,65 @@ defects and are explicitly not repaired by a simulator-only cap. Bad-tag
 decryption retains the executable mutation order: already streamed plaintext
 remains published while the final output window is zero. These are recorded
 compatibility findings, not endorsed security properties.
+
+The admitted SHA service is one per-runtime shared transaction engine behind
+the virtual-MMIO router at `+0x780..+0x7DF`. Checked BIOS words and direct
+virtual-MMIO accesses reach that same object. The service implements all four
+SHA3/SHAKE modes, their exact rates and domain separators, sequential
+64-byte output windows, staged checked publication, and raw in-place
+Keccak-f[1600] over 25 little-endian lanes. Fixed and extendable-output
+transactions retain their BIOS `(COREID,TASK-ID)` owner until the required
+terminal clear. In the current one-core pre-scheduler profile that identity is
+always `(0,0)`; guest control unwinding does not implicitly release it.
+
+Every nonempty checked input, output, or 200-byte raw-state transfer is
+qualified as one complete caller-managed span before its first guest-memory
+access. Bank 0 is bounded below by the hosted static/dictionary rollback floor
+and above by the active caller's future result-cell boundary (`DSP-8`);
+external, HBW, and VRAM spans must fit wholly within one advertised region.
+Zero length ignores its unused address. Host scratch contexts without a
+memory-backed stack borrow the canonical foreground stack boundary. These
+checks establish geometry and protection, not allocation ownership,
+mutability, lifetime, initialization, or nonaliasing.
+
+SHA operations complete synchronously to their semantic terminal state. The
+simulator claims terminal values, output bytes, ownership, mutation order, and
+error/cleanup behavior; it does not claim an observable BUSY interval,
+Keccak-round or bus latency, DIN backpressure, polling timeout cadence,
+interrupt delivery, physical spinlock arbitration, RTL timing, or constant-
+time host execution.
+
+Direct SHA MMIO intentionally follows the current native executable model on
+three error-priority cases where integrated RTL differs:
+
+| Case | Native executable and simulator | Current integrated RTL |
+|---|---|---|
+| `INIT` while the stream feature is disabled and the engine is not owner-free/idle | The general owner/phase conflict has priority | A raw owner conflicts, but otherwise feature unavailability is tested before the general owner/phase conflict |
+| `NEXT` in a fixed-output mode from a non-raw state that is not sponge/DONE | After feature availability, invalid mode has priority | Invalid mode is emitted only for sponge/DONE; the other wrong owner/phase states report conflict |
+| Disabled DOUT or raw state/index read while the opposing owner is active | Opposing-owner conflict is recorded before the disabled feature returns zero | The feature gate returns zero first and does not record that conflict |
+
+This discrepancy record chooses the executable behavior for hosted
+differential compatibility; it does not decide which native/RTL contract must
+ultimately change.
+
+The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
+Each 64-byte pool is derived reproducibly from an explicit host-injected seed
+and refill counter using SHA-256. No operating-system or physical randomness
+is consulted, and its output is not cryptographically secure entropy. Equal
+seeds plus equal guest read and supplemental-seed schedules reproduce the same
+stream, while separate runtimes have independent pools. `RANDOM`, `RANDOM8`,
+and `SEED-RNG` retain the decoded aperture, byte-consumption, supplemental
+future-byte mixing, zeroization, and latched-unusable behavior. Guest
+`SEED-RNG` cannot recover an unusable source; only explicit host
+reinitialization can do so.
+
+The exact unchanged KDOS SHA3/random slice ending at `kdos.f` line 1216 is
+qualified only in its current safe source domain. `.SHA3` uses `0 DO`, so its
+length must be positive and nonwrapping; zero or negative lengths can wrap or
+fail to terminate. `RAND-RANGE` requires a positive signed maximum, faults on
+a zero divisor, has no useful negative-maximum contract, and is generally
+modulo-biased because it does not use rejection sampling. These limitations
+are not repaired by simulator-only substitutes.
 
 ## 7. Rich-terminal path
 

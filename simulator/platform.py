@@ -1,23 +1,34 @@
 """Focused platform services for the hosted one-core simulator profile.
 
-The hosted profile routes read-only SysInfo and the admitted AES service
+The hosted profile routes read-only SysInfo and each admitted accelerator
 through one virtual MMIO port.  Its memory-topology registers are built from
 the exact :class:`~simulator.memory.SparseAddressSpace` returned by the factory
-below;
-the service does not carry an independent copy of the address-space defaults.
+below; the services do not carry an independent copy of the address-space
+defaults.
 """
 
 from __future__ import annotations
 
 from shared.cells import MASK64
-from shared.crc import CRYPTO_CAP_CRC_REFLECT_RAW
+from shared.crypto_caps import (
+    CRYPTO_CAP_CRC_REFLECT_RAW,
+    CRYPTO_CAP_KECCAK_F1600,
+    CRYPTO_CAP_SHA3_STREAM,
+)
 from simulator.aes import AES_LIMIT, AES_OFFSET, HostedAESService
+from simulator.entropy import (
+    DEFAULT_TRNG_SEED,
+    TRNG_LIMIT,
+    TRNG_OFFSET,
+    HostedTRNGService,
+)
 from simulator.memory import (
     BANK0_DEFAULT_SIZE,
     DEFAULT_PAGE_SIZE,
     AddressClass,
     SparseAddressSpace,
 )
+from simulator.sha3 import SHA3_LIMIT, SHA3_OFFSET, HostedSHA3Service
 
 
 SYSINFO_OFFSET = 0x300
@@ -29,6 +40,12 @@ SYSINFO_NUM_FULL = SYSINFO_OFFSET + 0x48
 SYSINFO_CRYPTO_CAPS = SYSINFO_OFFSET + 0x60
 
 BOARD_ID_VERSION = 0x4D50_3634_0002_0001
+
+HOSTED_CRYPTO_CAPABILITIES = (
+    CRYPTO_CAP_CRC_REFLECT_RAW
+    | CRYPTO_CAP_SHA3_STREAM
+    | CRYPTO_CAP_KECCAK_F1600
+)
 
 _INTEGER_WIDTHS = frozenset((1, 2, 4, 8))
 
@@ -81,7 +98,7 @@ class OneCoreSysInfo:
     def __init__(
         self,
         *,
-        crypto_capabilities: int = CRYPTO_CAP_CRC_REFLECT_RAW,
+        crypto_capabilities: int = HOSTED_CRYPTO_CAPABILITIES,
     ) -> None:
         if (
             isinstance(crypto_capabilities, bool)
@@ -90,7 +107,7 @@ class OneCoreSysInfo:
             raise TypeError("crypto capabilities must be a uint64 integer")
         if not 0 <= crypto_capabilities <= MASK64:
             raise ValueError("crypto capabilities must be a uint64 integer")
-        if crypto_capabilities & ~CRYPTO_CAP_CRC_REFLECT_RAW:
+        if crypto_capabilities & ~HOSTED_CRYPTO_CAPABILITIES:
             raise ValueError(
                 "hosted profile cannot advertise unimplemented crypto bits"
             )
@@ -233,20 +250,28 @@ class OneCoreSysInfo:
 class OneCorePlatformMMIO:
     """Route each admitted one-core MMIO window to its sole service state."""
 
-    __slots__ = ("aes", "sysinfo")
+    __slots__ = ("aes", "entropy", "sha3", "sysinfo")
 
     def __init__(
         self,
         *,
         sysinfo: OneCoreSysInfo,
         aes: HostedAESService,
+        sha3: HostedSHA3Service,
+        entropy: HostedTRNGService,
     ) -> None:
         if not isinstance(sysinfo, OneCoreSysInfo):
             raise TypeError("platform SysInfo must be a OneCoreSysInfo")
         if not isinstance(aes, HostedAESService):
             raise TypeError("platform AES must be a HostedAESService")
+        if not isinstance(sha3, HostedSHA3Service):
+            raise TypeError("platform SHA3 must be a HostedSHA3Service")
+        if not isinstance(entropy, HostedTRNGService):
+            raise TypeError("platform entropy must be a HostedTRNGService")
         self.sysinfo = sysinfo
         self.aes = aes
+        self.sha3 = sha3
+        self.entropy = entropy
 
     def preflight(self, offset: int, width: int, *, write: bool) -> None:
         self._service(offset, width, write=write).preflight(
@@ -267,13 +292,22 @@ class OneCorePlatformMMIO:
         width: int,
         *,
         write: bool,
-    ) -> OneCoreSysInfo | HostedAESService:
+    ) -> (
+        OneCoreSysInfo
+        | HostedAESService
+        | HostedSHA3Service
+        | HostedTRNGService
+    ):
         if isinstance(offset, int):
             if SYSINFO_OFFSET <= offset < SYSINFO_LIMIT:
                 # Let the selected service diagnose a crossing span.
                 return self.sysinfo
             if AES_OFFSET <= offset < AES_LIMIT:
                 return self.aes
+            if SHA3_OFFSET <= offset < SHA3_LIMIT:
+                return self.sha3
+            if TRNG_OFFSET <= offset < TRNG_LIMIT:
+                return self.entropy
         raise PlatformMMIOAccessError(
             "access is outside every admitted platform MMIO window",
             offset=offset,
@@ -289,7 +323,9 @@ def create_one_core_address_space(
     vram_size: int = 0,
     hbw_size: int = 0,
     page_size: int = DEFAULT_PAGE_SIZE,
-    crypto_capabilities: int = CRYPTO_CAP_CRC_REFLECT_RAW,
+    crypto_capabilities: int = HOSTED_CRYPTO_CAPABILITIES,
+    entropy_seed: bytes = DEFAULT_TRNG_SEED,
+    entropy_usable: bool = True,
 ) -> SparseAddressSpace:
     """Return sparse guest memory with the one-core platform router attached."""
 
@@ -297,6 +333,14 @@ def create_one_core_address_space(
     platform = OneCorePlatformMMIO(
         sysinfo=sysinfo,
         aes=HostedAESService(),
+        sha3=HostedSHA3Service(
+            crypto_capabilities
+            & (CRYPTO_CAP_SHA3_STREAM | CRYPTO_CAP_KECCAK_F1600)
+        ),
+        entropy=HostedTRNGService(
+            entropy_seed,
+            usable=entropy_usable,
+        ),
     )
     memory = SparseAddressSpace(
         bank0_size=bank0_size,
@@ -312,6 +356,7 @@ def create_one_core_address_space(
 
 __all__ = [
     "BOARD_ID_VERSION",
+    "HOSTED_CRYPTO_CAPABILITIES",
     "SYSINFO_BANK0_SIZE",
     "SYSINFO_CRYPTO_CAPS",
     "SYSINFO_LIMIT",

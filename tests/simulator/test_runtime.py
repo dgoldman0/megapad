@@ -31,7 +31,10 @@ from simulator.stacks import ReturnStackShapeError, StackPointerError
 def test_runtime_owns_a_default_address_space_or_uses_the_injected_one() -> None:
     first = MegaForthRuntime()
     second = MegaForthRuntime()
-    injected = create_one_core_address_space(bank0_size=0x4000)
+    # This test exercises ownership of an injected address space, not a
+    # near-minimum Bank-0 capacity.  Use the profile default so growth in the
+    # admitted BIOS vocabulary does not turn it into an accidental size cap.
+    injected = create_one_core_address_space()
 
     assert isinstance(first.memory, SparseAddressSpace)
     assert first.memory is not second.memory

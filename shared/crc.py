@@ -12,9 +12,8 @@ from types import MappingProxyType
 from typing import Final, Mapping
 
 from shared.cells import MASK64, u64
+from shared.crypto_caps import CRYPTO_CAP_CRC_REFLECT_RAW
 
-
-CRYPTO_CAP_CRC_REFLECT_RAW: Final = 1 << 0
 
 # mode -> (polynomial, width, reflected)
 CRC_MODE_PARAMETERS: Mapping[int, tuple[int, int, bool]] = MappingProxyType(

@@ -16,6 +16,7 @@ from simulator.aes import (
     AES_TAG,
 )
 from simulator.errors import ExecutionError, ForthAbort
+from simulator.entropy import TRNG_RAND8, TRNG_RAND64, TRNG_SEED
 from simulator.memory import MMIO_BASE
 from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
@@ -29,6 +30,7 @@ from simulator.runtime import (
     Invoke,
     MegaForthRuntime,
 )
+from simulator.sha3 import SHA3_CONTROL, SHA3_STATUS
 
 
 def _dup(context: ExecutionContext) -> None:
@@ -87,6 +89,17 @@ def _two_over(context: ExecutionContext) -> None:
     context.data.push(second)
 
 
+def _two_swap(context: ExecutionContext) -> None:
+    top = context.data.pop()
+    third = context.data.pop()
+    second = context.data.pop()
+    bottom = context.data.pop()
+    context.data.push(third)
+    context.data.push(top)
+    context.data.push(bottom)
+    context.data.push(second)
+
+
 def _question_dup(context: ExecutionContext) -> None:
     value = context.data.peek()
     if value != 0:
@@ -125,6 +138,22 @@ def _signed_divide(context: ExecutionContext) -> None:
     if (dividend < 0) != (divisor < 0):
         quotient = -quotient
     context.data.push(quotient)
+
+
+def _signed_modulo(context: ExecutionContext) -> None:
+    divisor = s64(context.data.pop())
+    dividend = s64(context.data.pop())
+    if divisor == 0:
+        raise ExecutionError("signed modulo trapped on zero")
+    quotient = abs(dividend) // abs(divisor)
+    if (dividend < 0) != (divisor < 0):
+        quotient = -quotient
+    context.data.push(dividend - quotient * divisor)
+
+
+def _absolute(context: ExecutionContext) -> None:
+    value = s64(context.data.pop())
+    context.data.push(-value if value < 0 else value)
 
 
 def _minimum(context: ExecutionContext) -> None:
@@ -168,6 +197,12 @@ def _right_shift(context: ExecutionContext) -> None:
     count = context.data.pop()
     value = context.data.pop()
     context.data.push(value >> (count & 0x3F))
+
+
+def _left_shift(context: ExecutionContext) -> None:
+    count = context.data.pop()
+    value = context.data.pop()
+    context.data.push(u64(value << (count & 0x3F)))
 
 
 def _invert(context: ExecutionContext) -> None:
@@ -473,6 +508,10 @@ def _carriage_return(runtime: MegaForthRuntime, _context: ExecutionContext) -> N
     runtime.write_uart_bytes(b"\r\n")
 
 
+def _emit(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.write_uart_bytes(bytes((context.data.pop() & 0xFF,)))
+
+
 def _uppercase_character(context: ExecutionContext) -> None:
     value = context.data.pop()
     if ord("a") <= value <= ord("z"):
@@ -610,6 +649,140 @@ def _aes_status_fetch(
     context.data.push(runtime.memory.read8(MMIO_BASE + AES_STATUS))
 
 
+def _caller_span_status(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    length = context.data.pop()
+    address = context.data.pop()
+    context.data.push(runtime.caller_span_status(context, address, length))
+
+
+def _sha3_begin(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    status = runtime.sha3.begin(
+        runtime.guest_identity(context),
+        context.data.pop(),
+        runtime.memory,
+    )
+    context.data.push(status)
+
+
+def _sha3_update(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    length = context.data.pop()
+    source = context.data.pop()
+    status = runtime.sha3.update(
+        runtime.guest_identity(context),
+        source,
+        length,
+        memory=runtime.memory,
+        span_status=lambda address, count: runtime.caller_span_status(
+            context,
+            address,
+            count,
+        ),
+    )
+    context.data.push(status)
+
+
+def _sha3_final(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    status = runtime.sha3.final(
+        runtime.guest_identity(context),
+        context.data.pop(),
+        memory=runtime.memory,
+        span_status=lambda address, count: runtime.caller_span_status(
+            context,
+            address,
+            count,
+        ),
+    )
+    context.data.push(status)
+
+
+def _shake_final(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(
+        runtime.sha3.shake_final(
+            runtime.guest_identity(context),
+            runtime.memory,
+        )
+    )
+
+
+def _shake_read(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    length = context.data.pop()
+    destination = context.data.pop()
+    status = runtime.sha3.shake_read(
+        runtime.guest_identity(context),
+        destination,
+        length,
+        memory=runtime.memory,
+        span_status=lambda address, count: runtime.caller_span_status(
+            context,
+            address,
+            count,
+        ),
+    )
+    context.data.push(status)
+
+
+def _sha3_clear(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(
+        runtime.sha3.clear(runtime.guest_identity(context), runtime.memory)
+    )
+
+
+def _sha3_status_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.memory.read8(MMIO_BASE + SHA3_STATUS))
+
+
+def _sha3_mode_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.memory.read8(MMIO_BASE + SHA3_CONTROL))
+
+
+def _keccak_f1600(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    status = runtime.sha3.keccak_f1600_checked(
+        runtime.guest_identity(context),
+        context.data.pop(),
+        memory=runtime.memory,
+        span_status=lambda address, count: runtime.caller_span_status(
+            context,
+            address,
+            count,
+        ),
+    )
+    context.data.push(status)
+
+
+def _random(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    value = 0
+    for index in range(8):
+        byte = runtime.memory.read8(MMIO_BASE + TRNG_RAND64 + index)
+        value |= byte << (index * 8)
+    context.data.push(value)
+
+
+def _random8(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(runtime.memory.read8(MMIO_BASE + TRNG_RAND8))
+
+
+def _seed_rng(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    value = context.data.pop()
+    for index in range(8):
+        runtime.memory.write8(
+            MMIO_BASE + TRNG_SEED + index,
+            value & 0xFF,
+        )
+        value >>= 8
+
+
 def _push_diagnostic(context: ExecutionContext, value: int) -> None:
     context.data.push(value)
 
@@ -690,18 +863,22 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"2DUP", _two_dup),
         (b"2DROP", _two_drop),
         (b"2OVER", _two_over),
+        (b"2SWAP", _two_swap),
         (b"?DUP", _question_dup),
         (b"PICK", _pick),
         (b"+", _add),
         (b"-", _subtract),
         (b"*", _multiply),
         (b"/", _signed_divide),
+        (b"MOD", _signed_modulo),
+        (b"ABS", _absolute),
         (b"MIN", _minimum),
         (b"MAX", _maximum),
         (b"1+", _one_plus),
         (b"1-", _one_minus),
         (b"AND", _and),
         (b"OR", _or),
+        (b"LSHIFT", _left_shift),
         (b"RSHIFT", _right_shift),
         (b"INVERT", _invert),
         (b"=", _equal),
@@ -769,6 +946,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
                 context,
                 SYSINFO_CRYPTO_CAPS,
             ),
+        ),
+        (
+            b"CALLER-SPAN-STATUS",
+            lambda context: _caller_span_status(runtime, context),
         ),
         (b"CRC-MODE!", lambda context: _crc_mode_store(runtime, context)),
         (b"CRC-RESET", lambda context: _crc_reset(runtime, context)),
@@ -878,6 +1059,27 @@ def install_core(runtime: MegaForthRuntime) -> None:
                 length=16,
             ),
         ),
+        (b"SHA3-BEGIN", lambda context: _sha3_begin(runtime, context)),
+        (b"SHA3-UPDATE", lambda context: _sha3_update(runtime, context)),
+        (b"SHA3-FINAL", lambda context: _sha3_final(runtime, context)),
+        (b"SHAKE-FINAL", lambda context: _shake_final(runtime, context)),
+        (b"SHAKE-READ", lambda context: _shake_read(runtime, context)),
+        (b"SHA3-CLEAR", lambda context: _sha3_clear(runtime, context)),
+        (
+            b"SHA3-STATUS@",
+            lambda context: _sha3_status_fetch(runtime, context),
+        ),
+        (
+            b"SHA3-MODE@",
+            lambda context: _sha3_mode_fetch(runtime, context),
+        ),
+        (
+            b"KECCAK-F1600",
+            lambda context: _keccak_f1600(runtime, context),
+        ),
+        (b"RANDOM", lambda context: _random(runtime, context)),
+        (b"RANDOM8", lambda context: _random8(runtime, context)),
+        (b"SEED-RNG", lambda context: _seed_rng(runtime, context)),
         (
             b"PERF-CYCLES",
             lambda context: _push_diagnostic(
@@ -1019,6 +1221,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b".", lambda context: _dot(runtime, context)),
         (b"U.", lambda context: _unsigned_dot(runtime, context)),
         (b"CR", lambda context: _carriage_return(runtime, context)),
+        (b"EMIT", lambda context: _emit(runtime, context)),
         (b"UCHAR", _uppercase_character),
         (b"TRUE", lambda context: context.data.push(-1)),
         (b"FALSE", _push_zero),

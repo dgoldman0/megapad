@@ -268,6 +268,41 @@ raw 24-round permutation only: it does not absorb, pad, apply a domain
 separator, squeeze, or reverse bytes, and a failure leaves the image
 unchanged.
 
+The hosted simulator qualification through `kdos.f` line 1216 uses the
+derivative `CRYPTO_CAPS = 0x7` profile: reflected/raw CRC, checked SHA3/SHAKE,
+and raw Keccak are present, while WOTS bit 3 remains clear. This is distinct
+from the production checkpoint-3 `0xF` profile above. All checked input,
+output, and raw-state spans use `CALLER-SPAN-STATUS` before transfer. A
+nonempty Bank-0 span must lie between the static/dictionary protection floor
+and the calling context's future result-cell boundary; other caller-managed
+memory must fit wholly in one advertised external, HBW, or VRAM region. The
+shared transaction is owned by the BIOS `(COREID,TASK-ID)` identity until its
+terminal clear. Passing the span check establishes geometry and protection,
+not allocation ownership or safe aliasing.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `.SHA3-STATUS` | `( -- )` | Print the low two status bits as idle, busy, done, or error. |
+| `.SHA3` | `( addr len -- )` | Print each input byte as two uppercase hexadecimal digits, with no separator. |
+| `RANDOM32` | `( -- u )` | Mask the low 32 bits of BIOS `RANDOM`. |
+| `RANDOM16` | `( -- u )` | Mask the low 16 bits of BIOS `RANDOM`. |
+| `RAND-RANGE` | `( max -- n )` | Apply signed `MOD` and `ABS` to one BIOS `RANDOM` value; valid only for a positive signed maximum. |
+
+`.SHA3` uses `0 DO`, not `?DO`. Its qualified domain therefore requires a
+positive, nonwrapping readable length. A zero or negative length can enter a
+wrapping/nonterminating loop rather than print an empty string. `RAND-RANGE`
+faults when `max` is zero, has no useful range contract for a negative
+maximum, and is generally modulo-biased because it performs no rejection
+sampling. It must not be treated as a uniform bounded sampler.
+
+The hosted TRNG stream used by these random helpers is deterministic from an
+explicit injected seed and guest read/seed schedule. It is test replay input,
+not hardware or cryptographically secure randomness. Its synchronous SHA
+service likewise proves terminal values and state, not an observable BUSY
+interval or hardware timing. The hosted nonclaims and the current
+native-executable/RTL SHA error-priority discrepancies are recorded in the
+[simulator contract](simulator-contract.md#6-platform-services).
+
 ---
 
 ### §1.6a SHA-256 Hashing

@@ -13,6 +13,11 @@ from enum import Enum, auto
 from typing import Callable, NoReturn, TypeAlias
 
 from shared.cells import CELL_BYTES, MASK64, s64, u64
+from shared.crypto_caps import (
+    CRYPTO_CAP_CRC_REFLECT_RAW,
+    CRYPTO_CAP_KECCAK_F1600,
+    CRYPTO_CAP_SHA3_STREAM,
+)
 from simulator.crc import GuestIdentity, HostedCRCService
 from simulator.diagnostics import HostedDiagnosticsService
 from simulator.dictionary import Dictionary, Word
@@ -44,6 +49,7 @@ from simulator.ir import (
 )
 from simulator.memory import MMIO_BASE, AddressClass, SparseAddressSpace
 from simulator.platform import (
+    HOSTED_CRYPTO_CAPABILITIES,
     OneCorePlatformMMIO,
     SYSINFO_CRYPTO_CAPS,
     SYSINFO_NUM_CORES,
@@ -347,13 +353,29 @@ class MegaForthRuntime:
         crypto_capabilities = self.memory.read64(
             MMIO_BASE + SYSINFO_CRYPTO_CAPS
         )
-        self.crc = HostedCRCService(crypto_capabilities)
+        if crypto_capabilities & ~HOSTED_CRYPTO_CAPABILITIES:
+            raise ValueError(
+                "hosted runtime cannot admit unknown crypto capabilities"
+            )
         platform_mmio = self.memory.mmio
         if not isinstance(platform_mmio, OneCorePlatformMMIO):
             raise ValueError(
                 "hosted runtime requires the admitted one-core platform MMIO"
             )
+        crc_capabilities = (
+            crypto_capabilities & CRYPTO_CAP_CRC_REFLECT_RAW
+        )
+        sha_capabilities = crypto_capabilities & (
+            CRYPTO_CAP_SHA3_STREAM | CRYPTO_CAP_KECCAK_F1600
+        )
+        if platform_mmio.sha3.capabilities != sha_capabilities:
+            raise ValueError(
+                "SysInfo and hosted SHA capabilities do not agree"
+            )
+        self.crc = HostedCRCService(crc_capabilities)
         self.aes = platform_mmio.aes
+        self.sha3 = platform_mmio.sha3
+        self.entropy = platform_mmio.entropy
         self.diagnostics = (
             HostedDiagnosticsService()
             if diagnostics is None
@@ -512,6 +534,53 @@ class MegaForthRuntime:
         # Host scratch contexts are not schedulable guest tasks.  Until the
         # deterministic task layer exists, every dispatch is core 0, task 0.
         return 0, 0
+
+    def caller_span_status(
+        self,
+        context: ExecutionContext,
+        address: int,
+        length: int,
+    ) -> int:
+        """Qualify one complete caller-managed ordinary-memory span.
+
+        Results are the protocol-neutral BIOS values: ``0`` for admitted,
+        ``2`` for malformed/unmapped/cross-region ranges, and ``3`` for the
+        protected Bank-0 prefix or live stack boundary.  As in BIOS, an empty
+        span ignores its otherwise-unused address.
+        """
+
+        if not isinstance(context, ExecutionContext):
+            raise TypeError("context must be an ExecutionContext")
+        address = u64(address)
+        length = u64(length)
+        if length == 0:
+            return 0
+        if length & (1 << 63) or address == 0 or address & (1 << 63):
+            return 2
+
+        end = address + length
+        if end > (1 << 64):
+            return 2
+        region = next(
+            (
+                candidate
+                for candidate in self.memory.regions
+                if candidate.base <= address and end <= candidate.limit
+            ),
+            None,
+        )
+        if region is None:
+            return 2
+        if region.kind is not AddressClass.BANK0:
+            return 0
+
+        if address < self.dictionary.numeric_rollback_floor:
+            return 3
+        stack = context.data if context.data.backed else self.main_context.data
+        result_boundary = stack.pointer - CELL_BYTES
+        if end > result_boundary:
+            return 3
+        return 0
 
     def set_dictionary_fault_xt(self, xt: int) -> None:
         """Install a raw guest callback, including zero to disable it."""

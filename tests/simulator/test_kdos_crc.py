@@ -233,8 +233,8 @@ def test_crc_capability_word_and_sysinfo_are_one_coherent_profile(
     loaded_crc: MegaForthRuntime,
 ) -> None:
     runtime = loaded_crc
-    assert _execute(runtime, "CRYPTO-CAPS@") == (1,)
-    assert runtime.memory.read64(MMIO_BASE + SYSINFO_CRYPTO_CAPS) == 1
+    assert _execute(runtime, "CRYPTO-CAPS@") == (7,)
+    assert runtime.memory.read64(MMIO_BASE + SYSINFO_CRYPTO_CAPS) == 7
     assert runtime.crc.capabilities == 1
 
 
@@ -247,8 +247,8 @@ def test_runtime_fails_closed_without_one_admitted_sysinfo_profile() -> None:
     with pytest.raises(MMIOAccessError, match="rejected read preflight"):
         MegaForthRuntime(memory=rejected)
 
-    unsupported = SparseAddressSpace(mmio=_SysInfoProfileMMIO(2))
-    with pytest.raises(ValueError, match="unimplemented capabilities"):
+    unsupported = SparseAddressSpace(mmio=_SysInfoProfileMMIO(8))
+    with pytest.raises(ValueError, match="unknown crypto capabilities"):
         MegaForthRuntime(memory=unsupported)
 
     sysinfo_only = SparseAddressSpace(mmio=_SysInfoProfileMMIO(0))
