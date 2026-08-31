@@ -920,19 +920,26 @@ Canonical field elements and valid custom-prime/Montgomery tuples are the
 portable arithmetic domain; backend discrepancies outside it and the native
 raw-MAC carry defect are recorded in [bios-forth.md](bios-forth.md#field-alu--multi-prime-arithmetic-15-raw-words).
 
-### NTT Engine (9 words)
+### NTT Engine (10 raw words)
 
-| # | Word | Stack Effect | Imm | Description |
-|---|------|-------------|-----|-------------|
-| 295 | `NTT-LOAD` | `( addr -- )` | | Load 256-element polynomial |
-| 296 | `NTT-STORE` | `( addr -- )` | | Store 256-element result |
-| 297 | `NTT-FWD` | `( -- )` | | Forward NTT (time → frequency) |
-| 298 | `NTT-INV` | `( -- )` | | Inverse NTT (frequency → time) |
-| 299 | `NTT-PMUL` | `( addr -- )` | | Pointwise multiply |
-| 300 | `NTT-PADD` | `( addr -- )` | | Pointwise add |
-| 301 | `NTT-SETQ` | `( q -- )` | | Set modulus (3329 or 8380417) |
-| 302 | `NTT-STATUS@` | `( -- status )` | | Read engine status |
-| 303 | `NTT-WAIT` | `( -- )` | | Busy-wait until complete |
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `NTT-SETQ` | `( q -- )` | Set the retained uint64 modulus |
+| `NTT-IDX!` | `( idx -- )` | Set the raw 16-bit coefficient index |
+| `NTT-LOAD` | `( addr buf -- )` | Load 256 uint32-LE coefficients; zero selects A, nonzero selects B |
+| `NTT-STORE` | `( addr -- )` | Store 256 uint32-LE result coefficients |
+| `NTT-FWD` | `( -- )` | Generic forward NTT of A |
+| `NTT-INV` | `( -- )` | Generic inverse NTT of A |
+| `NTT-PMUL` | `( -- )` | Pointwise multiply A and B modulo q |
+| `NTT-PADD` | `( -- )` | Pointwise add A and B modulo q |
+| `NTT-STATUS@` | `( -- status )` | Read 0 idle, 1 busy, or 2 done |
+| `NTT-WAIT` | `( -- )` | Poll DONE; idle is not terminal |
+
+As with the corrected Field section, these entries follow the authoritative
+`.dq` chain and deliberately omit obsolete ordinal numbers instead of shifting
+every later legacy row locally. Transfer/state details and the incompatible
+current RTL surface are recorded in
+[bios-forth.md](bios-forth.md#ntt-engine-10-raw-words).
 
 ### KEM Engine — ML-KEM-512 (7 words)
 
@@ -1048,14 +1055,14 @@ machine reset.
 | Checked Entropy Boundaries | 2 |
 | Caller Span Boundary | 1 |
 | Field ALU | 15 |
-| NTT Engine | 9 |
+| NTT Engine | 10 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **390** |
+| **Catalogued subtotal** | **391** |
 
 ### All Immediate Words (34)
 
@@ -1095,7 +1102,7 @@ WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
 | `0xFFFF_FF00_0000_0840` | *(free)* | Field ALU is ISA-native (`EXT.CRYPTO FB 20..2D`); no MMIO device occupies this range |
 | `0xFFFF_FF00_0000_0880` | Port I/O Bridge | PORT1_TARGET..PORT7_TARGET=+00..+0D (16-bit LE, low 12 bits used), BRIDGE_CTRL=+0E |
 | `0xFFFF_FF00_0000_08A0` | WOTS Chain | Exact byte-only 32-byte aperture: CONTEXT_ADDR=+00..+07, STEPS=+08, START=+09, CMD/STATUS=+0A, ERROR=+0B, CYCLES=+0C..+0F, DOUT=+10..+1F |
-| `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
+| `0xFFFF_FF00_0000_08C0` | NTT Engine | Executable byte map: STATUS=+00, Q=+08..+0F, IDX=+10..+11, LOAD_A=+18..+1B, LOAD_B=+1C..+1F, RESULT=+20..+23, CMD=+28; current RTL uses incompatible 64-bit slots |
 | `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
 | `0xFFFF_FF00_0000_0940` | ~~SHA-2~~ | Removed — now ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`/`sha.release`) |
 | `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now ISA-native (`crc.mode`/`crc.init`/`crc.seed`/`crc.b`/`crc.q`/`crc.fin`/`crc.finraw`) |

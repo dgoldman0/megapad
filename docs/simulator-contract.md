@@ -514,6 +514,67 @@ integrated RTL, constant-time host behavior, or physical secret erasure. The
 current emulator reset paths also omit some prime/previous state that hosted
 `reset()` clears; simulator lifecycle tests do not resolve that reset defect.
 
+The admitted NTT slice is one runtime-global semantic service behind all 10
+raw BIOS words: `NTT-SETQ`, `NTT-IDX!`, `NTT-LOAD`, `NTT-STORE`, `NTT-FWD`,
+`NTT-INV`, `NTT-PMUL`, `NTT-PADD`, `NTT-STATUS@`, and `NTT-WAIT`. It is
+shared by guest contexts and has no core/task owner, lock, capability bit,
+checked error result, or automatic wipe. Guest `ABORT`, `THROW`, and memory
+faults do not roll it back. Hosted construction and explicit service reset
+clear q/index/buffers/status to their construction values; this is not a claim
+that the current emulator's warm `boot()` resets its NTT device.
+
+The service follows the working BIOS plus architectural Python device. Native
+CPU acceleration has no C++ NTT implementation and delegates this range to
+that same Python device. Q is a retained uint64 initially 3329; IDX retains 16
+bits, while buffer access and auto-increment use modulo 256. A and B each hold
+256 reduced uint32 coefficients, result is separate, and changing q does not
+renormalize retained buffers. Exact selector zero loads A and every nonzero
+selector loads B. The portable q domain is set-before-load use of 3329 or
+8380417; invalid/composite-q behavior is retained where deterministic but is
+not advertised as a mathematical accelerator contract.
+
+`NTT-LOAD` consumes both stack cells and resets IDX before reading memory. For
+each coefficient, each source byte is read before its staging byte changes;
+only byte 3 commits `uint32le % q` and increments the index. `NTT-STORE`
+resets IDX and reads each result byte before its corresponding guest write; a
+byte-3 result read increments before the guest byte-3 write. Address stepping
+wraps as uint64, with no span preflight or alignment check. A later load fault
+therefore retains prior coefficients and the current staging prefix. A later
+store fault retains its destination prefix, and a byte-3 destination fault
+also retains the already advanced index. Complete 1024-byte transfers end at
+index zero. Input/output aliasing is safe after complete input consumption.
+
+Commands use raw bytes 1, 3, 5, and 7. They synchronously replace only result,
+leaving A and B intact, and transition from initial status 0 through an
+unobservable busy interval to retained status 2. A modulus for which the
+Python search finds no 256th root still reaches DONE without replacing result.
+`NTT-WAIT` tests the DONE bit, not “not busy,” so an idle call never completes;
+the hosted semantic dispatcher repeats it until a caller-provided step budget
+expires. Hosted execution makes no BUSY-latency, fairness, arbitration, or
+interrupt claim.
+
+The shared value model reproduces the Python device's bounded root search and
+ordinary radix-2 forward/inverse transforms. Pointwise addition and
+multiplication are fully reduced. This means
+`INTT(NTT(a)*NTT(b))` computes cyclic convolution modulo `x^256-1`, not the
+negacyclic ring operation required by ML-KEM or ML-DSA. Exact unchanged
+`kdos.f` lines 1517 through 1584 define both named moduli, selectors, two
+global 1024-byte scratch buffers, `NTT-POLYMUL`, and `.NTT-STATUS`; the PQ
+labels do not strengthen that mathematical claim. The KEM emulator uses
+separate FIPS-oriented routines. KDOS scratch aliases and concurrent
+`NTT-POLYMUL` calls are unsafe because there is no ownership protocol.
+
+This frontier is deliberately pseudo-BIOS-only: it does not admit direct
+virtual NTT MMIO. Current RTL uses an incompatible 64-bit-slot map, while the
+working BIOS/Python path uses byte windows STATUS `+00`, Q `+08..0F`, IDX
+`+10..11`, A `+18..1B`, B `+1C..1F`, RESULT `+20..23`, and CMD `+28`.
+Current RTL also fixes its twiddle tables and inverse scale to q=3329 even when
+Q changes, exposes multi-cycle BUSY/partial work, and produces a different
+forward ordering for its fixed root. BIOS byte accesses cannot drive that RTL
+unit correctly. Simulator success therefore makes no direct-MMIO, RTL,
+standardized-PQ, cycle, bus-width, constant-time, or physical-erasure claim,
+and this discrepancy record does not choose the eventual hardware correction.
+
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
 and refill counter using SHA-256. No operating-system or physical randomness

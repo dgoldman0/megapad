@@ -26,7 +26,6 @@ from shared.field import (
     raw_multiply_add,
     raw_product,
 )
-from simulator.errors import SourceError
 from simulator.field import HostedFieldALUService
 from simulator.memory import (
     EXTERNAL_BASE,
@@ -630,23 +629,3 @@ def test_service_reset_clears_all_per_core_field_state() -> None:
         assert service.previous_low(core_id) == 0
         assert service.previous_high(core_id) == 0
         assert service.zero_flag(core_id) is False
-
-
-def test_next_contiguous_frontier_stops_at_ntt_load(
-    loaded_field: MegaForthRuntime,
-) -> None:
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    assert lines[1515] == b"\n"  # source line 1516
-    next_source = b"".join(lines[1516:1558])
-    assert next_source.startswith(b"\\ ================================")
-    assert next_source.endswith(
-        b"    NTT-BUF-A NTT-LOAD            \\ load a \xe2\x86\x92 A\n"
-    )
-
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_field.evaluate(
-            next_source,
-            source_name="kdos.f:1517-1558",
-        )
-    assert caught.value.location.line == 42
-    assert caught.value.message == "unknown word b'NTT-LOAD'"

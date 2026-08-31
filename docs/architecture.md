@@ -153,7 +153,7 @@ device occupies a small range:
 | **TRNG** | `+0x0800` | 32 bytes | Checked hardware entropy source |
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
 | **WOTS Chain** | `+0x08A0` | 32 bytes | Qualified checked byte-only WOTS chain sequencer with 64-bit read-only Bank 0 context DMA |
-| **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
+| **NTT Engine** | `+0x08C0` | 64 bytes | Generic 256-point cyclic transform; executable byte ABI and current RTL slots differ |
 | **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
@@ -581,7 +581,7 @@ zeroizes the bank before another TACC operation is admitted.
 | SHA-256 | 64 bytes / 64 cycles | TLS 1.3, HMAC-SHA256, HKDF (per-core ISA, no MMIO) |
 | CRC (32/64-bit tuples) | 8 bytes / feed | Data integrity (private full-core / cluster-shared ISA, no MMIO) |
 | Field ALU | 1–4335 nominal ISA cycles, operation-dependent | Per-core multi-prime arithmetic, raw 512-bit products, and X25519 |
-| NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
+| NTT Engine | Python device synchronous; current RTL ~2304 FWD / ~2560 INV work cycles | Generic cyclic polynomial transform; not the standards' negacyclic ML-KEM/ML-DSA operation |
 | KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
 | TRNG | 64 bits / 2 cycles | Hardware true random number generator |
 
@@ -786,23 +786,39 @@ and simulator contract rather than inferred from the leaf block alone.
 ### NTT Engine (Number Theoretic Transform)
 
 A 256-point NTT accelerator at MMIO base `+0x08C0` for lattice-based
-post-quantum cryptography (ML-KEM, ML-DSA).
+experimentation. The executable BIOS path uses the architectural Python device
+even when CPU execution is native-accelerated; no separate C++ NTT algorithm
+exists.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
-| CMD | `+0x00` | W | **1:** NTT_FWD, **2:** NTT_INV, **3:** NTT_PMUL, **4:** NTT_PADD |
-| Q | `+0x08` | RW | Modulus (default 3329 for ML-KEM, 8380417 for ML-DSA) |
-| IDX | `+0x10` | RW | Coefficient index (0–255), auto-increments on RESULT read |
-| LOAD_A | `+0x18` | W | Write coefficient to polynomial A[IDX] |
-| LOAD_B / RESULT | `+0x20` | RW | Write to B[IDX], read from work[IDX] |
+| STATUS | `+0x00` | R byte | 0 idle, 1 busy, 2 done |
+| Q | `+0x08..+0x0F` | RW bytes | Retained uint64 modulus, default 3329 |
+| IDX | `+0x10..+0x11` | RW bytes | Retained 16-bit index; data access uses modulo 256 |
+| LOAD_A | `+0x18..+0x1B` | W bytes | Stage one uint32-LE A coefficient; byte 3 commits and increments |
+| LOAD_B | `+0x1C..+0x1F` | W bytes | Stage one uint32-LE B coefficient; byte 3 commits and increments |
+| RESULT | `+0x20..+0x23` | R bytes | Read one uint32-LE result; byte 3 increments |
+| CMD | `+0x28` | W byte | **1:** FWD, **3:** INV, **5:** PMUL, **7:** PADD |
 
-Internal storage: 3 × 256 × 32-bit register files (poly_a, poly_b, work).
-Cooley-Tukey butterfly with precomputed twiddle ROM (ω = 17 for q = 3329).
-~1,280 cycles for forward/inverse NTT, ~256 cycles for PMUL/PADD.
+Internal executable storage is 3 × 256 × 32-bit coefficient arrays. The
+Python device selects a primitive 256th root for q, completes commands
+synchronously, and is shared system-wide. Its generic transform implements
+cyclic convolution modulo `x^256-1`; the separate ML-KEM device contains its
+own FIPS-oriented NTT/basemul routines.
 
-**BIOS words:** `NTT-LOAD`, `NTT-STORE`, `NTT-FWD`, `NTT-INV`, `NTT-PMUL`,
-`NTT-PADD`, `NTT-SETQ`, `NTT-STATUS@`, `NTT-WAIT`.
-**KDOS word (§1.11):** `NTT-POLYMUL` (full polynomial multiply via NTT).
+The current RTL is not register-compatible with this table. It decodes
+64-bit slots with CMD/STATUS at `+0x00`, 32-bit Q at `+0x08`, 8-bit IDX at
+`+0x10`, A at `+0x18`, and B-write/result-read at `+0x20`. BIOS byte accesses
+therefore write the wrong values/slots and cannot start the unit. The RTL also
+uses permanent q=3329 twiddle tables and `N_INV=3316` after Q changes, and its
+state machine exposes approximately 2304 forward, 2560 inverse, or 256
+pointwise work cycles before bus overhead. The older ~1280-cycle and
+configurable-Dilithium RTL descriptions are not current implementation facts.
+
+**BIOS words:** `NTT-SETQ`, `NTT-IDX!`, `NTT-LOAD`, `NTT-STORE`, `NTT-FWD`,
+`NTT-INV`, `NTT-PMUL`, `NTT-PADD`, `NTT-STATUS@`, `NTT-WAIT`.
+**KDOS word (§1.11):** `NTT-POLYMUL` (generic cyclic polynomial multiply via
+NTT).
 
 ### KEM (ML-KEM-512 Key Encapsulation)
 

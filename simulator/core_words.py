@@ -845,6 +845,46 @@ def _field_conditional_move(
     runtime.field.conditional_move(core_id, condition, runtime.memory)
 
 
+def _ntt_set_modulus(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.ntt.set_modulus(context.data.pop())
+
+
+def _ntt_set_index(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.ntt.set_index(context.data.pop())
+
+
+def _ntt_load(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    selector = context.data.pop()
+    address = context.data.pop()
+    runtime.ntt.load(address, selector, runtime.memory)
+
+
+def _ntt_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.ntt.store(context.data.pop(), runtime.memory)
+
+
+def _ntt_status(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(runtime.ntt.status)
+
+
+def _ntt_wait(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> Invoke | None:
+    if runtime.ntt.status & 2:
+        return None
+    wait_word = runtime.find(b"NTT-WAIT")
+    if wait_word is None:
+        raise ExecutionError("NTT-WAIT disappeared during semantic dispatch")
+    return Invoke(wait_word.xt)
+
+
 def _sha256_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     core_id, _task_id = runtime.guest_identity(context)
     context.data.push(runtime.sha2.sha256_init(core_id))
@@ -1316,6 +1356,22 @@ def install_core(runtime: MegaForthRuntime) -> None:
                 runtime.field.multiply_add_raw,
             ),
         ),
+        (
+            b"NTT-SETQ",
+            lambda context: _ntt_set_modulus(runtime, context),
+        ),
+        (
+            b"NTT-IDX!",
+            lambda context: _ntt_set_index(runtime, context),
+        ),
+        (b"NTT-LOAD", lambda context: _ntt_load(runtime, context)),
+        (b"NTT-STORE", lambda context: _ntt_store(runtime, context)),
+        (b"NTT-FWD", lambda _context: runtime.ntt.forward()),
+        (b"NTT-INV", lambda _context: runtime.ntt.inverse()),
+        (b"NTT-PMUL", lambda _context: runtime.ntt.pointwise_multiply()),
+        (b"NTT-PADD", lambda _context: runtime.ntt.pointwise_add()),
+        (b"NTT-STATUS@", lambda context: _ntt_status(runtime, context)),
+        (b"NTT-WAIT", lambda context: _ntt_wait(runtime, context)),
         (
             b"X25519-SCALAR!",
             lambda context: _x25519_scalar_store(runtime, context),

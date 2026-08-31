@@ -49,6 +49,7 @@ from simulator.ir import (
     WriteOutput,
 )
 from simulator.memory import MMIO_BASE, AddressClass, SparseAddressSpace
+from simulator.ntt import HostedNTTService
 from simulator.platform import (
     HOSTED_CRYPTO_CAPABILITIES,
     OneCorePlatformMMIO,
@@ -382,6 +383,7 @@ class MegaForthRuntime:
         self.sha2 = HostedSHA2Service(core_count=num_full)
         self.spinlocks = HostedSpinlockBank(core_count=num_cores)
         self.field = HostedFieldALUService(core_count=num_cores)
+        self.ntt = HostedNTTService()
         self.diagnostics = (
             HostedDiagnosticsService()
             if diagnostics is None

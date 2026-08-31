@@ -572,8 +572,8 @@ recorded in the [BIOS reference](bios-forth.md#field-alu--multi-prime-arithmetic
 and [simulator contract](simulator-contract.md#6-platform-services).
 
 The hosted simulator executes this exact source block after unchanged X25519,
-advancing the contiguous KDOS frontier through line 1515. The next source
-section begins NTT at line 1517 and first requires `NTT-LOAD` on line 1558.
+advancing the contiguous KDOS frontier through line 1515. The adjacent NTT
+slice now continues that same frontier through line 1584.
 
 ---
 
@@ -584,7 +584,8 @@ section begins NTT at line 1517 and first requires `NTT-LOAD` on line 1558.
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `NTT-SETQ` | `( q -- )` | Set the NTT modulus (3329 for ML-KEM, 8380417 for ML-DSA). |
-| `NTT-LOAD` | `( addr buf -- )` | Load 256 coefficients from memory.  *buf*: 0 = poly A, 1 = poly B. |
+| `NTT-IDX!` | `( idx -- )` | Set the retained raw 16-bit coefficient index. |
+| `NTT-LOAD` | `( addr buf -- )` | Load 256 uint32-LE coefficients. *buf*: 0 = poly A, every nonzero value = poly B. |
 | `NTT-STORE` | `( addr -- )` | Store 256 result coefficients to memory. |
 | `NTT-FWD` | `( -- )` | Forward NTT (time → frequency domain). |
 | `NTT-INV` | `( -- )` | Inverse NTT (frequency → time domain). |
@@ -594,6 +595,25 @@ section begins NTT at line 1517 and first requires `NTT-LOAD` on line 1558.
 | `NTT-WAIT` | `( -- )` | Poll until NTT operation completes. |
 | `NTT-POLYMUL` | `( a b r -- )` | Full polynomial multiply: r = a · b via forward NTT, pointwise multiply, inverse NTT. |
 | `.NTT-STATUS` | `( -- )` | Print human-readable NTT status. |
+
+Exact unchanged lines 1517 through 1584 define `Q-KYBER`, `Q-DILITHIUM`,
+the two selectors, two 1024-byte global scratch buffers, `NTT-POLYMUL`, and
+`.NTT-STATUS`. The raw engine and scratch buffers are shared cooperative state
+with no lock or task owner. Ordinary input/output aliasing is safe after each
+input load, but a caller must not alias `_NTT-TMP-A` or `_NTT-TMP-B`, and
+concurrent `NTT-POLYMUL` calls are unsafe.
+
+Despite the section's PQ labels, this primitive computes ordinary cyclic
+convolution modulo `x^256-1`; it is not the specialized negacyclic
+multiplication used by ML-KEM or ML-DSA. Current executable and RTL NTT paths
+also disagree on register layout, transfer width, roots, configurable-q
+behavior, and latency. See the
+[BIOS reference](bios-forth.md#ntt-engine-10-raw-words) for the pinned
+discrepancy rather than treating either backend as interchangeable evidence.
+
+The hosted contiguous frontier now ends at line 1584. The following ML-KEM
+constants compile, and the next genuine semantic-BIOS gap is `KEM-SEL!` in
+`KYBER-KEYGEN` at line 1608.
 
 ---
 

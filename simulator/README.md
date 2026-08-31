@@ -63,6 +63,10 @@ The implemented slices provide:
   BIOS words and six X25519 staging words, backed by portable Field and RFC
   7748 value models and preserving native four-qword effects without emulating
   EXT.CRYPTO timing;
+- a runtime-local shared NTT service for all 10 raw BIOS words, backed by the
+  executable emulator's generic 256-point transform values and preserving its
+  coefficient, status, index, and byte-transfer effects without admitting the
+  physical NTT MMIO window;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -389,6 +393,32 @@ and is not integrated into a complete core. Exact publication/fault order and
 these unresolved discrepancies are specified in the
 [simulator contract](../docs/simulator-contract.md#6-platform-services).
 
+Byte-exact logical lines 1517 through 1584 add unchanged KDOS §1.11. They
+define the Kyber and Dilithium modulus constants, A/B selectors, two global
+1024-byte scratch buffers, `NTT-POLYMUL`, and `.NTT-STATUS`. The hosted raw
+surface contains all 10 checked-in words, including the previously omitted
+`NTT-IDX!`; `NTT-LOAD` takes both an address and selector, while `NTT-PMUL`
+and `NTT-PADD` take no stack arguments.
+
+The service follows the BIOS plus the Python device used by both interpreted
+and native-accelerated emulator execution: q is uint64, coefficients are
+uint32 little endian, selector zero means A and every nonzero selector means
+B, and ordinary commands complete synchronously from initial status 0 to
+retained status 2. `NTT-WAIT` still waits specifically for DONE, so calling it
+while idle remains an indefinite guest loop bounded only by an optional hosted
+step budget. Loads and stores retain their exact byte-level partial-fault and
+index-increment order. State is shared by all contexts in a runtime and has no
+lock, owner, checked status, capability bit, or implicit unwind cleanup.
+
+This generic transform computes cyclic convolution modulo `x^256-1`; it is
+not the specialized negacyclic polynomial operation used by ML-KEM or ML-DSA.
+The emulator's ML-KEM device uses separate FIPS-oriented routines. Current NTT
+RTL is also not executable-BIOS compatible: it has a different 64-bit-slot
+map, consumes unit-width transfers while BIOS emits bytes, retains Kyber-only
+twiddles and inverse scale when q changes, and exposes real BUSY latency.
+Hosted NTT is therefore a pseudo-BIOS semantic slice, not direct MMIO, RTL,
+cycle, arbitration, or standardized-PQ evidence.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -404,8 +434,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–1515 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, and the general Field block; blank separators at lines 70, 1432, and 1482 have no definitions |
-| 1516 onward | Next uncovered frontier | Line 1516 is blank and §1.11 NTT begins at line 1517; constants and scratch compile until the first missing primitive, `NTT-LOAD`, at line 1558 |
+| 39–1584 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, Field, and the complete NTT block; blank separators have no definitions |
+| 1585 onward | Next uncovered frontier | §1.12 constants compile and `KYBER-KEYGEN` begins normally; the next genuine semantic-BIOS gap is `KEM-SEL!` at line 1608 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -417,10 +447,11 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins NTT at line 1517. Its constants and scratch
-advance naturally to the first actual semantic-BIOS gap, `NTT-LOAD`, at line
-1558. Later slices continue the same contiguous unchanged prefix toward the
-persistent evaluator, ordinary checked module-loader surface, and
+The next source boundary begins ML-KEM at line 1586. Its constants and the
+opening of `KYBER-KEYGEN` advance naturally to the first actual semantic-BIOS
+gap, `KEM-SEL!`, at line 1608. Later slices continue the same contiguous
+unchanged prefix toward the persistent evaluator, ordinary checked
+module-loader surface, and
 deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are

@@ -1337,23 +1337,55 @@ claims constant-time behavior.
 
 ---
 
-## NTT Engine (9 words)
+## NTT Engine (10 raw words)
 
 256-point Number Theoretic Transform accelerator at
-`0xFFFF_FF00_0000_08C0`.  Configurable modulus (q=3329 for ML-KEM,
-q=8380417 for ML-DSA).
+`0xFFFF_FF00_0000_08C0`. The working BIOS plus architectural Python device
+retain a configurable uint64 modulus (normally 3329 or 8380417), two
+256-entry uint32 input buffers, one result buffer, a 16-bit index, and
+idle/busy/done state.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `NTT-LOAD` | `( addr -- )` | Load 256-element polynomial from addr. |
-| `NTT-STORE` | `( addr -- )` | Store 256-element result to addr. |
-| `NTT-FWD` | `( -- )` | Run forward NTT (time → frequency). |
-| `NTT-INV` | `( -- )` | Run inverse NTT (frequency → time). |
-| `NTT-PMUL` | `( addr -- )` | Pointwise multiply with polynomial at addr. |
-| `NTT-PADD` | `( addr -- )` | Pointwise add with polynomial at addr. |
 | `NTT-SETQ` | `( q -- )` | Set modulus (3329 or 8380417). |
+| `NTT-IDX!` | `( idx -- )` | Set the raw 16-bit coefficient index. |
+| `NTT-LOAD` | `( addr buf -- )` | Load 256 uint32-LE coefficients; `buf=0` selects A and every nonzero value selects B. |
+| `NTT-STORE` | `( addr -- )` | Store 256 uint32-LE result coefficients. |
+| `NTT-FWD` | `( -- )` | Run the generic forward transform on A. |
+| `NTT-INV` | `( -- )` | Run the generic inverse transform on A. |
+| `NTT-PMUL` | `( -- )` | Pointwise multiply retained A and B modulo q. |
+| `NTT-PADD` | `( -- )` | Pointwise add retained A and B modulo q. |
 | `NTT-STATUS@` | `( -- status )` | Read engine status. |
-| `NTT-WAIT` | `( -- )` | Busy-wait until NTT operation completes. |
+| `NTT-WAIT` | `( -- )` | Poll until DONE bit 1 is set; calling it while idle does not return. |
+
+The executable device starts at status 0. Commands use bytes 1, 3, 5, and 7
+(`go` in bit 0, operation in bits 2:1), complete synchronously, and retain
+status 2. Loading or storing resets IDX and transfers four bytes per
+coefficient. A load publishes a coefficient and advances only after byte 3;
+a result read advances before the corresponding byte-3 destination write.
+There is no complete-span preflight, lock, owner, capability bit, checked
+error status, automatic wipe, or unwind cleanup. Later memory faults therefore
+retain completed coefficients, staging/destination prefixes, and the exact
+current index.
+
+The Python device chooses a primitive 256th root for the selected q and
+implements an ordinary radix-2 transform. Consequently
+`INTT(NTT(a)*NTT(b))` is cyclic convolution modulo `x^256-1`, not the
+negacyclic multiplication required by ML-KEM or ML-DSA. The KEM device uses
+separate FIPS-oriented polynomial routines. Invalid or composite moduli are
+outside the portable contract; a modulus without a selected root completes a
+command without replacing the prior result, while q=0 faults on coefficient
+commit in the current Python model.
+
+> **Executable/RTL discrepancy.** Native accelerated execution has no C++ NTT
+> algorithm and delegates this MMIO range to the Python device. That working
+> byte map is STATUS `+00`, Q `+08..0F`, IDX `+10..11`, A `+18..1B`, B
+> `+1C..1F`, RESULT `+20..23`, and CMD `+28`. Current RTL instead decodes
+> 64-bit slots with CMD/STATUS `+00`, 32-bit Q `+08`, 8-bit IDX `+10`, A
+> `+18`, and B/RESULT `+20`; it also retains q=3329 twiddles and inverse scale
+> when Q changes. BIOS byte accesses therefore cannot operate that RTL path,
+> and its multi-cycle BUSY behavior is not evidence for executable or hosted
+> timing. This record does not choose the eventual hardware/API correction.
 
 ---
 

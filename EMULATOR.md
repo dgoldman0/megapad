@@ -623,7 +623,12 @@ Python/native/RTL discrepancies.
 
 **NTT Engine**
 `NTT-LOAD` `NTT-STORE` `NTT-FWD` `NTT-INV` `NTT-PMUL`
-`NTT-PADD` `NTT-SETQ` `NTT-STATUS@` `NTT-WAIT`
+`NTT-PADD` `NTT-SETQ` `NTT-IDX!` `NTT-STATUS@` `NTT-WAIT`
+
+These are the 10 raw words in the checked-in dictionary chain. The executable
+BIOS/Python-device contract and current RTL NTT differ in register layout,
+transfer width, configurable-root behavior, and timing; see the
+[BIOS reference](docs/bios-forth.md#ntt-engine-10-raw-words).
 
 **KEM Engine (ML-KEM-512)**
 `KEM-KEYGEN` `KEM-ENCAPS` `KEM-DECAPS` `KEM-SETQ`
