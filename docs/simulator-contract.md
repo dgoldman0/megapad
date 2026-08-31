@@ -807,18 +807,61 @@ window and a nonwrapping base-plus-size. `XMEM?` uses signed `0>`, and
 public size guard also admits `0x7fff_ffff_ffff_fff0` before adding its
 eight-byte prefix even though subsequent 16-byte normalization cannot remain
 positive; ordinary sub-VRAM geometry rejects that request before the edge can
-mutate state. The
-hosted and executable-emulator constructors interpret configured size zero as
+mutate state. The hosted and executable-emulator constructors interpret
+configured size zero as
 no external region, while the current RTL parameter interprets zero as the
 maximum window up to VRAM; the normal emulator session profile separately
 defaults to 128 MiB. Every profile must expose its actual SysInfo geometry.
 This discrepancy is recorded without selecting one universal meaning for a
 configuration value that is not itself a guest ABI input.
 
-The contiguous source frontier now ends at line 2388. The dictionary-index
-bootstrap begins at line 2390; `2/` at line 2395 is the next missing primitive,
-followed by `2*` and the substantive checked `DICT-INDEX!` BIOS service. That
-initializer is the next slice and is not represented by a no-op index.
+The admitted dictionary-index BIOS service preserves the executable
+`DICT-INDEX!` validation and statuses. `0 0` disables with status 0; otherwise
+the base must be 16-byte aligned, the slot count a nonzero power of two,
+`slots*16` and base plus span must not wrap, and the complete span must fit in
+advertised external memory. Invalid status 1 changes neither diagnostics nor
+table bytes. Valid installation clears and rebuilds the new table
+newest-to-oldest: complete state returns 0 with `BOUND|AUTHORITATIVE`, while an
+incomplete or saturated rebuild returns 2 with the partial positive table
+retained as `BOUND|SATURATED`.
+
+Each exact 16-byte guest slot contains the entry pointer at `+0`, uppercase
+FNV-1a32 at `+8`, the name length at `+12`, and three zero reserved bytes.
+Metadata is written before the pointer. Rebuild uses insert-if-absent so the
+newest shadow wins; later definitions upsert that pointer without increasing
+the unique-name count. Numeric `DICT-ROLLBACK` clears and rebuilds the bound
+table after restoring the semantic dictionary. The linked semantic dictionary
+remains the correctness representation, so an unbound or saturated index has
+the same lookup results without claiming hardware `EXT.DICT`, probe timing,
+seqlock concurrency, or cycle counts.
+
+Exact unchanged `kdos.f` lines 2390 through 2423 add
+`_DICT-POW2-FLOOR`, `_DICT-INDEX-DONE`, and `_DICT-INDEX-INIT`, then run the
+initializer. `2*` wraps one-cell left shifts. Executable BIOS `2/` is a logical
+right shift even though its assembly comment calls it arithmetic; the sizing
+source supplies positive values, and the discrepancy is pinned rather than
+normalized. Canonical 128 MiB XMEM reserves 65,536 slots (1 MiB) and advances
+both `XMEM-HERE` and `XMEM-FLOOR`. Absent XMEM and a present bump tail below
+2,048 bytes leave the index disabled. Exactly 2,048 bytes selects one slot,
+installs a saturated fallback, and protects the 16-byte table.
+
+The BIOS validates physical geometry, not allocator ownership or disjointness;
+a caller can bind over live XMEM data or dictionary headers and rebuild will
+clear that span. Disable clears diagnostics but intentionally leaves old table
+bytes. `DICT-INDEX@` is four sequential BIOS loads rather than an epoch-retried
+multicore snapshot; the hosted one-core profile returns one stable state and
+does not claim that stronger hardware behavior. KDOS sizes from `XMEM-FREE`,
+which counts only virgin bump-tail capacity, not reclaimed nodes.
+
+KDOS sets `_DICT-INDEX-DONE` before allocation and installation. A status-1
+BIOS rejection after allocation therefore leaves retry disabled, the
+allocation consumed, and the floor unadvanced before aborting. The admitted
+fresh-boot geometry cannot reach that path, but it remains a documented
+nontransactional edge rather than an invented rollback.
+
+The contiguous source frontier now ends at line 2423. Userland isolation
+begins at line 2425 and compiles through its state and partition calculation;
+`DICT-BOUNDS!` at line 2521 is the next missing BIOS service.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

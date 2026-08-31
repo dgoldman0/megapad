@@ -833,9 +833,26 @@ the RTL parameter value zero selects the maximum window up to VRAM; guest
 words report each profile's actual SysInfo rather than normalizing this host
 configuration difference.
 
-The contiguous hosted frontier now ends at line 2388. Dictionary-index boot
-initialization begins at line 2390; `2/` at line 2395 is the next missing word,
-followed by `2*` and the checked `DICT-INDEX!` BIOS service.
+Exact lines 2390 through 2423 then define `_DICT-POW2-FLOOR`,
+`_DICT-INDEX-DONE`, and `_DICT-INDEX-INIT` and execute the one-shot
+initializer. Canonical 128 MiB XMEM selects 65,536 slots (1 MiB); the table is
+built newest-first and protected by advancing `XMEM-FLOOR`. Present capacity
+below 2,048 bytes selects no table, while exactly 2,048 bytes selects one slot
+and safely retains a saturated, linked-fallback state. The executable BIOS
+implements `2/` as a logical shift despite its stale assembly comment calling
+the operation arithmetic; this source uses only positive sizing values.
+
+Index geometry proves neither allocator ownership nor disjointness, so callers
+must reserve the supplied span exclusively. Rebuild clears it. Disable clears
+the binding diagnostics but leaves old slot bytes, and the four values from
+`DICT-INDEX@` are sequential BIOS loads rather than a coherent multicore
+snapshot. KDOS also sets its DONE cell before allocation/install; an otherwise
+unreachable status-1 rejection after allocation would consume the block,
+leave the floor unchanged, disable retry, and abort.
+
+The contiguous hosted frontier now ends at line 2423. Userland isolation
+begins at line 2425 and reaches `DICT-BOUNDS!` at line 2521 as the next missing
+BIOS word.
 
 ---
 
@@ -884,7 +901,8 @@ partition cell; `USERLAND-INIT` leaves that low-level bound disarmed until the
 actual `ENTER-USERLAND` transition.
 
 Before that partition, KDOS's one-shot index initializer reserves at most
-1/128 of free XMEM, rounded down to a power-of-two count of 16-byte slots. It
+1/128 of the virgin XMEM bump tail, rounded down to a power-of-two count of
+16-byte slots. Reclaimed free-list nodes are not included in that sizing. It
 uses checked allocation, advances `XMEM-FLOOR`, and leaves linked lookup active
 if no table can be allocated. `XMEM-INIT` is itself one-shot; `XMEM-RESET`, not
 reinitialization, is the supported allocator reset after boot.

@@ -201,6 +201,16 @@ def _one_plus(context: ExecutionContext) -> None:
     context.data.push(context.data.pop() + 1)
 
 
+def _two_multiply(context: ExecutionContext) -> None:
+    context.data.push(context.data.pop() << 1)
+
+
+def _two_divide(context: ExecutionContext) -> None:
+    # The executable BIOS uses a logical right shift even though an old source
+    # comment calls 2/ arithmetic.  Preserve that cell-level behavior.
+    context.data.push(context.data.pop() >> 1)
+
+
 def _and(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
@@ -393,6 +403,26 @@ def _dictionary_fault_xt_store(
     context: ExecutionContext,
 ) -> None:
     runtime.set_dictionary_fault_xt(context.data.pop())
+
+
+def _dictionary_index_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    slots = context.data.pop()
+    base = context.data.pop()
+    context.data.push(runtime.configure_dictionary_index(base, slots))
+
+
+def _dictionary_index_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    state = runtime.dictionary_index_state
+    context.data.push(state.base)
+    context.data.push(state.slots)
+    context.data.push(state.count)
+    context.data.push(state.flags)
 
 
 def _dictionary_base_fetch(
@@ -1213,6 +1243,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"MAX", _maximum),
         (b"1+", _one_plus),
         (b"1-", _one_minus),
+        (b"2*", _two_multiply),
+        (b"2/", _two_divide),
         (b"AND", _and),
         (b"OR", _or),
         (b"XOR", _xor),
@@ -1244,6 +1276,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"VARIABLE", lambda context: _variable(runtime, context)),
         (b"HERE", lambda context: _here(runtime, context)),
         (b"LATEST", lambda context: _latest(runtime, context)),
+        (
+            b"DICT-INDEX!",
+            lambda context: _dictionary_index_store(runtime, context),
+        ),
+        (
+            b"DICT-INDEX@",
+            lambda context: _dictionary_index_fetch(runtime, context),
+        ),
         (
             b"DICT-ROLLBACK",
             lambda context: _dictionary_rollback(runtime, context),

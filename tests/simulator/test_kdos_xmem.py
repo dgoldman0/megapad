@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from shared.cells import MASK64, TRUE
-from simulator.errors import ForthAbort, SourceError
+from simulator.errors import ForthAbort
 from simulator.memory import BANK0_DEFAULT_SIZE, EXTERNAL_BASE, MMIO_BASE
 from simulator.platform import (
     SYSINFO_EXTERNAL_BASE,
@@ -435,18 +435,3 @@ def test_xmem_pointer_and_free_list_are_shared_across_contexts() -> None:
     separate = _small_xmem(128)
     assert _pointer(separate, "XMEM-HERE") == EXTERNAL_BASE
     assert _pointer(separate, "XMEM-FL") == 0
-
-
-def test_next_contiguous_frontier_stops_at_dictionary_power_words(
-    loaded_xmem: MegaForthRuntime,
-) -> None:
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[2388:2395])
-    assert next_source.startswith(b"\n")
-    assert next_source.endswith(b"        2/ SWAP 2* SWAP\n")
-
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_xmem.evaluate(next_source, source_name="kdos.f:2389-2395")
-    assert caught.value.location.line == 7
-    assert caught.value.location.column == 8
-    assert caught.value.message == "unknown word b'2/'"

@@ -99,6 +99,14 @@ BIOS validates the span before publishing it and never owns, grows, or frees
 the allocation. With no valid allocation, lookup remains correct through the
 linked list.
 
+Geometry validation is not an ownership or disjointness proof. The caller
+must reserve the complete span exclusively while it is bound; installation
+and rebuild clear it and can otherwise overwrite live XMEM data or external
+dictionary headers. Disabling the binding clears retained diagnostics but
+does not wipe the old caller bytes. `DICT-INDEX@` performs four sequential raw
+loads, so it is useful bounded diagnostics but is not itself an epoch-retried
+coherent snapshot for multicore readers.
+
 Each 16-byte slot contains the entry pointer at `+0`, the 32-bit uppercase
 FNV-1a hash at `+8`, the seven-bit name length at `+12`, and three zero reserved
 bytes at `+13..+15`. An entry pointer of zero marks an empty slot. Metadata is
@@ -135,6 +143,13 @@ advances `XMEM-FLOOR` after a successful installation, and rebuilds all BIOS
 and KDOS definitions accumulated before installation. If external memory is
 absent or the reservation cannot be made, installation is skipped and linked
 lookup remains the fallback.
+
+The sizing input is `XMEM-FREE`, meaning the virgin bump tail rather than the
+sum of that tail and reclaimed free-list nodes. `_DICT-INDEX-DONE` is published
+before allocation and installation. Consequently, a status-1 BIOS rejection
+after successful allocation aborts with the block consumed, the floor not yet
+advanced, and retry disabled. Normal fresh-boot sizing supplies aligned,
+power-of-two, in-range geometry and cannot reach that edge.
 
 ## Publication and rollback
 

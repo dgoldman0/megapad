@@ -607,8 +607,9 @@ XMEM region:
   └──────────────────────────────┘  XMEM-LIMIT
 ```
 
-The one-shot KDOS initializer reserves at most 1/128 of free XMEM for the BIOS
-dictionary index, rounded down to a power-of-two number of 16-byte slots. The
+The one-shot KDOS initializer reserves at most 1/128 of the virgin XMEM bump
+tail for the BIOS dictionary index, rounded down to a power-of-two number of
+16-byte slots. Reclaimed free-list bytes are not part of this sizing input. The
 canonical 128 MiB arrangement uses 1 MiB. `XMEM-FLOOR` protects that table,
 later kernel allocations, and the dictionary from `XMEM-RESET`. The userland
 interval is sealed at `ENTER-USERLAND` time and is not reclaimable by the XMEM

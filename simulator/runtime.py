@@ -21,6 +21,10 @@ from shared.crypto_caps import (
 from simulator.crc import GuestIdentity, HostedCRCService
 from simulator.diagnostics import HostedDiagnosticsService
 from simulator.dictionary import Dictionary, Word
+from simulator.dictionary_index import (
+    DictionaryIndexState,
+    HostedDictionaryIndex,
+)
 from simulator.errors import (
     ExecutionError,
     ForthAbort,
@@ -395,6 +399,10 @@ class MegaForthRuntime:
             start_address=dictionary_start,
             memory=self.memory,
         )
+        self.dictionary_index = HostedDictionaryIndex(
+            self.memory,
+            self.dictionary,
+        )
         bank0 = next(
             (
                 region
@@ -493,6 +501,12 @@ class MegaForthRuntime:
         """Return the raw callback installed through ``DICT-FAULT-XT!``."""
 
         return self._dictionary_fault_xt
+
+    @property
+    def dictionary_index_state(self) -> DictionaryIndexState:
+        """Return stable diagnostics for the caller-backed BIOS index."""
+
+        return self.dictionary_index.state
 
     @property
     def uart_output(self) -> bytes:
@@ -596,6 +610,11 @@ class MegaForthRuntime:
         """Install a raw guest callback, including zero to disable it."""
 
         self._dictionary_fault_xt = u64(xt)
+
+    def configure_dictionary_index(self, base: int, slots: int) -> int:
+        """Install, rebuild, or disable the caller-backed BIOS index."""
+
+        return self.dictionary_index.configure(base, slots)
 
     def _dictionary_context(
         self,
@@ -720,7 +739,7 @@ class MegaForthRuntime:
         width = self.dictionary.definition_size(name, initial_body=initial_body)
         self._preflight_dictionary_growth(width, active_context)
         try:
-            return self.dictionary.define(
+            word = self.dictionary.define(
                 name,
                 implementation,
                 immediate=immediate,
@@ -728,6 +747,8 @@ class MegaForthRuntime:
             )
         except OverflowError as exc:
             self._request_dictionary_fault(active_context, str(exc))
+        self.dictionary_index.publish(word)
+        return word
 
     def _route_unhandled_dictionary_fault(
         self,
@@ -817,6 +838,7 @@ class MegaForthRuntime:
             self.dictionary.rollback_to(saved_here, saved_latest)
         except (TypeError, ValueError, RuntimeError) as exc:
             self._request_dictionary_fault(context, str(exc))
+        self.dictionary_index.rebuild()
 
     def new_context(self) -> ExecutionContext:
         """Return an unbacked host scratch context.

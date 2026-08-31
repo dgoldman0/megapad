@@ -543,6 +543,24 @@ to VRAM, while ordinary emulator sessions default separately to 128 MiB.
 Hosted words report the profile's actual SysInfo geometry and do not erase
 that configuration discrepancy.
 
+Exact logical lines 2390 through 2423 now run KDOS's one-shot caller-backed
+dictionary-index initializer. The semantic BIOS validates the complete
+external span, emits exact 16-byte FNV/length/entry slots, rebuilds newest
+first, upserts later shadows, rebuilds after numeric rollback, and exposes
+status 0/1/2 plus the four public flags. Canonical 128 MiB XMEM reserves a
+1 MiB/65,536-slot authoritative table; absent or sub-2,048-byte capacity leaves
+it disabled, while exactly 2,048 bytes deliberately produces a protected
+one-slot saturated fallback. Executable `2/` is logical despite its stale
+assembly comment describing arithmetic shift.
+
+The caller must reserve the table exclusively: BIOS geometry checks do not
+prove allocator ownership or disjointness, and rebuild clears the supplied
+span. Disable leaves old bytes, `DICT-INDEX@` is not a coherent multicore
+snapshot in hardware, and KDOS's early DONE publication makes an otherwise
+unreachable post-allocation status-1 failure nontransactional. Hosted
+one-core execution preserves the visible table/state contract without claiming
+hardware-cache timing or multicore seqlock behavior.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -558,8 +576,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–2388 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW, and the complete external-memory allocator/allocation dispatch through `XBUF`; blank separators have no definitions |
-| 2390 onward | Next uncovered frontier | Dictionary-index boot initialization reaches missing `2/` at line 2395, followed by `2*` and checked `DICT-INDEX!` |
+| 39–2423 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, and the checked caller-backed dictionary-index initializer; blank separators have no definitions |
+| 2425 onward | Next uncovered frontier | Userland partition setup reaches missing `DICT-BOUNDS!` at line 2521 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -571,12 +589,11 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins the dictionary-index boot initializer at line
-2390. Its arithmetic helpers are small, but `DICT-INDEX!` must preserve the
-real caller-backed validation, rebuild, and status contract; it will not be
-accepted as a no-op merely to move the frontier. Later slices continue the
-same contiguous unchanged prefix toward the persistent evaluator, ordinary
-checked module-loader surface, and deterministic cooperative task scheduler.
+The next source boundary is the userland memory-isolation block beginning at
+line 2425. Its first missing service is checked external dictionary-bound
+publication, not an allocator shortcut. Later slices continue the same
+contiguous unchanged prefix toward the persistent evaluator, ordinary checked
+module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

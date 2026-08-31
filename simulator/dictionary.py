@@ -156,6 +156,12 @@ class Dictionary:
         return self._definitions[-1] if self._definitions else None
 
     @property
+    def words(self) -> tuple[Word, ...]:
+        """Return the live definition order from oldest to newest."""
+
+        return tuple(self._definitions)
+
+    @property
     def numeric_rollback_floor(self) -> int:
         """Return the lowest HERE accepted by the source-visible rollback ABI."""
 
