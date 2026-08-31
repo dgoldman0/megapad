@@ -851,12 +851,11 @@ unreachable status-1 rejection after allocation would consume the block,
 leave the floor unchanged, disable retry, and abort.
 
 The contiguous hosted frontier now includes the complete unchanged userland
-section through line 2574. Its checked bounds service, lazy partition,
-Bank-0/XMEM HERE transitions, cross-zone linked definitions, rollback/index
-repair, reset floor, and free-span overlap hook are executable semantic
-behavior rather than reporting-only shims. The following Arena section
-compiles through line 2780; Buffer `IDLE` reaches missing compile-state `[` at
-line 2796.
+and Arena sections through line 2780. Their checked bounds, Bank-0/XMEM HERE
+transitions, cross-zone definitions, allocator dispatch, descriptor
+lifecycle, snapshots, and scoped stack are executable semantic behavior
+rather than reporting-only shims. Buffer `IDLE` reaches missing compile-state
+`[` at line 2796.
 
 ---
 
@@ -960,6 +959,84 @@ multicore transition atomicity.
 > and the current `HERE` after execution; since `ENTER-USERLAND` moves `HERE`
 > to ext mem, this clear loop would wipe system RAM.  Wrap the call in a
 > colon definition instead: `: _GO  XMEM? IF ENTER-USERLAND THEN ; _GO`.
+
+---
+
+### §1.1b Arena Allocator
+
+An Arena owns one preallocated backing span and advances a pointer inside it.
+Its four-cell descriptor stores base, requested capacity, current pointer, and
+source at offsets 0, 8, 16, and 24. `ARENA-NEW` appends that descriptor at the
+active dictionary HERE; `ARENA-NEW-AT` writes the same cells into a
+caller-supplied, writable, cell-aligned 32-byte span without advancing HERE.
+Both return `ior`; callers that immediately define a constant must consume it,
+for example:
+
+```forth
+4096 A-XMEM ARENA-NEW ABORT" arena fail" CONSTANT work-arena
+```
+
+Writing `ARENA-NEW CONSTANT work-arena` is wrong: `CONSTANT` consumes the
+topmost zero status and leaves the descriptor address on the data stack.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `ARENA-NEW` | `( size source -- arena ior )` | Allocate backing and append a permanent 32-byte dictionary descriptor. |
+| `ARENA-NEW-AT` | `( desc size source -- ior )` | Allocate backing and publish into caller-owned descriptor storage. |
+| `ARENA-ALLOT` | `( arena u -- addr )` | Round the requested length to eight bytes, bump the pointer, or abort on ordinary overflow/destruction. |
+| `ARENA-ALLOT?` | `( arena u -- addr ior )` | Checked counterpart returning `(0,-1)` on ordinary overflow/destruction. |
+| `ARENA-USED` / `ARENA-FREE` | `( arena -- u )` | Derive live accounting from descriptor cells. |
+| `ARENA-RESET` | `( arena -- )` | Restore the pointer to base without wiping bytes. |
+| `ARENA-DESTROY` | `( arena -- )` | Release reclaimable backing where supported and zero all descriptor cells. |
+| `ARENA-SNAP` | `( arena -- snap )` | Return the current pointer as a bare token. |
+| `ARENA-ROLLBACK` | `( arena snap -- )` | Replace the pointer after an inclusive descriptor-range check. |
+| `ARENA-PUSH` / `ARENA-POP` | varied | Mutate the single four-entry current-arena stack. |
+| `CURRENT-ARENA` | `( -- arena )` | Read the top entry or abort when the stack is empty. |
+| `AALLOT` | `( u -- addr )` | Allocate through that selected descriptor. |
+| `.ARENA` | `( arena -- )` | Print base, size, used, free, and source label. |
+
+`A-HEAP` is the general reclaimable `ALLOCATE`/`FREE` route, not an invariant
+Bank-0 route: it uses prefixed XMEM when external memory is present and Bank 0
+otherwise. `A-XMEM` calls raw `XMEM-ALLOT?` and returns destroyed blocks to
+the XMEM free list. `A-HBW` calls raw `HBW-ALLOT?`; destruction zeros only the
+descriptor and leaves the bump span occupied until `HBW-RESET`. Zero size and
+unknown source fail without a descriptor. Successful dictionary descriptors
+remain committed after destruction; repeated temporary construction should
+use `ARENA-NEW-AT`.
+
+The normal allocation domain is a positive representable request no greater
+than capacity. The current bump words do not prove that domain: wrapping
+`7 + -8 AND` is followed by a signed `<` comparison. Cell patterns
+`0xffff_ffff_ffff_fff9` through `0xffff_ffff_ffff_ffff` round to zero and
+succeed without moving the pointer, while other sign-bit-set aligned values
+can pass the signed comparison and wrap the pointer below base. HBW-backed
+construction separately inherits the raw HBW high-cell wrap documented
+above. These outcomes are defects reproduced by the hosted source, not an
+unsigned-capacity contract.
+
+Snapshot tokens carry no provenance. The rollback check admits any value in
+`[base,base+size]`, including an unaligned or forward address that was never a
+past pointer; it also admits token zero for a destroyed all-zero descriptor.
+Backing allocation occurs before four separate descriptor writes. A
+dictionary-capacity failure can therefore leak a newly allocated span, and a
+bad `ARENA-NEW-AT` destination can leak backing after partial descriptor
+publication. Callers must preflight descriptor storage and dictionary
+capacity themselves.
+
+`AR-SZ`, `AR-SRC`, and `AR-BLK` are shared scratch, so construction and
+destruction retain the source's core-0 guard. The `ARENA-STK` array and
+`ARENA-SP` are also one runtime-global unsynchronized selection stack;
+`CURRENT-ARENA` and `AALLOT` are not task-local despite the convenience API.
+Separate owners can safely use direct `ARENA-ALLOT` only when they have
+exclusive descriptors and coordinate backing lifecycle outside the worker.
+
+Exact unchanged lines 2576 through 2780 contain 205 lines, 8,303 bytes, and
+all 31 definitions. Hosted acceptance covers all three backing routes,
+recycling/abandonment, dictionary and caller descriptors, alignment and exact
+fit, ordinary failures, high-cell edges, reset, snapshot bounds, the scoped
+stack, and `.ARENA`. The next source seam is `IDLE` at line 2796: its `[` and
+`]` temporarily interpret `0 C,` inside an open definition, and the emitted
+MP64 opcode must become a semantic scheduler yield rather than inert data.
 
 ---
 

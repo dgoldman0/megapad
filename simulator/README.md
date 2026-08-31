@@ -604,8 +604,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–2574 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, and complete userland partition/transition semantics; blank separators have no definitions |
-| 2576 onward | Next uncovered frontier | The Arena allocator compiles with the admitted vocabulary through line 2780; Buffer `IDLE` first reaches missing compile-state `[` at line 2796 |
+| 39–2780 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, and the complete Arena allocator; blank separators have no definitions |
+| 2781 onward | Next uncovered frontier | Buffer `IDLE` first reaches missing compile-state `[` at line 2796 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -617,14 +617,17 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary is the Arena allocator beginning at line 2576. A
-first-failure probe already crosses that complete section; the next genuine
-semantic seam is Buffer `IDLE` at line 2796, whose raw opcode source uses `[`
-and `]`. Hosted acceptance must define scheduler-yield behavior rather than
-mistaking successful byte compilation for MP64 instruction execution. Later
-slices continue the same contiguous unchanged prefix toward the persistent
-evaluator, ordinary checked module-loader surface, and deterministic
-cooperative task scheduler.
+The Arena checkpoint executes all 31 unchanged definitions across general
+`ALLOCATE`/`FREE`, raw XMEM, and HBW backing. It covers caller-placed and
+dictionary descriptors, exact-fit and failed bump allocation, reclaim/reset,
+bare snapshot tokens, the four-entry scoped stack, and source-visible
+diagnostics. The next genuine semantic seam is Buffer `IDLE` at line 2796,
+whose raw opcode source uses `[` and `]`. Hosted acceptance must keep an open
+definition distinct from compile state and give `IDLE` scheduler-yield
+behavior rather than mistaking successful byte compilation for MP64
+instruction execution. Later slices continue the same contiguous unchanged
+prefix toward the persistent evaluator, ordinary checked module-loader
+surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

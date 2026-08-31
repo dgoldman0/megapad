@@ -291,9 +291,10 @@ CPU.
 ### 2.4 Arenas — `ARENA-NEW`, `ARENA-ALLOT`, `ARENA-DESTROY`
 
 Region-based scoped allocation.  An arena pre-allocates a backing block
-from any of the three regions, then provides O(1) bump allocation
-within it and O(1) bulk deallocation.  No per-object headers, no
-free-list, no fragmentation within the arena.
+from any of the three regions, then provides O(1) bump allocation and O(1)
+pointer reset within it. Destruction performs one backing-release dispatch;
+its cost and reclamation behavior depend on the source. No per-object headers,
+no internal free-list, no fragmentation within the arena.
 
 Full specification: [arenas.md](arenas.md)
 
@@ -311,9 +312,9 @@ Full specification: [arenas.md](arenas.md)
 
 ```forth
 \ Create
-4096 A-HEAP ARENA-NEW CONSTANT scratch    \ permanent descriptor
+4096 A-HEAP ARENA-NEW ABORT" arena fail" CONSTANT scratch
 CREATE my-desc 32 ALLOT                   \ or: user-placed descriptor
-my-desc 4096 A-XMEM ARENA-NEW-AT         \ no dictionary leak
+my-desc 4096 A-XMEM ARENA-NEW-AT ABORT" arena fail"
 
 \ Use
 scratch 256 ARENA-ALLOT   ( addr )        \ O(1) bump
@@ -338,6 +339,19 @@ scratch ARENA-DESTROY                     \ backing freed, descriptor zeroed
 | `A-XMEM` | 1 | External RAM (XMEM bump + free-list) |
 | `A-HBW` | 2 | HBW math RAM (bump only) |
 
+`ARENA-NEW` stores the caller's requested capacity, not the backing
+allocator's normalized size. Backing allocation happens before the four
+descriptor stores, so a later dictionary fault can leak the span.
+`ARENA-NEW-AT` likewise trusts its caller-provided destination and can leak or
+partially publish if a store faults; it does not reject reuse of a still-live
+descriptor.
+
+The normal bump-allocation domain is a positive representable request within
+capacity. Current source aligns through wrapping `7 + -8 AND` and then uses a
+signed `<` comparison. High-cell inputs can consequently round to zero or
+wrap the pointer below base. This is an open source defect, not large-size
+support.
+
 #### Snapshots
 
 ```forth
@@ -345,6 +359,10 @@ scratch ARENA-SNAP       ( snap )         \ save pointer
   \ ... tentative work ...
   ok? IF DROP ELSE scratch SWAP ARENA-ROLLBACK THEN
 ```
+
+Snapshot tokens are bare addresses. Rollback checks only that the value lies
+in the inclusive descriptor interval; it accepts future and unaligned values
+that were never returned by `ARENA-SNAP`.
 
 #### Scoped Arena Stack
 
@@ -354,13 +372,16 @@ scratch ARENA-PUSH                        \ push onto 4-deep stack
 ARENA-POP
 ```
 
-This supports **allocation-polymorphic code** — library words that call
-`AALLOT` without knowing which arena (or which region) is current.
+This supports **allocation-polymorphic code** under one coordinated owner —
+library words can call `AALLOT` without knowing which arena (or which region)
+is current. `ARENA-STK` and `ARENA-SP` are runtime-global, not task-local;
+parallel owners must pass distinct descriptors and call `ARENA-ALLOT`
+directly.
 
 #### Arena-Scoped Buffers
 
 ```forth
-65536 A-XMEM ARENA-NEW CONSTANT map-arena
+65536 A-XMEM ARENA-NEW ABORT" arena fail" CONSTANT map-arena
 2 8 4096 map-arena ARENA-BUFFER tile-data  \ buffer lives in the arena
 map-arena ARENA-DESTROY                     \ buffer auto-unregistered
 ```
@@ -533,13 +554,17 @@ simulator-only lock.
 | `ARENA-NEW`, `ARENA-NEW-AT` | Uses AR-SZ, AR-SRC, AR-BLK |
 | `ARENA-DESTROY` | Calls `FREE` or `XMEM-FREE-BLOCK` |
 
-| Safe on any core | Why |
+| Safe on any core with an exclusively owned descriptor | Why |
 |---|---|
 | `ARENA-ALLOT`, `ARENA-ALLOT?` | Pure stack + one arena-local pointer |
 | `ARENA-FREE`, `ARENA-USED` | Read-only |
-| `ARENA-SNAP`, `ARENA-ROLLBACK` | Single pointer write to own arena |
-| `AALLOT` | Delegates to `ARENA-ALLOT` via current-arena |
+| `ARENA-RESET`, `ARENA-SNAP`, `ARENA-ROLLBACK` | Read or write only the owned descriptor |
 | `@`, `!`, `C@`, `C!`, `MOVE`, `FILL` | Direct memory access |
+
+`ARENA-PUSH`, `ARENA-POP`, `CURRENT-ARENA`, and `AALLOT` use one global
+four-cell `ARENA-STK` plus `ARENA-SP`. They are unsynchronized, not task-local,
+and not automatically unwound on abort. They must not be used as concurrent
+per-core arena selection.
 
 ### 5.2 The Pattern: Core 0 as Memory Manager
 
@@ -549,9 +574,9 @@ time rather than implicitly on every memory access:
 
 ```forth
 \ ── Core 0: set up ──
-4096 A-XMEM ARENA-NEW CONSTANT c1-arena   \ allocate
-4096 A-XMEM ARENA-NEW CONSTANT c2-arena
-4096 A-XMEM ARENA-NEW CONSTANT c3-arena
+4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c1-arena
+4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c2-arena
+4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c3-arena
 
 \ ── Core 0: dispatch ──
 ' task1 1 CORE-RUN                          \ map (hand arena to core)
@@ -568,16 +593,13 @@ c3-arena ARENA-DESTROY
 ```forth
 \ ── Secondary core: task body ──
 : task1  ( -- )
-    c1-arena ARENA-PUSH
-    256 AALLOT                              \ bump from own arena — no locks
-    ( ... compute ... )
-    ARENA-POP ;
+    c1-arena 256 ARENA-ALLOT                \ direct private-descriptor bump
+    ( ... compute ... ) ;
 ```
 
-Each core writes only to its own bump pointer.  No locks, no atomic
-CAS, no cache flushes, no false sharing.  The only synchronization
-points are arena creation (before dispatch) and arena destruction
-(after barrier).
+Each core writes only to its own descriptor and backing span. The lifecycle
+still requires arena creation before dispatch and destruction after the
+barrier; the global current-arena stack is deliberately not involved.
 
 This is equivalent to an MMU that maps a private virtual address space
 per process — but the "mapping" happens once at dispatch time in
@@ -593,14 +615,12 @@ micro-cores:
 
 ```forth
 \ Core 0: allocate HBW scratch for cluster 0
-4096 A-HBW ARENA-NEW CONSTANT cl0-arena
+4096 A-HBW ARENA-NEW ABORT" OOM" CONSTANT cl0-arena
 
 \ Cluster lead (core 4): split among 4 micro-cores
 : cluster-task  ( -- )
-    cl0-arena ARENA-PUSH
-    1024 AALLOT   ( my-scratch )
-    ( ... each micro-core gets its own slice ... )
-    ARENA-POP ;
+    cl0-arena 1024 ARENA-ALLOT   ( my-scratch )
+    ( ... cluster lead distributes disjoint slices ... ) ;
 ```
 
 ---
@@ -678,7 +698,7 @@ atomicity gap rather than an implied rollback guarantee.
 |----------|------|------|-------|
 | Dictionary rewind | `CLEAN` (marker word) | O(dictionary + index capacity) | Contiguous active-zone history after marker |
 | Individual heap free | `addr FREE` | O(n) | One block |
-| Arena destroy | `arena ARENA-DESTROY` | O(1) | Entire arena |
+| Arena destroy | `arena ARENA-DESTROY` | One backing-release dispatch | Entire arena where the source supports reclaim |
 | Arena reset | `arena ARENA-RESET` | O(1) | All arena allocs (keeps backing) |
 | Arena rollback | `arena snap ARENA-ROLLBACK` | O(1) | Allocs after snapshot |
 | Checked bulk XMEM reset | `XMEM-RESET` | O(1) | All XMEM above floor, only when no TLS credential is active; no-op without XMEM |
@@ -796,7 +816,7 @@ you do.
 ### 9.2 Tile Map with Undo
 
 ```forth
-65536 A-XMEM ARENA-NEW CONSTANT map-arena
+65536 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT map-arena
 
 : TRY-BRUSH  ( x y tile -- )
     map-arena ARENA-SNAP
@@ -812,9 +832,9 @@ you do.
 
 ```forth
 : SETUP-CORES  ( -- )
-    4096 A-XMEM ARENA-NEW CONSTANT c1-work
-    4096 A-XMEM ARENA-NEW CONSTANT c2-work
-    4096 A-XMEM ARENA-NEW CONSTANT c3-work ;
+    4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c1-work
+    4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c2-work
+    4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c3-work ;
 
 : TEARDOWN-CORES  ( -- )
     c1-work ARENA-DESTROY

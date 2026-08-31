@@ -907,11 +907,40 @@ retains its initial-start lower bound and faults that otherwise-admitted raw
 rewind. This existing safer host divergence does not affect the Bank-0/XMEM
 transition and is documented without treating it as the desired native API.
 
-The contiguous source frontier now ends at line 2574. The complete Arena
-section through line 2780 already compiles under the admitted vocabulary; the
-next first-failure probe reaches compile-state `[` in Buffer `IDLE` at line
-2796. A hosted `IDLE` needs semantic scheduler-yield behavior, not merely an
-accepted raw MP64 opcode byte.
+The contiguous source frontier now ends at line 2780. Exact unchanged lines
+2576 through 2780 add all 31 Arena definitions without a host allocator
+shortcut. `A-HEAP` follows public `ALLOCATE`/`FREE` and therefore uses
+prefixed XMEM when present and Bank 0 otherwise; `A-XMEM` uses raw recyclable
+XMEM blocks; `A-HBW` advances and later abandons HBW backing until
+`HBW-RESET`. Dictionary descriptors consume 32 bytes permanently, while
+`ARENA-NEW-AT` leaves HERE unchanged and publishes into caller storage.
+
+The admitted ordinary domain uses positive representable sizes, valid
+source IDs, live descriptors, and genuine snapshots. Current source does not
+enforce that domain completely. Bump allocation applies wrapping
+`7 + -8 AND` before a signed `<` capacity comparison: the highest seven cell
+patterns round to zero, while other sign-bit-set aligned requests can pass,
+wrap the pointer below its base, and make used/free accounting nonsensical.
+HBW-backed construction also inherits raw `HBW-ALLOT?` request wrap.
+Rollback accepts every address in the inclusive descriptor interval,
+including future or unaligned values never returned by `ARENA-SNAP`; it does
+not authenticate a token or require backward movement.
+
+Backing allocation precedes the four independent descriptor stores. A later
+dictionary fault in `ARENA-NEW`, or an invalid/crossing caller destination in
+`ARENA-NEW-AT`, can therefore consume backing and partially publish or leave
+no descriptor from which to reclaim it. The four-cell `ARENA-STK` and
+`ARENA-SP` are one runtime-global unsynchronized selection stack, not
+per-task/per-core state; direct `ARENA-ALLOT` on exclusively owned descriptors
+does not have that selection race. These are pinned source-contract gaps, not
+host-side repairs.
+
+The next first-failure probe reaches compile-state `[` in Buffer `IDLE` at
+line 2796. BIOS `[` and `]` change `STATE` while the colon definition remains
+open, whereas the current hosted compiler has only an open-compiler state.
+The eventual seam must preserve that distinction, and a hosted `IDLE` needs
+semantic scheduler-yield behavior rather than merely accepting raw MP64
+opcode byte zero.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

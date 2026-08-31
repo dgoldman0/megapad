@@ -12,7 +12,7 @@ from simulator.dictionary_index import (
     DICT_INDEX_AUTHORITATIVE,
     DICT_INDEX_BOUND,
 )
-from simulator.errors import ForthAbort, SourceError
+from simulator.errors import ForthAbort
 from simulator.memory import EXTERNAL_BASE
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
@@ -596,23 +596,3 @@ def test_preinit_status_exposes_the_source_reserve_reporting_discrepancy(
         f"XMEM reserve = {CANONICAL_EXTERNAL_END} bytes\r\n".encode("ascii")
         in output
     )
-
-
-def test_next_contiguous_frontier_compiles_arena_then_stops_at_left_bracket(
-    loaded_userland: MegaForthRuntime,
-) -> None:
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[2574:2796])
-    assert next_source.startswith(b"\n")
-    assert next_source.endswith(
-        ": IDLE  ( -- )  [ 0 C, ] ;  \\ IDL opcode — yield CPU until next interrupt\n".encode()
-    )
-
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_userland.evaluate(
-            next_source,
-            source_name="kdos.f:2575-2796",
-        )
-    assert caught.value.location.line == 222
-    assert caught.value.location.column == 16
-    assert caught.value.message == "unknown word b'['"
