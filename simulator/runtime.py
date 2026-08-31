@@ -59,6 +59,8 @@ from simulator.platform import (
     HOSTED_CRYPTO_CAPABILITIES,
     OneCorePlatformMMIO,
     SYSINFO_CRYPTO_CAPS,
+    SYSINFO_EXTERNAL_BASE,
+    SYSINFO_EXTERNAL_SIZE,
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
 )
@@ -414,6 +416,14 @@ class MegaForthRuntime:
         if bank0 is None:
             raise ValueError("hosted runtime requires a mapped Bank 0")
         self._bank0 = bank0
+        self._external = next(
+            (
+                region
+                for region in self.memory.regions
+                if region.kind is AddressClass.EXTERNAL
+            ),
+            None,
+        )
         data_empty = bank0.base + bank0.size // 2
         return_empty = bank0.limit
         if (
@@ -611,6 +621,69 @@ class MegaForthRuntime:
 
         self._dictionary_fault_xt = u64(xt)
 
+    def configure_dictionary_bounds(
+        self,
+        base: int,
+        limit: int,
+        context: ExecutionContext,
+    ) -> None:
+        """Install one checked inclusive/exclusive external dictionary zone."""
+
+        base = u64(base)
+        limit = u64(limit)
+        if base == 0 and limit == 0:
+            self.disable_dictionary_bounds()
+            return
+
+        advertised_base = self.memory.read64(
+            MMIO_BASE + SYSINFO_EXTERNAL_BASE
+        )
+        advertised_size = self.memory.read64(
+            MMIO_BASE + SYSINFO_EXTERNAL_SIZE
+        )
+        advertised_end = advertised_base + advertised_size
+        valid = (
+            base != 0
+            and limit > base
+            and advertised_size != 0
+            and advertised_end <= MASK64
+            and advertised_end > advertised_base
+            and base >= advertised_base
+            and limit <= advertised_end
+            and self._external is not None
+            and self._external.base == advertised_base
+            and self._external.limit == advertised_end
+        )
+        if not valid:
+            self._request_dictionary_fault(
+                context,
+                "invalid external dictionary bounds",
+            )
+
+        # Limit is the active marker in BIOS.  Disable it before changing the
+        # selected physical zone or base, then publish the complete new pair.
+        self._dictionary_limit = 0
+        active_floor, active_limit = self.dictionary.active_zone
+        operating_in_external = (
+            self._external is not None
+            and self._external.base <= active_floor
+            and active_limit <= self._external.limit
+        )
+        if operating_in_external and base <= self.dictionary.here <= limit:
+            self.dictionary.move_here(
+                self.dictionary.here,
+                floor=base,
+                limit=limit,
+            )
+        self._dictionary_base = base
+        self._dictionary_limit = limit
+
+    def disable_dictionary_bounds(self) -> None:
+        """Restore guarded Bank-0 dictionary allocation without moving HERE."""
+
+        self._dictionary_limit = 0
+        self._dictionary_base = 0
+
     def configure_dictionary_index(self, base: int, slots: int) -> int:
         """Install, rebuild, or disable the caller-backed BIOS index."""
 
@@ -796,9 +869,15 @@ class MegaForthRuntime:
             return
         target = self.dictionary.here + s64(delta_cell)
         self._preflight_dictionary_target(target, context)
+        if self._dictionary_limit:
+            floor = self._dictionary_base
+            limit = self._dictionary_limit
+        else:
+            floor = self.dictionary.start_address
+            limit = self._bank0.limit
         try:
-            self.dictionary.allot(delta_cell)
-        except OverflowError as exc:
+            self.dictionary.move_here(target, floor=floor, limit=limit)
+        except (OverflowError, ValueError) as exc:
             self._request_dictionary_fault(context, str(exc))
 
     def comma_dictionary(self, cell: int, context: ExecutionContext) -> None:

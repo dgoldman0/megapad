@@ -439,6 +439,22 @@ def _dictionary_limit_fetch(
     context.data.push(runtime.dictionary_limit)
 
 
+def _dictionary_bounds_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    limit = context.data.pop()
+    base = context.data.pop()
+    runtime.configure_dictionary_bounds(base, limit, context)
+
+
+def _dictionary_bounds_off(
+    runtime: MegaForthRuntime,
+    _context: ExecutionContext,
+) -> None:
+    runtime.disable_dictionary_bounds()
+
+
 def _tile_align(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.tile_align_dictionary(context)
 
@@ -1299,6 +1315,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (
             b"DICT-LIMIT@",
             lambda context: _dictionary_limit_fetch(runtime, context),
+        ),
+        (
+            b"DICT-BOUNDS!",
+            lambda context: _dictionary_bounds_store(runtime, context),
+        ),
+        (
+            b"DICT-BOUNDS-OFF",
+            lambda context: _dictionary_bounds_off(runtime, context),
         ),
         (b"TALIGN", lambda context: _tile_align(runtime, context)),
         (b"ALLOT", lambda context: _allot(runtime, context)),

@@ -421,6 +421,23 @@ dictionary full`; the corresponding Bank-0 diagnostic remains `dictionary
 overflow`. Even native `WORD` is checked because its transient counted string
 is written at `HERE` without advancing it.
 
+The partition policy proves nonempty spans, not useful minimum dictionary
+capacity or alignment of a nonstandard external-memory end. For example, a
+17-byte external region produces a one-byte user dictionary and a 16-byte
+general reserve, then moves XMEM HERE/floor to the resulting misaligned limit.
+Very large positive reserve rounding can cross the signed-cell boundary; the
+later signed minimum check then aborts before partition publication. These are
+current source edges rather than recommended machine profiles.
+
+Among the partition and allocator cells, a late initialization failure can
+update only the `_U-AVAILABLE` scratch before a later `ABORT"`; the published
+base, limit, saved HERE, allocator HERE/floor, and done flag remain unchanged.
+Before initialization, `.USERLAND` computes its displayed reserve from a zero
+dictionary limit and therefore prints the absolute external end. The display
+is capacity-meaningful only after the partition is sealed. Entry and leave are
+shared ordered state transitions, not locked transactions against corrupted
+public cells or concurrent callers.
+
 ---
 
 ## 3. Memory Lifetime Hierarchy
@@ -612,10 +629,11 @@ tail for the BIOS dictionary index, rounded down to a power-of-two number of
 16-byte slots. Reclaimed free-list bytes are not part of this sizing input. The
 canonical 128 MiB arrangement uses 1 MiB. `XMEM-FLOOR` protects that table,
 later kernel allocations, and the dictionary from `XMEM-RESET`. The userland
-interval is sealed at `ENTER-USERLAND` time and is not reclaimable by the XMEM
-allocator. `LEAVE-USERLAND` disables the active BIOS bounds and switches
-`HERE` back to Bank 0 without affecting either XMEM side. `XMEM-INIT` is a
-boot-only one-shot; use `XMEM-RESET` for the supported post-boot reset.
+interval is sealed by `USERLAND-INIT`, normally lazily on the first
+`ENTER-USERLAND`, and is not reclaimable by the XMEM allocator.
+`LEAVE-USERLAND` disables the active BIOS bounds and switches `HERE` back to
+Bank 0 without affecting either XMEM side. `XMEM-INIT` is a boot-only
+one-shot; use `XMEM-RESET` for the supported post-boot reset.
 
 The module registry deliberately does not live in either XMEM zone.  Its
 stable exact-ID entries and any grown bucket vector use the Bank 0 heap through

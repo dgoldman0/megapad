@@ -81,6 +81,8 @@ class _DictionaryCheckpointSeal:
 
     here: int
     latest: int
+    active_floor: int
+    active_limit: int
     depth: int
     tail: Word | None
     owner: object = field(compare=False)
@@ -113,6 +115,7 @@ class Dictionary:
         if memory is not None and not isinstance(memory, SparseAddressSpace):
             raise TypeError("memory must be a SparseAddressSpace or None")
         self._memory = memory
+        self._active_floor = self._start_address
         self._active_limit = MASK64
         if memory is not None:
             containing_region = next(
@@ -140,6 +143,18 @@ class Dictionary:
         """Return the first free byte address in the active dictionary zone."""
 
         return self._here
+
+    @property
+    def start_address(self) -> int:
+        """Return the immutable first address of the hosted Bank-0 dictionary."""
+
+        return self._start_address
+
+    @property
+    def active_zone(self) -> tuple[int, int]:
+        """Return the inclusive/exclusive storage interval selected for HERE."""
+
+        return self._active_floor, self._active_limit
 
     @property
     def latest(self) -> int:
@@ -266,13 +281,41 @@ class Dictionary:
             raise TypeError("ALLOT delta must be an integer cell")
         delta = s64(delta_cell)
         candidate = self._here + delta
-        if candidate < self._start_address:
-            raise OverflowError("ALLOT would move HERE below the dictionary start")
+        if candidate < self._active_floor:
+            raise OverflowError("ALLOT would move HERE below its active dictionary zone")
         if candidate > MASK64:
             raise OverflowError("ALLOT would wrap the uint64 address space")
         if candidate > self._active_limit:
             raise OverflowError("ALLOT would move HERE beyond its memory region")
         self._here = candidate
+
+    def move_here(self, target: int, *, floor: int, limit: int) -> None:
+        """Select one mapped dictionary zone and move ``HERE`` into it.
+
+        Native ``ALLOT`` can redirect HERE between Bank 0 and a checked
+        external interval.  The runtime validates the BIOS policy first;
+        this lower layer independently pins the physical zone that subsequent
+        definitions and stores may occupy.
+        """
+
+        target = _address(target, label="dictionary target")
+        floor = _address(floor, label="dictionary zone floor")
+        limit = _address(limit, label="dictionary zone limit")
+        if floor >= limit:
+            raise ValueError("dictionary zone must be nonempty")
+        if not floor <= target <= limit:
+            raise ValueError("dictionary target is outside the selected zone")
+        if self._memory is not None and not any(
+            region.base <= floor and limit <= region.limit
+            for region in self._memory.regions
+        ):
+            raise ValueError(
+                "dictionary zone must fit one mapped ordinary-memory region"
+            )
+
+        self._active_floor = floor
+        self._active_limit = limit
+        self._here = target
 
     def comma(self, cell: int) -> None:
         """Store one little-endian cell at ``HERE`` and advance atomically."""
@@ -326,6 +369,8 @@ class Dictionary:
         seal = _DictionaryCheckpointSeal(
             here=self._here,
             latest=self.latest,
+            active_floor=self._active_floor,
+            active_limit=self._active_limit,
             depth=len(self._definitions),
             tail=tail,
             owner=self._owner,
@@ -346,8 +391,14 @@ class Dictionary:
             raise ValueError("checkpoint belongs to another dictionary")
         if checkpoint.here != seal.here or checkpoint.latest != seal.latest:
             raise ValueError("checkpoint coordinates do not match its sealed state")
-        if not self._start_address <= seal.here <= self._active_limit:
+        if not seal.active_floor <= seal.here <= seal.active_limit:
             raise ValueError("checkpoint HERE is outside the dictionary region")
+        if self._memory is not None and not any(
+            region.base <= seal.active_floor
+            and seal.active_limit <= region.limit
+            for region in self._memory.regions
+        ):
+            raise ValueError("checkpoint dictionary zone is outside mapped memory")
         if not 0 <= seal.depth <= len(self._definitions):
             raise ValueError("checkpoint is not in the active dictionary history")
         if seal.here > self._here:
@@ -361,7 +412,12 @@ class Dictionary:
         elif seal.tail is not None:
             raise ValueError("invalid empty-dictionary checkpoint")
 
-        self._publish_rollback(depth=seal.depth, here=seal.here)
+        self._publish_rollback(
+            depth=seal.depth,
+            here=seal.here,
+            active_floor=seal.active_floor,
+            active_limit=seal.active_limit,
+        )
 
     def rollback_to(self, saved_here: int, saved_latest: int) -> None:
         """Restore one source-visible contiguous dictionary checkpoint.
@@ -379,7 +435,7 @@ class Dictionary:
 
         target_here = _address(saved_here, label="saved HERE")
         target_latest = _address(saved_latest, label="saved LATEST")
-        if not self._start_address <= target_here <= self._active_limit:
+        if not self._active_floor <= target_here <= self._active_limit:
             raise ValueError("saved HERE is outside the dictionary region")
         if target_here < self._numeric_rollback_floor:
             raise ValueError("saved HERE is below the protected dictionary prefix")
@@ -426,7 +482,14 @@ class Dictionary:
 
         self._publish_rollback(depth=target_depth, here=target_here)
 
-    def _publish_rollback(self, *, depth: int, here: int) -> None:
+    def _publish_rollback(
+        self,
+        *,
+        depth: int,
+        here: int,
+        active_floor: int | None = None,
+        active_limit: int | None = None,
+    ) -> None:
         """Remove a prevalidated definition suffix without touching its bytes."""
 
         removed = self._definitions[depth:]
@@ -456,6 +519,11 @@ class Dictionary:
             del self._by_xt[word.xt]
 
         del self._definitions[depth:]
+        if active_floor is not None:
+            if active_limit is None:
+                raise AssertionError("rollback zone limit is missing")
+            self._active_floor = active_floor
+            self._active_limit = active_limit
         self._here = here
 
     def _checked_advance(self, width: int, *, operation: str) -> int:

@@ -78,6 +78,10 @@ The implemented slices provide:
 - dynamic `HBW-BASE`/`HBW-SIZE` BIOS reads routed to the bound SysInfo service
   and the unchanged source-defined HBW bump allocator, including its shared
   pointer, exact-fit/zero allocation, bulk reset, and unchecked edge behavior;
+- checked external dictionary-bound publication plus unchanged KDOS userland
+  partitioning, with Bank-0/XMEM `HERE` transitions, one linked dictionary,
+  index-coherent external definitions and rollback, capacity-derived reserve,
+  reset-floor protection, and the deferred free-span overlap guard;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -111,8 +115,12 @@ callback takes the BIOS diagnostic-and-ABORT fallback. Unbacked contexts from
 `new_context()` are host scratch views rather than guest tasks, so their
 dictionary operations use the canonical foreground stack margin. Direct
 `runtime.dictionary` mutation remains a low-level host/test seam outside the
-guest ABI. External user-dictionary bounds, their switching words, and the
-later transactional evaluator remain pending.
+guest ABI. The external interval and its source-defined switching words are
+now admitted; the later transactional evaluator remains pending. Hosted
+Bank-0 relocation still refuses to move below the semantic dictionary's
+initial start even though native raw `ALLOT` has no equivalent lower-bound
+check. That pre-existing divergence is outside the userland transition and is
+not presented as native equivalence.
 
 ## Run it
 
@@ -561,6 +569,26 @@ unreachable post-allocation status-1 failure nontransactional. Hosted
 one-core execution preserves the visible table/state contract without claiming
 hardware-cache timing or multicore seqlock behavior.
 
+Exact logical lines 2425 through 2574 now run the complete KDOS userland
+section. `DICT-BOUNDS!` consumes and validates one nonempty external interval
+without imposing alignment or allocator-ownership policy; invalid geometry
+enters the dictionary-fault callback before changing the old pair, and `0 0`
+or `DICT-BOUNDS-OFF` disables without moving `HERE`. Unchanged
+`USERLAND-INIT`, `ENTER-USERLAND`, and `LEAVE-USERLAND` then seal a
+capacity-derived XMEM partition and move the same semantic dictionary between
+Bank 0 and external RAM while retaining the global `LATEST` chain and side
+index.
+
+The source remains runtime-global and ordered rather than task-owned or
+transactional. Corrupted public partition cells or concurrent transitions can
+leave bounds and `HERE` disagreeing. A failed capacity calculation may retain
+the `_U-AVAILABLE` scratch value; exotic positive reserve rounding can cross
+the signed-cell boundary and is then rejected; a non-16-byte external end can
+publish a misaligned XMEM HERE/floor; and pre-init `.USERLAND` labels the
+absolute external end as its reserve because its limit cell is still zero.
+These behaviors are pinned as source discrepancies, not repaired by hosted
+policy.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -576,8 +604,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–2423 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, and the checked caller-backed dictionary-index initializer; blank separators have no definitions |
-| 2425 onward | Next uncovered frontier | Userland partition setup reaches missing `DICT-BOUNDS!` at line 2521 |
+| 39–2574 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, and complete userland partition/transition semantics; blank separators have no definitions |
+| 2576 onward | Next uncovered frontier | The Arena allocator compiles with the admitted vocabulary through line 2780; Buffer `IDLE` first reaches missing compile-state `[` at line 2796 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -589,11 +617,14 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary is the userland memory-isolation block beginning at
-line 2425. Its first missing service is checked external dictionary-bound
-publication, not an allocator shortcut. Later slices continue the same
-contiguous unchanged prefix toward the persistent evaluator, ordinary checked
-module-loader surface, and deterministic cooperative task scheduler.
+The next source boundary is the Arena allocator beginning at line 2576. A
+first-failure probe already crosses that complete section; the next genuine
+semantic seam is Buffer `IDLE` at line 2796, whose raw opcode source uses `[`
+and `]`. Hosted acceptance must define scheduler-yield behavior rather than
+mistaking successful byte compilation for MP64 instruction execution. Later
+slices continue the same contiguous unchanged prefix toward the persistent
+evaluator, ordinary checked module-loader surface, and deterministic
+cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

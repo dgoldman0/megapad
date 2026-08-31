@@ -859,9 +859,59 @@ allocation consumed, and the floor unadvanced before aborting. The admitted
 fresh-boot geometry cannot reach that path, but it remains a documented
 nontransactional edge rather than an invented rollback.
 
-The contiguous source frontier now ends at line 2423. Userland isolation
-begins at line 2425 and compiles through its state and partition calculation;
-`DICT-BOUNDS!` at line 2521 is the next missing BIOS service.
+The admitted bounds service implements the executable `DICT-BOUNDS!` contract.
+`0 0` disables; every other pair requires nonzero base, unsigned
+`limit > base`, and complete containment in the nonwrapping external-memory
+geometry advertised by SysInfo. There is deliberately no alignment,
+current-HERE, allocator-ownership, index-overlap, or minimum-capacity rule.
+Invalid input consumes both arguments and enters `DICT-FAULT-XT!` before the
+old pair changes. `DICT-BOUNDS-OFF` clears the pair without moving `HERE`.
+The hardware's limit-first publication ordering is not independently
+observable in the one-core hosted profile; hosted callers see only the stable
+old, disabled, or complete new state.
+
+Exact unchanged `kdos.f` lines 2425 through 2574 define and execute the
+complete userland lifecycle. Loading the slice only publishes its 18 words and
+rebinds the XMEM free-span hook. Lazy initialization aligns above the live
+XMEM high-water mark, assigns either an explicit rounded reserve or half the
+remaining capacity to general XMEM, temporarily validates the complementary
+dictionary interval, publishes its cells, and advances both XMEM HERE and
+floor to the dictionary limit. The canonical post-index 128 MiB profile uses
+base `0x0020_0000`, limit `0x0418_0000`, and equal `0x03f8_0000` dictionary
+and general-XMEM spans.
+
+`ENTER-USERLAND` and `LEAVE-USERLAND` use unchanged signed-delta `ALLOT`, not
+an invented `HERE!` ABI. The semantic dictionary selects the corresponding
+mapped physical zone, but keeps one global newest-first definition chain.
+External definitions remain discoverable and executable in system mode;
+Bank-0 definitions made after leaving can link back to them; re-entry resumes
+the saved external frontier. Exact-limit `ALLOT` is valid, while the next
+positive store faults before bytes or HERE change. Numeric rollback within
+the active external zone removes bindings and rebuilds the caller-backed
+index exactly as it does in Bank 0.
+
+This lifecycle is runtime-global and unsynchronized, matching the source's
+shared cells rather than inventing task ownership. Ordered transitions are
+not transactional against corrupted public cells or concurrency. Capacity
+failures can leave `_U-AVAILABLE` changed while the published partition stays
+untouched. High positive reserve rounding can cross the signed-cell boundary
+and is then rejected by the signed minimum check. External sizes not divisible
+by 16 can publish a misaligned dictionary limit and XMEM floor; a
+17-byte external region consequently yields a legal one-byte dictionary plus
+a 16-byte reserve. Before initialization, `.USERLAND` subtracts zero from
+`XMEM-LIMIT` and therefore labels the absolute external end as its reserve.
+
+Native disabled-bound `ALLOT` checks only guarded Bank-0 geometry and can
+rewind below the initial dictionary start. The hosted semantic dictionary
+retains its initial-start lower bound and faults that otherwise-admitted raw
+rewind. This existing safer host divergence does not affect the Bank-0/XMEM
+transition and is documented without treating it as the desired native API.
+
+The contiguous source frontier now ends at line 2574. The complete Arena
+section through line 2780 already compiles under the admitted vocabulary; the
+next first-failure probe reaches compile-state `[` in Buffer `IDLE` at line
+2796. A hosted `IDLE` needs semantic scheduler-yield behavior, not merely an
+accepted raw MP64 opcode byte.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

@@ -850,9 +850,13 @@ snapshot. KDOS also sets its DONE cell before allocation/install; an otherwise
 unreachable status-1 rejection after allocation would consume the block,
 leave the floor unchanged, disable retry, and abort.
 
-The contiguous hosted frontier now ends at line 2423. Userland isolation
-begins at line 2425 and reaches `DICT-BOUNDS!` at line 2521 as the next missing
-BIOS word.
+The contiguous hosted frontier now includes the complete unchanged userland
+section through line 2574. Its checked bounds service, lazy partition,
+Bank-0/XMEM HERE transitions, cross-zone linked definitions, rollback/index
+repair, reset floor, and free-span overlap hook are executable semantic
+behavior rather than reporting-only shims. The following Arena section
+compiles through line 2780; Buffer `IDLE` reaches missing compile-state `[` at
+line 2796.
 
 ---
 
@@ -889,7 +893,7 @@ userland zone.  System words remain accessible.
 | `U-DICT-BASE` | `( -- addr )` | Variable containing the sealed inclusive dictionary base. |
 | `U-DICT-LIMIT` | `( -- addr )` | Variable containing the sealed exclusive dictionary limit. |
 | `U-ZONE-SIZE` | `( -- u )` | Derived size `U-DICT-LIMIT - U-DICT-BASE`. |
-| `U-XMEM-RESERVE!` | `( u -- )` | Before initialization, request exact general-XMEM capacity; zero selects the default half of remaining capacity. |
+| `U-XMEM-RESERVE!` | `( u -- )` | Before initialization, request general-XMEM capacity rounded up to 16 bytes; zero selects the default half of remaining capacity. |
 
 `USERLAND-INIT` aligns above the live XMEM high-water mark and derives the
 partition from `XMEM-LIMIT`. The default splits the remaining capacity in
@@ -931,6 +935,25 @@ checkpoints on each side of a zone transition.
 `XMEM-FREE-BLOCK` accepts only spans wholly below the current XMEM high-water
 mark, then applies the dictionary-overlap check after initialization. This
 prevents a forged pre-init free node from becoming later dictionary storage.
+
+Several edge results follow directly from the current source and are not
+normalized by the hosted backend. A failed partition calculation can retain
+the `_U-AVAILABLE` scratch value while leaving all published partition cells
+unchanged. Exotic high positive reserve rounding can cross the signed-cell
+boundary and is then rejected by the signed minimum check. If the
+hardware-reported external end is not 16-byte aligned, the derived dictionary
+limit and the new XMEM HERE/floor inherit that misalignment; a 17-byte region
+therefore passes with a one-byte dictionary and a 16-byte reserve. Before
+initialization on a present-XMEM profile, `.USERLAND` prints zero base/limit
+but reports `XMEM-LIMIT - 0` as “XMEM reserve,” which is the absolute external
+end rather than available capacity. Treat that display as meaningful only
+after successful initialization.
+
+The transition cells are runtime-global and have no lock or `?CORE0` guard.
+Their ordered stores are safe for valid, uncorrupted single-owner use but are
+not a transaction against manual cell corruption or concurrent enter/leave.
+The hosted one-core proof preserves that lifecycle and does not claim
+multicore transition atomicity.
 
 > **Important:** Do not call `ENTER-USERLAND` inside interpret-mode
 > `IF … THEN`.  The BIOS clears temporary code between `var_interp_if_start`

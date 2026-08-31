@@ -13,7 +13,6 @@ from simulator.dictionary_index import (
     DICT_INDEX_BOUND,
     DICT_INDEX_SATURATED,
 )
-from simulator.errors import SourceError
 from simulator.memory import EXTERNAL_BASE
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
@@ -388,21 +387,3 @@ def test_absent_or_too_small_external_memory_leaves_index_disabled(
     expected_here = 0 if external_size == 0 else EXTERNAL_BASE
     assert _pointer(runtime, "XMEM-HERE") == expected_here
     assert runtime.find("_DICT-INDEX-INIT") is not None
-
-
-def test_next_contiguous_frontier_reaches_userland_dictionary_bounds(
-    loaded_dictionary_index: MegaForthRuntime,
-) -> None:
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[2423:2521])
-    assert next_source.startswith(b"\n")
-    assert next_source.endswith(b"    2DUP DICT-BOUNDS! DICT-BOUNDS-OFF\n")
-
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_dictionary_index.evaluate(
-            next_source,
-            source_name="kdos.f:2424-2521",
-        )
-    assert caught.value.location.line == 98
-    assert caught.value.location.column == 9
-    assert caught.value.message == "unknown word b'DICT-BOUNDS!'"

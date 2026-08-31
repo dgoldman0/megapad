@@ -11,7 +11,7 @@ from simulator.dictionary import (
     IMMEDIATE_FLAG,
     SEMANTIC_CODE_SLOT_BYTES,
 )
-from simulator.memory import SparseAddressSpace
+from simulator.memory import EXTERNAL_BASE, SparseAddressSpace
 
 
 def test_definition_uses_native_no_padding_header_geometry() -> None:
@@ -157,6 +157,31 @@ def test_rollback_restores_metadata_but_leaves_stale_header_bytes() -> None:
     assert dictionary.find("OPEN") is original
     assert dictionary.here == checkpoint.here
     assert memory.read_bytes(replacement.header_address, len(stale)) == stale
+
+
+def test_opaque_rollback_restores_the_checkpoint_dictionary_zone() -> None:
+    memory = SparseAddressSpace(bank0_size=0x8000, external_size=0x1000)
+    dictionary = Dictionary(start_address=0x4000, memory=memory)
+    retained = dictionary.define("SYSTEM", implementation="retained")
+    checkpoint = dictionary.checkpoint()
+    bank0_zone = dictionary.active_zone
+
+    dictionary.move_here(
+        EXTERNAL_BASE,
+        floor=EXTERNAL_BASE,
+        limit=EXTERNAL_BASE + 0x1000,
+    )
+    external = dictionary.define("EXTERNAL", implementation="removed")
+    assert dictionary.active_zone == (EXTERNAL_BASE, EXTERNAL_BASE + 0x1000)
+
+    dictionary.rollback(checkpoint)
+
+    assert dictionary.here == checkpoint.here
+    assert dictionary.active_zone == bank0_zone
+    assert dictionary.latest_word is retained
+    assert dictionary.find("EXTERNAL") is None
+    with pytest.raises(KeyError):
+        dictionary.resolve(external.xt)
 
 
 def test_rollback_rejects_checkpoint_ahead_of_here_without_mutation() -> None:
