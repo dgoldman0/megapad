@@ -449,13 +449,33 @@ recorded rather than repaired in simulator-only code.
 ### §1.8 X25519 ECDH
 
 Elliptic Curve Diffie-Hellman key exchange (RFC 7748) using the Field ALU
-in mode 0 (X25519 scalar multiplication).
+X25519 operation. All scalar, point, and result values are 32-byte
+little-endian byte strings.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `X25519-CLAMP` | `( addr -- )` | Apply RFC 7748 clamping to a 32-byte scalar. |
-| `X25519-PUBKEY` | `( priv pub -- )` | Compute public key from private key (base point × scalar). |
-| `X25519` | `( priv peer shared -- )` | Full ECDH: shared = scalar × peer point.  All args are 32-byte addresses. |
+| `X25519` | `( scalar point result -- )` | Clamp the scalar inside the operation and compute `result = scalar × point`. |
+| `X25519-KEYGEN` | `( -- )` | Fill `X25519-PRIV` with 32 `RANDOM8` bytes and compute `X25519-PUB` against the base point. |
+| `X25519-DH` | `( their-pub -- )` | Compute `X25519-SHARED = X25519-PRIV × their-pub`. |
+
+The four 32-byte source buffers are `X25519-PRIV`, `X25519-PUB`,
+`X25519-SHARED`, and the fixed `X25519-BASE = 09 00...00`. The stored private
+bytes remain unclamped; clamping occurs only while `X25519` executes. These
+global buffers are cooperative KDOS scratch, are not task/core-isolated, and
+are not wiped by this section. The raw BIOS path has no checked status,
+capability gate, lock, or low-order/all-zero-secret rejection; TLS applies its
+separate all-zero policy where required.
+
+The hosted simulator's exact unchanged qualification through `kdos.f` line
+1481 executes these seven definitions over the six ordinary BIOS primitives,
+not a host-side replacement for `X25519`, `X25519-KEYGEN`, or `X25519-DH`.
+Inputs are consumed before the result is stored, so the result may alias the
+scalar or point. Hosted deterministic `RANDOM8` makes key generation
+reproducible for tests and is explicitly not cryptographically secure entropy.
+
+The former table entries `X25519-CLAMP` and `X25519-PUBKEY` do not exist in
+the checked-in KDOS source or BIOS dictionary. They were stale documentation,
+not compatibility aliases.
 
 ---
 

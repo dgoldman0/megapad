@@ -1260,6 +1260,36 @@ mandatory final read).
 
 ---
 
+## X25519 — RFC 7748 Scalar Multiplication (6 raw words)
+
+Per-core Field-ALU state exposes X25519 through EXT.CRYPTO `FB 2D`:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `X25519-SCALAR!` | `( addr -- )` | Load four ascending little-endian qwords into ACC0–ACC3. |
+| `X25519-POINT!` | `( addr -- )` | Set TSRC0 to the deferred 32-byte point address without reading it. |
+| `X25519-GO` | `( -- )` | Clamp the scalar in ACC, mask the point's top bit, run Curve25519 synchronously, and replace ACC. |
+| `X25519-WAIT` | `( -- )` | No-op because the ISA operation completes synchronously. |
+| `X25519-STATUS@` | `( -- 2 )` | Return 2 unconditionally, before or after a computation. |
+| `X25519-RESULT@` | `( addr -- )` | Store ACC0–ACC3 as four ascending little-endian qwords. |
+
+This is deliberately a raw, status-free ABI. It has no capability bit,
+software owner, hardware lock, complete-span check, cleanup, or all-zero
+shared-secret rejection. ACC0–ACC3 and TSRC0 belong to the physical core and
+are shared by its tasks. Scalar loads and result stores mutate one qword at a
+time, so a later fault can leave a prefix changed; `GO` reads all point qwords
+before replacing ACC. Ordinary unaligned memory is valid, and output may
+alias an already consumed scalar or point.
+
+The RFC calculation uses `A24=121665` with `E*(AA+A24*E)`. Native C++ and the
+standalone Field-ALU RTL implement that value. The architectural Python
+emulator currently uses `121666` with the same formula and fails the published
+RFC vector. Current SoC RTL also does not connect the standalone Field engine
+to either executing core path. These are open backend discrepancies; hosted
+X25519 qualification is not evidence that those paths work.
+
+---
+
 ## Field ALU — GF(2²⁵⁵−19) Arithmetic (13 words)
 
 General-purpose finite-field coprocessor, per-core ISA (EXT.CRYPTO FB,
@@ -1280,6 +1310,12 @@ results read back via CSR reads.
 | `FPOW` | `( a b -- r )` | a^b mod p. |
 | `FMUL-RAW` | `( a b -- rlo rhi )` | Raw 256×256→512-bit multiply (no reduction). |
 | `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | Multiply-accumulate (raw). |
+
+> **Open Field-table discrepancy.** The heading says 13 words while this
+> legacy table lists 12; `bios.asm` actually defines 15 and additionally
+> exposes `FCMOV`, `FCEQ`, and `FMAC`. Several displayed stack effects also
+> predate the current address-based wrappers. The executable dictionary is
+> authoritative until the next Field-ALU source slice reconciles this table.
 
 ---
 

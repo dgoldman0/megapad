@@ -27,6 +27,7 @@ from simulator.errors import (
     SourceError,
     StepBudgetExceeded,
 )
+from simulator.field import HostedFieldALUService
 from simulator.ir import (
     AbortIf,
     Branch,
@@ -380,6 +381,7 @@ class MegaForthRuntime:
         self.entropy = platform_mmio.entropy
         self.sha2 = HostedSHA2Service(core_count=num_full)
         self.spinlocks = HostedSpinlockBank(core_count=num_cores)
+        self.field = HostedFieldALUService(core_count=num_cores)
         self.diagnostics = (
             HostedDiagnosticsService()
             if diagnostics is None

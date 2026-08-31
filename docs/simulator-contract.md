@@ -404,6 +404,48 @@ wrapper can still enter and release it. Hosted execution does not invent task
 ownership to conceal this discrepancy, and this record does not decide
 whether KDOS software bookkeeping or the hardware contract should change.
 
+The admitted X25519 path consists of a backend-neutral RFC 7748 value model,
+one runtime-local Field-ALU state per architectural core, and the six raw BIOS
+words `X25519-SCALAR!`, `X25519-POINT!`, `X25519-GO`, `X25519-WAIT`,
+`X25519-STATUS@`, and `X25519-RESULT@`. There is no X25519 capability bit,
+checked status namespace, lock, or task owner. ACC0-ACC3, TSRC0, and the
+persistent previous result are physical-core state shared by tasks on that
+core; construction/reset clears them, while guest `ABORT` and `THROW` do not.
+`STATUS@` always returns 2 and `WAIT` is a no-op, including before any
+operation.
+
+`SCALAR!` loads four ascending little-endian qwords and can leave a partially
+replaced ACC after a later access fault. `POINT!` records TSRC0 without
+preflight. `GO` reads all four point qwords before replacing ACC and the
+previous result, so a point-read fault leaves ACC unchanged. `RESULT@` stores
+four ascending qwords and can leave a destination prefix after a later write
+fault. Address stepping wraps as a guest uint64 cell; unaligned ordinary
+memory is accepted, while MMIO validity is determined independently for each
+qword. The raw path intentionally has no complete-span or all-or-nothing
+publication claim.
+
+The value operation clamps the scalar, clears the encoded point's top bit,
+uses the field `2^255-19`, and emits 32 little-endian bytes. Low-order/all-zero
+points are not rejected and may produce an all-zero result. The high-level
+unchanged `X25519` consumes both inputs before publishing, so its destination
+may alias either one. Exact `kdos.f` lines 1433 through 1481 also add the
+global 32-byte `X25519-PRIV`, `X25519-PUB`, `X25519-SHARED`, and base-point
+buffers plus ordinary `X25519-KEYGEN` and `X25519-DH`. Those buffers are not
+task/core-isolated or automatically wiped. Key generation uses the admitted
+deterministic development TRNG and is reproducible, not cryptographically
+secure.
+
+The hosted result follows RFC 7748, native C++, and the standalone Field-ALU
+RTL by using `A24=121665` with `E*(AA+A24*E)`. The architectural Python
+emulator currently uses `121666` with that same formula and returns the wrong
+published vector. Current integrated RTL is a second discrepancy: the
+full-core crypto dispatch treats units beyond CRC/SHA as no-ops, while the
+microcore's declared Field ports are not connected by the cluster. Hosted
+qualification therefore does not claim Python-interpreter or integrated-RTL
+agreement and does not choose the eventual correction there. It also makes
+no claim about EXT.CRYPTO encodings, CSRs, the nominal 4335-cycle latency,
+stalls, interrupts, constant-time host execution, or host-memory erasure.
+
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
 and refill counter using SHA-256. No operating-system or physical randomness
@@ -492,10 +534,13 @@ time is demonstrated.
 
 ## 10. Differential authority
 
-The architectural emulator is the differential oracle.  A comparison starts
-from the same source revisions, copied initial media, declared one-core
-capability profile, deterministic clock and entropy, and timestamped ingress
-script.
+The architectural emulator is the default differential oracle. A documented
+backend defect is not promoted into the semantic contract merely because it
+is executable: the X25519 slice, for example, uses published RFC vectors and
+the agreeing native C++/standalone-RTL value while recording the Python
+emulator mismatch. A comparison starts from the same source revisions, copied
+initial media, declared one-core capability profile, deterministic clock and
+entropy, and timestamped ingress script.
 
 Claimed comparisons include:
 

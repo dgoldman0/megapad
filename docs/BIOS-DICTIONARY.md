@@ -865,6 +865,31 @@ intentionally does not expose readable static BIOS storage. Success proves
 geometry and platform protection only, not allocation ownership, mutability,
 initialization, lifetime, or freedom from application-level aliases.
 
+### X25519 (6 raw words) — ISA-native (EXT.CRYPTO `FB 2D`)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `X25519-SCALAR!` | `( addr -- )` | Load four ascending little-endian qwords into this core's ACC0–ACC3. |
+| `X25519-POINT!` | `( addr -- )` | Record the deferred 32-byte point operand in this core's TSRC0. |
+| `X25519-GO` | `( -- )` | Synchronously clamp ACC as an RFC 7748 scalar, multiply by the TSRC0 point using Curve25519, and replace ACC. |
+| `X25519-WAIT` | `( -- )` | No-op; the ISA operation is synchronous. |
+| `X25519-STATUS@` | `( -- n )` | Return 2 unconditionally, including before an operation. |
+| `X25519-RESULT@` | `( addr -- )` | Store ACC0–ACC3 as four ascending little-endian qwords. |
+
+These are raw architectural-state words, not checked transactions. They have
+no capability bit, lock, task owner, complete-span preflight, wipe, or
+low-order/all-zero-result rejection. `POINT!` does not touch memory until
+`GO`; later scalar/result qword faults can retain an already mutated prefix.
+Unaligned ordinary memory is accepted. `GO` always uses `2^255-19` regardless
+of the current Field prime selection.
+
+> **Open accelerator-catalog discrepancy.** These six dictionary entries are
+> absent from the legacy ordinal/count tables below, which also disagree with
+> the checked-in Field/NTT/KEM chain about several word counts and names. The
+> `.dq` dictionary chain in `bios.asm` is authoritative until those later
+> tables are regenerated; this X25519 table deliberately does not invent
+> replacement ordinal numbers during the simulator slice.
+
 ### Field ALU (12 words)
 
 | # | Word | Stack Effect | Imm | Description |

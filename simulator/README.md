@@ -59,6 +59,9 @@ The implemented slices provide:
 - a runtime-local 16-entry semantic spinlock bank with physical-core ownership,
   depthless same-core reacquisition, nonblocking contention, and owner-only
   release for the ordinary pseudo-BIOS words;
+- a runtime-local per-core Field-ALU register service for the six raw X25519
+  BIOS words, backed by a portable RFC 7748 value model and preserving the
+  native four-qword load/store order without emulating EXT.CRYPTO timing;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -338,6 +341,34 @@ owner; arbitrary `SPIN@ 8` interference and multicore guard interoperation
 must be unified before either is claimed. Unchanged HMAC uses only lock 9 and
 then the checked SHA3 ABI, so it does not cross that deferred seam.
 
+Byte-exact logical lines 1433 through 1481 add unchanged KDOS X25519. The
+source initializes the 32-byte base point, runs `X25519` through the six raw
+BIOS words, fills the persistent private buffer with 32 `RANDOM8` calls for
+`X25519-KEYGEN`, and computes `X25519-DH` into its persistent shared buffer.
+Scalar clamping and point top-bit masking happen inside the Field operation;
+the source buffers remain unchanged except for their documented outputs.
+There is no checked status, capability bit, lock, automatic wipe, or all-zero
+shared-secret rejection. The four global 32-byte buffers are cooperative KDOS
+state rather than task/core-safe storage, and hosted key generation consumes
+the deterministic development TRNG rather than secure entropy.
+
+The hosted Field service is physical-core state shared by tasks on that core:
+ACC0-ACC3, deferred TSRC0, and the persistent previous result. Scalar loads,
+point reads, and result stores each use four ascending qwords and retain the
+raw BIOS's partial-fault behavior; the high-level word consumes both inputs
+before output and therefore permits destination aliasing. Hosted execution
+claims RFC 7748 bytes and these memory/state effects, not ISA encodings, CSRs,
+4335-cycle latency, stalls, interrupts, RTL integration, constant-time host
+execution, or physical erasure.
+
+This slice follows RFC 7748 and the native C++/standalone-RTL constant
+`A24=121665`. The architectural Python emulator currently uses `121666` with
+the same `AA + A24*E` formula and fails the published RFC vector. Separately,
+the standalone Field-ALU RTL is not connected into the current full-core SoC
+path, and the microcore declares Field ports that its cluster does not wire.
+Simulator success is therefore not Python-interpreter or integrated-RTL
+X25519 evidence; those discrepancies remain explicit rather than normalized.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -353,8 +384,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–1431 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2 wrappers, and the complete unchanged unified-crypto/HMAC section; line 70 is blank |
-| 1432 onward | Next uncovered frontier | Line 1432 is blank and §1.8 X25519 begins at line 1433; the first missing semantic-BIOS primitive is `X25519-SCALAR!` at line 1467 |
+| 39–1481 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, and unchanged X25519; blank separator lines 70 and 1432 have no definitions |
+| 1482 onward | Next uncovered frontier | Line 1482 is blank and §1.10 Field ALU begins at line 1483; the first missing semantic-BIOS primitive is `GF-PRIME` at line 1506 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -366,8 +397,8 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins X25519 at line 1433. Its first actual
-semantic-BIOS gap is `X25519-SCALAR!` at line 1467; later slices continue the
+The next source boundary begins the general Field ALU at line 1483. Its first
+actual semantic-BIOS gap is `GF-PRIME` at line 1506; later slices continue the
 same contiguous unchanged prefix toward the persistent evaluator, ordinary
 checked module-loader surface, and deterministic cooperative task scheduler.
 

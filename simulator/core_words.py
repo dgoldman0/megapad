@@ -695,6 +695,42 @@ def _spin_release(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.spinlocks.release(lock_id, core_id)
 
 
+def _x25519_scalar_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.load_accumulator(core_id, address, runtime.memory)
+
+
+def _x25519_point_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.set_operand_address(core_id, address)
+
+
+def _x25519_go(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.x25519(core_id, runtime.memory)
+
+
+def _x25519_status(context: ExecutionContext) -> None:
+    context.data.push(2)
+
+
+def _x25519_result_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.store_accumulator(core_id, address, runtime.memory)
+
+
 def _sha256_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     core_id, _task_id = runtime.guest_identity(context)
     context.data.push(runtime.sha2.sha256_init(core_id))
@@ -1066,6 +1102,21 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (b"SPIN@", lambda context: _spin_fetch(runtime, context)),
         (b"SPIN!", lambda context: _spin_release(runtime, context)),
+        (
+            b"X25519-SCALAR!",
+            lambda context: _x25519_scalar_store(runtime, context),
+        ),
+        (
+            b"X25519-POINT!",
+            lambda context: _x25519_point_store(runtime, context),
+        ),
+        (b"X25519-GO", lambda context: _x25519_go(runtime, context)),
+        (b"X25519-WAIT", lambda _context: None),
+        (b"X25519-STATUS@", _x25519_status),
+        (
+            b"X25519-RESULT@",
+            lambda context: _x25519_result_fetch(runtime, context),
+        ),
         (b"CRC-MODE!", lambda context: _crc_mode_store(runtime, context)),
         (b"CRC-RESET", lambda context: _crc_reset(runtime, context)),
         (b"CRC-INIT!", lambda context: _crc_init_store(runtime, context)),
