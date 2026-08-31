@@ -11,11 +11,14 @@ that does so belongs with that backend even if the model behind it is shared.
 The crypto capability-bit registry, six-mode CRC parameter table and pure
 byte/cell recurrences, AES/GHASH operations, the 24-round Keccak-f[1600]
 permutation, 256-bit Field arithmetic/raw-product values, and RFC 7748 X25519
-scalar multiplication, plus the generic 256-point radix-2 NTT value transforms
-are such shared value models. Field and NTT helpers own integer results only:
-prime selection registers, ACC/TSRC/TDST, NTT buffers/registers, previous
-results, guest-memory ordering, and fault publication remain
-simulator/emulator state.
+scalar multiplication, the generic 256-point radix-2 NTT value transforms,
+and deterministic ML-KEM-512 key-generation/encapsulation/decapsulation bytes
+are such shared value models. Field, NTT, and ML-KEM helpers own pure result
+values only: prime selection registers, ACC/TSRC/TDST, NTT and KEM retained
+buffers/registers, previous results, guest-memory ordering, status, and fault
+publication remain simulator/emulator state. The ML-KEM implementation is
+ordinary non-constant-time Python for target-value compatibility; it is not a
+host-secret cryptography API.
 Checked owner records, capability publication, MMIO state machines, entropy
 sources, architectural register state, ISA execution, and semantic BIOS stack
 adapters likewise remain in their respective backends.

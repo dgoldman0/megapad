@@ -943,15 +943,26 @@ current RTL surface are recorded in
 
 ### KEM Engine — ML-KEM-512 (7 words)
 
-| # | Word | Stack Effect | Imm | Description |
-|---|------|-------------|-----|-------------|
-| 304 | `KEM-KEYGEN` | `( -- )` | | Generate ML-KEM-512 keypair |
-| 305 | `KEM-ENCAPS` | `( pk-addr -- )` | | Encapsulate: ciphertext + shared secret |
-| 306 | `KEM-DECAPS` | `( ct-addr -- )` | | Decapsulate: recover shared secret |
-| 307 | `KEM-SETQ` | `( q -- )` | | Set underlying NTT modulus |
-| 308 | `KEM-STATUS@` | `( -- status )` | | Read engine status |
-| 309 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
-| 310 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `KEM-SEL!` | `( n -- )` | Select retained buffer 0..4 and reset its byte index |
+| `KEM-LOAD` | `( addr count -- )` | Copy caller bytes to the selected buffer |
+| `KEM-STORE` | `( addr count -- )` | Copy selected-buffer bytes to caller memory |
+| `KEM-KEYGEN` | `( -- )` | Replace PK and SK from retained 64-byte `d || z` |
+| `KEM-ENCAPS` | `( -- )` | Replace CT and SS from retained PK and 32-byte coin |
+| `KEM-DECAPS` | `( -- )` | Replace SS from retained CT and SK |
+| `KEM-STATUS@` | `( -- n )` | Read retained raw status (0 idle, 2 done in Python execution) |
+
+These are the seven entries in the authoritative `.dq` chain. As in the
+corrected Field and NTT sections, obsolete ordinal numbers are omitted rather
+than shifting every later legacy row locally. The executable device uses a
+40-byte byte-register window at `+0x0900`, completes commands synchronously,
+and retains shared buffers and DONE state without ownership or automatic wipe.
+Current RTL instead exposes an incompatible 64-bit-slot map, BUSY timing, and
+non-cryptographic deterministic stub values. The full transfer/lifecycle,
+valid-key interoperability, secret-boundary qualifications, and unresolved
+KDOS `KEM-SEED-SIZE` 32-versus-64-byte keygen discrepancy are recorded in
+[bios-forth.md](bios-forth.md#kem-engine--ml-kem-512-7-words).
 
 ### Cooperative Multitasking (9 words)
 
@@ -1103,7 +1114,7 @@ WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
 | `0xFFFF_FF00_0000_0880` | Port I/O Bridge | PORT1_TARGET..PORT7_TARGET=+00..+0D (16-bit LE, low 12 bits used), BRIDGE_CTRL=+0E |
 | `0xFFFF_FF00_0000_08A0` | WOTS Chain | Exact byte-only 32-byte aperture: CONTEXT_ADDR=+00..+07, STEPS=+08, START=+09, CMD/STATUS=+0A, ERROR=+0B, CYCLES=+0C..+0F, DOUT=+10..+1F |
 | `0xFFFF_FF00_0000_08C0` | NTT Engine | Executable byte map: STATUS=+00, Q=+08..+0F, IDX=+10..+11, LOAD_A=+18..+1B, LOAD_B=+1C..+1F, RESULT=+20..+23, CMD=+28; current RTL uses incompatible 64-bit slots |
-| `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
+| `0xFFFF_FF00_0000_0900` | KEM Engine | Executable 40-byte window: STATUS(R)=+00, CMD(W)=+01, BUF_SEL(W)=+08, DIN(W)=+10, DOUT(R)=+18, BUF_SIZE(R,uint16-LE)=+20..+21; current RTL uses an incompatible 64-bit-slot map and deterministic crypto stub |
 | `0xFFFF_FF00_0000_0940` | ~~SHA-2~~ | Removed — now ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`/`sha.release`) |
 | `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now ISA-native (`crc.mode`/`crc.init`/`crc.seed`/`crc.b`/`crc.q`/`crc.fin`/`crc.finraw`) |
 | `0xFFFF_FF00_0000_0B00` | RTC | UPTIME=+0..7 (R,latched), EPOCH=+8..F (RW,latched), SEC=+10, MIN=+11, HOUR=+12, DAY=+13, MON=+14, YEAR=+15..16, DOW=+17, CTRL=+18, STATUS=+19, ALARM=+1A..1C |

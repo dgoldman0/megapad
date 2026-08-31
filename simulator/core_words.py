@@ -885,6 +885,26 @@ def _ntt_wait(
     return Invoke(wait_word.xt)
 
 
+def _kem_select(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.kem.select(context.data.pop())
+
+
+def _kem_load(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    count = context.data.pop()
+    address = context.data.pop()
+    runtime.kem.load(address, count, runtime.memory)
+
+
+def _kem_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    count = context.data.pop()
+    address = context.data.pop()
+    runtime.kem.store(address, count, runtime.memory)
+
+
+def _kem_status(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(runtime.kem.status)
+
+
 def _sha256_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     core_id, _task_id = runtime.guest_identity(context)
     context.data.push(runtime.sha2.sha256_init(core_id))
@@ -1372,6 +1392,13 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"NTT-PADD", lambda _context: runtime.ntt.pointwise_add()),
         (b"NTT-STATUS@", lambda context: _ntt_status(runtime, context)),
         (b"NTT-WAIT", lambda context: _ntt_wait(runtime, context)),
+        (b"KEM-SEL!", lambda context: _kem_select(runtime, context)),
+        (b"KEM-LOAD", lambda context: _kem_load(runtime, context)),
+        (b"KEM-STORE", lambda context: _kem_store(runtime, context)),
+        (b"KEM-KEYGEN", lambda _context: runtime.kem.keygen()),
+        (b"KEM-ENCAPS", lambda _context: runtime.kem.encapsulate()),
+        (b"KEM-DECAPS", lambda _context: runtime.kem.decapsulate()),
+        (b"KEM-STATUS@", lambda context: _kem_status(runtime, context)),
         (
             b"X25519-SCALAR!",
             lambda context: _x25519_scalar_store(runtime, context),

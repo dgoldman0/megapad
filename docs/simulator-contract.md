@@ -561,7 +561,7 @@ negacyclic ring operation required by ML-KEM or ML-DSA. Exact unchanged
 `kdos.f` lines 1517 through 1584 define both named moduli, selectors, two
 global 1024-byte scratch buffers, `NTT-POLYMUL`, and `.NTT-STATUS`; the PQ
 labels do not strengthen that mathematical claim. The KEM emulator uses
-separate FIPS-oriented routines. KDOS scratch aliases and concurrent
+separate ML-KEM-specific routines. KDOS scratch aliases and concurrent
 `NTT-POLYMUL` calls are unsafe because there is no ownership protocol.
 
 This frontier is deliberately pseudo-BIOS-only: it does not admit direct
@@ -574,6 +574,74 @@ forward ordering for its fixed root. BIOS byte accesses cannot drive that RTL
 unit correctly. Simulator success therefore makes no direct-MMIO, RTL,
 standardized-PQ, cycle, bus-width, constant-time, or physical-erasure claim,
 and this discrepancy record does not choose the eventual hardware correction.
+
+The admitted ML-KEM slice is one runtime-global semantic service behind the
+seven authoritative raw BIOS words: `KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`,
+`KEM-KEYGEN`, `KEM-ENCAPS`, `KEM-DECAPS`, and `KEM-STATUS@`. Exact unchanged
+`kdos.f` lines 1586 through 1633 define five buffer IDs, five size constants,
+the three `KYBER-*` wrappers, and `.KEM-STATUS`. The source declares
+`KEM-SEED-SIZE=32`, while `KYBER-KEYGEN` explicitly loads all 64 bytes consumed
+as `d || z`; this is a pinned discrepancy, not an implicit simulator repair.
+
+Construction creates zero-filled SEED/COIN=64, PK=800, SK=1632, CT=768, and
+SS=32 buffers, selector zero, index zero, and status IDLE=0. All contexts share
+that state with no core/task owner, lock, capability bit, command transaction,
+unwind cleanup, or secret wipe. Selecting takes the low byte, clamps 5..255 to
+SS/4, and resets only the index. Selection and transfer do not clear status.
+Hosted explicit `reset()` restores construction state, but emulator warm
+`System.boot()` does not reset its Python KEM device; hosted reset tests do not
+qualify warm-boot behavior.
+
+DIN and DOUT advance only while the selected buffer is in bounds. At capacity
+DIN drops bytes, DOUT returns zero, and the index remains pinned. Short loads
+retain the old suffix. `KEM-LOAD` consumes count then address from the data
+stack and, for each byte, reads guest memory before writing DIN. `KEM-STORE`
+also consumes count then address and reads DOUT before the corresponding guest
+write. There is no whole-span preflight or alignment restriction; address
+stepping wraps as uint64. Thus a load fault leaves only its successfully read
+prefix committed, while an in-range store fault has already consumed the
+faulting output byte. Excess loads still read the caller span after device
+capacity, and excess stores publish zeros. Count zero touches neither memory
+nor index. Normal wrapper inputs are fully loaded before any output store, so
+input/output aliasing is safe; PK then SK and CT then SS store order determines
+the final bytes when outputs overlap.
+
+Commands synchronously snapshot fixed buffers and replace only their outputs:
+keygen reads all 64 seed bytes and replaces PK/SK; encapsulation reads PK plus
+the first 32 seed bytes and replaces CT/SS; decapsulation reads CT/SK and
+replaces SS. Each returns with retained DONE=2 without resetting selector or
+index. BUSY=1 is never observable, commands report no error state, and unknown
+raw command bytes do nothing. `.KEM-STATUS` therefore renders only 0 as idle,
+2 as done, and every other retained value as unknown.
+
+The backend-neutral value implementation produces exact deterministic
+ML-KEM-512 bytes for generated or independently validated fixed-size keys. An
+independent local OpenSSL 3.5.2 zero-`d || z`/zero-coin comparison produced
+SHA-256 hashes `52b46f0597ac5cb10c6281ad5731f18d599feaa92ce24d897d4084195b27e448`
+(PK), `3a19948fd8e0d7af1e2f3bb32bf2299b91f40c66b3faeb773b8fc3dc2f140092`
+(SK), `b9f7694fa5a2be9fb849d0c0ea8f55fce6d91eaecb9c34dffe47b5b5d6034de3`
+(CT), and `e9a21d9e6c451ac6b7b78b57c7fef1aeb43af246bc782efbacdca0e19bac2c62`
+(SS). Flipping every bit of CT byte zero yields implicit-rejection SS hash
+`55dc98baa9f1632bb478e3348e3cb7b258df5309a9a7815c967f2dcada38c557`.
+
+That oracle is not FIPS certification or a checked external API. Callers
+supply `d`, `z`, and encapsulation randomness. Length-correct noncanonical
+public keys and decapsulation keys with inconsistent embedded hashes are
+accepted where OpenSSL rejects them; comparison and arithmetic are not
+constant time; the rejection sampler assumes a fixed 840-byte SHAKE prefix is
+sufficient; and secrets are retained rather than zeroized. The shared code is
+target-value compatibility logic, not a host-secret cryptography boundary.
+
+This frontier is pseudo-BIOS-only and does not admit direct virtual KEM MMIO.
+Native C++ has no KEM implementation and routes the working Python device. Its
+40-byte map is STATUS `+00`, CMD `+01`, selector `+08`, DIN `+10`, DOUT `+18`,
+and little-endian size `+20..21`. Current RTL instead places CMD/STATUS in the
+`+00` 64-bit slot, DIN/DOUT at `+10`, IDX_SET/size at `+18`, and index at
+`+20`; it exposes multi-cycle BUSY, advances and clamps streams differently,
+fills only prefixes of large outputs, and computes non-cryptographic XOR stub
+values. BIOS DOUT therefore reads RTL size, and immediate KDOS stores race the
+RTL lifecycle. Hosted success makes no direct-MMIO, RTL, timing, arbitration,
+FIPS-validation, constant-time, or physical-erasure claim.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

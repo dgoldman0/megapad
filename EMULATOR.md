@@ -11,7 +11,8 @@ and an interactive CLI monitor/debugger.
 > seven physical tile engines, seven 2,048-bit full-width TACCs,
 > 3 MiB HBW math RAM, mailbox IPI, spinlocks, extended tile execution
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), crypto accelerators
-> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512) plus a
+> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, and a working Python
+> ML-KEM-512 value path whose current RTL counterpart remains a stub) plus a
 > qualified checked WOTS chain with real Bank 0 DMA and shared
 > Keccak, optional
 > C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
@@ -189,7 +190,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0880` | 16 B | Port I/O Bridge (remap CSR — maps OUT/INP to MMIO targets) |
 | `+0x08A0` | 32 B | Qualified checked byte-only WOTS chain (64-bit read-only Bank 0 context DMA) |
 | `+0x08C0` | 64 B | NTT Engine (256-point NTT/INTT) |
-| `+0x0900` | 64 B | KEM Engine (ML-KEM-512) |
+| `+0x0900` | 40 B | Executable Python KEM Engine (ML-KEM-512); the 64-byte RTL allocation has an incompatible slot ABI and crypto stub |
 | `+0x0A00` | 64 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
 | `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
@@ -631,8 +632,24 @@ transfer width, configurable-root behavior, and timing; see the
 [BIOS reference](docs/bios-forth.md#ntt-engine-10-raw-words).
 
 **KEM Engine (ML-KEM-512)**
-`KEM-KEYGEN` `KEM-ENCAPS` `KEM-DECAPS` `KEM-SETQ`
-`KEM-STATUS@` `KEM-PK@` `KEM-CT@`
+`KEM-SEL!` `KEM-LOAD` `KEM-STORE` `KEM-KEYGEN`
+`KEM-ENCAPS` `KEM-DECAPS` `KEM-STATUS@`
+
+These are the exact seven raw words in the checked-in dictionary chain. The
+working Python byte map at `+0x0900` is STATUS `+00`, CMD `+01`, BUF_SEL `+08`,
+DIN `+10`, DOUT `+18`, and uint16-LE BUF_SIZE `+20..+21`. Commands complete
+synchronously and leave status DONE=2; five shared retained buffers have no
+owner or automatic wipe. The current RTL instead combines CMD/STATUS at the
+`+00` 64-bit slot, DIN/DOUT at `+10`, IDX_SET/BUF_SIZE at `+18`, exposes IDX at
+`+20`, reports BUSY during a multi-cycle operation, and emits deterministic
+XOR stub output. It is not BIOS-compatible ML-KEM execution.
+
+The valid-key zero-seed/zero-coin fixture agrees byte-for-byte with local
+OpenSSL 3.5.2 ML-KEM-512, but this is not FIPS certification, hostile external
+key validation, constant-time execution, or a protected host-secret boundary.
+KDOS also declares `KEM-SEED-SIZE=32` while `KYBER-KEYGEN` loads 64-byte
+`d || z`; that discrepancy remains intentionally unresolved. See the
+[BIOS reference](docs/bios-forth.md#kem-engine--ml-kem-512-7-words).
 
 **Disk / Storage**
 `DISK@` `DISK-SEC!` `DISK-DMA!` `DISK-N!` `DISK-READ` `DISK-WRITE` `DISK-FLUSH`

@@ -67,6 +67,10 @@ The implemented slices provide:
   executable emulator's generic 256-point transform values and preserving its
   coefficient, status, index, and byte-transfer effects without admitting the
   physical NTT MMIO window;
+- a runtime-local shared KEM service for all seven raw BIOS words, backed by a
+  portable deterministic ML-KEM-512 value model and preserving the executable
+  Python device's five retained buffers, selector/index, synchronous status,
+  and byte-fault order without admitting either physical KEM MMIO contract;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -412,12 +416,49 @@ lock, owner, checked status, capability bit, or implicit unwind cleanup.
 
 This generic transform computes cyclic convolution modulo `x^256-1`; it is
 not the specialized negacyclic polynomial operation used by ML-KEM or ML-DSA.
-The emulator's ML-KEM device uses separate FIPS-oriented routines. Current NTT
+The emulator's ML-KEM device uses separate ML-KEM-specific routines. Current NTT
 RTL is also not executable-BIOS compatible: it has a different 64-bit-slot
 map, consumes unit-width transfers while BIOS emits bytes, retains Kyber-only
 twiddles and inverse scale when q changes, and exposes real BUSY latency.
 Hosted NTT is therefore a pseudo-BIOS semantic slice, not direct MMIO, RTL,
 cycle, arbitration, or standardized-PQ evidence.
+
+Byte-exact logical lines 1586 through 1633 now add unchanged KDOS §1.12. They
+define five buffer IDs, five size constants, `KYBER-KEYGEN`, `KYBER-ENCAPS`,
+`KYBER-DECAPS`, and `.KEM-STATUS` over the exact seven-word raw BIOS surface:
+`KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`, the three commands, and `KEM-STATUS@`.
+The source-visible `KEM-SEED-SIZE=32` remains recorded alongside the literal
+64-byte `d || z` transfer performed by `KYBER-KEYGEN`; this slice does not
+silently choose which interface should change.
+
+The service follows the working Python device used by both interpreted and
+native-accelerated emulator CPU execution. It owns one per-runtime set of
+SEED/COIN, PK, SK, CT, and SS buffers, plus one selector, byte index, and
+status shared by every guest context. Selection uses the low byte, clamps
+values above four to SS, and resets the index. Short loads preserve suffixes;
+excess DIN is dropped, excess DOUT is zero, and the index pins at capacity.
+`KEM-LOAD` reads the caller byte before DIN, while `KEM-STORE` consumes DOUT
+before the caller write, preserving the executable partial-fault order.
+Commands synchronously replace only their documented output buffers and leave
+retained DONE=2, selector, and index unchanged. There is no owner, lock,
+capability bit, transaction rollback, automatic wipe, or warm-boot claim.
+
+The shared value model exactly reproduces the former emulator-local code. A
+pinned zero-`d || z`/zero-coin fixture was independently checked against local
+OpenSSL 3.5.2 ML-KEM-512 through keygen, encapsulation, valid decapsulation,
+and implicit rejection. That evidence is limited to generated or independently
+validated fixed-size keys. The implementation accepts some malformed keys,
+uses a fixed 840-byte SHAKE sampling prefix, compares in ordinary Python, and
+retains secrets. It is neither FIPS certification nor a hostile-key validator,
+constant-time host primitive, or protected secret boundary.
+
+This is another pseudo-BIOS-only slice. Native CPU acceleration has no C++ KEM
+implementation and falls through to the Python device. Current RTL instead
+uses incompatible 64-bit slots, exposes BUSY latency, advances/clamps streams
+differently, fills only partial buffers, and computes deterministic XOR test
+data. In particular, BIOS DOUT at byte `+0x18` reads RTL BUF_SIZE. Hosted KEM
+therefore makes no direct-MMIO, RTL, cycle, arbitration, or physical-erasure
+claim.
 
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
@@ -434,8 +475,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–1584 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, Field, and the complete NTT block; blank separators have no definitions |
-| 1585 onward | Next uncovered frontier | §1.12 constants compile and `KYBER-KEYGEN` begins normally; the next genuine semantic-BIOS gap is `KEM-SEL!` at line 1608 |
+| 39–1633 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, Field, NTT, and the complete ML-KEM block; blank separators have no definitions |
+| 1634 onward | Next uncovered frontier | §1.13 begins the hybrid X25519 + ML-KEM/HKDF source block; its complete lifecycle is the next contiguous qualification slice |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -447,11 +488,9 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins ML-KEM at line 1586. Its constants and the
-opening of `KYBER-KEYGEN` advance naturally to the first actual semantic-BIOS
-gap, `KEM-SEL!`, at line 1608. Later slices continue the same contiguous
-unchanged prefix toward the persistent evaluator, ordinary checked
-module-loader surface, and
+The next source boundary begins hybrid X25519 + ML-KEM/HKDF at line 1635.
+Later slices continue the same contiguous unchanged prefix toward the
+persistent evaluator, ordinary checked module-loader surface, and
 deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are

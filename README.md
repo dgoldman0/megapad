@@ -184,8 +184,9 @@ DMA), CRC ISA engine (three exact non-reflected 32/64-bit tuples), AES-256-GCM (
 authentication), SHA-3/SHAKE (Keccak-f[1600], 4 modes + XOF squeeze),
 TRNG (hardware CSPRNG, ring-oscillator on FPGA), Field ALU (GF(2²⁵⁵−19)
 arithmetic + raw 256×256→512-bit multiply), NTT Engine (256-point NTT/
-INTT, configurable modulus for ML-KEM/ML-DSA), KEM Engine (ML-KEM-512
-key encapsulation via NTT+SHA3+TRNG), one-shot PCM Audio (deterministic
+INTT, configurable modulus), KEM Engine (working synchronous Python
+ML-KEM-512 values for generated/well-formed keys; current RTL is an
+incompatible non-cryptographic stub), one-shot PCM Audio (deterministic
 headless capture with optional host playback), SystemInfo (CPUID, memory
 size), Mailbox (inter-core IPI), and Spinlocks (8 hardware mutexes). Peripheral
 devices are memory-mapped at `0xFFFF_FF00+`; CRC, SHA-2, and Field ALU
@@ -221,7 +222,8 @@ strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
 (COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
 **performance counters**, **CRC engine**, **AES-256-GCM**, **SHA-3/SHAKE**,
 **TRNG**, **Field ALU** (FADD–FPOW + MUL_RAW), **NTT engine**,
-**KEM engine** (ML-KEM-512), **memory BIST**, **tile self-test**,
+**KEM words** (Python ML-KEM-512 value path; RTL stub), **memory BIST**,
+**tile self-test**,
 **strided/2D addressing**, and **FP16/BF16 modes**.
 Includes `FSLOAD` for booting KDOS directly from a disk image.  Hardened
 with stack underflow detection, EVALUATE depth limiting, dictionary-full
@@ -492,7 +494,8 @@ and block-RAM-backed memory:
 - **Four full cores plus three four-microcore clusters** with round-robin bus
   arbitration and per-core QoS weights
 - **Crypto accelerators**: AES-256-GCM, SHA-3/SHAKE, CRC, TRNG, X25519/
-  Field ALU, NTT, KEM (ML-KEM-512)
+  Field ALU, NTT, and a working Python ML-KEM-512 value path whose current
+  RTL counterpart remains a stub
 - **Fully static design** — retains state down to DC for ultra-low power
 
 Manual resource estimates (Kintex-7 325T, no Vivado synthesis yet):

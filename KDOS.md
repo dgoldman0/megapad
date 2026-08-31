@@ -142,8 +142,26 @@ PORTS                          \ List all port bindings
 - **TRNG**: RANDOM, RANDOM8, SEED-RNG
 - **Field ALU**: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW, GF-A!, GF-R@, GF-PRIME, LOAD-PRIME, FMUL-ADD-RAW
 - **NTT engine**: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV, NTT-PMUL, NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT
-- **KEM engine**: KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-SETQ, KEM-STATUS@, KEM-PK@, KEM-CT@
+- **KEM engine**: KEM-SEL!, KEM-LOAD, KEM-STORE, KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-STATUS@
 - **CRC**: exact-length byte/quad feeds, reflected and non-reflected 32/64-bit tuples, and raw finalization
+
+The seven KEM names above are the exact raw BIOS surface. They select and
+stream five retained buffers at executable MMIO base
+`0xFFFF_FF00_0000_0900`; the Python device uses STATUS `+00`, CMD `+01`,
+BUF_SEL `+08`, DIN `+10`, DOUT `+18`, and uint16-LE BUF_SIZE `+20..+21` in a
+40-byte window. Keygen/encaps/decaps complete synchronously and retain DONE=2.
+This shared state has no requester ownership or automatic wipe.
+
+KDOS declares `KEM-SEED-SIZE=32`, while `KYBER-KEYGEN` explicitly loads the
+64-byte `d || z` input required by the working key-generation path;
+`KYBER-ENCAPS` uses 32 coin bytes from the same buffer. The mismatch is
+documented without choosing which interface should change. Deterministic
+generated/well-formed-key vectors match local OpenSSL 3.5.2 ML-KEM-512, but
+the implementation is not FIPS-certified, constant time, a hostile-key
+validator, or a protected host-secret boundary. Current RTL uses an
+incompatible 64-bit-slot map, observable BUSY lifecycle, and deterministic XOR
+crypto stub, so it is not evidence for executable KEM behavior. See the
+[BIOS KEM contract](docs/bios-forth.md#kem-engine--ml-kem-512-7-words).
 
 **KDOS core (`kdos.f`):**
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
@@ -544,7 +562,7 @@ accumulation supported via TCTRL (ACC_ACC bit).
 | **TRNG** | Hardware CSPRNG (ring-oscillator + SHA-3 conditioner on FPGA) |
 | **Field ALU** | GF(2²⁵⁵−19) arithmetic + raw 256×256→512-bit multiply |
 | **NTT** | 256-point NTT/INTT, configurable modulus (ML-KEM / ML-DSA) |
-| **KEM** | ML-KEM-512 key encapsulation (KeyGen/Encaps/Decaps) |
+| **KEM** | Synchronous Python ML-KEM-512 value path for generated/well-formed keys; current RTL is an incompatible non-cryptographic stub |
 
 ### 3.4 Memory
 

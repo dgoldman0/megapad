@@ -611,16 +611,15 @@ behavior, and latency. See the
 [BIOS reference](bios-forth.md#ntt-engine-10-raw-words) for the pinned
 discrepancy rather than treating either backend as interchangeable evidence.
 
-The hosted contiguous frontier now ends at line 1584. The following ML-KEM
-constants compile, and the next genuine semantic-BIOS gap is `KEM-SEL!` in
-`KYBER-KEYGEN` at line 1608.
+The hosted contiguous frontier continues through the complete adjacent
+ML-KEM block at line 1633.
 
 ---
 
 ### §1.12 ML-KEM-512 (Kyber)
 
-Lattice-based key encapsulation mechanism (FIPS 203) using the KEM
-accelerator and NTT engine.
+Lattice-based key encapsulation using the executable Python KEM device's
+ML-KEM-specific value path. It does not use the generic cyclic NTT service.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -628,6 +627,31 @@ accelerator and NTT engine.
 | `KYBER-ENCAPS` | `( pk coin ct ss -- )` | Encapsulate with 32 caller-provided random bytes: produce ciphertext (768 bytes) and shared secret (32 bytes). |
 | `KYBER-DECAPS` | `( ct sk ss -- )` | Decapsulate: recover shared secret from ciphertext using the secret key. |
 | `KEM-STATUS@` | `( -- n )` | Read KEM accelerator status. |
+
+Exact unchanged lines 1586 through 1633 define the five KEM buffer IDs and
+sizes, the three wrappers, and `.KEM-STATUS` over the seven raw BIOS words
+`KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`, `KEM-KEYGEN`, `KEM-ENCAPS`,
+`KEM-DECAPS`, and `KEM-STATUS@`. The wrappers fully load every input before
+storing outputs, so ordinary input/output aliases are safe. If PK and SK
+outputs exactly overlap, the later SK store wins; if CT and SS overlap, the
+result is `SS || CT[32:]`.
+
+The service owns five shared retained buffers plus one selector, byte index,
+and status with no owner, lock, rollback, or automatic wipe. Commands complete
+synchronously and retain status 2. Short loads retain old suffixes, indices
+pin at capacity, excess stores write zero, and byte-transfer faults preserve
+the executable read-before-write order. `KEM-SEED-SIZE` is visibly 32 even
+though `KYBER-KEYGEN` literal-loads and consumes a 64-byte `d || z` input; this
+document records that discrepancy without resolving it.
+
+Generated/well-formed-key deterministic vectors were independently matched to
+OpenSSL 3.5.2 ML-KEM-512. The implementation is not FIPS-certified,
+constant-time, a hostile-key validator, or a protected host-secret boundary.
+Its fixed 840-byte SHAKE sampling prefix also leaves a theoretical rare
+capacity case. Current RTL has an incompatible register/timing contract and a
+non-cryptographic deterministic stub; the hosted slice qualifies neither RTL
+nor direct MMIO. The contiguous hosted frontier now ends at line 1633, and
+§1.13 hybrid exchange is the next source block.
 
 ---
 

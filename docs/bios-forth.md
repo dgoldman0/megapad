@@ -1372,7 +1372,7 @@ The Python device chooses a primitive 256th root for the selected q and
 implements an ordinary radix-2 transform. Consequently
 `INTT(NTT(a)*NTT(b))` is cyclic convolution modulo `x^256-1`, not the
 negacyclic multiplication required by ML-KEM or ML-DSA. The KEM device uses
-separate FIPS-oriented polynomial routines. Invalid or composite moduli are
+separate ML-KEM-specific polynomial routines. Invalid or composite moduli are
 outside the portable contract; a modulus without a selected root completes a
 command without replacing the prior result, while q=0 faults on coefficient
 commit in the current Python model.
@@ -1391,18 +1391,74 @@ commit in the current Python model.
 
 ## KEM Engine — ML-KEM-512 (7 words)
 
-Key encapsulation mechanism at `0xFFFF_FF00_0000_0940`.  Uses NTT,
-SHA-3, and TRNG for NIST ML-KEM-512 (Kyber).
+The authoritative raw dictionary surface drives the executable Python KEM
+device at `0xFFFF_FF00_0000_0900`. The caller supplies all key-generation and
+encapsulation randomness; these words do not obtain entropy from the TRNG.
+Operands and results live in five retained device buffers: 0=SEED/COIN (64
+bytes), 1=PK (800 bytes), 2=SK (1,632 bytes), 3=CT (768 bytes), and 4=SS (32
+bytes).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `KEM-KEYGEN` | `( -- )` | Generate ML-KEM-512 keypair.  Public key readable via KEM-PK@. |
-| `KEM-ENCAPS` | `( pk-addr -- )` | Encapsulate: produce ciphertext + shared secret. |
-| `KEM-DECAPS` | `( ct-addr -- )` | Decapsulate: recover shared secret from ciphertext. |
-| `KEM-SETQ` | `( q -- )` | Set underlying NTT modulus. |
-| `KEM-STATUS@` | `( -- status )` | Read engine status. |
-| `KEM-PK@` | `( addr -- )` | Read public key to addr. |
-| `KEM-CT@` | `( addr -- )` | Read ciphertext to addr. |
+| `KEM-SEL!` | `( n -- )` | Select a retained buffer and reset its byte index. The executable device takes the low byte and clamps values above 4 to 4. |
+| `KEM-LOAD` | `( addr count -- )` | Copy exactly *count* caller bytes to the selected buffer through DIN. |
+| `KEM-STORE` | `( addr count -- )` | Copy exactly *count* DOUT bytes from the selected buffer to caller memory. |
+| `KEM-KEYGEN` | `( -- )` | Replace PK and SK from the retained 64-byte `d || z` seed. |
+| `KEM-ENCAPS` | `( -- )` | Replace CT and SS from retained PK and the first 32 SEED/COIN bytes. |
+| `KEM-DECAPS` | `( -- )` | Replace SS from retained CT and SK. |
+| `KEM-STATUS@` | `( -- n )` | Read the retained status byte: 0 initially, 2 after a completed command. |
+
+The executable Python byte window is the half-open range
+`[0xFFFF_FF00_0000_0900, 0xFFFF_FF00_0000_0928)`:
+
+| Offset | Register | Access | Executable behavior |
+|--------|----------|--------|---------------------|
+| `+0x00` | STATUS | R byte | 0=idle, 2=done |
+| `+0x01` | CMD | W byte | 1=KEYGEN, 2=ENCAPS, 3=DECAPS |
+| `+0x08` | BUF_SEL | W byte | Select 0..4 and reset the retained index |
+| `+0x10` | DIN | W byte | Write one selected-buffer byte and auto-increment while in bounds |
+| `+0x18` | DOUT | R byte | Read one selected-buffer byte and auto-increment while in bounds |
+| `+0x20..+0x21` | BUF_SIZE | R bytes | Selected capacity as uint16 little-endian |
+
+Commands complete within the triggering Python write, so executable code does
+not observe BUSY=1. DONE remains set across selection and transfer operations
+until device reset; starting another command replaces the appropriate outputs
+and leaves DONE set. Selection resets only the index. Short loads retain the
+old suffix of a buffer. At capacity the executable index pins: excess DIN is
+dropped and excess DOUT returns zero. The raw transfer loops do no complete-span
+preflight. LOAD reads each caller byte before attempting DIN, and STORE reads
+DOUT before writing the corresponding caller byte, so a failing destination
+write has already consumed that device byte. There is no lock, requester
+owner, capability check, transactional rollback, automatic wipe, or Forth
+unwind cleanup; all callers share the buffers and status.
+
+KDOS declares `32 CONSTANT KEM-SEED-SIZE`, but `KYBER-KEYGEN` explicitly
+loads 64 bytes and the executable SEED buffer/key-generation primitive consumes
+64 bytes as `d || z`. `KYBER-ENCAPS` uses 32 bytes from that same buffer as its
+coin input. This is a recorded source/API discrepancy; this document does not
+choose whether the constant or the key-generation interface should change.
+
+For generated/well-formed keys, the deterministic zero-`d || z`, zero-coin
+fixture produces byte-identical keys, ciphertext, and shared secret to the
+locally audited OpenSSL 3.5.2 ML-KEM-512 implementation. That is interoperability
+evidence for the valid-key value path, not FIPS 203 certification. The Python
+implementation accepts merely length-correct noncanonical public keys and
+secret keys with inconsistent embedded hashes that OpenSSL rejects, uses a
+fixed 840-byte SHAKE rejection-sampling window rather than an unbounded stream,
+and is ordinary non-constant-time Python. Retained buffers and host allocations
+are not a protected secret boundary and are not physically erased; do not use
+this service to protect host secrets.
+
+> **Executable/RTL discrepancy.** The current RTL block has a different
+> 64-bit-slot interface: CMD-write/STATUS-read share `+0x00`, BUF_SEL is
+> `+0x08`, DIN-write/DOUT-read share `+0x10`, IDX_SET-write/BUF_SIZE-read share
+> `+0x18`, and IDX is readable at `+0x20`. It exposes BUSY during a multi-cycle
+> FSM and fills outputs with deterministic XOR test data, not ML-KEM. In
+> particular, the checked-in BIOS reads executable DOUT at `+0x18`, which is
+> BUF_SIZE on RTL. RTL index-overrun and out-of-range-selector behavior also
+> differ. The RTL is interface-stub evidence only; its timing and values do not
+> qualify the executable Python device or hosted simulator, and those paths do
+> not qualify the RTL.
 
 ---
 

@@ -154,7 +154,7 @@ device occupies a small range:
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
 | **WOTS Chain** | `+0x08A0` | 32 bytes | Qualified checked byte-only WOTS chain sequencer with 64-bit read-only Bank 0 context DMA |
 | **NTT Engine** | `+0x08C0` | 64 bytes | Generic 256-point cyclic transform; executable byte ABI and current RTL slots differ |
-| **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
+| **KEM** | `+0x0900` | 40 executable bytes | Synchronous Python ML-KEM-512 value device; the allocated 64-byte RTL block has an incompatible slot ABI and crypto stub |
 | **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 | **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
@@ -582,7 +582,7 @@ zeroizes the bank before another TACC operation is admitted.
 | CRC (32/64-bit tuples) | 8 bytes / feed | Data integrity (private full-core / cluster-shared ISA, no MMIO) |
 | Field ALU | 1–4335 nominal ISA cycles, operation-dependent | Per-core multi-prime arithmetic, raw 512-bit products, and X25519 |
 | NTT Engine | Python device synchronous; current RTL ~2304 FWD / ~2560 INV work cycles | Generic cyclic polynomial transform; not the standards' negacyclic ML-KEM/ML-DSA operation |
-| KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
+| KEM | Python device synchronous; current RTL exposes a multi-cycle stub | Deterministic ML-KEM-512 values for generated/well-formed keys; no hardware/FIPS-validation claim |
 | TRNG | 64 bits / 2 cycles | Hardware true random number generator |
 
 ### SHA-3/SHAKE and raw Keccak-f[1600]
@@ -804,7 +804,7 @@ Internal executable storage is 3 × 256 × 32-bit coefficient arrays. The
 Python device selects a primitive 256th root for q, completes commands
 synchronously, and is shared system-wide. Its generic transform implements
 cyclic convolution modulo `x^256-1`; the separate ML-KEM device contains its
-own FIPS-oriented NTT/basemul routines.
+own ML-KEM-specific NTT/basemul routines.
 
 The current RTL is not register-compatible with this table. It decodes
 64-bit slots with CMD/STATUS at `+0x00`, 32-bit Q at `+0x08`, 8-bit IDX at
@@ -822,25 +822,68 @@ NTT).
 
 ### KEM (ML-KEM-512 Key Encapsulation)
 
-An ML-KEM-512 accelerator framework at MMIO base `+0x0900`.  Provides
-hardware-managed key/ciphertext buffers and keygen/encaps/decaps operations.
+The working architectural path is a Python ML-KEM-512 value device at MMIO
+base `+0x0900`. It owns five process-global retained buffers: SEED/COIN=64
+bytes, PK=800, SK=1,632, CT=768, and SS=32. Callers explicitly load randomness
+and keys and explicitly store results; the device does not source the TRNG and
+does not call the generic cyclic NTT service described above.
 
-| Register | Offset | R/W | Description |
-|----------|--------|-----|-------------|
-| CMD | `+0x00` | W | **1:** KEYGEN, **2:** ENCAPS, **3:** DECAPS |
-| BUF_SEL | `+0x08` | RW | Buffer select: 0=SEED(64B), 1=PK(800B), 2=SK(1632B), 3=CT(768B), 4=SS(32B) |
-| DIN / DOUT | `+0x10` | RW | Byte-streaming data port (auto-increment index) |
-| IDX_SET / BUF_SIZE | `+0x18` | RW | Write: set byte index; Read: selected buffer size |
-| IDX | `+0x20` | R | Current byte index |
+The executable aperture is exactly 40 bytes, `[+0x0900,+0x0928)`:
 
-5 internal buffers (3,296 bytes total).  Current RTL has stub crypto
-datapath (deterministic XOR fill); phase 2 will add real CRYSTALS-Kyber
-polynomial arithmetic.
+| Register | Offset | Access | Working Python behavior |
+|----------|--------|--------|-------------------------|
+| STATUS | `+0x00` | R byte | 0 initially; retained 2 after command completion |
+| CMD | `+0x01` | W byte | **1:** KEYGEN, **2:** ENCAPS, **3:** DECAPS |
+| BUF_SEL | `+0x08` | W byte | Low-byte selector, clamped to 0..4; resets index |
+| DIN | `+0x10` | W byte | Write selected-buffer byte and increment while in bounds |
+| DOUT | `+0x18` | R byte | Read selected-buffer byte and increment while in bounds; zero past capacity |
+| BUF_SIZE | `+0x20..+0x21` | R bytes | Selected capacity as uint16 little-endian |
+
+KEYGEN consumes all 64 retained SEED bytes as `d || z` and replaces PK and SK.
+ENCAPS consumes retained PK plus the first 32 SEED bytes as caller-provided
+coin and replaces CT and SS. DECAPS consumes retained CT and SK and replaces
+SS. Each Python command is complete before its triggering write returns, so
+BUSY=1 is not observable; selection and transfers do not clear retained DONE.
+The byte index pins at capacity. Short input preserves a buffer suffix, and
+there is no lock, task owner, capability bit, complete-span transaction,
+implicit cleanup, or wipe. These shared buffers therefore are not a protected
+secret boundary.
+
+The KDOS source declares `KEM-SEED-SIZE` as 32 while `KYBER-KEYGEN` explicitly
+loads and consumes 64 bytes. That discrepancy remains open rather than being
+silently resolved by the architecture description.
+
+A pinned zero-`d || z`/zero-coin valid-key fixture matches OpenSSL 3.5.2
+ML-KEM-512 byte for byte through keygen, encapsulation, and decapsulation. This
+qualifies deterministic interoperability for generated/well-formed keys only.
+The Python implementation is not FIPS-certified, is not constant time, uses a
+fixed 840-byte SHAKE rejection-sampling window, and does not enforce all
+external-key checks: it accepts noncanonical encapsulation keys and
+decapsulation keys with inconsistent embedded hashes that OpenSSL rejects. It
+must not be treated as a host-secret cryptography API or physical-erasure
+boundary.
+
+The current RTL at the same allocated 64-byte block is materially different:
+
+| RTL 64-bit slot | Write meaning | Read meaning |
+|-----------------|---------------|--------------|
+| `+0x00` | CMD | STATUS |
+| `+0x08` | BUF_SEL | BUF_SEL |
+| `+0x10` | DIN | DOUT |
+| `+0x18` | IDX_SET | BUF_SIZE |
+| `+0x20` | — | IDX |
+
+That RTL exposes BUSY during a multi-cycle FSM and produces deterministic XOR
+fill, not ML-KEM. The BIOS byte ABI writes CMD at `+0x01` and reads DOUT at
+`+0x18`, so it cannot operate this RTL contract (the latter read obtains
+BUF_SIZE). RTL overflow/index and invalid-selector details also differ from
+Python execution. The two implementations are separate discrepancy records;
+neither supplies value, register, or timing evidence for the other.
 
 **BIOS words:** `KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`, `KEM-KEYGEN`,
 `KEM-ENCAPS`, `KEM-DECAPS`, `KEM-STATUS@`.
 **KDOS words (§1.12–§1.13):** `KYBER-KEYGEN`, `KYBER-ENCAPS`,
-`KYBER-DECAPS`, `PQ-EXCHANGE` (hybrid X25519 + ML-KEM).
+`KYBER-DECAPS`, `PQ-DERIVE`, `PQ-EXCHANGE-INIT`, and `PQ-EXCHANGE-RESP`.
 
 ### SHA-2 (Per-Core / Micro-Cluster ISA)
 

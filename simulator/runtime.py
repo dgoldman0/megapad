@@ -48,6 +48,7 @@ from simulator.ir import (
     Unloop,
     WriteOutput,
 )
+from simulator.kem import HostedKEMService
 from simulator.memory import MMIO_BASE, AddressClass, SparseAddressSpace
 from simulator.ntt import HostedNTTService
 from simulator.platform import (
@@ -384,6 +385,7 @@ class MegaForthRuntime:
         self.spinlocks = HostedSpinlockBank(core_count=num_cores)
         self.field = HostedFieldALUService(core_count=num_cores)
         self.ntt = HostedNTTService()
+        self.kem = HostedKEMService()
         self.diagnostics = (
             HostedDiagnosticsService()
             if diagnostics is None

@@ -19,7 +19,7 @@ from shared.ntt import (
     ntt_pointwise_add,
     ntt_pointwise_multiply,
 )
-from simulator.errors import SourceError, StepBudgetExceeded
+from simulator.errors import StepBudgetExceeded
 from simulator.memory import SparseAddressSpace, UnmappedAddressError
 from simulator.ntt import (
     HostedNTTService,
@@ -178,21 +178,6 @@ def test_ntt_slice_is_exact_and_publishes_complete_ledger(
     ) == bytes(NTT_POLYNOMIAL_BYTES)
     assert loaded_ntt.ntt.status == NTT_STATUS_IDLE
     assert loaded_ntt.uart_output == b""
-
-
-def test_next_contiguous_frontier_stops_at_kem_select(
-    loaded_ntt: MegaForthRuntime,
-) -> None:
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[1584:1608])
-    assert next_source.startswith(b"\n")
-    assert next_source.endswith(b"    KBUF-SEED KEM-SEL!  64 KEM-LOAD\n")
-
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_ntt.evaluate(next_source, source_name="kdos.f:1585-1608")
-    assert caught.value.location.line == 24
-    assert caught.value.location.column == 14
-    assert caught.value.message == "unknown word b'KEM-SEL!'"
 
 
 @pytest.mark.parametrize(
