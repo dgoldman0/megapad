@@ -823,10 +823,11 @@ NTT).
 ### KEM (ML-KEM-512 Key Encapsulation)
 
 The working architectural path is a Python ML-KEM-512 value device at MMIO
-base `+0x0900`. It owns five process-global retained buffers: SEED/COIN=64
-bytes, PK=800, SK=1,632, CT=768, and SS=32. Callers explicitly load randomness
-and keys and explicitly store results; the device does not source the TRNG and
-does not call the generic cyclic NTT service described above.
+base `+0x0900`. Each emulator system or hosted runtime owns five retained
+buffers shared by its guest callers: SEED/COIN=64 bytes, PK=800, SK=1,632,
+CT=768, and SS=32. Callers explicitly load randomness and keys and explicitly
+store results; the device does not source the TRNG and does not call the
+generic cyclic NTT service described above.
 
 The executable aperture is exactly 40 bytes, `[+0x0900,+0x0928)`:
 

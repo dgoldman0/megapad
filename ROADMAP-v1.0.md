@@ -215,7 +215,10 @@ Implemented network components, bottom-up:
     P-256, custom), modes 0–12 (15 + 39 tests)
 35. ✅ **NTT Engine** — 256-point NTT/INTT, dual modulus (12 tests)
 36. ✅ **SHA-3 SHAKE Streaming** — XOF auto-squeeze
-37. ✅ **ML-KEM-512 (Kyber)** — keygen/encaps/decaps via NTT+SHA3+TRNG (11 tests)
+37. ✅ **ML-KEM-512 executable model** — deterministic
+    keygen/encaps/decaps with caller-supplied `d`, `z`, and coin through
+    ML-KEM-specific routines; ⚠ the current RTL block has an incompatible ABI
+    and non-cryptographic stub datapath
 38. ✅ **Hybrid PQ Key Exchange** — X25519 + ML-KEM + HKDF (7 tests)
 
 ### Layer 6: Architecture & Portability (Items 39–42) — ✅ DONE
