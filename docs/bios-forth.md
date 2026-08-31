@@ -596,8 +596,8 @@ Each of these operates on every lane independently: `dst[i] = srcA[i] OP srcB[i]
 | `TAND` | `( -- )` | `dst[lane] = src0[lane] AND src1[lane]`. |
 | `TOR` | `( -- )` | `dst[lane] = src0[lane] OR src1[lane]`. |
 | `TXOR` | `( -- )` | `dst[lane] = src0[lane] XOR src1[lane]`. |
-| `TMIN` | `( -- )` | `dst[lane] = min(src0[lane], src1[lane])`. |
-| `TMAX` | `( -- )` | `dst[lane] = max(src0[lane], src1[lane])`. |
+| `TEMIN` | `( -- )` | `dst[lane] = min(src0[lane], src1[lane])`. |
+| `TEMAX` | `( -- )` | `dst[lane] = max(src0[lane], src1[lane])`. |
 | `TABS` | `( -- )` | `dst[lane] = abs(src0[lane])` (signed mode). |
 
 ### Tile Multiply
@@ -616,13 +616,13 @@ Each of these operates on every lane independently: `dst[i] = srcA[i] OP srcB[i]
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TSUM` | `( -- )` | `ACC = Σ src0[lane]` — sum all lanes. |
-| `TEMIN` | `( -- )` | `ACC = min(src0[lane])` — minimum across all lanes. |
-| `TEMAX` | `( -- )` | `ACC = max(src0[lane])` — maximum across all lanes. |
+| `TMIN` | `( -- )` | `ACC = min(src0[lane])` — minimum across all lanes. |
+| `TMAX` | `( -- )` | `ACC = max(src0[lane])` — maximum across all lanes. |
 | `TPOPCNT` | `( -- )` | `ACC = Σ popcount(src0[lane])` — total bit count. |
 | `TL1` | `( -- )` | `ACC = Σ |src0[lane]|` — L1 norm. |
 | `TSUMSQ` | `( -- )` | `ACC = Σ src0[lane]²` — sum of squares. |
-| `TMINIDX` | `( -- )` | Minimum with index: ACC0 = min value, ACC1 = lane index. |
-| `TMAXIDX` | `( -- )` | Maximum with index: ACC0 = max value, ACC1 = lane index. |
+| `TMINIDX` | `( -- )` | Minimum with index: ACC0 = lane index, ACC1 = min value. |
+| `TMAXIDX` | `( -- )` | Maximum with index: ACC0 = lane index, ACC1 = max value. |
 
 ### Tile System
 

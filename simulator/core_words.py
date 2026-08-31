@@ -459,6 +459,45 @@ def _tile_align(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.tile_align_dictionary(context)
 
 
+def _tile_mode_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    runtime.tile.set_mode(context.data.pop())
+
+
+def _tile_control_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.tile.set_control(context.data.pop())
+
+
+def _tile_source0_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.tile.set_source0(context.data.pop())
+
+
+def _tile_source1_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.tile.set_source1(context.data.pop())
+
+
+def _tile_destination_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.tile.set_destination(context.data.pop())
+
+
+def _tile_accumulator_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.tile.accumulator_word())
+
+
 def _allot(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.allot_dictionary(context.data.pop(), context)
 
@@ -1331,6 +1370,32 @@ def install_core(runtime: MegaForthRuntime) -> None:
             lambda context: _dictionary_bounds_off(runtime, context),
         ),
         (b"TALIGN", lambda context: _tile_align(runtime, context)),
+        (b"TMODE!", lambda context: _tile_mode_store(runtime, context)),
+        (
+            b"TCTRL!",
+            lambda context: _tile_control_store(runtime, context),
+        ),
+        (
+            b"TSRC0!",
+            lambda context: _tile_source0_store(runtime, context),
+        ),
+        (
+            b"TSRC1!",
+            lambda context: _tile_source1_store(runtime, context),
+        ),
+        (
+            b"TDST!",
+            lambda context: _tile_destination_store(runtime, context),
+        ),
+        (b"TADD", lambda _context: runtime.tile.add()),
+        (b"TSUB", lambda _context: runtime.tile.subtract()),
+        (b"TSUM", lambda _context: runtime.tile.sum()),
+        (b"TMIN", lambda _context: runtime.tile.minimum()),
+        (b"TMAX", lambda _context: runtime.tile.maximum()),
+        (
+            b"ACC@",
+            lambda context: _tile_accumulator_fetch(runtime, context),
+        ),
         (b"ALLOT", lambda context: _allot(runtime, context)),
         (b",", lambda context: _comma(runtime, context)),
         (b"C,", lambda context: _c_comma(runtime, context)),

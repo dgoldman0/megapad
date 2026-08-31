@@ -52,6 +52,10 @@ The implemented slices provide:
 - a per-runtime pseudo-BIOS diagnostic profile with persistent semantic-work
   accounting, retained non-destructive BIST observations, a real four-operation
   tile value self-test, and logical no-cache controls/zero cache counters;
+- a retained one-core semantic tile service for four integer lane widths,
+  wrapping/saturating ADD/SUB, signed-aware SUM/MIN/MAX, low-byte control
+  registers, completed-operation accounting, and the ACC/TSRC0/TDST state
+  shared with the hosted Field ALU;
 - a routed per-runtime AES-128/256-GCM service shared by BIOS words and direct
   virtual MMIO, backed by a portable AES/GHASH value model and exact native
   command, status, fault, and incremental guest-transfer semantics;
@@ -627,8 +631,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–2985 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, the complete Arena allocator, semantic `IDLE`, and Buffer registry/constructors/inspection/Arena integration; blank separators have no definitions |
-| 2986 onward | Next uncovered frontier | The §3 separator precedes `B.SUM`; its first unadmitted hardware operation is `TMODE!` at line 3000 |
+| 39–3109 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, the complete Arena allocator, semantic `IDLE`, Buffer construction, and the byte tile/scalar Buffer operations; blank separators have no definitions |
+| 3110 onward | Next uncovered frontier | FP16/BF16 Buffer operations begin next; `FP16-MODE` in `F.SUM` at line 3127 is the first unadmitted word |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -670,9 +674,32 @@ free-list allocation address by recording `XMEM-HERE` first; and Arena
 destruction unlinks a descriptor without reclaiming its link node or
 undefining its now-dangling constant. `ARENA-RESET` does no unregistration,
 and dictionary rollback after registration does not repair `BUF-HEAD` or
-`BUF-COUNT`. Later slices continue the same contiguous unchanged prefix
-through the tile operations toward the persistent evaluator, ordinary checked
-module-loader surface, and deterministic cooperative task scheduler.
+`BUF-COUNT`.
+
+The next 124-line, 4,170-byte fixture is exact `kdos.f` lines 2986–3109
+(SHA-256
+`91d0fc5a15da85c31f9e4c4fcf17691c2bd32ba306b6b5bc338a7cf8b1ab96c4`).
+It publishes six byte Buffer operations plus `BTMP-NTILES` scratch unchanged.
+The hosted BIOS seam
+retains TMODE/TCTRL and tile addresses, shares ACC/TSRC0/TDST with Field-ALU
+words, processes exact complete mapped 64-byte spans, and counts completed
+operations. Its integer ADD/SUB and reductions cover 8/16/32/64-bit lane
+modes; the admitted KDOS words themselves always force unsigned-byte mode.
+FP16/BF16 remains the next explicit capability boundary.
+
+The source's physical-tail and loop behavior remains visible. Rounded-up
+reductions include bytes after a partial logical buffer; ADD/SUB write complete
+tiles, trust only `src1`'s count, and use global scratch. Multi-tile B.MIN/B.MAX
+mistake the running byte extreme for the next TSRC0 address. B.SCALE is scalar
+and wraps products modulo 256 rather than clamping. Empty B.MIN/B.MAX return
+zero, while empty B.SUM/B.ADD/B.SUB/B.SCALE enter `0 DO` and cannot complete
+normally before 64-bit loop-index wrap; an invalid memory access may fault
+first. The semantic service accepts exact unaligned
+spans because existing backends disagree about alignment and Arena supplies
+only eight-byte alignment; crossing, wrapping, and MMIO spans fail closed.
+Later slices continue the same contiguous prefix through FP Buffer operations
+toward the persistent evaluator, ordinary checked module-loader surface, and
+deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

@@ -176,7 +176,8 @@ secret boundary, or security proof.
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed buffers with 32-byte descriptors and an
   allocation-backed linked registry (no fixed slot limit)
-- **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
+- **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, and B.SUB use MEX;
+  B.SCALE is a scalar byte loop
 - **Kernel registry**: Metadata for compute kernels (up to 16 registered)
 - **7 sample kernels**: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
 - **11 advanced kernels**: kclamp, kavg, khistogram, kdelta, knorm, kpeak, krms-buf, kcorrelate, kconvolve3, kinvert, kcount
@@ -773,11 +774,12 @@ my-pipe P.BENCH             \ Time each step
 
 ## 6. Tile Engine Integration (v0.2)
 
-KDOS v0.2 makes full use of the MEX tile engine for all buffer operations.
+KDOS v0.2 uses the MEX tile engine for reductions and binary Buffer
+operations. `B.SCALE` remains an ordinary byte-at-a-time Forth loop.
 
 ### 6.1 Accumulator Readback
 
-**Critical addition**: ACC@ word reads the 256-bit accumulator back to the Forth stack.
+**Critical addition**: ACC@ reads ACC0, the low 64 bits of the 256-bit accumulator, back to the Forth stack.
 
 Before v0.4, reductions like TSUM/TMIN/TMAX wrote results to ACC0-ACC3 CSRs but there was no way to read them from Forth. Now:
 
@@ -805,6 +807,17 @@ B.SUM demonstrates multi-tile accumulation:
     LOOP
     DROP ACC@ ;           \ Read final result
 ```
+
+The present implementation rounds byte counts up to whole tiles and does not
+mask a final partial tile, so its trailing physical bytes participate. The
+same whole-tile rule lets `B.ADD`/`B.SUB` overwrite bytes beyond a partial
+logical destination. Their loop count comes only from `src1`; the stated
+equal-size precondition is not checked.
+
+`B.MIN` and `B.MAX` are currently correct only for one tile. Their stack order
+causes iterations after the first to program the running extreme into TSRC0
+instead of the advanced buffer address. This is an open KDOS source defect,
+not tile-engine behavior.
 
 ### 6.3 Element-Wise Operations
 

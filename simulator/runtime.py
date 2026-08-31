@@ -67,6 +67,7 @@ from simulator.platform import (
     SYSINFO_NUM_FULL,
 )
 from simulator.sha2 import HostedSHA2Service
+from simulator.tile import HostedTileService
 from simulator.spinlocks import HostedSpinlockBank
 from simulator.source import (
     ASCII_SPACE,
@@ -488,6 +489,11 @@ class MegaForthRuntime:
             HostedDiagnosticsService()
             if diagnostics is None
             else diagnostics.clone()
+        )
+        self.tile = HostedTileService(
+            self.memory,
+            self.field,
+            account_operation=self.diagnostics.account_tile_operation,
         )
         self._runtime_token = object()
         self._next_suspension_sequence = 1

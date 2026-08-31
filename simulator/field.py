@@ -8,6 +8,7 @@ cycles, stalls, or the RTL datapath.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -66,8 +67,34 @@ class HostedFieldALUService:
     def accumulator(self, core_id: int) -> bytes:
         """Return one diagnostic ACC0-ACC3 snapshot in little-endian order."""
 
-        state = self._state(core_id)
-        return b"".join(value.to_bytes(8, "little") for value in state.accumulator)
+        return b"".join(
+            value.to_bytes(8, "little")
+            for value in self.accumulator_words(core_id)
+        )
+
+    def accumulator_words(self, core_id: int) -> tuple[int, ...]:
+        """Return the shared legacy ACC register bank from low to high."""
+
+        return tuple(self._state(core_id).accumulator)
+
+    def replace_accumulator_words(
+        self,
+        core_id: int,
+        words: Iterable[int],
+    ) -> None:
+        """Replace ACC0--ACC3 without changing Field previous-result state."""
+
+        try:
+            values = tuple(words)
+        except TypeError as exc:
+            raise TypeError("legacy accumulator words must be iterable") from exc
+        if len(values) != _ACCUMULATOR_QWORDS:
+            raise ValueError("legacy accumulator requires exactly four words")
+        checked = [
+            self._cell(value, label=f"legacy accumulator word {index}")
+            for index, value in enumerate(values)
+        ]
+        self._state(core_id).accumulator[:] = checked
 
     def operand_address(self, core_id: int) -> int:
         """Return one diagnostic TSRC0 snapshot."""

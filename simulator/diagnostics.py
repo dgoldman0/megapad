@@ -107,6 +107,12 @@ class HostedDiagnosticsService:
         if self._perf_enabled:
             self._perf_cycles = u64(self._perf_cycles + 1)
 
+    def account_tile_operation(self) -> None:
+        """Count one completed hosted tile operation with cell wrapping."""
+
+        if self._perf_enabled:
+            self._perf_tileops = u64(self._perf_tileops + 1)
+
     def clone(self) -> HostedDiagnosticsService:
         """Return an independent copy suitable for one runtime instance."""
 

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from simulator.errors import ForthAbort, SourceError
+from simulator.errors import ForthAbort
 from simulator.memory import HBW_BASE
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
@@ -124,29 +124,32 @@ def test_buffer_slice_is_exact_and_publishes_the_complete_ledger(
     assert runtime.uart_output == b""
 
 
-def test_next_contiguous_definition_stops_at_the_first_tile_mmio_word(
+def test_next_contiguous_tile_buffer_slice_is_now_admitted(
     loaded_buffer: MegaForthRuntime,
 ) -> None:
-    runtime = loaded_buffer
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[LAST_LINE:3000])
-    here_before = runtime.dictionary.here
-    latest_before = runtime.dictionary.latest
+    assert lines[LAST_LINE] == b"\n"
+    next_source = b"".join(lines[LAST_LINE:3109])
+    assert next_source.count(b"\n") == 124
+    assert next_source.startswith(b"\n\\ ====")
+    assert next_source.endswith(b"    2DROP ;\n")
 
-    with pytest.raises(SourceError, match="unknown word b'TMODE!'") as caught:
-        runtime.evaluate(
-            next_source,
-            source_name=f"kdos.f@{MEGAPAD_REVISION}:2986-3000",
-        )
+    result = loaded_buffer.evaluate(
+        next_source,
+        source_name=f"kdos.f@{MEGAPAD_REVISION}:2986-3109",
+    )
 
-    assert next_source.count(b"\n") == 15
-    assert caught.value.location.line == 15
-    assert caught.value.location.column == 6
-    assert runtime.find("B.SUM") is None
-    assert runtime.dictionary.here == here_before
-    assert runtime.dictionary.latest == latest_before
-    assert runtime.main_context.data.snapshot() == ()
-    assert runtime.main_context.returns.snapshot() == ()
+    assert tuple(word.name for word in result.definitions) == (
+        b"B.SUM",
+        b"B.MIN",
+        b"B.MAX",
+        b"BTMP-NTILES",
+        b"B.ADD",
+        b"B.SUB",
+        b"B.SCALE",
+    )
+    assert loaded_buffer.main_context.data.snapshot() == ()
+    assert loaded_buffer.main_context.returns.snapshot() == ()
 
 
 def test_bank0_buffer_layout_registry_and_byte_operations(

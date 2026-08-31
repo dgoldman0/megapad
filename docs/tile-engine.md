@@ -69,7 +69,13 @@ The tile engine is controlled entirely through **Control/Status Registers**
 | `TSRC1` | `0x17` | `TSRC1!` | **Source tile 1** — pointer to the second input tile |
 | `TDST` | `0x18` | `TDST!` | **Destination tile** — where results are written |
 
-All three must point to **64-byte-aligned** addresses.
+Software should normally make all three addresses **64-byte aligned**. The
+current backends do not yet agree on misalignment: internal RTL aliases down
+to a tile boundary, the untimed executable emulator uses the exact address,
+and strict-cycle transport rejects an unaligned beat. KDOS `ARENA-BUFFER`
+guarantees only eight-byte alignment. Until that discrepancy is resolved,
+portable code must align explicitly; the hosted semantic simulator uses the
+exact address and requires the complete 64-byte span to fit one mapped region.
 
 ### Mode Register (TMODE, CSR `0x14`)
 
@@ -840,6 +846,15 @@ for each chunk automatically:
 | `B.ADD` | `( src1 src2 dst -- )` | Element-wise add using tile TADD per tile pair |
 | `B.SUB` | `( src1 src2 dst -- )` | Element-wise subtract using tile TSUB per tile pair |
 
+This table names the intended operation family, not stronger validation than
+the current source performs. Every word above forces unsigned-byte TMODE.
+Rounded-up final tiles are processed in full, so reductions include trailing
+physical bytes and ADD/SUB can overwrite a partial destination tail. ADD/SUB
+take their count only from `src1`. Current multi-tile B.MIN/B.MAX also have a
+stack-order defect: after the first tile they use the running byte extreme as
+TSRC0 instead of the advanced data address. `B.SCALE` is a separate scalar
+modulo-256 byte loop, not a MEX operation.
+
 **How `B.SUM` works internally:**
 
 1. Set `TMODE` to 8-bit unsigned (`0`)
@@ -852,7 +867,7 @@ for each chunk automatically:
 
 **How `B.ADD` works internally:**
 
-1. Compute the number of tiles: `buffer-size / 64`
+1. Compute the ceiling tile count from `src1`'s byte size
 2. For each tile index:
    - Point `TSRC0` at src1's tile, `TSRC1` at src2's tile, `TDST` at dst's tile
    - Execute `TADD`

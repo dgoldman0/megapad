@@ -262,8 +262,9 @@ one-core topology qwords to report exactly one full core.
 
 The hosted diagnostic profile is intentionally backend-local. `PERF-CYCLES`
 is a persistent, wrapping count of dispatched semantic work, not
-wall time, instructions, or MP64 cycles; stall, tile-operation, and external-
-beat counters remain zero until those specific services exist. BIST getters
+wall time, instructions, or MP64 cycles. Stall and external-beat counters
+remain zero; `PERF-TILEOPS` counts completed operations in the admitted
+semantic tile service. BIST getters
 retain the boot/profile snapshot, while destructive `BIST-FULL` and
 `BIST-QUICK` fail before changing guest memory or retained BIST state. Their
 admitted, faulting dispatch still counts as semantic work. The tile
@@ -273,6 +274,29 @@ logical optimization state, dispatch remains immediately coherent, and its
 hit/miss observations are zero. None of these diagnostic substitutions is
 evidence for pipeline timing, physical RAM coverage, tile hardware, or a
 physical instruction cache.
+
+The admitted one-core legacy tile service binds `TMODE!`, `TCTRL!`,
+`TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TSUM`, `TMIN`, `TMAX`, and
+`ACC@`. It retains low-byte TMODE/TCTRL, full-cell addresses, and ACC0--ACC3;
+ACC, TSRC0, and TDST are the same state observed by the hosted Field-ALU
+surface. TCTRL zero-first is consumed only by a successful reduction, while
+accumulate adds the new reduction to the existing modulo-2^256 ACC value even
+for TMIN/TMAX. Binary operations read both complete sources before writing the
+destination, so valid aliasing observes one pre-operation pair of tiles.
+
+Integer widths 8, 16, 32, and 64 implement wrapping or saturating ADD/SUB and
+signed-aware SUM/MIN/MAX. FP16/BF16 and all unbound tile/TACC words fail rather
+than silently using integer byte behavior. Each operand is the exact addressed
+64-byte span and must fit one ordinary mapped region; MMIO and crossing or
+wrapping spans are rejected before destination or accumulator publication.
+This exact-address rule is a hosted contract choice while the prose, untimed
+emulators, RTL, and strict-cycle transport still disagree about unaligned tile
+addresses. Low-byte CSR writes and full 256-bit reductions follow the
+documented Python architectural oracle. The native C++ and RTL TMODE/TCTRL
+write paths retain higher bits, while RTL's legacy integer reduction
+accumulator is narrower; both remain explicit discrepancies.
+The service makes no MEX encoding, CSR, scratchpad, latency, flag, pipeline, or
+hardware-throughput claim.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
@@ -977,8 +1001,8 @@ native-code emission, executing a `]` compiled while already in compile state,
 and compiler state persistent across separate evaluator calls remain pending;
 that unsupported `]` form fails during source compilation.
 
-The contiguous source frontier now ends at line 2985. Exact unchanged lines
-2797 through 2985 execute the Buffer registry, descriptor accessors, ordinary,
+Exact unchanged lines 2797 through 2985 execute the Buffer registry,
+descriptor accessors, ordinary,
 HBW, XMEM, and Arena constructors, byte fill/inspection, and Arena destruction
 integration against the same guest dictionary and sparse memory used by prior
 slices. There is no host-side buffer object table. `(BUF-REG)` appends a
@@ -1009,8 +1033,27 @@ still contain the destroyed descriptor address. These are recorded source
 behaviors, not reasons for simulator-only repair. `ARENA-RESET` makes Arena
 storage reusable without unregistering its Buffer descriptors, and dictionary
 rollback after a publication does not repair `BUF-HEAD` or `BUF-COUNT`; both
-paths can therefore leave stale registry state. The next definition is
-`B.SUM`; `TMODE!` at line 3000 is the next unsupported hardware seam.
+paths can therefore leave stale registry state.
+
+The contiguous source frontier now ends at line 3109. Exact unchanged lines
+2986 through 3109 publish `B.SUM`, `B.MIN`, `B.MAX`, `BTMP-NTILES`, `B.ADD`,
+`B.SUB`, and `B.SCALE`. The five tile-backed words force unsigned-byte TMODE;
+descriptor width changes byte and tile counts but never selects wider lanes.
+`B.SCALE` never reaches the tile service: it scales exactly `B.BYTES` through
+scalar `C@`, wrapping multiplication, `255 AND`, and `C!`.
+
+`B.TILES` rounds up, but the tile instructions always touch 64 physical bytes.
+SUM/MIN/MAX therefore include a partial tile's trailing bytes, while ADD/SUB
+can read or overwrite beyond the logical source/destination. ADD/SUB take their
+count only from `src1`, do not validate the other descriptors, and share global
+`BTMP-NTILES`. B.MIN/B.MAX are correct for one tile, but after the first
+iteration their stack order makes `DUP TSRC0!` install the running extreme as
+the next address. Empty MIN/MAX explicitly return zero; empty SUM, ADD, SUB,
+and SCALE use `0 DO`, enter the body, and cannot complete normally before
+64-bit index wrap, although an invalid memory access can fault first. These
+defects are pinned rather than repaired by host
+objects. The next definition is `F.SUM`; `FP16-MODE` at line 3127 is the next
+unsupported semantic BIOS seam.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
@@ -1129,7 +1172,10 @@ equivalent exists, a differential vector.  The independent APT byte and state
 oracles are the model for this separation: production encoders and decoders do
 not define their own expected results. The hosted tile self-test is admitted
 against the architectural Python emulator's corresponding public status,
-failure mask, and scratch-preservation vector.
+failure mask, and scratch-preservation vector. The integer legacy tile service
+also runs decoded `TADD`, `TSUB`, `TSUM`, `TMIN`, and `TMAX` instructions in
+the Python architectural emulator for every admitted lane width, comparing the
+complete destination, ACC0--ACC3, and TCTRL after each aligned in-bounds step.
 
 ## 11. Initial implementation sequence
 

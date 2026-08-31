@@ -528,8 +528,8 @@ of compiled code.
 | 179 | `TEMAX` | `( -- )` | | Tile element-wise max, writes to DST (t.max) |
 | 180 | `TABS` | `( -- )` | | Tile element-wise absolute value, writes to DST (t.abs) |
 | 181 | `TSUMSQ` | `( -- )` | | Tile sum-of-squares reduction, result in ACC (t.sumsq) |
-| 182 | `TMINIDX` | `( -- )` | | Tile min-with-index reduction, ACC0=min, ACC1=index (t.minidx) |
-| 183 | `TMAXIDX` | `( -- )` | | Tile max-with-index reduction, ACC0=max, ACC1=index (t.maxidx) |
+| 182 | `TMINIDX` | `( -- )` | | Tile min-with-index reduction, ACC0=index, ACC1=min (t.minidx) |
+| 183 | `TMAXIDX` | `( -- )` | | Tile max-with-index reduction, ACC0=index, ACC1=max (t.maxidx) |
 | 184 | `TWMUL` | `( -- )` | | Tile widening multiply: 8b×8b→16b, 16b×16b→32b (t.wmul) |
 | 185 | `TMAC` | `( -- )` | | Tile multiply-accumulate: DST += SRC0 × SRC1 (t.mac) |
 | 186 | `TFMA` | `( -- )` | | Tile fused multiply-add: DST = SRC0 × SRC1 + DST (t.fma) |

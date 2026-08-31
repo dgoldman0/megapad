@@ -852,12 +852,12 @@ leave the floor unchanged, disable retry, and abort.
 
 The contiguous hosted frontier now includes the complete unchanged userland
 and Arena sections plus Buffer's general `IDLE`, registry, constructors,
-inspection words, and Arena integration through line 2985. Their checked
-bounds, Bank-0/XMEM HERE transitions, cross-zone definitions, allocator
-dispatch, descriptor lifecycle, snapshots, scoped stack, IDL block/wake
-boundary, and Buffer publication order are executable semantic behavior rather
-than reporting-only shims. The next definition is `B.SUM`; its first
-unadmitted hardware seam is `TMODE!` at line 3000.
+inspection, Arena integration, and byte operations through line 3109. Their
+checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
+allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
+block/wake boundary, Buffer publication order, and integer tile effects are
+executable semantic behavior rather than reporting-only shims. The next
+definition is `F.SUM`; its first unadmitted seam is `FP16-MODE` at line 3127.
 
 ---
 
@@ -1056,8 +1056,13 @@ registry, four field readers, three ordinary constructors, byte sizing/fill,
 inspection, and Arena integration. This 189-line, 7,191-byte slice is admitted
 with SHA-256
 `eb4d6d1bf072f854c667e86f428f49370bde4cd06e4770bd095d5f549906b2f1`.
-The next definition is `B.SUM`; its first unsupported operation is `TMODE!` at
-line 3000, so tile-aware operations remain outside this frontier.
+Exact lines 2986 through 3109 publish seven definitions—six Buffer operations
+plus `BTMP-NTILES` scratch—in 124
+lines and 4,170 bytes, with SHA-256
+`91d0fc5a15da85c31f9e4c4fcf17691c2bd32ba306b6b5bc338a7cf8b1ab96c4`.
+Hosted qualification covers complete-tile integer effects and retains the
+source defects documented in §3. FP16/BF16 operations remain outside this
+frontier; `FP16-MODE` in `F.SUM` at line 3127 is the next unsupported word.
 
 ---
 
@@ -1152,27 +1157,41 @@ dictionary history.
 
 ## §3 Tile-Aware Buffer Operations
 
-These words use the **MEX tile engine** (hardware SIMD) to perform fast
-bulk operations on buffers.  They iterate over the buffer one 64-byte tile
-at a time, using tile registers `TSRC0!`, `TSRC1!`, `TDST!`, and tile
-instructions like `TSUM`, `TMIN`, `TMAX`, `TADD`, `TSUB`.
-
-The default tile mode is `0` (8-bit unsigned, 64 lanes per tile).
+Five words use the **MEX tile engine** (hardware SIMD) one 64-byte tile at a
+time, through `TSRC0!`, `TSRC1!`, `TDST!`, `TSUM`, `TMIN`, `TMAX`, `TADD`,
+and `TSUB`. `B.SCALE` is instead an ordinary scalar Forth loop. Every
+tile-backed word unconditionally selects mode `0` (8-bit unsigned, 64 lanes);
+the descriptor width affects `B.BYTES` and `B.TILES`, not tile lane width.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `B.SUM` | `( desc -- n )` | Sum all bytes in the buffer using tile-accelerated reduction.  Iterates over tiles, accumulating with `TSUM`.  Returns the total. |
-| `B.MIN` | `( desc -- n )` | Find the minimum byte value across the entire buffer.  Uses per-tile `TMIN`, then takes the minimum across tiles. |
-| `B.MAX` | `( desc -- n )` | Find the maximum byte value.  Mirror of `B.MIN`. |
-| `B.ADD` | `( src1 src2 dst -- )` | Element-wise addition of two buffers into a destination: `dst[i] = src1[i] + src2[i]`.  All three buffers must have the same tile count.  Uses `TADD` per tile — very fast. |
-| `B.SUB` | `( src1 src2 dst -- )` | Element-wise subtraction: `dst[i] = src1[i] − src2[i]`.  Uses `TSUB` per tile. |
-| `B.SCALE` | `( n desc -- )` | Multiply every byte in the buffer by *n* in-place.  This is a byte-by-byte loop (not tile-accelerated), clamping results to 0–255. |
+| `B.SUM` | `( desc -- n )` | Sum every physical lane in the rounded-up tile span with `TSUM`; a partial logical tile includes its trailing bytes. |
+| `B.MIN` | `( desc -- n )` | Reduce one tile correctly. The current multi-tile source has the address defect described below. |
+| `B.MAX` | `( desc -- n )` | Reduce one tile correctly. The current multi-tile source has the address defect described below. |
+| `B.ADD` | `( src1 src2 dst -- )` | Wrapping unsigned-byte `TADD` over the tile count taken from `src1`; complete destination tiles are written. |
+| `B.SUB` | `( src1 src2 dst -- )` | Wrapping unsigned-byte `TSUB` over the tile count taken from `src1`; complete destination tiles are written. |
+| `B.SCALE` | `( n desc -- )` | Scale exactly `B.BYTES` bytes with scalar `C@`/`C!`; `255 AND` wraps each product modulo 256 rather than clamping it. |
+
+These words do not validate descriptor types, widths, equal source/destination
+sizes, or logical-tail padding. `B.ADD` and `B.SUB` can read beyond a shorter
+source and overwrite bytes after a partial destination. `BTMP-NTILES` is shared
+global scratch. `B.MIN` and `B.MAX` retain `(next-address running-extreme)`
+after their first iteration, but the next `DUP TSRC0!` consumes the extreme as
+the address. Multi-tile calls therefore reduce a low Bank-0 address in later
+iterations rather than the next data tile.
+
+`B.MIN` and `B.MAX` explicitly return zero for an empty buffer. The other four
+words use `0 DO`; when their byte/tile count is zero, the loop executes and
+cannot complete normally until the 64-bit index wraps, although an invalid
+memory access can fault first. Empty calls are not
+zero-trip safe. These are current source behaviors, not requirements for a
+future corrected Buffer API.
 
 **Example — tile-accelerated statistics:**
 ```forth
 my-signal B.SUM .    \ print the sum of all bytes
-my-signal B.MIN .    \ print the minimum byte
-my-signal B.MAX .    \ print the maximum byte
+my-signal B.MIN .    \ one physical tile is currently the safe domain
+my-signal B.MAX .    \ one physical tile is currently the safe domain
 ```
 
 ---
