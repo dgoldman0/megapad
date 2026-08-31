@@ -35,6 +35,7 @@ organized by their source sections in `kdos.f` and `networking.f`.
    - [§1.11 NTT Engine](#111-ntt-engine)
    - [§1.12 ML-KEM-512 (Kyber)](#112-ml-kem-512-kyber)
    - [§1.13 Hybrid PQ Key Exchange](#113-hybrid-pq-key-exchange)
+   - [HBW Math RAM Allocator](#hbw-math-ram-allocator)
    - [§1.15 Userland Memory Isolation](#115-userland-memory-isolation)
 2. [§2 Buffer Subsystem](#2-buffer-subsystem)
 3. [§3 Tile-Aware Buffer Operations](#3-tile-aware-buffer-operations)
@@ -691,8 +692,8 @@ a single 32-byte hybrid shared secret.
 INIT and RESP first populate `_PQ-CAT` as `_PQ-SS-X || _PQ-SS-K`.
 `PQ-DERIVE` assumes that 64-byte concatenation is already present, performs
 SHA3-HMAC HKDF-Extract with the 32-zero-byte empty-salt convention, and expands
-32 bytes with the literal
-9-byte info string `pq-hybrid`. `PQ-EXCHANGE-INIT` first performs X25519,
+32 bytes with the literal 9-byte info string `pq-hybrid`.
+`PQ-EXCHANGE-INIT` first performs X25519,
 consumes 32 `RANDOM8` bytes into `_PQ-COIN`, publishes the ML-KEM ciphertext,
 and only then derives the final key. `PQ-EXCHANGE-RESP` likewise completes
 X25519 and ML-KEM decapsulation before derivation. Their returned status is
@@ -715,8 +716,8 @@ extract succeeds but expand later contends or fails, `_PQ-PRK` has also been
 published while the final-key output remains unchanged. A responder has
 likewise completed its raw stages before either derivation failure. Initiator
 callers must keep ciphertext and final-key output disjoint when both values
-must survive, because the later key publication may
-overwrite an overlapping ciphertext prefix. Ordinary external inputs are
+must survive, because the later key publication may overwrite an overlapping
+ciphertext prefix. Ordinary external inputs are
 consumed before final output, but callers must not alias the private PQ or
 HMAC/HKDF scratch.
 
@@ -726,8 +727,66 @@ hostile-key validator. This construction is therefore qualified as the exact
 KDOS application composition and its byte values, lifecycle, and failures—not
 as a standardized hybrid KEM, a security proof, constant-time execution, or a
 protected secret boundary. Exact unchanged lines 1635 through 2043 advance the
-contiguous hosted frontier to the blank line immediately before the HBW
-allocator section; `HBW-BASE` at line 2070 is the next missing BIOS word.
+contiguous hosted frontier to the blank line immediately before the now-admitted
+HBW allocator section.
+
+---
+
+### HBW Math RAM Allocator
+
+The source repeats the `§1.12` section number for this block even though it
+follows §1.13; that numbering discrepancy is retained rather than silently
+renumbering the executable source. The allocator reads its geometry through
+the BIOS words `HBW-BASE` and `HBW-SIZE` and owns only two ordinary dictionary
+variables:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `HBW-BASE` | `( -- addr )` | BIOS word reading the bound SysInfo HBW base qword. |
+| `HBW-SIZE` | `( -- u )` | BIOS word reading the bound SysInfo HBW size qword. |
+| `HBW-HERE` | `( -- a-addr )` | Variable containing the shared next-allocation pointer. |
+| `HBW-LIMIT` | `( -- a-addr )` | Variable containing the shared exclusive limit. |
+| `HBW-INIT` | `( -- )` | Reload `HBW-HERE` and `HBW-LIMIT` from current SysInfo geometry. |
+| `HBW-ALLOT` | `( u -- addr )` | Return the old pointer and advance exactly `u`; ordinary overflow emits `HBW overflow` and aborts before changing the pointer. |
+| `HBW-ALLOT?` | `( u -- addr ior )` | Checked counterpart returning `(0,-1)` on ordinary overflow with the pointer unchanged. |
+| `HBW-TALIGN` | `( -- )` | Round `HBW-HERE` upward to a 64-byte boundary without allocating or checking the limit. |
+| `HBW-RESET` | `( -- )` | Reset the shared pointer to the current SysInfo base. |
+| `HBW-FREE` | `( -- u )` | Return `HBW-LIMIT - HBW-HERE`. |
+| `.HBW` | `( -- )` | Render live base, size, used, and free cells in the current numeric base using signed `.`. |
+
+`HBW-INIT` runs once while the block loads. Zero-byte and exact-fit allocations
+succeed; allocation does not align, write, or clear returned storage. The
+pointer is shared by every context in one runtime and has no owner, lock,
+ledger, floor, individual free, or rollback. `HBW-RESET` neither wipes bytes
+nor revokes stale addresses, so callers must coordinate allocation and bulk
+reuse themselves. Separate simulator runtimes retain independent guest memory
+and allocator variables.
+
+The allocator treats the complete advertised span as available. Separately,
+`graphics.f` places its framebuffer at `HBW-BASE + 0x200000` without advancing
+`HBW-HERE`; allocation into the third MiB can therefore overlap an active
+framebuffer unless the composing system reserves that range cooperatively.
+
+The ordinary qualified domain uses a mapped HBW span, a pointer within that
+span, and a request no larger than the remaining capacity. Although the stack
+comment calls the request `u`, both allocation words add before using signed
+`>` and perform no wrap check. A high-cell request can therefore wrap the new
+pointer and be reported as success; for example, request `-1` as a cell moves
+the canonical base backward by one. `HBW-TALIGN` also has no bound check and
+can cross a configured limit that is not 64-byte aligned. These source defects
+are reproduced and documented, not repaired by a simulator-only allocator.
+
+Canonical hardware and emulator geometry is base `0xFFD0_0000`, size 3 MiB.
+The hosted factory can also represent an absent HBW region and then reports
+base/size `(0,0)`; an ordinary small, nonwrapping positive allocation fails
+while zero allocation succeeds. A configured-zero emulator instead retains
+the fixed base with size zero. Canonical hardware is unaffected, and this
+record does not choose a permanent absent-region convention.
+
+Exact unchanged lines 2044 through 2108 define all nine source words and run
+the load-time initializer over the two dynamic SysInfo-backed BIOS reads. The
+contiguous hosted frontier now ends at line 2108. External-memory source begins
+at line 2110, with `EXT-MEM-BASE` at line 2163 as the next missing BIOS word.
 
 ---
 

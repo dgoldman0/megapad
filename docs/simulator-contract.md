@@ -709,9 +709,46 @@ does not reject an all-zero X25519 result; and the raw KEM contract accepts
 some malformed fixed-size keys. Admission proves exact source composition,
 values, state, and failure ordering. It is not a standardized hybrid-KEM
 claim, security proof, FIPS validation, constant-time claim, hostile-key
-validation, concurrency safety, or protected host-secret boundary. The
-contiguous source frontier ends at line 2043; the HBW allocator begins next,
-with `HBW-BASE` at line 2070 as its first missing BIOS dependency.
+validation, concurrency safety, or protected host-secret boundary.
+
+The admitted HBW slice installs `HBW-BASE` and `HBW-SIZE` as semantic BIOS
+reads of SysInfo `+0x20` and `+0x28`, respectively. They always read the
+currently bound sparse-memory geometry rather than copying host constants into
+the dictionary. Exact unchanged `kdos.f` lines 2044 through 2108 then define
+`HBW-HERE`, `HBW-LIMIT`, `HBW-INIT`, `HBW-ALLOT`, `HBW-ALLOT?`,
+`HBW-TALIGN`, `HBW-RESET`, `HBW-FREE`, and `.HBW`, and execute `HBW-INIT` at
+load time.
+
+Those two variables are runtime-global guest state shared by all contexts.
+There is no task/core owner, lock, transaction, allocation ledger, floor,
+individual free, or automatic wipe. Allocation returns the old pointer and
+advances by exactly the supplied cell without touching storage; zero and exact
+fit succeed. Ordinary checked overflow returns `(0,-1)`, while the aborting
+form emits `HBW overflow` and performs task `ABORT`; both leave the pointer
+unchanged because their store follows the comparison. `HBW-TALIGN` rounds the
+pointer up to 64 bytes. `HBW-RESET` rereads the base but does not clear memory,
+revoke old addresses, or synchronize callers. `.HBW` reads live state and uses
+the current numeric base plus signed `.` formatting.
+
+The allocator reserves none of the advertised span for other subsystems.
+`graphics.f` independently chooses `HBW-BASE + 0x200000` for its framebuffer
+without moving `HBW-HERE`, so an allocation entering the third MiB may overlap
+that framebuffer. Hosted execution preserves this composition requirement and
+does not invent a hidden reservation.
+
+The admitted allocation domain requires the current pointer and a nonwrapping
+request to stay within the mapped HBW span. The source names the request `u`
+but adds before applying signed `>` and performs no wrap check, so high-cell
+requests can wrap and succeed. Alignment is also unchecked and can cross a
+configured limit that is not 64-byte aligned. Canonical base
+`0xFFD0_0000`/size 3 MiB is aligned. The hosted factory can explicitly model
+no HBW and then reports `(0,0)`; the emulator's configured-zero edge instead
+retains fixed `HBW_BASE` with size zero. These unqualified edge discrepancies
+are reproduced and recorded without choosing a future contract.
+
+The contiguous source frontier ends at line 2108. External-memory allocation
+begins at line 2110, and `EXT-MEM-BASE` at line 2163 is the next missing BIOS
+dependency.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

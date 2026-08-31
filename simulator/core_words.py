@@ -22,6 +22,8 @@ from simulator.entropy import TRNG_RAND8, TRNG_RAND64, TRNG_SEED
 from simulator.memory import MMIO_BASE, SparseAddressSpace
 from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
+    SYSINFO_HBW_BASE,
+    SYSINFO_HBW_SIZE,
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
 )
@@ -1257,6 +1259,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (
             b"N-FULL",
             lambda context: _sysinfo_fetch(runtime, context, SYSINFO_NUM_FULL),
+        ),
+        (
+            b"HBW-BASE",
+            lambda context: _sysinfo_fetch(runtime, context, SYSINFO_HBW_BASE),
+        ),
+        (
+            b"HBW-SIZE",
+            lambda context: _sysinfo_fetch(runtime, context, SYSINFO_HBW_SIZE),
         ),
         (
             b"CRYPTO-CAPS@",

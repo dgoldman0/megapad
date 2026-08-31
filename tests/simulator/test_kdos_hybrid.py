@@ -10,7 +10,6 @@ import pytest
 
 from shared.mlkem import mlkem512_decapsulate, mlkem512_encapsulate
 from shared.x25519 import x25519_scalar_multiply
-from simulator.errors import SourceError
 from simulator.memory import MASK64
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
@@ -351,21 +350,6 @@ def test_hybrid_slice_is_exact_and_publishes_complete_initialized_ledger(
         )
     assert loaded_hybrid.spinlocks.owner(9) is None
     assert loaded_hybrid.uart_output == b""
-
-
-def test_next_contiguous_frontier_stops_at_hbw_base(
-    loaded_hybrid: MegaForthRuntime,
-) -> None:
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[2043:2070])
-    assert next_source.startswith(b"\n")
-    assert next_source.endswith(b"    HBW-BASE HBW-HERE !\n")
-
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_hybrid.evaluate(next_source, source_name="kdos.f:2044-2070")
-    assert caught.value.location.line == 27
-    assert caught.value.location.column == 4
-    assert caught.value.message == "unknown word b'HBW-BASE'"
 
 
 @pytest.mark.parametrize(

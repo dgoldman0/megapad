@@ -235,6 +235,7 @@ pool itself survives the admitted reset.
 
 ```forth
 HBW-ALLOT    ( u -- addr )   \ bump-allocate u bytes
+HBW-ALLOT?   ( u -- addr ior ) \ checked form; 0/-1 on ordinary overflow
 HBW-RESET    ( -- )          \ reset pointer (bulk free)
 HBW-TALIGN   ( -- )          \ align to 64-byte tile boundary
 HBW-FREE     ( -- u )        \ bytes remaining
@@ -245,6 +246,25 @@ HBW is a pure bump allocator with no individual free.  It has no
 free-list.  In practice, HBW arenas are short-lived tile/SIMD
 scratch buffers, and HBW is large (3 MiB), so abandoned slivers
 are tolerable.
+
+Zero-byte and exact-fit allocations succeed. Allocation returns the old
+pointer, advances by exactly the requested cell, and neither aligns nor clears
+storage. `HBW-RESET` resets only the shared pointer; stale addresses and bytes
+remain usable and may alias later allocations. All callers therefore share one
+cooperatively managed arena with no lock or owner.
+
+`graphics.f` independently places its framebuffer at
+`HBW-BASE + 0x200000` without advancing `HBW-HERE`. The allocator does not
+reserve that third-MiB range, so systems using both must coordinate a ceiling
+or otherwise prevent overlap.
+
+The safe domain is a nonwrapping request no larger than the remaining mapped
+span. The current source adds before a signed `>` bound check even though its
+stack comment calls the request unsigned, so a high-cell request can wrap and
+be accepted. `HBW-TALIGN` also performs no limit check and can cross a
+non-64-aligned configured limit. Canonical 3 MiB HBW geometry is aligned. These
+are documented source limitations, not permission to substitute a different
+host allocator.
 
 **When to use XMEM:** large datasets, file contents, network buffers,
 map data — anything big that doesn't need 1-cycle latency.

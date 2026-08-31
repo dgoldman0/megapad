@@ -75,6 +75,9 @@ The implemented slices provide:
   X25519+ML-KEM composition, including lock-9 serialization, checked status
   propagation, caller-bounded expansion, and the source's retained global PQ
   scratch and nontransactional failure order;
+- dynamic `HBW-BASE`/`HBW-SIZE` BIOS reads routed to the bound SysInfo service
+  and the unchanged source-defined HBW bump allocator, including its shared
+  pointer, exact-fit/zero allocation, bulk reset, and unchecked edge behavior;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -497,6 +500,24 @@ or service exceptions are not converted into an HKDF status. This qualifies
 the ordinary KDOS application composition, not a standardized hybrid KEM,
 protected secret boundary, constant-time implementation, or security proof.
 
+Byte-exact logical lines 2044 through 2108 add the complete nine-definition
+HBW bump allocator. `HBW-BASE` and `HBW-SIZE` are dynamic reads of the same
+SysInfo qwords that describe the sparse address space; no host allocator or
+copied geometry is substituted. Load-time `HBW-INIT` sets the two guest
+variables, and ordinary source handles sequential, zero-byte, exact-fit,
+checked-failure, 64-byte alignment, status rendering, and global pointer reset.
+The pointer is shared across contexts in one runtime but independent across
+runtimes. Reset reclaims addresses without wiping bytes or revoking stale
+pointers, and there is no owner, lock, allocation ledger, or individual free.
+
+The qualified allocation domain is a nonwrapping request within the remaining
+mapped span. The source adds before a signed `>` check despite naming the size
+`u`, so high-cell requests can wrap and succeed. `HBW-TALIGN` can also cross a
+configured limit that is not 64-byte aligned. The canonical 3 MiB geometry is
+aligned, while an absent hosted region reports `(base,size)=(0,0)`; a
+configured-zero emulator retains fixed `HBW_BASE` instead. These cases are
+pinned discrepancies, not simulator-side normalization.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -512,8 +533,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–2043 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, Field, NTT, ML-KEM, both HKDF families, and the complete hybrid exchange; blank separators have no definitions |
-| 2044 onward | Next uncovered frontier | The HBW allocator preamble loads until its first missing BIOS dependency, `HBW-BASE` at line 2070 |
+| 39–2108 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, Field, NTT, ML-KEM, both HKDF families, hybrid exchange, and the complete HBW allocator; blank separators have no definitions |
+| 2110 onward | Next uncovered frontier | The external-memory allocator compiles through its preamble to the first missing BIOS dependency, `EXT-MEM-BASE` at line 2163 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -525,10 +546,10 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins the HBW allocator preamble at line 2044, with
-`HBW-BASE` at line 2070 as the first missing word. Later slices continue the
-same contiguous unchanged prefix toward the persistent evaluator, ordinary
-checked module-loader surface, and
+The next source boundary begins the external-memory allocator at line 2110,
+with `EXT-MEM-BASE` at line 2163 as the first missing word. Later slices
+continue the same contiguous unchanged prefix toward the persistent evaluator,
+ordinary checked module-loader surface, and
 deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
