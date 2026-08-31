@@ -47,7 +47,8 @@ disk, interactive TUI, built-in documentation browser, **16-core
 heterogeneous SoC** (4 full cores + 3 micro-clusters of 4 cores each)
 with IPI, spinlocks, barriers, and **3 MiB HBW math RAM**,
 **core-type-aware scheduling**, and **post-quantum crypto** (Field ALU,
-NTT, ML-KEM-512, hybrid PQ exchange).
+NTT, ML-KEM-512, and a source-defined X25519+ML-KEM/HKDF hybrid
+composition).
 
 Transport is still under active qualification. The current TCP sender is a
 one-outstanding-segment profile: retained data now has strict cumulative-ACK

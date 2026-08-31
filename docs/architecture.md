@@ -886,6 +886,15 @@ neither supplies value, register, or timing evidence for the other.
 **KDOS words (§1.12–§1.13):** `KYBER-KEYGEN`, `KYBER-ENCAPS`,
 `KYBER-DECAPS`, `PQ-DERIVE`, `PQ-EXCHANGE-INIT`, and `PQ-EXCHANGE-RESP`.
 
+The three PQ words are ordinary KDOS composition, not another device: INIT
+and RESP combine X25519 and ML-KEM secrets, while `PQ-DERIVE` applies
+SHA3-HMAC HKDF with the literal info `pq-hybrid`. Their X25519 key, KEM state,
+and secret-bearing PQ scratch are shared and unwiped, with no owner or outer
+transaction; extract and expand take lock 9 separately. Consequently an HKDF
+failure can follow entropy consumption and ciphertext publication. This is
+executable application behavior, not a standardized hybrid-KEM,
+concurrency-safety, constant-time, or security-proof claim.
+
 ### SHA-2 (Per-Core / Micro-Cluster ISA)
 
 SHA-256/384/512 hashing is implemented with EXT.CRYPTO (`FB`) instructions,

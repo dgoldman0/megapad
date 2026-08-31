@@ -643,6 +643,76 @@ values. BIOS DOUT therefore reads RTL size, and immediate KDOS stores race the
 RTL lifecycle. Hosted success makes no direct-MMIO, RTL, timing, arbitration,
 FIPS-validation, constant-time, or physical-erasure claim.
 
+The admitted HMAC/HKDF/hybrid slice is exact unchanged `kdos.f` lines 1635
+through 2043: 59 ordinary definitions spanning the §1.13 PQ scratch preamble,
+the complete SHA3-HMAC HKDF family, HMAC-SHA256 and HKDF-SHA256, and the three
+final PQ exchange words. No high-level HMAC, HKDF, or exchange word is a host
+substitute. Hosted services beneath them remain the already admitted SHA3,
+SHA-256, X25519, ML-KEM, spinlock, memory, and deterministic-entropy
+primitives.
+
+Public `HMAC`, `HMAC-SHA256`, and both HKDF families share one nonblocking
+physical-core-owned spinlock 9. SHA3 capability absence is checked before lock
+contention and returns `CRYPTO-UNSUPPORTED`; a busy lock returns `CRYPTO-STATE`
+for SHA3 or `SHA256-STATE` for SHA-256. Capability and busy exits consume their
+public arguments before the guard and do not wipe preexisting private scratch.
+Acquired paths retain the existing `_HMAC-HKDF-GUARD` contract: ordinary and
+checked-status returns wipe family-specific pad/key/digest/metadata state and
+release; a caught Forth exception first invokes the selected checked-hash
+clear, then wipes, releases, and rethrows. A lower clear failure takes
+precedence and retains lock 9 as already specified by that guard. This slice
+does not add an outer PQ owner.
+
+Both expand words accept 0 through 8,160 output bytes, preflight the complete
+32-byte PRK, info, and output spans, and reject any nonempty destination overlap
+with the PRK or nonempty info before writing. Zero output ignores its output
+pointer after the other required input checks. Successful output is published
+one at-most-32-byte HMAC block at a time; a failure in a later block retains
+the earlier prefix. Callers may not alias named private HMAC/HKDF scratch.
+
+For extract, the empty-salt convention is selected solely by `slen=0`; the
+pointer is ignored only in that case and the key becomes 32 zero bytes. The
+source comment's "salt is 0 / slen=0" wording does not match that branch.
+With nonzero length, pointer zero is treated as a real address: SHA3's
+caller-managed span policy returns `CRYPTO-RANGE`, whereas SHA-256's physical
+span policy admits Bank 0 address zero when otherwise valid and hashes it.
+This contract records current execution and does not decide whether the source
+comment or either implementation should change.
+
+INIT and RESP populate `_PQ-CAT` as `_PQ-SS-X || _PQ-SS-K`; `PQ-DERIVE`
+assumes that 64-byte value is already present, extracts `_PQ-PRK` with
+SHA3-HMAC HKDF and the empty-salt convention, then expands 32 bytes with the
+literal info `pq-hybrid`. INIT performs X25519, consumes 32 `RANDOM8` bytes,
+encapsulates and publishes the 768-byte ciphertext, fills SS-X/SS-K/CAT/coin
+scratch, and only then calls derivation. RESP performs X25519 and decapsulation
+before the same derivation. SHA3 capability absence is therefore discovered
+only after those raw side effects. The returned status is only HKDF's checked
+result; X25519 and the KEM commands expose no checked result at this layer, and
+memory, entropy, or raw-service exceptions are not converted into one.
+
+`X25519-PRIV`, `_PQ-SS-X`, `_PQ-SS-K`, `_PQ-CAT`, `_PQ-PRK`, and `_PQ-COIN`
+are runtime-global guest storage. They have no task/core owner, transaction,
+rollback, or wipe. Extract and expand are separately locked, so exchanges may
+interleave before, between, and after those calls. For INIT, initial extract
+contention or SHA3 absence does not roll back entropy consumption, ciphertext
+publication, KEM state, X25519 work, or the changed SS/CAT/coin scratch, but it
+preserves `_PQ-PRK` and the final-key destination. RESP likewise retains its
+completed X25519/KEM and SS/CAT effects. If extract succeeds but expand then
+contends or fails, `_PQ-PRK` is also retained while the final-key destination
+remains unchanged. Ciphertext and final-key outputs must be disjoint if both
+must remain intact. External inputs are consumed before final publication, but
+callers must not alias the
+named PQ or HMAC/HKDF scratch.
+
+The hosted entropy source is deterministic and non-cryptographic; the source
+does not reject an all-zero X25519 result; and the raw KEM contract accepts
+some malformed fixed-size keys. Admission proves exact source composition,
+values, state, and failure ordering. It is not a standardized hybrid-KEM
+claim, security proof, FIPS validation, constant-time claim, hostile-key
+validation, concurrency safety, or protected host-secret boundary. The
+contiguous source frontier ends at line 2043; the HBW allocator begins next,
+with `HBW-BASE` at line 2070 as its first missing BIOS dependency.
+
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
 and refill counter using SHA-256. No operating-system or physical randomness

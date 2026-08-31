@@ -487,9 +487,9 @@ HMAC-based Key Derivation Function (RFC 5869).  Two families: SHA3-HMAC
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `HKDF-EXTRACT` | `( salt slen ikm ilen out -- status )` | Checked SHA3-HMAC extract: PRK = HMAC(salt, IKM), with a 32-byte output; returns the HMAC status unchanged. |
-| `HKDF-EXPAND` | `( prk info ilen len out -- status )` | Checked SHA3-HMAC expand: OKM = HMAC(PRK, info \|\| counter), up to 255×32 bytes; returns the first failure unchanged. |
+| `HKDF-EXPAND` | `( prk info ilen len out -- status )` | Checked SHA3-HMAC expand: T(0) is empty, T(i) = HMAC(PRK, T(i−1) \|\| info \|\| i), and OKM concatenates T blocks up to 255×32 bytes. |
 | `HKDF-SHA256-EXTRACT` | `( salt slen ikm ilen out -- status )` | Checked extract (SHA-256): PRK = HMAC-SHA256(salt, IKM). 32-byte output on success. |
-| `HKDF-SHA256-EXPAND` | `( prk info ilen len out -- status )` | Checked expand (SHA-256): OKM = HMAC-SHA256(PRK, info \|\| counter). Up to 255×32 bytes; returns the first hash failure. |
+| `HKDF-SHA256-EXPAND` | `( prk info ilen len out -- status )` | Checked SHA-256 expand with the same chained T(i−1) \|\| info \|\| i construction, up to 255×32 bytes; returns the first hash failure. |
 
 `HMAC`, `HMAC-SHA256`, and both HKDF families serialize their shared KDOS
 scratch with one nonblocking attempt on reserved hardware spinlock 9. Busy
@@ -515,12 +515,26 @@ This boundary contains Forth exceptions, not architectural traps, and does
 not by itself release an outer owner such as the networking module's TLS lock
 10.
 
-HKDF expansion preflights the complete output span and its fixed 32-byte PRK,
-then publishes one successful 32-byte-or-smaller block at a time. If a later
-checked hash operation fails, the word returns that first failure and leaves
-the already-completed output prefix in place. No unrelated 8,160-byte staging
-arena is imposed. Multi-window SHAKE wrappers have the same per-chunk
-publication rule, with each BIOS `SHAKE-READ` itself all-or-nothing.
+Capability-absent and busy-lock exits occur before the guard, so they consume
+their public arguments but do not run checked-hash abort or wipe preexisting
+private scratch. The cleanup and release contract applies only after lock 9
+was acquired.
+
+The null-salt convention is selected solely by `slen=0`; the salt pointer is
+then ignored and 32 zero bytes are used. This is narrower than the source
+comment saying "salt is 0 / slen=0." With a nonzero length, address zero is an
+ordinary supplied pointer: SHA3 HKDF rejects it under the caller-managed-span
+policy with `CRYPTO-RANGE`, while SHA-256 HKDF admits physical Bank 0 address
+zero when that span is otherwise valid and hashes those bytes. This is a
+documented source-comment/implementation discrepancy, not a decision that
+either pointer-zero behavior should become the public convention.
+
+HKDF expansion preflights the complete output and info spans plus its fixed
+32-byte PRK, then publishes one successful 32-byte-or-smaller block at a time.
+If a later checked hash operation fails, the word returns that first failure
+and leaves the already-completed output prefix in place. No unrelated
+8,160-byte staging arena is imposed. Multi-window SHAKE wrappers have the same
+per-chunk publication rule, with each BIOS `SHAKE-READ` itself all-or-nothing.
 
 An HKDF expansion destination may not overlap its fixed 32-byte PRK or its
 nonempty info span, because both inputs are reread for each output block. Such
@@ -529,7 +543,14 @@ HKDF before publishing output.
 
 The named HMAC/HKDF pads, intermediate buffers, normalized keys, counters, and
 metadata are private KDOS implementation storage. Application key, message,
-info, PRK, and destination spans must not alias them.
+salt, IKM, info, PRK, and destination spans must not alias them.
+
+The hosted simulator executes these definitions from the exact unchanged
+`kdos.f` block at lines 1635 through 2043. That source block begins with the
+hybrid-exchange scratch, then defines both complete HKDF families and
+`HMAC-SHA256`, and finally publishes the three hybrid words. All 59 definitions
+are ordinary source definitions; none is replaced by a hosted whole-word
+implementation.
 
 ---
 
@@ -650,8 +671,8 @@ constant-time, a hostile-key validator, or a protected host-secret boundary.
 Its fixed 840-byte SHAKE sampling prefix also leaves a theoretical rare
 capacity case. Current RTL has an incompatible register/timing contract and a
 non-cryptographic deterministic stub; the hosted slice qualifies neither RTL
-nor direct MMIO. The contiguous hosted frontier now ends at line 1633, and
-§1.13 hybrid exchange is the next source block.
+nor direct MMIO. The contiguous hosted frontier now continues through the
+adjacent hybrid/HKDF block at line 2043.
 
 ---
 
@@ -666,6 +687,47 @@ a single 32-byte hybrid shared secret.
 | `PQ-EXCHANGE-INIT` | `( peer-x25519 peer-pk ct ss -- status )` | Initiator side: X25519 ECDH + ML-KEM encapsulation, followed by checked hybrid-key derivation. |
 | `PQ-EXCHANGE-RESP` | `( peer-x25519 ct sk ss -- status )` | Responder side: X25519 ECDH + ML-KEM decapsulation, followed by checked hybrid-key derivation. |
 | `PQ-DERIVE` | `( out -- status )` | Derive the 32-byte hybrid key from the internal concatenated X25519 and ML-KEM secrets, propagating checked HKDF status. |
+
+INIT and RESP first populate `_PQ-CAT` as `_PQ-SS-X || _PQ-SS-K`.
+`PQ-DERIVE` assumes that 64-byte concatenation is already present, performs
+SHA3-HMAC HKDF-Extract with the 32-zero-byte empty-salt convention, and expands
+32 bytes with the literal
+9-byte info string `pq-hybrid`. `PQ-EXCHANGE-INIT` first performs X25519,
+consumes 32 `RANDOM8` bytes into `_PQ-COIN`, publishes the ML-KEM ciphertext,
+and only then derives the final key. `PQ-EXCHANGE-RESP` likewise completes
+X25519 and ML-KEM decapsulation before derivation. Their returned status is
+only the checked HKDF status; the raw X25519 and KEM stages have no checked
+result to propagate.
+
+The exchange has no outer owner or transaction. It uses the global
+`X25519-PRIV` plus `_PQ-SS-X`, `_PQ-SS-K`, `_PQ-CAT`, `_PQ-PRK`, and
+`_PQ-COIN`; those secret-bearing buffers are shared across callers and are not
+wiped. Spinlock 9 covers only each HKDF call and its HMAC/HKDF scratch cleanup.
+Concurrent exchanges can therefore interleave the X25519, KEM, PQ-scratch,
+extract, and expand stages; each individual HKDF call excludes peer cores,
+subject to the depthless same-core reacquisition caveat above.
+
+Failure is correspondingly nontransactional. If extract cannot acquire lock
+9, an initiator has already consumed entropy and published its ML-KEM
+ciphertext, while `_PQ-SS-X`, `_PQ-SS-K`, `_PQ-CAT`, and `_PQ-COIN` have
+changed; `_PQ-PRK` and the requested final-key output remain unchanged. If
+extract succeeds but expand later contends or fails, `_PQ-PRK` has also been
+published while the final-key output remains unchanged. A responder has
+likewise completed its raw stages before either derivation failure. Initiator
+callers must keep ciphertext and final-key output disjoint when both values
+must survive, because the later key publication may
+overwrite an overlapping ciphertext prefix. Ordinary external inputs are
+consumed before final output, but callers must not alias the private PQ or
+HMAC/HKDF scratch.
+
+The hosted `RANDOM8` stream is deterministic development entropy. The source
+does not reject an all-zero X25519 result, and the raw ML-KEM service is not a
+hostile-key validator. This construction is therefore qualified as the exact
+KDOS application composition and its byte values, lifecycle, and failures—not
+as a standardized hybrid KEM, a security proof, constant-time execution, or a
+protected secret boundary. Exact unchanged lines 1635 through 2043 advance the
+contiguous hosted frontier to the blank line immediately before the HBW
+allocator section; `HBW-BASE` at line 2070 is the next missing BIOS word.
 
 ---
 

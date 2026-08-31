@@ -71,6 +71,10 @@ The implemented slices provide:
   portable deterministic ML-KEM-512 value model and preserving the executable
   Python device's five retained buffers, selector/index, synchronous status,
   and byte-fault order without admitting either physical KEM MMIO contract;
+- unchanged source-defined HMAC-SHA256, SHA3/SHA-256 HKDF, and hybrid
+  X25519+ML-KEM composition, including lock-9 serialization, checked status
+  propagation, caller-bounded expansion, and the source's retained global PQ
+  scratch and nontransactional failure order;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -460,6 +464,39 @@ data. In particular, BIOS DOUT at byte `+0x18` reads RTL BUF_SIZE. Hosted KEM
 therefore makes no direct-MMIO, RTL, cycle, arbitration, or physical-erasure
 claim.
 
+Byte-exact logical lines 1635 through 2043 now load all 59 definitions in the
+adjacent hybrid/HKDF block unchanged. The source first allocates and initializes
+the hybrid scratch, defines the complete SHA3-HMAC HKDF family, adds
+HMAC-SHA256 and HKDF-SHA256, then publishes `PQ-DERIVE`,
+`PQ-EXCHANGE-INIT`, and `PQ-EXCHANGE-RESP`. Independent HMAC/HKDF vectors plus
+a distinct-key, two-party initiator/responder exchange pin the guest
+composition across one-, two-, and three-block derivations; the raw X25519 and
+ML-KEM stage values use their already qualified shared value models.
+
+Each public HMAC/HKDF call makes one nonblocking lock-9 attempt. SHA3
+capability absence precedes that lock check; contention otherwise returns the
+selected hash family's state status. Expand accepts only lengths 0 through
+8,160 and rejects complete output aliases with the 32-byte PRK or nonempty info
+before publication, then publishes successful blocks incrementally. Acquired
+paths wipe their private HMAC/HKDF state before release; capability and busy
+exits do not enter that guard. The null-salt branch tests only `slen=0`, despite
+the source comment also mentioning pointer zero: nonempty address zero is
+rejected by SHA3 caller-span policy but is physically readable by SHA-256. The
+simulator records and reproduces that difference without selecting a future
+interface.
+
+The outer hybrid exchange is deliberately not upgraded into a transaction.
+It shares `X25519-PRIV`, the raw KEM service, and retained secret-bearing PQ
+scratch without an owner; extract and expand are two separately locked calls.
+If extract contends or discovers absent SHA3 during INIT, X25519 and KEM have
+already run, 32 deterministic entropy bytes have been consumed, the ciphertext
+has been published, and SS/CAT/coin scratch has changed, while `_PQ-PRK` and
+the final-key destination remain untouched. If extract succeeds but expand
+then contends or fails, `_PQ-PRK` has also been published. Raw memory, entropy,
+or service exceptions are not converted into an HKDF status. This qualifies
+the ordinary KDOS application composition, not a standardized hybrid KEM,
+protected secret boundary, constant-time implementation, or security proof.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -475,8 +512,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–1633 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, Field, NTT, and the complete ML-KEM block; blank separators have no definitions |
-| 1634 onward | Next uncovered frontier | §1.13 begins the hybrid X25519 + ML-KEM/HKDF source block; its complete lifecycle is the next contiguous qualification slice |
+| 39–2043 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, Field, NTT, ML-KEM, both HKDF families, and the complete hybrid exchange; blank separators have no definitions |
+| 2044 onward | Next uncovered frontier | The HBW allocator preamble loads until its first missing BIOS dependency, `HBW-BASE` at line 2070 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -488,9 +525,10 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins hybrid X25519 + ML-KEM/HKDF at line 1635.
-Later slices continue the same contiguous unchanged prefix toward the
-persistent evaluator, ordinary checked module-loader surface, and
+The next source boundary begins the HBW allocator preamble at line 2044, with
+`HBW-BASE` at line 2070 as the first missing word. Later slices continue the
+same contiguous unchanged prefix toward the persistent evaluator, ordinary
+checked module-loader surface, and
 deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are

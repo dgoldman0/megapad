@@ -219,7 +219,10 @@ Implemented network components, bottom-up:
     keygen/encaps/decaps with caller-supplied `d`, `z`, and coin through
     ML-KEM-specific routines; ⚠ the current RTL block has an incompatible ABI
     and non-cryptographic stub datapath
-38. ✅ **Hybrid PQ Key Exchange** — X25519 + ML-KEM + HKDF (7 tests)
+38. ✅ **Hybrid PQ Key Exchange** — source-defined X25519 + ML-KEM +
+    SHA3-HMAC HKDF composition; ⚠ it has shared unwiped scratch and no outer
+    transaction/owner, uses deterministic hosted entropy in simulator tests,
+    and is not a standardized hybrid-KEM or security-proof claim
 
 ### Layer 6: Architecture & Portability (Items 39–42) — ✅ DONE
 

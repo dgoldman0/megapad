@@ -163,6 +163,15 @@ incompatible 64-bit-slot map, observable BUSY lifecycle, and deterministic XOR
 crypto stub, so it is not evidence for executable KEM behavior. See the
 [BIOS KEM contract](docs/bios-forth.md#kem-engine--ml-kem-512-7-words).
 
+KDOS's high-level `PQ-EXCHANGE-INIT`/`PQ-EXCHANGE-RESP` path is an ordinary
+source composition of X25519, ML-KEM-512, and SHA3-HMAC HKDF with info
+`pq-hybrid`. It has global unwiped PQ scratch and no outer owner or rollback;
+extract and expand are separate lock-9 transactions. The final status reports
+HKDF only, after earlier X25519/KEM effects may already be visible. Hosted
+qualification therefore proves the source's values and mutation order, not a
+standardized hybrid KEM, concurrency-safe session abstraction, protected
+secret boundary, or security proof.
+
 **KDOS core (`kdos.f`):**
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
 - **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
