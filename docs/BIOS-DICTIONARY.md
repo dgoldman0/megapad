@@ -619,8 +619,8 @@ of compiled code.
 | 213 | `IPI-ACK` | `( core -- )` | | Acknowledge IPI from the given core. Clears the pending bit. MMIO at MBOX_BASE+0x0A. |
 | 214 | `MBOX!` | `( d -- )` | | Write 64-bit value to mailbox outgoing data register (8 bytes LE at MBOX_BASE+0x00). |
 | 215 | `MBOX@` | `( -- d )` | | Read 64-bit value from mailbox incoming data register (8 bytes LE at MBOX_BASE+0x00). |
-| 216 | `SPIN@` | `( n -- flag )` | | Try to acquire spinlock *n*. Returns 0 if acquired, 1 if busy. MMIO at SPINLOCK_BASE + n*4. |
-| 217 | `SPIN!` | `( n -- )` | | Release spinlock *n*. Writes to SPINLOCK_BASE + n*4 + 1. |
+| 216 | `SPIN@` | `( n -- flag )` | | Try to acquire spinlock *n*. Returns 0 when free or already owned by this physical core, 1 when another core owns it. Same-core reacquisition has no depth count. MMIO at SPINLOCK_BASE + n*4. |
+| 217 | `SPIN!` | `( n -- )` | | Release spinlock *n* only for its owning physical core; free and foreign-owned release writes are ignored. MMIO at SPINLOCK_BASE + n*4 + 1. |
 | 218 | `WAKE-CORE` | `( xt core -- )` | | Convenience: pre-writes XT into shared worker table, then sends IPI to wake the target core. |
 | 219 | `CORE-STATUS` | `( core -- n )` | | Read worker XT slot for core. Returns 0 if core is idle, non-zero (= pending XT) if busy. |
 

@@ -193,6 +193,12 @@ def _or(context: ExecutionContext) -> None:
     context.data.push(left | right)
 
 
+def _xor(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    context.data.push(left ^ right)
+
+
 def _right_shift(context: ExecutionContext) -> None:
     count = context.data.pop()
     value = context.data.pop()
@@ -296,6 +302,12 @@ def _store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
     runtime.memory.write64(address, value)
+
+
+def _c_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    value = context.data.pop()
+    runtime.memory.write8(address, value)
 
 
 def _plus_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -667,6 +679,22 @@ def _sha2_span_status(
     context.data.push(runtime.sha2.span_status(runtime.memory, address, length))
 
 
+def _spin_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    lock_id = context.data.pop()
+    if lock_id >= runtime.spinlocks.lock_count:
+        raise ExecutionError("SPIN@ requires a lock ID from 0 through 15")
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(runtime.spinlocks.acquire(lock_id, core_id))
+
+
+def _spin_release(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    lock_id = context.data.pop()
+    if lock_id >= runtime.spinlocks.lock_count:
+        raise ExecutionError("SPIN! requires a lock ID from 0 through 15")
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.spinlocks.release(lock_id, core_id)
+
+
 def _sha256_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     core_id, _task_id = runtime.guest_identity(context)
     context.data.push(runtime.sha2.sha256_init(core_id))
@@ -957,6 +985,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"1-", _one_minus),
         (b"AND", _and),
         (b"OR", _or),
+        (b"XOR", _xor),
         (b"LSHIFT", _left_shift),
         (b"RSHIFT", _right_shift),
         (b"INVERT", _invert),
@@ -976,6 +1005,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"C@", lambda context: _c_fetch(runtime, context)),
         (b"COUNT", lambda context: _count(runtime, context)),
         (b"!", lambda context: _store(runtime, context)),
+        (b"C!", lambda context: _c_store(runtime, context)),
         (b"+!", lambda context: _plus_store(runtime, context)),
         (b"FILL", lambda context: _fill(runtime, context)),
         (b"CMOVE", lambda context: _cmove(runtime, context)),
@@ -1034,6 +1064,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
             b"SHA2-SPAN-STATUS",
             lambda context: _sha2_span_status(runtime, context),
         ),
+        (b"SPIN@", lambda context: _spin_fetch(runtime, context)),
+        (b"SPIN!", lambda context: _spin_release(runtime, context)),
         (b"CRC-MODE!", lambda context: _crc_mode_store(runtime, context)),
         (b"CRC-RESET", lambda context: _crc_reset(runtime, context)),
         (b"CRC-INIT!", lambda context: _crc_init_store(runtime, context)),

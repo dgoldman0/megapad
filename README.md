@@ -149,7 +149,7 @@ and full ISA) plus three micro-core clusters of 4 cores each (scalar-only,
 shared MUL/DIV, 1 KiB scratchpad, hardware barrier per cluster).  All 16
 cores share a unified address space via a round-robin bus arbiter with
 per-core QoS weights.  Cores communicate through a hardware mailbox (IPI)
-and 8 spinlocks.  Micro-clusters are gated by the SysInfo CLUSTER_EN
+and 16 spinlocks.  Micro-clusters are gated by the SysInfo CLUSTER_EN
 register.  KDOS automatically routes tile/SIMD work to full cores only.
 
 **Scalar CPU** — Each full core has 32 general-purpose 64-bit registers,

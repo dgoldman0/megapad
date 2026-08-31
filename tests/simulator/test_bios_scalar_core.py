@@ -29,6 +29,7 @@ def test_allocator_logic_words_use_full_width_cells_and_signed_less_than() -> No
 
     runtime.evaluate(
         b"0xF000 0x0FF0 OR "
+        b"0xAAAA 0x0FF0 XOR "
         b"-1 0 < "
         b"-1 0 <> "
         b"0 0<> "
@@ -38,6 +39,7 @@ def test_allocator_logic_words_use_full_width_cells_and_signed_less_than() -> No
 
     assert context.data.snapshot() == (
         0xFFF0,
+        0xA55A,
         TRUE,
         TRUE,
         0,

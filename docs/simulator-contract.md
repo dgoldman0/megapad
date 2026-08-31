@@ -98,6 +98,11 @@ two's-complement values.  False is zero and true is
 `0xffffffffffffffff`.  Memory is byte addressed and little endian, including
 unaligned loads and stores.
 
+The admitted scalar vocabulary includes full-cell `XOR` and the ordinary
+`C!` byte store. `C!` preflights exactly one addressed byte and stores the low
+eight bits of its value, including for unaligned ordinary or admitted MMIO
+addresses; it does not widen into a cell transfer.
+
 The current executable BIOS implements scalar `MIN` as an unsigned comparison,
 while the public Forth descriptions call it signed. That remains an
 [open documentation/implementation discrepancy](bios-forth.md), not a hosted
@@ -203,10 +208,12 @@ capabilities:
 - tile, SIMD, and TACC math; and
 - core identity, dispatch, mailbox, barriers, and locks.
 
-BIOS words and direct virtual-MMIO accesses for the same facility reach one
-service implementation.  Word-only substitution is insufficient because
-ordinary source contains narrow direct-MMIO paths, including UART flush and
-audio control.
+When a facility's direct virtual-MMIO surface is admitted, its BIOS words and
+direct accesses reach one service implementation. A pseudo-BIOS-only frontier
+slice must say so explicitly and does not qualify the corresponding raw
+window. Ultimately, word-only substitution is insufficient because ordinary
+source contains narrow direct-MMIO paths, including UART flush and audio
+control.
 
 An unsupported service advertises an absent capability and returns the
 existing unsupported or absent status.  It never silently reports success.
@@ -257,6 +264,26 @@ defects and are explicitly not repaired by a simulator-only cap. Bad-tag
 decryption retains the executable mutation order: already streamed plaintext
 remains published while the final output window is zero. These are recorded
 compatibility findings, not endorsed security properties.
+
+The admitted semantic `SPIN@`/`SPIN!` surface uses one runtime-local bank of
+16 independent locks keyed by architectural physical-core ID, not task ID. A
+free or same-owner acquire returns 0, a foreign-owner attempt returns 1, and
+only the owner can release. Reacquisition is depthless, so one release frees a
+lock after any number of same-core successes. Construction/reset starts every
+lock free; guest `THROW` does not release one implicitly. The current slice
+needs only valid lock 9 through the pseudo-BIOS words. It does not admit direct
+spinlock MMIO, and rejects IDs outside 0 through 15 instead of reproducing the
+BIOS's unchecked address arithmetic, which can fault or alias another device.
+The simulator claims ordered terminal ownership/results, not host-thread
+synchronization, memory fences, fairness, bus arbitration, contention timing,
+interrupt behavior, or physical multicore evidence.
+
+This first bank slice is not yet the backing object for the checked SHA3
+service's internal logical lock-8 owner. The admitted HMAC path touches lock 9
+and then enters SHA3 through its checked ABI, so that separation is not
+observable there. Arbitrary guest manipulation of reserved lock 8, direct
+lock-MMIO/SHA interference, and multicore guard interoperation remain outside
+the current claim and must be unified before those paths are admitted.
 
 The admitted SHA-2 service is runtime-local and keyed by architectural core,
 not task. It implements the checked `SHA256-*` and `SHA512-*` BIOS words plus
@@ -351,6 +378,31 @@ three error-priority cases where integrated RTL differs:
 This discrepancy record chooses the executable behavior for hosted
 differential compatibility; it does not decide which native/RTL contract must
 ultimately change.
+
+Byte-exact `kdos.f` lines 1270 through 1431 execute the complete unchanged
+HMAC-SHA3 portion of unified crypto plus its `ENCRYPT`, `DECRYPT`, and
+`VERIFY` words. Capability absence precedes the one nonblocking lock-9
+attempt, contention precedes caller-span validation, and later checked SHA3
+statuses propagate unchanged. The source builds 136-byte ipad/opad values,
+hashes keys longer than the SHA3-256 rate, holds lock 9 across inner/outer
+transactions, and wipes 392 bytes of HMAC scratch before ordinary release.
+Final HMAC publication inherits `SHA3-FINAL`'s complete 32-byte preflight and
+all-or-nothing write. The named scratch remains a cooperative caller
+nonaliasing rule rather than a protection domain. `VERIFY` evaluates every
+requested byte for its result when given a positive, nonwrapping length, but
+that source property is not a host timing or constant-time claim. Its
+unchanged `0 DO` loop does not admit zero as an empty comparison: equal zero
+bounds enter the body and can wrap or fault. The hosted backend does not patch
+that source-level discrepancy.
+
+The exception guard also preserves the executable limitation recorded in the
+project crypto contract. A successful lower clear after a Forth `THROW`
+allows wipe, release, and rethrow of the original code. A nonzero lower clear
+wins and leaves lock 9 owned, excluding peer cores. Because the hardware bank
+accepts a depthless reacquire by that same physical core, a later same-core
+wrapper can still enter and release it. Hosted execution does not invent task
+ownership to conceal this discrepancy, and this record does not decide
+whether KDOS software bookkeeping or the hardware contract should change.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

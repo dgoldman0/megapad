@@ -114,6 +114,16 @@ def test_unaligned_fetch_store_and_plus_store_share_wrapping_guest_memory() -> N
     assert context.data.snapshot() == (0x8877_6655_4433_2211, 1)
 
 
+def test_byte_store_masks_to_the_low_byte_and_roundtrips_through_c_fetch() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+
+    runtime.evaluate(b"0x1AB 7 C! 7 C@", context=context)
+
+    assert runtime.memory.read_bytes(6, 3) == bytes.fromhex("00 AB 00")
+    assert context.data.snapshot() == (0xAB,)
+
+
 def test_fill_uses_addr_count_low_byte_order_in_the_shared_address_space() -> None:
     runtime = MegaForthRuntime()
     context = runtime.new_context()

@@ -56,6 +56,7 @@ from simulator.platform import (
     SYSINFO_NUM_FULL,
 )
 from simulator.sha2 import HostedSHA2Service
+from simulator.spinlocks import HostedSpinlockBank
 from simulator.source import (
     ASCII_SPACE,
     SourceBuffer,
@@ -378,6 +379,7 @@ class MegaForthRuntime:
         self.sha3 = platform_mmio.sha3
         self.entropy = platform_mmio.entropy
         self.sha2 = HostedSHA2Service(core_count=num_full)
+        self.spinlocks = HostedSpinlockBank(core_count=num_cores)
         self.diagnostics = (
             HostedDiagnosticsService()
             if diagnostics is None

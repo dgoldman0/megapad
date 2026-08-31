@@ -429,6 +429,21 @@ High-level crypto API combining AES and SHA3.
 | `DECRYPT` | `( key iv src dst len tag -- flag )` | AES-256-GCM decrypt (alias for AES-DECRYPT). |
 | `VERIFY` | `( addr1 addr2 len -- flag )` | Constant-time comparison.  Returns 0 if equal, -1 if different. |
 
+The hosted simulator's exact contiguous qualification through `kdos.f` line
+1431 executes this complete section unchanged. Its runtime-local 16-lock bank
+supplies the nonblocking, physical-core-owned `SPIN@`/`SPIN!` contract needed
+by lock 9. HMAC-SHA3-256 uses the 136-byte SHA3-256 rate, hashes keys longer
+than 136 bytes, propagates the first checked SHA3 status, stages its final
+32-byte publication through `SHA3-FINAL`, and wipes its 392 bytes of pads,
+intermediate key/digest storage, and metadata before ordinary release.
+`ENCRYPT` and `DECRYPT` remain source aliases to the already admitted AES
+words. `VERIFY` visits the complete requested byte count and returns the
+documented flag for a positive, nonwrapping length; hosted execution makes no
+constant-time or side-channel claim. The unchanged word uses `0 DO`, not
+`?DO`, so a zero length enters a wrapping loop rather than representing an
+empty comparison and can fault on its first byte access. That source defect is
+recorded rather than repaired in simulator-only code.
+
 ---
 
 ### §1.8 X25519 ECDH
@@ -471,9 +486,14 @@ from a private HMAC/HKDF stage is caught at the lock-9 boundary. The selected
 checked-hash transaction is aborted before the complete family scratch is wiped; after a
 successful abort, lock 9 is released and the exact exception is rethrown. If
 the lower abort fails, its cleanup status takes precedence and lock 9 remains
-held fail-closed after the family scratch is wiped. This boundary contains
-Forth exceptions, not architectural traps, and does not by itself release an
-outer owner such as the networking module's TLS lock 10.
+held after the family scratch is wiped. That retention excludes other cores,
+but the hardware bank's depthless same-core reacquisition means it is not
+fully fail-closed against a later task on the retaining core; the open design
+choice is recorded in the
+[crypto interface contract](crypto-interface-contract.md#portable-crypto-guard).
+This boundary contains Forth exceptions, not architectural traps, and does
+not by itself release an outer owner such as the networking module's TLS lock
+10.
 
 HKDF expansion preflights the complete output span and its fixed 32-byte PRK,
 then publishes one successful 32-byte-or-smaller block at a time. If a later

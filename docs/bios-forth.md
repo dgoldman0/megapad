@@ -797,10 +797,17 @@ device.
 | `IPI-ACK` | `( core -- )` | Acknowledge (clear) the pending IPI from the given core. |
 | `MBOX!` | `( d -- )` | Write a 64-bit value to the mailbox outgoing data register (8 bytes LE). |
 | `MBOX@` | `( -- d )` | Read the 64-bit value from the mailbox incoming data register. |
-| `SPIN@` | `( n -- flag )` | Try to acquire spinlock *n*.  Returns 0 if successfully acquired, 1 if the lock is already held. |
-| `SPIN!` | `( n -- )` | Release spinlock *n*. |
+| `SPIN@` | `( n -- flag )` | Try to acquire spinlock *n*. Returns 0 if free or already owned by this physical core, 1 if owned by another core. |
+| `SPIN!` | `( n -- )` | Release spinlock *n* only when this physical core owns it; a free or foreign-owned release is ignored. |
 | `WAKE-CORE` | `( xt core -- )` | Convenience wrapper: pre-writes the XT into the shared worker table, then sends the IPI.  This ensures `CORE-STATUS` sees the pending work immediately. |
 | `CORE-STATUS` | `( core -- n )` | Read the worker XT slot for a core.  Returns 0 if the core is idle, or the pending XT if it’s busy/dispatched. |
+
+The bank contains 16 locks and records global physical-core identity, not a
+task identity. Same-core acquisition is depthless: repeated `SPIN@` calls all
+return 0, but one `SPIN!` releases the lock. The BIOS words do not validate
+the lock number before forming their raw MMIO address, so only IDs 0 through
+15 name the documented spinlock ABI; an out-of-range cell can fault or alias
+another MMIO window rather than returning a portable status.
 
 **Example — dispatching work to core 1:**
 ```forth

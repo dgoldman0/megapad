@@ -28,9 +28,9 @@ The implemented slices provide:
   checked SHA3/SHAKE streaming, and raw Keccak-f[1600];
 - fail-closed construction for injected address spaces: their SysInfo
   capability qword must be readable and may advertise only admitted services;
-- BIOS-compatible unaligned `@`, `!`, and `+!` access and byte `FILL` over that
-  shared address space, plus the arithmetic and comparison words needed by the
-  next unchanged Akashic source slice;
+- BIOS-compatible unaligned `@`, `!`, and `+!` access, low-byte `C!`, byte
+  `FILL`, and full-cell `XOR` over that shared address space, plus the
+  arithmetic and comparison words needed by unchanged source;
 - memory-backed linked dictionary headers and CREATE-family bodies, including
   signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
 - numeric `HERE`/`LATEST` checkpoint rollback with live-ancestry and contiguous
@@ -56,6 +56,9 @@ The implemented slices provide:
 - runtime-local, per-core checked SHA-256 and SHA-512 streams with their
   distinct physical-span policy, exact 64/128-bit length accounting, staged
   digest publication, and no invented MMIO aperture or capability bit;
+- a runtime-local 16-entry semantic spinlock bank with physical-core ownership,
+  depthless same-core reacquisition, nonblocking contention, and owner-only
+  release for the ordinary pseudo-BIOS words;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -310,6 +313,31 @@ constant-time execution. The working BIOS/native SHA-2 behavior also differs
 materially from current RTL instruction glue; that discrepancy is recorded in
 the [simulator contract](../docs/simulator-contract.md#6-platform-services).
 
+Byte-exact logical lines 1270 through 1431 complete unchanged KDOS §1.7. HMAC
+runs as ordinary Forth over checked SHA3, not as a host-side shortcut: it
+normalizes keys longer than the 136-byte rate, constructs ipad/opad, propagates
+the first checked status, holds shared lock 9 across both hash transactions,
+and wipes all 392 bytes of HMAC scratch before an ordinary release. Capability
+absence wins before contention, and contention wins before argument
+validation. The adjacent `ENCRYPT`/`DECRYPT` aliases reuse the admitted AES
+path; `VERIFY` traverses its requested bytes but carries no hosted
+constant-time claim. Only positive, nonwrapping `VERIFY` lengths are
+qualified: its unchanged `0 DO` enters the body for zero length and can wrap
+or fault instead of performing an empty comparison.
+
+The hardware-compatible spinlock model deliberately keeps same-core
+reacquisition depthless and ignores task identity. Consequently, the source's
+cleanup-failure description is only peer-core fail-closed: a retained lock 9
+blocks another physical core, but a later wrapper on the retaining core can
+reacquire and one release can free it. The discrepancy is documented without
+choosing a future KDOS-owner or hardware-recursion fix. Direct spinlock MMIO,
+out-of-range lock-number aliasing, bus arbitration, fairness, timing, memory
+fences, and host-thread synchronization are outside this pseudo-BIOS slice.
+The bank is also not yet the backing object for SHA3's logical checked lock-8
+owner; arbitrary `SPIN@ 8` interference and multicore guard interoperation
+must be unified before either is claimed. Unchanged HMAC uses only lock 9 and
+then the checked SHA3 ABI, so it does not cross that deferred seam.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -325,8 +353,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–1269 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, and the adjacent unchanged SHA-256/SHA-512 one-shot wrappers; line 70 is blank |
-| 1270 onward | Next uncovered frontier | HMAC-SHA3 begins at line 1270; its shared-lock preamble reaches the next missing BIOS primitive, `SPIN@`, at line 1280 |
+| 39–1431 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2 wrappers, and the complete unchanged unified-crypto/HMAC section; line 70 is blank |
+| 1432 onward | Next uncovered frontier | Line 1432 is blank and §1.8 X25519 begins at line 1433; the first missing semantic-BIOS primitive is `X25519-SCALAR!` at line 1467 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -338,10 +366,10 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins HMAC-SHA3 at line 1270. Its first actual
-semantic-BIOS gap is `SPIN@` at line 1280; later slices continue the same
-contiguous unchanged prefix toward the persistent evaluator, ordinary checked
-module-loader surface, and deterministic cooperative task scheduler.
+The next source boundary begins X25519 at line 1433. Its first actual
+semantic-BIOS gap is `X25519-SCALAR!` at line 1467; later slices continue the
+same contiguous unchanged prefix toward the persistent evaluator, ordinary
+checked module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work
