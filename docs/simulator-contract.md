@@ -172,9 +172,38 @@ contracts have an implementation and differential evidence.
 
 ## 5. Scheduling and time
 
-The simulator uses a deterministic cooperative scheduler, not uncontrolled
-host threads.  Given the same runnable set, yield sequence, clock, entropy, and
-ingress schedule, public task ordering and state repeat.
+The target simulator uses a deterministic cooperative scheduler, not
+uncontrolled host threads. Given the same runnable set, yield sequence, clock,
+entropy, and ingress schedule, public task ordering and state repeat. The
+current one-core profile has not implemented that task scheduler yet.
+
+It does implement the narrower architectural `IDL` boundary needed by
+unchanged source. `run_until_blocked` detaches a compiled-word dispatch after
+the semantic IDL operation while retaining its exact next instruction,
+ordered return stack, root identity, pointer-capture guard, and original step
+meter. The context and dictionary remain leased until cancellation or resume.
+A runtime-issued, one-shot receipt bound to that exact suspension and an
+explicit host-delivered interrupt or DMA wake is required before execution
+continues. The wake is a semantic host event attestation; this profile does
+not claim interrupt vectoring, an ISR, a DMA engine, latency, fairness, or
+physical timing.
+
+Only one compiled-word suspension is admitted at a time. Interpreted source
+evaluation and a Python primitive's nested public dispatch have Python-owned
+continuations that are not captured by this seam, so reaching IDL there fails
+explicitly and restores the ordinary dispatch guard. A suspended context
+rejects stack changes at resume, and dictionary mutation is rejected while a
+suspension is detached. Resumption retains the original cumulative step
+budget rather than silently granting a fresh quantum. This is an IDL
+block/wake contract, not BIOS `PAUSE` or KDOS task scheduling.
+
+Cancellation restores the pre-dispatch return stack. If the canceled path
+observed `RP@`, the context is marked non-reusable because a data-stack copy
+may still name detached continuation storage; cancellation never licenses a
+later `RP!` to revive that control state. Failure while atomically publishing
+a later IDL suspension after resumption receives the same fail-closed
+treatment: no partial lease survives, the original return stack is restored,
+and an `RP@`-observing context becomes non-reusable.
 
 Task descriptors, per-task stacks, `PAUSE`, `TASK-YIELD`, `SCHEDULE`, exception
 ownership, and checkpoint behavior remain visible source semantics.  A future
@@ -907,9 +936,9 @@ retains its initial-start lower bound and faults that otherwise-admitted raw
 rewind. This existing safer host divergence does not affect the Bank-0/XMEM
 transition and is documented without treating it as the desired native API.
 
-The contiguous source frontier now ends at line 2780. Exact unchanged lines
-2576 through 2780 add all 31 Arena definitions without a host allocator
-shortcut. `A-HEAP` follows public `ALLOCATE`/`FREE` and therefore uses
+The Arena portion of the contiguous source frontier ends at line 2780. Exact
+unchanged lines 2576 through 2780 add all 31 Arena definitions without a host
+allocator shortcut. `A-HEAP` follows public `ALLOCATE`/`FREE` and therefore uses
 prefixed XMEM when present and Bank 0 otherwise; `A-XMEM` uses raw recyclable
 XMEM blocks; `A-HBW` advances and later abandons HBW backing until
 `HBW-RESET`. Dictionary descriptors consume 32 bytes permanently, while
@@ -935,12 +964,18 @@ per-task/per-core state; direct `ARENA-ALLOT` on exclusively owned descriptors
 does not have that selection race. These are pinned source-contract gaps, not
 host-side repairs.
 
-The next first-failure probe reaches compile-state `[` in Buffer `IDLE` at
-line 2796. BIOS `[` and `]` change `STATE` while the colon definition remains
-open, whereas the current hosted compiler has only an open-compiler state.
-The eventual seam must preserve that distinction, and a hosted `IDLE` needs
-semantic scheduler-yield behavior rather than merely accepting raw MP64
-opcode byte zero.
+The contiguous source frontier now ends at line 2796. Exact unchanged lines
+2782 through 2796 add Buffer's general `IDLE` helper. The hosted compiler keeps
+an open definition distinct from its compile/interpret mode, preserves the
+native immediate `[` and non-immediate `]` flags, and translates the exact low
+byte emitted by `[ 0 C, ]` into one semantic `Idle` IR operation. No raw byte
+is stranded at hosted HERE, and any other bracketed raw opcode fails closed.
+Execution blocks after that operation and resumes only through the exact
+one-shot wake contract above; treating IDL as a no-op or ordinary cooperative
+task yield is outside the contract. Public memory-backed `STATE`, general raw
+native-code emission, executing a `]` compiled while already in compile state,
+and compiler state persistent across separate evaluator calls remain pending;
+that unsupported `]` form fails during source compilation.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
@@ -1070,12 +1105,13 @@ branch has an explicit pre-rich-terminal stop line:
    dictionary, and explicit semantic dispatch;
 2. enough compiler and control-flow semantics to source-load unchanged real
    Akashic utility code, including shared return/loop-stack behavior;
-3. sparse byte memory, dictionary/runtime backing, persistent compiler and
-   evaluator state, exceptions, and numeric dictionary rollback;
-4. the complete supported one-core semantic BIOS public vocabulary and
-   platform profile, followed by ordinary `kdos.f` from source;
-5. an unchanged, focused KDOS load followed by qualification of KDOS-owned
-   evaluator and module-loading surfaces; and
+3. sparse byte memory, dictionary/runtime backing, staged compiler/evaluator
+   semantics, exceptions, and numeric dictionary rollback;
+4. advance one unchanged `kdos.f` frontier alongside the one-core semantic
+   BIOS surfaces it actually reaches, while filling the remaining persistent
+   compiler/evaluator seams instead of replacing source definitions;
+5. complete the ordinary `kdos.f` load, then qualify KDOS-owned evaluator and
+   module-loading surfaces; and
 6. stop before loading or implementing `rich-terminal.f`.
 
 KDOS qualification maintains one monotonically advancing source frontier.

@@ -25,6 +25,18 @@ class ExecutionError(SimulatorError):
     """A semantic definition could not execute coherently."""
 
 
+class ExecutionBlocked(SimulatorError):
+    """Completion-only execution reached a resumable IDL boundary."""
+
+    def __init__(self, suspension: object, semantic_steps: int) -> None:
+        self.suspension = suspension
+        self.semantic_steps = semantic_steps
+        super().__init__(
+            "semantic execution blocked at IDL after "
+            f"{semantic_steps} step(s); deliver a wake and resume the suspension"
+        )
+
+
 class ForthAbort(ExecutionError):
     """The nonreturning BIOS ``ABORT`` word cleared one active task."""
 
@@ -55,6 +67,7 @@ class StepBudgetExceeded(ExecutionError):
 
 __all__ = [
     "ExecutionError",
+    "ExecutionBlocked",
     "ForthAbort",
     "SimulatorError",
     "SourceError",

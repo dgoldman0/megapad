@@ -14,7 +14,7 @@ kept in host metadata.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from shared.cells import CELL_BYTES, MASK64, s64
 from simulator.memory import SparseAddressSpace
@@ -105,6 +105,7 @@ class Dictionary:
         start_address: int = 0x1000,
         *,
         memory: SparseAddressSpace | None = None,
+        mutation_guard: Callable[[str], None] | None = None,
     ) -> None:
         self._start_address = _address(start_address, label="start address")
         if self._start_address == 0:
@@ -114,7 +115,10 @@ class Dictionary:
             )
         if memory is not None and not isinstance(memory, SparseAddressSpace):
             raise TypeError("memory must be a SparseAddressSpace or None")
+        if mutation_guard is not None and not callable(mutation_guard):
+            raise TypeError("dictionary mutation guard must be callable or None")
         self._memory = memory
+        self._mutation_guard = mutation_guard
         self._active_floor = self._start_address
         self._active_limit = MASK64
         if memory is not None:
@@ -190,6 +194,7 @@ class Dictionary:
         checkpoints retain their separate lineage rules.
         """
 
+        self._guard_mutation("change the dictionary rollback floor")
         if self._here > self._numeric_rollback_floor:
             self._numeric_rollback_floor = self._here
 
@@ -203,6 +208,7 @@ class Dictionary:
     ) -> Word:
         """Publish a definition and return its stable semantic word record."""
 
+        self._guard_mutation("define a dictionary word")
         raw_name = _name_bytes(name)
         if not isinstance(initial_body, bytes):
             raise TypeError("dictionary initial body must be bytes")
@@ -277,6 +283,7 @@ class Dictionary:
     def allot(self, delta_cell: int) -> None:
         """Move ``HERE`` by one signed-cell delta without touching memory."""
 
+        self._guard_mutation("allot dictionary storage")
         if not isinstance(delta_cell, int):
             raise TypeError("ALLOT delta must be an integer cell")
         delta = s64(delta_cell)
@@ -298,6 +305,7 @@ class Dictionary:
         definitions and stores may occupy.
         """
 
+        self._guard_mutation("move the dictionary frontier")
         target = _address(target, label="dictionary target")
         floor = _address(floor, label="dictionary zone floor")
         limit = _address(limit, label="dictionary zone limit")
@@ -320,11 +328,13 @@ class Dictionary:
     def comma(self, cell: int) -> None:
         """Store one little-endian cell at ``HERE`` and advance atomically."""
 
+        self._guard_mutation("store into the dictionary")
         self._store_and_advance(cell, CELL_BYTES)
 
     def c_comma(self, cell: int) -> None:
         """Store the low byte of one cell at ``HERE`` and advance atomically."""
 
+        self._guard_mutation("store into the dictionary")
         self._store_and_advance(cell, 1)
 
     def write_transient(self, payload: bytes) -> int:
@@ -334,6 +344,7 @@ class Dictionary:
         surface.  A later definition or comma operation may overwrite it.
         """
 
+        self._guard_mutation("write transient dictionary bytes")
         if not isinstance(payload, bytes):
             raise TypeError("transient dictionary payload must be bytes")
         if self._memory is None:
@@ -384,6 +395,7 @@ class Dictionary:
     def rollback(self, checkpoint: DictionaryCheckpoint) -> None:
         """Remove definitions after a checkpoint and restore prior bindings."""
 
+        self._guard_mutation("roll back the dictionary")
         if not isinstance(checkpoint, DictionaryCheckpoint):
             raise TypeError("rollback requires a DictionaryCheckpoint")
         seal = checkpoint._seal
@@ -433,6 +445,7 @@ class Dictionary:
         that interval.  Guest dictionary bytes are deliberately not erased.
         """
 
+        self._guard_mutation("roll back the dictionary")
         target_here = _address(saved_here, label="saved HERE")
         target_latest = _address(saved_latest, label="saved LATEST")
         if not self._active_floor <= target_here <= self._active_limit:
@@ -525,6 +538,12 @@ class Dictionary:
             self._active_floor = active_floor
             self._active_limit = active_limit
         self._here = here
+
+    def _guard_mutation(self, operation: str) -> None:
+        """Give the owning runtime one boundary for leasing dictionary state."""
+
+        if self._mutation_guard is not None:
+            self._mutation_guard(operation)
 
     def _checked_advance(self, width: int, *, operation: str) -> int:
         if self._here > MASK64 - width:

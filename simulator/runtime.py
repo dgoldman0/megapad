@@ -26,6 +26,7 @@ from simulator.dictionary_index import (
     HostedDictionaryIndex,
 )
 from simulator.errors import (
+    ExecutionBlocked,
     ExecutionError,
     ForthAbort,
     SourceError,
@@ -38,6 +39,7 @@ from simulator.ir import (
     BranchZero,
     Call,
     Do,
+    Idle,
     InstallDoes,
     Literal,
     Loop,
@@ -72,7 +74,7 @@ from simulator.source import (
     SourceCursor,
     SourceLocation,
 )
-from simulator.stacks import DataStack, ReturnStack
+from simulator.stacks import DataStack, ReturnEntry, ReturnStack
 
 
 @dataclass(slots=True)
@@ -82,12 +84,22 @@ class ExecutionContext:
     data: DataStack = field(default_factory=DataStack)
     returns: ReturnStack = field(default_factory=ReturnStack)
     _host_control_fault: str | None = field(default=None, init=False, repr=False)
+    _suspension_sequence: int | None = field(default=None, init=False, repr=False)
 
     @property
     def reusable(self) -> bool:
         """Whether another public dispatch can safely use this context."""
 
-        return self._host_control_fault is None
+        return (
+            self._host_control_fault is None
+            and self._suspension_sequence is None
+        )
+
+    @property
+    def suspended(self) -> bool:
+        """Whether a blocked semantic dispatch currently leases this context."""
+
+        return self._suspension_sequence is not None
 
     @property
     def host_control_fault(self) -> str | None:
@@ -101,10 +113,25 @@ class ExecutionContext:
                 "execution context is not reusable after a host escape across "
                 f"an RP@-observing dispatch: {self._host_control_fault}"
             )
+        if self._suspension_sequence is not None:
+            raise ExecutionError(
+                "execution context is leased by suspended dispatch "
+                f"{self._suspension_sequence}"
+            )
 
     def _mark_host_control_fault(self, error: BaseException) -> None:
         if self._host_control_fault is None:
             self._host_control_fault = type(error).__name__
+
+    def _lease_for_suspension(self, sequence: int) -> None:
+        if self._suspension_sequence is not None:
+            raise AssertionError("execution context already has a suspension lease")
+        self._suspension_sequence = sequence
+
+    def _release_suspension(self, sequence: int) -> None:
+        if self._suspension_sequence != sequence:
+            raise AssertionError("execution context suspension lease is corrupted")
+        self._suspension_sequence = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +145,31 @@ class Invoke:
         if token == 0:
             raise ExecutionError("execution token zero is not callable")
         object.__setattr__(self, "xt", token)
+
+
+class IdleWake(Enum):
+    """Host event classes that can release the MP64 ``IDL`` boundary."""
+
+    INTERRUPT = auto()
+    DMA = auto()
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionSuspension:
+    """Opaque identity for one runtime-owned blocked dispatch."""
+
+    sequence: int
+    _runtime_token: object = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class IdleWakeReceipt:
+    """One-shot runtime receipt for one delivered IDL wake event."""
+
+    kind: IdleWake
+    sequence: int
+    _suspension_sequence: int = field(repr=False)
+    _runtime_token: object = field(repr=False)
 
 
 PrimitiveCallback: TypeAlias = Callable[[ExecutionContext], Invoke | None]
@@ -199,6 +251,8 @@ class DirectiveKind(Enum):
     PROVIDED = auto()
     DOT_QUOTE = auto()
     ABORT_QUOTE = auto()
+    LEFT_BRACKET = auto()
+    RIGHT_BRACKET = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,6 +281,17 @@ class EvaluationResult:
 @dataclass(frozen=True, slots=True)
 class ExecutionResult:
     semantic_steps: int
+
+
+@dataclass(frozen=True, slots=True)
+class BlockedExecution:
+    """A semantic dispatch stopped after IDL and awaits an admitted wake."""
+
+    semantic_steps: int
+    suspension: ExecutionSuspension
+
+
+RunResult: TypeAlias = ExecutionResult | BlockedExecution
 
 
 @dataclass(slots=True)
@@ -260,6 +325,7 @@ _ControlFrame: TypeAlias = _IfFrame | _DoFrame | _BeginFrame | _WhileFrame
 class _Compiler:
     name: bytes
     location: SourceLocation
+    compile_mode: bool = True
     operations: list[Operation] = field(default_factory=list)
     controls: list[_ControlFrame] = field(default_factory=list)
 
@@ -303,6 +369,32 @@ class _DispatchFrame:
     context: ExecutionContext
     meter: _StepMeter
     root_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DispatchCursor:
+    """Resume location immediately after one semantic IDL operation."""
+
+    xt: int
+    ip: int
+
+
+@dataclass(slots=True)
+class _SuspendedExecution:
+    """Runtime-owned continuation and guard state for one blocked dispatch."""
+
+    handle: ExecutionSuspension
+    context: ExecutionContext
+    meter: _StepMeter
+    starting_steps: int
+    root_id: int
+    cursor: _DispatchCursor
+    return_snapshot: tuple[ReturnEntry, ...]
+    capture_checkpoint: int
+    had_pointer_capture: bool
+    blocked_data_snapshot: tuple[int, ...]
+    blocked_return_snapshot: tuple[ReturnEntry, ...]
+    wake_receipt: IdleWakeReceipt | None = None
 
 
 class _DictionaryFaultRequest(BaseException):
@@ -397,9 +489,14 @@ class MegaForthRuntime:
             if diagnostics is None
             else diagnostics.clone()
         )
+        self._runtime_token = object()
+        self._next_suspension_sequence = 1
+        self._next_wake_sequence = 1
+        self._suspended_execution: _SuspendedExecution | None = None
         self.dictionary = Dictionary(
             start_address=dictionary_start,
             memory=self.memory,
+            mutation_guard=self._require_no_suspension,
         )
         self.dictionary_index = HostedDictionaryIndex(
             self.memory,
@@ -619,6 +716,7 @@ class MegaForthRuntime:
     def set_dictionary_fault_xt(self, xt: int) -> None:
         """Install a raw guest callback, including zero to disable it."""
 
+        self._require_no_suspension("change the dictionary fault callback")
         self._dictionary_fault_xt = u64(xt)
 
     def configure_dictionary_bounds(
@@ -629,6 +727,7 @@ class MegaForthRuntime:
     ) -> None:
         """Install one checked inclusive/exclusive external dictionary zone."""
 
+        self._require_no_suspension("change dictionary bounds")
         base = u64(base)
         limit = u64(limit)
         if base == 0 and limit == 0:
@@ -681,12 +780,14 @@ class MegaForthRuntime:
     def disable_dictionary_bounds(self) -> None:
         """Restore guarded Bank-0 dictionary allocation without moving HERE."""
 
+        self._require_no_suspension("disable dictionary bounds")
         self._dictionary_limit = 0
         self._dictionary_base = 0
 
     def configure_dictionary_index(self, base: int, slots: int) -> int:
         """Install, rebuild, or disable the caller-backed BIOS index."""
 
+        self._require_no_suspension("reconfigure the dictionary index")
         return self.dictionary_index.configure(base, slots)
 
     def _dictionary_context(
@@ -728,6 +829,34 @@ class MegaForthRuntime:
             raise ExecutionError("semantic dispatch identity space exhausted")
         return root_id
 
+    def _allocate_suspension_handle(self) -> ExecutionSuspension:
+        sequence = self._next_suspension_sequence
+        self._next_suspension_sequence += 1
+        if sequence > MASK64:
+            raise ExecutionError("semantic suspension identity space exhausted")
+        return ExecutionSuspension(sequence, self._runtime_token)
+
+    def _require_no_suspension(self, operation: str) -> None:
+        suspended = self._suspended_execution
+        if suspended is not None:
+            raise ExecutionError(
+                f"cannot {operation} while dispatch "
+                f"{suspended.handle.sequence} is suspended"
+            )
+
+    def _require_suspension(
+        self,
+        handle: ExecutionSuspension,
+    ) -> _SuspendedExecution:
+        if not isinstance(handle, ExecutionSuspension):
+            raise TypeError("suspension must be an ExecutionSuspension")
+        if handle._runtime_token is not self._runtime_token:
+            raise ExecutionError("suspension belongs to a different runtime")
+        suspended = self._suspended_execution
+        if suspended is None or suspended.handle is not handle:
+            raise ExecutionError("suspension is stale or already consumed")
+        return suspended
+
     def _request_dictionary_fault(
         self,
         context: ExecutionContext,
@@ -744,6 +873,7 @@ class MegaForthRuntime:
         width: int,
         context: ExecutionContext,
     ) -> None:
+        self._require_no_suspension("mutate the dictionary")
         if not isinstance(width, int) or width < 0:
             raise TypeError("dictionary growth width must be a nonnegative integer")
 
@@ -781,6 +911,7 @@ class MegaForthRuntime:
         target: int,
         context: ExecutionContext,
     ) -> None:
+        self._require_no_suspension("move the dictionary frontier")
         if not 0 <= target <= MASK64:
             self._request_dictionary_fault(context, "dictionary target wraps uint64")
         if self._dictionary_limit:
@@ -888,6 +1019,22 @@ class MegaForthRuntime:
             self._request_dictionary_fault(context, str(exc))
 
     def c_comma_dictionary(self, cell: int, context: ExecutionContext) -> None:
+        if self._active_input_states:
+            state = self._active_input_states[-1]
+            compiler = state.compiler
+            if (
+                state.context is context
+                and compiler is not None
+                and not compiler.compile_mode
+            ):
+                byte = cell & 0xFF
+                if byte != 0:
+                    self._compile_error(
+                        state,
+                        "hosted raw opcode emission supports only MP64 IDL byte 0",
+                    )
+                compiler.operations.append(Idle())
+                return
         self._preflight_dictionary_growth(1, context)
         try:
             self.dictionary.c_comma(cell)
@@ -979,13 +1126,21 @@ class MegaForthRuntime:
             self._active_input_states[-1].definitions.append(word)
         return word
 
-    def define_directive(self, name: bytes | str, kind: DirectiveKind) -> Word:
+    def define_directive(
+        self,
+        name: bytes | str,
+        kind: DirectiveKind,
+        *,
+        immediate: bool = True,
+    ) -> Word:
         if not isinstance(kind, DirectiveKind):
             raise TypeError("directive kind must be a DirectiveKind")
+        if not isinstance(immediate, bool):
+            raise TypeError("directive immediacy must be a bool")
         return self._define_public_dictionary_word(
             name,
             DirectiveDefinition(kind),
-            immediate=True,
+            immediate=immediate,
         )
 
     def parse_input_word(self) -> bytes:
@@ -1062,6 +1217,7 @@ class MegaForthRuntime:
         active_context = self.main_context if context is None else context
         if not isinstance(active_context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
+        self._require_no_suspension("evaluate source")
         active_context._require_reusable()
 
         meter, starting_steps = self._meter_for_public_call(step_budget)
@@ -1175,16 +1331,169 @@ class MegaForthRuntime:
         context: ExecutionContext | None = None,
         step_budget: int | None = None,
     ) -> ExecutionResult:
-        """Execute one live word in a context using explicit dispatch."""
+        """Execute one live word to completion or raise ``ExecutionBlocked``."""
+
+        if self._active_dispatches or self._active_input_states:
+            active_context = self.main_context if context is None else context
+            if not isinstance(active_context, ExecutionContext):
+                raise TypeError("context must be an ExecutionContext")
+            self._require_no_suspension("execute a nested semantic dispatch")
+            active_context._require_reusable()
+            word = self._resolve_word(name_or_xt)
+            meter, starting_steps = self._meter_for_public_call(step_budget)
+            self._execute_guarded(word, active_context, meter)
+            return ExecutionResult(meter.steps - starting_steps)
+
+        result = self.run_until_blocked(
+            name_or_xt,
+            context=context,
+            step_budget=step_budget,
+        )
+        if isinstance(result, BlockedExecution):
+            raise ExecutionBlocked(result.suspension, result.semantic_steps)
+        return result
+
+    def run_until_blocked(
+        self,
+        name_or_xt: bytes | str | int,
+        *,
+        context: ExecutionContext | None = None,
+        step_budget: int | None = None,
+    ) -> RunResult:
+        """Run one compiled word until completion or its next IDL boundary."""
 
         active_context = self.main_context if context is None else context
         if not isinstance(active_context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
+        self._require_no_suspension("start another semantic dispatch")
+        if self._active_dispatches or self._active_input_states:
+            raise ExecutionError(
+                "resumable dispatch cannot start inside source evaluation or "
+                "another host dispatch"
+            )
         active_context._require_reusable()
         word = self._resolve_word(name_or_xt)
         meter, starting_steps = self._meter_for_public_call(step_budget)
-        self._execute_guarded(word, active_context, meter)
-        return ExecutionResult(meter.steps - starting_steps)
+        suspended = self._execute_guarded(
+            word,
+            active_context,
+            meter,
+            allow_idle=True,
+            starting_steps=starting_steps,
+        )
+        semantic_steps = meter.steps - starting_steps
+        if suspended is None:
+            return ExecutionResult(semantic_steps)
+        return BlockedExecution(semantic_steps, suspended.handle)
+
+    def deliver_idle_wake(
+        self,
+        suspension: ExecutionSuspension,
+        kind: IdleWake,
+    ) -> IdleWakeReceipt:
+        """Publish one interrupt/DMA wake for an exact blocked dispatch."""
+
+        blocked = self._require_suspension(suspension)
+        if not isinstance(kind, IdleWake):
+            raise TypeError("idle wake kind must be an IdleWake")
+        if blocked.wake_receipt is not None:
+            raise ExecutionError("suspension already has an undelivered wake receipt")
+        sequence = self._next_wake_sequence
+        self._next_wake_sequence += 1
+        if sequence > MASK64:
+            raise ExecutionError("idle wake identity space exhausted")
+        receipt = IdleWakeReceipt(
+            kind,
+            sequence,
+            suspension.sequence,
+            self._runtime_token,
+        )
+        blocked.wake_receipt = receipt
+        return receipt
+
+    def resume(
+        self,
+        suspension: ExecutionSuspension,
+        wake_receipt: IdleWakeReceipt,
+    ) -> RunResult:
+        """Resume one exact IDL suspension after a runtime-issued wake."""
+
+        blocked = self._require_suspension(suspension)
+        if not isinstance(wake_receipt, IdleWakeReceipt):
+            raise TypeError("wake receipt must be an IdleWakeReceipt")
+        if (
+            wake_receipt._runtime_token is not self._runtime_token
+            or wake_receipt._suspension_sequence != suspension.sequence
+            or blocked.wake_receipt is not wake_receipt
+        ):
+            raise ExecutionError("wake receipt is stale, foreign, or already consumed")
+        if blocked.context.data.snapshot() != blocked.blocked_data_snapshot:
+            raise ExecutionError("data stack changed while dispatch was suspended")
+        if blocked.context.returns.snapshot() != blocked.blocked_return_snapshot:
+            raise ExecutionError("return stack changed while dispatch was suspended")
+
+        blocked.had_pointer_capture = (
+            blocked.had_pointer_capture
+            or blocked.context.returns.has_pointer_captures_after(
+                blocked.capture_checkpoint
+            )
+        )
+
+        blocked.wake_receipt = None
+        self._suspended_execution = None
+        old_sequence = suspension.sequence
+        blocked.context._release_suspension(old_sequence)
+        cursor = self._resume_guarded(blocked)
+
+        semantic_steps = blocked.meter.steps - blocked.starting_steps
+        if cursor is None:
+            return ExecutionResult(semantic_steps)
+
+        handle: ExecutionSuspension | None = None
+        lease_installed = False
+        try:
+            handle = self._allocate_suspension_handle()
+            blocked.handle = handle
+            blocked.cursor = cursor
+            blocked.blocked_data_snapshot = blocked.context.data.snapshot()
+            blocked.blocked_return_snapshot = blocked.context.returns.snapshot()
+            blocked.context._lease_for_suspension(handle.sequence)
+            lease_installed = True
+            self._suspended_execution = blocked
+        except BaseException as exc:
+            if lease_installed:
+                assert handle is not None
+                blocked.context._release_suspension(handle.sequence)
+            if blocked.had_pointer_capture:
+                blocked.context._mark_host_control_fault(exc)
+            blocked.context.returns.restore(blocked.return_snapshot)
+            blocked.context.returns.restore_pointer_captures(
+                blocked.capture_checkpoint
+            )
+            raise
+        assert handle is not None
+        return BlockedExecution(semantic_steps, handle)
+
+    def cancel_suspension(self, suspension: ExecutionSuspension) -> None:
+        """Unwind internal return state and release one blocked context."""
+
+        blocked = self._require_suspension(suspension)
+        blocked.had_pointer_capture = (
+            blocked.had_pointer_capture
+            or blocked.context.returns.has_pointer_captures_after(
+                blocked.capture_checkpoint
+            )
+        )
+        if blocked.had_pointer_capture:
+            blocked.context._mark_host_control_fault(
+                ExecutionError("IDL suspension canceled after RP@")
+            )
+        blocked.context.returns.restore(blocked.return_snapshot)
+        blocked.context.returns.restore_pointer_captures(
+            blocked.capture_checkpoint
+        )
+        self._suspended_execution = None
+        blocked.context._release_suspension(suspension.sequence)
 
     def _evaluate_line(self, state: _EvaluationState) -> None:
         self._active_input_states.append(state)
@@ -1207,11 +1516,31 @@ class MegaForthRuntime:
 
         word = self.dictionary.find(token)
         if word is not None and isinstance(word.implementation, DirectiveDefinition):
-            self._apply_directive(word.implementation.kind, state)
+            if (
+                state.compiler is not None
+                and state.compiler.compile_mode
+                and not word.immediate
+            ):
+                if word.implementation.kind is DirectiveKind.RIGHT_BRACKET:
+                    self._compile_error(
+                        state,
+                        "] cannot be compiled until persistent STATE is admitted",
+                    )
+                self._compile_error(
+                    state,
+                    f"{word.name.decode('ascii')} is a non-executable "
+                    "directive and cannot be compiled",
+                )
+            else:
+                self._apply_directive(word.implementation.kind, state)
             return
 
         if word is not None:
-            if state.compiler is not None and not word.immediate:
+            if (
+                state.compiler is not None
+                and state.compiler.compile_mode
+                and not word.immediate
+            ):
                 state.compiler.operations.append(Call(word.xt))
             else:
                 self._execute_guarded(word, state.context, state.meter)
@@ -1219,10 +1548,10 @@ class MegaForthRuntime:
 
         number = self._parse_number(token)
         if number is not None:
-            if state.compiler is None:
-                state.context.data.push(number)
-            else:
+            if state.compiler is not None and state.compiler.compile_mode:
                 state.compiler.operations.append(Literal(number))
+            else:
+                state.context.data.push(number)
             return
 
         raise SourceError(
@@ -1249,13 +1578,13 @@ class MegaForthRuntime:
                 state,
                 unconditionally_skip_next=True,
             )
-            if state.compiler is None:
-                self.write_uart_bytes(payload)
-            else:
+            if state.compiler is not None and state.compiler.compile_mode:
                 state.compiler.operations.append(WriteOutput(payload))
+            else:
+                self.write_uart_bytes(payload)
             return
         if kind is DirectiveKind.ABORT_QUOTE:
-            if state.compiler is None:
+            if state.compiler is None or not state.compiler.compile_mode:
                 self._compile_error(state, 'ABORT" is compile-only')
             payload = self._parse_quoted_literal(
                 state,
@@ -1279,8 +1608,18 @@ class MegaForthRuntime:
             state.compiler = _Compiler(name, self._token_location(state))
             return
 
+        if kind is DirectiveKind.LEFT_BRACKET:
+            if state.compiler is not None:
+                state.compiler.compile_mode = False
+            return
+        if kind is DirectiveKind.RIGHT_BRACKET:
+            if state.compiler is None:
+                self._compile_error(state, "] requires an open definition")
+            state.compiler.compile_mode = True
+            return
+
         compiler = state.compiler
-        if compiler is None:
+        if compiler is None or not compiler.compile_mode:
             self._compile_error(state, f"{kind.name} is compile-only")
 
         if kind is DirectiveKind.SEMICOLON:
@@ -1407,7 +1746,10 @@ class MegaForthRuntime:
         word: Word,
         context: ExecutionContext,
         meter: _StepMeter,
-    ) -> None:
+        *,
+        allow_idle: bool = False,
+        starting_steps: int = 0,
+    ) -> _SuspendedExecution | None:
         """Execute atomically with respect to internal return-stack state."""
 
         context._require_reusable()
@@ -1417,10 +1759,40 @@ class MegaForthRuntime:
         frame = _DispatchFrame(context, meter, root_id)
         preserve_capture_evidence = False
         completed_successfully = False
+        suspended: _SuspendedExecution | None = None
         self._active_dispatches.append(frame)
         try:
-            self._execute_top(word, context, meter, root_id=root_id)
-            completed_successfully = True
+            cursor = self._execute_top(
+                word,
+                context,
+                meter,
+                root_id=root_id,
+                allow_idle=allow_idle,
+            )
+            if cursor is None:
+                completed_successfully = True
+            else:
+                handle = self._allocate_suspension_handle()
+                suspended = _SuspendedExecution(
+                    handle=handle,
+                    context=context,
+                    meter=meter,
+                    starting_steps=starting_steps,
+                    root_id=root_id,
+                    cursor=cursor,
+                    return_snapshot=return_snapshot,
+                    capture_checkpoint=capture_checkpoint,
+                    had_pointer_capture=(
+                        context.returns.has_pointer_captures_after(
+                            capture_checkpoint
+                        )
+                    ),
+                    blocked_data_snapshot=context.data.snapshot(),
+                    blocked_return_snapshot=context.returns.snapshot(),
+                )
+                context._lease_for_suspension(handle.sequence)
+                self._suspended_execution = suspended
+                preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
             if transfer.context is not context:
                 if context.returns.has_pointer_captures_after(
@@ -1480,6 +1852,117 @@ class MegaForthRuntime:
             active = self._active_dispatches.pop()
             if active is not frame:
                 raise AssertionError("active semantic dispatch stack is corrupted")
+        return suspended
+
+    def _resume_guarded(
+        self,
+        suspended: _SuspendedExecution,
+    ) -> _DispatchCursor | None:
+        """Continue a detached dispatch under its original host guard."""
+
+        context = suspended.context
+        resume_capture_checkpoint = (
+            context.returns.pointer_capture_checkpoint()
+        )
+        frame = _DispatchFrame(context, suspended.meter, suspended.root_id)
+        preserve_capture_evidence = False
+        completed_successfully = False
+        cursor: _DispatchCursor | None = None
+        self._active_dispatches.append(frame)
+        try:
+            cursor = self._execute_top(
+                None,
+                context,
+                suspended.meter,
+                root_id=suspended.root_id,
+                resume_cursor=suspended.cursor,
+                allow_idle=True,
+            )
+            suspended.had_pointer_capture = (
+                suspended.had_pointer_capture
+                or context.returns.has_pointer_captures_after(
+                    resume_capture_checkpoint
+                )
+            )
+            completed_successfully = cursor is None
+            if cursor is not None:
+                preserve_capture_evidence = True
+        except _GuestControlTransfer as transfer:
+            suspended.had_pointer_capture = (
+                suspended.had_pointer_capture
+                or context.returns.has_pointer_captures_after(
+                    resume_capture_checkpoint
+                )
+            )
+            if transfer.context is not context:
+                if suspended.had_pointer_capture:
+                    context._mark_host_control_fault(transfer)
+                context.returns.restore(suspended.return_snapshot)
+                raise
+            if transfer.root_id != suspended.root_id:
+                if suspended.had_pointer_capture:
+                    context._mark_host_control_fault(transfer)
+                preserve_capture_evidence = True
+                raise
+            completed_successfully = True
+            cursor = None
+        except _DictionaryFaultRequest as request:
+            suspended.had_pointer_capture = (
+                suspended.had_pointer_capture
+                or context.returns.has_pointer_captures_after(
+                    resume_capture_checkpoint
+                )
+            )
+            if request.context is not context:
+                if suspended.had_pointer_capture:
+                    context._mark_host_control_fault(request)
+                context.returns.restore(suspended.return_snapshot)
+                raise
+            context.returns.restore(suspended.return_snapshot)
+            if suspended.had_pointer_capture:
+                context._mark_host_control_fault(request)
+            preserve_capture_evidence = True
+            raise
+        except ForthAbort as exc:
+            suspended.had_pointer_capture = (
+                suspended.had_pointer_capture
+                or context.returns.has_pointer_captures_after(
+                    resume_capture_checkpoint
+                )
+            )
+            if suspended.had_pointer_capture:
+                context._mark_host_control_fault(exc)
+            if exc.bind_origin(context):
+                context.data.clear()
+                context.returns.clear()
+            else:
+                context.returns.restore(suspended.return_snapshot)
+            raise
+        except BaseException as exc:
+            suspended.had_pointer_capture = (
+                suspended.had_pointer_capture
+                or context.returns.has_pointer_captures_after(
+                    resume_capture_checkpoint
+                )
+            )
+            if suspended.had_pointer_capture:
+                context._mark_host_control_fault(exc)
+            context.returns.restore(suspended.return_snapshot)
+            raise
+        finally:
+            if completed_successfully and (
+                self._has_older_dispatch(context)
+                or self._has_active_evaluation(context)
+            ):
+                preserve_capture_evidence = True
+            if not preserve_capture_evidence:
+                context.returns.restore_pointer_captures(
+                    suspended.capture_checkpoint
+                )
+            active = self._active_dispatches.pop()
+            if active is not frame:
+                raise AssertionError("active semantic dispatch stack is corrupted")
+        return cursor
 
     def _execute_dictionary_fault_guarded(
         self,
@@ -1617,15 +2100,27 @@ class MegaForthRuntime:
         *,
         root_id: int,
         fault_request: _DictionaryFaultRequest | None = None,
-    ) -> None:
+        resume_cursor: _DispatchCursor | None = None,
+        allow_idle: bool = False,
+    ) -> _DispatchCursor | None:
         fault_entry = fault_request is not None
-        if fault_request is not None:
+        if resume_cursor is not None:
+            if word is not None or fault_request is not None:
+                raise AssertionError("resumed dispatch cannot have a new entry target")
+            current = self.dictionary.resolve(resume_cursor.xt)
+            if not isinstance(current.implementation, ColonDefinition):
+                raise ExecutionError("suspended definition is no longer executable")
+            ip = resume_cursor.ip
+        else:
+            current = None
+            ip = 0
+        if resume_cursor is None and fault_request is not None:
             target, entry_ip = self._begin_dictionary_fault(
                 fault_request,
                 context,
                 meter,
             )
-        else:
+        elif resume_cursor is None:
             if word is None:
                 raise AssertionError("ordinary dispatch requires a target word")
             target = word
@@ -1668,17 +2163,20 @@ class MegaForthRuntime:
                     raise ExecutionError("primitive returned an invalid control result")
                 target = self.dictionary.resolve(invocation.xt)
 
-        if not isinstance(target.implementation, ColonDefinition):
-            raise ExecutionError(f"word {target.name!r} is not executable")
-        if not fault_entry:
-            context.returns.push_continuation(
-                target.xt,
-                entry_ip,
-                root=True,
-                dispatch_id=root_id,
-            )
-        current = target
-        ip = entry_ip
+        if resume_cursor is None:
+            if not isinstance(target.implementation, ColonDefinition):
+                raise ExecutionError(f"word {target.name!r} is not executable")
+            if not fault_entry:
+                context.returns.push_continuation(
+                    target.xt,
+                    entry_ip,
+                    root=True,
+                    dispatch_id=root_id,
+                )
+            current = target
+            ip = entry_ip
+
+        assert current is not None
 
         while True:
             definition = current.implementation
@@ -1712,6 +2210,13 @@ class MegaForthRuntime:
                 ip = operation.target
             elif isinstance(operation, BranchZero):
                 ip = operation.target if context.data.pop() == 0 else ip + 1
+            elif isinstance(operation, Idle):
+                if not allow_idle:
+                    raise ExecutionError(
+                        "IDL cannot suspend source evaluation or a nested host "
+                        "dispatch; use run_until_blocked on a compiled word"
+                    )
+                return _DispatchCursor(current.xt, ip + 1)
             elif isinstance(operation, RPush):
                 context.returns.push(context.data.pop())
                 ip += 1
@@ -1990,6 +2495,7 @@ class MegaForthRuntime:
 
 
 __all__ = [
+    "BlockedExecution",
     "ColonDefinition",
     "ConstantDefinition",
     "CreatedDefinition",
@@ -1999,9 +2505,13 @@ __all__ = [
     "EvaluationResult",
     "ExecutionContext",
     "ExecutionResult",
+    "ExecutionSuspension",
+    "IdleWake",
+    "IdleWakeReceipt",
     "Invoke",
     "MegaForthRuntime",
     "PrimitiveCallback",
     "PrimitiveDefinition",
+    "RunResult",
     "WordImplementation",
 ]

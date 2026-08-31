@@ -602,11 +602,12 @@ class ReturnStack:
     def restore(self, snapshot: tuple[ReturnEntry, ...]) -> None:
         """Restore an earlier snapshot after an aborted semantic dispatch.
 
-        The dispatcher has no resumable instruction pointer when execution
-        raises.  Restoring the complete ordered stack therefore prevents a
-        budget abort or primitive failure from leaving internal
-        continuations and partially advanced loop frames in a reusable task
-        context.
+        Ordinary raised failures have no resumable instruction pointer.
+        Restoring the complete ordered stack therefore prevents a budget
+        abort or primitive failure from leaving internal continuations and
+        partially advanced loop frames in a reusable task context. IDL uses
+        the runtime's separate explicit suspension path and does not call
+        this failure restore while blocked.
         """
 
         if not isinstance(snapshot, tuple):

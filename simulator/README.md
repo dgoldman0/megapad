@@ -33,6 +33,12 @@ The implemented slices provide:
   arithmetic and comparison words needed by unchanged source;
 - memory-backed linked dictionary headers and CREATE-family bodies, including
   signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
+- separate open-definition and compile/interpret state for `[` and `]`, plus
+  the exact `[ 0 C, ]` admission that compiles MP64 `IDL` as semantic `Idle`
+  IR without leaking a native byte into hosted dictionary storage;
+- a runtime-owned one-core IDL suspension boundary with opaque continuation
+  handles, one-shot interrupt/DMA wake receipts, cumulative step budgets,
+  cancellation, and original return-stack guard restoration;
 - numeric `HERE`/`LATEST` checkpoint rollback with live-ancestry and contiguous
   reclaimed-zone validation, binding restoration, and stale-byte retention;
 - the installable BIOS dictionary-fault callback, including the dynamic
@@ -99,12 +105,15 @@ The implemented slices provide:
   cleanup.
 
 This is deliberately not yet a complete MegaForth environment. Additional
-task stack arenas and scheduling remain pending. Persistent compiler state,
-the BIOS evaluator surfaces, clocks, complete UART/MMIO service, media, and an
-ordinary complete KDOS load also remain. The simulator does not execute ROMs,
-MP64 binaries, or MF64 native dictionaries, and it makes no machine-timing,
-interrupt, snapshot, RTL, or hardware claim. Those remain the architectural
-emulator's and physical implementation's responsibility.
+task stack arenas and cooperative scheduling remain pending. The IDL seam
+blocks and resumes one compiled-word dispatch; it is not `PAUSE`, task
+round-robin, interrupt-vector delivery, DMA timing, or a device scheduler.
+Persistent compiler state across evaluator calls, public `STATE`, the BIOS
+evaluator surfaces, clocks, complete UART/MMIO service, media, and an ordinary
+complete KDOS load also remain. The simulator does not execute ROMs, MP64
+binaries, or MF64 native dictionaries, and it makes no machine-timing,
+snapshot, RTL, or hardware claim. Those remain the architectural emulator's
+and physical implementation's responsibility.
 
 The current stack bounds enforce the canonical mapped Bank 0 halves, and the
 ordinary KDOS `?DICT-ROOM` guard observes the live stack and heap. Every
@@ -143,6 +152,20 @@ context = runtime.new_context()
 context.data.push(21)
 runtime.execute("TWICE", context=context)
 assert context.data.snapshot() == (42,)
+```
+
+`IDLE` uses the explicit block/wake API. A host first runs a compiled word to
+its next boundary, publishes one admitted wake, then resumes the exact opaque
+suspension. Receipts cannot be reused across boundaries:
+
+```python
+from simulator.runtime import BlockedExecution, IdleWake
+
+runtime.evaluate(b": IDLE [ 0 C, ] ;")
+blocked = runtime.run_until_blocked("IDLE", context=context)
+assert isinstance(blocked, BlockedExecution)
+receipt = runtime.deliver_idle_wake(blocked.suspension, IdleWake.INTERRUPT)
+runtime.resume(blocked.suspension, receipt)
 ```
 
 ## Real-source proofs
@@ -227,7 +250,7 @@ The shared source helper changes exactly one selected background handler and
 never slot zero. Each start wrapper reaches that reset before its captured
 BIOS entry reports scheduling unavailable. `TASK-STOP` orders its reset after
 the captured entry, so that reset is deliberately unreachable until
-cancellation exists.
+task cancellation exists.
 Resumable cooperative task contexts, `PAUSE`, and scheduling have not been
 implemented, so this slice makes no task-execution or cadence claim.
 
@@ -604,8 +627,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–2780 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, and the complete Arena allocator; blank separators have no definitions |
-| 2781 onward | Next uncovered frontier | Buffer `IDLE` first reaches missing compile-state `[` at line 2796 |
+| 39–2796 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, the complete Arena allocator, and Buffer's semantic `IDLE`; blank separators have no definitions |
+| 2797 onward | Next uncovered frontier | Buffer registry, constructors, inspection, and Arena integration begin here; the next probed hardware seam is tile mode control in `B.SUM` |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -621,13 +644,18 @@ The Arena checkpoint executes all 31 unchanged definitions across general
 `ALLOCATE`/`FREE`, raw XMEM, and HBW backing. It covers caller-placed and
 dictionary descriptors, exact-fit and failed bump allocation, reclaim/reset,
 bare snapshot tokens, the four-entry scoped stack, and source-visible
-diagnostics. The next genuine semantic seam is Buffer `IDLE` at line 2796,
-whose raw opcode source uses `[` and `]`. Hosted acceptance must keep an open
-definition distinct from compile state and give `IDLE` scheduler-yield
-behavior rather than mistaking successful byte compilation for MP64
-instruction execution. Later slices continue the same contiguous unchanged
-prefix toward the persistent evaluator, ordinary checked module-loader
-surface, and deterministic cooperative task scheduler.
+diagnostics. Exact lines 2782 through 2796 then keep the definition open while
+`[` enters interpretation state, translate only raw opcode byte zero into an
+`Idle` operation, and restore compile state with non-immediate `]`. Executing
+that operation detaches a runtime-owned continuation after the IDL boundary;
+only a matching runtime-issued interrupt or DMA receipt resumes it. Source
+evaluation and nested Python-host dispatch cannot yet suspend and fail
+explicitly. Compiling `]` while already in compile state also fails closed
+until public persistent `STATE` exists. Canceling a path that observed `RP@`
+restores its return stack but marks the context non-reusable so a leaked guest
+pointer cannot resurrect detached control. Later slices continue the same
+contiguous unchanged prefix toward the persistent evaluator, ordinary checked
+module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

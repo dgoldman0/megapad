@@ -68,6 +68,11 @@ class Return:
 
 
 @dataclass(frozen=True, slots=True)
+class Idle:
+    """Wait at one semantic host-service boundary before continuing."""
+
+
+@dataclass(frozen=True, slots=True)
 class RPush:
     pass
 
@@ -162,6 +167,7 @@ Operation: TypeAlias = (
     | Branch
     | BranchZero
     | Return
+    | Idle
     | RPush
     | RPop
     | RPeek
@@ -183,6 +189,7 @@ __all__ = [
     "BranchZero",
     "Call",
     "Do",
+    "Idle",
     "InstallDoes",
     "Literal",
     "Loop",

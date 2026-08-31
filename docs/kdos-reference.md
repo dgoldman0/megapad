@@ -851,11 +851,11 @@ unreachable status-1 rejection after allocation would consume the block,
 leave the floor unchanged, disable retry, and abort.
 
 The contiguous hosted frontier now includes the complete unchanged userland
-and Arena sections through line 2780. Their checked bounds, Bank-0/XMEM HERE
-transitions, cross-zone definitions, allocator dispatch, descriptor
-lifecycle, snapshots, and scoped stack are executable semantic behavior
-rather than reporting-only shims. Buffer `IDLE` reaches missing compile-state
-`[` at line 2796.
+and Arena sections plus Buffer's general `IDLE` helper through line 2796.
+Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
+allocator dispatch, descriptor lifecycle, snapshots, scoped stack, and IDL
+block/wake boundary are executable semantic behavior rather than
+reporting-only shims.
 
 ---
 
@@ -1043,9 +1043,12 @@ Exact unchanged lines 2576 through 2780 contain 205 lines, 8,303 bytes, and
 all 31 definitions. Hosted acceptance covers all three backing routes,
 recycling/abandonment, dictionary and caller descriptors, alignment and exact
 fit, ordinary failures, high-cell edges, reset, snapshot bounds, the scoped
-stack, and `.ARENA`. The next source seam is `IDLE` at line 2796: its `[` and
-`]` temporarily interpret `0 C,` inside an open definition, and the emitted
-MP64 opcode must become a semantic scheduler yield rather than inert data.
+stack, and `.ARENA`. Exact unchanged lines 2782 through 2796 are now admitted:
+`IDLE` uses `[` and `]` to interpret `0 C,` inside an open definition, and the
+emitted MP64 opcode becomes a runtime-owned semantic IDL suspension rather
+than inert data or an ordinary task yield. An exact one-shot interrupt/DMA
+receipt is required to resume. The following Buffer registry and constructor
+block remains the next source slice.
 
 ---
 

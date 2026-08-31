@@ -1233,6 +1233,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
     for name, kind in directives:
         runtime.define_directive(name, kind)
+    runtime.define_directive(b"[", DirectiveKind.LEFT_BRACKET)
+    runtime.define_directive(
+        b"]",
+        DirectiveKind.RIGHT_BRACKET,
+        immediate=False,
+    )
 
     primitives = (
         (b"DUP", _dup),

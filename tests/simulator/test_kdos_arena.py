@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from shared.cells import MASK64, u64
-from simulator.errors import ForthAbort, SourceError
+from simulator.errors import ForthAbort
 from simulator.memory import BANK0_DEFAULT_SIZE, EXTERNAL_BASE, HBW_BASE
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
@@ -643,26 +643,3 @@ def test_arena_new_can_consume_backing_before_partial_descriptor_fault(
     assert _execute(runtime, "LEAVE-USERLAND") == ()
     assert runtime.dictionary.here == system_here
     assert _execute(runtime, "HBW-RESET") == ()
-
-
-def test_next_contiguous_frontier_stops_at_buffer_idle_left_bracket(
-    loaded_arena: MegaForthRuntime,
-) -> None:
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[LAST_LINE:2796])
-    assert next_source.startswith(b"\n")
-    assert next_source.endswith(
-        (
-            ": IDLE  ( -- )  [ 0 C, ] ;  \\ IDL opcode — "
-            "yield CPU until next interrupt\n"
-        ).encode()
-    )
-
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_arena.evaluate(
-            next_source,
-            source_name="kdos.f:2781-2796",
-        )
-    assert caught.value.location.line == 16
-    assert caught.value.location.column == 16
-    assert caught.value.message == "unknown word b'['"
