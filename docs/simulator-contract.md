@@ -746,9 +746,70 @@ no HBW and then reports `(0,0)`; the emulator's configured-zero edge instead
 retains fixed `HBW_BASE` with size zero. These unqualified edge discrepancies
 are reproduced and recorded without choosing a future contract.
 
-The contiguous source frontier ends at line 2108. External-memory allocation
-begins at line 2110, and `EXT-MEM-BASE` at line 2163 is the next missing BIOS
-dependency.
+The admitted external-memory slice installs `EXT-MEM-BASE` and
+`EXT-MEM-SIZE` as dynamic semantic BIOS reads of SysInfo `+0x38` and `+0x40`.
+They report the actual external region bound to the sparse address space; the
+runtime does not copy a second geometry or substitute a host allocator.
+Unchanged `kdos.f` lines 2110 through 2388 add all 31 definitions through
+`XBUF`, including the raw XMEM allocator, first-fit free list, public
+`ALLOCATE`/`FREE`/`RESIZE` dispatch, explicit Bank-0 DMA allocation, reset
+floor, and status output. `NIP` and `TUCK` are ordinary stack primitives needed
+by that source, not fused allocator operations.
+
+Load-time `XMEM-INIT` is one-shot. A present region starts the bump pointer at
+`EXT-MEM-BASE` and the limit at base plus size; an absent hosted region reports
+`(base,size)=(0,0)`. Positive raw requests are rounded to 16 bytes, search the
+LIFO free list by first fit, split only when a 16-byte tail remains, and then
+fall back to the bump tail. Rejected checked allocation returns `(0,-1)` and
+the aborting form publishes its source message; both preserve allocator state.
+Returned spans are normalized and preflighted against the configured limit and
+current high-water mark before free-list metadata is written. `XMEM-RESET`
+restores the floor (or base), clears the list, and neither wipes storage nor
+revokes old addresses. `XMEM-FREE` and `.XMEM` count only the unused bump tail,
+not recyclable list nodes.
+
+When XMEM is present, public `ALLOCATE` stores an eight-byte total-size prefix
+and returns the following payload; `FREE` uses that prefix, and `RESIZE`
+allocate-copies-frees while preserving the original address on allocation
+failure. With no XMEM, these words retain the source-defined Bank-0 path.
+`DMA-ALLOCATE`, `DMA-FREE`, and `DMA-RESIZE` always retain that Bank-0 path.
+`XBUF` uses XMEM when present, publishes an ordinary constant, and advances
+the reset floor; without XMEM it uses ordinary `CREATE ALLOT` in the active
+dictionary.
+
+The free checks establish interval bounds, not ownership. There is no live
+allocation ledger, alignment proof, overlap check, or double-free check, so a
+manufactured interior subspan can be admitted and a repeated free can create
+a self-linked node. `FREE` classifies every nonzero address at or above
+`MEM-SIZE` as XMEM and reads its prefix before validation; qualification is
+therefore limited to zero or pointers returned by the corresponding allocator.
+`XBUF` allocation precedes constant publication and floor advancement, so a
+later dictionary fault can leak an unprotected block. These are open KDOS
+contract gaps, not simulator-side repairs.
+
+Allocator variables, free-list links, search scratch, the resize scratch cell,
+and floor are runtime-global and unsynchronized. The public XMEM `ALLOCATE`
+branch checks `?CORE0`, but raw XMEM allocation/free/alignment/reset do not;
+XMEM `FREE` is consequently unguarded, and XMEM `RESIZE` writes `_RS-OLD`
+before its nested allocation reaches the guard. Hosted one-core evidence does
+not claim multicore safety. The general memory documentation now records this
+source/enforcement discrepancy rather than claiming every shared operation is
+self-guarded.
+
+The qualified geometry has a positive signed size below the next physical
+window and a nonwrapping base-plus-size. `XMEM?` uses signed `0>`, and
+`XMEM-TALIGN` can advance beyond a non-64-byte-aligned configured limit. The
+hosted and executable-emulator constructors interpret configured size zero as
+no external region, while the current RTL parameter interprets zero as the
+maximum window up to VRAM; the normal emulator session profile separately
+defaults to 128 MiB. Every profile must expose its actual SysInfo geometry.
+This discrepancy is recorded without selecting one universal meaning for a
+configuration value that is not itself a guest ABI input.
+
+The contiguous source frontier now ends at line 2388. The dictionary-index
+bootstrap begins at line 2390; `2/` at line 2395 is the next missing primitive,
+followed by `2*` and the substantive checked `DICT-INDEX!` BIOS service. That
+initializer is the next slice and is not represented by a no-op index.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

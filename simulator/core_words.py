@@ -22,6 +22,8 @@ from simulator.entropy import TRNG_RAND8, TRNG_RAND64, TRNG_SEED
 from simulator.memory import MMIO_BASE, SparseAddressSpace
 from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
+    SYSINFO_EXTERNAL_BASE,
+    SYSINFO_EXTERNAL_SIZE,
     SYSINFO_HBW_BASE,
     SYSINFO_HBW_SIZE,
     SYSINFO_NUM_CORES,
@@ -54,6 +56,20 @@ def _swap(context: ExecutionContext) -> None:
 
 def _over(context: ExecutionContext) -> None:
     context.data.push(context.data.peek(1))
+
+
+def _nip(context: ExecutionContext) -> None:
+    top = context.data.pop()
+    context.data.pop()
+    context.data.push(top)
+
+
+def _tuck(context: ExecutionContext) -> None:
+    top = context.data.pop()
+    below = context.data.pop()
+    context.data.push(top)
+    context.data.push(below)
+    context.data.push(top)
 
 
 def _rotate(context: ExecutionContext) -> None:
@@ -1177,6 +1193,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"DROP", _drop),
         (b"SWAP", _swap),
         (b"OVER", _over),
+        (b"NIP", _nip),
+        (b"TUCK", _tuck),
         (b"ROT", _rotate),
         (b"-ROT", _reverse_rotate),
         (b"2DUP", _two_dup),
@@ -1267,6 +1285,22 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (
             b"HBW-SIZE",
             lambda context: _sysinfo_fetch(runtime, context, SYSINFO_HBW_SIZE),
+        ),
+        (
+            b"EXT-MEM-BASE",
+            lambda context: _sysinfo_fetch(
+                runtime,
+                context,
+                SYSINFO_EXTERNAL_BASE,
+            ),
+        ),
+        (
+            b"EXT-MEM-SIZE",
+            lambda context: _sysinfo_fetch(
+                runtime,
+                context,
+                SYSINFO_EXTERNAL_SIZE,
+            ),
         ),
         (
             b"CRYPTO-CAPS@",

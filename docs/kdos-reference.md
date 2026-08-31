@@ -785,8 +785,56 @@ record does not choose a permanent absent-region convention.
 
 Exact unchanged lines 2044 through 2108 define all nine source words and run
 the load-time initializer over the two dynamic SysInfo-backed BIOS reads. The
-contiguous hosted frontier now ends at line 2108. External-memory source begins
-at line 2110, with `EXT-MEM-BASE` at line 2163 as the next missing BIOS word.
+next unchanged block, lines 2110 through 2388, admits the complete `§1.12a`
+external-memory allocator and `§1.0b` public allocation dispatch through
+`XBUF`.
+
+### External Memory Allocator and Dispatch
+
+`EXT-MEM-BASE` and `EXT-MEM-SIZE` dynamically read the actual SysInfo external
+region. Load-time `XMEM-INIT` snapshots that geometry into `XMEM-HERE` and
+`XMEM-LIMIT`; an absent region sets both to zero.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `XMEM?` | `( -- flag )` | True when the reported size is positive as a signed cell. |
+| `XMEM-ALLOT` | `( u -- addr )` | Allocate a positive request, normalized to 16 bytes; abort on failure. |
+| `XMEM-ALLOT?` | `( u -- addr ior )` | Checked counterpart returning `(0,-1)` on failure. |
+| `XMEM-FREE-BLOCK` | `( addr u -- )` | Normalize and prepend one caller-owned span to the in-band free list after bounds checks. |
+| `ALLOCATE` / `FREE` / `RESIZE` | standard | Prefer prefixed XMEM blocks when XMEM is present; otherwise retain the Bank-0 heap. |
+| `DMA-ALLOCATE` / `DMA-FREE` / `DMA-RESIZE` | standard | Always use the Bank-0 heap. |
+| `XMEM-TALIGN` | `( -- )` | Round the bump pointer upward to 64 bytes without a limit check. |
+| `XMEM-RESET` | `( -- )` | Reset to `XMEM-FLOOR` or the base and clear the free list without wiping bytes. |
+| `XMEM-FREE` | `( -- u )` | Return virgin bump-tail capacity; reclaimed list nodes are not included. |
+| `XBUF` | `( u "name" -- )` | Allocate a persistent XMEM constant and advance the floor, or use `CREATE ALLOT` without XMEM. |
+
+Free-list insertion is LIFO; allocation is first-fit, splits a block only when
+at least one 16-byte node remains, and does not coalesce. Public XMEM
+allocations carry an eight-byte total-size prefix. XMEM `RESIZE` allocates,
+copies the lesser of the recorded old usable size and new request, and frees
+the old block; allocation failure returns the original address and `-1`.
+
+The current bounds checks are not an ownership proof. There is no live-block
+ledger, alignment/overlap validation, or double-free detection. An interior
+span can be returned and a repeated free can create a self-linked node. Public
+`FREE` also treats every nonzero address at or above `MEM-SIZE` as XMEM and
+reads the prefix first, so its contract is restricted to allocator results.
+Raw XMEM allocation, free, alignment, and reset are unsynchronized and lack
+the intended core-0 guard; XMEM `FREE` is likewise unguarded, while `RESIZE`
+writes shared scratch before its nested allocation guard. These discrepancies
+remain open and are not repaired by hosted execution.
+
+`XBUF` allocation precedes constant publication and floor advancement, so a
+dictionary fault in between can leak an unprotected block. Reset does not
+revoke stale pointers. `XMEM-TALIGN` can cross a nonaligned configured limit.
+The hosted and executable-emulator zero-size profiles mean absence, whereas
+the RTL parameter value zero selects the maximum window up to VRAM; guest
+words report each profile's actual SysInfo rather than normalizing this host
+configuration difference.
+
+The contiguous hosted frontier now ends at line 2388. Dictionary-index boot
+initialization begins at line 2390; `2/` at line 2395 is the next missing word,
+followed by `2*` and the checked `DICT-INDEX!` BIOS service.
 
 ---
 

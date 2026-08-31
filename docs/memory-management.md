@@ -114,7 +114,10 @@ recovered by `FREE`.
   data stack.
 - **Cost:** O(n) free-list search in the selected allocator; the XMEM path may
   fall back to an O(1) bump allocation.
-- **Constraint:** core-0 only (`?CORE0` guard).
+- **Constraint:** intended for serialized core-0 use. The XMEM `ALLOCATE` path
+  enforces `?CORE0`, but the current source does not put the same guard on raw
+  XMEM allocation/free/reset, XMEM `FREE`, or the shared `_RS-OLD` write at the
+  start of XMEM `RESIZE`. See the multicore discrepancy in §5.1.
 - **Size contract:** requests must be strictly positive. Values that cannot be
   aligned and represented in a signed cell fail before heap or free-list state
   changes.
@@ -196,6 +199,14 @@ current bump frontier. Once userland is initialized, the same
 pre-write validation rejects any returned span that intersects
 `[U-DICT-BASE,U-DICT-LIMIT)`. Wholly reclaimed pre-init buffers below the
 dictionary base remain valid free-list nodes.
+
+These checks prove only interval bounds. The current source has no allocation
+ledger and does not prove that a returned span starts at a live allocation,
+is aligned, is disjoint from another returned span, or has not already been
+freed. An interior subspan can therefore be admitted, and a double free can
+make a free-list node point to itself. This is an open source/contract gap;
+callers must pass each valid owned allocation exactly once. `XMEM-FREE` and
+`.XMEM` report the unused bump tail only, not bytes available in the free list.
 
 **Floor protection:** `XMEM-FLOOR` is the lowest address to which the bump
 allocator may reset. Before userland it protects persistent kernel XMEM
@@ -484,9 +495,16 @@ The allocators use shared scratch `VARIABLE`s (`A-PREV`, `A-CURR`,
 cores calling `ALLOCATE` concurrently would corrupt these variables
 and silently destroy the free list.
 
-The rule: **all allocator words that touch shared state are core-0
-only.**  They enforce this with `?CORE0`, which aborts with a clear
-message if `COREID` ≠ 0.
+The intended rule is: **all allocator words that touch shared state are
+serialized and core-0 only.** The current enforcement is incomplete.
+Bank-0 allocation paths enforce `?CORE0`, as does the XMEM branch of public
+`ALLOCATE`. Raw `XMEM-ALLOT`, `XMEM-ALLOT?`, `XMEM-FREE-BLOCK`,
+`XMEM-TALIGN`, and `(XMEM-RESET)` do not. Public XMEM `FREE` reaches the
+unguarded raw free, and XMEM `RESIZE` writes shared `_RS-OLD` before its
+nested `ALLOCATE` performs the guard. Thus the table below states the caller
+contract, not a claim that every entry currently self-enforces it. This
+documentation/source discrepancy remains open rather than being hidden by a
+simulator-only lock.
 
 | Core-0 only | Why |
 |---|---|
@@ -606,6 +624,12 @@ Bank 0 dictionary space), then advances the floor:
 ```forth
 16384 XBUF my-data   \ lives in XMEM, protected from XMEM-RESET
 ```
+
+Publication is not transactional: on an XMEM system, allocation precedes the
+`CONSTANT` definition and floor advance. A later dictionary-publication fault
+can therefore leak an allocated block below the old floor. Boot composition
+must leave dictionary room for the definition; this remains an open failure
+atomicity gap rather than an implied rollback guarantee.
 
 ---
 

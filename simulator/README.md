@@ -518,6 +518,31 @@ aligned, while an absent hosted region reports `(base,size)=(0,0)`; a
 configured-zero emulator retains fixed `HBW_BASE` instead. These cases are
 pinned discrepancies, not simulator-side normalization.
 
+Byte-exact logical lines 2110 through 2388 add the complete external-memory
+allocator and allocation-dispatch slice through `XBUF`. `EXT-MEM-BASE` and
+`EXT-MEM-SIZE` dynamically read the bound SysInfo geometry. The unchanged
+source owns bump and free-list state, 16-byte normalization, LIFO first-fit
+reuse and splitting, the eight-byte public-allocation prefix, resize copying,
+Bank-0 DMA routing, reset floors, XBUF publication, and present/absent status
+output. No host allocation object replaces guest-visible links or metadata.
+
+Qualification covers normal owned pointers. The source's bounds checks are
+failure-atomic but do not prove allocation ownership, alignment, disjointness,
+or single free; interior and repeated frees can corrupt or cycle the list.
+Free-list bytes are also excluded from `XMEM-FREE` accounting. `FREE` treats
+every address at or above `MEM-SIZE` as XMEM, reset leaves stale bytes and
+pointers, `XMEM-TALIGN` may cross a nonaligned limit, and XBUF can leak an
+allocation if constant publication faults before the floor advances. The
+shared XMEM state is unsynchronized, and several raw/free/reset paths lack the
+documented core-0 guard. These are explicit source-contract gaps rather than
+hosted fixes.
+
+The hosted and executable-emulator constructors use external size zero for an
+absent region; RTL's `EXT_MEM_SIZE_PARAM=0` instead selects the full window up
+to VRAM, while ordinary emulator sessions default separately to 128 MiB.
+Hosted words report the profile's actual SysInfo geometry and do not erase
+that configuration discrepancy.
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -533,8 +558,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–2108 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, Field, NTT, ML-KEM, both HKDF families, hybrid exchange, and the complete HBW allocator; blank separators have no definitions |
-| 2110 onward | Next uncovered frontier | The external-memory allocator compiles through its preamble to the first missing BIOS dependency, `EXT-MEM-BASE` at line 2163 |
+| 39–2388 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW, and the complete external-memory allocator/allocation dispatch through `XBUF`; blank separators have no definitions |
+| 2390 onward | Next uncovered frontier | Dictionary-index boot initialization reaches missing `2/` at line 2395, followed by `2*` and checked `DICT-INDEX!` |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -546,11 +571,12 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins the external-memory allocator at line 2110,
-with `EXT-MEM-BASE` at line 2163 as the first missing word. Later slices
-continue the same contiguous unchanged prefix toward the persistent evaluator,
-ordinary checked module-loader surface, and
-deterministic cooperative task scheduler.
+The next source boundary begins the dictionary-index boot initializer at line
+2390. Its arithmetic helpers are small, but `DICT-INDEX!` must preserve the
+real caller-backed validation, rebuild, and status contract; it will not be
+accepted as a no-op merely to move the frontier. Later slices continue the
+same contiguous unchanged prefix toward the persistent evaluator, ordinary
+checked module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

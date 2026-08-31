@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from simulator.errors import ForthAbort, SourceError
+from simulator.errors import ForthAbort
 from simulator.memory import HBW_BASE, MASK64, MMIO_BASE
 from simulator.platform import (
     SYSINFO_HBW_BASE,
@@ -250,20 +250,3 @@ def test_hbw_request_wrap_and_unchecked_alignment_discrepancies_are_visible(
     assert _execute(unaligned, "HBW-TALIGN") == ()
     assert _pointer(unaligned, "HBW-HERE") == HBW_BASE + 128
     assert _execute(unaligned, "HBW-FREE") == (MASK64 - 62,)
-
-
-def test_next_contiguous_frontier_stops_at_external_memory_base(
-    loaded_hbw: MegaForthRuntime,
-) -> None:
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[2109:2163])
-    assert next_source.startswith(b"\\ ===")
-    assert next_source.endswith(
-        b'    OVER EXT-MEM-BASE < ABORT" XMEM-FREE: addr below base"\n'
-    )
-
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_hbw.evaluate(next_source, source_name="kdos.f:2110-2163")
-    assert caught.value.location.line == 54
-    assert caught.value.location.column == 9
-    assert caught.value.message == "unknown word b'EXT-MEM-BASE'"
