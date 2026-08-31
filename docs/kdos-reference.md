@@ -354,6 +354,30 @@ modulo-128 position before an empty UPDATE or destination preflight. Every
 failure aborts and wipes; a failed `FINAL` does not publish a digest to a
 non-context destination.
 
+The hosted simulator's exact contiguous qualification through `kdos.f` line
+1269 includes both one-shot wrappers and all ten status constants. Its
+runtime-local service is per architectural core, uses no SHA-3 owner or
+spinlock, has no MMIO aperture, and requires no `CRYPTO_CAPS` bit. `HASH`
+continues to mean the SHA3-256 wrapper; `SHA256` and `SHA512` are distinct
+SHA-2 transactions.
+
+Hosted `SHA2-SPAN-STATUS` follows physical geometry rather than the stricter
+caller-managed policy: address zero and static Bank-0 data are admissible when
+the nonempty span fits in that region, while wrap, MMIO, unmapped, and
+cross-region spans return RANGE. Native context arenas return CONTEXT-ALIAS.
+The hosted contexts live outside guest memory, so an ordinary hosted span
+cannot alias them unless a composition explicitly maps private arena ranges.
+Every nonzero `UPDATE` or `FINAL` result logically clears the selected
+context, and finalization stages the complete big-endian digest before
+publication.
+
+Hosted logical cleanup clears its explicit metadata/stage and releases its
+incremental host hash object; it does not claim physical erasure inside the
+host crypto library. It also supplies no EXT.CRYPTO, cycle, interrupt,
+arbitration, constant-time, RTL, or hardware evidence. The current
+working-native/current-RTL instruction-path discrepancy is recorded in the
+[simulator contract](simulator-contract.md#6-platform-services).
+
 ---
 
 ### §1.6c Checked WOTS Chain

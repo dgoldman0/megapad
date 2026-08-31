@@ -53,6 +53,9 @@ The implemented slices provide:
   words and direct virtual MMIO, with complete caller-span preflight,
   `(COREID,TASK-ID)` transaction ownership, staged publication, and a portable
   24-round Keccak-f[1600] value model;
+- runtime-local, per-core checked SHA-256 and SHA-512 streams with their
+  distinct physical-span policy, exact 64/128-bit length accounting, staged
+  digest publication, and no invented MMIO aperture or capability bit;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -281,6 +284,32 @@ general. SHAKE's safe positive chunk sizes do not resolve the separate
 continues to record that mismatch without deciding whether the public word
 should be signed or unsigned.
 
+Byte-exact logical lines 1217 through 1269 add the unchanged `HASH`, `SHA256`,
+and `SHA512` wrappers and their ten public status constants. `HASH` remains an
+alias for the already admitted SHA3-256 wrapper. SHA-256 and SHA-512 instead
+reach one runtime-local service whose contexts are keyed by architectural core,
+not task, and whose successful finalization publishes exactly 32 or 64
+big-endian digest bytes only after complete destination preflight.
+
+`SHA2-SPAN-STATUS` intentionally does not reuse `CALLER-SPAN-STATUS`. A
+nonempty SHA-2 span may include address zero or static Bank-0 bytes, but must
+fit wholly in one Bank 0, external, HBW, or VRAM region; wrap, MMIO, unmapped,
+and cross-region spans return RANGE. Native context arenas return
+CONTEXT-ALIAS. Hosted SHA-2 contexts are private host objects and therefore do
+not alias ordinary guest memory; a composition may provide mapped private
+arena ranges when that distinction needs to be exposed. Empty spans ignore
+their address. Every nonzero continuation result aborts its selected context,
+and failed finalization publishes nothing to an ordinary destination.
+
+The hosted value operation uses incremental `hashlib` objects. Clearing their
+references plus explicit metadata/stage wiping proves logical simulator state,
+not physical erasure inside CPython or its crypto library. The service makes no
+claim about EXT.CRYPTO instructions or CSRs, engine latency, cluster
+arbitration, stalls, interrupt masking, raw padding-buffer effects, or
+constant-time execution. The working BIOS/native SHA-2 behavior also differs
+materially from current RTL instruction glue; that discrepancy is recorded in
+the [simulator contract](../docs/simulator-contract.md#6-platform-services).
+
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
@@ -296,8 +325,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–1216 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, and the complete unchanged KDOS SHA3/SHAKE/TRNG-helper section in their documented safe input domains; line 70 is blank |
-| 1217 onward | Next uncovered frontier | Unified crypto begins at line 1217; its alias and checked SHA-256 constants precede the next genuinely missing BIOS primitive, `SHA256-INIT`, at line 1241 |
+| 39–1269 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, and the adjacent unchanged SHA-256/SHA-512 one-shot wrappers; line 70 is blank |
+| 1270 onward | Next uncovered frontier | HMAC-SHA3 begins at line 1270; its shared-lock preamble reaches the next missing BIOS primitive, `SPIN@`, at line 1280 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -309,8 +338,8 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins unified crypto at line 1217. Its first actual
-semantic-BIOS gap is `SHA256-INIT` at line 1241; later slices continue the same
+The next source boundary begins HMAC-SHA3 at line 1270. Its first actual
+semantic-BIOS gap is `SPIN@` at line 1280; later slices continue the same
 contiguous unchanged prefix toward the persistent evaluator, ordinary checked
 module-loader surface, and deterministic cooperative task scheduler.
 

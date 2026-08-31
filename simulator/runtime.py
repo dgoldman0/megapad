@@ -55,6 +55,7 @@ from simulator.platform import (
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
 )
+from simulator.sha2 import HostedSHA2Service
 from simulator.source import (
     ASCII_SPACE,
     SourceBuffer,
@@ -376,6 +377,7 @@ class MegaForthRuntime:
         self.aes = platform_mmio.aes
         self.sha3 = platform_mmio.sha3
         self.entropy = platform_mmio.entropy
+        self.sha2 = HostedSHA2Service(core_count=num_full)
         self.diagnostics = (
             HostedDiagnosticsService()
             if diagnostics is None

@@ -1081,6 +1081,20 @@ aborts and wipes the active context. A failed `FINAL` publishes no digest and
 does not modify a non-context destination. Streaming contexts are core-local
 and must be updated, finalized, or cleared on their originating core.
 
+> **Open native/RTL SHA-2 instruction discrepancy.** The checked BIOS above
+> produces standard SHA-256/SHA-512 through the Python and native executable
+> models, but the current RTL instruction glue is not equivalent. Full-core
+> and cluster RTL make `SHA.PAD`/`SHA.FINAL` data-path no-ops even though BIOS
+> relies on `SHA.FINAL` to pad; their `SHA.DOUT` selects from the encoded
+> register field rather than `R[Rs] & 7`; `SHA.DIN` writes an accumulator
+> qword rather than feeding one buffer byte; and their ROUND memory loaders do
+> not perform the required little-endian-memory to big-endian-word conversion.
+> The RTL SHA leaf also leaves SHA-384/512 as future work. Existing RTL tests
+> bypass these seams with pre-padded/endian-correct words or test ownership
+> only. This note records the split without choosing the eventual RTL, BIOS,
+> or public-ISA correction; hosted semantic execution follows the working
+> BIOS/native result and is not RTL evidence.
+
 ---
 
 ## Checked SHA-3 / SHAKE / raw Keccak (9 words)

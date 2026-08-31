@@ -258,6 +258,60 @@ decryption retains the executable mutation order: already streamed plaintext
 remains published while the final output window is zero. These are recorded
 compatibility findings, not endorsed security properties.
 
+The admitted SHA-2 service is runtime-local and keyed by architectural core,
+not task. It implements the checked `SHA256-*` and `SHA512-*` BIOS words plus
+pure `SHA2-SPAN-STATUS`; it is not an MMIO service and does not consume a
+`CRYPTO_CAPS` bit. `INIT` always replaces that core's selected context,
+`CLEAR` is idempotent, and continuations use statuses 0 OK, 1 STATE, 2 RANGE,
+3 CONTEXT-ALIAS, and 4 LENGTH-OVERFLOW. SHA-256 tracks a checked 64-bit bit
+length and SHA-512 a checked 128-bit bit length. Active marker, high-word where
+applicable, partial-offset bound, byte alignment, and length/offset agreement
+are validated before an empty update may succeed. Every nonzero continuation
+result aborts and logically wipes the selected context.
+
+SHA-2 physical-span qualification is deliberately broader than
+`CALLER-SPAN-STATUS`. Empty spans ignore their address. A nonempty span may
+start at address zero or name static Bank-0 bytes, but it must fit wholly in
+one advertised Bank 0, external, HBW, or VRAM region; wrap, MMIO, unmapped, and
+cross-region spans return RANGE. Native layouts then reject intersection with
+either complete SHA-2 private-context arena as CONTEXT-ALIAS. Hosted contexts
+are out-of-band host objects, so ordinary hosted guest spans cannot alias
+them; a composition may configure mapped private arena ranges when it exposes
+such storage. Geometry is still checked before alias classification.
+
+Updates preflight their complete source before reading it. Finalization
+preflights all 32 or 64 destination bytes, stages the standard big-endian
+digest, publishes once, and then becomes inactive. A failed final does not
+alter an ordinary destination. The exact unchanged KDOS slice through
+`kdos.f` line 1269 retains `HASH` as the SHA3-256 alias and adds the adjacent
+`SHA256` and `SHA512` one-shot wrappers, which return the first checked status
+unchanged.
+
+Hosted SHA-2 uses incremental `hashlib` objects. Dropping those objects and
+overwriting explicit metadata and publication stages is a logical simulator
+cleanup claim only; it does not prove physical erasure in CPython or its host
+crypto library. The simulator does not claim EXT.CRYPTO instruction or CSR
+behavior, raw engine state, compression latency, cluster arbitration or
+stalls, interrupt masking, raw padding-buffer effects, or constant-time host
+execution.
+
+The hosted service follows the working BIOS/native executable SHA-2 behavior.
+Current RTL instruction glue is not equivalent:
+
+| Surface | Working BIOS/native behavior | Current RTL behavior |
+|---|---|---|
+| `SHA.PAD` / `SHA.FINAL` | Performs FIPS padding/final compression used directly by BIOS | Both are data-path no-ops, despite BIOS not constructing padding manually |
+| `SHA.DOUT Rd,Rs` | Selects 32-bit `H[R[Rs] & 7]`, allowing the BIOS value-indexed loop | Selects a 64-bit accumulator qword from the encoded register field |
+| `SHA.DIN` | Feeds one byte through the documented block-buffer path | Writes a whole qword into an accumulator slot |
+| ROUND memory load | Reconstructs addressed bytes and parses big-endian SHA words | Splits little-endian memory qwords into W words without the required byte swap |
+| SHA-512 | Native mode 2 backs the checked BIOS stream | The RTL SHA leaf identifies SHA-384/512 as future work |
+
+Native checked tests cover standard digests and padding/split boundaries; the
+present RTL tests exercise an already padded/endian-correct compression leaf
+or ownership only. Simulator success therefore supplies no RTL or physical
+SHA-2 evidence, and this discrepancy record does not choose which hardware or
+public-ISA correction should land.
+
 The admitted SHA service is one per-runtime shared transaction engine behind
 the virtual-MMIO router at `+0x780..+0x7DF`. Checked BIOS words and direct
 virtual-MMIO accesses reach that same object. The service implements all four

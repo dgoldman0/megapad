@@ -658,6 +658,85 @@ def _caller_span_status(
     context.data.push(runtime.caller_span_status(context, address, length))
 
 
+def _sha2_span_status(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    length = context.data.pop()
+    address = context.data.pop()
+    context.data.push(runtime.sha2.span_status(runtime.memory, address, length))
+
+
+def _sha256_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(runtime.sha2.sha256_init(core_id))
+
+
+def _sha256_update(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    length = context.data.pop()
+    source = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(
+        runtime.sha2.sha256_update(
+            core_id,
+            source,
+            length,
+            runtime.memory,
+        )
+    )
+
+
+def _sha256_final(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    destination = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(
+        runtime.sha2.sha256_final(core_id, destination, runtime.memory)
+    )
+
+
+def _sha256_clear(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(runtime.sha2.sha256_clear(core_id))
+
+
+def _sha512_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(runtime.sha2.sha512_init(core_id))
+
+
+def _sha512_update(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    length = context.data.pop()
+    source = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(
+        runtime.sha2.sha512_update(
+            core_id,
+            source,
+            length,
+            runtime.memory,
+        )
+    )
+
+
+def _sha512_final(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    destination = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(
+        runtime.sha2.sha512_final(core_id, destination, runtime.memory)
+    )
+
+
+def _sha512_clear(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(runtime.sha2.sha512_clear(core_id))
+
+
 def _sha3_begin(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     status = runtime.sha3.begin(
         runtime.guest_identity(context),
@@ -951,6 +1030,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
             b"CALLER-SPAN-STATUS",
             lambda context: _caller_span_status(runtime, context),
         ),
+        (
+            b"SHA2-SPAN-STATUS",
+            lambda context: _sha2_span_status(runtime, context),
+        ),
         (b"CRC-MODE!", lambda context: _crc_mode_store(runtime, context)),
         (b"CRC-RESET", lambda context: _crc_reset(runtime, context)),
         (b"CRC-INIT!", lambda context: _crc_init_store(runtime, context)),
@@ -1059,6 +1142,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
                 length=16,
             ),
         ),
+        (b"SHA256-INIT", lambda context: _sha256_init(runtime, context)),
+        (b"SHA256-UPDATE", lambda context: _sha256_update(runtime, context)),
+        (b"SHA256-FINAL", lambda context: _sha256_final(runtime, context)),
+        (b"SHA256-CLEAR", lambda context: _sha256_clear(runtime, context)),
+        (b"SHA512-INIT", lambda context: _sha512_init(runtime, context)),
+        (b"SHA512-UPDATE", lambda context: _sha512_update(runtime, context)),
+        (b"SHA512-FINAL", lambda context: _sha512_final(runtime, context)),
+        (b"SHA512-CLEAR", lambda context: _sha512_clear(runtime, context)),
         (b"SHA3-BEGIN", lambda context: _sha3_begin(runtime, context)),
         (b"SHA3-UPDATE", lambda context: _sha3_update(runtime, context)),
         (b"SHA3-FINAL", lambda context: _sha3_final(runtime, context)),
