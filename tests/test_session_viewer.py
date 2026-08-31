@@ -739,7 +739,7 @@ def test_terminal_composition_orders_cell_draw_plane_then_cursor(monkeypatch):
     ]
 
 
-def test_physical_present_occurs_only_after_draw_and_flip():
+def test_reference_sink_present_occurs_only_after_draw_and_flip():
     events = []
     offer = _display_offer(3)
 

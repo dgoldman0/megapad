@@ -15,11 +15,13 @@ Text areas, logical text grids, tabsets, and tabs extend the existing retained
 API, or terminal-buffer reservations.
 
 The wire does not equate one CONTROL root with one UIDL source element. One
-generic provider element may publish multiple roots—such as a TABSET and a
-TEXT_AREA—using stable control IDs derived by the producer from its attachment,
-source index, and stable per-element object key. Those producer coordinates do
-not enter the wire. The results remain ordinary independent CONTROL
-definitions in one owner and region, not a mirrored DOM or element-owned scene.
+ordinary core UIDL type or canonical reusable widget may automatically project
+multiple roots—such as a TABSET and a TEXT_AREA—using stable control IDs
+derived by the lower producer from its attachment, source index, and stable
+per-element object key. Those producer coordinates do not enter the wire. The
+results remain ordinary independent CONTROL definitions in one owner and
+region, not a mirrored DOM or element-owned scene. Applets do not register a
+provider or maintain a second semantic description.
 
 Feature bit 9, `RET_CONTROL_COLLECTIONS`, gates all four kinds and depends on
 bit 8 `RET_CONTROLS`. The same `CONTROL_DEFINE`, `CONTROL_REPLACE`,
@@ -263,9 +265,12 @@ valid extreme-u32 spans cannot wrap into false geometry. A paint failure occurs
 before flip, hit-map staging, or physical acknowledgement.
 
 The completed pixel surface—not STX1 revision, item geometry, or semantic
-state—is the input to later e-paper damage derivation. Partial/full refresh,
-waveform, ghosting, color conversion, controller completion, and settling remain
-selected-sink policy.
+state—is the input to the opt-in panel-neutral damage tracker. A damage-aware
+sink captures it only after CELL, rich planes, and cursor composition; the SDL
+reference sink avoids that readback because it has no partial-refresh consumer.
+The damage baseline advances only on exact sink acknowledgement. Partial/full
+refresh, waveform, ghosting, color conversion, controller completion, and
+settling remain selected-sink policy.
 
 ## Implementation boundary
 
@@ -283,20 +288,23 @@ The coherent protocol slice is owned by:
   sibling roots. The view reuses the deeply immutable STX1 content value
   validated at wire/model admission; it does not rebuild the item graph or
   repeat item-family, UTF-8, or rectangle-overlap scans on every display offer;
-  and
 - `shared_session.py`: exact tagged local-viewer transport, carrying canonical
-  STX1 bytes without defining a parallel item representation; and
+  STX1 bytes without defining a parallel item representation;
 - `rich_terminal/pygame_view.py` and `session_viewer.py`: generic collection
   rasterization, same-pass immutable TAB hit geometry, complete CELL/cursor
-  composition order, and exact physical-offer promotion.
+  composition order, an explicit damage-sink capture helper, and synchronous
+  SDL reference-sink promotion after successful flip; and
+- `rich_terminal/final_raster.py`: sink-local final-pixel damage, pinned
+  raster/damage/hit-map offers, and acknowledgement-only baseline promotion.
 
 The reference sink no longer blocks collection rendering. Capability bit 9
-remains unadvertised until the synchronized Akashic producer and ordinary
-Desk/Pad/Daybook vertical can supply and exercise these records end to end.
-Akashic can advertise/use bit 9 only after its generic UIDL semantic provider
-and CONTROL encoder emit these exact records. Pad and Daybook must remain
-ordinary UIDL/TUI sources; neither receives a terminal API or renderer-specific
-annotation.
+remains unadvertised until a synchronized Akashic lower-layer producer and an
+ordinary application journey can supply and exercise these records end to end.
+Akashic can advertise/use bit 9 only after an ordinary core UIDL type or
+canonical reusable widget automatically emits these exact records through the
+CONTROL encoder. Pad, Daybook, and every other applet remain ordinary UIDL/TUI
+clients; none receives a provider callback, terminal API, renderer-specific
+annotation, or future per-applet repair obligation.
 
 Advertisement is deliberately one final vertical gate, not an isolated policy
 bit flip. The MegaPad guest module now accepts mask `0x33f`, requires bit 8 for
@@ -312,15 +320,16 @@ overlap, then all source borrows are scrubbed after the guarded call.
 Bit-9 discovery now audits the 152-byte peer payload, 192-byte guest TX staging,
 and 352-byte retained-transaction minima, and a focused target-Forth oracle
 locks the complete minimum-content CONTROL frame. No host/product policy
-advertises the capability yet. Akashic's real collection operation counts and
-UTF-8 bytes must still be included in the Desktop caller-owned arena derivation,
-and its ordinary UIDL provider/encoder must drive the real Pad and Daybook
-records before advertisement.
+advertises the capability yet. Akashic's real core-owned collection operation
+counts and UTF-8 bytes must still be included in the Desktop caller-owned arena
+derivation, and its ordinary core-widget projection/encoder must drive
+representative records before advertisement.
 
 The session configuration derives its transport `max_payload` from both the CELL
 row requirement and the retained client-to-terminal payload policy. This keeps
 an otherwise valid retained policy from failing discovery and quietly selecting
-CELL fallback. The real largest Pad/Daybook collection must fit the negotiated
-payload and the guest's current 8 KiB TX staging before advertisement.
+CELL fallback. The largest supported canonical collection must fit the
+negotiated payload and the guest's current 8 KiB TX staging before
+advertisement.
 `MANDATORY_CAPABILITIES` remains the base `0x3f`; collection support belongs
 only to the additive `RET_CAPS` negotiation.

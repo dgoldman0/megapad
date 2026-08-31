@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from display import VirtualTerminal
+from rich_terminal.final_raster import FinalRaster
 from rich_terminal.pygame_view import (
     CompositeDrawResult,
     ControlHitTarget,
@@ -87,7 +88,7 @@ def _status_display_required(status) -> bool:
 
 
 def _accepted_presentation_revision(response) -> int | None:
-    """Return the CELL cursor only for one accepted physical presentation."""
+    """Return the CELL cursor only for one accepted sink presentation."""
 
     if not isinstance(response, Mapping):
         raise RuntimeError("present returned no response object")
@@ -112,7 +113,7 @@ def _accepted_presentation_revision(response) -> int | None:
 
 
 class _RetainedDisplayState:
-    """Keep offer delivery separate from acknowledged physical display state."""
+    """Keep offer delivery separate from acknowledged sink display state."""
 
     def __init__(self) -> None:
         self.since_offer = 0
@@ -133,13 +134,13 @@ class _RetainedDisplayState:
 
     @property
     def hit_map_token(self) -> tuple[int, DisplayScope] | None:
-        """Exact physically acknowledged offer/scope owning the hit map."""
+        """Exact sink-acknowledged offer/scope owning the hit map."""
 
         return self._hit_map_token
 
     @property
     def hit_targets(self) -> tuple[ControlHitTarget, ...]:
-        """Only the immutable map promoted by accepted physical presentation."""
+        """Only the immutable map promoted by accepted sink presentation."""
 
         return self._hit_targets
 
@@ -162,7 +163,7 @@ class _RetainedDisplayState:
         self._hit_targets = ()
 
     def reset(self) -> None:
-        """Drop visual candidates while preserving the last physical ACK cursor."""
+        """Drop visual candidates while preserving the last sink ACK cursor."""
 
         self.pending_offer = None
         self.pending_generation = None
@@ -183,7 +184,7 @@ class _RetainedDisplayState:
         self.pending_offer = offer
         self.pending_generation = normalized_generation
         # Delivery of a newer candidate invalidates the older frame as local
-        # input authority before the candidate is drawn or physically ACKed.
+        # input authority before the candidate crosses its sink boundary.
         self._hit_map_token = None
         self._hit_targets = ()
         self._pending_hit_token = self._offer_token(offer)
@@ -216,7 +217,7 @@ class _RetainedDisplayState:
         *,
         display_token: tuple[int, DisplayScope] | None,
     ) -> ControlHitTarget | None:
-        """Hit-test only when the input proof and physical map token agree."""
+        """Hit-test only when the input proof and sink map token agree."""
 
         if display_token is None or display_token != self._hit_map_token:
             return None
@@ -345,7 +346,7 @@ class _GuestKeyboardForwarder:
         self.last_error = None
 
     def begin_display_offer(self) -> None:
-        """Invalidate old queued input while one newer frame awaits physical ACK."""
+        """Invalidate old input while a newer frame awaits its sink boundary."""
 
         self._pending_inputs.clear()
         self._display_ack = None
@@ -504,7 +505,7 @@ class _GuestKeyboardForwarder:
 
 
 class _SemanticPointerInteractor:
-    """Resolve clicks exclusively through one physically ACKed semantic map."""
+    """Resolve clicks exclusively through one sink-acknowledged semantic map."""
 
     def __init__(
         self,
@@ -878,6 +879,32 @@ def compose_terminal_frame_result(
     return CompositeDrawResult(surface, hit_targets)
 
 
+def capture_final_terminal_raster(pygame_module, surface) -> FinalRaster:
+    """Freeze exact RGB pixels for an explicitly selected damage-aware sink.
+
+    The ordinary SDL reference sink does not call this helper: its synchronous
+    completion boundary is a successful ``pygame.display.flip()`` and it has no
+    partial-refresh consumer.  A physical sink calls this only after CELL, all
+    rich planes, and the cursor have been composed.
+    """
+
+    try:
+        width, height = surface.get_size()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise TypeError("surface must expose a two-dimensional get_size()") from exc
+    try:
+        pixels = pygame_module.image.tobytes(surface, "RGB")
+    except AttributeError as exc:
+        raise TypeError("pygame image API must expose tobytes()") from exc
+    return FinalRaster(
+        width=width,
+        height=height,
+        bytes_per_pixel=3,
+        pixel_format="RGB888",
+        pixels=pixels,
+    )
+
+
 def draw_flip_and_present(
     pygame_module,
     client,
@@ -887,7 +914,12 @@ def draw_flip_and_present(
     generation: int,
     active: bool = True,
 ) -> dict | None:
-    """Draw and flip one frame, then ACK only its exact retained offer."""
+    """Cross the synchronous SDL reference-sink boundary, then attest it.
+
+    A successful ``pygame.display.flip()`` is the documented completion
+    boundary for this software reference sink.  It is not evidence of e-paper
+    controller completion or panel settling.
+    """
 
     if not isinstance(active, bool):
         raise TypeError("active must be bool")
@@ -1263,7 +1295,6 @@ def main() -> int:
                         frame_offer,
                         rendered_hit_targets,
                     )
-
             presentation = draw_flip_and_present(
                 pygame,
                 client,

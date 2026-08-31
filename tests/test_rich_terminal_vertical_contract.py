@@ -25,6 +25,7 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
     projection = _read(ROOT / "rich_terminal" / "retained_view.py")
     scene = _read(ROOT / "rich_terminal" / "retained_scene.py")
     compositor = _read(ROOT / "rich_terminal" / "pygame_view.py")
+    final_raster = _read(ROOT / "rich_terminal" / "final_raster.py")
     server = _read(ROOT / "rich_terminal" / "server.py")
     session = _read(ROOT / "session.py")
     viewer = _read(ROOT / "session_viewer.py")
@@ -57,9 +58,11 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
     assert "MessageType.CONTROL_EVENT" in server
     assert 'pygame.font.SysFont("sans"' in viewer
     assert "def stage_frame_hit_map" in viewer
+    assert "def capture_final_terminal_raster" in viewer
     assert "def finish_presentation" in viewer
     assert "class _SemanticPointerInteractor" in viewer
-    assert "presented hit map was not rendered for its exact offer" in viewer
+    assert "class FinalRasterDisplayState" in final_raster
+    assert "def derive_raster_damage" in final_raster
     assert "def _acknowledged_output_scope" in session
     assert "def send_control_event" in session
 

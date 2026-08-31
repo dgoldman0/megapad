@@ -1,4 +1,4 @@
-"""Focused physical-ACK authority tests for semantic viewer activation."""
+"""Focused sink-ACK authority tests for semantic viewer activation."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from session_viewer import (
     _SemanticPointerInteractor,
     _accept_status_update,
     _pygame_apt_modifiers,
+    capture_final_terminal_raster,
     compose_terminal_frame_result,
     draw_flip_and_present,
 )
@@ -118,7 +119,7 @@ def test_only_independently_activatable_controls_can_enter_the_hit_map():
         _target(kind=ControlKind.TEXT_GRID)
 
 
-def test_pending_hit_map_is_not_authority_until_accepted_physical_present():
+def test_pending_hit_map_is_not_authority_until_accepted_sink_present():
     client = _RecordingClient()
     keyboard = _GuestKeyboardForwarder(
         _Pygame(),
@@ -162,7 +163,7 @@ def test_accepted_present_requires_a_rendered_map_for_the_exact_offer():
     assert state.hit_targets == ()
 
 
-def test_render_flip_present_then_promotion_order_is_explicit():
+def test_reference_sink_flip_precedes_present_and_hit_map_promotion():
     events = []
     state = _RetainedDisplayState()
     offer = _offer(1)
@@ -416,3 +417,62 @@ def test_companion_composition_returns_hits_from_the_exact_paint_pass(monkeypatc
     assert events[1][0:3] == ("semantic", surface, plane)
     assert events[1][3]["control_font"] is control_font
     assert events[1][3]["hovered"] == target.identity
+
+
+def test_explicit_final_raster_capture_freezes_post_composition_surface(monkeypatch):
+    events = []
+
+    class Surface:
+        @staticmethod
+        def get_size():
+            return 2, 1
+
+    surface = Surface()
+    plane = RetainedDrawPlane(True, True, ())
+
+    class Terminal:
+        cols = 2
+        rows = 1
+        cx = 0
+        cy = 0
+        cursor_visible = True
+        _lock = nullcontext()
+
+        @staticmethod
+        def render(*args, **kwargs):
+            events.append("cell")
+            return surface
+
+    def composite(*args, **kwargs):
+        events.append("rich")
+        return CompositeDrawResult(surface, ())
+
+    def cursor(*args, **kwargs):
+        events.append("cursor")
+
+    class Image:
+        @staticmethod
+        def tobytes(captured, pixel_format):
+            assert captured is surface
+            assert pixel_format == "RGB"
+            events.append("capture")
+            return b"\x01\x02\x03\x04\x05\x06"
+
+    pygame = SimpleNamespace(draw=SimpleNamespace(), image=Image())
+    monkeypatch.setattr(session_viewer, "composite_draw_plane_result", composite)
+    monkeypatch.setattr(session_viewer, "_paint_terminal_cursor", cursor)
+
+    result = compose_terminal_frame_result(
+        pygame,
+        Terminal(),
+        object(),
+        6,
+        10,
+        retained_plane=plane,
+        show_cursor=True,
+    )
+    raster = capture_final_terminal_raster(pygame, result.surface)
+
+    assert events == ["cell", "rich", "cursor", "capture"]
+    assert raster.pixel_format == "RGB888"
+    assert raster.pixels == b"\x01\x02\x03\x04\x05\x06"
