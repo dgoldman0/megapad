@@ -178,7 +178,7 @@ secret boundary, or security proof.
   allocation-backed linked registry (no fixed slot limit)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, and B.SUB use MEX;
   B.SCALE is a scalar byte loop
-- **Kernel registry**: Metadata for compute kernels (up to 16 registered)
+- **Kernel registry**: Metadata for compute kernels (up to 32 registered)
 - **7 sample kernels**: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
 - **11 advanced kernels**: kclamp, kavg, khistogram, kdelta, knorm, kpeak, krms-buf, kcorrelate, kconvolve3, kinvert, kcount
 - **Pipeline engine**: Ordered kernel pipelines with per-step timing (up to 8 registered)
@@ -811,8 +811,9 @@ B.SUM demonstrates multi-tile accumulation:
 The present implementation rounds byte counts up to whole tiles and does not
 mask a final partial tile, so its trailing physical bytes participate. The
 same whole-tile rule lets `B.ADD`/`B.SUB` overwrite bytes beyond a partial
-logical destination. Their loop count comes only from `src1`; the stated
-equal-size precondition is not checked.
+logical destination. Their loop count comes only from the leftmost stack
+argument named `src1`, loaded into hardware TSRC0; the stated equal-size
+precondition is not checked.
 
 `B.MIN` and `B.MAX` are currently correct only for one tile. Their stack order
 causes iterations after the first to program the running extreme into TSRC0
@@ -838,7 +839,35 @@ B.ADD uses TADD for SIMD element-wise addition:
 
 All 64 lanes operate in parallel. For 8-bit data, that's 64 additions per TADD.
 
-### 6.4 Performance
+### 6.4 FP16 and BF16 Buffers
+
+`F.SUM`, `F.DOT`, `F.SUMSQ`, `F.ADD`, and `F.MUL` interpret complete tiles as
+32 FP16 lanes. `BF.SUM` and `BF.DOT` do the same for BF16. Reductions return
+the raw binary32 encoding in ACC0 through `ACC@`; the result is an integer cell
+containing float bits, not a Forth floating-point value.
+
+These words do not validate descriptor type, width, an even byte count, equal
+sizes, or a partial logical tail. Two-input operations take their tile count
+only from the leftmost stack argument named `src1`, which is loaded into
+hardware TSRC0, and every selected tile reads or writes all 64 bytes.
+Normal return resets TMODE to zero rather than restoring the caller's prior
+mode; a tile-loop memory fault or budget fault before the final `0 TMODE!`
+leaves FP16/BF16 mode active. The source example `0 1 64 BUFFER` has the right
+physical byte count for 32 half lanes but describes 64 one-byte elements; `0 2
+32 BUFFER` matches the descriptor model.
+
+Floating reduction order is not yet uniform across backends. The Python
+executable model and hosted simulator use host-language per-tile SUM/SUMSQ;
+the native accelerator currently falls back to Python, while its bypassed
+direct C++ bodies use sequential binary32 and RTL uses a balanced binary32
+tree. Python and active native TDOT use a binary64 loop before one binary32
+pack; RTL again uses its own tree. With ACC_ACC, the existing binary32 ACC0 is
+widened, added to the tile subtotal in binary64, and repacked at the inter-tile
+rounding point. The current executable FP16 encoder also has a carry-boundary
+discrepancy at the largest-subnormal/minimum-normal transition. These behaviors
+are tracked explicitly rather than treated as a settled hardware contract.
+
+### 6.5 Performance
 
 Measured with BENCH:
 ```forth

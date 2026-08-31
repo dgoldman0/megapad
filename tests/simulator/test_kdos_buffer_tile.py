@@ -10,7 +10,7 @@ import pytest
 from asm import assemble
 from emulator.megapad64 import Megapad64 as PythonMegapad64
 from shared.cells import MASK64
-from simulator.errors import SourceError, StepBudgetExceeded
+from simulator.errors import StepBudgetExceeded
 from simulator.memory import CrossRegionAccessError
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
@@ -121,7 +121,7 @@ def _lane_tile(width: int, values: tuple[int, ...]) -> bytes:
     )
 
 
-def test_buffer_tile_slice_is_exact_and_next_definition_stops_at_fp16_mode(
+def test_next_contiguous_fp_buffer_slice_is_now_admitted(
     loaded_buffer_tile: MegaForthRuntime,
 ) -> None:
     runtime = loaded_buffer_tile
@@ -132,22 +132,27 @@ def test_buffer_tile_slice_is_exact_and_next_definition_stops_at_fp16_mode(
     assert runtime.tile.accumulator == (0, 0, 0, 0)
 
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[LAST_LINE:3127])
-    here_before = runtime.dictionary.here
-    latest_before = runtime.dictionary.latest
+    next_source = b"".join(lines[LAST_LINE:3216])
+    assert next_source.count(b"\n") == 107
+    assert next_source.startswith(b"\n\\ ====")
+    assert next_source.endswith(b"    0 TMODE! ;\n")
 
-    with pytest.raises(SourceError, match="unknown word b'FP16-MODE'") as caught:
-        runtime.evaluate(
-            next_source,
-            source_name=f"kdos.f@{MEGAPAD_REVISION}:3110-3127",
-        )
+    result = runtime.evaluate(
+        next_source,
+        source_name=f"kdos.f@{MEGAPAD_REVISION}:3110-3216",
+    )
 
-    assert next_source.count(b"\n") == 18
-    assert caught.value.location.line == 18
-    assert caught.value.location.column == 4
-    assert runtime.find("F.SUM") is None
-    assert runtime.dictionary.here == here_before
-    assert runtime.dictionary.latest == latest_before
+    assert tuple(word.name for word in result.definitions) == (
+        b"F.SUM",
+        b"F.DOT",
+        b"F.SUMSQ",
+        b"F.ADD",
+        b"F.MUL",
+        b"BF.SUM",
+        b"BF.DOT",
+    )
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
 
 
 def test_bios_u8_add_sub_latch_exact_state_and_count_completed_operations() -> None:
@@ -203,7 +208,7 @@ def test_bios_u8_add_sub_latch_exact_state_and_count_completed_operations() -> N
     assert runtime.diagnostics.perf_tileops == 3
 
 
-def test_integer_widths_signed_saturation_and_unsupported_fp_fail_closed() -> None:
+def test_integer_widths_signed_saturation_and_reserved_formats_fail_closed() -> None:
     runtime = MegaForthRuntime()
     vectors = (
         (0x01, 2, (0xFFFF, 1), (2, 3), (1, 4), (0xFFFD, 0xFFFE)),
@@ -268,9 +273,13 @@ def test_integer_widths_signed_saturation_and_unsupported_fp_fail_closed() -> No
 
     before = runtime.memory.read_bytes(DESTINATION, 64)
     operations = runtime.diagnostics.perf_tileops
-    runtime.tile.set_mode(4)
-    with pytest.raises(UnsupportedTileModeError, match="tile mode 0x04"):
-        runtime.tile.add()
+    for reserved_mode in (6, 7):
+        runtime.tile.set_mode(reserved_mode)
+        with pytest.raises(
+            UnsupportedTileModeError,
+            match=f"tile mode 0x{reserved_mode:02x}",
+        ):
+            runtime.tile.add()
     assert runtime.memory.read_bytes(DESTINATION, 64) == before
     assert runtime.diagnostics.perf_tileops == operations
 
@@ -312,8 +321,10 @@ def test_hosted_integer_tiles_match_decoded_architectural_emulator(
     left = _lane_tile(width, left_values)
     right = _lane_tile(width, right_values)
     sentinel = bytes((0xA5,)) * 64
-    program = assemble("t.add\nt.sub\nt.sum\nt.rmin\nt.rmax")
-    assert len(program) == 10
+    program = assemble(
+        "t.add\nt.sub\nt.mul\nt.dot\nt.sum\nt.rmin\nt.rmax\nt.sumsq"
+    )
+    assert len(program) == 16
 
     emulator = PythonMegapad64(mem_size=0x400)
     emulator.load_bytes(0, program)
@@ -343,9 +354,12 @@ def test_hosted_integer_tiles_match_decoded_architectural_emulator(
     hosted_operations = (
         runtime.tile.add,
         runtime.tile.subtract,
+        runtime.tile.multiply,
+        runtime.tile.dot,
         runtime.tile.sum,
         runtime.tile.minimum,
         runtime.tile.maximum,
+        runtime.tile.sum_squares,
     )
     for hosted_operation in hosted_operations:
         emulator.step()

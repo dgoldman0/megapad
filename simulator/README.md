@@ -52,10 +52,10 @@ The implemented slices provide:
 - a per-runtime pseudo-BIOS diagnostic profile with persistent semantic-work
   accounting, retained non-destructive BIST observations, a real four-operation
   tile value self-test, and logical no-cache controls/zero cache counters;
-- a retained one-core semantic tile service for four integer lane widths,
-  wrapping/saturating ADD/SUB, signed-aware SUM/MIN/MAX, low-byte control
-  registers, completed-operation accounting, and the ACC/TSRC0/TDST state
-  shared with the hosted Field ALU;
+- a retained one-core semantic tile service for four integer lane widths plus
+  FP16/BF16, integer and half-format ADD/SUB/MUL/SUM/MIN/MAX/SUMSQ/DOT,
+  low-byte control registers, completed-operation accounting, and the
+  ACC/TSRC0/TDST state shared with the hosted Field ALU;
 - a routed per-runtime AES-128/256-GCM service shared by BIOS words and direct
   virtual MMIO, backed by a portable AES/GHASH value model and exact native
   command, status, fault, and incremental guest-transfer semantics;
@@ -631,8 +631,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–3109 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, the complete Arena allocator, semantic `IDLE`, Buffer construction, and the byte tile/scalar Buffer operations; blank separators have no definitions |
-| 3110 onward | Next uncovered frontier | FP16/BF16 Buffer operations begin next; `FP16-MODE` in `F.SUM` at line 3127 is the first unadmitted word |
+| 39–3216 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, the complete Arena allocator, semantic `IDLE`, Buffer construction, and integer/FP16/BF16 Buffer operations; blank separators have no definitions |
+| 3217 onward | Next uncovered frontier | Kernel and pipeline source compiles through `P.ADD`; `OFF` in `P.CLEAR` at line 3673 is the next unadmitted word |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -683,23 +683,48 @@ It publishes six byte Buffer operations plus `BTMP-NTILES` scratch unchanged.
 The hosted BIOS seam
 retains TMODE/TCTRL and tile addresses, shares ACC/TSRC0/TDST with Field-ALU
 words, processes exact complete mapped 64-byte spans, and counts completed
-operations. Its integer ADD/SUB and reductions cover 8/16/32/64-bit lane
-modes; the admitted KDOS words themselves always force unsigned-byte mode.
-FP16/BF16 remains the next explicit capability boundary.
+operations. Its integer ADD/SUB/MUL and reductions cover 8/16/32/64-bit lane
+modes; these admitted KDOS words themselves always force unsigned-byte mode.
 
 The source's physical-tail and loop behavior remains visible. Rounded-up
-reductions include bytes after a partial logical buffer; ADD/SUB write complete
-tiles, trust only `src1`'s count, and use global scratch. Multi-tile B.MIN/B.MAX
-mistake the running byte extreme for the next TSRC0 address. B.SCALE is scalar
-and wraps products modulo 256 rather than clamping. Empty B.MIN/B.MAX return
-zero, while empty B.SUM/B.ADD/B.SUB/B.SCALE enter `0 DO` and cannot complete
-normally before 64-bit loop-index wrap; an invalid memory access may fault
-first. The semantic service accepts exact unaligned
-spans because existing backends disagree about alignment and Arena supplies
-only eight-byte alignment; crossing, wrapping, and MMIO spans fail closed.
-Later slices continue the same contiguous prefix through FP Buffer operations
-toward the persistent evaluator, ordinary checked module-loader surface, and
-deterministic cooperative task scheduler.
+SUM/MIN/MAX reductions include bytes after a partial logical buffer; ADD/SUB
+write complete tiles, take their count only from the leftmost stack argument
+named `src1` (loaded into hardware TSRC0), and use global scratch. Multi-tile
+B.MIN/B.MAX mistake the running byte extreme for the next TSRC0 address.
+B.SCALE is scalar and wraps products modulo 256 rather than clamping. Empty
+B.MIN/B.MAX return zero, while empty B.SUM/B.ADD/B.SUB/B.SCALE enter `0 DO`
+and cannot complete normally before 64-bit loop-index wrap; an invalid memory
+access may fault first. The semantic service accepts exact unaligned spans
+because existing backends disagree about alignment and Arena supplies only
+eight-byte alignment; crossing, wrapping, and MMIO spans fail closed.
+
+The following 107-line, 2,869-byte fixture is exact `kdos.f` lines 3110–3216
+(SHA-256
+`cea60476207e132760c32cf2fb82773d6325d6d1895f0e7d73c40bf667b75065`).
+It publishes seven FP16/BF16 Buffer words unchanged. FP ADD and MUL write
+half-format lanes; SUM and SUMSQ reductions plus DOT publish raw binary32 bits
+in ACC0 and clear ACC1--ACC3. Successful source words reset TMODE to zero and
+those reductions leave TCTRL at one. They process full rounded-up physical
+tiles, take the two-input operation count only from the leftmost stack argument
+named `src1` (loaded into hardware TSRC0), and do not validate descriptor type,
+width, an even byte count, or compatible sizes. Zero counts enter `0 DO`; a
+tile-loop memory fault or budget fault before the final `0 TMODE!` leaves
+FP16/BF16 mode active.
+
+The hosted result path provisionally follows the decoded Python emulator,
+including host-language per-tile SUM/SUMSQ before one binary32 pack and the
+current FP16 subnormal-carry encoding defect. The native accelerator currently
+falls back to Python for those reductions; its bypassed direct C++ arithmetic
+and RTL use different orders. Python and active native TDOT use a binary64 loop
+before packing, unlike RTL. With ACC_ACC the existing binary32 ACC0 is widened,
+added to the tile subtotal in binary64, and repacked at the inter-tile rounding
+point. Reserved-mode aliases and high-accumulator-word behavior also differ.
+These remain recorded discrepancies rather than claims of hardware parity.
+The source example `0 1 64 BUFFER` has the right physical byte count but does
+not describe 32 two-byte elements; `0 2 32 BUFFER` does.
+Later slices continue the same contiguous prefix through the registry, sample
+kernels, and pipeline sections toward the persistent evaluator, ordinary
+checked module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

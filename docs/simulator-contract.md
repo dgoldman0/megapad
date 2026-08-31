@@ -276,19 +276,30 @@ evidence for pipeline timing, physical RAM coverage, tile hardware, or a
 physical instruction cache.
 
 The admitted one-core legacy tile service binds `TMODE!`, `TCTRL!`,
-`TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TSUM`, `TMIN`, `TMAX`, and
-`ACC@`. It retains low-byte TMODE/TCTRL, full-cell addresses, and ACC0--ACC3;
+`TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TMUL`, `TDOT`, `TSUM`,
+`TMIN`, `TMAX`, `TSUMSQ`, `FP16-MODE`, `BF16-MODE`, and `ACC@`. It retains
+low-byte TMODE/TCTRL, full-cell addresses, and ACC0--ACC3;
 ACC, TSRC0, and TDST are the same state observed by the hosted Field-ALU
-surface. TCTRL zero-first is consumed only by a successful reduction, while
-accumulate adds the new reduction to the existing modulo-2^256 ACC value even
-for TMIN/TMAX. Binary operations read both complete sources before writing the
-destination, so valid aliasing observes one pre-operation pair of tiles.
+surface. TCTRL zero-first is consumed only by a successful reduction or DOT.
+For integer reductions, accumulate adds the new result to the existing
+modulo-2^256 ACC value even for TMIN/TMAX. Binary operations read both complete
+sources before writing the destination, so valid aliasing observes one
+pre-operation pair of tiles.
 
-Integer widths 8, 16, 32, and 64 implement wrapping or saturating ADD/SUB and
-signed-aware SUM/MIN/MAX. FP16/BF16 and all unbound tile/TACC words fail rather
-than silently using integer byte behavior. Each operand is the exact addressed
-64-byte span and must fit one ordinary mapped region; MMIO and crossing or
-wrapping spans are rejected before destination or accumulator publication.
+Integer widths 8, 16, 32, and 64 implement wrapping or saturating ADD/SUB,
+wrapping MUL, and signed-aware SUM/MIN/MAX/DOT/SUMSQ. FP16 and BF16 implement
+ADD/SUB/MUL plus SUM/MIN/MAX/DOT/SUMSQ. Floating reductions and DOT place raw
+binary32 bits in ACC0 and clear ACC1--ACC3; MIN/MAX skip NaNs and ignore
+ACC_ACC, while SUM/DOT/SUMSQ add the binary32 value already in ACC0 when
+requested. The signed and saturating mode flags are ignored for floating
+formats. Reserved EW 6/7 and all unbound tile/TACC words fail rather than
+silently aliasing another format.
+
+Each used operand is the exact addressed 64-byte span and must fit one ordinary
+mapped region; MMIO and crossing or wrapping spans are rejected before
+destination or accumulator publication. Reductions read only TSRC0, matching
+their logical and RTL data dependency; the Python emulator currently performs
+an unused eager TSRC1 read.
 This exact-address rule is a hosted contract choice while the prose, untimed
 emulators, RTL, and strict-cycle transport still disagree about unaligned tile
 addresses. Low-byte CSR writes and full 256-bit reductions follow the
@@ -297,6 +308,26 @@ write paths retain higher bits, while RTL's legacy integer reduction
 accumulator is narrower; both remain explicit discrepancies.
 The service makes no MEX encoding, CSR, scratchpad, latency, flag, pipeline, or
 hardware-throughput claim.
+
+For FP SUM/SUMSQ the hosted service deliberately follows the executable Python
+oracle: one host-language `sum` over a tile followed by one binary32 pack.
+TDOT uses an explicit binary64 loop followed by the same pack. The native
+accelerator currently falls back to Python for SUM/SUMSQ, although its bypassed
+direct C++ implementation is sequential binary32; RTL uses a balanced binary32
+tree.
+With ACC_ACC, hosted execution decodes the existing binary32 value in ACC0,
+widens it, adds it to that tile's subtotal in binary64, and packs once again;
+that final pack is the inter-tile rounding point.
+Results can therefore differ under cancellation, and Python's `sum` algorithm
+is itself interpreter-version-sensitive. This is a recorded compatibility
+choice, not a resolution of the hardware contract. Python/C++ conversion also
+maps the FP16 product `0x0017 * 0x5190` to zero when an IEEE round-to-even carry
+would produce minimum-normal `0x0400`; the shared hosted value model preserves
+that executable behavior. Reserved EW 6/7 fail closed here even though current
+Python/C++ and RTL implementations alias them differently. RTL scalar FP TRED
+retains ACC1--ACC3 on overwrite or accumulate whenever ACC_ZERO is not taken,
+and FP DOT retains them on ACC_ACC; Python and hosted operations always clear
+them.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
@@ -1035,7 +1066,7 @@ storage reusable without unregistering its Buffer descriptors, and dictionary
 rollback after a publication does not repair `BUF-HEAD` or `BUF-COUNT`; both
 paths can therefore leave stale registry state.
 
-The contiguous source frontier now ends at line 3109. Exact unchanged lines
+Exact unchanged lines
 2986 through 3109 publish `B.SUM`, `B.MIN`, `B.MAX`, `BTMP-NTILES`, `B.ADD`,
 `B.SUB`, and `B.SCALE`. The five tile-backed words force unsigned-byte TMODE;
 descriptor width changes byte and tile counts but never selects wider lanes.
@@ -1045,15 +1076,35 @@ scalar `C@`, wrapping multiplication, `255 AND`, and `C!`.
 `B.TILES` rounds up, but the tile instructions always touch 64 physical bytes.
 SUM/MIN/MAX therefore include a partial tile's trailing bytes, while ADD/SUB
 can read or overwrite beyond the logical source/destination. ADD/SUB take their
-count only from `src1`, do not validate the other descriptors, and share global
+count only from the leftmost stack argument named `src1` (loaded into TSRC0),
+do not validate the other descriptors, and share global
 `BTMP-NTILES`. B.MIN/B.MAX are correct for one tile, but after the first
 iteration their stack order makes `DUP TSRC0!` install the running extreme as
 the next address. Empty MIN/MAX explicitly return zero; empty SUM, ADD, SUB,
 and SCALE use `0 DO`, enter the body, and cannot complete normally before
 64-bit index wrap, although an invalid memory access can fault first. These
-defects are pinned rather than repaired by host
-objects. The next definition is `F.SUM`; `FP16-MODE` at line 3127 is the next
-unsupported semantic BIOS seam.
+defects are pinned rather than repaired by host objects.
+
+The contiguous source frontier now ends at line 3216. Exact unchanged lines
+3110 through 3216 publish `F.SUM`, `F.DOT`, `F.SUMSQ`, `F.ADD`, `F.MUL`,
+`BF.SUM`, and `BF.DOT`. These words treat every complete physical tile as 32
+little-endian half lanes without validating descriptor type, width, whether
+`B.BYTES` is even, or cross-descriptor sizes. Reductions return raw binary32
+bits through `ACC@`; binary words and DOT take their tile count only from the
+leftmost stack argument named `src1`, which is loaded into hardware TSRC0. A
+partial logical tail therefore participates or is overwritten, and with an
+ordinary `BUFFER` that access can reach registry or dictionary bytes
+immediately following the allocation.
+
+Every zero-sized FP word inherits the unsafe `0 DO` entry behavior. On normal
+return each word restores TMODE to hard-coded zero rather than the caller's
+prior mode, and reductions leave TCTRL at one. A tile-loop memory fault or
+budget fault before the final `0 TMODE!` leaves FP16/BF16 mode installed. The
+source's example `0 1 64 BUFFER` occupies one correct physical tile but
+describes 64 one-byte elements; `0 2 32 BUFFER` matches its stated 32-element
+descriptor. The next Forth-only registry, sample-kernel, and pipeline source
+compiles through `P.ADD`; `OFF` in `P.CLEAR` at line 3673 is the next
+unsupported BIOS seam.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

@@ -934,13 +934,31 @@ memory regions (e.g., extracting an 8×8 patch from a 640-wide framebuffer).
 
 ## FP16 / BF16 Modes (2 words)
 
-Half-precision floating-point tile operations.  Reductions (SUM, DOT,
-SUMSQ) use FP32 accumulation for numerical stability.
+Half-precision floating-point tile operations. Reductions publish raw binary32
+bits in ACC0. “FP32 accumulation” is the intended operation family, not yet a
+bitwise cross-backend ordering guarantee: Python/hosted SUM and SUMSQ perform a
+host-language per-tile sum before one binary32 pack. The native accelerator
+currently falls back to Python for those reductions; its bypassed direct C++
+bodies use sequential binary32, and RTL uses a balanced binary32 tree. Python
+and active native TDOT use a binary64 loop before packing, while RTL uses its
+own tree.
+With ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds
+it to the tile subtotal in binary64, and repacks; that pack is the inter-tile
+rounding point.
+With ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds
+it to the tile subtotal in binary64, and repacks; that pack is the inter-tile
+rounding point.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `FP16-MODE` | `( -- )` | Set TMODE to FP16 half-precision (EW=4, 32 lanes). |
 | `BF16-MODE` | `( -- )` | Set TMODE to bfloat16 (EW=5, 32 lanes). |
+
+EW 6 and 7 are reserved. Hosted execution rejects them; current emulator and
+RTL paths alias them inconsistently and must not be used as extra formats. The
+current executable FP16 converter also encodes the exact carry-boundary product
+`0x0017 * 0x5190` as zero rather than IEEE minimum-normal `0x0400`; this remains
+an explicit compatibility discrepancy.
 
 ---
 

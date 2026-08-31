@@ -8,10 +8,19 @@ scratchpad arbitration, or a physical datapath.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable
 from typing import Protocol
 
 from shared.cells import MASK64, u64
+from shared.fp import (
+    BF16_FORMAT,
+    FP16_FORMAT,
+    bits_to_fp32,
+    decode_tile_float,
+    encode_tile_float,
+    fp32_to_bits,
+)
 from simulator.errors import ExecutionError
 from simulator.memory import SparseAddressSpace
 
@@ -42,12 +51,12 @@ class _LegacyRegisterFile(Protocol):
 
 
 class UnsupportedTileModeError(ExecutionError):
-    """An operation reached a tile format outside the admitted integer set."""
+    """An operation reached a tile format outside the admitted format set."""
 
     def __init__(self, mode: int) -> None:
         self.mode = mode
         super().__init__(
-            f"tile mode 0x{mode:02x} is not admitted by the hosted integer service"
+            f"tile mode 0x{mode:02x} is not admitted by the hosted tile service"
         )
 
 
@@ -93,10 +102,10 @@ def tile_sum_u8(tile: bytes) -> int:
 class HostedTileService:
     """One runtime-local semantic legacy tile engine.
 
-    The service accepts all four integer element widths and the native signed
-    and saturating flags.  The unchanged KDOS Buffer slice currently exercises
-    unsigned byte mode.  FP16/BF16 and the later extended/TACC families fail
-    explicitly until their own source frontier is admitted.
+    The service accepts all four integer element widths, FP16, and BF16.  It
+    implements only the generic legacy operations required by the admitted
+    unchanged KDOS prefix; later extended and TACC families fail until their
+    own source frontier is reached.
     """
 
     __slots__ = (
@@ -189,6 +198,47 @@ class HostedTileService:
     def subtract(self) -> None:
         self._binary("subtract")
 
+    def multiply(self) -> None:
+        self._binary("multiply")
+
+    def dot(self) -> None:
+        element_bytes, signed, _saturating, floating_format = self._mode_format()
+        left = self._memory.read_bytes(self.source0, TILE_BYTES)
+        right = self._memory.read_bytes(self.source1, TILE_BYTES)
+
+        if floating_format is not None:
+            total = 0.0
+            for offset in range(0, TILE_BYTES, element_bytes):
+                raw_left = int.from_bytes(
+                    left[offset : offset + element_bytes],
+                    "little",
+                )
+                raw_right = int.from_bytes(
+                    right[offset : offset + element_bytes],
+                    "little",
+                )
+                total += float(decode_tile_float(raw_left, floating_format)) * float(
+                    decode_tile_float(raw_right, floating_format)
+                )
+            self._publish_float_reduction(total, accumulate=True)
+        else:
+            bits = element_bytes * 8
+            total = 0
+            for offset in range(0, TILE_BYTES, element_bytes):
+                raw_left = int.from_bytes(
+                    left[offset : offset + element_bytes],
+                    "little",
+                )
+                raw_right = int.from_bytes(
+                    right[offset : offset + element_bytes],
+                    "little",
+                )
+                lane_left = self._signed(raw_left, bits) if signed else raw_left
+                lane_right = self._signed(raw_right, bits) if signed else raw_right
+                total += lane_left * lane_right
+            self._publish_integer_reduction(total)
+        self._account()
+
     def sum(self) -> None:
         self._reduce("sum")
 
@@ -198,8 +248,11 @@ class HostedTileService:
     def maximum(self) -> None:
         self._reduce("maximum")
 
+    def sum_squares(self) -> None:
+        self._reduce("sum_squares")
+
     def _binary(self, operation: str) -> None:
-        element_bytes, signed, saturating = self._integer_mode()
+        element_bytes, signed, saturating, floating_format = self._mode_format()
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         bits = element_bytes * 8
@@ -214,6 +267,25 @@ class HostedTileService:
                 right[offset : offset + element_bytes],
                 "little",
             )
+            if floating_format is not None:
+                lane_left_float = decode_tile_float(raw_left, floating_format)
+                lane_right_float = decode_tile_float(raw_right, floating_format)
+                if operation == "add":
+                    result = lane_left_float + lane_right_float
+                elif operation == "subtract":
+                    result = lane_left_float - lane_right_float
+                elif operation == "multiply":
+                    result = lane_left_float * lane_right_float
+                else:  # pragma: no cover - private callers constrain this value
+                    raise AssertionError(
+                        f"unknown tile binary operation {operation!r}"
+                    )
+                output[offset : offset + element_bytes] = encode_tile_float(
+                    result,
+                    floating_format,
+                ).to_bytes(element_bytes, "little")
+                continue
+
             if saturating and signed:
                 lane_left = self._signed(raw_left, bits)
                 lane_right = self._signed(raw_right, bits)
@@ -232,6 +304,10 @@ class HostedTileService:
                 result = lane_left - lane_right
                 if saturating:
                     result = max(low, min(high, result)) if signed else max(0, result)
+            elif operation == "multiply":
+                lane_left = self._signed(raw_left, bits) if signed else raw_left
+                lane_right = self._signed(raw_right, bits) if signed else raw_right
+                result = lane_left * lane_right
             else:  # pragma: no cover - private callers constrain this value
                 raise AssertionError(f"unknown tile binary operation {operation!r}")
             output[offset : offset + element_bytes] = (result & lane_mask).to_bytes(
@@ -243,13 +319,39 @@ class HostedTileService:
         self._account()
 
     def _reduce(self, operation: str) -> None:
-        element_bytes, signed, _saturating = self._integer_mode()
+        element_bytes, signed, _saturating, floating_format = self._mode_format()
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
-        bits = element_bytes * 8
-        values = [
+        raw_values = [
             int.from_bytes(tile[offset : offset + element_bytes], "little")
             for offset in range(0, TILE_BYTES, element_bytes)
         ]
+
+        if floating_format is not None:
+            values = [
+                decode_tile_float(value, floating_format) for value in raw_values
+            ]
+            if operation == "sum":
+                result = sum(float(value) for value in values)
+                accumulate = True
+            elif operation == "minimum":
+                non_nan = [value for value in values if not math.isnan(value)]
+                result = min(non_nan) if non_nan else float("nan")
+                accumulate = False
+            elif operation == "maximum":
+                non_nan = [value for value in values if not math.isnan(value)]
+                result = max(non_nan) if non_nan else float("nan")
+                accumulate = False
+            elif operation == "sum_squares":
+                result = sum(float(value) * float(value) for value in values)
+                accumulate = True
+            else:  # pragma: no cover - private callers constrain this value
+                raise AssertionError(f"unknown tile reduction {operation!r}")
+            self._publish_float_reduction(result, accumulate=accumulate)
+            self._account()
+            return
+
+        bits = element_bytes * 8
+        values = raw_values
         if signed:
             values = [self._signed(value, bits) for value in values]
 
@@ -259,9 +361,15 @@ class HostedTileService:
             result = min(values)
         elif operation == "maximum":
             result = max(values)
+        elif operation == "sum_squares":
+            result = sum(value * value for value in values)
         else:  # pragma: no cover - private callers constrain this value
             raise AssertionError(f"unknown tile reduction {operation!r}")
 
+        self._publish_integer_reduction(result)
+        self._account()
+
+    def _publish_integer_reduction(self, result: int) -> None:
         control = self._control
         if control & 0x01:
             old = 0 if control & 0x02 else self._accumulator_value()
@@ -274,13 +382,36 @@ class HostedTileService:
         self._registers.replace_accumulator_words(self._core_id, words)
         if control & 0x02:
             self._control &= ~0x02
-        self._account()
 
-    def _integer_mode(self) -> tuple[int, bool, bool]:
+    def _publish_float_reduction(
+        self,
+        result: float,
+        *,
+        accumulate: bool,
+    ) -> None:
+        control = self._control
+        if accumulate and control & 0x01:
+            old_bits = 0 if control & 0x02 else self.accumulator[0]
+            result = bits_to_fp32(old_bits) + result
+        self._registers.replace_accumulator_words(
+            self._core_id,
+            (fp32_to_bits(result), 0, 0, 0),
+        )
+        if control & 0x02:
+            self._control &= ~0x02
+
+    def _mode_format(self) -> tuple[int, bool, bool, int | None]:
         element_width = self._mode & 0x07
-        if element_width > 3:
-            raise UnsupportedTileModeError(self._mode)
-        return 1 << element_width, bool(self._mode & 0x10), bool(self._mode & 0x20)
+        if element_width <= 3:
+            return (
+                1 << element_width,
+                bool(self._mode & 0x10),
+                bool(self._mode & 0x20),
+                None,
+            )
+        if element_width in (FP16_FORMAT, BF16_FORMAT):
+            return 2, False, False, element_width
+        raise UnsupportedTileModeError(self._mode)
 
     def _accumulator_value(self) -> int:
         return sum(

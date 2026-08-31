@@ -852,12 +852,14 @@ leave the floor unchanged, disable retry, and abort.
 
 The contiguous hosted frontier now includes the complete unchanged userland
 and Arena sections plus Buffer's general `IDLE`, registry, constructors,
-inspection, Arena integration, and byte operations through line 3109. Their
+inspection, Arena integration, and integer/FP16/BF16 operations through line
+3216. Their
 checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
-block/wake boundary, Buffer publication order, and integer tile effects are
-executable semantic behavior rather than reporting-only shims. The next
-definition is `F.SUM`; its first unadmitted seam is `FP16-MODE` at line 3127.
+block/wake boundary, Buffer publication order, and tile effects are executable
+semantic behavior rather than reporting-only shims. The next kernel/pipeline
+source compiles through `P.ADD`; `OFF` in `P.CLEAR` at line 3673 is the first
+unadmitted BIOS seam.
 
 ---
 
@@ -1061,8 +1063,12 @@ plus `BTMP-NTILES` scratch—in 124
 lines and 4,170 bytes, with SHA-256
 `91d0fc5a15da85c31f9e4c4fcf17691c2bd32ba306b6b5bc338a7cf8b1ab96c4`.
 Hosted qualification covers complete-tile integer effects and retains the
-source defects documented in §3. FP16/BF16 operations remain outside this
-frontier; `FP16-MODE` in `F.SUM` at line 3127 is the next unsupported word.
+source defects documented in §3. Exact lines 3110 through 3216 then publish
+the seven FP16/BF16 Buffer words in 107 lines and 2,869 bytes, with SHA-256
+`cea60476207e132760c32cf2fb82773d6325d6d1895f0e7d73c40bf667b75065`.
+The next unsupported word is `OFF` at line 3673; completed kernel and pipeline
+definitions before that failure remain published under ordinary evaluator
+semantics, but are not part of this semantically qualified fixture.
 
 ---
 
@@ -1193,6 +1199,54 @@ my-signal B.SUM .    \ print the sum of all bytes
 my-signal B.MIN .    \ one physical tile is currently the safe domain
 my-signal B.MAX .    \ one physical tile is currently the safe domain
 ```
+
+### §3.1 FP16/BF16 Buffer Operations
+
+These seven words interpret each physical 64-byte tile as 32 little-endian
+half-format lanes. They do not inspect `B.TYPE` or use `B.WIDTH` to choose a
+format: the word itself installs TMODE 4 or 5. Reduction results are raw IEEE
+binary32 bits in ACC0, returned as an ordinary Forth cell by `ACC@`; they are
+not converted to a decimal or fixed-point Forth number.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `F.SUM` | `( desc -- fp32-bits )` | Sum complete FP16 tiles and return the binary32 encoding. |
+| `F.DOT` | `( src1 src2 -- fp32-bits )` | FP16 dot product over the leftmost `src1` descriptor's tile count. |
+| `F.SUMSQ` | `( desc -- fp32-bits )` | Sum FP16 lane squares and return the binary32 encoding. |
+| `F.ADD` | `( src1 src2 dst -- )` | Add FP16 lanes into complete destination tiles. |
+| `F.MUL` | `( src1 src2 dst -- )` | Multiply FP16 lanes into complete destination tiles. |
+| `BF.SUM` | `( desc -- fp32-bits )` | Sum complete BF16 tiles and return the binary32 encoding. |
+| `BF.DOT` | `( src1 src2 -- fp32-bits )` | BF16 dot product over the leftmost `src1` descriptor's tile count. |
+
+All seven inherit `B.TILES` rounding. A partial logical tail participates in a
+reduction and is overwritten by F.ADD/F.MUL. With ordinary `BUFFER`, those
+physical bytes can be the following registry link or dictionary data rather
+than reserved padding. Two-input operations derive their loop count only from
+the leftmost stack argument named `src1`, which is loaded into hardware TSRC0;
+descriptor type, width, whether `B.BYTES` is even, and the other lengths are
+unchecked.
+The source example `0 1 64 BUFFER myfp16` allocates the right 64 bytes but its
+descriptor says 64 one-byte elements. `0 2 32 BUFFER myfp16` describes 32
+two-byte elements under the documented descriptor model.
+
+Every zero-count loop uses `0 DO` and therefore enters rather than completing
+normally before index wrap; it may fault first. Normal return resets TMODE to
+hard-coded zero instead of restoring the caller's mode, and reductions leave
+TCTRL at one. A tile-loop memory fault or budget fault before the final
+`0 TMODE!` leaves FP16/BF16 mode active.
+
+The hosted path follows the decoded Python emulator while the legacy FP
+contract is unresolved. Python/hosted SUM and SUMSQ use the host `sum`
+algorithm for one tile and then pack once to binary32; the native accelerator
+currently falls back to that path, while its direct C++ body is sequential
+binary32 and RTL uses a balanced binary32 tree. Cancellation can differ. The
+Python and active native TDOT paths instead use an explicit binary64 loop
+before one binary32 pack, while RTL again uses its own tree. The
+ACC_ACC path widens the existing binary32 ACC0, adds it to the tile subtotal
+in binary64, and repacks; that pack is the inter-tile rounding point. The
+executable FP16 encoder also maps the exact product `0x0017 * 0x5190` to zero
+where IEEE round-to-even would carry into minimum-normal `0x0400`. These are
+recorded discrepancies, not KDOS requirements.
 
 ---
 

@@ -472,11 +472,28 @@ All standard TALU, TMUL, and TRED operations work with FP16/BF16:
 
 ### FP32 Accumulation
 
-When computing DOT, SUM, or SUMSQ with FP16/BF16 inputs, products are
-computed in **FP32 precision** and accumulated with FP32 addition.  The
-accumulator registers ACC0–ACC3 hold FP32 values.  This matches modern
-AI accelerator behavior (TPU, Tensor Cores) and prevents catastrophic
-precision loss during large summations.
+DOT, SUM, and SUMSQ publish one raw binary32 result in ACC0; the Python and
+hosted paths clear ACC1--ACC3. `TDOTACC` instead publishes four binary32 chunk
+results across ACC0--ACC3.
+
+The reduction order is not yet one backend-independent FP32 algorithm. Python
+and the hosted simulator use host-language `sum` for each SUM/SUMSQ tile and
+pack once to binary32; the native accelerator currently routes those functions
+back to Python, though its direct C++ body uses sequential binary32. RTL uses a
+balanced binary32 tree. TDOT uses a binary64 loop in Python/native before its
+binary32 pack, while RTL has its own tree. Cancellation and signed-zero results
+can differ, so “FP32 accumulation” names the output/intent rather than a bitwise
+cross-backend guarantee.
+For ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds it
+to the tile subtotal in binary64, and repacks; that pack is the inter-tile
+rounding point.
+
+There is also a known executable conversion discrepancy: the exact FP16
+product `0x0017 * 0x5190` lies at the largest-subnormal/minimum-normal tie.
+Python/C++ and the hosted compatibility model currently encode it as zero,
+where IEEE round-to-nearest-even would produce `0x0400`. Reserved EW 6/7 are
+not formats: hosted execution rejects them, while existing Python/C++ and RTL
+paths alias them differently. These discrepancies remain open.
 
 ---
 
@@ -850,7 +867,8 @@ This table names the intended operation family, not stronger validation than
 the current source performs. Every word above forces unsigned-byte TMODE.
 Rounded-up final tiles are processed in full, so reductions include trailing
 physical bytes and ADD/SUB can overwrite a partial destination tail. ADD/SUB
-take their count only from `src1`. Current multi-tile B.MIN/B.MAX also have a
+take their count only from the leftmost stack argument named `src1`, loaded
+into hardware TSRC0. Current multi-tile B.MIN/B.MAX also have a
 stack-order defect: after the first tile they use the running byte extreme as
 TSRC0 instead of the advanced data address. `B.SCALE` is a separate scalar
 modulo-256 byte loop, not a MEX operation.

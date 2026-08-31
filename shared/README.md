@@ -12,13 +12,16 @@ The crypto capability-bit registry, six-mode CRC parameter table and pure
 byte/cell recurrences, AES/GHASH operations, the 24-round Keccak-f[1600]
 permutation, 256-bit Field arithmetic/raw-product values, and RFC 7748 X25519
 scalar multiplication, the generic 256-point radix-2 NTT value transforms,
-and deterministic ML-KEM-512 key-generation/encapsulation/decapsulation bytes
-are such shared value models. Field, NTT, and ML-KEM helpers own pure result
-values only: prime selection registers, ACC/TSRC/TDST, NTT and KEM retained
-buffers/registers, previous results, guest-memory ordering, status, and fault
-publication remain simulator/emulator state. The ML-KEM implementation is
-ordinary non-constant-time Python for target-value compatibility; it is not a
-host-secret cryptography API.
+deterministic ML-KEM-512 key-generation/encapsulation/decapsulation bytes, and
+FP16/BF16/binary32 bit-value conversions are such shared value models. Field,
+NTT, ML-KEM, and floating-point helpers own pure result values only: mode and
+prime selectors, ACC/TSRC/TDST, retained buffers/registers, previous results,
+guest-memory ordering, status, and fault publication remain simulator/emulator
+state. The FP16 encoder intentionally preserves the current executable
+emulator's subnormal carry behavior while that discrepancy is unresolved; it
+is compatibility machinery, not an independent IEEE conformance oracle. The
+ML-KEM implementation is ordinary non-constant-time Python for target-value
+compatibility; it is not a host-secret cryptography API.
 Checked owner records, capability publication, MMIO state machines, entropy
 sources, architectural register state, ISA execution, and semantic BIOS stack
 adapters likewise remain in their respective backends.
