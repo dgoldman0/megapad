@@ -225,8 +225,19 @@ def test_hosted_service_and_executable_emulator_share_exact_value_bytes() -> Non
     for value in seed:
         service.write_data(value)
         device.write8(0x10, value)
+    assert service.selector == KEM_BUFFER_SEED
+    assert service.index == MLKEM512_KEYGEN_SEED_BYTES
     service.keygen()
     device.write8(0x01, 1)
+    assert service.selector == KEM_BUFFER_SEED
+    assert service.index == MLKEM512_KEYGEN_SEED_BYTES
+    assert service.buffer(KEM_BUFFER_SEED) == seed
+    assert service.buffer(KEM_BUFFER_CIPHERTEXT) == bytes(
+        MLKEM512_CIPHERTEXT_BYTES
+    )
+    assert service.buffer(KEM_BUFFER_SHARED_SECRET) == bytes(
+        MLKEM512_SHARED_SECRET_BYTES
+    )
 
     for selector, size in (
         (KEM_BUFFER_PUBLIC_KEY, MLKEM512_ENCAPSULATION_KEY_BYTES),
@@ -239,16 +250,27 @@ def test_hosted_service_and_executable_emulator_share_exact_value_bytes() -> Non
     for value in coin:
         service.write_data(value)
         device.write8(0x10, value)
+    retained_public_key = service.buffer(KEM_BUFFER_PUBLIC_KEY)
+    retained_secret_key = service.buffer(KEM_BUFFER_SECRET_KEY)
     service.encapsulate()
     device.write8(0x01, 2)
+    assert service.selector == KEM_BUFFER_SEED
+    assert service.index == MLKEM512_ENCAPSULATION_RANDOM_BYTES
+    assert service.buffer(KEM_BUFFER_PUBLIC_KEY) == retained_public_key
+    assert service.buffer(KEM_BUFFER_SECRET_KEY) == retained_secret_key
     for selector, size in (
         (KEM_BUFFER_CIPHERTEXT, MLKEM512_CIPHERTEXT_BYTES),
         (KEM_BUFFER_SHARED_SECRET, MLKEM512_SHARED_SECRET_BYTES),
     ):
         assert service.buffer(selector) == _device_buffer(device, selector, size)
 
+    retained_ciphertext = service.buffer(KEM_BUFFER_CIPHERTEXT)
     service.decapsulate()
     device.write8(0x01, 3)
+    assert service.selector == KEM_BUFFER_SEED
+    assert service.index == MLKEM512_ENCAPSULATION_RANDOM_BYTES
+    assert service.buffer(KEM_BUFFER_CIPHERTEXT) == retained_ciphertext
+    assert service.buffer(KEM_BUFFER_SECRET_KEY) == retained_secret_key
     assert service.buffer(KEM_BUFFER_SHARED_SECRET) == _device_buffer(
         device,
         KEM_BUFFER_SHARED_SECRET,
@@ -270,11 +292,15 @@ def test_selector_stream_bounds_short_load_and_zero_count_semantics() -> None:
     assert service.buffer(KEM_BUFFER_SEED) == b"\x11\x22" + bytes(range(2, 64))
     assert service.index == 2
 
-    service.select(0x1_0105)
-    assert service.selector == KEM_BUFFER_SHARED_SECRET
+    service.select(0x1_0102)
+    assert service.selector == KEM_BUFFER_SECRET_KEY
     assert service.index == 0
     service.load(0xDEAD_BEEF, 0, memory)
     service.store(0xDEAD_BEEF, 0, memory)
+    assert service.index == 0
+
+    service.select(0x1_0105)
+    assert service.selector == KEM_BUFFER_SHARED_SECRET
     assert service.index == 0
 
     for value in range(40):
