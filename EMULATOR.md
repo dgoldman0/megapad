@@ -611,7 +611,15 @@ following status check, including after the final byte.
 
 **Field ALU (GF(p) arithmetic)**
 `FADD` `FSUB` `FMUL` `FSQR` `FINV` `FPOW` `FMUL-RAW`
-`GF-A!` `GF-R@` `GF-PRIME` `LOAD-PRIME` `FMUL-ADD-RAW`
+`FCMOV` `FCEQ` `FMAC` `FMUL-ADD-RAW`
+`GF-A!` `GF-R@` `GF-PRIME` `LOAD-PRIME`
+
+These 15 raw words use addresses to 32-byte little-endian values; raw
+multiply/MAC take separate low and high destinations, and `FCMOV` takes an
+operand address plus a condition-byte address. See the
+[BIOS reference](docs/bios-forth.md#field-alu--multi-prime-arithmetic-15-raw-words)
+for persistent per-core state, canonical-input qualifications, and current
+Python/native/RTL discrepancies.
 
 **NTT Engine**
 `NTT-LOAD` `NTT-STORE` `NTT-FWD` `NTT-INV` `NTT-PMUL`

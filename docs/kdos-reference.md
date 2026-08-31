@@ -535,21 +535,45 @@ info, PRK, and destination spans must not alias them.
 
 ### §1.10 Field ALU
 
-GF(2²⁵⁵−19) field arithmetic coprocessor with 8 operation modes.
-Supersedes the original X25519-only interface.
+The unchanged `kdos.f` section at lines 1483–1515 exposes the general
+multi-prime Field ABI. It defines `PRIME-25519`, `PRIME-SECP`, `PRIME-P256`,
+and `PRIME-CUSTOM`, plus four zero-initialized 32-byte scratch buffers `_FA`,
+`_FB`, `_FR`, and `_FRH`. It does not define the formerly documented `F+`,
+`F-`, or `F*` aliases.
+
+All raw BIOS arguments below are addresses. Values are 32-byte little-endian
+integers, and raw 512-bit results use distinct low/high buffers.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `FADD` | `( a b r -- )` | (a + b) mod p.  All args are 32-byte field element addresses. |
-| `FSUB` | `( a b r -- )` | (a − b) mod p. |
-| `FMUL` | `( a b r -- )` | (a · b) mod p. |
-| `FSQR` | `( a r -- )` | a² mod p. |
-| `FINV` | `( a r -- )` | a^(p−2) mod p (modular inverse via Fermat). |
-| `FPOW` | `( a b r -- )` | a^b mod p (general modular exponentiation). |
-| `FMUL-RAW` | `( a b r -- )` | Raw 256×256→512-bit multiply (64 bytes output, no reduction). |
-| `F+` | `( a b r -- )` | Alias for `FADD`. |
-| `F-` | `( a b r -- )` | Alias for `FSUB`. |
-| `F*` | `( a b r -- )` | Alias for `FMUL`. |
+| `GF-A!` | `( a-addr -- )` | Load ACC0–ACC3 from four ascending qwords. |
+| `GF-R@` | `( r-addr -- )` | Store ACC0–ACC3 as four ascending qwords. |
+| `GF-PRIME` | `( selector -- )` | Select Curve25519, secp256k1, P-256, or custom by the low two bits. |
+| `LOAD-PRIME` | `( p-addr pinv-addr -- )` | Latch custom prime and Montgomery inverse without selecting custom mode. |
+| `FADD` | `( a-addr b-addr r-addr -- )` | (a + b) mod p for canonical field inputs. |
+| `FSUB` | `( a-addr b-addr r-addr -- )` | (a − b) mod p for canonical field inputs. |
+| `FMUL` | `( a-addr b-addr r-addr -- )` | (a · b) mod p. |
+| `FSQR` | `( a-addr r-addr -- )` | a² mod p. |
+| `FINV` | `( a-addr r-addr -- )` | a^(p−2) mod p (Fermat exponentiation). |
+| `FPOW` | `( a-addr e-addr r-addr -- )` | a^e mod p (ordinary modular exponentiation). |
+| `FMUL-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Raw 256×256 product in two 32-byte outputs. |
+| `FCMOV` | `( a-addr cond-addr -- )` | Replace ACC if `cond-addr C@` is nonzero; read `a` even when false. |
+| `FCEQ` | `( a-addr b-addr r-addr -- )` | Store exact 256-bit equality as 1 or 0. |
+| `FMAC` | `( a-addr b-addr r-addr -- )` | Add retained previous-low to the selected product. |
+| `FMUL-ADD-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Add the product to retained previous-low/high modulo `2^512`. |
+
+ACC, operand/result addresses, prime configuration, and previous results are
+physical-core state, not task-owned state. `FMUL`/`FSQR` use Montgomery REDC
+only in custom mode with a nonzero latched inverse; `FINV` and `FPOW` always
+use ordinary residues. Portable arithmetic assumes canonical inputs and a
+valid prime/custom tuple. The exact qword fault/publication order and known
+noncanonical, native raw-carry, reset, and RTL-integration discrepancies are
+recorded in the [BIOS reference](bios-forth.md#field-alu--multi-prime-arithmetic-15-raw-words)
+and [simulator contract](simulator-contract.md#6-platform-services).
+
+The hosted simulator executes this exact source block after unchanged X25519,
+advancing the contiguous KDOS frontier through line 1515. The next source
+section begins NTT at line 1517 and first requires `NTT-LOAD` on line 1558.
 
 ---
 

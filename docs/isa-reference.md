@@ -1007,19 +1007,20 @@ RTL decode and cluster-lock paths implement this `SHA.RELEASE` contract.
 #### Field ALU Sub-Operations (sub-op 0x20–0x2D)
 
 All Field ALU operands and results are 256-bit, stored in ACC0–ACC3 (CSRs
-0x19–0x1C).  Operand B comes from tile memory at M[TSRC0] (32 bytes).
+0x19–0x1C). Operand B is read as four ascending little-endian qwords from
+M[TSRC0]. Raw high halves are written as four ascending qwords to M[TDST].
 
 | Sub-op | Mnemonic | Bytes | Cycles | Operation |
 |--------|----------|-------|--------|-----------|
-| `0x20` | **GF.ADD** | 2 | 1 | `ACC ← (ACC + M[TSRC0]) mod p` |
-| `0x21` | **GF.SUB** | 2 | 1 | `ACC ← (ACC − M[TSRC0]) mod p` |
+| `0x20` | **GF.ADD** | 2 | 1 | One-subtraction selected-prime addition; `(ACC + B) mod p` for canonical inputs |
+| `0x21` | **GF.SUB** | 2 | 1 | Selected-prime subtract/compensate; `(ACC − B) mod p` for canonical inputs |
 | `0x22` | **GF.MUL** | 2 | 1–4 | `ACC ← (ACC × M[TSRC0]) mod p` (1 cy built-in, 4 cy REDC). |
 | `0x23` | **GF.SQR** | 2 | 1–4 | `ACC ← ACC² mod p` |
 | `0x24` | **GF.INV** | 2 | ~767 | `ACC ← ACC^(p−2) mod p` (Fermat's little theorem) |
 | `0x25` | **GF.POW** | 2 | ~767 | `ACC ← ACC^(M[TSRC0]) mod p` (binary method) |
 | `0x26` | **GF.MULR** | 2 | 1 | Raw 256×256→512: `{M[TDST], ACC} ← ACC × M[TSRC0]` |
-| `0x27` | **GF.MAC** | 2 | 1–4 | `ACC ← (prev + ACC × M[TSRC0]) mod p` (accumulate) |
-| `0x28` | **GF.MACR** | 2 | 1 | Raw MAC: `{M[TDST], ACC} ← prev_512 + ACC × M[TSRC0]` |
+| `0x27` | **GF.MAC** | 2 | 1–4 | One-subtraction add of previous-low to the selected product |
+| `0x28` | **GF.MACR** | 2 | 1 | Raw MAC: `{M[TDST], ACC} ← (prev_512 + ACC × M[TSRC0]) mod 2^512` |
 | `0x29` | **GF.CMOV Rd** | 3 | 1 | If `R[d] ≠ 0`: `ACC ← M[TSRC0]`; else unchanged. Constant-time. |
 | `0x2A` | **GF.CEQ** | 2 | 1 | Constant-time equality: `ACC ← (ACC == M[TSRC0]) ? 1 : 0`, sets Z flag. |
 | `0x2B` | **GF.PRIME imm8** | 3 | 1 | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom. |
@@ -1033,15 +1034,31 @@ All Field ALU operands and results are 256-bit, stored in ACC0–ACC3 (CSRs
 |-----|------|-------------|
 | `0x85` | GF_PRIME_SEL | Active prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
 
-**Primes:** GF.ADD/SUB/MUL/SQR use the selected prime for modular
-reduction.  Built-in primes (0–2) have optimised single-cycle reducers.
-Custom prime (sel=3) uses Montgomery REDC (4-cycle multiply pipeline).
+**Primes:** selectors 0–2 name Curve25519, secp256k1, and NIST P-256.
+Selector 3 names the custom value latched by GF.LDPRIME; native C++ and the
+Python model fall back to Curve25519 when that value is zero. GF.LDPRIME does
+not change the selector or validate `p`/`p_inv`. Montgomery REDC is enabled
+only for selector 3 with nonzero `p_inv`, and only for GF.MUL, GF.SQR, and the
+product portion of GF.MAC. GF.INV and GF.POW use ordinary residues.
 
-**Flags:** GF.CEQ sets the Z flag (constant-time).  All other field ALU
-ops do not modify flags (side-channel resistance).
+The portable arithmetic domain is canonical inputs and a valid prime/custom
+Montgomery tuple. ADD/SUB behavior outside it differs among native C++, Python,
+and standalone RTL. Native C++ can retain hidden upper previous-low limbs after
+noncanonical ADD/SUB, and its current GF.MACR misses a low-to-high carry; the
+Python model and standalone RTL implement the wrapped 512-bit raw result.
+Standalone RTL also lacks the custom-zero fallback. These are implementation
+defects/discrepancies, not additional ISA results.
 
-**Micro-cores:** CRC is available through the cluster-shared engine described
-above. Availability of the other EXT.CRYPTO units is implementation-specific.
+**Flags:** raw GF.CEQ sets Z; the other raw Field operations do not. The BIOS
+`FCEQ` wrapper subsequently runs flag-writing address increments while storing
+ACC, so it exposes only its 256-bit 1/0 memory result. Constant-time wording
+describes the intended hardware datapath, not host emulator/simulator timing.
+
+**Integration:** the standalone Field leaf is not wired into the current
+full-core dispatch, and the microcore/cluster path does not currently provide
+a complete Field execution route. CRC remains available through the
+cluster-shared engine described above; other EXT.CRYPTO availability is
+implementation-specific.
 
 ---
 

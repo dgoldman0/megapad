@@ -890,22 +890,35 @@ of the current Field prime selection.
 > tables are regenerated; this X25519 table deliberately does not invent
 > replacement ordinal numbers during the simulator slice.
 
-### Field ALU (12 words)
+### Field ALU (15 raw words)
 
-| # | Word | Stack Effect | Imm | Description |
-|---|------|-------------|-----|-------------|
-| 282 | `GF-A!` | `( addr -- )` | | Load 256-bit operand A from addr into ACC0–ACC3 |
-| 283 | `GF-R@` | `( addr -- )` | | Store ACC0–ACC3 (256-bit result) to addr |
-| 284 | `GF-PRIME` | `( n -- )` | | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
-| 285 | `LOAD-PRIME` | `( p-addr pinv-addr -- )` | | Latch custom prime + Montgomery p_inv |
-| 286 | `FADD` | `( a b -- r )` | | (a + b) mod p |
-| 287 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
-| 288 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
-| 289 | `FSQR` | `( a -- r )` | | a² mod p |
-| 290 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
-| 291 | `FPOW` | `( a b -- r )` | | a^b mod p |
-| 292 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
-| 293 | `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | | Multiply-accumulate (raw) |
+All field operands and results are addresses of 32-byte little-endian values.
+The raw operations take separate 32-byte low and high destination addresses.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `GF-A!` | `( a-addr -- )` | Load ACC0–ACC3 from four ascending qwords |
+| `GF-R@` | `( r-addr -- )` | Store ACC0–ACC3 as four ascending qwords |
+| `GF-PRIME` | `( selector -- )` | Select by low two bits: Curve25519, secp256k1, P-256, or custom |
+| `LOAD-PRIME` | `( p-addr pinv-addr -- )` | Latch custom `p` and Montgomery inverse without changing the selector |
+| `FADD` | `( a-addr b-addr r-addr -- )` | Selected-prime addition for canonical inputs |
+| `FSUB` | `( a-addr b-addr r-addr -- )` | Selected-prime subtraction for canonical inputs |
+| `FMUL` | `( a-addr b-addr r-addr -- )` | Selected ordinary/Montgomery product |
+| `FSQR` | `( a-addr r-addr -- )` | Selected ordinary/Montgomery square |
+| `FINV` | `( a-addr r-addr -- )` | Fermat exponent `a^(p-2) mod p` |
+| `FPOW` | `( a-addr e-addr r-addr -- )` | Ordinary modular exponentiation |
+| `FMUL-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Raw 256×256 product |
+| `FCMOV` | `( a-addr cond-addr -- )` | Replace ACC when `cond-addr C@` is nonzero; always read `a` |
+| `FCEQ` | `( a-addr b-addr r-addr -- )` | Store exact-representation equality as 256-bit 1/0 |
+| `FMAC` | `( a-addr b-addr r-addr -- )` | Add retained previous-low to the selected product |
+| `FMUL-ADD-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Wrapped 512-bit raw multiply-accumulate |
+
+The old ordinal table placed only 12 Field entries before NTT. It cannot be
+repaired locally without regenerating every later ordinal, so this section
+deliberately omits invented numbers and follows the checked-in `.dq` chain.
+Canonical field elements and valid custom-prime/Montgomery tuples are the
+portable arithmetic domain; backend discrepancies outside it and the native
+raw-MAC carry defect are recorded in [bios-forth.md](bios-forth.md#field-alu--multi-prime-arithmetic-15-raw-words).
 
 ### NTT Engine (9 words)
 
@@ -1034,7 +1047,7 @@ machine reset.
 | TRNG | 3 |
 | Checked Entropy Boundaries | 2 |
 | Caller Span Boundary | 1 |
-| Field ALU | 13 |
+| Field ALU | 15 |
 | NTT Engine | 9 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
@@ -1042,7 +1055,7 @@ machine reset.
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **388** |
+| **Catalogued subtotal** | **390** |
 
 ### All Immediate Words (34)
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 from shared.cells import CELL_BYTES, forth_flag, s64, u64
 from simulator.aes import (
     AES_AAD_LENGTH,
@@ -17,7 +19,7 @@ from simulator.aes import (
 )
 from simulator.errors import ExecutionError, ForthAbort
 from simulator.entropy import TRNG_RAND8, TRNG_RAND64, TRNG_SEED
-from simulator.memory import MMIO_BASE
+from simulator.memory import MMIO_BASE, SparseAddressSpace
 from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
     SYSINFO_NUM_CORES,
@@ -731,6 +733,118 @@ def _x25519_result_fetch(
     runtime.field.store_accumulator(core_id, address, runtime.memory)
 
 
+_FieldMemoryOperation = Callable[[int, SparseAddressSpace], None]
+_FieldUnaryOperation = Callable[[int], None]
+
+
+def _field_accumulator_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.load_accumulator(core_id, address, runtime.memory)
+
+
+def _field_result_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.store_accumulator(core_id, address, runtime.memory)
+
+
+def _field_prime_select(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    selection = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.select_prime(core_id, selection)
+
+
+def _field_load_prime(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    inverse_address = context.data.pop()
+    prime_address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.load_accumulator(core_id, prime_address, runtime.memory)
+    runtime.field.set_operand_address(core_id, inverse_address)
+    runtime.field.latch_custom_prime(core_id, runtime.memory)
+
+
+def _field_binary(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    operation: _FieldMemoryOperation,
+) -> None:
+    result_address = context.data.pop()
+    operand_address = context.data.pop()
+    accumulator_address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.load_accumulator(
+        core_id,
+        accumulator_address,
+        runtime.memory,
+    )
+    runtime.field.set_operand_address(core_id, operand_address)
+    operation(core_id, runtime.memory)
+    runtime.field.store_accumulator(core_id, result_address, runtime.memory)
+
+
+def _field_unary(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    operation: _FieldUnaryOperation,
+) -> None:
+    result_address = context.data.pop()
+    accumulator_address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.load_accumulator(
+        core_id,
+        accumulator_address,
+        runtime.memory,
+    )
+    operation(core_id)
+    runtime.field.store_accumulator(core_id, result_address, runtime.memory)
+
+
+def _field_raw(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    operation: _FieldMemoryOperation,
+) -> None:
+    high_address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.set_result_address(core_id, high_address)
+    low_address = context.data.pop()
+    operand_address = context.data.pop()
+    accumulator_address = context.data.pop()
+    runtime.field.load_accumulator(
+        core_id,
+        accumulator_address,
+        runtime.memory,
+    )
+    runtime.field.set_operand_address(core_id, operand_address)
+    operation(core_id, runtime.memory)
+    runtime.field.store_accumulator(core_id, low_address, runtime.memory)
+
+
+def _field_conditional_move(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    condition_address = context.data.pop()
+    operand_address = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    runtime.field.set_operand_address(core_id, operand_address)
+    condition = runtime.memory.read8(u64(condition_address)) != 0
+    runtime.field.conditional_move(core_id, condition, runtime.memory)
+
+
 def _sha256_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     core_id, _task_id = runtime.guest_identity(context)
     context.data.push(runtime.sha2.sha256_init(core_id))
@@ -1102,6 +1216,106 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (b"SPIN@", lambda context: _spin_fetch(runtime, context)),
         (b"SPIN!", lambda context: _spin_release(runtime, context)),
+        (
+            b"GF-A!",
+            lambda context: _field_accumulator_store(runtime, context),
+        ),
+        (
+            b"GF-R@",
+            lambda context: _field_result_fetch(runtime, context),
+        ),
+        (
+            b"GF-PRIME",
+            lambda context: _field_prime_select(runtime, context),
+        ),
+        (
+            b"LOAD-PRIME",
+            lambda context: _field_load_prime(runtime, context),
+        ),
+        (
+            b"FADD",
+            lambda context: _field_binary(
+                runtime,
+                context,
+                runtime.field.add,
+            ),
+        ),
+        (
+            b"FSUB",
+            lambda context: _field_binary(
+                runtime,
+                context,
+                runtime.field.subtract,
+            ),
+        ),
+        (
+            b"FMUL",
+            lambda context: _field_binary(
+                runtime,
+                context,
+                runtime.field.multiply,
+            ),
+        ),
+        (
+            b"FSQR",
+            lambda context: _field_unary(
+                runtime,
+                context,
+                runtime.field.square,
+            ),
+        ),
+        (
+            b"FINV",
+            lambda context: _field_unary(
+                runtime,
+                context,
+                runtime.field.invert,
+            ),
+        ),
+        (
+            b"FPOW",
+            lambda context: _field_binary(
+                runtime,
+                context,
+                runtime.field.power,
+            ),
+        ),
+        (
+            b"FMUL-RAW",
+            lambda context: _field_raw(
+                runtime,
+                context,
+                runtime.field.multiply_raw,
+            ),
+        ),
+        (
+            b"FCMOV",
+            lambda context: _field_conditional_move(runtime, context),
+        ),
+        (
+            b"FCEQ",
+            lambda context: _field_binary(
+                runtime,
+                context,
+                runtime.field.equal,
+            ),
+        ),
+        (
+            b"FMAC",
+            lambda context: _field_binary(
+                runtime,
+                context,
+                runtime.field.multiply_accumulate,
+            ),
+        ),
+        (
+            b"FMUL-ADD-RAW",
+            lambda context: _field_raw(
+                runtime,
+                context,
+                runtime.field.multiply_add_raw,
+            ),
+        ),
         (
             b"X25519-SCALAR!",
             lambda context: _x25519_scalar_store(runtime, context),

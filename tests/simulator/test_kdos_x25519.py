@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from shared.x25519 import X25519_BYTES, x25519_scalar_multiply
-from simulator.errors import SourceError
 from simulator.field import HostedFieldALUService
 from simulator.memory import (
     EXTERNAL_BASE,
@@ -406,19 +405,26 @@ def test_unchanged_x25519_publishes_all_zero_result_without_rejection(
     assert loaded_x25519.memory.read_bytes(RESULT_ADDRESS, 32) == bytes(32)
 
 
-def test_next_contiguous_frontier_stops_at_gf_prime(
+def test_next_contiguous_field_slice_is_now_admitted(
     loaded_x25519: MegaForthRuntime,
 ) -> None:
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
     assert lines[1481] == b"\n"  # source line 1482
-    next_source = b"".join(lines[1482:1506])
+    next_source = b"".join(lines[1482:1515])
     assert next_source.startswith(b"\\ =================================")
-    assert next_source.endswith(b": PRIME-25519  ( -- ) 0 GF-PRIME ;\n")
+    assert next_source.endswith(b"CREATE _FRH 32 ALLOT\n")
 
-    with pytest.raises(SourceError, match="unknown word") as caught:
-        loaded_x25519.evaluate(
-            next_source,
-            source_name="kdos.f:1483-1506",
-        )
-    assert caught.value.location.line == 24
-    assert caught.value.message == "unknown word b'GF-PRIME'"
+    result = loaded_x25519.evaluate(
+        next_source,
+        source_name="kdos.f:1483-1515",
+    )
+    assert tuple(word.name for word in result.definitions) == (
+        b"PRIME-25519",
+        b"PRIME-SECP",
+        b"PRIME-P256",
+        b"PRIME-CUSTOM",
+        b"_FA",
+        b"_FB",
+        b"_FR",
+        b"_FRH",
+    )

@@ -1290,32 +1290,50 @@ X25519 qualification is not evidence that those paths work.
 
 ---
 
-## Field ALU — GF(2²⁵⁵−19) Arithmetic (13 words)
+## Field ALU — Multi-Prime Arithmetic (15 raw words)
 
-General-purpose finite-field coprocessor, per-core ISA (EXT.CRYPTO FB,
-sub-ops 0x20–0x2D).  Operands staged via ACC0–ACC3 CSR writes;
-results read back via CSR reads.
+The per-core Field unit is exposed through EXT.CRYPTO `FB 20`–`FB 2D`.
+Every `a`, `b`, `e`, `r`, `rlo`, `rhi`, `p`, and `pinv` argument below is an
+address. Field values are 32-byte little-endian integers; raw products use two
+separate 32-byte low/high destinations.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `GF-A!` | `( addr -- )` | Load 256-bit operand A from addr into ACC0–ACC3. |
-| `GF-R@` | `( addr -- )` | Store ACC0–ACC3 (256-bit result) to addr. |
-| `GF-PRIME` | `( n -- )` | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom. |
-| `LOAD-PRIME` | `( p-addr pinv-addr -- )` | Latch custom prime + Montgomery p_inv. |
-| `FADD` | `( a b -- r )` | (a + b) mod p — loads operands, executes, returns result. |
-| `FSUB` | `( a b -- r )` | (a − b) mod p. |
-| `FMUL` | `( a b -- r )` | (a · b) mod p. |
-| `FSQR` | `( a -- r )` | a² mod p. |
-| `FINV` | `( a -- r )` | a^(p−2) mod p (modular inverse). |
-| `FPOW` | `( a b -- r )` | a^b mod p. |
-| `FMUL-RAW` | `( a b -- rlo rhi )` | Raw 256×256→512-bit multiply (no reduction). |
-| `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | Multiply-accumulate (raw). |
+| `GF-A!` | `( a-addr -- )` | Load four ascending qwords into ACC0–ACC3. |
+| `GF-R@` | `( r-addr -- )` | Store ACC0–ACC3 as four ascending qwords. |
+| `GF-PRIME` | `( selector -- )` | Select by the low two bits: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom. |
+| `LOAD-PRIME` | `( p-addr pinv-addr -- )` | Latch custom `p` and Montgomery `-p^-1 mod 2^256`; it does not select custom mode. |
+| `FADD` | `( a-addr b-addr r-addr -- )` | Add under the selected prime. |
+| `FSUB` | `( a-addr b-addr r-addr -- )` | Subtract under the selected prime. |
+| `FMUL` | `( a-addr b-addr r-addr -- )` | Multiply under the selected prime. |
+| `FSQR` | `( a-addr r-addr -- )` | Square under the selected prime. |
+| `FINV` | `( a-addr r-addr -- )` | Compute `a^(p-2) mod p`. |
+| `FPOW` | `( a-addr e-addr r-addr -- )` | Compute `a^e mod p`. |
+| `FMUL-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Publish the raw 256×256 product as low and high halves. |
+| `FCMOV` | `( a-addr cond-addr -- )` | Read `cond-addr C@`; if nonzero replace ACC with `a`, otherwise retain ACC. The `a` span is read in either case. |
+| `FCEQ` | `( a-addr b-addr r-addr -- )` | Store a 256-bit 1 when equal, otherwise 0. |
+| `FMAC` | `( a-addr b-addr r-addr -- )` | Add the retained previous low result to the selected product. |
+| `FMUL-ADD-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Add the product to the retained 512-bit previous result, wrapping at 512 bits. |
 
-> **Open Field-table discrepancy.** The heading says 13 words while this
-> legacy table lists 12; `bios.asm` actually defines 15 and additionally
-> exposes `FCMOV`, `FCEQ`, and `FMAC`. Several displayed stack effects also
-> predate the current address-based wrappers. The executable dictionary is
-> authoritative until the next Field-ALU source slice reconciles this table.
+ACC, TSRC0, TDST, prime configuration, and previous low/high results belong to
+the physical core and are shared by its tasks. Ordinary result operations
+replace previous-low only; raw operations replace both halves. `GF-A!`,
+`GF-R@`, prime selection, and `LOAD-PRIME` do not themselves publish a
+previous result. Loads and stores proceed one qword at a time, so a later
+fault may retain an ACC or destination prefix. `FCEQ` sets the raw instruction
+Z flag, but `_gf_store_acc` executes flag-writing `ADDI` instructions before
+the Forth word returns; callers must use the stored 1/0 result.
+
+For valid primes and canonical field inputs, the modular words have their
+displayed mathematical meaning. Custom parameters are not validated. Current
+C++ and standalone RTL subtract at most one `p` for ADD, while the Python
+emulator uses full `% p`; SUB has further noncanonical backend differences.
+The native C++ `BigNum` can also retain non-architectural upper limbs from
+such an add/subtract into a later `FMAC`. For raw MAC carry, the hosted model,
+Python emulator, and standalone RTL implement wrapped 512-bit addition, while
+native C++ currently misses a carry from bit 255 into the high half. These are
+open backend defects, not alternate public ABIs. No hosted execution path
+claims constant-time behavior.
 
 ---
 

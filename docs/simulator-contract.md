@@ -446,6 +446,74 @@ agreement and does not choose the eventual correction there. It also makes
 no claim about EXT.CRYPTO encodings, CSRs, the nominal 4335-cycle latency,
 stalls, interrupts, constant-time host execution, or host-memory erasure.
 
+The general Field slice admits the same per-core state through all 15 raw BIOS
+words: `GF-A!`, `GF-R@`, `GF-PRIME`, `LOAD-PRIME`, `FADD`, `FSUB`, `FMUL`,
+`FSQR`, `FINV`, `FPOW`, `FMUL-RAW`, `FCMOV`, `FCEQ`, `FMAC`, and
+`FMUL-ADD-RAW`. Exact unchanged `kdos.f` lines 1483 through 1515 then define
+the four named prime selectors and four 32-byte scratch buffers. Every
+ordinary operand/result argument is an address to a 32-byte little-endian
+integer; raw operations take separate low and high addresses. `FCMOV` takes
+an operand address and a condition-byte address, not an immediate condition.
+
+ACC0–ACC3, TSRC0, TDST, the two-bit selector, custom prime and inverse, and
+previous low/high values are physical-core state. Successful ordinary result
+operations replace previous-low; successful raw operations replace both
+halves. False `FCMOV`, transfer/configuration words, and `LOAD-PRIME` leave the
+previous values unchanged. Previous-high deliberately remains stale across a
+later low-only operation, so a subsequent raw MAC may combine it with the
+newer low half. X25519 shares ACC, TSRC0, and previous-low with these words
+while ignoring the selected prime. Hosted construction/reset clears the whole
+service; guest `ABORT`, `THROW`, and memory failure do not roll it back.
+
+The transfer contract is four ascending qword accesses at offsets 0, 8, 16,
+and 24, each with uint64 address stepping. There is no complete-span preflight
+or alignment restriction. An A-load fault retains its completed ACC prefix;
+a B/exponent fault leaves fully loaded A but publishes no arithmetic result.
+Normal arithmetic updates ACC/previous-low before its sequential result store.
+Raw multiply updates ACC low, publishes high qwords, then commits the previous
+pair, after which BIOS publishes low qwords. Thus a high fault leaves low in
+ACC, a high destination prefix, the old previous pair, and an untouched low
+destination; a low fault leaves high and the new previous pair committed.
+Input/output aliasing is valid after complete input consumption. High and low
+destinations may also alias, with the later low stores winning. `LOAD-PRIME`
+fully loads `p`, sets TSRC0, then latches custom `p` before reading the inverse;
+an inverse fault can retain new `p` with the old inverse. `FCMOV` sets TSRC0,
+reads the condition byte, and reads all four operand qwords even when false.
+
+Selectors 0, 1, and 2 name Curve25519, secp256k1, and NIST P-256. Selector 3
+uses the latched custom value, with the executable native/Python zero fallback
+to Curve25519. `LOAD-PRIME` neither selects custom mode nor validates its
+tuple. Montgomery REDC is used only by `FMUL`, `FSQR`, and the product portion
+of `FMAC`, and only when selector 3 has a nonzero inverse. `FINV` is literal
+Fermat exponentiation, `FPOW` uses ordinary residues, and `FCEQ` compares exact
+representations. The portable mathematical claim is limited to canonical
+inputs and a valid prime/custom Montgomery tuple. Invalid primes, incorrect
+inverses, and noncanonical Montgomery representations are accepted raw state,
+not a cross-backend field contract.
+
+Outside that domain the checked-in backends disagree. C++ and standalone RTL
+use one conditional reduction for ADD, while Python uses full `% p`; SUB has
+additional C++/RTL/Python differences for noncanonical inputs. Native C++ can
+retain hidden upper `BigNum` limbs after such ADD/SUB operations and expose
+them through a later FMAC, whereas hosted and RTL previous-low is exactly 256
+bits. Native C++ also loses the carry from previous-low into previous-high in
+raw MAC; hosted follows the wrapped 512-bit result agreed by Python and the
+standalone RTL. Python transfers Field B/high data bytewise rather than in
+BIOS/native qwords. Standalone RTL lacks the custom-zero fallback, and custom
+`p=1,e=0` differs between native C++ and the other value models; both are
+outside the valid-custom-prime claim. These discrepancies are pinned rather
+than silently selected as alternate ABIs.
+
+Raw `GF.CEQ` computes a Z flag, but the BIOS result-store helper immediately
+executes flag-writing address increments before returning. The public result
+is the stored 256-bit 1/0, not retained flags. There is no Field capability
+bit, checked status, wait protocol, lock, task owner, span qualifier, automatic
+wipe, allocation, or error return. Hosted Field execution makes no claim about
+instruction bytes, CSRs, cycles, stalls, arbitration, interrupt interleaving,
+integrated RTL, constant-time host behavior, or physical secret erasure. The
+current emulator reset paths also omit some prime/previous state that hosted
+`reset()` clears; simulator lifecycle tests do not resolve that reset defect.
+
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
 and refill counter using SHA-256. No operating-system or physical randomness

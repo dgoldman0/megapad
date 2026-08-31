@@ -580,7 +580,7 @@ zeroizes the bank before another TACC operation is admitted.
 | WOTS Chain | 0–15 shared Keccak permutations after one 64-byte context read | Production Winternitz chain primitive over a caller-owned Bank 0 context |
 | SHA-256 | 64 bytes / 64 cycles | TLS 1.3, HMAC-SHA256, HKDF (per-core ISA, no MMIO) |
 | CRC (32/64-bit tuples) | 8 bytes / feed | Data integrity (private full-core / cluster-shared ISA, no MMIO) |
-| Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519, per-core ISA) |
+| Field ALU | 1–4335 nominal ISA cycles, operation-dependent | Per-core multi-prime arithmetic, raw 512-bit products, and X25519 |
 | NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
 | KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
 | TRNG | 64 bits / 2 cycles | Hardware true random number generator |
@@ -745,30 +745,43 @@ responses, with acquire reported busy. Spinlock owner storage covers the
 complete `NUM_CORES` global topology independently of mailbox full-core
 capacity.
 
-### Field ALU (GF(2²⁵⁵−19) Coprocessor)
+### Field ALU (Multi-Prime Coprocessor)
 
-A general-purpose field arithmetic unit implemented as per-core ISA
-instructions (EXT.CRYPTO FB, sub-ops 0x20–0x2D).  Eight operation modes:
+The Field unit is per physical core and uses EXT.CRYPTO `FB 20`–`FB 2D`:
 
-| Mode | Name | Description |
-|------|------|-------------|
-| 0 | X25519 | Full scalar multiplication (Montgomery ladder, ~255 iterations) |
-| 1 | FADD | (a + b) mod p |
-| 2 | FSUB | (a − b) mod p |
-| 3 | FMUL | (a · b) mod p (shared 256-bit multiplier) |
-| 4 | FSQR | a² mod p |
-| 5 | FINV | a^(p−2) mod p (Fermat's little theorem) |
-| 6 | FPOW | a^b mod p (general exponentiation) |
-| 7 | MUL_RAW | Raw 256×256→512-bit multiply (no modular reduction) |
+| Sub-op | Name | Description |
+|--------|------|-------------|
+| `20` | GF.ADD | Selected-prime addition |
+| `21` | GF.SUB | Selected-prime subtraction |
+| `22` | GF.MUL | Ordinary or custom Montgomery product |
+| `23` | GF.SQR | Ordinary or custom Montgomery square |
+| `24` | GF.INV | Fermat exponent `a^(p-2) mod p` |
+| `25` | GF.POW | Ordinary modular exponentiation |
+| `26` | GF.MULR | Raw 256×256 product |
+| `27` | GF.MAC | Selected product plus retained previous-low |
+| `28` | GF.MACR | Wrapped raw 512-bit multiply-accumulate |
+| `29` | GF.CMOV | Register-conditioned exact 256-bit move |
+| `2A` | GF.CEQ | Exact 256-bit equality result |
+| `2B` | GF.PRIME | Select Curve25519, secp256k1, P-256, or custom |
+| `2C` | GF.LDPRIME | Latch custom prime and Montgomery inverse |
+| `2D` | GF.X25519 | RFC 7748 scalar multiplication |
 
-Operands are staged via CSR writes (ACC0–ACC3 for A, TSRC0 for B
-address); results read back via CSR reads.  The ISA instructions are
-synchronous — each completes in deterministic cycles with no polling.
+ACC0–ACC3 stage A/result, TSRC0 names B, and TDST names the raw high-half
+destination. Prime configuration and previous low/high results persist across
+calls and are shared by tasks on the core. Instructions are synchronous; the
+BIOS wrappers transfer four ascending little-endian qwords without a complete
+32-byte preflight.
 
-Zero additional DSPs — reuses the existing shared 256-bit multiplier.
-**BIOS words:** `GF-A!`, `GF-R@`, `GF-PRIME`, `LOAD-PRIME`,
-`FADD`, `FSUB`, `FMUL`, `FSQR`, `FINV`, `FPOW`, `FMUL-RAW`, `FMUL-ADD-RAW`.
-**KDOS words (§1.10):** `F+`, `F-`, `F*`.
+The checked-in dictionary exposes 15 raw words: `GF-A!`, `GF-R@`,
+`GF-PRIME`, `LOAD-PRIME`, `FADD`, `FSUB`, `FMUL`, `FSQR`, `FINV`, `FPOW`,
+`FMUL-RAW`, `FCMOV`, `FCEQ`, `FMAC`, and `FMUL-ADD-RAW`. KDOS §1.10 adds
+four named prime selectors and four scratch buffers; it does not define
+`F+`, `F-`, or `F*`.
+
+The standalone Field RTL is not currently connected into either complete core
+path. Canonical-input, custom-prime, raw-MAC carry, and emulator discrepancies
+are therefore tracked in the [BIOS reference](bios-forth.md#field-alu--multi-prime-arithmetic-15-raw-words)
+and simulator contract rather than inferred from the leaf block alone.
 
 ### NTT Engine (Number Theoretic Transform)
 

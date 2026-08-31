@@ -59,9 +59,10 @@ The implemented slices provide:
 - a runtime-local 16-entry semantic spinlock bank with physical-core ownership,
   depthless same-core reacquisition, nonblocking contention, and owner-only
   release for the ordinary pseudo-BIOS words;
-- a runtime-local per-core Field-ALU register service for the six raw X25519
-  BIOS words, backed by a portable RFC 7748 value model and preserving the
-  native four-qword load/store order without emulating EXT.CRYPTO timing;
+- a runtime-local per-core Field-ALU service for the 15 general arithmetic/raw
+  BIOS words and six X25519 staging words, backed by portable Field and RFC
+  7748 value models and preserving native four-qword effects without emulating
+  EXT.CRYPTO timing;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
@@ -353,13 +354,14 @@ state rather than task/core-safe storage, and hosted key generation consumes
 the deterministic development TRNG rather than secure entropy.
 
 The hosted Field service is physical-core state shared by tasks on that core:
-ACC0-ACC3, deferred TSRC0, and the persistent previous result. Scalar loads,
-point reads, and result stores each use four ascending qwords and retain the
-raw BIOS's partial-fault behavior; the high-level word consumes both inputs
-before output and therefore permits destination aliasing. Hosted execution
-claims RFC 7748 bytes and these memory/state effects, not ISA encodings, CSRs,
-4335-cycle latency, stalls, interrupts, RTL integration, constant-time host
-execution, or physical erasure.
+ACC0-ACC3, deferred TSRC0, raw-result TDST, prime configuration, and persistent
+previous-low/high. Scalar loads, point reads, and result stores each use four
+ascending qwords and retain the raw BIOS's partial-fault behavior; the
+high-level word consumes both inputs before output and therefore permits
+destination aliasing. Hosted execution claims RFC 7748 bytes and these
+memory/state effects, not ISA encodings, CSRs, 4335-cycle latency, stalls,
+interrupts, RTL integration, constant-time host execution, or physical
+erasure.
 
 This slice follows RFC 7748 and the native C++/standalone-RTL constant
 `A24=121665`. The architectural Python emulator currently uses `121666` with
@@ -368,6 +370,24 @@ the standalone Field-ALU RTL is not connected into the current full-core SoC
 path, and the microcore declares Field ports that its cluster does not wire.
 Simulator success is therefore not Python-interpreter or integrated-RTL
 X25519 evidence; those discrepancies remain explicit rather than normalized.
+
+Byte-exact logical lines 1483 through 1515 now add unchanged KDOS §1.10 over
+all 15 general Field BIOS words. The source defines four prime selectors and
+four zeroed 32-byte scratch buffers. The ABI uses address operands and
+separate low/high raw destinations; `FCMOV` consumes an operand address and a
+condition-byte address. `LOAD-PRIME` latches but does not select a custom
+prime. Only custom-mode `FMUL`, `FSQR`, and the product in `FMAC` use a
+nonzero Montgomery inverse; inverse and power remain ordinary exponentiation.
+
+The qualified arithmetic domain is canonical field inputs with a valid prime
+or custom Montgomery tuple. Hosted execution keeps architecturally intended
+256-bit previous state and correct wrapped 512-bit raw-MAC carry. Native C++
+currently leaks hidden upper limbs after noncanonical ADD/SUB and drops that
+raw carry; Python uses full modulo and byte-granular Field traffic where
+BIOS/native use qwords; standalone RTL differs on malformed custom-zero state
+and is not integrated into a complete core. Exact publication/fault order and
+these unresolved discrepancies are specified in the
+[simulator contract](../docs/simulator-contract.md#6-platform-services).
 
 A host-side budget or implementation error that escapes a dispatch which has
 observed `RP@` marks that execution context non-reusable. The registration is
@@ -384,8 +404,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–1481 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, and unchanged X25519; blank separator lines 70 and 1432 have no definitions |
-| 1482 onward | Next uncovered frontier | Line 1482 is blank and §1.10 Field ALU begins at line 1483; the first missing semantic-BIOS primitive is `GF-PRIME` at line 1506 |
+| 39–1515 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, AES, SHA3/SHAKE/TRNG helpers, SHA-2, unified crypto/HMAC, X25519, and the general Field block; blank separators at lines 70, 1432, and 1482 have no definitions |
+| 1516 onward | Next uncovered frontier | Line 1516 is blank and §1.11 NTT begins at line 1517; constants and scratch compile until the first missing primitive, `NTT-LOAD`, at line 1558 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -397,10 +417,11 @@ continuous load.
 
 The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
 or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
-The next source boundary begins the general Field ALU at line 1483. Its first
-actual semantic-BIOS gap is `GF-PRIME` at line 1506; later slices continue the
-same contiguous unchanged prefix toward the persistent evaluator, ordinary
-checked module-loader surface, and deterministic cooperative task scheduler.
+The next source boundary begins NTT at line 1517. Its constants and scratch
+advance naturally to the first actual semantic-BIOS gap, `NTT-LOAD`, at line
+1558. Later slices continue the same contiguous unchanged prefix toward the
+persistent evaluator, ordinary checked module-loader surface, and
+deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work
