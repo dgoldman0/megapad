@@ -311,10 +311,16 @@ Full specification: [arenas.md](arenas.md)
 #### Core API
 
 ```forth
+\ Example checked helpers (not built-in KDOS words)
+: MUST-ARENA  ( size source -- arena )
+    ARENA-NEW ABORT" arena fail" ;
+: MUST-ARENA-AT  ( desc size source -- )
+    ARENA-NEW-AT ABORT" arena fail" ;
+
 \ Create
-4096 A-HEAP ARENA-NEW ABORT" arena fail" CONSTANT scratch
+4096 A-HEAP MUST-ARENA CONSTANT scratch
 CREATE my-desc 32 ALLOT                   \ or: user-placed descriptor
-my-desc 4096 A-XMEM ARENA-NEW-AT ABORT" arena fail"
+my-desc 4096 A-XMEM MUST-ARENA-AT
 
 \ Use
 scratch 256 ARENA-ALLOT   ( addr )        \ O(1) bump
@@ -381,7 +387,7 @@ directly.
 #### Arena-Scoped Buffers
 
 ```forth
-65536 A-XMEM ARENA-NEW ABORT" arena fail" CONSTANT map-arena
+65536 A-XMEM MUST-ARENA CONSTANT map-arena
 2 8 4096 map-arena ARENA-BUFFER tile-data  \ buffer lives in the arena
 map-arena ARENA-DESTROY                     \ buffer auto-unregistered
 ```
@@ -468,11 +474,14 @@ Lifetime         Strategy           Reclaim             Region
 ────────────────────────────────────────────────────────────────
 Permanent        Dictionary         MARKER / FORGET     Bank 0 / XMEM
 Long-lived       General heap ALLOCATE  FREE            XMEM / Bank 0
-Scoped           Arena              ARENA-DESTROY       Any
+Scoped           Arena              ARENA-DESTROY*      General / XMEM / HBW
 Transactional    Arena + snapshot    ARENA-ROLLBACK      Any
 Ephemeral        Bump (raw)         XMEM-RESET /        XMEM / HBW
                                     HBW-RESET
 ```
+
+`*` Arena destruction immediately reclaims general and raw-XMEM backing, but
+HBW backing remains abandoned until `HBW-RESET`.
 
 The discipline is: **choose the shortest lifetime that fits**.
 
@@ -574,9 +583,9 @@ time rather than implicitly on every memory access:
 
 ```forth
 \ ── Core 0: set up ──
-4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c1-arena
-4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c2-arena
-4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c3-arena
+4096 A-XMEM MUST-ARENA CONSTANT c1-arena
+4096 A-XMEM MUST-ARENA CONSTANT c2-arena
+4096 A-XMEM MUST-ARENA CONSTANT c3-arena
 
 \ ── Core 0: dispatch ──
 ' task1 1 CORE-RUN                          \ map (hand arena to core)
@@ -615,7 +624,7 @@ micro-cores:
 
 ```forth
 \ Core 0: allocate HBW scratch for cluster 0
-4096 A-HBW ARENA-NEW ABORT" OOM" CONSTANT cl0-arena
+4096 A-HBW MUST-ARENA CONSTANT cl0-arena
 
 \ Cluster lead (core 4): split among 4 micro-cores
 : cluster-task  ( -- )
@@ -758,7 +767,8 @@ task dispatch time:
 |---|---|---|
 | Page allocation | `ARENA-NEW` | Setup time |
 | Address mapping | `WAKE-CORE` (pass arena base) | Dispatch time |
-| Protection | Arena bounds + `?CORE0` | Enforced at call boundary |
+| Coordination guard | `?CORE0` | Enforced on shared allocator lifecycle calls |
+| Object bounds | Arena bump check | Intended per allocation; signed/wrapping source defects remain |
 
 The cost of a hardware MMU is attached to translation: a TLB hit is commonly
 part of the access pipeline, while a miss may require a page walk. The cost of
@@ -816,7 +826,7 @@ you do.
 ### 9.2 Tile Map with Undo
 
 ```forth
-65536 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT map-arena
+65536 A-XMEM MUST-ARENA CONSTANT map-arena
 
 : TRY-BRUSH  ( x y tile -- )
     map-arena ARENA-SNAP
@@ -831,15 +841,19 @@ you do.
 ### 9.3 Per-Core Parallel Workload
 
 ```forth
+VARIABLE c1-work
+VARIABLE c2-work
+VARIABLE c3-work
+
 : SETUP-CORES  ( -- )
-    4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c1-work
-    4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c2-work
-    4096 A-XMEM ARENA-NEW ABORT" OOM" CONSTANT c3-work ;
+    4096 A-XMEM ARENA-NEW ABORT" OOM" c1-work !
+    4096 A-XMEM ARENA-NEW ABORT" OOM" c2-work !
+    4096 A-XMEM ARENA-NEW ABORT" OOM" c3-work ! ;
 
 : TEARDOWN-CORES  ( -- )
-    c1-work ARENA-DESTROY
-    c2-work ARENA-DESTROY
-    c3-work ARENA-DESTROY ;
+    c1-work @ ARENA-DESTROY
+    c2-work @ ARENA-DESTROY
+    c3-work @ ARENA-DESTROY ;
 
 : PARALLEL-COMPUTE  ( -- )
     SETUP-CORES
@@ -930,7 +944,7 @@ Switch the affected workload to arenas — arenas cannot fragment.
 | **Bank 0** | 1 MiB on-chip BRAM at address 0.  Holds BIOS, dictionary, heap, stacks. |
 | **XMEM** | External RAM (HyperRAM/SDRAM).  Large, higher latency.  Starts at 0x0010_0000. |
 | **HBW** | High-Bandwidth math RAM.  3 MiB on-chip BRAM at 0xFFD0_0000.  512-bit tile ports. |
-| **Arena** | Pre-allocated region with O(1) bump allocation and O(1) bulk free. |
+| **Arena** | Pre-allocated region with O(1) bump allocation and O(1) pointer reset; destruction is source-dependent. |
 | **Bump allocator** | Advances a pointer; no individual free.  Cannot fragment. |
 | **Free-list** | Linked list of available blocks.  First-fit search.  Can fragment. |
 | **Coalescing** | Merging adjacent free blocks to reduce fragmentation. |

@@ -28,18 +28,20 @@ lifetime is tied to an operation, not to an individual object.  Examples:
 - REPL experimentation: try something, undo all side-effects.
 
 Today these patterns require careful manual `FREE` of every allocation,
-or they leak. An arena makes the lifetime explicit and gives O(1) bulk
-cleanup. Creation, descriptor publication, and destruction are ordered Forth
-operations, not a transactional commit.
+or they leak. An arena makes the lifetime explicit and gives O(1) logical
+cleanup by pointer reset. Physical reclamation on destruction depends on the
+backing allocator. Creation, descriptor publication, and destruction are
+ordered Forth operations, not a transactional commit.
 
 ---
 
 ## 2. Core Concept
 
 An arena is a pre-allocated region where allocations are O(1) (bump a
-pointer forward) and deallocation is O(1) (reset the pointer or free
-the entire region).  No per-object headers.  No free list.  No
-fragmentation within the arena.
+pointer forward) and logical deallocation is O(1) (reset the pointer).
+Destroying an arena performs one backing-release dispatch, whose cost and
+reclamation behavior depend on the selected allocator. No per-object
+headers. No free list within the arena. No fragmentation within the arena.
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -95,6 +97,17 @@ Allocate a backing region of `size` bytes from the specified memory
 source (0=heap, 1=XMEM, 2=HBW).  Build a descriptor in the dictionary.
 Returns descriptor address and 0 on success, or 0 and -1 on failure.
 
+The examples below use these local checked helpers; they are illustrative and
+are not built-in KDOS words. `ABORT"` belongs inside a colon definition, not
+directly in interpretation state.
+
+```forth
+: MUST-ARENA  ( size source -- arena )
+    ARENA-NEW ABORT" arena fail" ;
+: MUST-ARENA-AT  ( desc size source -- )
+    ARENA-NEW-AT ABORT" arena fail" ;
+```
+
 **Note:** the 32-byte descriptor is permanently committed to the
 dictionary.  For temporary arenas created/destroyed in a loop, use
 `ARENA-NEW-AT` instead.
@@ -105,11 +118,11 @@ ARENA-NEW-AT  ( desc size source -- ior )
 Like `ARENA-NEW` but writes the descriptor at `desc` (a user-provided,
 writable, cell-aligned span of at least 32 bytes) instead of consuming
 dictionary space. The current source relies on that caller contract rather
-than checking it. Returns 0 on success, -1 on allocation failure. Example:
+than checking it. Returns 0 on success, -1 on failure. Example:
 
 ```forth
 CREATE MY-DESC 32 ALLOT
-MY-DESC 4096 A-HEAP ARENA-NEW-AT ABORT" arena fail"
+MY-DESC 4096 A-HEAP MUST-ARENA-AT
 \ ... use MY-DESC as the arena (ARENA-ALLOT, ARENA-RESET, etc.) ...
 MY-DESC ARENA-DESTROY
 ```
@@ -167,9 +180,9 @@ The `A-` prefix avoids collision with `XMEM-ALLOT`, `HBW-ALLOT`, etc.
 The constants make `ARENA-NEW` calls self-documenting:
 
 ```forth
-4096 A-HEAP ARENA-NEW ABORT" arena fail" CONSTANT my-scratch
-65536 A-XMEM ARENA-NEW ABORT" arena fail" CONSTANT file-arena
-1024 A-HBW ARENA-NEW ABORT" arena fail" CONSTANT tile-scratch
+4096 A-HEAP MUST-ARENA CONSTANT my-scratch
+65536 A-XMEM MUST-ARENA CONSTANT file-arena
+1024 A-HBW MUST-ARENA CONSTANT tile-scratch
 ```
 
 ### 4.3 Snapshots (Phase 2)
@@ -275,7 +288,7 @@ them.
 
 ```forth
 \ Create a tile buffer in XMEM scratch
-65536 A-XMEM ARENA-NEW ABORT" arena fail" CONSTANT map-arena
+65536 A-XMEM MUST-ARENA CONSTANT map-arena
 2 8 4096 map-arena ARENA-BUFFER tile-data
 
 \ Use tile-data normally — B.SUM, B.FILL, tile ops all work
@@ -341,6 +354,13 @@ pass and wrap `ptr` below `base`. HBW construction also inherits the raw HBW
 allocator's high-cell wrap. These are open source defects, not supported
 large-allocation behavior.
 
+Snapshot validation has the same signed/wrapping limitation. Its nominal
+`[base, base+size]` interval is meaningful only for an ordinary low-half,
+nonwrapping descriptor; corrupt or high-cell descriptors can admit or reject
+tokens according to signed comparisons instead. `ARENA-USED` and
+`ARENA-FREE` likewise perform wrapping arithmetic rather than validating a
+descriptor.
+
 Construction is ordered but not transactional. Backing allocation completes
 before the four descriptor cells are written. A dictionary fault in
 `ARENA-NEW`, or a bad caller span in `ARENA-NEW-AT`, can leak the backing and
@@ -357,7 +377,7 @@ eliminates heap contention in multi-core workloads:
 
 ```forth
 \ In task setup (runs on assigned core):
-4096 A-HEAP ARENA-NEW ABORT" arena fail" CONSTANT my-arena
+4096 A-HEAP MUST-ARENA CONSTANT my-arena
 
 \ In task body:
 my-arena 256 ARENA-ALLOT   ( scratch-addr )
@@ -384,7 +404,7 @@ and destroy it on task exit, making task-local scratch fully automatic.
 | Subsystem | Interaction |
 |-----------|-------------|
 | **General allocation** (`ALLOCATE`/`FREE`) | `A-HEAP` follows the current public route: prefixed XMEM when present, otherwise a Bank 0 heap block. `FREE` reclaims a valid block through the matching route. |
-| **MARKER/FORGET** | Orthogonal.  Arenas live in the heap; MARKER saves/restores dictionary (HERE/LATEST).  If an arena descriptor is in the dictionary, `FORGET` past it leaves the backing block allocated (leak).  Recommendation: `ARENA-DESTROY` before `MARKER`/`FORGET`. |
+| **MARKER/FORGET** | Orthogonal. `MARKER` saves/restores dictionary HERE/LATEST. If an arena descriptor is in the dictionary, `FORGET` past it reclaims only that descriptor and leaks whichever general, raw-XMEM, or HBW backing it owns. Recommendation: `ARENA-DESTROY` before `MARKER`/`FORGET`. |
 | **Buffers** | Phase 4 `ARENA-BUFFER` integrates with the buffer linked list.  Non-arena buffers are unaffected. |
 | **Tasks/scheduler** | Direct allocation through an exclusively owned descriptor composes with task dispatch. The current-arena stack is global and needs serialization or redesign before it can be called task-local. |
 | **HBW/XMEM** | Phase 2.  Arena becomes a structured front-end to the existing bump allocators. |
@@ -443,7 +463,7 @@ and destroy it on task exit, making task-local scratch fully automatic.
 ### Tile map undo
 
 ```forth
-65536 A-XMEM ARENA-NEW ABORT" arena fail" CONSTANT undo-arena
+65536 A-XMEM MUST-ARENA CONSTANT undo-arena
 
 : TRY-BRUSH  ( x y tile -- )
     undo-arena ARENA-SNAP            ( x y tile snap )

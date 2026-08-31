@@ -969,15 +969,20 @@ Its four-cell descriptor stores base, requested capacity, current pointer, and
 source at offsets 0, 8, 16, and 24. `ARENA-NEW` appends that descriptor at the
 active dictionary HERE; `ARENA-NEW-AT` writes the same cells into a
 caller-supplied, writable, cell-aligned 32-byte span without advancing HERE.
-Both return `ior`; callers that immediately define a constant must consume it,
-for example:
+Both return `ior`; callers that immediately define a constant must consume it.
+For example, an application can define an interpretation-safe helper (this is
+not a built-in KDOS word):
 
 ```forth
-4096 A-XMEM ARENA-NEW ABORT" arena fail" CONSTANT work-arena
+: MUST-ARENA  ( size source -- arena )
+    ARENA-NEW ABORT" arena fail" ;
+4096 A-XMEM MUST-ARENA CONSTANT work-arena
 ```
 
 Writing `ARENA-NEW CONSTANT work-arena` is wrong: `CONSTANT` consumes the
 topmost zero status and leaves the descriptor address on the data stack.
+Putting `ABORT"` directly between those top-level words is also wrong because
+`ABORT"` is compile-only; the checked helper must contain it.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -1017,6 +1022,10 @@ unsigned-capacity contract.
 Snapshot tokens carry no provenance. The rollback check admits any value in
 `[base,base+size]`, including an unaligned or forward address that was never a
 past pointer; it also admits token zero for a destroyed all-zero descriptor.
+That interval is computed with wrapping addition and tested with signed
+comparisons, so it describes the source behavior cleanly only for ordinary
+low-half, nonwrapping descriptors. `ARENA-USED` and `ARENA-FREE` similarly
+wrap rather than validate descriptor arithmetic.
 Backing allocation occurs before four separate descriptor writes. A
 dictionary-capacity failure can therefore leak a newly allocated span, and a
 bad `ARENA-NEW-AT` destination can leak backing after partial descriptor

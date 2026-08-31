@@ -178,7 +178,9 @@ def test_arena_slice_is_exact_and_loads_complete_source_state(
     )
     assert _execute(runtime, "ARENA-STK-DEPTH") == (4,)
     arena_stack = _execute(runtime, "ARENA-STK")[0]
-    assert runtime.memory.read_bytes(arena_stack, 32) == bytes(32)
+    arena_sp = runtime.find("ARENA-SP")
+    assert arena_sp is not None
+    assert arena_sp.header_address == arena_stack + 32
     assert _pointer(runtime, "ARENA-SP") == 0
     assert runtime.uart_output == b""
 
@@ -222,6 +224,19 @@ def test_arena_new_and_destroy_follow_each_backing_route(
     else:
         assert _pointer(runtime, "XMEM-FL") == 0
         assert _pointer(runtime, "HBW-HERE") == hbw_here + 64
+
+    released_state = (
+        _pointer(runtime, "XMEM-HERE"),
+        _pointer(runtime, "HBW-HERE"),
+        _pointer(runtime, "XMEM-FL"),
+    )
+    assert _execute(runtime, "ARENA-DESTROY", arena) == ()
+    assert _descriptor(runtime, arena) == (0, 0, 0, 0)
+    assert (
+        _pointer(runtime, "XMEM-HERE"),
+        _pointer(runtime, "HBW-HERE"),
+        _pointer(runtime, "XMEM-FL"),
+    ) == released_state
 
     second, second_status = _new(runtime, 64, source)
     assert second_status == 0
