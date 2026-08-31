@@ -232,7 +232,8 @@ guards, and FSLOAD error recovery with file/line context.
 
 **KDOS core** — The Bank 0-resident part of the Kernel Dashboard OS,
 written entirely in Forth.  It covers utility words, described buffers with
-tile-aligned storage, tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel
+constructor-specific alignment guarantees, tile-accelerated buffer operations
+(B.SUM, B.ADD, etc.), a kernel
 registry with 18 built-in compute kernels, a pipeline engine, raw and
 named file I/O, the MP64FS filesystem, a documentation browser, dictionary
 search tools, a cooperative scheduler with timer-assisted preemption, a
@@ -349,16 +350,16 @@ Type TOPICS or LESSONS for documentation.
 HELP                              \ Full command reference
 DASHBOARD                         \ System overview
 
-256 0 1 BUFFER: demo              \ Create a 256-byte buffer
+0 1 256 BUFFER demo              \ Create a 256-byte buffer
 42 demo B.FILL                    \ Fill every byte with 42
 demo B.SUM .                      \ Sum → 10752
 demo kstats                       \ Prints sum, min, max
 
-256 0 1 BUFFER: a                 \ Two more buffers
-256 0 1 BUFFER: b
+0 1 256 BUFFER a                 \ Two more buffers
+0 1 256 BUFFER b
 10 a B.FILL  20 b B.FILL
 a b demo kadd                     \ Tile-accelerated add: demo = a + b
-demo B.PREVIEW                    \ Hex dump first 64 bytes
+HEX demo B.PREVIEW DECIMAL        \ Show first 64 bytes in hex
 
 SCREENS                           \ Launch 9-screen TUI dashboard
 ```

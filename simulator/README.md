@@ -627,8 +627,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–2796 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, the complete Arena allocator, and Buffer's semantic `IDLE`; blank separators have no definitions |
-| 2797 onward | Next uncovered frontier | Buffer registry, constructors, inspection, and Arena integration begin here; the next probed hardware seam is tile mode control in `B.SUM` |
+| 39–2985 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, the complete Arena allocator, semantic `IDLE`, and Buffer registry/constructors/inspection/Arena integration; blank separators have no definitions |
+| 2986 onward | Next uncovered frontier | The §3 separator precedes `B.SUM`; its first unadmitted hardware operation is `TMODE!` at line 3000 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -653,8 +653,25 @@ evaluation and nested Python-host dispatch cannot yet suspend and fail
 explicitly. Compiling `]` while already in compile state also fails closed
 until public persistent `STATE` exists. Canceling a path that observed `RP@`
 restores its return stack but marks the context non-reusable so a leaked guest
-pointer cannot resurrect detached control. Later slices continue the same
-contiguous unchanged prefix toward the persistent evaluator, ordinary checked
+pointer cannot resurrect detached control.
+
+The adjacent 189-line, 7,191-byte fixture is exact `kdos.f` lines 2797–2985
+(SHA-256
+`eb4d6d1bf072f854c667e86f428f49370bde4cd06e4770bd095d5f549906b2f1`).
+It executes the source's newest-first linked registry with no fixed 16-buffer
+cap, dictionary/HBW/XMEM/Arena constructors, field and byte-size queries,
+fill/zero, current-base fixed-64-byte preview, enumeration, and Arena
+unregistration. The hosted runtime does not replace these with host buffer
+objects or make construction transactional.
+
+Source discrepancies remain visible. `BUF-NTH` is unchecked;
+`ARENA-BUFFER` gives its data only eight-byte alignment; `XBUFFER` loses a
+free-list allocation address by recording `XMEM-HERE` first; and Arena
+destruction unlinks a descriptor without reclaiming its link node or
+undefining its now-dangling constant. `ARENA-RESET` does no unregistration,
+and dictionary rollback after registration does not repair `BUF-HEAD` or
+`BUF-COUNT`. Later slices continue the same contiguous unchanged prefix
+through the tile operations toward the persistent evaluator, ordinary checked
 module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are

@@ -964,8 +964,8 @@ per-task/per-core state; direct `ARENA-ALLOT` on exclusively owned descriptors
 does not have that selection race. These are pinned source-contract gaps, not
 host-side repairs.
 
-The contiguous source frontier now ends at line 2796. Exact unchanged lines
-2782 through 2796 add Buffer's general `IDLE` helper. The hosted compiler keeps
+Exact unchanged lines 2782 through 2796 add Buffer's general `IDLE` helper.
+The hosted compiler keeps
 an open definition distinct from its compile/interpret mode, preserves the
 native immediate `[` and non-immediate `]` flags, and translates the exact low
 byte emitted by `[ 0 C, ]` into one semantic `Idle` IR operation. No raw byte
@@ -976,6 +976,41 @@ task yield is outside the contract. Public memory-backed `STATE`, general raw
 native-code emission, executing a `]` compiled while already in compile state,
 and compiler state persistent across separate evaluator calls remain pending;
 that unsupported `]` form fails during source compilation.
+
+The contiguous source frontier now ends at line 2985. Exact unchanged lines
+2797 through 2985 execute the Buffer registry, descriptor accessors, ordinary,
+HBW, XMEM, and Arena constructors, byte fill/inspection, and Arena destruction
+integration against the same guest dictionary and sparse memory used by prior
+slices. There is no host-side buffer object table. `(BUF-REG)` appends a
+16-byte dictionary link and publishes it at `BUF-HEAD`; traversal and
+`BUF-NTH` therefore see newest-first order. `BUF-COUNT` has no fixed 16-entry
+capacity, and `BUF-NTH` deliberately retains the source's lack of bounds
+checking.
+
+Constructor effects retain source order rather than receiving a hosted
+transaction. Descriptor fields, allocator movement, registry links/count, and
+the final named constant can consequently be only partly published when a
+later step fails. Width and length multiplication wraps as cell arithmetic and
+the source does not validate its documented type/width conventions.
+`BUFFER` and `HBW-BUFFER` align the selected data frontier to 64 bytes, while
+`ARENA-BUFFER` rounds its data request only to eight bytes. `B.PREVIEW` always
+reads 64 bytes in four rows and uses current `BASE`; it does not force hex or
+clip a short buffer. `B.TILES` adds 63 to the wrapped byte count and then uses
+signed `/`, so its ceiling calculation is qualified only for ordinary
+nonnegative sizes that do not overflow either arithmetic step.
+
+Two source defects are explicitly preserved. `XBUFFER` stores aligned
+`XMEM-HERE` in the descriptor before calling `XMEM-ALLOT`, then discards that
+word's returned address. A free-list allocation can therefore consume a
+reclaimed block while the descriptor incorrectly retains the bump frontier.
+Arena destruction unlinks matching descriptors and decrements `BUF-COUNT`,
+but it does not reclaim the dictionary link nodes or undefine constants that
+still contain the destroyed descriptor address. These are recorded source
+behaviors, not reasons for simulator-only repair. `ARENA-RESET` makes Arena
+storage reusable without unregistering its Buffer descriptors, and dictionary
+rollback after a publication does not repair `BUF-HEAD` or `BUF-COUNT`; both
+paths can therefore leave stale registry state. The next definition is
+`B.SUM`; `TMODE!` at line 3000 is the next unsupported hardware seam.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

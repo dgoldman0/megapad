@@ -1,6 +1,6 @@
 # Arena Allocator — Design Document
 
-**Status:** Implemented in KDOS §1.1b; buffer integration follows in §2
+**Status:** Implemented in KDOS §1.1b with Buffer integration in §2.1
 
 **Depends on:** Item 47 (memory management hardening) ✅
 
@@ -279,27 +279,52 @@ ARENA-POP
 ARENA-BUFFER  ( type width length arena "name" -- )
 ```
 Like `BUFFER`, but both the descriptor and data region are allocated
-from the given arena.  The buffer is registered in the normal linked
-list (via `(BUF-REG)`) but tagged as arena-scoped.
+from the given arena. The buffer is registered in the normal linked list via
+`(BUF-REG)`. No arena tag is stored in the descriptor or link; destruction
+recognizes an arena buffer solely because its descriptor address falls in the
+arena's `[base, base+size)` interval.
 
 On `ARENA-DESTROY`, all arena-scoped buffers are automatically
-unregistered from the buffer list.  `BUFFERS` shows `[arena]` next to
-them.
+unregistered from the buffer list. `BUFFERS` uses the ordinary `B.INFO`
+format and does not show an `[arena]` tag. Unregistration does not reclaim the
+16-byte dictionary link nodes or undefine the constants created for those
+buffers, so each old name becomes a dangling descriptor address after the
+arena backing is released or abandoned.
+
+`ARENA-RESET` is intentionally only a pointer rewind and does not run the
+unregistration walk. Existing registered descriptors and constants therefore
+remain visible while their Arena storage becomes eligible for overwrite by
+later allocations. Likewise, dictionary `MARKER`, `FORGET`, or rollback does
+not coordinate with `BUF-HEAD`/`BUF-COUNT`; reclaiming a published link or
+constant can strand stale registry state.
+
+`ARENA-BUFFER` uses the Arena allocator's eight-byte rounding for its data
+request. It does not insert a 64-byte alignment step after the 32-byte
+descriptor, despite the Buffer comments' tile-alignment intent. Callers must
+not assume an Arena buffer is a valid tile-engine operand. Construction is
+ordered, not transactional: descriptor/data allocation and stores precede
+link/count publication, which precedes the final constant definition. A later
+failure can therefore leave consumed Arena capacity, a partial descriptor, or
+a registered buffer without the requested name. `AB-AR`, `AB-DESC`, and the
+registry are shared global state rather than task-local publication state.
 
 ```forth
-\ Create a tile buffer in XMEM scratch
+\ Create an arena buffer in XMEM scratch
 65536 A-XMEM MUST-ARENA CONSTANT map-arena
 2 8 4096 map-arena ARENA-BUFFER tile-data
 
-\ Use tile-data normally — B.SUM, B.FILL, tile ops all work
-tile-data B.SUM .
+\ Byte-oriented operations do not require tile alignment
+7 tile-data B.FILL
+tile-data B.INFO
 
-\ Discard everything — tile-data + descriptor + all scratch gone
+\ Do not use tile ops unless this particular data address was proven aligned
+
+\ Unregister and destroy backing; tile-data is now a stale constant
 map-arena ARENA-DESTROY
 ```
 
-This transforms buffers from "permanent until reboot" into
-"scoped to an operation."
+This scopes registry visibility and backing lifetime to the operation. It does
+not give the dictionary name/link allocations the same lifetime.
 
 ---
 
@@ -313,7 +338,7 @@ three behind a single API:
 |--------|---------|----------|------|
 | `A-HEAP` (0) | General `ALLOCATE` / `FREE` (XMEM when present, Bank 0 otherwise) | General reclaimable scratch | Platform-dependent |
 | `A-XMEM` (1) | `XMEM-ALLOT` region | Large files, datasets, maps | Large, moderate latency |
-| `A-HBW` (2) | `HBW-ALLOT` region | Tile engine buffers, SIMD ops | Tile-width bandwidth |
+| `A-HBW` (2) | `HBW-ALLOT` region | High-bandwidth scratch; tile operands require explicit alignment | Tile-width bandwidth |
 
 `ARENA-NEW` dispatches to the appropriate allocator based on `source`.
 `ARENA-DESTROY` dispatches to the appropriate deallocator.  User code
@@ -336,12 +361,14 @@ XMEM now supports individual block reclaim via a free-list.
   normalization, so padding remains part of the live allocation and is
   recovered even when the requested arena size is not node-aligned. This
   means XMEM-backed arenas can be repeatedly created and destroyed without
-  leaking memory.
+  leaking backing memory. A dictionary descriptor created by `ARENA-NEW`
+  remains; use caller-placed `ARENA-NEW-AT` when that growth is unwanted.
   `XMEM-RESET` clears the free-list along with the bump pointer.
 
-- **HBW-backed arenas:** HBW remains a pure bump allocator.  In
-  practice, HBW arenas are short-lived (tile operation scratch) and
-  HBW is large (3 MiB), so abandoned slivers are tolerable.  A
+- **HBW-backed arenas:** HBW remains a pure bump allocator. In practice, HBW
+  arenas are short-lived high-bandwidth scratch and HBW is large (3 MiB), so
+  abandoned slivers are tolerable. Arena allocation is only eight-byte
+  aligned; a tile operand still needs an explicitly proven 64-byte address. A
   free-list could be added later if needed.
 
 ### Source contract edges
@@ -405,7 +432,7 @@ and destroy it on task exit, making task-local scratch fully automatic.
 |-----------|-------------|
 | **General allocation** (`ALLOCATE`/`FREE`) | `A-HEAP` follows the current public route: prefixed XMEM when present, otherwise a Bank 0 heap block. `FREE` reclaims a valid block through the matching route. |
 | **MARKER/FORGET** | Orthogonal. `MARKER` saves/restores dictionary HERE/LATEST. If an arena descriptor is in the dictionary, `FORGET` past it reclaims only that descriptor and leaks whichever general, raw-XMEM, or HBW backing it owns. Recommendation: `ARENA-DESTROY` before `MARKER`/`FORGET`. |
-| **Buffers** | Phase 4 `ARENA-BUFFER` integrates with the buffer linked list.  Non-arena buffers are unaffected. |
+| **Buffers** | Phase 4 `ARENA-BUFFER` integrates with the linked registry. Destroy walks descriptor addresses to unlink Arena members; it leaves their constants and dictionary link nodes behind. Non-arena buffers are unaffected. |
 | **Tasks/scheduler** | Direct allocation through an exclusively owned descriptor composes with task dispatch. The current-arena stack is global and needs serialization or redesign before it can be called task-local. |
 | **HBW/XMEM** | Phase 2.  Arena becomes a structured front-end to the existing bump allocators. |
 | **RESIZE** | Not applicable — arenas don't support per-object resize.  Use the heap for objects that may grow. |
@@ -437,9 +464,10 @@ and destroy it on task exit, making task-local scratch fully automatic.
 ### Phase 4: Arena-scoped buffers
 - `ARENA-BUFFER` word
 - `ARENA-DESTROY` auto-unregisters arena-scoped buffers
-- `BUFFERS` shows `[arena]` tag
+- `BUFFERS` retains the ordinary untagged `B.INFO` format
 - ~20 additional lines
-- ~4 tests: arena buffer create, use, auto-unregister, BUFFERS output
+- ~4 tests: arena buffer create, eight-byte data alignment, auto-unregister,
+  dangling-name/link behavior
 
 **Total:** ~85 lines of Forth, ~22 tests across 4 phases.
 
@@ -457,7 +485,7 @@ and destroy it on task exit, making task-local scratch fully automatic.
     DUP 4096 ARENA-ALLOT             ( arena arena buf )
     S" config.f" READ-FILE           ( arena arena )
     ( ... parse lines from buf ... )
-    ARENA-DESTROY ;                  ( all scratch gone )
+    ARENA-DESTROY ;                  ( backing gone; descriptor remains )
 ```
 
 ### Tile map undo
@@ -483,7 +511,7 @@ and destroy it on task exit, making task-local scratch fully automatic.
     DUP ARENA-PUSH
     ( ... use AALLOT freely — all scratch is arena-local ... )
     ARENA-POP
-    ARENA-DESTROY ;                  ( task cleanup, zero leaks )
+    ARENA-DESTROY ;                  ( backing cleanup; descriptor remains )
 ```
 
 ### Region-agnostic library code

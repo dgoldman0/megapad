@@ -388,9 +388,13 @@ directly.
 
 ```forth
 65536 A-XMEM MUST-ARENA CONSTANT map-arena
-2 8 4096 map-arena ARENA-BUFFER tile-data  \ buffer lives in the arena
-map-arena ARENA-DESTROY                     \ buffer auto-unregistered
+2 8 4096 map-arena ARENA-BUFFER arena-data \ only 8-byte data alignment
+map-arena ARENA-DESTROY                    \ unregister and destroy backing
 ```
+
+`ARENA-BUFFER` does not guarantee the 64-byte alignment required by tile
+operations. Destruction unlinks the descriptor from `BUFFERS`, but its named
+constant and 16-byte dictionary link remain; the old name is dangling.
 
 **When to use:** any pattern where multiple allocations share a
 lifetime — parse buffers, tile map scratch, per-task working memory,
@@ -820,7 +824,7 @@ you do.
     DUP 4096 ARENA-ALLOT           ( arena buf )
     S" data.txt" READ-FILE
     ( ... parse buf ... )
-    ARENA-DESTROY ;                \ everything freed
+    ARENA-DESTROY ;                \ backing reclaimed; descriptor remains
 ```
 
 ### 9.2 Tile Map with Undo
@@ -906,8 +910,11 @@ Need permanent data or code?
 Need large storage with moderate latency?
   └─ XMEM arena  (A-XMEM)
 
-Need tile-engine-accessible working buffers?
-  └─ HBW arena  (A-HBW)
+Need HBW working storage with one shared lifetime?
+  └─ HBW arena  (A-HBW; individual destroy abandons backing until HBW-RESET)
+
+Need a tile-engine-aligned buffer?
+  └─ BUFFER / HBW-BUFFER, or explicitly prove a manually aligned arena address
 
 Running on a secondary core?
   └─ Arena only  (ARENA-ALLOT / AALLOT)

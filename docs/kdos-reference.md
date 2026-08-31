@@ -851,11 +851,13 @@ unreachable status-1 rejection after allocation would consume the block,
 leave the floor unchanged, disable retry, and abort.
 
 The contiguous hosted frontier now includes the complete unchanged userland
-and Arena sections plus Buffer's general `IDLE` helper through line 2796.
-Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
-allocator dispatch, descriptor lifecycle, snapshots, scoped stack, and IDL
-block/wake boundary are executable semantic behavior rather than
-reporting-only shims.
+and Arena sections plus Buffer's general `IDLE`, registry, constructors,
+inspection words, and Arena integration through line 2985. Their checked
+bounds, Bank-0/XMEM HERE transitions, cross-zone definitions, allocator
+dispatch, descriptor lifecycle, snapshots, scoped stack, IDL block/wake
+boundary, and Buffer publication order are executable semantic behavior rather
+than reporting-only shims. The next definition is `B.SUM`; its first
+unadmitted hardware seam is `TMODE!` at line 3000.
 
 ---
 
@@ -1043,20 +1045,30 @@ Exact unchanged lines 2576 through 2780 contain 205 lines, 8,303 bytes, and
 all 31 definitions. Hosted acceptance covers all three backing routes,
 recycling/abandonment, dictionary and caller descriptors, alignment and exact
 fit, ordinary failures, high-cell edges, reset, snapshot bounds, the scoped
-stack, and `.ARENA`. Exact unchanged lines 2782 through 2796 are now admitted:
-`IDLE` uses `[` and `]` to interpret `0 C,` inside an open definition, and the
-emitted MP64 opcode becomes a runtime-owned semantic IDL suspension rather
-than inert data or an ordinary task yield. An exact one-shot interrupt/DMA
-receipt is required to resume. The following Buffer registry and constructor
-block remains the next source slice.
+stack, and `.ARENA`. Exact unchanged lines 2782 through 2796 add `IDLE`: `[` and
+`]` interpret `0 C,` inside an open definition, and the emitted MP64 opcode
+becomes a runtime-owned semantic IDL suspension rather than inert data or an
+ordinary task yield. An exact one-shot interrupt/DMA receipt is required to
+resume.
+
+Exact unchanged lines 2797 through 2985 then add the complete linked Buffer
+registry, four field readers, three ordinary constructors, byte sizing/fill,
+inspection, and Arena integration. This 189-line, 7,191-byte slice is admitted
+with SHA-256
+`eb4d6d1bf072f854c667e86f428f49370bde4cd06e4770bd095d5f549906b2f1`.
+The next definition is `B.SUM`; its first unsupported operation is `TMODE!` at
+line 3000, so tile-aware operations remain outside this frontier.
 
 ---
 
 ## §2 Buffer Subsystem
 
-Buffers are the core data container in KDOS.  A buffer is a contiguous,
-**tile-aligned** (64-byte aligned) block of memory with a 4-cell (32-byte)
-descriptor.  Up to **16 buffers** can be registered in the system.
+Buffers are the core data container in KDOS. A buffer has a 4-cell (32-byte)
+descriptor and a contiguous data span. Alignment depends on the constructor:
+`BUFFER` and `HBW-BUFFER` align their data frontier to 64 bytes;
+`ARENA-BUFFER` rounds only to the Arena allocator's eight-byte alignment; and
+`XBUFFER` has the reclaimed-block defect described below. The registry is a
+linked list with no fixed slot limit, rather than a 16-entry table.
 
 ### Buffer Descriptor Layout
 
@@ -1066,14 +1078,18 @@ Offset   Field         Meaning
 +0       type          0=raw, 1=records, 2=tiles, 3=bitset
 +8       elem_width    Bytes per element (1, 2, 4, or 8)
 +16      length        Number of elements
-+24      data_addr     Pointer to tile-aligned data region
++24      data_addr     Pointer to data region
 ```
 
 ### Words
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `BUFFER` | `( type width length "name" -- )` | **Create a new buffer.**  Allocates a descriptor and a tile-aligned data region.  Registers it in `BUF-TABLE`.  Defines a CONSTANT named *"name"* that pushes the descriptor address.  This is the primary way to create buffers. |
+| `BUFFER` | `( type width length "name" -- )` | Append the descriptor and 64-byte-align the data at dictionary `HERE`, register it, then define *name* as a constant containing the descriptor address. |
+| `HBW-BUFFER` | `( type width length "name" -- )` | Append the descriptor in the dictionary, 64-byte-align and allocate the data from HBW, register it, then define the descriptor constant. |
+| `XBUFFER` | `( type width length "name" -- )` | Append the descriptor in the dictionary and request external-memory data. Its saved-pointer/free-list discrepancy is documented below. |
+| `ARENA-BUFFER` | `( type width length arena "name" -- )` | Allocate both descriptor and data from *arena*, register the descriptor, and define its constant. Data is rounded to eight bytes, not necessarily tile-aligned. |
+| `BUF-NTH` | `( n -- desc )` | Walk newest-first from `BUF-HEAD` and return the zero-based descriptor; *n* is not bounds-checked. |
 | `B.TYPE` | `( desc -- type )` | Read the buffer type field. |
 | `B.WIDTH` | `( desc -- width )` | Read the element width in bytes. |
 | `B.LEN` | `( desc -- len )` | Read the element count. |
@@ -1083,19 +1099,54 @@ Offset   Field         Meaning
 | `B.FILL` | `( byte desc -- )` | Fill the entire buffer with a byte value. |
 | `B.ZERO` | `( desc -- )` | Zero the entire buffer. |
 | `B.INFO` | `( desc -- )` | Print a one-line summary: type, width, length, tiles, address. |
-| `B.PREVIEW` | `( desc -- )` | Hex-dump the first tile (64 bytes) as 4 rows of 16 bytes.  Useful for quick data inspection. |
-| `BUFFERS` | `( -- )` | List all registered buffers with their info. |
+| `B.PREVIEW` | `( desc -- )` | Read exactly 64 bytes from `B.DATA` and print four rows of 16 values using the caller's current numeric `BASE`; it neither forces hexadecimal nor clips to `B.BYTES`. |
+| `BUFFERS` | `( -- )` | Walk the registry newest-first and list each zero-based traversal index with `B.INFO`. |
 
-**Variables:** `BUF-COUNT`, `BUF-TABLE` (16-slot registry), `BDESC` (internal temp).
+**Variables:** `BUF-COUNT`, `BUF-HEAD` (head of the linked registry), `BDESC`,
+`AB-AR`, and `AB-DESC` (shared constructor scratch). Every registration
+allocates a 16-byte link node in the active dictionary. There is no configured
+buffer-count ceiling; dictionary capacity is the practical bound.
 
 **Example — creating and using a buffer:**
 ```forth
 0 1 256 BUFFER my-signal       \ raw, 1 byte/elem, 256 elements
 42 my-signal B.FILL             \ fill every byte with 42
 my-signal B.INFO                \ prints descriptor summary
-my-signal B.PREVIEW             \ hex-dump first 64 bytes
+HEX my-signal B.PREVIEW DECIMAL \ show the fixed 64-byte preview in hex
 BUFFERS                         \ list all registered buffers
 ```
+
+The constructors publish through a sequence of ordinary writes and
+allocations; they are not transactions. They do not validate the documented
+type/width conventions, and length-times-width uses wrapping cell arithmetic.
+A capacity or name-definition failure can leave descriptor cells, consumed
+data capacity, or a registered link/count without the requested constant.
+`B.BYTES` inherits that multiplication; `B.TILES` then adds 63 with wrapping
+cell arithmetic and applies signed `/` by 64. Its ceiling result is meaningful
+only in the ordinary nonnegative, nonoverflowing size domain. `B.FILL` and
+`B.ZERO` operate on exactly `B.BYTES`; `B.ZERO` is the scalar `FILL` path, not
+the tile engine.
+
+`XBUFFER` aligns `XMEM-HERE`, saves that bump pointer into `data_addr`, then
+calls `XMEM-ALLOT` and discards the address it returns. The values coincide on
+the bump path. If the allocator instead satisfies the request from its free
+list, the descriptor still points at the bump frontier while the reclaimed
+block returned by `XMEM-ALLOT` is consumed and lost. This is an open source
+defect, not a simulator substitution.
+
+The redefined `ARENA-DESTROY` walks the registry and unlinks descriptors whose
+addresses fall inside the Arena backing interval. It decrements `BUF-COUNT`
+but cannot reclaim the dictionary link nodes, and the named constant remains
+defined with the old descriptor address after backing destruction. Thus
+automatic unregistration prevents normal enumeration of the dead descriptor;
+it does not make the name safe to use or provide complete object reclamation.
+`ARENA-BUFFER` and registration also use shared scratch/global list state and
+are not a concurrent task-local publication path. `ARENA-RESET` does not
+unregister anything: it makes descriptor/data storage eligible for reuse while
+the old list entries and constants remain live. Dictionary rollback is also
+unaware of the registry, so `MARKER`, `FORGET`, or numeric rollback past a
+published link/name can leave `BUF-HEAD` and `BUF-COUNT` pointing at reclaimed
+dictionary history.
 
 ---
 

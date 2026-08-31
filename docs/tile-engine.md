@@ -926,8 +926,8 @@ ACC@ .   \ Prints 5376  (= 256 × 3 × 7)
 Or, using KDOS buffers (much simpler):
 
 ```forth
-256 0 1 BUFFER: my-a
-256 0 1 BUFFER: my-b
+0 1 256 BUFFER my-a
+0 1 256 BUFFER my-b
 3 my-a B.FILL   7 my-b B.FILL
 my-a my-b kcorrelate .   \ Prints 5376
 ```

@@ -174,7 +174,8 @@ secret boundary, or security proof.
 
 **KDOS core (`kdos.f`):**
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
-- **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
+- **Buffer subsystem**: Typed buffers with 32-byte descriptors and an
+  allocation-backed linked registry (no fixed slot limit)
 - **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
 - **Kernel registry**: Metadata for compute kernels (up to 16 registered)
 - **7 sample kernels**: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
@@ -500,9 +501,13 @@ be extended dynamically without breaking continuity between firmware and OS.
 
 3. **Buffers as the Universal Medium**
 
-   * All data lives in typed, tile-aligned buffers.
+   * Data is described by typed buffers; ordinary and HBW constructors align
+     data to tiles, while the current Arena constructor guarantees only
+     eight-byte alignment.
    * Files, streams, datasets, views, UI previews are all buffer-backed.
-   * No hidden mutable global state.
+   * The design goal is no hidden mutable global state. The current Buffer
+     implementation has explicit exceptions: its registry and the
+     `BDESC`/`AB-AR`/`AB-DESC` constructor scratch cells are shared globals.
 
 4. **Single Interactive Core**
 
@@ -641,7 +646,8 @@ approved Python regression. Akashic adoption remains separately scoped.
 
 ### 5.1 Buffer (IMPLEMENTED)
 
-A buffer is a typed, tile-aligned data region with a 32-byte descriptor.
+A buffer is a typed data region with a 32-byte descriptor. `BUFFER` and
+`HBW-BUFFER` tile-align their data; the current `ARENA-BUFFER` source does not.
 
 **Implementation (kdos.f §2)**:
 ```forth
@@ -649,7 +655,7 @@ buffer-descriptor:
   +0   type        ( 0=raw  1=records  2=tiles  3=bitset )
   +8   elem_width  ( bytes per element: 1, 2, 4, or 8 )
   +16  length      ( number of elements )
-  +24  data_addr   ( pointer to tile-aligned data )
+  +24  data_addr   ( pointer to data region )
 ```
 
 **Usage**:
@@ -663,6 +669,7 @@ mybuf B.SUM .          \ Sum via tile engine → 5376
 ```
 
 **Implemented operations**:
+- `BUFFER`, `HBW-BUFFER`, `XBUFFER`, `ARENA-BUFFER` — named constructors
 - `B.TYPE`, `B.WIDTH`, `B.LEN`, `B.DATA` — field accessors
 - `B.BYTES`, `B.TILES` — derived queries
 - `B.FILL`, `B.ZERO` — basic fill operations
@@ -670,8 +677,26 @@ mybuf B.SUM .          \ Sum via tile engine → 5376
 - `B.ADD`, `B.SUB` — element-wise SIMD ops on two buffers
 - `B.SCALE` — multiply each element by scalar
 - `B.INFO` — print descriptor details
-- `B.PREVIEW` — hex dump first tile
-- `BUFFERS` — list all registered buffers (up to 16)
+- `B.PREVIEW` — print exactly 64 bytes in the current numeric base
+- `BUFFERS` — list the uncapped linked registry newest-first
+
+The registry uses `BUF-HEAD` plus one 16-byte dictionary link per
+registration; `BUF-NTH` has no bounds check. Constructors publish their
+descriptor, capacity, registry entry, and named constant in ordinary source
+order, so a late failure is not transactional. `B.PREVIEW` does not clip short
+buffers and does not switch to hexadecimal; use `HEX ... B.PREVIEW DECIMAL`
+when hexadecimal output is wanted. `B.TILES` adds 63 to the wrapped byte count
+and applies signed `/`, so its ceiling result assumes an ordinary nonnegative,
+nonoverflowing size.
+
+Two implementation discrepancies remain explicit. `XBUFFER` stores
+`XMEM-HERE` before allocation and discards the address returned by
+`XMEM-ALLOT`, so a reclaimed free-list block is consumed while the descriptor
+keeps the wrong bump-frontier address. `ARENA-BUFFER` rounds data only to eight
+bytes, and `ARENA-DESTROY` unlinks its descriptor without reclaiming the
+dictionary link node or undefining the now-dangling constant. `ARENA-RESET`
+makes the storage reusable without unregistering it, and dictionary rollback
+past published links/names does not repair `BUF-HEAD` or `BUF-COUNT`.
 
 ### 5.2 Kernel (IMPLEMENTED)
 
@@ -1367,7 +1392,8 @@ data-pipe P.RUN
 * OS is a set of vocabularies layered on top
 * UI screens are Forth words that emit UART escape sequences
 * Kernel installation = defining Forth words that drive the tile engine
-* Buffer creation = allocating tile-aligned RAM and writing a descriptor
+* Buffer creation = allocating data and writing a descriptor; alignment is a
+  constructor-specific guarantee
 * Scheduling = a Forth word that walks the pipeline DAG
 
 If the OS faults:
@@ -1406,7 +1432,8 @@ This machine is:
 It is a **Kernel Computer**:
 
 * where computation is installed as named, inspectable objects
-* data is explored live through typed, tile-aligned buffers
+* data is explored live through typed buffers, with tile alignment made
+  explicit where the constructor actually guarantees it
 * performance is visible in tile ops, cycle counts, and residency state
 * the tile engine is the unquestioned center of gravity
 * and the Forth console is always one fault away

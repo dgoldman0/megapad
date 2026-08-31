@@ -154,11 +154,12 @@ APROPOS TILE       \ Find words related to tiles
 
 ## Creating Your First Buffer
 
-Buffers are KDOS's fundamental data container — a described region of
-tile-aligned memory with a known element width and length.
+Buffers are KDOS's fundamental data container: a descriptor records a data
+region, element width, and length. The ordinary `BUFFER` constructor below
+64-byte-aligns its data; alignment differs for some other constructors.
 
 ```forth
-256 0 1 BUFFER: demo
+0 1 256 BUFFER demo
 ```
 
 This creates a buffer named `demo` with:
@@ -172,14 +173,15 @@ This creates a buffer named `demo` with:
 demo B.INFO
 ```
 
-This prints the buffer's type, element width, element count, data address,
-total byte size, and tile count.
+This prints the buffer's type, element width, element count, tile count, and
+data address. Use `demo B.BYTES .` when you also want the byte count.
 
 ### Filling and Viewing
 
 ```forth
 42 demo B.FILL       \ Fill every byte with 42
-demo B.PREVIEW       \ Show first 16 bytes as hex
+HEX demo B.PREVIEW DECIMAL
+                      \ Show exactly 64 bytes as four hex rows
 
 demo B.SUM .         \ Sum all elements → 256 × 42 = 10752
 demo B.MIN .         \ Minimum element → 42
@@ -189,7 +191,7 @@ demo B.MAX .         \ Maximum element → 42
 ### Zeroing
 
 ```forth
-demo B.ZERO          \ Clear to all zeros (uses tile TZERO internally)
+demo B.ZERO          \ Clear exactly B.BYTES bytes using scalar FILL
 demo B.SUM .         \ Prints: 0
 ```
 
@@ -212,7 +214,7 @@ and whether it uses the tile engine.
 ### Sum a Buffer
 
 ```forth
-256 0 1 BUFFER: my-data
+0 1 256 BUFFER my-data
 99 my-data B.FILL        \ Fill with 99
 
 my-data ksum             \ Run the 'ksum' kernel — sums all elements
@@ -222,15 +224,16 @@ my-data ksum             \ Run the 'ksum' kernel — sums all elements
 ### Add Two Buffers Together
 
 ```forth
-256 0 1 BUFFER: a-buf
-256 0 1 BUFFER: b-buf
-256 0 1 BUFFER: c-buf
+0 1 256 BUFFER a-buf
+0 1 256 BUFFER b-buf
+0 1 256 BUFFER c-buf
 
 10 a-buf B.FILL          \ a = [10, 10, 10, ...]
 20 b-buf B.FILL          \ b = [20, 20, 20, ...]
 
 a-buf b-buf c-buf kadd   \ c = a + b (tile-accelerated!)
-c-buf B.PREVIEW          \ Shows: 1E 1E 1E ...  (30 = 0x1E)
+HEX c-buf B.PREVIEW DECIMAL
+                          \ Shows 1E values (30 decimal) across 64 bytes
 c-buf B.SUM .            \ Prints: 7680  (= 256 × 30)
 ```
 
@@ -328,7 +331,7 @@ RMFILE mydata            \ Delete it
 ### Saving a Buffer to Disk
 
 ```forth
-256 0 1 BUFFER: results
+0 1 256 BUFFER results
 42 results B.FILL
 4 5 MKFILE results.dat   \ Create a data file (type 5)
 results SAVE-BUFFER results.dat
