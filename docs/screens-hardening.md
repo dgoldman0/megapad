@@ -186,6 +186,28 @@ keeps them observable while tests avoid the unbounded and invalid-XT paths.
 
 ---
 
+## 10. Dispatch and Event-loop Correctness
+
+The remainder of unchanged §9 adds defects at the registry-to-render and input
+lifecycle boundary:
+
+| Issue | Detail |
+|-------|--------|
+| **Per-frame stack growth** | The subscreen branch of `RENDER-SCREEN` retains its normalized parent index. Home returns `0` and Buffers returns `1` on every render despite `( -- )`. |
+| **Partial ID normalization** | Render clamps a local index, then tabs, subscreen dispatch, and the footer reread raw `SCREEN-ID`. Switch, handler, action, and public entry paths also trust IDs; `SUBSCREEN-ID` is unchecked. |
+| **Throw-path leaks** | Renderer, action, and key-handler `EXECUTE CATCH` paths expose the saved data-stack-pointer cell when the target throws. |
+| **Task selection under-read** | `TASK-KEYS` rejects only `-1`; another signed-negative selection can read before `TASK-TABLE`. |
+| **Incomplete CSI parser** | A truncated `ESC [` blocks at `KEY`. A parameterized CSI consumes only its first byte and leaves the remainder queued as ordinary commands. |
+| **Empty selection manufacture** | n/p navigation with `SCR-MAX = 0` stores selection zero rather than retaining the empty `-1` sentinel. |
+| **Busy event loop** | `SCREEN-LOOP` polls `KEY?` and `CYCLES` without `PAUSE` or `IDLE` and remains unbounded until explicitly stopped. |
+| **Non-idempotent load** | Re-evaluation appends duplicate screens until the registry fills and appends duplicate Home/Buffer subscreens. |
+
+The complete ANSI path is now source-qualified with explicit termination in
+loop tests. That does not make it rich-terminal acceptance or make these
+defects safe for production use.
+
+---
+
 ## Priority Order
 
 | # | Item | Severity | Effort | Status |
@@ -199,5 +221,6 @@ keeps them observable while tests avoid the unbounded and invalid-XT paths.
 | 7 | SCR-SEL reset (§7) | Low | Small | **Done** |
 | 8 | Fix W.INPUT parameterized CSI leak (§8) | High | Small | Open |
 | 9 | Fix SDL correctness defects (§9) | High | Mixed | Open |
-| 10 | Spinlock for multicore (§4 long-term) | Low | Medium | Deferred |
-| 11 | W.INPUT enhancements (§8) | Low | Large | Deferred |
+| 10 | Fix dispatch/event-loop defects (§10) | High | Mixed | Open |
+| 11 | Spinlock for multicore (§4 long-term) | Low | Medium | Deferred |
+| 12 | W.INPUT enhancements (§8) | Low | Large | Deferred |

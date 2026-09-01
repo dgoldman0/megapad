@@ -36,7 +36,7 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 8339. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 8568. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
@@ -932,9 +932,8 @@ untouched. No operation validates pool membership, alignment, allocation, or
 directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
 flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
 and deferred targets are global and unlocked. The contiguous hosted frontier
-continues through §9.1–§9.6 registry/control, widget-vector SDL, and ordinary
-screen definitions at line 8339; the screen-label, dispatch, registration, and
-event-loop tail begins at line 8340.
+continues through complete §9 screen registry, widget, dispatch, registration,
+handler, and event-loop source at line 8568; §10 begins at line 8569.
 
 ### Documentation Access
 

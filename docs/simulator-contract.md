@@ -291,7 +291,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 8339.
+KDOS source frontier now ends at line 8568.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1450,7 +1450,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 8339. Exact unchanged lines
+The contiguous source frontier now ends at line 8568. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2543,10 +2543,55 @@ visible:
   `NET-RX?` into the user label `idle`; that label is not evidence that a NIC
   exists.
 
-The contiguous frontier now ends at line 8339. Line 8340 begins the screen
-label, registration, key-handler, and event-loop tail of §9. Nothing in the
-qualified frontier loads `rich-terminal.f`, projects a rich frame, or advances
-the rich-terminal vertical.
+Exact unchanged lines 8340 through 8568 complete §9 in 229 LF records and
+7,772 bytes, with SHA-256
+`6294e7f8f2170e73bf7188481a8ae0575564e11b75e8fb61ae808ed305f155c1`
+and Git blob `9de3741357f813221f0f44216340cc55c2f51cd0`. They publish 23
+zero-body colon definitions using exactly 604 bytes of hosted headers, names,
+and semantic slots. Load registers nine screens in source order, installs
+`TASK-KEYS` on zero-based row 4, and registers three Home plus two Buffer
+subscreens. It leaves `NSCREENS = 9`, `SUB-COUNTS = (3,2,0,0,0,0,0,0,0)`,
+`SCREEN-ID = 1`, `SCR-SEL = -1`, `SCR-MAX = 0`, and `SUBSCREEN-ID = 0`.
+Unused physical table tails remain untouched. No UART, key, filesystem,
+storage, NIC, or renderer operation occurs during load.
+
+Focused acceptance pins all 14 label byte sequences, both `RENDER-SCREEN`
+branches, normal task kill/restart and document fallback dispatch, caught
+renderer failure, bracket and CSI key handling, empty-list navigation, a
+pre-terminated `SCREEN-LOOP`, and bounded public `SCREENS`/`SCREEN` entries.
+This finishes the ordinary ANSI screen source seam; it does not load
+`rich-terminal.f` or qualify a rich projection, compositor, viewer, or
+revision-bound rich input.
+
+The tail adds these source-literal discrepancies:
+
+- The positive-subscreen branch of `RENDER-SCREEN` retains its normalized
+  parent index, then recomputes the raw dispatch index. Every normal Home
+  render therefore returns `0`, every Buffers render returns `1`, and repeated
+  refreshes grow the data stack despite the declared `( -- )` effect.
+- The initial invalid-`SCREEN-ID` normalization affects only the retained
+  local index. `SUB-TABS`, subscreen dispatch, and the footer reread the raw
+  global ID; `SWITCH-SCREEN`, `CALL-SCREEN-KEY`, `DO-SELECT`, and public
+  `SCREEN` likewise do no complete bounds validation. `SUBSCREEN-ID` is not
+  clamped before table lookup. Invalid state can therefore read or execute
+  inactive physical table cells.
+- Renderer, screen-action, and key-handler `EXECUTE CATCH` paths inherit the
+  already documented saved-data-stack-pointer leak when their target throws.
+  `TASK-KEYS` rejects selection `-1` specifically, but another signed-negative
+  selection passes its upper-bound check and reads before `TASK-TABLE`.
+- `HANDLE-KEY` checks availability before the CSI prefix only. A truncated
+  `ESC [` blocks at the direction `KEY`; a parameterized sequence such as
+  `ESC [ 1 ; 5 D` consumes only `1` and leaves `;5D` queued as later commands.
+  Navigation with `SCR-MAX = 0` stores selection zero rather than preserving
+  the empty `-1` sentinel.
+- `SCREEN-LOOP` busy-polls `KEY?` and `CYCLES` without `PAUSE` or `IDLE`; it is
+  intentionally unbounded until `SCREEN-RUN` clears. Re-evaluating the slice
+  is also not idempotent: it appends registrations until the 16-row table is
+  full and appends duplicate Home and Buffer subscreens.
+
+The contiguous frontier now ends at line 8568. Line 8569 is the separator for
+§10 Data Ports. Nothing in the qualified frontier advances the rich-terminal
+vertical.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

@@ -773,14 +773,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 8339.
+ends at line 8568.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–8339 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, §9.1–§9.4 ANSI screen registry/control, and the §9.5–§9.6 widget-vector SDL and ordinary screen definitions |
-| 8340 onward | Next uncovered frontier | The remainder of §9 begins with screen labels and continues through registration, input handlers, and the event loop |
+| 39–8568 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, and complete §9 ANSI screen registry, widget SDL, screen definitions, dispatch, registration, handlers, and event loop |
+| 8569 onward | Next uncovered frontier | §10 begins the Data Ports structures and binding layer |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1776,9 +1776,28 @@ selected Storage inherits the `FIND-NTH-ACTIVE` stack fault; zero-count
 zero-count `.BSTATS-BODY` retains stale counters. The full normative details
 are in `docs/simulator-contract.md`.
 
-The contiguous frontier now ends at line 8339. The next block begins at line
-8340 with the screen-label, registration, input-handler, and event-loop tail
-of §9.
+Exact unchanged lines 8340–8568 complete §9: 229 LF records, 7,772 bytes,
+SHA-256
+`6294e7f8f2170e73bf7188481a8ae0575564e11b75e8fb61ae808ed305f155c1`,
+Git blob `9de3741357f813221f0f44216340cc55c2f51cd0`, 23 zero-body colon
+definitions, and 604 bytes of hosted dictionary growth. Load registers nine
+screens, the Task key handler, three Home subscreens, and two Buffer
+subscreens without device or output effects. Focused oracles cover exact
+labels, both render branches, task/document dispatch, caught renderer failure,
+key handling, an explicitly terminated loop, and bounded public entries.
+
+The unchanged tail also exposes more source defects. Subscreen rendering leaks
+the normalized parent index on every frame and then recomputes dispatch from
+raw global state. ID and subscreen bounds are incomplete across render,
+switch, handler, action, and public entry paths. Dynamic `CATCH` sites retain
+their saved-stack-pointer throw leak; Task keys admit signed-negative
+selections other than `-1`; CSI handling can block after a prefix and leaves
+parameter bytes queued; empty-list n/p navigation manufactures selection
+zero; and the event loop busy-polls without yielding. Reloading the slice
+duplicates registrations until capacity.
+
+The contiguous frontier now ends at line 8568. Line 8569 begins §10 Data
+Ports.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

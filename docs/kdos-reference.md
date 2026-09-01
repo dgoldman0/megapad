@@ -870,8 +870,9 @@ navigation/mutation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
 the one-core queue/affinity/flag/message/lock state machines, and the
 cluster-control/MPU source boundary, absent-network forward bridge,
-§9.1–§9.4 ANSI screen registry/control layer, and §9.5–§9.6 widget-vector SDL
-and ordinary screen definitions through line 8339.
+§9.1–§9.4 ANSI screen registry/control layer, and the complete §9 widget SDL,
+screen definitions, dispatch, registration, handlers, and event loop through
+line 8568.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -889,8 +890,7 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-8339; line 8340 begins the screen label, registration, input-handler, and
-event-loop tail of §9.
+8568; line 8569 begins §10's Data Ports structures and binding layer.
 
 ---
 
@@ -1179,9 +1179,9 @@ Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
-§8.2–§8.7, §8.8–§8.9, and §9.1–§9.6 through line 8339. Their provenance and
+§8.2–§8.7, §8.8–§8.9, and complete §9 through line 8568. Their provenance and
 edge contracts are recorded in the corresponding sections below and in
-`docs/simulator-contract.md`; the remaining §9 tail begins at line 8340.
+`docs/simulator-contract.md`; §10 begins at line 8569.
 
 ---
 
@@ -1823,7 +1823,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 8339. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 8568. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2196,9 +2196,8 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through §9.1–§9.6 registry/control, widget-vector SDL, and ordinary
-screen definitions at line 8339; the screen-label, dispatch, registration, and
-event-loop tail begins at line 8340.
+continues through complete §9 screen registry, widget, dispatch, registration,
+handler, and event-loop source at line 8568; §10 begins at line 8569.
 
 **Example — filesystem operations:**
 ```forth
@@ -2983,8 +2982,49 @@ simulator:
 - The Home views render absent `NET-RX?` as `idle`; this is a user label, not
   evidence of NIC presence.
 
-The contiguous hosted frontier ends at line 8339. Line 8340 starts §9's
-screen-label, registration, input-handler, and event-loop tail.
+### Hosted unchanged-source frontier through complete §9
+
+Exact unchanged lines 8340–8568 contain 229 LF records and 7,772 bytes, with
+SHA-256
+`6294e7f8f2170e73bf7188481a8ae0575564e11b75e8fb61ae808ed305f155c1`
+and Git blob `9de3741357f813221f0f44216340cc55c2f51cd0`. They publish 23
+zero-body colon words using 604 bytes of hosted headers, names, and semantic
+slots. At load, nine ordinary screens are registered with flags
+`(0,1,0,0,1,0,1,1,0)`, `TASK-KEYS` is installed on row 4, and the Home and
+Buffer rows receive three and two subscreens respectively. All action slots
+remain zero. The resulting registry has `NSCREENS = 9`, count-respecting
+unused rows remain outside the live set, and load performs no UART, input,
+filesystem, storage, or NIC operation.
+
+Focused acceptance covers the exact 14 label outputs, balanced no-subscreen
+and leaking subscreen renders, safe proof of raw invalid-ID dispatch, valid
+Task kill/restart, the Documentation fallback, caught renderer failure,
+bracket and CSI paths, empty selection navigation, and explicitly
+`q`-terminated `SCREEN-LOOP`, `SCREENS`, and `SCREEN` executions.
+
+The following tail discrepancies are source-literal:
+
+- `RENDER-SCREEN` leaves the normalized parent index on its positive-subscreen
+  path, then recomputes a raw index. Home frames return `0` and Buffer frames
+  return `1`, growing the data stack under refresh. Raw `SCREEN-ID` is reused
+  by tab, dispatch, and footer paths after the local clamp.
+- `SWITCH-SCREEN`, `CALL-SCREEN-KEY`, `DO-SELECT`, and `SCREEN` trust global
+  or supplied IDs, and `SUBSCREEN-ID` is not clamped. Invalid state can reach
+  inactive physical cells. Their dynamic renderer/action/handler `CATCH`
+  forms also inherit the saved-data-stack-pointer throw leak.
+- `TASK-KEYS` excludes only `SCR-SEL = -1`; another signed-negative value can
+  index before `TASK-TABLE`. Empty n/p navigation stores selection zero even
+  when `SCR-MAX = 0`.
+- After `ESC [`, `HANDLE-KEY` performs a blocking `KEY` without another
+  availability check. Parameterized CSI consumes only its first parameter
+  byte and leaves the remainder queued as future commands.
+- `SCREEN-LOOP` is an unbounded `KEY?`/`CYCLES` busy poll with no `PAUSE` or
+  `IDLE`. Re-evaluating this source is non-idempotent and appends duplicate
+  screen/subscreen registrations until the fixed tables fill.
+
+The contiguous hosted frontier ends at line 8568. Line 8569 starts §10 Data
+Ports. This completes the existing ANSI TUI source but does not accept a
+rich-terminal module, projection, compositor, or viewer.
 
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
