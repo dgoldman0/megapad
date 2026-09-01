@@ -129,10 +129,13 @@ The implemented slices provide:
 - the retired user-mode compatibility ABI: stack-neutral `ENTER-USER` and
   `SYS-EXIT`, constant-supervisor `PRIV@`, and runtime-local, guest-visible
   `MPU-BASE`/`MPU-LIMIT` registers which retain values but do not enforce
-  access restrictions; and
+  access restrictions;
 - the unchanged KDOS checked whole-source compiler and MP64FS `LOAD`, including
   nested relative paths, concatenated primary/secondary extents, guest
-  `THROW` cleanup, and the literal pre-registry transaction hooks.
+  `THROW` cleanup, and the literal pre-registry transaction hooks;
+- unchanged `APP-EVAL` and MP64FS `APP-LOAD` through their normal evaluator,
+  loader-frame, allocation, extent-read, and transaction paths, plus the
+  adjacent canonical ANSI byte helpers.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 task stack arenas and cooperative scheduling remain pending. The IDL seam
@@ -712,14 +715,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 5944.
+ends at line 6059.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5944 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, and nested two-extent filesystem `LOAD` |
-| 5945 onward | Next uncovered frontier | Application loading begins at line 5945, followed by the remaining ordinary KDOS source |
+| 39–6059 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, and ANSI byte helpers |
+| 6060 onward | Next uncovered frontier | Filesystem encryption begins at line 6060, followed by the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1254,6 +1257,31 @@ simulator does not insert a checked host loader behind them. Loader, resolver,
 parser, evaluator, filesystem-cache, and transaction state are global and
 unlocked.
 
+The current exact fixture is unchanged `kdos.f` lines 5945–6059: 115 LF records,
+2,892 bytes, SHA-256
+`1c671d6f3677d9fb65e7c5b20a6af1b3d10323b28b5abb10d827cd80a58e5bb2`,
+and Git blob `c95aa1a3385d10587ed42292328b0c7c323e702f`. It publishes the five
+Application Loading words and six ANSI helpers without load-time I/O or MPU
+mutation. `_APP-MPU-ON` overwrites the inert window with Bank 0 plus external
+memory, `_APP-MPU-OFF` zeros it, and ordinary `APP-EVAL` observes that active
+state before teardown. An externally caught guest `THROW` bypasses teardown
+and evaluator unwind, leaving the active limit and abandoned depth visible.
+
+`APP-LOAD` uses direct current-directory lookup rather than `LOAD`'s slash
+resolver, but reuses the real loader frame, heap allocation, primary/secondary
+extent reads, evaluator, and transaction hooks. The ordinary qualified domain
+requires LF termination, no retained CR, at most 255 bytes per physical line,
+complete compiler state, and zero net data-stack effect per line. The last two
+bounds are not cosmetic: the raw walker never finishes or checks evaluator
+status and exposes four internal cells beneath each evaluation. Its scanner
+also compares the line offset against the buffer address rather than remaining
+length, so an unterminated final line can execute sector padding beyond
+`DE.USED`. Focused coverage preserves that defect with deterministic padding
+rather than adding simulator-only bounds. Clean early failures leave prior MPU
+state alone; read aborts still occur before the guard and inherit `LOAD`'s
+allocation/frame leak. The ANSI helpers are ordinary UART byte publishers, not
+a rich-terminal path.
+
 The earlier low-level helper domain is validator-approved geometry, positive
 run counts, in-range sectors and slots, complete cache spans, and structurally
 valid directory entries. Those helper words do not gate on `FS-OK` or validate
@@ -1263,8 +1291,8 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue with Application Loading at line 5945, then advance the
-remaining ordinary KDOS source toward its module registry and deterministic
+Later slices continue with filesystem encryption at line 6060, then advance
+the remaining ordinary KDOS source toward its module registry and deterministic
 cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are

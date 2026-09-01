@@ -255,7 +255,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 5944.
+KDOS source frontier now ends at line 6059.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1332,7 +1332,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5944. Exact unchanged lines
+The contiguous source frontier now ends at line 6059. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1785,8 +1785,68 @@ undefined-middle-line continuation. `LOAD` additionally performs no file-type
 or flag check. Loader, path, parser, evaluator, cache, diagnostic, and
 transaction scratch is runtime-global and unlocked. These literal KDOS
 behaviors define the current contract; no direct host filesystem loader or
-simulator repair is substituted. The next uncovered seam is Application
-Loading at line 5945.
+simulator repair is substituted.
+
+Exact unchanged lines 5945 through 6059 contain 115 LF records and 2,892
+bytes, with SHA-256
+`1c671d6f3677d9fb65e7c5b20a6af1b3d10323b28b5abb10d827cd80a58e5bb2`
+and Git blob `c95aa1a3385d10587ed42292328b0c7c323e702f`. The eleven-definition
+ledger installs `_APP-MPU-ON`, `_APP-MPU-OFF`, `APP-EVAL`, the filesystem
+application walker and `APP-LOAD`, followed by the six canonical ANSI byte
+helpers. Loading the fixture only compiles dictionary entries; it does not
+change MPU state or touch the filesystem, storage service, locks, or UART.
+
+`_APP-MPU-ON` overwrites the inert base with zero and selects either the
+exclusive external-memory end or `MEM-SIZE` as its limit. `_APP-MPU-OFF`
+zeros both registers rather than restoring their prior values. On ordinary
+return, `APP-EVAL` exposes those active values and permanent supervisor
+privilege to the supplied guest bytes, preserves their data-stack and
+dictionary effects, then disables the MPU state. It calls raw `EVALUATE`, so
+undefined and unfinished input retain that evaluator's literal status behavior.
+A guest `THROW` caught outside `APP-EVAL` bypasses `SYS-EXIT`, MPU teardown,
+and evaluator unwind: the configured limit and one abandoned evaluator frame
+remain visible. Focused acceptance pins that defect in a disposable runtime;
+the simulator does not insert an implicit guard.
+
+`APP-LOAD` performs a direct current-directory `FIND-BY-NAME`; unlike `LOAD`,
+it does not call `_RESOLVE-PATH`, so slash syntax has no navigation meaning.
+It does not validate file type or flags. Once a nonempty entry is found it
+uses the existing nested loader frame, sector-rounded allocation, and complete
+primary/secondary-extent reads, then enables the MPU compatibility state and
+passes `DE.USED` as the walker's nominal source length. A normal LF-terminated
+two-extent application can compile across the extent seam and invoke ordinary
+nested `LOAD`; success disables the MPU, calls commit, releases the
+allocation/frame, and calls after-release. A guest `THROW` takes the
+corresponding MPU-off, evaluator-unwind, rollback, release, after-release,
+exact-rethrow path. Before the module registry binds real actions, a definition
+completed before that throw remains published.
+
+The currently admitted ordinary application-source domain is stable valid
+metadata, lines no longer than 255 bytes, no retained CR, complete compiler
+state, a terminal LF, and zero net data-stack effect from every physical line.
+The last condition is source-visible: `_APP-LOAD-WALK` leaves four cursor and
+input cells beneath each raw `EVALUATE`, so a line's retained values displace
+the walker operands. The scanner also builds `(addr rem addr addr index)` and
+compares the index with the buffer address instead of `rem`. Without a final
+LF it can scan beyond `DE.USED` and evaluate sector padding; acceptance uses a
+deterministic padding definition to prove this exact behavior. Raw evaluator
+status is ignored and `EVALUATE-FINISH` is never called, matching `LOAD`'s
+undefined, overlong, and unfinished-state hazards.
+
+Allocation and read still precede the guarded walker and MPU setup. Thus the
+clean no-filesystem, miss, empty-file, slash-literal miss, and allocation-fail
+paths do not alter preexisting MPU state or invoke transaction actions, while
+a read abort inherits `LOAD`'s pre-guard allocation/frame leak and likewise
+never enables the application MPU window. Parser, loader, evaluator, MPU,
+filesystem-cache, diagnostics, and transaction scratch remain runtime-global
+and unlocked.
+
+`ESC`, `CSI`, `SGR`, `RESET-COLOR`, and `DIM` publish literal UART byte
+sequences through ordinary `EMIT`. `.N` emits a leading minus and explicit
+decimal digits for ordinary magnitudes below 1,000; magnitudes at least 1,000
+delegate to the existing base-sensitive `.` and inherit its trailing space.
+No separate terminal renderer or rich-terminal path is involved. The next
+uncovered seam is filesystem encryption at line 6060.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
