@@ -183,9 +183,9 @@ The implemented slices provide:
 - unchanged KDOS cluster-control and MPU failure behavior, complete §9 ANSI
   screens, §10 Data Port bindings, Dashboard and Help publication, and §15
   Pipeline Bundle tracking/declarative words plus §18 Ring Buffer primitives
-  through line 9214, without claiming networking transport, real bundle-file
-  integration, concurrent ring execution, scheduling, rendering, or
-  rich-terminal output.
+  and §19 Hash Table primitives through line 9383, without claiming networking
+  transport, real bundle-file integration, concurrent collection execution,
+  scheduling, rendering, or rich-terminal output.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -781,14 +781,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 9214.
+ends at line 9383.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–9214 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, and §18 Ring Buffer Primitives |
-| 9215 onward | Next uncovered frontier | Line 9215 is the separator; §19 Hash Table Primitives begins at line 9216 |
+| 39–9383 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19 Hash Table Primitives |
+| 9384 onward | Next uncovered frontier | Line 9384 is the separator; §20 Module System begins at line 9385 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1866,7 +1866,7 @@ The unchanged source retains these discrepancies:
 - Full Help advertises `POLL`, `INGEST`, and Bundle words before they exist at
   the line-8943 boundary. The Bundle words arrive in the following §15 slice;
   the transport words, including the promised `RECV-FRAME`, `ROUTE-FRAME`,
-  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent at line 9214. Help/comment
+  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent at line 9383. Help/comment
   publication is qualified, not any transport operation.
 
 Exact unchanged lines 8944–9121 add §15 Pipeline Bundles: 178 LF records,
@@ -1990,12 +1990,101 @@ Unchanged source retains these limits:
   element. Concurrent head/count observations are not linearizable, and the
   pointed slot can be popped or overwritten immediately after return.
 
-The contiguous frontier now ends at line 9214. Line 9215 is the separator;
-§19 Hash Table Primitives begins at line 9216. Real disk-backed bundle
-integration, actual scheduling/cadence, concurrent ring qualification, hash
-tables, mask-driven rendering, physical presentation, and all rich-terminal
-work remain deferred. This advance does not implement `rich-terminal.f` or
-advance the rich-terminal vertical.
+Exact unchanged lines 9215–9383 add §19 Hash Table Primitives: 169 LF records,
+5,352 bytes, SHA-256
+`ce5fc5c20a4905a0092ec28cd647c0d1679317334968db81084aba7bf6410e24`,
+and Git blob `3c465404ec02b189269d5c982ee360c9d070e638`. The exact fixture includes
+the line-9384 separator and has 170 LF records, 5,424 bytes, SHA-256
+`9379a85c46423efe2d14242f61bb974f6d1fa746cd9449b046cfbc3dbebdb467`,
+and Git blob `b75a16f60f80d7885323443843919b8946af38ea`. §20 Module System begins at
+line 9385 and is not qualified by the sentinel.
+
+The slice publishes 28 definitions: seventeen zero-body colons and eleven
+eight-byte scratch variables. Its 211 name bytes, 88 body bytes, and 476 fixed
+header/semantic-slot bytes produce exactly 775 bytes of hosted dictionary
+growth. Load zeroes every variable and otherwise only publishes dictionary
+entries. It constructs no table, runs no hash, acquires no lock, emits no
+output, and leaves CRC, registries, storage, RTC, UART, rendering, scheduling,
+and other device state unchanged.
+
+Seven focused tests qualify positive-small, single-core tables. They pin the
+40-byte constructor header, zero-filled slot data, accessors and address
+geometry; exact non-reflected mode-0 CRC collision chains; CRUD, update, full
+table behavior, and owner release; tombstone handling; physical-order EACH
+callbacks; zero-width aliases; and the direct zero-slot hash trap. Mode 0 is
+the CRC-32/BZIP2-family, not zlib's reflected CRC-32. One-byte keys `01`,
+`05`, `09`, and `0D` hash to `B5365DFC`, `A6322B20`, `933EB044`, and
+`803AC698`, all initial slot zero modulo four.
+
+The four-key chain occupies all physical slots. An existing key updates in
+place without growing count, while a new key presented to the full table is
+silently discarded: PUT returns no status and leaves bytes/count unchanged.
+The tombstone oracle exposes a source defect. When a tombstone precedes an
+existing equal key, PUT reuses it immediately, creates a second physical copy,
+and increments count. Deleting that new first copy makes GET find the older
+value again. Count therefore describes occupied physical slots, not unique
+logical keys.
+
+EACH calls its XT with `( key-addr val-addr -- )`, scans in physical slot
+order, and skips tombstones. The ordinary qualified callback consumes both
+cells, does not mutate or reenter, and treats the addresses as borrowed
+mutable views. A bounded equal-size nested-call oracle separately proves that
+reentry replaces `_HTE-XT` and `_HTE-HT`: the rest of the outer scan uses the
+inner callback and table instead of restoring its own state. Zero key size
+makes every address the same logical key. Zero value size
+copies no bytes and returns a computed pointer that can alias the next slot's
+flag. A zero-slot table has no data interval, so DATA aliases its following
+constant header; direct HASH releases CRC ownership and then traps at
+`MOD 0`. Those cases preserve literal behavior and are not useful production
+geometry.
+
+Unchanged source retains these limits:
+
+- HASH uses non-reflected mode 0, so a zlib/reflected oracle predicts the
+  wrong slots.
+- PUT inserts at the first tombstone before searching later slots for an equal
+  key, causing duplicate/resurrected keys. It publishes flag 1 before copying
+  key/value bytes, so lock-free readers can observe partial publication.
+  Delete retains key/value bytes behind flag 2.
+- Full-table insertion silently drops a new key. Count wraps and tracks
+  physical transitions rather than uniqueness. Noncanonical flags are skipped
+  as neither empty, occupied, nor reusable and do not repair count.
+- Every table uses global lock 5. Constructor, PUT/DEL, GET, and EACH scratch
+  is shared; table scratch is written before acquisition and reader/iterator
+  scratch is unlocked. Concurrent, nested, or cross-table calls can redirect
+  an operation or its final unlock.
+- CRC is another global transaction. GET can contend without the table lock;
+  PUT/DEL hold lock 5 while hashing. CRC, descriptor, copy, modulo, or guest
+  failure after acquisition skips `UNLOCK` and strands the shared lock.
+- GET and EACH expose direct mutable pointers with no generation, ownership,
+  lifetime, or coherent-publication guarantee.
+- EACH has no callback stack cleanup, `CATCH`, mutation guard, or reentrancy
+  guard. A callback must consume exactly two cells and return normally;
+  recursion overwrites the outer `_HTE-XT`/`_HTE-HT` state.
+- Sizes, slots, stride/product, flags, descriptor cells, probe indices, caller
+  spans, arithmetic, and `CMOVE` overlap are unchecked. The constructor uses
+  raw unaligned `HERE`, has no rollback/registry/destructor, and signed
+  negative or high-bit allocation geometry can rewind after partial writes.
+- Zero slots make HASH/GET trap at `MOD 0`; PUT/DEL first acquire lock 5 and
+  leak it on that trap. EACH uses plain `0 DO`, so equal zero bounds imply the
+  `2^64`-iteration domain. The locked and unbounded zero-slot paths are
+  deliberately not executed by focused qualification.
+- Zero key size aliases all keys, while zero value size returns a pointer to
+  storage it does not own. These are pinned degeneracies, not general map
+  support.
+
+The safe domain is positive key/value sizes and slot count, canonical flags,
+fitting nonwrapping `HASHTABLE` geometry, complete mapped caller spans,
+uncontended CRC, one nonnested caller, and a nonmutating callback with the
+exact stack effect. Tombstone-before-duplicate updates remain defective even
+inside otherwise valid geometry and are pinned rather than corrected.
+
+The contiguous frontier now ends at line 9383. Line 9384 is the separator;
+§20 Module System begins at line 9385. Real disk-backed bundle integration,
+actual scheduling/cadence, concurrent ring/hash qualification, module loading,
+mask-driven rendering, physical presentation, and all rich-terminal work
+remain deferred. This advance does not implement `rich-terminal.f` or advance
+the rich-terminal vertical.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

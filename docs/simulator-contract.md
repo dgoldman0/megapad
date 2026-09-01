@@ -307,7 +307,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 9214.
+KDOS source frontier now ends at line 9383.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1466,7 +1466,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 9214. Exact unchanged lines
+The contiguous source frontier now ends at line 9383. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2688,7 +2688,7 @@ The following source-literal discrepancies remain visible:
   following qualified §15 slice, but the surrounding §10 source also promises
   `RECV-FRAME`, `ROUTE-FRAME`, `PORT-SEND`, and the deferred networking layer.
   None of those transport names, including `PORT-SEND-SLICE`, is executable
-  at the current line-9214 frontier; qualified Help text does not qualify a
+  at the current line-9383 frontier; qualified Help text does not qualify a
   transport operation.
 
 Exact unchanged lines 8944 through 9121 add §15 Pipeline Bundles in 178 LF
@@ -2884,10 +2884,136 @@ The unchanged source retains these discrepancies and unsafe domains:
   need not be coherent, and a successful returned address can be popped or
   overwritten immediately after return.
 
-The contiguous frontier now ends at line 9214. Line 9215 is the separator and
-§19 Hash Table Primitives begins at line 9216. Real bundle-file/disk
-integration, scheduler or cadence behavior, concurrent ring qualification,
-hash tables, rendering, physical viewing, and every rich-terminal
+Exact unchanged lines 9215 through 9383 add §19 Hash Table Primitives in 169
+LF records and 5,352 bytes, with SHA-256
+`ce5fc5c20a4905a0092ec28cd647c0d1679317334968db81084aba7bf6410e24`
+and Git blob `3c465404ec02b189269d5c982ee360c9d070e638`. The checked fixture includes
+the following separator at line 9384: 170 LF records and 5,424 bytes, with
+SHA-256
+`9379a85c46423efe2d14242f61bb974f6d1fa746cd9449b046cfbc3dbebdb467`
+and Git blob `b75a16f60f80d7885323443843919b8946af38ea`. §20 Module System begins at
+line 9385 and is not part of this slice.
+
+The slice publishes 28 definitions in source order: seventeen colon words
+from `HASHTABLE` through `HT-EACH` and eleven scratch variables across the
+constructor, put, get, delete, and iteration paths. Its 211 name bytes, 88
+bytes of variable bodies, and 476 fixed hosted header/semantic-slot bytes
+advance the dictionary by exactly 775 bytes. Every variable is zero at load
+and every colon has a zero-byte hosted body. Load constructs no table, hashes
+no key, acquires no lock, emits no output, and changes no CRC transaction,
+registry, storage, RTC, UART, screen, scheduler, or other device state. Only
+the ordinary timer counter advances while the source is evaluated.
+
+Seven focused tests qualify the positive-small, single-core domain. The
+constructor evidence pins its actual 40-byte header, field accessors, stride,
+slot/key/value address arithmetic, named constant placement, and complete
+zero-fill of the caller-requested slot interval. A one-byte-key,
+one-byte-value, four-slot table pins non-reflected CRC mode 0 results and a
+four-key collision chain. Those hashes are CRC-32/BZIP2-family results, not
+the reflected CRC-32 used by zlib: keys `01`, `05`, `09`, and `0D` produce
+`B5365DFC`, `A6322B20`, `933EB044`, and `803AC698`, respectively, and all
+reduce to initial slot zero modulo four.
+
+CRUD evidence proves linear probing, exact key/value copies, updates without
+count growth, lookups, deletes, and owner release. Filling all four physical
+slots leaves count four. Inserting a new key then returns normally with no
+status while leaving bytes and count unchanged; unchanged source silently
+drops the entry. Iteration evidence uses a callback that consumes exactly
+`( key-addr val-addr -- )`, visits occupied slots in physical slot order,
+skips a tombstone, preserves table state, and leaves the shared iteration
+scratch containing the callback XT and table address. A separate bounded
+equal-size nested-iteration oracle pins the reentrancy defect: the inner call
+replaces both scratch cells, so the outer scan invokes the inner callback for
+its remaining physical slot rather than restoring its own table and XT.
+
+The tombstone oracle pins the source's duplicate/resurrection defect. After
+two colliding keys occupy slots zero and one, deleting the first marks slot
+zero as tombstone 2 while retaining its key and value bytes. Putting the
+second key with a new value immediately reuses that first tombstone instead
+of continuing to find its existing slot-one copy. Count therefore becomes
+two because it counts occupied physical slots, not unique keys. Deleting the
+new slot-zero copy makes lookup find and effectively resurrect the old
+slot-one value.
+
+Zero-width and zero-slot evidence remains explicitly degenerate rather than a
+production contract. A zero-length key makes every caller address compare as
+the same key, so a later put updates the first physical entry. A zero-length
+value copies no caller bytes and GET returns the computed one-past-key
+address; in the tested geometry that address aliases the following slot's
+flag. A zero-slot table has no data interval, so `HT.DATA` aliases its
+following constant header. Direct `HT-HASH` completes and releases the CRC
+transaction, then traps at signed `MOD 0`; this test does not enter a locked
+mutator or the iterator.
+
+The admitted ordinary domain requires positive key/value sizes and slot
+count, canonical flags, intact `HASHTABLE`-created geometry whose complete
+nonwrapping data interval fits the dictionary, mapped key and value spans of
+the declared lengths, an uncontended CRC service, and one nonnested caller.
+An `HT-EACH` callback must consume exactly the supplied two cells, avoid
+reentry or table mutation, return normally, and treat both addresses as
+borrowed mutable views. The zero-width tests only preserve source-literal
+alias behavior; they do not broaden that useful domain.
+
+The unchanged source retains these discrepancies and unsafe domains:
+
+- `HT-HASH` uses `CRC32-BUF`, which selects non-reflected mode 0 with all-ones
+  initialization and final XOR. Calling it standard CRC-32 without the mode
+  qualifier invites a zlib/reflected-hash mismatch and different probe chain.
+- `HT-PUT` treats the first tombstone exactly like an empty slot and inserts
+  before searching the remainder of the chain for an equal key. Duplicate
+  physical keys, inflated count, and resurrection of an older value are
+  therefore source behavior.
+- Insertion stores occupied flag 1 before copying the key or value and before
+  incrementing count. `HT-GET` and `HT-EACH` are lock-free, so they can observe
+  a published flag with stale or partially copied bytes. Delete changes only
+  the flag to 2; key and value bytes remain resident.
+- `HT.COUNT` is a wrapping count of slots whose transitions ran through these
+  words, not a proof of unique keys or canonical flags. Full-table insertion
+  has no failure result and silently drops a new key. Flags other than 0, 1,
+  and 2 are treated as neither empty, occupied, nor reusable: probing skips
+  them while count is unchanged.
+- Every table stores global `HT-LOCK = 5`, serializing all writers. Shared
+  constructor and operation scratch has no caller identity. `HT-PUT` and
+  `HT-DEL` publish table scratch before lock acquisition; GET and EACH scratch
+  is entirely unlocked. Cross-table concurrency, nesting, or reentry can
+  redirect the table, key, value, callback, or final unlock.
+- Hashing uses the runtime-global CRC transaction. Lock-free GET can contend
+  with another GET, a writer, or an unrelated CRC caller. PUT and DEL hold
+  lock 5 while hashing; a CRC error, invalid span, copy fault, modulo fault,
+  guest throw, or other escape after acquisition skips `UNLOCK` and strands
+  that global lock.
+- GET returns a direct mutable value pointer and EACH supplies direct key and
+  value pointers. Neither has ownership, generation, lifetime, or coherent
+  read protection. A concurrent update/delete can mutate or tombstone the
+  referenced slot immediately after return.
+- EACH invokes its XT with exactly two stack cells and has no `CATCH`, stack
+  cleanup, or reentrancy guard. A callback that retains cells, consumes the
+  wrong shape, throws, mutates flags, or recursively calls EACH can corrupt
+  the caller's stack/iteration; recursive use also overwrites `_HTE-XT` and
+  `_HTE-HT` used by the outer scan.
+- Key size, value size, slot count, stride, total byte product, flags, probe
+  index, descriptor cells, caller spans, and arithmetic results are trusted.
+  Multiplication/addition wraps; `HT-SLOT` can address before or beyond data;
+  `CMOVE` proves neither bounds nor overlap. The constructor starts at raw
+  `HERE`, adds no alignment, and has no failure rollback, registry,
+  destructor, or ownership record. Negative/high-bit geometry can make signed
+  `ALLOT` rewind after partial header writes before `FILL` acts on the derived
+  span.
+- A zero-slot descriptor makes data alias the following header. HASH and GET
+  reach `MOD 0`; PUT and DEL acquire lock 5 before the same trap and therefore
+  leak it. EACH uses plain `0 DO`, so equal zero bounds enter the full
+  `2^64`-iteration domain rather than performing zero visits. Qualification
+  executes only direct HASH for this geometry and deliberately avoids the
+  locked and unbounded paths.
+- Zero key size makes all keys equal because both CRC and `SAMESTR?` consume
+  zero bytes. Zero value size returns an address without owning a value byte,
+  which can alias the next slot or following header. These cases are pinned as
+  literal degeneracies, not safe general-purpose maps.
+
+The contiguous frontier now ends at line 9383. Line 9384 is the separator and
+§20 Module System begins at line 9385. Real bundle-file/disk integration,
+scheduler or cadence behavior, concurrent ring/hash qualification, module
+loading, rendering, physical viewing, and every rich-terminal
 module/projection/compositor/input seam remain deferred. This source advance
 does not implement `rich-terminal.f` or move the rich-terminal vertical.
 

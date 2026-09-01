@@ -61,9 +61,10 @@ organized by their source sections in `kdos.f` and `networking.f`.
 20. [§14 Startup](#14-startup)
 21. [§15 Pipeline Bundles](#15-pipeline-bundles)
 22. [§18 Ring Buffer Primitives](#18-ring-buffer-primitives)
-23. [§20 Module Registry](#20-module-registry)
-24. [`networking.f` §16 Network Stack](#16-network-stack)
-25. [`networking.f` §17 Socket API](#17-socket-api)
+23. [§19 Hash Table Primitives](#19-hash-table-primitives)
+24. [§20 Module Registry](#20-module-registry)
+25. [`networking.f` §16 Network Stack](#16-network-stack)
+26. [`networking.f` §17 Socket API](#17-socket-api)
 
 ---
 
@@ -874,8 +875,8 @@ cluster-control/MPU source boundary, absent-network forward bridge,
 §9.1–§9.4 ANSI screen registry/control layer, the complete §9 widget SDL,
 screen definitions, dispatch, registration, handlers, and event loop, and the
 §10 Data Port structures and bindings, §11 placeholder, §12 Dashboard,
-§13 Help, §15 Pipeline Bundles, and §18 Ring Buffer Primitives source through
-line 9214.
+§13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19 Hash Table
+Primitives source through line 9383.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -893,9 +894,9 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-9214; line 9215 is the next section sentinel and line 9216 begins §19 Hash
-Table Primitives. The source has no §14, §16, or §17 block at the
-corresponding section-numbering boundaries.
+9383; line 9384 is the next section sentinel and line 9385 begins §20 Module
+System. The source has no §14, §16, or §17 block at the corresponding
+section-numbering boundaries.
 
 ---
 
@@ -1184,10 +1185,10 @@ Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
-§8.2–§8.7, §8.8–§8.9, complete §9, §10–§13, §15, and §18 through line
-9214. Their provenance and edge contracts are recorded in the corresponding
-sections below and in `docs/simulator-contract.md`; §19 begins at line 9216
-after the line-9215 sentinel.
+§8.2–§8.7, §8.8–§8.9, complete §9, §10–§13, §15, §18, and §19 through line
+9383. Their provenance and edge contracts are recorded in the corresponding
+sections below and in `docs/simulator-contract.md`; §20 begins at line 9385
+after the line-9384 sentinel.
 
 ---
 
@@ -1829,7 +1830,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 9214. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 9383. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2204,9 +2205,9 @@ fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
 continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
-Dashboard, §13 Help, §15 Pipeline Bundles, and §18 Ring Buffer Primitives
-through line 9214; §19 Hash Table Primitives begins at line 9216 after the
-line-9215 sentinel.
+Dashboard, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19
+Hash Table Primitives through line 9383; §20 Module System begins at line 9385
+after the line-9384 sentinel.
 
 **Example — filesystem operations:**
 ```forth
@@ -3032,10 +3033,11 @@ The following tail discrepancies are source-literal:
   screen/subscreen registrations until the fixed tables fill.
 
 This §9 block ends at line 8568. The contiguous hosted frontier now continues
-through §10–§13, §15, and §18 and ends at line 9214, before the line-9215
-sentinel and §19 at line 9216. The admitted source completes the existing ANSI
-TUI, Pipeline Bundle tracking layer, and source-defined Ring Buffer primitives
-but does not accept a rich-terminal module, projection, compositor, or viewer.
+through §10–§13, §15, §18, and §19 and ends at line 9383, before the
+line-9384 sentinel and §20 at line 9385. The admitted source completes the
+existing ANSI TUI, Pipeline Bundle tracking layer, and source-defined Ring
+Buffer and Hash Table primitives but does not accept a rich-terminal module,
+projection, compositor, or viewer.
 
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
@@ -3217,8 +3219,8 @@ The following limits and discrepancies are unchanged source behavior:
   to §15 without a §14 block here.
 
 The historical §10–§13 fixture ends at line 8943. The contiguous hosted
-frontier now continues through §15 and §18 and ends at line 9214, before the
-line-9215 sentinel and §19 at line 9216. This qualification adds no
+frontier now continues through §15, §18, and §19 and ends at line 9383, before
+the line-9384 sentinel and §20 at line 9385. This qualification adds no
 rich-terminal module, projection, compositor, physical viewer, or other
 rich-terminal work.
 
@@ -3724,10 +3726,199 @@ The qualified safe domain is one core, one ordinary control flow, small
 strictly positive element size and capacity, ample dictionary space, valid
 mapped source/destination spans of at least element size, canonical fields
 maintained only by these words, no pre-held/contentious lock 4, and no
-concurrent descriptor or payload mutation. The contiguous frontier ends at
-line 9214; line 9215 is the §19 sentinel and line 9216 begins Hash Table
-Primitives. This source qualification does not load `rich-terminal.f`, render
-or composite a frame, reach a physical viewer, or advance rich-terminal input.
+concurrent descriptor or payload mutation. The §18 source ends at line 9214;
+the following qualified §19 slice advances the contiguous frontier through
+line 9383. Neither qualification loads `rich-terminal.f`, renders or
+composites a frame, reaches a physical viewer, or advances rich-terminal
+input.
+
+---
+
+## §19 Hash Table Primitives
+
+This slice defines fixed-capacity, dictionary-resident open-addressing tables
+with byte flags and linear probing. Writers take the shared KDOS hash-table
+lock; lookup and iteration are lock-free. Keys and values are fixed-width
+binary spans, not counted or NUL-terminated strings.
+
+### Hosted unchanged-source qualification
+
+Exact unchanged `kdos.f` lines 9215 through 9383 contain 169 LF records and
+5,352 bytes, with SHA-256
+`ce5fc5c20a4905a0092ec28cd647c0d1679317334968db81084aba7bf6410e24`
+and Git blob `3c465404ec02b189269d5c982ee360c9d070e638`. The checked fixture includes
+the following one-line section sentinel at line 9384, exactly
+`\ =====================================================================`
+with its terminating LF. That 170-LF-record, 5,424-byte fixture has SHA-256
+`9379a85c46423efe2d14242f61bb974f6d1fa746cd9449b046cfbc3dbebdb467`
+and Git blob `b75a16f60f80d7885323443843919b8946af38ea`. Line 9385 begins §20 Module
+System. The enclosing `kdos.f` Git blob is
+`fd017b16dbd3ef4746d0e3467e980c015cf5a664`, from revision
+`ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
+
+The slice publishes 28 definitions. Eleven are variables: constructor scratch
+`_HT-KSIZE`, `_HT-VSIZE`, `_HT-NSLOTS`; put scratch `_HTP-KEY`, `_HTP-VAL`,
+`_HTP-HT`; get scratch `_HTG-KEY`, `_HTG-HT`; delete scratch `_HTD-KEY`; and
+iteration scratch `_HTE-XT`, `_HTE-HT`. The 17 colon words, in source order,
+are `HASHTABLE`, `HT.KSIZE`, `HT.VSIZE`, `HT.SLOTS`, `HT.COUNT`, `HT.LOCK`,
+`HT.DATA`, `HT.STRIDE`, `HT-SLOT`, `HT-HASH`, `HT-KEY`, `HT-VAL`,
+`HT-COUNT`, `HT-PUT`, `HT-GET`, `HT-DEL`, and `HT-EACH`.
+
+Their names occupy 211 bytes, the eleven variable bodies occupy 88 bytes, and
+the 28 fixed 17-byte header/semantic slots occupy 476 bytes, so exact hosted
+dictionary growth is `211 + 88 + 476 = 775` bytes. All eleven variables
+initialize to zero. Loading performs no table construction, CRC transaction,
+lock operation, parser input, UART output, storage or filesystem operation,
+RTC mutation, scheduling, rendering, or rich-terminal work. Ordinary evaluator
+progress may advance the Timer counter.
+
+Focused acceptance remains seconds-scale. It pins source identity, definition
+order/linkage/body spans, exact growth, all zero initializers, and load-time
+purity. It verifies packed construction and zero-fill, exact mode-0 hashes,
+collision/wrap probing, insertion/update/lookup, a full-table silent miss,
+deletion/tombstones, physical-order iteration, zero-width aliases, and the
+tombstone duplicate/resurrection defect. A bounded nested `HT-EACH` call on
+equal-size tables also proves that inner scratch replaces the outer table and
+callback for the rest of the outer scan. A direct zero-slot `HT-HASH` proves
+the modulo-zero trap after normal CRC release. The unconditional zero-bound
+`HT-EACH` loop is recorded structurally and deliberately not executed. No
+hosted map, probe repair, reader snapshot, transaction wrapper, or callback
+adapter replaces the unchanged source.
+
+### Executable descriptor and slot layout
+
+`HASHTABLE` emits this five-cell, 40-byte descriptor:
+
+| Offset | Field | Meaning |
+|--------|-------|---------|
+| `+0` | key size | Exact bytes hashed, copied, and compared |
+| `+8` | value size | Exact bytes copied for a value |
+| `+16` | slots | Fixed physical slot count and probe bound |
+| `+24` | count | Tracked number of flag-1 occupied slots |
+| `+32` | lock | Initialized from `HT-LOCK`, currently lock 5 |
+| `+40` | data | First packed slot |
+
+Each slot has stride `1 + key-size + value-size`: one flag byte, then the key
+bytes, then the value bytes. Flag zero means never-used empty, one occupied,
+and two tombstone. The constructor writes the five cells, allots
+`slots * stride`, zero-fills the complete packed area, and defines a named
+`CONSTANT` returning the descriptor. It performs no alignment. In the admitted
+small-positive domain, a name of *n* bytes advances hosted `HERE` by
+`40 + slots * stride + 17 + n` bytes. The constant header can therefore begin
+at an unaligned address.
+
+### Public words and probe behavior
+
+| Word | Stack Effect | Executable behavior |
+|------|--------------|---------------------|
+| `HASHTABLE` | `( key-size value-size slots "name" -- )` | Construct and zero-fill one packed fixed-capacity table, then publish its descriptor constant. |
+| `HT.KSIZE` | `( ht -- n )` | Fetch key size at `+0`. |
+| `HT.VSIZE` | `( ht -- n )` | Fetch value size at `+8`. |
+| `HT.SLOTS` | `( ht -- n )` | Fetch physical slot count at `+16`. |
+| `HT.COUNT` | `( ht -- n )` | Fetch tracked occupied count at `+24`. |
+| `HT.LOCK` | `( ht -- n )` | Fetch lock number at `+32`. |
+| `HT.DATA` | `( ht -- addr )` | Return `ht + 40`. |
+| `HT.STRIDE` | `( ht -- n )` | Return wrapped cell sum `1 + key-size + value-size`. |
+| `HT-SLOT` | `( slot# ht -- addr )` | Return `data + slot# * stride` without a bounds check. |
+| `HT-HASH` | `( key-addr ht -- slot# )` | Compute `CRC32-BUF(key,key-size) MOD slots`. |
+| `HT-KEY` | `( slot-addr -- key-addr )` | Return `slot + 1`. |
+| `HT-VAL` | `( slot-addr ht -- val-addr )` | Return `slot + 1 + key-size`. |
+| `HT-COUNT` | `( ht -- n )` | Alias the fetched-count behavior. |
+| `HT-PUT` | `( key-addr val-addr ht -- )` | Under the stored lock, update a matching occupied slot or insert immediately at the first empty/tombstone; silently return unchanged if every slot is occupied by other keys. |
+| `HT-GET` | `( key-addr ht -- val-addr \| 0 )` | Without an HT lock, stop absent at the first empty, skip tombstones, and return the direct value pointer for the first exact key match. |
+| `HT-DEL` | `( key-addr ht -- flag )` | Under the stored lock, mark the first exact match tombstone, decrement count, and return `-1`; return zero at the first empty or after a full miss. |
+| `HT-EACH` | `( xt ht -- )` | Without locking, visit physical slots from zero upward and execute `xt ( key-addr val-addr -- )` for each flag-1 slot. |
+
+`HT-HASH` uses the already-qualified `CRC32-BUF`: mode 0, all-ones seed and
+XOR-out, non-reflected CRC-32/BZIP2. It is not the reflected IEEE CRC used by
+GPT. With a small positive slot count, the finalized CRC is reduced by signed
+`MOD`; probing starts there, increments and wraps by one, and examines at most
+exactly `slots` positions. Count is not consulted to terminate or admit a
+probe. All normal calls emit no UART bytes.
+
+Insertion publishes flag one, then copies key, then value, then increments
+count. A matching update copies only the value and leaves count unchanged.
+Deletion publishes flag two before decrementing count and does not erase key
+or value. `HT-EACH` skips empty/tombstone flags and exposes physical slot
+order, not insertion or hash order.
+
+### Executable limits and source discrepancies
+
+- Tombstone handling breaks unique-key update semantics. `HT-PUT` inserts at
+  the first tombstone without continuing to search for a matching occupied
+  key later in the same probe chain. For colliding A then B, deleting A and
+  putting B again creates two physical B entries and increments count. GET
+  selects the newer first copy; deleting it reveals the older B and its old
+  value, so the key appears to resurrect. A second deletion is required.
+- Count is a wrapping physical-occupancy cell, not a unique-key count or a
+  trusted capacity invariant. It is incremented only after flag/key/value
+  publication and decremented only after tombstone publication. A fault,
+  manual flag mutation, duplicate creation, underflow, overflow, or concurrent
+  observation can disagree with physical flags. Probing ignores count, and a
+  full absent `HT-PUT` returns no status to distinguish its silent drop.
+- Writer ordering is incompatible with coherent lock-free readers. A new
+  entry becomes flag-1 visible before its key and value are copied; a GET or
+  EACH can therefore match old/partial key bytes and expose old/partial value.
+  Updating an occupied value also mutates it in place while visible. Delete
+  publishes the tombstone before count changes, and an already-returned value
+  pointer remains usable across deletion or slot reuse. There is no memory
+  fence, snapshot, generation, or lifetime token.
+- Every normal table stores shared lock 5, while all constructor, put, get,
+  delete, and iteration scratch is global. PUT and DEL write shared `_HTP-HT`
+  before acquiring the lock; a contending caller can overwrite the active
+  writer's target while it waits. Concurrent GETs overwrite `_HTG-*` without
+  a lock. Nested EACH replaces `_HTE-HT`/`_HTE-XT`; the outer `DO` retains its
+  original limit while subsequent addresses and callbacks use the replacement
+  globals. The words are not reentrant or multicore-safe despite writer lock
+  acquisition.
+- Hashing uses the one checked global CRC transaction. A preexisting CRC
+  owner, including the same `(COREID,TASK-ID)`, makes `CRC-MODE!` fail and
+  throw. PUT and DEL have already acquired lock 5 at that point, so the throw
+  bypasses their final unlock. A key-span fault after CRC acquisition can
+  strand both CRC ownership and, for a writer, lock 5. Normal hashing finalizes
+  and releases CRC but does not preserve a caller's prior mode/accumulator
+  state. Same-core preownership of lock 5 is depthless and a normal writer's
+  final unlock releases that caller critical section.
+- GET returns direct mutable storage. EACH passes direct pointers to an
+  unchecked XT, holds no lock, catches no throw, and offers no early-stop
+  result. The callback must consume exactly `( key-addr val-addr )` and return
+  nothing: extra results make the trailing `DROP` discard callback output
+  instead of the retained slot and leak/corrupt the outer stack. A recursive
+  EACH or callback mutation of the same table is outside the contract.
+- Key size, value size, slot count, count, lock, flags, and all packed bytes
+  remain publicly writable and unvalidated. `HT-SLOT` accepts any signed or
+  high-bit index. Stride addition, data-size multiplication, address
+  arithmetic, count changes, and probe increments wrap one cell. Invalid
+  geometry can rewind/overlap the dictionary, partially publish construction,
+  address another object, or drive CRC, `FILL`, `CMOVE`, or `DO` through an
+  enormous span. Flags other than 0, 1, and 2 are silently skipped.
+- Key size zero is executable but degenerate: hashing reads no key bytes,
+  every key hashes to slot zero, and zero-length `SAMESTR?` makes all callers'
+  keys equal. Value size zero copies no value bytes; a successful GET returns
+  the address immediately after the key, which aliases the next slot flag or
+  the following constant header. Neither case supplies ordinary map semantics.
+- Slot count zero allots and fills no packed data, so `HT.DATA` aliases the
+  following constant header. `HT-HASH`, GET, PUT, and DEL reach signed
+  `MOD 0`; writers already hold lock 5 when they trap. `HT-EACH` uses plain
+  `slots 0 DO`, not `?DO`, so equal zero bounds enter a wrapping 2^64-iteration
+  walk rather than returning. Focused acceptance does not execute that loop.
+- Tombstones retain deleted key/value bytes, tables never resize or compact,
+  and no ownership record binds returned pointers to a live table or slot
+  incarnation. Overlapping key/value/table spans inherit forward `CMOVE`
+  behavior and are not transactional.
+
+The qualified safe domain is one core/task, one nonnested operation at a time,
+no active CRC transaction, small strictly positive key/value sizes and slot
+count with overflow-free geometry and ample dictionary space, canonical
+immutable descriptor fields, valid mapped nonoverlapping key/value spans, no
+reader/writer overlap, and no pre-held/contentious lock 5. `HT-EACH` additionally
+requires a nonthrowing, result-free callback that neither recurses nor mutates
+the table. Unique-map callers must avoid updating an existing key when an
+earlier tombstone can occur in its probe chain; the simplest admitted subset
+does not update collision clusters after deletion. The contiguous frontier
+ends at line 9383; line 9384 is the §20 sentinel and line 9385 begins Module
+System. This qualification adds no rich-terminal module, rendering,
+composition, physical viewing, or input work.
 
 ---
 
