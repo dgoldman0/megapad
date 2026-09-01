@@ -6,12 +6,16 @@ The caller owns CELL rendering and paints the cursor after this compositor.
 from __future__ import annotations
 
 import operator
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .apt1 import UINT32_MAX, UINT64_MAX
-from .retained_scene import ControlKind, ControlState
+from .retained_model import ResourceFormat
+from .retained_scene import ControlKind, ControlState, ImageFit
 from .retained_view import (
     GlyphRunDraw,
+    ImageDraw,
+    ImageResourceManifest,
     MenuBarDraw,
     MenuDraw,
     MenuItemDraw,
@@ -62,6 +66,23 @@ _GRID_CELL = (26, 32, 42)
 _GRID_HEADER = (34, 43, 57)
 _GRID_UNAVAILABLE = (23, 28, 36)
 _GRID_PRIMARY = (39, 69, 112)
+
+
+# Public renderer-cache handoff key.  It is exactly
+# ``ImageResourceManifest.key`` and deliberately includes immutable content
+# metadata, not only the owner-local authority tuple.  Session/presentation
+# scope remains an outer cache concern because this mapping belongs to one
+# exact display offer.
+ImageSurfaceKey = tuple[
+    int,
+    int,
+    int,
+    ResourceFormat,
+    int,
+    int,
+    int,
+    bytes,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -2009,6 +2030,202 @@ def _optional_identity(name: str, value) -> ControlIdentity | None:
     return value
 
 
+def _preflight_image_surfaces(
+    pygame_module,
+    plane: RetainedDrawPlane,
+    resource_surfaces: Mapping[ImageSurfaceKey, object] | None,
+) -> dict[tuple[int, int, int], object]:
+    """Resolve every visible IMAGE before the destination can be mutated.
+
+    The public mapping is offer-scoped and keyed by the full immutable
+    :attr:`ImageResourceManifest.key`.  The returned authority-keyed dictionary
+    is a private convenience for region-local draw lookup; callers cannot use
+    that shorter key to bypass manifest metadata or digest authorization.
+    """
+
+    if resource_surfaces is None:
+        surfaces: Mapping[ImageSurfaceKey, object] = {}
+    elif isinstance(resource_surfaces, Mapping):
+        surfaces = resource_surfaces
+    else:
+        raise TypeError("resource_surfaces must be a mapping or None")
+
+    manifests = {manifest.resource_key: manifest for manifest in plane.resources}
+    resolved: dict[tuple[int, int, int], object] = {}
+    for resource_key, manifest in manifests.items():
+        if not isinstance(manifest, ImageResourceManifest):
+            raise TypeError("draw plane contains an invalid IMAGE resource manifest")
+        try:
+            source = surfaces[manifest.key]
+        except KeyError as exc:
+            raise ValueError(
+                "visible IMAGE has no exact resource surface"
+            ) from exc
+        get_size = getattr(source, "get_size", None)
+        if not callable(get_size):
+            raise TypeError("IMAGE resource surface has no get_size operation")
+        try:
+            size = tuple(get_size())
+        except (TypeError, ValueError) as exc:
+            raise TypeError("IMAGE resource surface size is invalid") from exc
+        if len(size) != 2:
+            raise TypeError("IMAGE resource surface size must have two axes")
+        width = _integer("IMAGE surface width", size[0], minimum=1)
+        height = _integer("IMAGE surface height", size[1], minimum=1)
+        if (width, height) != (manifest.width, manifest.height):
+            raise ValueError(
+                "IMAGE resource surface dimensions do not match its manifest"
+            )
+        if (
+            not callable(getattr(source, "copy", None))
+            or not callable(getattr(source, "set_alpha", None))
+            or not callable(getattr(source, "subsurface", None))
+        ):
+            raise TypeError(
+                "IMAGE resource surface lacks immutable crop/opacity operations"
+            )
+        resolved[resource_key] = source
+
+    for region in plane.regions:
+        for draw in region.draws:
+            if not isinstance(draw, ImageDraw):
+                continue
+            resource_key = (
+                region.owner_id,
+                region.owner_generation,
+                draw.resource_id,
+            )
+            if resource_key not in resolved:
+                raise ValueError("visible IMAGE has no exact resource manifest")
+
+    if resolved:
+        transform = getattr(pygame_module, "transform", None)
+        if transform is None or not callable(getattr(transform, "scale", None)):
+            raise TypeError("pygame module has no IMAGE scaling operation")
+    return resolved
+
+
+def _image_fit_geometry(fit: ImageFit, source_size, object_rect):
+    """Return a bounded source crop, target size, and centered destination."""
+
+    destination_width = object_rect.width
+    destination_height = object_rect.height
+    if destination_width <= 0 or destination_height <= 0:
+        return None
+    source_width, source_height = source_size
+    source_crop = None
+
+    if fit is ImageFit.STRETCH:
+        target_width = destination_width
+        target_height = destination_height
+    elif fit is ImageFit.CONTAIN:
+        if destination_width * source_height <= destination_height * source_width:
+            target_width = destination_width
+            target_height = max(
+                1,
+                (source_height * destination_width) // source_width,
+            )
+        else:
+            target_height = destination_height
+            target_width = max(
+                1,
+                (source_width * destination_height) // source_height,
+            )
+    elif fit is ImageFit.COVER:
+        # Crop the immutable source before scaling.  Scaling the entire source
+        # to its cover extent can make the off-object axis arbitrarily large
+        # for legal extreme aspect ratios.  The cropped input and scaled output
+        # are both bounded by the source resource and destination object.
+        if source_width * destination_height > source_height * destination_width:
+            crop_width = max(
+                1,
+                min(
+                    source_width,
+                    (
+                        source_height * destination_width
+                        + destination_height
+                        - 1
+                    )
+                    // destination_height,
+                ),
+            )
+            crop_height = source_height
+        else:
+            crop_width = source_width
+            crop_height = max(
+                1,
+                min(
+                    source_height,
+                    (
+                        source_width * destination_height
+                        + destination_width
+                        - 1
+                    )
+                    // destination_width,
+                ),
+            )
+        crop_x = (source_width - crop_width) // 2
+        crop_y = (source_height - crop_height) // 2
+        if (crop_width, crop_height) != (source_width, source_height):
+            source_crop = (crop_x, crop_y, crop_width, crop_height)
+        target_width = destination_width
+        target_height = destination_height
+    else:  # ImageDraw already validates this; retain a local fail-closed guard.
+        raise TypeError("IMAGE draw has an unsupported fit")
+
+    if target_width <= destination_width:
+        target_x = object_rect.left + (destination_width - target_width) // 2
+    else:
+        target_x = object_rect.left - (target_width - destination_width) // 2
+    if target_height <= destination_height:
+        target_y = object_rect.top + (destination_height - target_height) // 2
+    else:
+        target_y = object_rect.top - (target_height - destination_height) // 2
+    return source_crop, (target_width, target_height), (target_x, target_y)
+
+
+def _paint_image(
+    pygame_module,
+    surface,
+    region,
+    region_rect,
+    draw: ImageDraw,
+    source,
+) -> None:
+    """Scale and composite one immutable cached resource without mutating it."""
+
+    object_rect, clip = _object_clip(
+        pygame_module,
+        surface,
+        region,
+        region_rect,
+        draw,
+    )
+    if clip.width <= 0 or clip.height <= 0 or draw.opacity == 0:
+        return
+    geometry = _image_fit_geometry(draw.fit, source.get_size(), object_rect)
+    if geometry is None:
+        return
+    source_crop, target_size, target_position = geometry
+    image = source
+    if source_crop is not None:
+        image = source.subsurface(pygame_module.Rect(*source_crop))
+    if tuple(image.get_size()) != target_size:
+        image = pygame_module.transform.scale(image, target_size)
+    if draw.opacity != 0xFF:
+        # Even a freshly scaled surface is copied here so opacity application
+        # has one simple ownership rule and can never alter a viewer cache.
+        image = image.copy()
+        image.set_alpha(draw.opacity)
+
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(clip)
+        surface.blit(image, target_position)
+    finally:
+        surface.set_clip(prior_clip)
+
+
 def composite_draw_plane_result(
     pygame_module,
     surface,
@@ -2017,6 +2234,7 @@ def composite_draw_plane_result(
     cell_width: int,
     cell_height: int,
     *,
+    resource_surfaces: Mapping[ImageSurfaceKey, object] | None = None,
     control_font=None,
     hovered: ControlIdentity | None = None,
     pressed: ControlIdentity | None = None,
@@ -2034,6 +2252,11 @@ def composite_draw_plane_result(
     control_font = font if control_font is None else control_font
     hovered = _optional_identity("hovered", hovered)
     pressed = _optional_identity("pressed", pressed)
+    image_surfaces = _preflight_image_surfaces(
+        pygame_module,
+        plane,
+        resource_surfaces,
+    )
     series_by_key = {history.key: history.samples for history in plane.series}
     targets: list[ControlHitTarget] = []
     for region in plane.regions:
@@ -2062,6 +2285,21 @@ def composite_draw_plane_result(
                     region,
                     region_rect,
                     draw,
+                )
+            elif isinstance(draw, ImageDraw):
+                _paint_image(
+                    pygame_module,
+                    surface,
+                    region,
+                    region_rect,
+                    draw,
+                    image_surfaces[
+                        (
+                            region.owner_id,
+                            region.owner_generation,
+                            draw.resource_id,
+                        )
+                    ],
                 )
             elif isinstance(draw, ReadoutDraw):
                 _paint_readout(
@@ -2173,6 +2411,7 @@ def composite_draw_plane(
     cell_width: int,
     cell_height: int,
     *,
+    resource_surfaces: Mapping[ImageSurfaceKey, object] | None = None,
     control_font=None,
     hovered: ControlIdentity | None = None,
     pressed: ControlIdentity | None = None,
@@ -2185,6 +2424,7 @@ def composite_draw_plane(
         font,
         cell_width,
         cell_height,
+        resource_surfaces=resource_surfaces,
         control_font=control_font,
         hovered=hovered,
         pressed=pressed,
@@ -2195,6 +2435,7 @@ __all__ = [
     "CompositeDrawResult",
     "ControlHitTarget",
     "ControlIdentity",
+    "ImageSurfaceKey",
     "PixelRect",
     "composite_draw_plane",
     "composite_draw_plane_result",

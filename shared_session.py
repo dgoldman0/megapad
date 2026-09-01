@@ -26,6 +26,8 @@ from rich_terminal.retained_view import (
     INT64_MIN,
     DisplayScope,
     GlyphRunDraw,
+    ImageDraw,
+    ImageResourceManifest,
     MenuBarDraw,
     MenuDraw,
     MenuItemDraw,
@@ -47,12 +49,14 @@ from rich_terminal.retained_view import (
 from rich_terminal.retained_scene import (
     ControlKind,
     ControlState,
+    ImageFit,
     ObjectBounds,
     Point,
     RGBA,
     Sample,
     validate_control_shape,
 )
+from rich_terminal.retained_resources import RGBAResource
 from rich_terminal.semantic_content import (
     SemanticTextContent,
     decode_semantic_text_content,
@@ -149,6 +153,23 @@ def _wire_text(value, name: str) -> str:
     except UnicodeEncodeError as exc:
         raise ValueError(f"{name} must contain only Unicode scalar values") from exc
     return value
+
+
+def _wire_sha3_256(value, name: str) -> bytes:
+    """Decode one canonical lowercase SHA3-256 hex identity."""
+
+    encoded = _wire_text(value, name)
+    if len(encoded) != 64 or encoded != encoded.lower():
+        raise ValueError(f"{name} must be 64 lowercase hexadecimal characters")
+    try:
+        digest = bytes.fromhex(encoded)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be 64 lowercase hexadecimal characters"
+        ) from exc
+    if len(digest) != 32 or digest.hex() != encoded:
+        raise ValueError(f"{name} must be canonical lowercase SHA3-256 hex")
+    return digest
 
 
 def _wire_integer_array(
@@ -386,6 +407,16 @@ _POLYLINE_WIRE_FIELDS = (
     "color",
     "closed",
 )
+_IMAGE_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "resource_id",
+    "fit",
+    "opacity",
+)
 _READOUT_WIRE_FIELDS = (
     "kind",
     "object_id",
@@ -454,6 +485,16 @@ _SERIES_HISTORY_WIRE_FIELDS = (
     "owner_generation",
     "series_id",
     "samples",
+)
+_IMAGE_RESOURCE_WIRE_FIELDS = (
+    "owner_id",
+    "owner_generation",
+    "resource_id",
+    "format",
+    "width",
+    "height",
+    "byte_length",
+    "sha3_256",
 )
 _MENU_BAR_WIRE_FIELDS = (
     "kind",
@@ -605,6 +646,58 @@ def _series_history_from_wire(data, name: str) -> SeriesHistoryDraw:
     )
 
 
+def _image_resource_to_wire(resource: ImageResourceManifest) -> dict:
+    if not isinstance(resource, ImageResourceManifest):
+        raise TypeError("resource must be ImageResourceManifest")
+    return {
+        "owner_id": resource.owner_id,
+        "owner_generation": resource.owner_generation,
+        "resource_id": resource.resource_id,
+        "format": int(resource.format),
+        "width": resource.width,
+        "height": resource.height,
+        "byte_length": resource.byte_length,
+        "sha3_256": resource.sha3_256.hex(),
+    }
+
+
+def _image_resource_from_wire(data, name: str) -> ImageResourceManifest:
+    wire = _wire_object(data, name, _IMAGE_RESOURCE_WIRE_FIELDS)
+    return ImageResourceManifest(
+        owner_id=_wire_integer(
+            wire["owner_id"], f"{name} owner_id", minimum=1, maximum=UINT64_MAX
+        ),
+        owner_generation=_wire_integer(
+            wire["owner_generation"],
+            f"{name} owner_generation",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        resource_id=_wire_integer(
+            wire["resource_id"],
+            f"{name} resource_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        format=_wire_integer(
+            wire["format"], f"{name} format", minimum=1, maximum=0xFF
+        ),
+        width=_wire_integer(
+            wire["width"], f"{name} width", minimum=1, maximum=UINT32_MAX
+        ),
+        height=_wire_integer(
+            wire["height"], f"{name} height", minimum=1, maximum=UINT32_MAX
+        ),
+        byte_length=_wire_integer(
+            wire["byte_length"],
+            f"{name} byte_length",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        sha3_256=_wire_sha3_256(wire["sha3_256"], f"{name} sha3_256"),
+    )
+
+
 def _semantic_content_from_wire(value, name: str) -> SemanticTextContent:
     encoded = _wire_text(value, name)
     try:
@@ -696,6 +789,7 @@ def _retained_draw_to_wire(
     draw: (
         GlyphRunDraw
         | PolylineDraw
+        | ImageDraw
         | ReadoutDraw
         | MeterDraw
         | StatusDraw
@@ -745,6 +839,17 @@ def _retained_draw_to_wire(
                 draw.color.alpha,
             ],
             "closed": draw.closed,
+        }
+    if isinstance(draw, ImageDraw):
+        return {
+            "kind": "image",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "resource_id": draw.resource_id,
+            "fit": int(draw.fit),
+            "opacity": draw.opacity,
         }
     if isinstance(draw, ReadoutDraw):
         return {
@@ -924,6 +1029,9 @@ def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
         "retained_initialized": plane.retained_initialized,
         "retained_visible": plane.retained_visible,
         "series": [_series_history_to_wire(history) for history in plane.series],
+        "resources": [
+            _image_resource_to_wire(resource) for resource in plane.resources
+        ],
         "regions": [
             {
                 "owner_id": region.owner_id,
@@ -1138,6 +1246,7 @@ def _retained_draw_from_wire(
 ) -> (
     GlyphRunDraw
     | PolylineDraw
+    | ImageDraw
     | ReadoutDraw
     | MeterDraw
     | StatusDraw
@@ -1229,6 +1338,42 @@ def _retained_draw_from_wire(
                 )
             ),
             closed=_wire_boolean(wire["closed"], f"{name} closed"),
+        )
+    if kind == "image":
+        wire = _wire_object(data, name, _IMAGE_WIRE_FIELDS)
+        return ImageDraw(
+            object_id=_wire_integer(
+                wire["object_id"],
+                f"{name} object_id",
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+            z_order=_wire_integer(
+                wire["z_order"],
+                f"{name} z_order",
+                minimum=INT32_MIN,
+                maximum=INT32_MAX,
+            ),
+            bounds=ObjectBounds(
+                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+            ),
+            resource_id=_wire_integer(
+                wire["resource_id"],
+                f"{name} resource_id",
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+            fit=ImageFit(
+                _wire_integer(
+                    wire["fit"], f"{name} fit", minimum=0, maximum=0xFF
+                )
+            ),
+            opacity=_wire_integer(
+                wire["opacity"], f"{name} opacity", minimum=0, maximum=0xFF
+            ),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
         )
     if kind == "readout":
         wire = _wire_object(data, name, _READOUT_WIRE_FIELDS)
@@ -1471,7 +1616,13 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
     wire = _wire_object(
         data,
         "retained draw plane",
-        ("retained_initialized", "retained_visible", "series", "regions"),
+        (
+            "retained_initialized",
+            "retained_visible",
+            "series",
+            "resources",
+            "regions",
+        ),
     )
     series_wire = wire["series"]
     if not isinstance(series_wire, (list, tuple)):
@@ -1479,6 +1630,16 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
     series = tuple(
         _series_history_from_wire(history, f"retained series {history_index}")
         for history_index, history in enumerate(series_wire)
+    )
+    resources_wire = wire["resources"]
+    if not isinstance(resources_wire, (list, tuple)):
+        raise TypeError("retained draw resources must be an array")
+    resources = tuple(
+        _image_resource_from_wire(
+            resource,
+            f"retained resource {resource_index}",
+        )
+        for resource_index, resource in enumerate(resources_wire)
     )
     regions_wire = wire["regions"]
     if not isinstance(regions_wire, (list, tuple)):
@@ -1558,6 +1719,7 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
         ),
         regions=tuple(regions),
         series=series,
+        resources=resources,
     )
 
 
@@ -2716,6 +2878,162 @@ class SharedMachine:
                 result["display_offer"] = display_offer_to_wire(offer)
         return result
 
+    @staticmethod
+    def _resource_refusal(status: str) -> dict:
+        if status not in {
+            "stale_generation",
+            "stale_display",
+            "invalid_resource",
+        }:
+            raise ValueError("resource refusal has an unknown status")
+        return {"status": status, "available": False}
+
+    def display_resource_chunk(
+        self,
+        offer_id: int,
+        scope: DisplayScope,
+        owner_id: int,
+        owner_generation: int,
+        resource_id: int,
+        sha3_256: bytes,
+        offset: int,
+        max_bytes: int,
+        *,
+        generation: int,
+    ) -> dict:
+        """Copy one exact current-offer resource range for its physical sink.
+
+        Pixel bytes remain solely in the private composite pin.  The machine
+        lock covers generation/display authorization and the bounded immutable
+        copy; base64 expansion happens after that lock is released.
+        """
+
+        normalized_offer = _wire_integer(
+            offer_id, "display offer id", minimum=1, maximum=UINT64_MAX
+        )
+        if not isinstance(scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        normalized_owner = _wire_integer(
+            owner_id, "resource owner_id", minimum=1, maximum=UINT64_MAX
+        )
+        normalized_owner_generation = _wire_integer(
+            owner_generation,
+            "resource owner_generation",
+            minimum=1,
+            maximum=UINT64_MAX,
+        )
+        normalized_resource = _wire_integer(
+            resource_id, "resource_id", minimum=1, maximum=UINT64_MAX
+        )
+        if not isinstance(sha3_256, (bytes, bytearray, memoryview)):
+            raise TypeError("sha3_256 must be bytes-like")
+        normalized_digest = bytes(sha3_256)
+        if len(normalized_digest) != 32:
+            raise ValueError("sha3_256 must be exactly 32 bytes")
+        normalized_offset = _wire_integer(
+            offset, "resource offset", minimum=0, maximum=UINT64_MAX
+        )
+        normalized_max = _wire_integer(
+            max_bytes, "resource max_bytes", minimum=1, maximum=UINT64_MAX
+        )
+
+        with self.lock:
+            if not self._generation_current(generation):
+                return self._resource_refusal("stale_generation")
+
+            offer = self.session.display_offer
+            composite = self.session._display_offer_composite
+            if (
+                offer is None
+                or composite is None
+                or offer.offer_id != normalized_offer
+                or offer.scope != scope
+                or composite.presentation_epoch != scope.presentation_epoch
+                or composite.revision != scope.model_revision
+            ):
+                return self._resource_refusal("stale_display")
+            cell = composite.cell
+            if (
+                cell is None
+                or cell.attachment_epoch != scope.attachment_epoch
+                or cell.session_id != scope.session_id
+                or cell.presentation_epoch != scope.presentation_epoch
+                or cell.revision != scope.cell_revision
+                or composite.geometry.generation != scope.geometry_generation
+            ):
+                return self._resource_refusal("stale_display")
+
+            driver = self.session.rich_terminal_driver
+            policy = None if driver is None else driver.core.retained_policy
+            if policy is None or policy.max_resource_chunk_bytes <= 0:
+                return self._resource_refusal("invalid_resource")
+
+            resource_key = (
+                normalized_owner,
+                normalized_owner_generation,
+                normalized_resource,
+            )
+            manifest = next(
+                (
+                    candidate
+                    for candidate in offer.retained.resources
+                    if candidate.resource_key == resource_key
+                ),
+                None,
+            )
+            matching_resources = tuple(
+                candidate
+                for candidate in composite.resources
+                if isinstance(candidate, RGBAResource)
+                and (
+                    candidate.owner.owner_id,
+                    candidate.owner.owner_generation,
+                    candidate.resource_id,
+                )
+                == resource_key
+            )
+            resource = (
+                matching_resources[0]
+                if len(matching_resources) == 1
+                else None
+            )
+            if (
+                manifest is None
+                or resource is None
+                or manifest.sha3_256 != normalized_digest
+                or resource.digest != normalized_digest
+                or resource.owner.session_id != scope.session_id
+                or resource.owner.presentation_epoch != scope.presentation_epoch
+                or resource.format != manifest.format
+                or resource.width != manifest.width
+                or resource.height != manifest.height
+                or resource.byte_length != manifest.byte_length
+                or normalized_offset > resource.byte_length
+            ):
+                return self._resource_refusal("invalid_resource")
+
+            bounded_max = min(
+                normalized_max,
+                policy.max_resource_chunk_bytes,
+            )
+            data = resource.read(normalized_offset, bounded_max)
+            next_offset = normalized_offset + len(data)
+            response = {
+                "status": "chunk",
+                "available": True,
+                "owner_id": normalized_owner,
+                "owner_generation": normalized_owner_generation,
+                "resource_id": normalized_resource,
+                "sha3_256": normalized_digest.hex(),
+                "offset": normalized_offset,
+                "next_offset": next_offset,
+                "byte_length": resource.byte_length,
+                "eof": next_offset == resource.byte_length,
+            }
+
+        response["data_base64"] = base64.b64encode(data).decode("ascii")
+        return response
+
     def present(
         self,
         offer_id: int,
@@ -3136,6 +3454,77 @@ class SessionServer:
                 self._display_ack = pair
             return result
 
+    def _display_resource_chunk_for_connection(
+        self,
+        params: Mapping[str, Any],
+        connection_id: int | None,
+    ) -> dict:
+        params = _wire_object(
+            params,
+            "display resource chunk",
+            (
+                "generation",
+                "display_offer_id",
+                "display_scope",
+                "owner_id",
+                "owner_generation",
+                "resource_id",
+                "sha3_256",
+                "offset",
+                "max_bytes",
+            ),
+        )
+        generation = self._required_generation(params)
+        pair = self._required_display_pair(params)
+        owner_id = _wire_integer(
+            params["owner_id"],
+            "resource owner_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        )
+        owner_generation = _wire_integer(
+            params["owner_generation"],
+            "resource owner_generation",
+            minimum=1,
+            maximum=UINT64_MAX,
+        )
+        resource_id = _wire_integer(
+            params["resource_id"],
+            "resource_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        )
+        digest = _wire_sha3_256(params["sha3_256"], "resource sha3_256")
+        offset = _wire_integer(
+            params["offset"],
+            "resource offset",
+            minimum=0,
+            maximum=UINT64_MAX,
+        )
+        max_bytes = _wire_integer(
+            params["max_bytes"],
+            "resource max_bytes",
+            minimum=1,
+            maximum=UINT64_MAX,
+        )
+
+        with self._display_lock:
+            if connection_id is None or self._display_holder != connection_id:
+                return {"status": "stale_display", "available": False}
+            if pair != self._display_delivered:
+                return {"status": "stale_display", "available": False}
+            return self.machine.display_resource_chunk(
+                pair[0],
+                pair[1],
+                owner_id,
+                owner_generation,
+                resource_id,
+                digest,
+                offset,
+                max_bytes,
+                generation=generation,
+            )
+
     def _dispatch_terminal_input(
         self,
         method: str,
@@ -3247,6 +3636,11 @@ class SessionServer:
             return self._claim_display(connection_id)
         if method == "present":
             return self._present_for_connection(params, connection_id)
+        if method == "display_resource_chunk":
+            return self._display_resource_chunk_for_connection(
+                params,
+                connection_id,
+            )
         if method in {"send_text", "send_key", "send_control_event", "resize"}:
             return self._dispatch_terminal_input(method, params, connection_id)
         if method == "screen":

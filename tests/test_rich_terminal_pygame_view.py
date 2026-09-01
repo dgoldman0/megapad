@@ -6,9 +6,12 @@ import pytest
 
 from rich_terminal.apt1 import UINT32_MAX
 from rich_terminal.pygame_view import composite_draw_plane, unorm_high_edge, unorm_low_edge
-from rich_terminal.retained_scene import ObjectBounds, Point, RGBA, Sample
+from rich_terminal.retained_model import ResourceFormat
+from rich_terminal.retained_scene import ImageFit, ObjectBounds, Point, RGBA, Sample
 from rich_terminal.retained_view import (
     GlyphRunDraw,
+    ImageDraw,
+    ImageResourceManifest,
     MeterDraw,
     PlotDraw,
     PolylineDraw,
@@ -468,3 +471,237 @@ def test_waveform_draws_zero_line_even_when_committed_history_is_empty():
 
     assert tuple(surface.get_at((4, 4)))[:3] == (90, 90, 90)
     assert tuple(surface.get_at((4, 3)))[:3] == (2, 4, 6)
+
+
+def _image_manifest(resource_id, width, height):
+    return ImageResourceManifest(
+        owner_id=1,
+        owner_generation=1,
+        resource_id=resource_id,
+        format=ResourceFormat.RGBA8,
+        width=width,
+        height=height,
+        byte_length=width * height * 4,
+        sha3_256=bytes((resource_id,)) * 32,
+    )
+
+
+def _image_draw(resource_id, fit, *, opacity=255, bounds=None, z_order=0):
+    return ImageDraw(
+        object_id=resource_id,
+        z_order=z_order,
+        bounds=(
+            ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX)
+            if bounds is None
+            else bounds
+        ),
+        resource_id=resource_id,
+        fit=fit,
+        opacity=opacity,
+    )
+
+
+def _image_plane(draws, manifests, *, cell_cols=1, cell_rows=1):
+    region = RetainedRegionDraw(
+        1,
+        1,
+        1,
+        0,
+        0,
+        cell_cols,
+        cell_rows,
+        0,
+        True,
+        tuple(draws),
+    )
+    return RetainedDrawPlane(
+        True,
+        True,
+        (region,),
+        (),
+        tuple(manifests),
+    )
+
+
+def _surface_pixels(surface):
+    return tuple(
+        tuple(tuple(surface.get_at((x, y))) for x in range(surface.get_width()))
+        for y in range(surface.get_height())
+    )
+
+
+def test_image_dependencies_are_preflighted_before_any_destination_mutation():
+    pygame = pytest.importorskip("pygame")
+    destination = pygame.Surface((8, 4))
+    destination.fill((2, 4, 6))
+    before = _surface_pixels(destination)
+    first = _image_manifest(1, 1, 1)
+    second = _image_manifest(2, 1, 1)
+    first_surface = pygame.Surface((1, 1), flags=pygame.SRCALPHA)
+    first_surface.fill((220, 30, 40, 255))
+    midpoint = UINT32_MAX // 2
+    plane = _image_plane(
+        (
+            _image_draw(
+                1,
+                ImageFit.STRETCH,
+                bounds=ObjectBounds(0, 0, midpoint, UINT32_MAX),
+            ),
+            _image_draw(
+                2,
+                ImageFit.STRETCH,
+                bounds=ObjectBounds(midpoint, 0, UINT32_MAX, UINT32_MAX),
+                z_order=1,
+            ),
+        ),
+        (first, second),
+    )
+
+    with pytest.raises(ValueError, match="no exact resource surface"):
+        composite_draw_plane(
+            pygame,
+            destination,
+            plane,
+            _PixelFont(pygame),
+            8,
+            4,
+            resource_surfaces={first.key: first_surface},
+        )
+
+    assert _surface_pixels(destination) == before
+
+
+@pytest.mark.parametrize(
+    ("fit", "top_pixel", "center_pixel", "bottom_pixel"),
+    (
+        (ImageFit.STRETCH, (220, 30, 40), (220, 30, 40), (220, 30, 40)),
+        (ImageFit.CONTAIN, (2, 4, 6), (220, 30, 40), (2, 4, 6)),
+        (ImageFit.COVER, (220, 30, 40), (220, 30, 40), (220, 30, 40)),
+    ),
+)
+def test_image_fit_modes_use_deterministic_integer_target_geometry(
+    fit,
+    top_pixel,
+    center_pixel,
+    bottom_pixel,
+):
+    pygame = pytest.importorskip("pygame")
+    destination = pygame.Surface((6, 6))
+    destination.fill((2, 4, 6))
+    source = pygame.Surface((2, 1), flags=pygame.SRCALPHA)
+    source.fill((220, 30, 40, 255))
+    manifest = _image_manifest(1, 2, 1)
+    plane = _image_plane((_image_draw(1, fit),), (manifest,))
+
+    composite_draw_plane(
+        pygame,
+        destination,
+        plane,
+        _PixelFont(pygame),
+        6,
+        6,
+        resource_surfaces={manifest.key: source},
+    )
+
+    assert tuple(destination.get_at((3, 0)))[:3] == top_pixel
+    assert tuple(destination.get_at((3, 2)))[:3] == center_pixel
+    assert tuple(destination.get_at((3, 5)))[:3] == bottom_pixel
+
+
+def test_cover_centers_oversized_raster_and_crops_at_the_object_bounds():
+    pygame = pytest.importorskip("pygame")
+    destination = pygame.Surface((4, 4))
+    destination.fill((2, 4, 6))
+    source = pygame.Surface((4, 1), flags=pygame.SRCALPHA)
+    source.set_at((0, 0), (220, 30, 40, 255))
+    source.set_at((1, 0), (20, 210, 70, 255))
+    source.set_at((2, 0), (30, 80, 220, 255))
+    source.set_at((3, 0), (240, 210, 20, 255))
+    manifest = _image_manifest(1, 4, 1)
+    plane = _image_plane(
+        (_image_draw(1, ImageFit.COVER),),
+        (manifest,),
+    )
+
+    composite_draw_plane(
+        pygame,
+        destination,
+        plane,
+        _PixelFont(pygame),
+        4,
+        4,
+        resource_surfaces={manifest.key: source},
+    )
+
+    assert tuple(destination.get_at((0, 2)))[:3] == (20, 210, 70)
+    assert tuple(destination.get_at((1, 2)))[:3] == (20, 210, 70)
+    # The exact one-pixel centered crop has an odd left/right remainder;
+    # deterministic top/left bias selects source pixel one.
+    assert tuple(destination.get_at((2, 2)))[:3] == (20, 210, 70)
+    assert tuple(destination.get_at((3, 2)))[:3] == (20, 210, 70)
+
+
+def test_cover_crops_extreme_aspect_source_before_bounded_scale(monkeypatch):
+    pygame = pytest.importorskip("pygame")
+    destination = pygame.Surface((20, 10))
+    source = pygame.Surface((256, 1), flags=pygame.SRCALPHA)
+    source.fill((80, 120, 200, 255))
+    manifest = _image_manifest(1, 256, 1)
+    plane = _image_plane(
+        (_image_draw(1, ImageFit.COVER),),
+        (manifest,),
+    )
+    original_scale = pygame.transform.scale
+    scales = []
+
+    def recording_scale(cropped, size):
+        scales.append((tuple(cropped.get_size()), tuple(size)))
+        return original_scale(cropped, size)
+
+    monkeypatch.setattr(pygame.transform, "scale", recording_scale)
+    composite_draw_plane(
+        pygame,
+        destination,
+        plane,
+        _PixelFont(pygame),
+        20,
+        10,
+        resource_surfaces={manifest.key: source},
+    )
+
+    assert scales == [((2, 1), (20, 10))]
+
+
+def test_image_opacity_uses_a_temporary_and_preserves_cache_surface_and_clip():
+    pygame = pytest.importorskip("pygame")
+    destination = pygame.Surface((4, 2))
+    destination.fill((0, 0, 200))
+    destination.set_clip(pygame.Rect(2, 0, 2, 2))
+    source = pygame.Surface((1, 1), flags=pygame.SRCALPHA)
+    source.fill((200, 0, 0, 255))
+    source_pixel = tuple(source.get_at((0, 0)))
+    source_alpha = source.get_alpha()
+    manifest = _image_manifest(1, 1, 1)
+    plane = _image_plane(
+        (_image_draw(1, ImageFit.STRETCH, opacity=128),),
+        (manifest,),
+    )
+
+    composite_draw_plane(
+        pygame,
+        destination,
+        plane,
+        _PixelFont(pygame),
+        4,
+        2,
+        resource_surfaces={manifest.key: source},
+    )
+
+    assert tuple(destination.get_at((1, 1)))[:3] == (0, 0, 200)
+    assert tuple(destination.get_at((3, 1)))[:3] == pytest.approx(
+        (100, 0, 100),
+        abs=1,
+    )
+    assert destination.get_clip() == pygame.Rect(2, 0, 2, 2)
+    assert tuple(source.get_at((0, 0))) == source_pixel
+    assert source.get_alpha() == source_alpha

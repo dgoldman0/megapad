@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import sys
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -10,12 +12,21 @@ import pytest
 
 import session_viewer
 from display import VirtualTerminal
-from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
+from rich_terminal.retained_model import ResourceFormat
+from rich_terminal.retained_scene import ImageFit, ObjectBounds
+from rich_terminal.retained_view import (
+    DisplayScope,
+    ImageDraw,
+    ImageResourceManifest,
+    RetainedDrawPlane,
+    RetainedRegionDraw,
+)
 from session import TerminalCell, TerminalDisplayOffer, TerminalSnapshot
 from session_viewer import (
     DISPLAY_CLAIM_RETRY_SECONDS,
     KEY_REPEAT_DELAY_MS,
     KEY_REPEAT_INTERVAL_MS,
+    _DisplayResourceCache,
     _GuestKeyboardForwarder,
     _RetainedDisplayState,
     _accept_screen_update,
@@ -127,6 +138,78 @@ def _display_offer(offer_id=1, *, char="X"):
         regions=(),
     )
     return TerminalDisplayOffer(offer_id, scope, snapshot, plane)
+
+
+def _image_offer(
+    data: bytes,
+    *,
+    offer_id: int = 1,
+    resource_id: int = 9,
+    opacity: int = 0xFF,
+) -> TerminalDisplayOffer:
+    if len(data) != 8:
+        raise ValueError("test RGBA image must contain exactly two pixels")
+    manifest = ImageResourceManifest(
+        owner_id=3,
+        owner_generation=4,
+        resource_id=resource_id,
+        format=ResourceFormat.RGBA8,
+        width=2,
+        height=1,
+        byte_length=len(data),
+        sha3_256=hashlib.sha3_256(data).digest(),
+    )
+    draw = ImageDraw(
+        object_id=5,
+        z_order=0,
+        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        resource_id=resource_id,
+        fit=ImageFit.STRETCH,
+        opacity=opacity,
+    )
+    region = RetainedRegionDraw(
+        owner_id=manifest.owner_id,
+        owner_generation=manifest.owner_generation,
+        region_id=6,
+        cell_x=0,
+        cell_y=0,
+        cell_cols=1,
+        cell_rows=1,
+        z_order=0,
+        clipped=True,
+        draws=(draw,),
+    )
+    scope = DisplayScope(1, 2, 0, offer_id, 0, offer_id, offer_id)
+    return TerminalDisplayOffer(
+        offer_id,
+        scope,
+        _display_offer(1).cell,
+        RetainedDrawPlane(True, True, (region,), (), (manifest,)),
+    )
+
+
+def _resource_chunk_response(
+    offer: TerminalDisplayOffer,
+    data: bytes,
+    *,
+    offset: int,
+    chunk: bytes,
+) -> dict:
+    manifest = offer.retained.resources[0]
+    next_offset = offset + len(chunk)
+    return {
+        "status": "chunk",
+        "available": True,
+        "owner_id": manifest.owner_id,
+        "owner_generation": manifest.owner_generation,
+        "resource_id": manifest.resource_id,
+        "sha3_256": hashlib.sha3_256(data).hexdigest(),
+        "offset": offset,
+        "next_offset": next_offset,
+        "byte_length": len(data),
+        "data_base64": base64.b64encode(chunk).decode("ascii"),
+        "eof": next_offset == len(data),
+    }
 
 
 def test_keyboard_configuration_enables_established_repeat_rate():
@@ -370,6 +453,185 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
         state.stage(_display_offer(second.offer_id), 10)
     with pytest.raises(RuntimeError, match="did not advance"):
         state.stage(_display_offer(first.offer_id), 10)
+
+
+def test_display_resource_cache_verifies_incremental_bytes_and_reuses_exact_identity():
+    data = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+    first = _image_offer(data, offer_id=1)
+    client = _RecordingClient(
+        responses=(
+            _resource_chunk_response(first, data, offset=0, chunk=data[:3]),
+            _resource_chunk_response(first, data, offset=3, chunk=data[3:]),
+        )
+    )
+
+    class Surface:
+        @staticmethod
+        def get_size():
+            return 2, 1
+
+    decoded = []
+    pygame = SimpleNamespace(
+        image=SimpleNamespace(
+            frombuffer=lambda payload, size, mode: (
+                decoded.append((payload, size, mode)) or Surface()
+            )
+        )
+    )
+    cache = _DisplayResourceCache()
+    cache.stage(first, 7)
+
+    assert cache.fetch_pending_chunk(client, pygame, first, 7) == "progress"
+    assert cache.fetch_pending_chunk(client, pygame, first, 7) == "ready"
+    assert cache.pending_ready(first, 7)
+    manifest = first.retained.resources[0]
+    surface = cache.pending_surfaces(first, 7)[manifest.key]
+    assert isinstance(surface, Surface)
+    assert decoded == [(data, (2, 1), "RGBA")]
+    assert isinstance(decoded[0][0], bytearray)
+    assert [request[1]["offset"] for request in client.requests] == [0, 3]
+    assert [request[1]["max_bytes"] for request in client.requests] == [8, 5]
+
+    cache.promote(first, 7)
+    successor = _image_offer(data, offer_id=2)
+    cache.stage(successor, 7)
+    assert cache.pending_ready(successor, 7)
+    assert cache.pending_surfaces(successor, 7)[manifest.key] is surface
+    assert len(client.requests) == 2
+
+
+def test_display_resource_cache_rejections_are_data_free_and_frames_wait_for_bytes():
+    data = b"\x10\x20\x30\x40\x50\x60\x70\x80"
+    offer = _image_offer(data)
+    cache = _DisplayResourceCache()
+    cache.stage(offer, 2)
+    client = _RecordingClient(
+        responses=({"status": "stale_display", "available": False},)
+    )
+
+    assert cache.fetch_pending_chunk(
+        client,
+        SimpleNamespace(image=SimpleNamespace()),
+        offer,
+        2,
+    ) == "stale_display"
+    assert not cache.pending_ready(offer, 2)
+
+    state = _RetainedDisplayState()
+    state.stage(offer, 2)
+    state.stage_frame_hit_map(offer, ())
+    with pytest.raises(RuntimeError, match="resources were not ready"):
+        state.finish_presentation(
+            {"status": "presented", "presented": True, "revision": 3}
+        )
+
+
+def test_display_resource_cache_keeps_old_surface_until_successor_promotion():
+    first_data = b"\x01\x01\x01\x01\x02\x02\x02\x02"
+    next_data = b"\x03\x03\x03\x03\x04\x04\x04\x04"
+    first = _image_offer(first_data, offer_id=1, resource_id=9)
+    successor = _image_offer(next_data, offer_id=2, resource_id=10)
+
+    class Surface:
+        def __init__(self, payload):
+            self.payload = payload
+
+        @staticmethod
+        def get_size():
+            return 2, 1
+
+    pygame = SimpleNamespace(
+        image=SimpleNamespace(
+            frombuffer=lambda payload, _size, _mode: Surface(payload)
+        )
+    )
+    cache = _DisplayResourceCache()
+    cache.stage(first, 1)
+    assert cache.fetch_pending_chunk(
+        _RecordingClient(
+            (_resource_chunk_response(first, first_data, offset=0, chunk=first_data),)
+        ),
+        pygame,
+        first,
+        1,
+    ) == "ready"
+    cache.promote(first, 1)
+    first_key = first.retained.resources[0].key
+    first_surface = cache.acknowledged_surfaces[first_key]
+
+    cache.stage(successor, 1)
+    assert cache.acknowledged_surfaces[first_key] is first_surface
+    assert cache.fetch_pending_chunk(
+        _RecordingClient(
+            (
+                _resource_chunk_response(
+                    successor,
+                    next_data,
+                    offset=0,
+                    chunk=next_data,
+                ),
+            )
+        ),
+        pygame,
+        successor,
+        1,
+    ) == "ready"
+    assert cache.acknowledged_surfaces[first_key] is first_surface
+
+    successor_key = successor.retained.resources[0].key
+    successor_surface = cache.pending_surfaces(successor, 1)[successor_key]
+    cache.promote(successor, 1)
+    assert cache.acknowledged_surfaces == {successor_key: successor_surface}
+
+
+def test_display_resource_cache_rejects_nonprogressing_or_mismatched_chunks():
+    data = b"\x11\x12\x13\x14\x15\x16\x17\x18"
+    offer = _image_offer(data)
+    bad = _resource_chunk_response(offer, data, offset=0, chunk=data[:4])
+    bad["next_offset"] = 0
+    cache = _DisplayResourceCache()
+    cache.stage(offer, 5)
+
+    with pytest.raises(RuntimeError, match="forward progress"):
+        cache.fetch_pending_chunk(
+            _RecordingClient((bad,)),
+            SimpleNamespace(image=SimpleNamespace()),
+            offer,
+            5,
+        )
+
+
+def test_real_pygame_verified_buffer_flows_into_image_compositor_with_alpha():
+    pygame = pytest.importorskip("pygame")
+    data = bytes((200, 0, 0, 128, 0, 200, 0, 255))
+    offer = _image_offer(data, opacity=128)
+    cache = _DisplayResourceCache()
+    cache.stage(offer, 3)
+
+    assert cache.fetch_pending_chunk(
+        _RecordingClient(
+            (_resource_chunk_response(offer, data, offset=0, chunk=data),)
+        ),
+        pygame,
+        offer,
+        3,
+    ) == "ready"
+    destination = pygame.Surface((2, 1))
+    destination.fill((0, 0, 0))
+    session_viewer.composite_draw_plane(
+        pygame,
+        destination,
+        offer.retained,
+        object(),
+        2,
+        1,
+        resource_surfaces=cache.pending_surfaces(offer, 3),
+    )
+
+    red = tuple(destination.get_at((0, 0)))[:3]
+    green = tuple(destination.get_at((1, 0)))[:3]
+    assert 45 <= red[0] <= 55 and red[1:] == (0, 0)
+    assert 95 <= green[1] <= 105 and (green[0], green[2]) == (0, 0)
 
 
 def test_retained_display_reset_clears_fallback_and_input_context():

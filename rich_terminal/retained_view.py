@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from .apt1 import UINT32_MAX, UINT64_MAX
 from .cell_model import TerminalView
 from .output_coordinator import CompositeTerminalView
-from .retained_model import OwnerIdentity
+from .retained_model import OwnerIdentity, ResourceFormat
+from .retained_resources import RGBAResource
 from .retained_scene import (
     CONTROL_STATE_MASK,
     GLYPH_RUN_ATTRIBUTE_MASK,
@@ -25,6 +26,8 @@ from .retained_scene import (
     ControlState,
     GroupBody,
     GlyphRunBody,
+    ImageBody,
+    ImageFit,
     MeterBody,
     ObjectBounds,
     ObjectDefinition,
@@ -316,6 +319,142 @@ class PolylineDraw:
             self,
             "parent_bounds",
             _object_bounds_path("parent_bounds", self.parent_bounds),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ImageDraw:
+    """One visible renderer-neutral IMAGE reference and fit operation."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    resource_id: int
+    fit: ImageFit
+    opacity: int
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "object_id",
+            _integer("object_id", self.object_id, minimum=1, maximum=UINT64_MAX),
+        )
+        object.__setattr__(
+            self,
+            "z_order",
+            _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
+        )
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        object.__setattr__(
+            self,
+            "resource_id",
+            _integer(
+                "resource_id",
+                self.resource_id,
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+        )
+        if isinstance(self.fit, bool):
+            raise TypeError("fit must not be bool")
+        try:
+            fit = ImageFit(self.fit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("fit is not a RETAINED-1 IMAGE fit") from exc
+        object.__setattr__(self, "fit", fit)
+        object.__setattr__(
+            self,
+            "opacity",
+            _integer("opacity", self.opacity, minimum=0, maximum=0xFF),
+        )
+        object.__setattr__(
+            self,
+            "parent_bounds",
+            _object_bounds_path("parent_bounds", self.parent_bounds),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ImageResourceManifest:
+    """Immutable IMAGE metadata; pixel bytes remain in the exact pinned resource."""
+
+    owner_id: int
+    owner_generation: int
+    resource_id: int
+    format: ResourceFormat
+    width: int
+    height: int
+    byte_length: int
+    sha3_256: bytes
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "resource_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                ),
+            )
+        if isinstance(self.format, bool):
+            raise TypeError("format must not be bool")
+        try:
+            resource_format = ResourceFormat(self.format)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("format is not a retained resource format") from exc
+        object.__setattr__(self, "format", resource_format)
+        for name in ("width", "height"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=1,
+                    maximum=UINT32_MAX,
+                ),
+            )
+        object.__setattr__(
+            self,
+            "byte_length",
+            _integer(
+                "byte_length",
+                self.byte_length,
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+        )
+        if self.byte_length != self.width * self.height * 4:
+            raise ValueError("IMAGE resource length is not width * height * 4")
+        if not isinstance(self.sha3_256, (bytes, bytearray, memoryview)):
+            raise TypeError("sha3_256 must be bytes-like")
+        digest = bytes(self.sha3_256)
+        if len(digest) != 32:
+            raise ValueError("sha3_256 must be exactly 32 bytes")
+        object.__setattr__(self, "sha3_256", digest)
+
+    @property
+    def resource_key(self) -> tuple[int, int, int]:
+        return self.owner_id, self.owner_generation, self.resource_id
+
+    @property
+    def key(
+        self,
+    ) -> tuple[int, int, int, ResourceFormat, int, int, int, bytes]:
+        return (
+            self.owner_id,
+            self.owner_generation,
+            self.resource_id,
+            self.format,
+            self.width,
+            self.height,
+            self.byte_length,
+            self.sha3_256,
         )
 
 
@@ -991,6 +1130,7 @@ class TabSetDraw:
 ObjectDraw = (
     GlyphRunDraw
     | PolylineDraw
+    | ImageDraw
     | ReadoutDraw
     | MeterDraw
     | StatusDraw
@@ -1003,6 +1143,7 @@ RetainedDraw = ObjectDraw | SemanticRootDraw
 _OBJECT_DRAW_TYPES = (
     GlyphRunDraw,
     PolylineDraw,
+    ImageDraw,
     ReadoutDraw,
     MeterDraw,
     StatusDraw,
@@ -1074,6 +1215,7 @@ class RetainedRegionDraw:
                 (
                     GlyphRunDraw,
                     PolylineDraw,
+                    ImageDraw,
                     ReadoutDraw,
                     MeterDraw,
                     StatusDraw,
@@ -1101,6 +1243,7 @@ class RetainedDrawPlane:
     retained_visible: bool
     regions: tuple[RetainedRegionDraw, ...]
     series: tuple[SeriesHistoryDraw, ...] = ()
+    resources: tuple[ImageResourceManifest, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1137,8 +1280,28 @@ class RetainedDrawPlane:
             raise ValueError("series history identities are duplicated")
         if not self.retained_visible and series:
             raise ValueError("a hidden retained plane cannot contain series histories")
+        resources = tuple(self.resources)
+        if any(
+            not isinstance(resource, ImageResourceManifest)
+            for resource in resources
+        ):
+            raise TypeError(
+                "resources must contain only ImageResourceManifest values"
+            )
+        if tuple(sorted(resources, key=lambda resource: resource.key)) != resources:
+            raise ValueError("IMAGE resource manifests are not in owner/resource order")
+        resources_by_key = {
+            resource.resource_key: resource for resource in resources
+        }
+        if len(resources_by_key) != len(resources):
+            raise ValueError("IMAGE resource manifest identities are duplicated")
+        if not self.retained_visible and resources:
+            raise ValueError(
+                "a hidden retained plane cannot contain IMAGE resource manifests"
+            )
         control_ids_by_owner: dict[tuple[int, int], set[int]] = {}
         referenced_series: set[tuple[int, int, int]] = set()
+        referenced_resources: set[tuple[int, int, int]] = set()
         for region in regions:
             owner = region.owner_id, region.owner_generation
             owner_control_ids = control_ids_by_owner.setdefault(owner, set())
@@ -1148,6 +1311,15 @@ class RetainedDrawPlane:
                     if key not in series_by_key:
                         raise ValueError("series consumer has no copied history")
                     referenced_series.add(key)
+                if isinstance(draw, ImageDraw):
+                    key = (
+                        region.owner_id,
+                        region.owner_generation,
+                        draw.resource_id,
+                    )
+                    if key not in resources_by_key:
+                        raise ValueError("IMAGE draw has no exact resource manifest")
+                    referenced_resources.add(key)
                 if isinstance(draw, _OBJECT_DRAW_TYPES):
                     continue
                 draw_control_ids = _semantic_draw_control_ids(draw)
@@ -1156,8 +1328,13 @@ class RetainedDrawPlane:
                 owner_control_ids.update(draw_control_ids)
         if referenced_series != set(series_by_key):
             raise ValueError("draw plane contains an unreferenced series history")
+        if referenced_resources != set(resources_by_key):
+            raise ValueError(
+                "draw plane contains an unreferenced IMAGE resource manifest"
+            )
         object.__setattr__(self, "regions", regions)
         object.__setattr__(self, "series", series)
+        object.__setattr__(self, "resources", resources)
 
 
 def _effectively_visible(
@@ -1558,6 +1735,69 @@ def _project_semantic_root(
     raise RetainedViewError(f"semantic root has unsupported kind {kind.name}")
 
 
+def _index_pinned_image_resources(
+    view: CompositeTerminalView,
+) -> dict[tuple[int, int, int], RGBAResource]:
+    """Index exact active resource pins without copying their pixel bytes."""
+
+    pinned: dict[tuple[int, int, int], RGBAResource] = {}
+    for resource in view.resources:
+        if not isinstance(resource, RGBAResource):
+            raise RetainedViewError(
+                "composite IMAGE pins contain a non-resource value"
+            )
+        owner = resource.owner
+        if (
+            owner.session_id != view.cell.session_id
+            or owner.presentation_epoch != view.presentation_epoch
+        ):
+            raise RetainedViewError("composite IMAGE pin is outside display scope")
+        key = owner.owner_id, owner.owner_generation, resource.resource_id
+        prior = pinned.setdefault(key, resource)
+        if prior is not resource:
+            raise RetainedViewError(
+                "composite IMAGE pins conflict for one exact resource identity"
+            )
+    return pinned
+
+
+def _require_pinned_image_resource(
+    pinned: Mapping[tuple[int, int, int], RGBAResource],
+    owner: OwnerIdentity,
+    resource_id: int,
+) -> RGBAResource:
+    key = owner.owner_id, owner.owner_generation, resource_id
+    resource = pinned.get(key)
+    if resource is None:
+        if any(
+            candidate.resource_id == resource_id
+            for candidate in pinned.values()
+        ):
+            raise RetainedViewError(
+                "visible IMAGE resource pin belongs to the wrong exact owner"
+            )
+        raise RetainedViewError("visible IMAGE has no exact pinned resource")
+    if resource.owner != owner or resource.resource_id != resource_id:
+        raise RetainedViewError(
+            "visible IMAGE resource pin belongs to the wrong exact owner"
+        )
+    return resource
+
+
+def _image_resource_manifest(resource: RGBAResource) -> ImageResourceManifest:
+    owner = resource.owner
+    return ImageResourceManifest(
+        owner_id=owner.owner_id,
+        owner_generation=owner.owner_generation,
+        resource_id=resource.resource_id,
+        format=resource.format,
+        width=resource.width,
+        height=resource.height,
+        byte_length=resource.byte_length,
+        sha3_256=resource.digest,
+    )
+
+
 def project_composite_draw_plane(
     view: CompositeTerminalView,
 ) -> tuple[DisplayScope, RetainedDrawPlane]:
@@ -1620,8 +1860,12 @@ def project_composite_draw_plane(
             (),
         )
 
+    pinned_resources = _index_pinned_image_resources(view)
     projected_regions: list[RetainedRegionDraw] = []
     projected_series: dict[tuple[int, int, int], SeriesHistoryDraw] = {}
+    projected_resources: dict[
+        tuple[int, int, int], ImageResourceManifest
+    ] = {}
     for owner_key, owner_scene in retained.active.owners.items():
         if not isinstance(owner_scene, OwnerScene):
             raise RetainedViewError("retained scene contains an invalid owner value")
@@ -1735,6 +1979,34 @@ def project_composite_draw_plane(
                             stroke_width=body.stroke_width,
                             color=body.color,
                             closed=body.closed,
+                            parent_bounds=parent_bounds,
+                        )
+                    )
+                    continue
+                if isinstance(body, ImageBody):
+                    resource = _require_pinned_image_resource(
+                        pinned_resources,
+                        owner,
+                        body.resource_id,
+                    )
+                    manifest = _image_resource_manifest(resource)
+                    resource_key = manifest.resource_key
+                    prior_manifest = projected_resources.setdefault(
+                        resource_key,
+                        manifest,
+                    )
+                    if prior_manifest != manifest:
+                        raise RetainedViewError(
+                            "visible IMAGE pins disagree on immutable metadata"
+                        )
+                    draws.append(
+                        ImageDraw(
+                            object_id=definition.object_id,
+                            z_order=definition.z_order,
+                            bounds=bounds,
+                            resource_id=body.resource_id,
+                            fit=body.fit,
+                            opacity=body.opacity,
                             parent_bounds=parent_bounds,
                         )
                     )
@@ -1889,12 +2161,17 @@ def project_composite_draw_plane(
         series=tuple(
             projected_series[key] for key in sorted(projected_series)
         ),
+        resources=tuple(
+            sorted(projected_resources.values(), key=lambda resource: resource.key)
+        ),
     )
 
 
 __all__ = [
     "DisplayScope",
     "GlyphRunDraw",
+    "ImageDraw",
+    "ImageResourceManifest",
     "MenuBarDraw",
     "MenuDraw",
     "MenuEntryDraw",

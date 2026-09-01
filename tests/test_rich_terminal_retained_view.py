@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from types import MappingProxyType
 
@@ -9,11 +10,14 @@ import pytest
 
 from rich_terminal.cell_model import BLANK_CELL, Cursor, TerminalView
 from rich_terminal.output_coordinator import CompositeTerminalView
-from rich_terminal.retained_model import OwnerIdentity
+from rich_terminal.retained_model import OwnerIdentity, ResourceFormat
+from rich_terminal.retained_resources import ResourceDeclaration, RGBAResource
 from rich_terminal.retained_scene import (
     GroupBody,
     HiddenTargetKind,
     GlyphRunBody,
+    ImageBody,
+    ImageFit,
     ObjectBounds,
     ObjectDefinition,
     OwnerScene,
@@ -36,10 +40,13 @@ from rich_terminal.retained_scene import (
 )
 from rich_terminal.retained_view import (
     DisplayScope,
+    ImageDraw,
+    ImageResourceManifest,
     MeterDraw,
     PlotDraw,
     PolylineDraw,
     ReadoutDraw,
+    RetainedDrawPlane,
     RetainedViewError,
     SeriesHistoryDraw,
     StatusDraw,
@@ -77,6 +84,28 @@ def _owner(owner_id: int, generation: int = 1) -> OwnerIdentity:
         PRESENTATION_EPOCH,
         owner_id,
         generation,
+    )
+
+
+def _resource(
+    owner: OwnerIdentity,
+    resource_id: int,
+    pixels: bytes,
+    *,
+    width: int = 1,
+    height: int = 1,
+) -> RGBAResource:
+    return RGBAResource(
+        owner,
+        ResourceDeclaration(
+            resource_id=resource_id,
+            format=ResourceFormat.RGBA8,
+            width=width,
+            height=height,
+            byte_length=len(pixels),
+            digest=hashlib.sha3_256(pixels).digest(),
+        ),
+        pixels,
     )
 
 
@@ -162,6 +191,7 @@ def _composite(
     initialized: bool = True,
     visible: bool = True,
     hidden: RetainedScene | None = None,
+    resources: tuple[RGBAResource, ...] = (),
 ) -> CompositeTerminalView:
     active = RetainedScene(
         MappingProxyType(
@@ -184,6 +214,7 @@ def _composite(
         geometry=GEOMETRY,
         cell=_cell_view(),
         retained=state,
+        resources=resources,
     )
 
 
@@ -339,6 +370,177 @@ def test_projection_copies_polyline_geometry_and_nested_group_path():
     assert draw.stroke_width == body.stroke_width
     assert draw.color == GREEN
     assert draw.closed
+
+
+def test_projection_copies_images_and_deduplicates_sorted_resource_manifests():
+    owner = _owner(5, 7)
+    region = _region(owner, 1)
+    group = replace(
+        _object(owner, 1, 1, GroupBody()),
+        bounds=ObjectBounds(0x10000000, 0, 0xEFFFFFFF, 0xFFFFFFFF),
+    )
+    later = _object(
+        owner,
+        2,
+        1,
+        ImageBody(9, ImageFit.COVER, 128),
+        z_order=2,
+        parent=1,
+    )
+    first = _object(
+        owner,
+        3,
+        1,
+        ImageBody(3, ImageFit.STRETCH, 255),
+        z_order=-1,
+    )
+    repeated = _object(
+        owner,
+        4,
+        1,
+        ImageBody(9, ImageFit.CONTAIN, 64),
+        z_order=3,
+        parent=1,
+    )
+    invisible = _object(
+        owner,
+        5,
+        1,
+        ImageBody(11, ImageFit.CONTAIN, 255),
+        visible=False,
+    )
+    resource_3 = _resource(owner, 3, bytes((3, 4, 5, 255)))
+    resource_9 = _resource(
+        owner,
+        9,
+        bytes((9, 8, 7, 255, 6, 5, 4, 255)),
+        width=2,
+    )
+    resource_11 = _resource(owner, 11, bytes((1, 2, 3, 255)))
+
+    _, plane = project_composite_draw_plane(
+        _composite(
+            [
+                _owner_scene(
+                    owner,
+                    [region],
+                    [repeated, invisible, later, group, first],
+                )
+            ],
+            resources=(resource_11, resource_9, resource_3, resource_9),
+        )
+    )
+
+    assert isinstance(plane, RetainedDrawPlane)
+    first_draw, later_draw, repeated_draw = plane.regions[0].draws
+    assert all(
+        isinstance(draw, ImageDraw)
+        for draw in (first_draw, later_draw, repeated_draw)
+    )
+    assert (
+        first_draw.object_id,
+        first_draw.resource_id,
+        first_draw.fit,
+        first_draw.opacity,
+    ) == (3, 3, ImageFit.STRETCH, 255)
+    assert (
+        later_draw.object_id,
+        later_draw.resource_id,
+        later_draw.fit,
+        later_draw.opacity,
+        later_draw.parent_bounds,
+    ) == (2, 9, ImageFit.COVER, 128, (group.bounds,))
+    assert repeated_draw.parent_bounds == (group.bounds,)
+
+    assert [manifest.resource_id for manifest in plane.resources] == [3, 9]
+    manifest_3, manifest_9 = plane.resources
+    assert isinstance(manifest_3, ImageResourceManifest)
+    assert manifest_3.key == (
+        owner.owner_id,
+        owner.owner_generation,
+        3,
+        ResourceFormat.RGBA8,
+        1,
+        1,
+        4,
+        hashlib.sha3_256(bytes((3, 4, 5, 255))).digest(),
+    )
+    assert (
+        manifest_9.width,
+        manifest_9.height,
+        manifest_9.byte_length,
+        manifest_9.sha3_256,
+    ) == (2, 1, 8, resource_9.digest)
+    assert not hasattr(manifest_9, "data")
+
+    with pytest.raises(ValueError, match="no exact resource manifest"):
+        replace(plane, resources=())
+    with pytest.raises(ValueError, match="identities are duplicated"):
+        replace(
+            plane,
+            resources=(manifest_3, manifest_3, manifest_9),
+        )
+    empty_region = replace(plane.regions[0], draws=())
+    with pytest.raises(ValueError, match="unreferenced IMAGE resource manifest"):
+        replace(plane, regions=(empty_region,))
+
+
+def test_projection_rejects_missing_and_wrong_exact_owner_image_pins():
+    owner = _owner(5, 7)
+    region = _region(owner, 1)
+    image = _object(
+        owner,
+        1,
+        1,
+        ImageBody(4, ImageFit.CONTAIN, 255),
+    )
+    scene = _owner_scene(owner, [region], [image])
+
+    with pytest.raises(RetainedViewError, match="no exact pinned resource"):
+        project_composite_draw_plane(_composite([scene]))
+
+    wrong_owner = _owner(6, 7)
+    wrong_pin = _resource(wrong_owner, 4, bytes((1, 2, 3, 255)))
+    with pytest.raises(RetainedViewError, match="wrong exact owner"):
+        project_composite_draw_plane(
+            _composite([scene], resources=(wrong_pin,))
+        )
+
+
+def test_hidden_retained_plane_exposes_no_image_draws_or_manifests():
+    owner = _owner(5)
+    region = _region(owner, 1)
+    image = _object(
+        owner,
+        1,
+        1,
+        ImageBody(1, ImageFit.COVER, 200),
+    )
+    resource = _resource(owner, 1, bytes((10, 20, 30, 255)))
+
+    _, plane = project_composite_draw_plane(
+        _composite(
+            [_owner_scene(owner, [region], [image])],
+            visible=False,
+            resources=(resource,),
+        )
+    )
+
+    assert not plane.retained_visible
+    assert plane.regions == ()
+    assert plane.resources == ()
+    manifest = ImageResourceManifest(
+        owner.owner_id,
+        owner.owner_generation,
+        resource.resource_id,
+        resource.format,
+        resource.width,
+        resource.height,
+        resource.byte_length,
+        resource.digest,
+    )
+    with pytest.raises(ValueError, match="hidden retained plane"):
+        RetainedDrawPlane(True, False, (), (), (manifest,))
 
 
 def test_projection_formats_and_copies_instruments_without_renderer_hints():

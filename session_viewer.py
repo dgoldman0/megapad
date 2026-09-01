@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import hashlib
 import operator
 import sys
 import time
 from collections import deque
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from display import VirtualTerminal
@@ -20,7 +24,12 @@ from rich_terminal.pygame_view import (
     composite_draw_plane,
     composite_draw_plane_result,
 )
-from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
+from rich_terminal.retained_model import ResourceFormat
+from rich_terminal.retained_view import (
+    DisplayScope,
+    ImageResourceManifest,
+    RetainedDrawPlane,
+)
 from session import TerminalDisplayOffer, TerminalSnapshot
 from shared_session import (
     DEFAULT_SOCKET,
@@ -87,6 +96,360 @@ def _status_display_required(status) -> bool:
     return required
 
 
+@dataclass(frozen=True, slots=True)
+class _DisplayResourceKey:
+    """Cache one immutable RGBA resource within its reset-stable scope."""
+
+    attachment_epoch: int
+    session_id: int
+    presentation_epoch: int
+    owner_id: int
+    owner_generation: int
+    resource_id: int
+    format: ResourceFormat
+    width: int
+    height: int
+    byte_length: int
+    sha3_256: bytes
+
+    @classmethod
+    def from_manifest(
+        cls,
+        scope: DisplayScope,
+        manifest: ImageResourceManifest,
+    ) -> "_DisplayResourceKey":
+        if not isinstance(scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        if not isinstance(manifest, ImageResourceManifest):
+            raise TypeError("manifest must be ImageResourceManifest")
+        return cls(
+            scope.attachment_epoch,
+            scope.session_id,
+            scope.presentation_epoch,
+            manifest.owner_id,
+            manifest.owner_generation,
+            manifest.resource_id,
+            manifest.format,
+            manifest.width,
+            manifest.height,
+            manifest.byte_length,
+            manifest.sha3_256,
+        )
+
+    @property
+    def manifest_key(self) -> tuple:
+        return (
+            self.owner_id,
+            self.owner_generation,
+            self.resource_id,
+            self.format,
+            self.width,
+            self.height,
+            self.byte_length,
+            self.sha3_256,
+        )
+
+
+@dataclass(slots=True)
+class _DisplayResourceDownload:
+    manifest: ImageResourceManifest
+    data: bytearray = field(default_factory=bytearray)
+    digest: object = field(default_factory=hashlib.sha3_256)
+
+    @property
+    def offset(self) -> int:
+        return len(self.data)
+
+
+@dataclass(slots=True)
+class _CachedDisplayResource:
+    """Keep the verified backing alive for a zero-copy Pygame surface."""
+
+    surface: object
+    pixels: bytearray
+
+
+class _DisplayResourceCache:
+    """Fetch and retain only resources needed by acknowledged/pending offers.
+
+    Fetching is deliberately incremental: the main viewer asks for one exact
+    chunk between event-pump passes and does not draw or flip the pending frame
+    until every dependency has passed its length and SHA3 checks.
+    """
+
+    _REJECTION_STATUSES = {
+        "stale_generation",
+        "stale_display",
+        "invalid_resource",
+    }
+
+    def __init__(self) -> None:
+        self._surfaces: dict[_DisplayResourceKey, _CachedDisplayResource] = {}
+        self._downloads: dict[_DisplayResourceKey, _DisplayResourceDownload] = {}
+        self._acknowledged_keys: frozenset[_DisplayResourceKey] = frozenset()
+        self._pending_token: tuple[int, DisplayScope] | None = None
+        self._pending_generation: int | None = None
+        self._pending_keys: tuple[_DisplayResourceKey, ...] = ()
+        self._pending_manifests: dict[
+            _DisplayResourceKey, ImageResourceManifest
+        ] = {}
+
+    @staticmethod
+    def _offer_token(offer: TerminalDisplayOffer) -> tuple[int, DisplayScope]:
+        if not isinstance(offer, TerminalDisplayOffer):
+            raise TypeError("offer must be TerminalDisplayOffer")
+        return offer.offer_id, offer.scope
+
+    @staticmethod
+    def _offer_resources(
+        offer: TerminalDisplayOffer,
+    ) -> tuple[ImageResourceManifest, ...]:
+        resources = tuple(offer.retained.resources)
+        if any(
+            not isinstance(resource, ImageResourceManifest)
+            for resource in resources
+        ):
+            raise TypeError("offer resources must be IMAGE resource manifests")
+        return resources
+
+    def clear(self) -> None:
+        """Drop both physical-display generations and all partial bytes."""
+
+        self._surfaces.clear()
+        self._downloads.clear()
+        self._acknowledged_keys = frozenset()
+        self._pending_token = None
+        self._pending_generation = None
+        self._pending_keys = ()
+        self._pending_manifests.clear()
+
+    def stage(self, offer: TerminalDisplayOffer, generation: int) -> None:
+        normalized_generation = _nonnegative_wire_integer(
+            generation, "display resource generation"
+        )
+        manifests = self._offer_resources(offer)
+        keys = tuple(
+            _DisplayResourceKey.from_manifest(offer.scope, manifest)
+            for manifest in manifests
+        )
+        if len(set(keys)) != len(keys):
+            raise RuntimeError("display offer contains duplicate resource manifests")
+        self._pending_token = self._offer_token(offer)
+        self._pending_generation = normalized_generation
+        self._pending_keys = keys
+        self._pending_manifests = dict(zip(keys, manifests, strict=True))
+
+        live_keys = self._acknowledged_keys | frozenset(keys)
+        self._surfaces = {
+            key: surface
+            for key, surface in self._surfaces.items()
+            if key in live_keys
+        }
+        self._downloads = {
+            key: download
+            for key, download in self._downloads.items()
+            if key in keys and key not in self._surfaces
+        }
+
+    def _matches_pending(
+        self,
+        offer: TerminalDisplayOffer,
+        generation: int,
+    ) -> bool:
+        return (
+            self._pending_token == self._offer_token(offer)
+            and self._pending_generation
+            == _nonnegative_wire_integer(
+                generation, "display resource generation"
+            )
+        )
+
+    def pending_ready(
+        self,
+        offer: TerminalDisplayOffer,
+        generation: int,
+    ) -> bool:
+        return self._matches_pending(offer, generation) and all(
+            key in self._surfaces for key in self._pending_keys
+        )
+
+    def pending_surfaces(
+        self,
+        offer: TerminalDisplayOffer,
+        generation: int,
+    ) -> dict[tuple, object]:
+        if not self.pending_ready(offer, generation):
+            raise RuntimeError("pending display resources are not complete")
+        return {
+            key.manifest_key: self._surfaces[key].surface
+            for key in self._pending_keys
+        }
+
+    @property
+    def acknowledged_surfaces(self) -> dict[tuple, object]:
+        return {
+            key.manifest_key: self._surfaces[key].surface
+            for key in self._acknowledged_keys
+        }
+
+    def promote(self, offer: TerminalDisplayOffer, generation: int) -> None:
+        if not self.pending_ready(offer, generation):
+            raise RuntimeError("cannot promote incomplete display resources")
+        self._acknowledged_keys = frozenset(self._pending_keys)
+        self._surfaces = {
+            key: surface
+            for key, surface in self._surfaces.items()
+            if key in self._acknowledged_keys
+        }
+        self._downloads.clear()
+        self._pending_token = None
+        self._pending_generation = None
+        self._pending_keys = ()
+        self._pending_manifests.clear()
+
+    @staticmethod
+    def _decoded_chunk(response: Mapping, download: _DisplayResourceDownload) -> bytes:
+        manifest = download.manifest
+        expected_fields = {
+            "status",
+            "available",
+            "owner_id",
+            "owner_generation",
+            "resource_id",
+            "sha3_256",
+            "offset",
+            "next_offset",
+            "byte_length",
+            "data_base64",
+            "eof",
+        }
+        if set(response) != expected_fields:
+            raise RuntimeError("resource chunk response has invalid shape")
+        if response.get("status") != "chunk" or response.get("available") is not True:
+            raise RuntimeError("resource chunk response has invalid availability")
+        for field_name, expected in (
+            ("owner_id", manifest.owner_id),
+            ("owner_generation", manifest.owner_generation),
+            ("resource_id", manifest.resource_id),
+            ("byte_length", manifest.byte_length),
+        ):
+            actual = _nonnegative_wire_integer(
+                response.get(field_name), f"resource chunk {field_name}"
+            )
+            if actual != expected:
+                raise RuntimeError(
+                    f"resource chunk {field_name} does not match its manifest"
+                )
+        digest_text = response.get("sha3_256")
+        if (
+            not isinstance(digest_text, str)
+            or digest_text != manifest.sha3_256.hex()
+        ):
+            raise RuntimeError("resource chunk digest does not match its manifest")
+        offset = _nonnegative_wire_integer(
+            response.get("offset"), "resource chunk offset"
+        )
+        next_offset = _nonnegative_wire_integer(
+            response.get("next_offset"), "resource chunk next_offset"
+        )
+        if offset != download.offset:
+            raise RuntimeError("resource chunk offset is not the requested offset")
+        if not offset < next_offset <= manifest.byte_length:
+            raise RuntimeError("resource chunk did not make bounded forward progress")
+        eof = response.get("eof")
+        if not isinstance(eof, bool):
+            raise RuntimeError("resource chunk eof must be bool")
+        if eof is not (next_offset == manifest.byte_length):
+            raise RuntimeError("resource chunk eof does not match its next offset")
+        encoded = response.get("data_base64")
+        if not isinstance(encoded, str):
+            raise RuntimeError("resource chunk data_base64 must be str")
+        try:
+            chunk = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise RuntimeError("resource chunk has invalid base64 data") from exc
+        if len(chunk) != next_offset - offset:
+            raise RuntimeError("resource chunk byte count does not match its offsets")
+        return chunk
+
+    def fetch_pending_chunk(
+        self,
+        client,
+        pygame_module,
+        offer: TerminalDisplayOffer,
+        generation: int,
+    ) -> str:
+        """Fetch at most one server-bounded chunk and report exact progress."""
+
+        if not self._matches_pending(offer, generation):
+            raise RuntimeError("resource fetch is outside the pending display offer")
+        missing = next(
+            (key for key in self._pending_keys if key not in self._surfaces),
+            None,
+        )
+        if missing is None:
+            return "ready"
+        manifest = self._pending_manifests[missing]
+        if manifest.format is not ResourceFormat.RGBA8:
+            raise RuntimeError("display resource format is not RGBA8")
+        download = self._downloads.setdefault(
+            missing,
+            _DisplayResourceDownload(manifest),
+        )
+        remaining = manifest.byte_length - download.offset
+        if remaining <= 0:
+            raise RuntimeError("resource download reached an uninstalled terminal state")
+        response = client.request(
+            "display_resource_chunk",
+            generation=generation,
+            display_offer_id=offer.offer_id,
+            display_scope=display_scope_to_wire(offer.scope),
+            owner_id=manifest.owner_id,
+            owner_generation=manifest.owner_generation,
+            resource_id=manifest.resource_id,
+            sha3_256=manifest.sha3_256.hex(),
+            offset=download.offset,
+            max_bytes=remaining,
+        )
+        if not isinstance(response, Mapping):
+            raise RuntimeError("resource chunk returned no response object")
+        status = response.get("status")
+        if status in self._REJECTION_STATUSES:
+            if set(response) != {"status", "available"}:
+                raise RuntimeError("rejected resource chunk response has invalid shape")
+            if response.get("available") is not False:
+                raise RuntimeError("rejected resource chunk response has invalid state")
+            return str(status)
+
+        chunk = self._decoded_chunk(response, download)
+        download.data.extend(chunk)
+        download.digest.update(chunk)
+        if download.offset < manifest.byte_length:
+            return "progress"
+        if download.digest.digest() != manifest.sha3_256:
+            raise RuntimeError("completed display resource failed SHA3 verification")
+        try:
+            surface = pygame_module.image.frombuffer(
+                download.data,
+                (manifest.width, manifest.height),
+                "RGBA",
+            )
+        except AttributeError as exc:
+            raise TypeError("pygame image API must expose frombuffer()") from exc
+        try:
+            surface_size = tuple(surface.get_size())
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise TypeError("decoded resource surface must expose get_size()") from exc
+        if surface_size != (manifest.width, manifest.height):
+            raise RuntimeError("decoded resource surface has the wrong dimensions")
+        self._surfaces[missing] = _CachedDisplayResource(
+            surface,
+            download.data,
+        )
+        del self._downloads[missing]
+        return "ready" if self.pending_ready(offer, generation) else "progress"
+
+
 def _accepted_presentation_revision(response) -> int | None:
     """Return the CELL cursor only for one accepted sink presentation."""
 
@@ -120,6 +483,8 @@ class _RetainedDisplayState:
         self.pending_offer: TerminalDisplayOffer | None = None
         self.pending_generation: int | None = None
         self.retained_plane: RetainedDrawPlane | None = None
+        self._pending_resource_token: tuple[int, DisplayScope] | None = None
+        self._pending_resources_ready = False
         self._pending_hit_token: tuple[int, DisplayScope] | None = None
         self._pending_hit_targets: tuple[ControlHitTarget, ...] = ()
         self._pending_hit_map_rendered = False
@@ -162,12 +527,17 @@ class _RetainedDisplayState:
         self._hit_map_token = None
         self._hit_targets = ()
 
+    def _clear_pending_resources(self) -> None:
+        self._pending_resource_token = None
+        self._pending_resources_ready = False
+
     def reset(self) -> None:
         """Drop visual candidates while preserving the last sink ACK cursor."""
 
         self.pending_offer = None
         self.pending_generation = None
         self.retained_plane = None
+        self._clear_pending_resources()
         self._clear_hit_maps()
 
     def stage(self, offer: TerminalDisplayOffer, generation: int) -> None:
@@ -187,9 +557,45 @@ class _RetainedDisplayState:
         # input authority before the candidate crosses its sink boundary.
         self._hit_map_token = None
         self._hit_targets = ()
-        self._pending_hit_token = self._offer_token(offer)
+        token = self._offer_token(offer)
+        self._pending_resource_token = token
+        self._pending_resources_ready = not bool(offer.retained.resources)
+        self._pending_hit_token = token
         self._pending_hit_targets = ()
         self._pending_hit_map_rendered = False
+
+    @property
+    def pending_resources_ready(self) -> bool:
+        offer = self.pending_offer
+        return bool(
+            offer is not None
+            and self._pending_resource_token == self._offer_token(offer)
+            and self._pending_resources_ready
+        )
+
+    @property
+    def poll_offer_cursor(self) -> int:
+        """Suppress redelivery while a potentially large offer is fetched."""
+
+        pending = self.pending_offer
+        return max(
+            self.since_offer,
+            0 if pending is None else pending.offer_id,
+        )
+
+    def stage_resources_ready(self, offer: TerminalDisplayOffer) -> None:
+        """Bind verified compositor resources to one exact pending offer."""
+
+        if not isinstance(offer, TerminalDisplayOffer):
+            raise TypeError("offer must be TerminalDisplayOffer")
+        token = self._offer_token(offer)
+        if self.pending_offer is None or token != self._offer_token(
+            self.pending_offer
+        ):
+            raise RuntimeError("resources do not belong to the pending offer")
+        if token != self._pending_resource_token:
+            raise RuntimeError("pending resource token is inconsistent")
+        self._pending_resources_ready = True
 
     def stage_frame_hit_map(
         self,
@@ -236,12 +642,15 @@ class _RetainedDisplayState:
             return None
         token = self._offer_token(offer)
         if (
-            self._pending_hit_token != token
+            self._pending_resource_token != token
+            or not self._pending_resources_ready
+            or self._pending_hit_token != token
             or not self._pending_hit_map_rendered
         ):
             self.reset()
             raise RuntimeError(
-                "presented hit map was not rendered for its exact offer"
+                "presented frame resources were not ready or its hit map "
+                "was not rendered for the exact offer"
             )
         self.since_offer = offer.offer_id
         self.retained_plane = offer.retained
@@ -249,6 +658,7 @@ class _RetainedDisplayState:
         self._hit_targets = self._pending_hit_targets
         self.pending_offer = None
         self.pending_generation = None
+        self._clear_pending_resources()
         self._pending_hit_token = None
         self._pending_hit_targets = ()
         self._pending_hit_map_rendered = False
@@ -628,6 +1038,7 @@ def _retry_display_claim(
     keyboard: _GuestKeyboardForwarder,
     display_state: _RetainedDisplayState,
     revision: int,
+    resource_cache: _DisplayResourceCache | None = None,
 ) -> tuple[bool, int, bool]:
     """Retry one observer lease claim and invalidate state on exact takeover."""
 
@@ -636,6 +1047,8 @@ def _retry_display_claim(
     if not claimed:
         return False, revision, False
     display_state.reset()
+    if resource_cache is not None:
+        resource_cache.clear()
     keyboard.clear_display_context(waiting=keyboard.display_required)
     keyboard.set_input_enabled(True)
     return True, -1, True
@@ -673,6 +1086,7 @@ def _accept_screen_update(
     keyboard: _GuestKeyboardForwarder,
     display_state: _RetainedDisplayState,
     revision: int,
+    resource_cache: _DisplayResourceCache | None = None,
 ) -> tuple[int, bool]:
     """Consume one coherent screen result and return its CELL cursor/resize."""
 
@@ -705,6 +1119,8 @@ def _accept_screen_update(
             keyboard.set_generation(screen_generation)
             revision = -1
             display_state.reset()
+            if resource_cache is not None:
+                resource_cache.clear()
     if revision < 0 and not has_payload:
         raise RuntimeError("screen refresh returned no CELL or display offer")
     if "snapshot" in update:
@@ -715,10 +1131,14 @@ def _accept_screen_update(
             raise RuntimeError("nonholder received a retained display offer")
         offer = display_offer_from_wire(update["display_offer"])
         display_state.stage(offer, update["generation"])
+        if resource_cache is not None:
+            resource_cache.stage(offer, update["generation"])
         apply_terminal_snapshot(terminal, offer.cell)
         keyboard.begin_display_offer()
     elif "snapshot" in update:
         display_state.reset()
+        if resource_cache is not None:
+            resource_cache.clear()
         keyboard.clear_display_context(waiting=keyboard.display_required)
     return revision, old_size != (terminal.cols, terminal.rows)
 
@@ -729,6 +1149,7 @@ def _accept_status_update(
     keyboard: _GuestKeyboardForwarder,
     display_state: _RetainedDisplayState,
     revision: int,
+    resource_cache: _DisplayResourceCache | None = None,
 ) -> tuple[int, bool]:
     """Apply display-relevant status and report whether CELL must be refetched."""
 
@@ -741,6 +1162,8 @@ def _accept_status_update(
         keyboard.set_generation(latest_generation)
         revision = -1
         display_state.reset()
+        if resource_cache is not None:
+            resource_cache.clear()
         refresh_required = True
     fallback_context = not latest_required and (
         keyboard.display_required
@@ -751,6 +1174,8 @@ def _accept_status_update(
     if fallback_context:
         revision = -1
         display_state.reset()
+        if resource_cache is not None:
+            resource_cache.clear()
         refresh_required = True
     keyboard.set_display_required(latest_required)
     return revision, refresh_required
@@ -799,6 +1224,7 @@ def compose_terminal_frame(
     retained_plane: RetainedDrawPlane | None,
     show_cursor: bool,
     glyph_cache: dict | None = None,
+    resource_surfaces: Mapping | None = None,
 ):
     """Render CELL, then retained draws, then the terminal cursor."""
 
@@ -811,14 +1237,25 @@ def compose_terminal_frame(
         _cache=glyph_cache,
     )
     if retained_plane is not None:
-        composite_draw_plane(
-            pygame_module,
-            surface,
-            retained_plane,
-            font,
-            cell_width,
-            cell_height,
-        )
+        if resource_surfaces is None:
+            composite_draw_plane(
+                pygame_module,
+                surface,
+                retained_plane,
+                font,
+                cell_width,
+                cell_height,
+            )
+        else:
+            composite_draw_plane(
+                pygame_module,
+                surface,
+                retained_plane,
+                font,
+                cell_width,
+                cell_height,
+                resource_surfaces=resource_surfaces,
+            )
     _paint_terminal_cursor(
         pygame_module,
         surface,
@@ -843,6 +1280,7 @@ def compose_terminal_frame_result(
     control_font=None,
     hovered: ControlIdentity | None = None,
     pressed: ControlIdentity | None = None,
+    resource_surfaces: Mapping | None = None,
 ) -> CompositeDrawResult:
     """Render the complete frame and return hits from that exact paint pass."""
 
@@ -856,6 +1294,13 @@ def compose_terminal_frame_result(
     )
     hit_targets: tuple[ControlHitTarget, ...] = ()
     if retained_plane is not None:
+        compositor_kwargs = {
+            "control_font": control_font,
+            "hovered": hovered,
+            "pressed": pressed,
+        }
+        if resource_surfaces is not None:
+            compositor_kwargs["resource_surfaces"] = resource_surfaces
         retained_result = composite_draw_plane_result(
             pygame_module,
             surface,
@@ -863,9 +1308,7 @@ def compose_terminal_frame_result(
             font,
             cell_width,
             cell_height,
-            control_font=control_font,
-            hovered=hovered,
-            pressed=pressed,
+            **compositor_kwargs,
         )
         hit_targets = retained_result.hit_targets
     _paint_terminal_cursor(
@@ -978,6 +1421,7 @@ def main() -> int:
         terminal = VirtualTerminal(cols=80, rows=30)
         revision = -1
         display_state = _RetainedDisplayState()
+        resource_cache = _DisplayResourceCache()
         guest_keyboard = _GuestKeyboardForwarder(
             pygame,
             client,
@@ -994,6 +1438,7 @@ def main() -> int:
             keyboard=guest_keyboard,
             display_state=display_state,
             revision=revision,
+            resource_cache=resource_cache,
         )
 
         # The machine-owner process may hold the optional audio mixer.  This
@@ -1059,6 +1504,7 @@ def main() -> int:
             keyboard=guest_keyboard,
             display_state=display_state,
             revision=revision,
+            resource_cache=resource_cache,
         )
         if resized or interaction_context() != prior_context:
             semantic_pointer.clear()
@@ -1085,6 +1531,7 @@ def main() -> int:
             keyboard=guest_keyboard,
             display_state=display_state,
             revision=revision,
+            resource_cache=resource_cache,
         )
         screen_refresh_required = (
             screen_refresh_required or refresh_required
@@ -1210,6 +1657,7 @@ def main() -> int:
                         keyboard=guest_keyboard,
                         display_state=display_state,
                         revision=revision,
+                        resource_cache=resource_cache,
                     )
                 )
                 last_claim_attempt = now
@@ -1229,7 +1677,7 @@ def main() -> int:
                 update = client.request(
                     "screen",
                     since=revision,
-                    since_offer=display_state.since_offer,
+                    since_offer=display_state.poll_offer_cursor,
                 )
                 if accept_screen_update(update):
                     screen = make_window()
@@ -1245,6 +1693,51 @@ def main() -> int:
             )
             frame_plane = display_state.frame_plane
             rendered_hit_targets: tuple[ControlHitTarget, ...] | None = None
+            if frame_offer is not None:
+                if not resource_cache.pending_ready(
+                    frame_offer,
+                    frame_generation,
+                ):
+                    fetch_status = resource_cache.fetch_pending_chunk(
+                        client,
+                        pygame,
+                        frame_offer,
+                        frame_generation,
+                    )
+                    if fetch_status in {"stale_generation", "stale_display"}:
+                        display_state.reset()
+                        resource_cache.clear()
+                        revision = -1
+                        screen_refresh_required = True
+                        semantic_pointer.clear()
+                        guest_keyboard.clear_display_context(
+                            waiting=guest_keyboard.display_required
+                        )
+                        guest_keyboard.report_error(
+                            f"display resource fetch rejected ({fetch_status})"
+                        )
+                        clock.tick()
+                        continue
+                    if fetch_status == "invalid_resource":
+                        raise RuntimeError(
+                            "display offer references an unavailable exact resource"
+                        )
+                    if not resource_cache.pending_ready(
+                        frame_offer,
+                        frame_generation,
+                    ):
+                        # Pump events again immediately after this server-bounded
+                        # chunk.  The pending frame has not touched the sink.
+                        clock.tick()
+                        continue
+                if not display_state.pending_resources_ready:
+                    display_state.stage_resources_ready(frame_offer)
+                resource_surfaces = resource_cache.pending_surfaces(
+                    frame_offer,
+                    frame_generation,
+                )
+            else:
+                resource_surfaces = resource_cache.acknowledged_surfaces
 
             def draw_frame() -> None:
                 nonlocal rendered_hit_targets
@@ -1261,6 +1754,7 @@ def main() -> int:
                     control_font=status_font,
                     hovered=semantic_pointer.hovered,
                     pressed=semantic_pointer.pressed,
+                    resource_surfaces=resource_surfaces,
                 )
                 rendered_hit_targets = frame_result.hit_targets
                 screen.blit(frame_result.surface, (0, 0))
@@ -1306,6 +1800,7 @@ def main() -> int:
             if frame_offer is not None:
                 accepted_revision = display_state.finish_presentation(presentation)
                 if accepted_revision is not None:
+                    resource_cache.promote(frame_offer, frame_generation)
                     revision = accepted_revision
                     if isinstance(status, dict):
                         status["revision"] = revision
@@ -1314,6 +1809,7 @@ def main() -> int:
                         frame_offer.scope,
                     )
                 else:
+                    resource_cache.clear()
                     revision = -1
                     screen_refresh_required = True
                     semantic_pointer.clear()
@@ -1330,6 +1826,7 @@ def main() -> int:
         print(f"shared viewer disconnected: {exc}", file=sys.stderr)
     finally:
         try:
+            resource_cache.clear()
             client.close()
         finally:
             try:

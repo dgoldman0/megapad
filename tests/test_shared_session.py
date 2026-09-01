@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import threading
 import time
 from dataclasses import replace
@@ -23,8 +24,15 @@ from rich_terminal import (
     TerminalView,
 )
 from rich_terminal.output_coordinator import CompositeTerminalView
-from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
+from rich_terminal.retained_model import (
+    OwnerIdentity,
+    ResourceFormat,
+    RetainedFeature,
+    RetainedPolicy,
+)
+from rich_terminal.retained_resources import RGBAResource, ResourceDeclaration
 from rich_terminal.retained_scene import (
+    ImageFit,
     ObjectBounds,
     RGBA,
     RetainedScene,
@@ -33,6 +41,8 @@ from rich_terminal.retained_scene import (
 from rich_terminal.retained_view import (
     DisplayScope,
     GlyphRunDraw,
+    ImageDraw,
+    ImageResourceManifest,
     RetainedDrawPlane,
     RetainedRegionDraw,
 )
@@ -126,6 +136,35 @@ def _retained_policy() -> RetainedPolicy:
     )
 
 
+def _image_policy(*, max_resource_chunk_bytes: int = 3) -> RetainedPolicy:
+    return RetainedPolicy(
+        features=RetainedFeature.CORE | RetainedFeature.RGBA_IMAGE,
+        max_owner_records=1,
+        max_live_owners=1,
+        max_regions=1,
+        max_resources=1,
+        max_objects=1,
+        max_series=0,
+        max_operations_per_transaction=2,
+        max_resource_chunk_bytes=max_resource_chunk_bytes,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=8,
+        image_format=int(ResourceFormat.RGBA8),
+        max_image_width=2,
+        max_image_height=1,
+        max_path_points=0,
+        max_glyph_run_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=256,
+        base_max_transaction_bytes=512,
+    )
+
+
 def _arm_retained_offer(
     session: MachineSession,
     *,
@@ -172,6 +211,86 @@ def _arm_retained_offer(
     session._receive_terminal_output(composite)
     assert session._service_display_cadence()
     return composite
+
+
+def _bind_image_resource_offer(
+    session: MachineSession,
+    pixels: bytes,
+) -> tuple[TerminalDisplayOffer, CompositeTerminalView, RGBAResource]:
+    """Attach one manifest/private pin to an already live display offer."""
+
+    if len(pixels) != 8:
+        raise ValueError("test image must be exactly two RGBA8 pixels")
+    composite = _arm_retained_offer(session)
+    offer = session.display_offer
+    driver = session.rich_terminal_driver
+    assert offer is not None
+    assert driver is not None
+    policy = session._rich_terminal_config.retained_policy
+    assert policy is not None
+    driver.core._session_retained_policy = policy
+
+    owner = OwnerIdentity(
+        session_id=offer.scope.session_id,
+        presentation_epoch=offer.scope.presentation_epoch,
+        owner_id=19,
+        owner_generation=23,
+    )
+    digest = hashlib.sha3_256(pixels).digest()
+    resource = RGBAResource(
+        owner,
+        ResourceDeclaration(
+            resource_id=29,
+            format=ResourceFormat.RGBA8,
+            width=2,
+            height=1,
+            byte_length=len(pixels),
+            digest=digest,
+        ),
+        pixels,
+    )
+    manifest = ImageResourceManifest(
+        owner_id=owner.owner_id,
+        owner_generation=owner.owner_generation,
+        resource_id=resource.resource_id,
+        format=resource.format,
+        width=resource.width,
+        height=resource.height,
+        byte_length=resource.byte_length,
+        sha3_256=resource.digest,
+    )
+    image = ImageDraw(
+        object_id=31,
+        z_order=0,
+        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        resource_id=resource.resource_id,
+        fit=ImageFit.CONTAIN,
+        opacity=211,
+    )
+    plane = RetainedDrawPlane(
+        retained_initialized=True,
+        retained_visible=True,
+        regions=(
+            RetainedRegionDraw(
+                owner_id=owner.owner_id,
+                owner_generation=owner.owner_generation,
+                region_id=37,
+                cell_x=0,
+                cell_y=0,
+                cell_cols=2,
+                cell_rows=2,
+                z_order=0,
+                clipped=True,
+                draws=(image,),
+            ),
+        ),
+        resources=(manifest,),
+    )
+    resource_composite = replace(composite, resources=(resource,))
+    resource_offer = replace(offer, retained=plane)
+    session._display_offer_composite = resource_composite
+    session._display_offer = resource_offer
+    return resource_offer, resource_composite, resource
 
 
 def wait_until(predicate, timeout=3.0):
@@ -698,6 +817,26 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         attributes=0x40,
         text="visible",
     )
+    image_digest = hashlib.sha3_256(b"pixel-wire-metadata").digest()
+    image = ImageDraw(
+        object_id=31,
+        z_order=-1,
+        bounds=ObjectBounds(5, 6, 7, 8),
+        resource_id=37,
+        fit=ImageFit.COVER,
+        opacity=211,
+        parent_bounds=(ObjectBounds(0, 0, 9, 9),),
+    )
+    resource = ImageResourceManifest(
+        owner_id=19,
+        owner_generation=23,
+        resource_id=37,
+        format=ResourceFormat.RGBA8,
+        width=2,
+        height=1,
+        byte_length=8,
+        sha3_256=image_digest,
+    )
     plane = RetainedDrawPlane(
         retained_initialized=True,
         retained_visible=True,
@@ -712,9 +851,10 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
                 cell_rows=4,
                 z_order=-1,
                 clipped=True,
-                draws=(draw,),
+                draws=(draw, image),
             ),
         ),
+        resources=(resource,),
     )
     snapshot = TerminalSnapshot(
         cols=1,
@@ -751,11 +891,45 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
     }
     assert "labels" not in wire["retained"]["regions"][0]
     assert "composite" not in repr(wire)
+    assert wire["retained"]["regions"][0]["draws"][1] == {
+        "kind": "image",
+        "object_id": 31,
+        "z_order": -1,
+        "bounds": [5, 6, 7, 8],
+        "parent_bounds": [[0, 0, 9, 9]],
+        "resource_id": 37,
+        "fit": int(ImageFit.COVER),
+        "opacity": 211,
+    }
+    assert wire["retained"]["resources"] == [
+        {
+            "owner_id": 19,
+            "owner_generation": 23,
+            "resource_id": 37,
+            "format": int(ResourceFormat.RGBA8),
+            "width": 2,
+            "height": 1,
+            "byte_length": 8,
+            "sha3_256": image_digest.hex(),
+        }
+    ]
+    assert "data" not in repr(wire["retained"])
+    assert "base64" not in repr(wire["retained"]["resources"])
 
     unsupported = retained_draw_plane_to_wire(plane)
     unsupported["regions"][0]["draws"][0]["attributes"] = 0x10
     with pytest.raises(ValueError, match="unsupported GLYPH_RUN bits"):
         retained_draw_plane_from_wire(unsupported)
+
+    noncanonical_digest = retained_draw_plane_to_wire(plane)
+    noncanonical_digest["resources"][0]["sha3_256"] = image_digest.hex().upper()
+    with pytest.raises(ValueError, match="lowercase hexadecimal"):
+        retained_draw_plane_from_wire(noncanonical_digest)
+
+    leaked_pixels = retained_draw_plane_to_wire(plane)
+    leaked_pixels["resources"][0]["data_base64"] = "AA=="
+    with pytest.raises(ValueError, match="fields are not exact"):
+        retained_draw_plane_from_wire(leaked_pixels)
 
 
 def test_display_wire_rejects_bool_in_integer_fields():
@@ -907,6 +1081,174 @@ def test_shared_screen_tracks_snapshot_and_display_offer_cursors_independently()
             machine.screen(since=True)
         with pytest.raises(TypeError, match="not bool"):
             machine.screen(since_offer=True)
+
+
+def test_display_resource_chunk_is_exact_offer_bounded_and_data_free_on_refusal(
+    tmp_path,
+):
+    policy = _image_policy(max_resource_chunk_bytes=3)
+    pixels = bytes(range(8))
+    with MachineSession(
+        MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2),
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(retained_policy=policy),
+    ) as session:
+        offer, composite, resource = _bind_image_resource_offer(session, pixels)
+        machine = SharedMachine(session)
+        server = SessionServer(machine, str(tmp_path / "unused.sock"))
+        proof = {
+            "generation": 0,
+            "display_offer_id": offer.offer_id,
+            "display_scope": display_scope_to_wire(offer.scope),
+            "owner_id": resource.owner.owner_id,
+            "owner_generation": resource.owner.owner_generation,
+            "resource_id": resource.resource_id,
+            "sha3_256": resource.digest.hex(),
+            "offset": 2,
+            "max_bytes": 99,
+        }
+        refusal = {"status": "stale_display", "available": False}
+
+        assert server.dispatch("claim_display", {}, connection_id=1)["claimed"]
+        assert server.dispatch(
+            "display_resource_chunk",
+            proof,
+            connection_id=1,
+        ) == refusal
+        delivered = server.dispatch(
+            "screen",
+            {"since": session.revision, "since_offer": 0},
+            connection_id=1,
+        )
+        assert display_offer_from_wire(delivered["display_offer"]) == offer
+        assert server.dispatch(
+            "display_resource_chunk",
+            proof,
+            connection_id=2,
+        ) == refusal
+
+        assert server.dispatch(
+            "display_resource_chunk",
+            {**proof, "generation": 1},
+            connection_id=1,
+        ) == {"status": "stale_generation", "available": False}
+
+        chunk = server.dispatch(
+            "display_resource_chunk",
+            proof,
+            connection_id=1,
+        )
+        assert chunk == {
+            "status": "chunk",
+            "available": True,
+            "owner_id": resource.owner.owner_id,
+            "owner_generation": resource.owner.owner_generation,
+            "resource_id": resource.resource_id,
+            "sha3_256": resource.digest.hex(),
+            "offset": 2,
+            "next_offset": 5,
+            "byte_length": len(pixels),
+            "eof": False,
+            "data_base64": base64.b64encode(pixels[2:5]).decode("ascii"),
+        }
+        tail = server.dispatch(
+            "display_resource_chunk",
+            {**proof, "offset": len(pixels), "max_bytes": 1},
+            connection_id=1,
+        )
+        assert tail["data_base64"] == ""
+        assert tail["next_offset"] == len(pixels)
+        assert tail["eof"]
+
+        invalid = {"status": "invalid_resource", "available": False}
+        for wrong in (
+            {"owner_generation": resource.owner.owner_generation + 1},
+            {"resource_id": resource.resource_id + 1},
+            {"sha3_256": "00" * 32},
+            {"offset": len(pixels) + 1},
+        ):
+            assert server.dispatch(
+                "display_resource_chunk",
+                {**proof, **wrong},
+                connection_id=1,
+            ) == invalid
+
+        # The ACK boundary clears both current offer tokens.  A previously
+        # delivered proof can therefore never read its old immutable pin.
+        session._display_offer = None
+        session._display_offer_composite = None
+        assert server.dispatch(
+            "display_resource_chunk",
+            proof,
+            connection_id=1,
+        ) == refusal
+
+        # Nor does an old delivery authorize bytes from a replacement offer.
+        session._display_offer = replace(offer, offer_id=offer.offer_id + 1)
+        session._display_offer_composite = composite
+        assert server.dispatch(
+            "display_resource_chunk",
+            proof,
+            connection_id=1,
+        ) == refusal
+
+
+def test_display_resource_chunk_encodes_base64_outside_machine_lock(monkeypatch):
+    policy = _image_policy(max_resource_chunk_bytes=3)
+    pixels = bytes(range(8))
+    with MachineSession(
+        MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2),
+        cols=2,
+        rows=2,
+        rich_terminal=_rich_terminal_config(retained_policy=policy),
+    ) as session:
+        offer, _composite, resource = _bind_image_resource_offer(session, pixels)
+        machine = SharedMachine(session)
+        conversion_started = threading.Event()
+        allow_conversion = threading.Event()
+        original = base64.b64encode
+
+        def blocking_conversion(data):
+            conversion_started.set()
+            assert allow_conversion.wait(timeout=2.0)
+            return original(data)
+
+        monkeypatch.setattr("shared_session.base64.b64encode", blocking_conversion)
+        result = []
+        failure = []
+
+        def request_chunk():
+            try:
+                result.append(
+                    machine.display_resource_chunk(
+                        offer.offer_id,
+                        offer.scope,
+                        resource.owner.owner_id,
+                        resource.owner.owner_generation,
+                        resource.resource_id,
+                        resource.digest,
+                        0,
+                        3,
+                        generation=0,
+                    )
+                )
+            except BaseException as exc:
+                failure.append(exc)
+
+        worker = threading.Thread(target=request_chunk)
+        worker.start()
+        assert conversion_started.wait(timeout=2.0)
+        acquired = machine.lock.acquire(timeout=0.5)
+        if acquired:
+            machine.lock.release()
+        allow_conversion.set()
+        worker.join(timeout=2.0)
+
+        assert acquired, "resource base64 conversion held the machine lock"
+        assert not worker.is_alive()
+        assert failure == []
+        assert base64.b64decode(result[0]["data_base64"]) == pixels[:3]
 
 
 def test_shared_raw_uses_absolute_bounded_cursors_across_reset():
