@@ -60,9 +60,10 @@ organized by their source sections in `kdos.f` and `networking.f`.
 19. [§13 Help System](#13-help-system)
 20. [§14 Startup](#14-startup)
 21. [§15 Pipeline Bundles](#15-pipeline-bundles)
-22. [§20 Module Registry](#20-module-registry)
-23. [`networking.f` §16 Network Stack](#16-network-stack)
-24. [`networking.f` §17 Socket API](#17-socket-api)
+22. [§18 Ring Buffer Primitives](#18-ring-buffer-primitives)
+23. [§20 Module Registry](#20-module-registry)
+24. [`networking.f` §16 Network Stack](#16-network-stack)
+25. [`networking.f` §17 Socket API](#17-socket-api)
 
 ---
 
@@ -873,7 +874,8 @@ cluster-control/MPU source boundary, absent-network forward bridge,
 §9.1–§9.4 ANSI screen registry/control layer, the complete §9 widget SDL,
 screen definitions, dispatch, registration, handlers, and event loop, and the
 §10 Data Port structures and bindings, §11 placeholder, §12 Dashboard,
-§13 Help, and §15 Pipeline Bundles source through line 9121.
+§13 Help, §15 Pipeline Bundles, and §18 Ring Buffer Primitives source through
+line 9214.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -891,8 +893,9 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-9121, immediately before §18 Ring Buffer Primitives. The source has no §14,
-§16, or §17 block at the corresponding section-numbering boundaries.
+9214; line 9215 is the next section sentinel and line 9216 begins §19 Hash
+Table Primitives. The source has no §14, §16, or §17 block at the
+corresponding section-numbering boundaries.
 
 ---
 
@@ -1181,10 +1184,10 @@ Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
-§8.2–§8.7, §8.8–§8.9, complete §9, §10–§13, and §15 through line
-9121. Their provenance and edge contracts are recorded in the corresponding
-sections below and in `docs/simulator-contract.md`; §18 begins at the following
-source boundary.
+§8.2–§8.7, §8.8–§8.9, complete §9, §10–§13, §15, and §18 through line
+9214. Their provenance and edge contracts are recorded in the corresponding
+sections below and in `docs/simulator-contract.md`; §19 begins at line 9216
+after the line-9215 sentinel.
 
 ---
 
@@ -1826,7 +1829,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 9121. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 9214. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2201,8 +2204,9 @@ fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
 continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
-Dashboard, §13 Help, and §15 Pipeline Bundles through line 9121; §18 is
-next.
+Dashboard, §13 Help, §15 Pipeline Bundles, and §18 Ring Buffer Primitives
+through line 9214; §19 Hash Table Primitives begins at line 9216 after the
+line-9215 sentinel.
 
 **Example — filesystem operations:**
 ```forth
@@ -3028,10 +3032,10 @@ The following tail discrepancies are source-literal:
   screen/subscreen registrations until the fixed tables fill.
 
 This §9 block ends at line 8568. The contiguous hosted frontier now continues
-through §10–§13 and §15 and ends at line 9121, immediately before §18. The
-admitted source completes the existing ANSI TUI and the Pipeline Bundle
-tracking layer but does not accept a rich-terminal module, projection,
-compositor, or viewer.
+through §10–§13, §15, and §18 and ends at line 9214, before the line-9215
+sentinel and §19 at line 9216. The admitted source completes the existing ANSI
+TUI, Pipeline Bundle tracking layer, and source-defined Ring Buffer primitives
+but does not accept a rich-terminal module, projection, compositor, or viewer.
 
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
@@ -3213,9 +3217,10 @@ The following limits and discrepancies are unchanged source behavior:
   to §15 without a §14 block here.
 
 The historical §10–§13 fixture ends at line 8943. The contiguous hosted
-frontier now continues through §15 and ends at line 9121, immediately before
-§18. This qualification adds no rich-terminal module, projection, compositor,
-physical viewer, or other rich-terminal work.
+frontier now continues through §15 and §18 and ends at line 9214, before the
+line-9215 sentinel and §19 at line 9216. This qualification adds no
+rich-terminal module, projection, compositor, physical viewer, or other
+rich-terminal work.
 
 ### Frame Protocol
 
@@ -3568,6 +3573,161 @@ value except for `BDL-DRY`.
   focused hosted domain is one core, canonical `BDL-BEGIN`/small valid
   declarations/one `BDL-END`, valid names and screen value, unsaturated
   registries, ample dictionary/allocation space, and no concurrent mutation.
+
+---
+
+## §18 Ring Buffer Primitives
+
+This slice defines fixed-capacity, dictionary-resident circular buffers. Push
+and pop take the shared KDOS ring lock; peek is lock-free and returns a direct
+pointer into the payload. The implementation is useful in its narrow,
+well-formed domain, but it does not validate descriptor geometry, element
+spans, or concurrent ownership.
+
+### Hosted unchanged-source qualification
+
+Exact unchanged `kdos.f` lines 9122 through 9214 contain 93 LF records and
+3,017 bytes, with SHA-256
+`1da96005485469573790f5c8e90a4aaa9480f361008b87dd918c3e9c7727866f`
+and Git blob `c52812c6db04665c7ac620613e7a14989743aa69`. The checked fixture includes
+the following one-line section sentinel at line 9215, exactly
+`\ =====================================================================`
+with its terminating LF. That 94-LF-record, 3,089-byte fixture has SHA-256
+`35d6d117f53e8b9cc98729f6989e057d83ffdb344fa381d30c352b0058a1cce2`
+and Git blob `b12f9a37059a1b15ae86056d645c24510b2811d5`. Line 9216 begins §19 Hash
+Table Primitives. The enclosing `kdos.f` Git blob is
+`fd017b16dbd3ef4746d0e3467e980c015cf5a664`, from revision
+`ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
+
+The slice publishes 15 definitions in exact source order: `RING`,
+`RING.ESIZE`, `RING.CAP`, `RING.HEAD`, `RING.TAIL`, `RING.COUNT`,
+`RING.LOCK`, `RING.DATA`, `RING-FULL?`, `RING-EMPTY?`, `RING-COUNT`,
+the variable `_RP-RING`, then `RING-PUSH`, `RING-POP`, and `RING-PEEK`.
+That is 14 colon definitions and one variable. Their names occupy 133 bytes,
+the variable body occupies eight bytes, and the 15 fixed 17-byte
+header/semantic slots occupy 255 bytes, so exact hosted dictionary growth is
+`133 + 8 + 255 = 396` bytes. `_RP-RING` initializes to zero. Loading performs
+no ring construction, allocation beyond those definition bytes, parser input,
+UART output, storage or filesystem operation, RTC mutation, lock operation,
+scheduling, rendering, or rich-terminal work. Ordinary evaluator progress may
+advance the Timer counter.
+
+Focused acceptance remains seconds-scale. It pins source identity, definition
+order/linkage/body spans, exact growth, the zero scratch initializer, and
+load-time purity. It then constructs small positive-capacity rings, verifies
+the descriptor bytes and retained payload poison, exercises exact-width copies,
+full/empty rejection, FIFO wraparound, pointer-valued peek, count/head/tail
+transitions, and normal lock release. Separate bounded edge evidence covers a
+zero-capacity ring and signed-negative peek. No simulator-only ring primitive,
+worker, scheduler, lock repair, bounds check, or payload initialization is
+substituted for the unchanged source.
+
+### Executable descriptor layout
+
+The executable descriptor has six fixed cells, not seven:
+
+| Offset | Field | Meaning |
+|--------|-------|---------|
+| `+0` | element size | Bytes copied for each push or pop |
+| `+8` | capacity | Maximum tracked element count |
+| `+16` | head | Index of the next element popped |
+| `+24` | tail | Index of the next slot written |
+| `+32` | count | Current tracked occupancy |
+| `+40` | lock | Initialized from `RING-LOCK`, currently lock 4 |
+| `+48` | data | First payload byte; not another descriptor cell |
+
+The nearby source comment says “7 cells = 56 bytes”, but its own offsets and
+all executable accessors put data at `ring + 48`. Qualification preserves that
+six-cell/48-byte behavior; it does not correct the source comment.
+
+`RING` captures the current `HERE`, writes the six little-endian cells, allots
+`capacity * element-size` bytes, and then defines a named `CONSTANT` that
+returns the captured descriptor address. It performs no alignment and does not
+clear the allotted payload. In the admitted small-positive domain, a name of
+*n* bytes therefore advances hosted `HERE` by
+`48 + capacity * element-size + 17 + n` bytes. The following constant header
+can be unaligned when the payload length is not cell-aligned.
+
+### Access and mutation words
+
+| Word | Stack Effect | Executable behavior |
+|------|--------------|---------------------|
+| `RING` | `( elem-size capacity "name" -- )` | Construct the raw descriptor/payload and publish a constant returning it. |
+| `RING.ESIZE` | `( ring -- n )` | Fetch the cell at `+0`. |
+| `RING.CAP` | `( ring -- n )` | Fetch the cell at `+8`. |
+| `RING.HEAD` | `( ring -- addr )` | Return `ring + 16`; it does not fetch the head. |
+| `RING.TAIL` | `( ring -- addr )` | Return `ring + 24`; it does not fetch the tail. |
+| `RING.COUNT` | `( ring -- n )` | Fetch the count at `+32`. |
+| `RING.LOCK` | `( ring -- n )` | Fetch the lock number at `+40`. |
+| `RING.DATA` | `( ring -- addr )` | Return `ring + 48`. |
+| `RING-FULL?` | `( ring -- flag )` | Return canonical true when signed `count >= capacity`. |
+| `RING-EMPTY?` | `( ring -- flag )` | Return canonical true exactly when count is zero. |
+| `RING-COUNT` | `( ring -- n )` | Alias the fetched-count behavior. |
+| `RING-PUSH` | `( elem-addr ring -- flag )` | Under the descriptor's lock, return zero if full; otherwise forward-copy exactly element-size bytes to `data + tail * element-size`, advance tail modulo capacity, increment count, and return `-1`. |
+| `RING-POP` | `( elem-addr ring -- flag )` | Under the descriptor's lock, return zero if empty; otherwise forward-copy exactly element-size bytes from `data + head * element-size`, advance head modulo capacity, decrement count, and return `-1`. |
+| `RING-PEEK` | `( idx ring -- elem-addr \| 0 )` | Without locking, reject signed `idx >= count`; otherwise return `data + ((head + idx) MOD capacity) * element-size`. |
+
+All normal push/pop branches first store the descriptor in global `_RP-RING`,
+acquire its stored lock, and release the lock selected through that scratch at
+the end. A full push does not read its element source; an empty pop does not
+write its destination. Successful copy and state-update paths emit no bytes.
+For a positive three-slot ring, filling slots A/B/C, popping A, and pushing D
+leaves logical peek order B/C/D while the physical slots contain D/B/C.
+
+### Executable limits and source discrepancies
+
+- Capacity zero is constructible. Its initial count makes both `RING-FULL?`
+  and `RING-EMPTY?` true. Push takes the full branch and returns zero; pop
+  takes the empty branch and returns zero; nonnegative peek returns zero.
+  Because `ALLOT` receives zero, `RING.DATA` aliases the following named
+  constant's header rather than reserved payload storage.
+- `RING-PEEK` has no negative-index check and uses signed `>=` and signed
+  `MOD`. With head and count zero in an eight-byte, positive-capacity ring,
+  index `-1` returns `RING.DATA - 8`, which is `ring + 40`, the lock cell.
+  After head advances to one, index `-1` names payload slot zero, which may be
+  stale. A negative index on a zero-capacity ring reaches `MOD 0` and traps
+  instead of returning zero. Other high-bit indices can produce pointers
+  before the payload or outside mapped memory; callers must not dereference
+  them.
+- Element size and capacity are unchecked cells. Their multiplication wraps
+  to one cell, after which `ALLOT` interprets the result as signed. Negative,
+  high-bit, or overflowing inputs can rewind or overlap the dictionary, fail
+  after the six raw fields have already been written, or request an enormous
+  span. A zero element size with positive capacity allots no payload; pushes
+  and pops still update indices/counts, and every admitted peek aliases the
+  following constant header.
+- Head, tail, count, capacity, element size, lock number, and payload lifetime
+  remain publicly writable and are never validated. A malformed head/tail can
+  make push/pop copy outside the payload before modulo normalization. Counts
+  and range decisions are signed; a high-bit count no longer represents an
+  ordinary unsigned occupancy. Source/destination spans, overlap, and object
+  ownership are also unchecked. `CMOVE` provides low-to-high overlap behavior,
+  not a transactional copy.
+- Every normally constructed ring stores the same hardcoded `RING-LOCK` value
+  4, serializing unrelated rings. `_RP-RING` is one shared, unlocked scratch
+  cell written before acquisition. There is no per-task/core scratch,
+  recursion depth, or descriptor-generation ownership. Same-core preownership
+  of lock 4 is depthless; a normal ring operation's final unlock releases the
+  caller's preexisting critical section.
+- Push/pop release their lock only on normal control flow. Copy occurs before
+  tail/head normalization, which occurs before count mutation. A memory fault,
+  zero-divisor `MOD`, or other exception after acquisition can therefore leave
+  lock 4 owned and retain a partial copy or earlier state prefix. The source
+  has no `CATCH`/cleanup path. Contended `LOCK` busy-waits through `YIELD?` and
+  is outside focused seconds-scale qualification.
+- `RING-PEEK` reads count and head separately without a lock and returns a
+  direct mutable address with no lifetime token. A concurrent push/pop or
+  descriptor mutation can make the decision and returned pointer inconsistent
+  or stale. Ring construction likewise has no dictionary lock or rollback.
+
+The qualified safe domain is one core, one ordinary control flow, small
+strictly positive element size and capacity, ample dictionary space, valid
+mapped source/destination spans of at least element size, canonical fields
+maintained only by these words, no pre-held/contentious lock 4, and no
+concurrent descriptor or payload mutation. The contiguous frontier ends at
+line 9214; line 9215 is the §19 sentinel and line 9216 begins Hash Table
+Primitives. This source qualification does not load `rich-terminal.f`, render
+or composite a frame, reach a physical viewer, or advance rich-terminal input.
 
 ---
 

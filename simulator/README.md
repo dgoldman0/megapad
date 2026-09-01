@@ -182,9 +182,10 @@ The implemented slices provide:
   qualified as one-core state machines rather than multicore execution;
 - unchanged KDOS cluster-control and MPU failure behavior, complete §9 ANSI
   screens, §10 Data Port bindings, Dashboard and Help publication, and §15
-  Pipeline Bundle tracking/declarative words through line 9121, without
-  claiming networking transport, real bundle-file integration, scheduling,
-  rendering, or rich-terminal output.
+  Pipeline Bundle tracking/declarative words plus §18 Ring Buffer primitives
+  through line 9214, without claiming networking transport, real bundle-file
+  integration, concurrent ring execution, scheduling, rendering, or
+  rich-terminal output.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -780,14 +781,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 9121.
+ends at line 9214.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–9121 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, and §15 Pipeline Bundles |
-| 9122 onward | Next uncovered frontier | §18 begins the Ring Buffer primitives after the line-9122 separator |
+| 39–9214 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, and §18 Ring Buffer Primitives |
+| 9215 onward | Next uncovered frontier | Line 9215 is the separator; §19 Hash Table Primitives begins at line 9216 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1865,7 +1866,7 @@ The unchanged source retains these discrepancies:
 - Full Help advertises `POLL`, `INGEST`, and Bundle words before they exist at
   the line-8943 boundary. The Bundle words arrive in the following §15 slice;
   the transport words, including the promised `RECV-FRAME`, `ROUTE-FRAME`,
-  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent at line 9121. Help/comment
+  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent at line 9214. Help/comment
   publication is qualified, not any transport operation.
 
 Exact unchanged lines 8944–9121 add §15 Pipeline Bundles: 178 LF records,
@@ -1933,10 +1934,68 @@ Unchanged source retains these limits:
 - Tracking, DRY mode, parser/evaluator state, registries, and constructor
   scratch are global and unlocked, with no nesting or concurrent ownership.
 
-The contiguous frontier now ends at line 9121. Line 9122 begins the separator
-for §18 Ring Buffer primitives. Real disk-backed bundle integration, actual
-scheduling/cadence, mask-driven rendering, physical presentation, and all
-rich-terminal work remain deferred.
+Exact unchanged lines 9122–9214 add §18 Ring Buffer Primitives: 93 LF records,
+3,017 bytes, SHA-256
+`1da96005485469573790f5c8e90a4aaa9480f361008b87dd918c3e9c7727866f`,
+and Git blob `c52812c6db04665c7ac620613e7a14989743aa69`. The exact fixture includes
+the line-9215 separator and has 94 LF records, 3,089 bytes, SHA-256
+`35d6d117f53e8b9cc98729f6989e057d83ffdb344fa381d30c352b0058a1cce2`,
+and Git blob `b12f9a37059a1b15ae86056d645c24510b2811d5`. §19 begins at line 9216 and
+is not qualified by that sentinel.
+
+The slice publishes fifteen definitions: fourteen zero-body colons from
+`RING` through `RING-PEEK` and the eight-byte `_RP-RING` variable. Its 133
+name bytes, eight body bytes, and 255 fixed header/semantic-slot bytes produce
+exactly 396 bytes of hosted dictionary growth. Load zeroes `_RP-RING` and
+otherwise only publishes dictionary entries. It constructs no ring, acquires
+no lock, emits no output, and touches no registry, storage, RTC, UART,
+renderer, scheduler, or other device state.
+
+Focused qualification uses only positive-small geometry with a product that
+fits the dictionary. It covers the actual constructor geometry, all
+accessors and initial flags, byte-exact multi-byte FIFO push/pop, guarded full
+and empty cases, wraparound, bounded peeks, count stability, and released
+ownership after every operation. A poisoned dictionary interval proves the
+constructor does not initialize its payload. A zero-capacity ring is safely
+exercised only through nonnegative guarded calls, and two rings prove that
+both store the shared lock number 4 and release it after sequential use. This
+evidence requires intact descriptors, mapped caller spans at least as large as
+one element, safe forward-copy overlap, ordinary nonnegative indices, and
+caller-provided lifetime synchronization for a returned peek pointer.
+
+Unchanged source retains these limits:
+
+- The comment says the descriptor is seven cells/56 bytes, but only six cells
+  are stored and `RING.DATA` is `ring + 48`. Capacity zero allots no payload,
+  so DATA aliases the following constant header.
+- Element size, capacity, their wrapping product, available dictionary space,
+  and descriptor fields are unchecked. Because `ALLOT` consumes a signed
+  delta, negative or high-bit geometry can rewind `HERE` after partial header
+  writes. There is no rollback, registry, destructor, or ownership proof.
+- No descriptor or payload alignment or clearing occurs. The constructor uses
+  raw `HERE`, and logically empty payload bytes retain prior memory.
+- Push/pop trust head, tail, count, capacity, lock ID, and caller pointers.
+  Offset arithmetic wraps; caller spans and `CMOVE` overlap are not validated.
+- Signed `>=` and signed `MOD` admit a negative peek index. At head zero with
+  eight-byte elements, index `-1` returns the `ring + 40` lock cell. For a
+  zero-capacity ring, a negative index reaches `MOD 0` and traps even though
+  ordinary nonnegative peek returns zero.
+- All rings use global lock 4. `_RP-RING` is one retained shared scratch cell
+  written before acquisition, so manufactured/mutated lock fields and
+  concurrent callers can make final unlock selection incoherent.
+- Push/pop have no unwind cleanup. A descriptor, copy, modulo, or guest failure
+  after acquisition skips `UNLOCK` and can strand lock 4; focused acceptance
+  does not deliberately invoke that path.
+- Lock-free PEEK returns a mutable internal address, not a copied or versioned
+  element. Concurrent head/count observations are not linearizable, and the
+  pointed slot can be popped or overwritten immediately after return.
+
+The contiguous frontier now ends at line 9214. Line 9215 is the separator;
+§19 Hash Table Primitives begins at line 9216. Real disk-backed bundle
+integration, actual scheduling/cadence, concurrent ring qualification, hash
+tables, mask-driven rendering, physical presentation, and all rich-terminal
+work remain deferred. This advance does not implement `rich-terminal.f` or
+advance the rich-terminal vertical.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

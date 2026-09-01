@@ -36,7 +36,7 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 9121. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 9214. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
@@ -55,8 +55,9 @@ and named-lock state machines, the §8.8–§8.9 cluster-control and MPU failure
 boundary, absent-network forward bridge, the complete §9 ANSI screen registry,
 widgets, definitions, dispatch, handlers, and event loop, then §10 Data Port
 structures and bindings, the §11 placeholder, §12 Dashboard, §13 Help, and
-§15 Pipeline Bundles. §18 Ring Buffer Primitives is next; there are no §16
-or §17 source blocks at this boundary.
+§15 Pipeline Bundles and §18 Ring Buffer Primitives. §19 Hash Table Primitives
+begins at line 9216 after the line-9215 sentinel; there are no §16 or §17
+source blocks at the earlier numbering boundary.
 
 The §15 `BUNDLE-LOAD` and `BUNDLE-INFO` words are thin wrappers around this
 same raw `LOAD`. They do not enforce file type 7 or directory flags and inherit
@@ -66,6 +67,10 @@ name-consumption edge, and nontransactional dictionary/object effects.
 skip construction; it is not a general dry-run or validation boundary. Exact
 Pipeline Bundle provenance and discrepancies are recorded in
 `docs/kdos-reference.md`.
+
+The §18 ring words construct in-memory dictionary objects and add no
+filesystem or media behavior. Their exact provenance, admitted domain, and
+source discrepancies are also recorded in `docs/kdos-reference.md`.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -946,12 +951,13 @@ flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
 and deferred targets are global and unlocked. The contiguous hosted frontier
 continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
-Dashboard, §13 Help, and §15 Pipeline Bundles through line 9121; §18 is
-next. The bundle wrappers still inherit raw `LOAD` semantics rather than
-forming a typed or transactional filesystem layer. Exact provenance and the
-source-literal limits of that later frontier are recorded in
-`docs/kdos-reference.md`. This frontier change performs no rich-terminal
-module, projection, compositor, renderer, or physical-viewer work.
+Dashboard, §13 Help, §15 Pipeline Bundles, and §18 Ring Buffer Primitives
+through line 9214; §19 begins at line 9216 after the line-9215 sentinel. The
+bundle wrappers still inherit raw `LOAD` semantics rather than forming a typed
+or transactional filesystem layer. Exact provenance and the source-literal
+limits of that later frontier are recorded in `docs/kdos-reference.md`. This
+frontier change performs no rich-terminal module, projection, compositor,
+renderer, or physical-viewer work.
 
 ### Documentation Access
 
