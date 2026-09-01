@@ -1148,9 +1148,15 @@ low nibble of the opcode byte.
 | `0x6A` | **PERF_TILE_OPS** | 64 | R | Total MEX instructions completed |
 | `0x6B` | **PERF_EXTMEM** | 64 | R | 64-bit external memory transfers |
 | `0x6C` | **PERF_CTRL** | 64 | RW | Bit 0: enable counting, Bit 1: reset all |
+| `0x6D` | **CL_PRIV** | 1 | RW cluster | Shared privilege state for the caller's micro-core cluster |
+| `0x6E` | **CL_MPU_BASE** | 64 | RW cluster | Shared cluster MPU lower bound (inclusive) |
+| `0x6F` | **CL_MPU_LIMIT** | 64 | RW cluster | Shared cluster MPU upper bound (exclusive) |
 | `0x70` | **ICACHE_CTRL** | 64 | RW | Bit 0: enable, Bit 1: invalidate all (auto-clear) |
 | `0x71` | **ICACHE_HITS** | 64 | R | I-cache hit counter (since last invalidate) |
 | `0x72` | **ICACHE_MISSES** | 64 | R | I-cache miss counter (since last invalidate) |
+| `0x73` | **CL_IVTBASE** | 64 | RW cluster | Shared interrupt-vector base for the caller's micro-core cluster |
+| `0x74` | **BARRIER_ARRIVE** | N | RW cluster | Read the N-bit arrival mask; a write marks the calling micro-core as arrived regardless of data |
+| `0x75` | **BARRIER_STATUS** | 64 | R cluster | Cluster arrival vector plus done indication; current backends disagree on the done bit and lifetime |
 | | | | | |
 | `0x80` | **CRC_ACC** | 64 | RW full / R micro | Running or finalized CRC accumulator; micro-core writes are ignored |
 | `0x81` | **CRC_MODE** | 64 | RW full / R micro | 0/1/2/4/5/6 select a complete CRC mode; every other complete value becomes 0 on full-core writes, and micro-core writes are ignored |
@@ -1205,8 +1211,17 @@ A violation fires `IVEC_PRIV_FAULT` (vector 15) with the faulting address
 saved in `TRAP_ADDR`.  Supervisor mode (`PRIV == 0`) is never checked —
 all addresses are accessible.
 
-Micro-cores do not implement the MPU (they have no privilege model and run
-exclusively in supervisor-equivalent mode).
+Micro-cores use cluster-shared `CL_PRIV`, `CL_MPU_BASE`, and `CL_MPU_LIMIT`
+state in the RTL. Its scalar arbiter always permits MMIO and cluster-local
+scratchpad, blocks HBW in user mode, and otherwise enforces the half-open
+cluster window. Full cores do not own that cluster domain: current full-core
+CSR reads return zero and writes are ignored.
+
+Backend parity remains open. The Python cluster model retains and forwards the
+three CSRs but explicitly omits scalar MPU enforcement, while the current RTL
+and Python paths do not enforce the documented supervisor-only restriction on
+cluster-state writes. These are implementation discrepancies, not additional
+portable privilege guarantees.
 
 ### Trap Entry Sequence
 

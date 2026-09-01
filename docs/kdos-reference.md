@@ -53,15 +53,16 @@ organized by their source sections in `kdos.f` and `networking.f`.
 12. [§8 Scheduler & Tasks](#8-scheduler--tasks)
 13. [§8.1 Multicore Dispatch](#81-multicore-dispatch)
 14. [§8.2–§8.7 Queues, Affinity, Messaging, and Locks](#8287-queues-affinity-messaging-and-locks)
-15. [§9 Interactive Screens (TUI)](#9-interactive-screens-tui)
-16. [§10 Data Ports](#10-data-ports)
-17. [§11–§12 Benchmarking & Dashboard](#1112-benchmarking--dashboard)
-18. [§13 Help System](#13-help-system)
-19. [§14 Startup](#14-startup)
-20. [§15 Pipeline Bundles](#15-pipeline-bundles)
-21. [§20 Module Registry](#20-module-registry)
-22. [`networking.f` §16 Network Stack](#16-network-stack)
-23. [`networking.f` §17 Socket API](#17-socket-api)
+15. [§8.8–§8.9 Micro-Clusters and Cluster MPU](#8889-micro-clusters-and-cluster-mpu)
+16. [§9 Interactive Screens (TUI)](#9-interactive-screens-tui)
+17. [§10 Data Ports](#10-data-ports)
+18. [§11–§12 Benchmarking & Dashboard](#1112-benchmarking--dashboard)
+19. [§13 Help System](#13-help-system)
+20. [§14 Startup](#14-startup)
+21. [§15 Pipeline Bundles](#15-pipeline-bundles)
+22. [§20 Module Registry](#20-module-registry)
+23. [`networking.f` §16 Network Stack](#16-network-stack)
+24. [`networking.f` §17 Socket API](#17-socket-api)
 
 ---
 
@@ -867,8 +868,8 @@ checked source compiler, nested two-extent filesystem `LOAD`, application
 loader and ANSI helpers, whole-file encryption, parent-byte directory
 navigation/mutation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
-and the one-core queue/affinity/flag/message/lock state machines through line
-7461.
+the one-core queue/affinity/flag/message/lock state machines, and the
+cluster-control/MPU source boundary through line 7568.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -886,7 +887,8 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-7461; Micro-Cluster Support begins at line 7462.
+7568; the forward declarations begin at line 7569 and first require
+`NET-STATUS` at line 7573.
 
 ---
 
@@ -1174,11 +1176,11 @@ only load effects; it does no filesystem or media I/O and emits nothing.
 Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
-registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch, and
-§8.2–§8.7 through line 7461.
-Their provenance and edge contracts are recorded in the corresponding
-sections below and in `docs/simulator-contract.md`; the next uncovered seam is
-Micro-Cluster Support at line 7462.
+registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
+§8.2–§8.7, and §8.8–§8.9 through line 7568. Their provenance and edge
+contracts are recorded in the corresponding sections below and in
+`docs/simulator-contract.md`; the next block begins at line 7569 and first
+requires `NET-STATUS` at line 7573.
 
 ---
 
@@ -1820,7 +1822,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 7461. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 7568. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2193,8 +2195,8 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through Shared Resource Locks at line 7461; the next uncovered seam
-is Micro-Cluster Support at line 7462.
+continues through Cluster MPU at line 7568; the next block begins at line 7569
+and first requires `NET-STATUS` at line 7573.
 
 **Example — filesystem operations:**
 ```forth
@@ -2787,8 +2789,88 @@ static assignments 0–11, not live state, and omits the later networking lock
 These sections qualify a broad unchanged source block and its one-core state
 transitions. They do not establish parallel scheduling, work-stealing
 workers, timer preemption, IPI delivery, task-level mutexes, or speedup. The
-frontier ends at line 7461; §8.8 Micro-Cluster Support begins at line 7462
-and requires additional BIOS cluster-control words.
+next adjacent source is qualified below.
+
+## §8.8–§8.9 Micro-Clusters and Cluster MPU
+
+Exact unchanged `kdos.f` lines 7462–7568 contain 107 LF records and 3,693
+bytes, with SHA-256
+`7f349876f58c132cf72f116c0fa764a97ff0963679abb78d961e4f9a08770932`
+and Git blob `3c13145b43c2eadc14841326f2fef22d34d01b6a`. They publish one
+constant, `NUM-CLUSTERS`, followed by thirteen colon definitions through
+`.CL-MPU`. The exact hosted dictionary advance is 398 bytes. Load publishes
+definitions only: it invokes no cluster-control, barrier, scratchpad, MPU,
+UART, storage, lock, or explicit Timer operation and leaves both stacks empty.
+
+### Cluster request mask
+
+The source hard-codes `NUM-CLUSTERS = 3`; it does not derive inventory from
+`NCORES`, `N-FULL`, or a capability register. IDs are validated with signed
+comparisons, so only 0 through 2 pass. Negative encodings and values at least
+three abort before `CLUSTER-EN@` and cannot mutate the request mask.
+
+| Word | Actual hosted behavior |
+|---|---|
+| `CLUSTER-DISABLE` | Every valid ID computes a zero result against the absent mask, then completes through the permitted idempotent zero store. |
+| `CLUSTER-ENABLE` | Every valid ID reaches `CLUSTER-EN!` with `1 << id`; the primitive fails without consuming that nonzero mask. |
+| `CLUSTERS-OFF` | Completes as a zero store. |
+| `CLUSTERS-ON` | Fails with literal mask 7 retained. |
+| `CLUSTER-STATE` | Reads zero and always prints three disabled rows because the row count is the hard-coded source constant. |
+
+Those rows describe request-bit positions, not configured or running hardware.
+The source read-modify-write operations are unlocked and would not be an
+atomic configuration interface on a multicore target. Enabling also performs
+no code installation, stack setup, readiness check, or scheduler integration;
+disabling has no quiescence protocol.
+
+### Barrier and scratchpad
+
+`HW-BARRIER-WAIT` fails immediately at `BARRIER-ARRIVE`. This keeps absent
+hardware bounded instead of allowing `BARRIER-STATUS = 0` to create an
+infinite poll. `SPAD-C@` and `SPAD-C!` add an unchecked offset to the native
+sentinel `0xFFFF_FE00_0000_0000`. No hosted storage is mapped there. A failed
+fetch retains the computed address because `C@` reads before replacing TOS;
+a failed store has already consumed its byte and address, matching the BIOS
+store ordering. Because cell addition wraps, a sufficiently large offset can
+leave the sentinel aperture and reach mapped Bank 0 or another address class;
+these source words are not fail-closed for arbitrary offsets.
+
+The native barrier contract is itself inconsistent: the BIOS ABI identifies
+done as bit 8 and KDOS polls that bit, current four-core-cluster RTL packs done
+at bit 4 and pulses it for one cycle, and the Python emulator exposes a sticky
+bit 8. No reusable native barrier behavior is inferred from this hosted
+explicit-failure path.
+
+### Cluster privilege and MPU
+
+There is no cluster caller or cluster-local register domain in the hosted
+one-full-core topology. All six cluster privilege/MPU primitives therefore
+fail explicitly: stores retain their operands, and fetches push no fake value.
+The unchanged wrappers expose their literal partial order:
+
+- `CL-MPU-SETUP` fails first at `CL-MPU-LIMIT!`, retaining `( base limit )`;
+- `CL-ENTER-USER` and `CL-EXIT-USER` retain their newly pushed 1 or 0;
+- `CL-MPU-OFF` fails at its first privilege write and never reaches either MPU
+  write; and
+- `.CL-MPU` emits its heading and privilege label before `CL-PRIV@` fails.
+
+The source validates neither MPU alignment nor `base <= limit`, writes limit
+before base, and has no lock, caller check, or barrier around cluster-wide
+state. Those remain target-side concerns rather than hosted enforcement.
+
+### Core classifier discrepancy
+
+Executable BIOS `MICRO?` performs an unsigned `id >= N-FULL` comparison and
+does not validate `id < NCORES`. Earlier KDOS `MICRO-CORE?` and `FULL-CORE?`
+use signed comparisons. With hosted `N-FULL = 1`, both classify 0 and 1 the
+same way, but the first sign-bit-set cell, `0x8000_0000_0000_0000`, is true
+for BIOS `MICRO?` and false for KDOS `MICRO-CORE?` (and true for KDOS
+`FULL-CORE?`). The simulator preserves and tests this discrepancy instead of
+choosing one interpretation silently.
+
+The contiguous frontier now ends at line 7568. The next block starts at line
+7569 with three forward variables; `NET-RX?` at line 7573 is its first blocked
+definition because `NET-STATUS` is not yet admitted.
 
 ---
 

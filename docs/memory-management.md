@@ -626,6 +626,14 @@ barrier.  For cluster workloads, core 0 can pre-allocate an HBW arena
 and pass it to the cluster lead, which distributes sub-regions to
 micro-cores:
 
+`SPAD` is caller-relative cluster storage, not a portable core-0 address.
+Current Python micro-cores provide byte access modulo 1 KiB, whereas current
+RTL indexes `addr[9:3]` and transfers whole qwords, so KDOS byte words
+`SPAD-C@` and `SPAD-C!` are not yet cross-backend qualified. Full-core access
+has no legitimate cluster-local target. The hosted one-core simulator returns
+the architectural sentinel but deliberately leaves it unmapped rather than
+preserving an emulator fall-through alias.
+
 ```forth
 \ Core 0: allocate HBW scratch for cluster 0
 4096 A-HBW MUST-ARENA CONSTANT cl0-arena

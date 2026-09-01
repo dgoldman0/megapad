@@ -1051,7 +1051,15 @@ Estimated area savings: ~300 FFs / ~200 LUTs per micro-core vs a full core.
 
 ### Privilege Model
 
-The Megapad-64 implements a two-level privilege model:
+Full cores implement the two-level model below through private `PRIV` and MPU
+CSRs. Micro-cores instead use cluster-shared `CL_PRIV`, `CL_MPU_BASE`, and
+`CL_MPU_LIMIT` state. Current RTL enforces that shared window in its scalar
+arbiter, while the Python cluster model retains the CSRs but omits scalar MPU
+enforcement; both currently accept cluster-state writes without the intended
+supervisor guard. That backend discrepancy is open and is not a portable
+privilege guarantee.
+
+The full-core model is:
 
 | Level | Value | Name | Context |
 |-------|-------|------|---------|

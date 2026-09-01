@@ -36,7 +36,7 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 7461. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 7568. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
@@ -50,8 +50,9 @@ subdirectory navigation/mutation, and the paged Documentation Browser through
 ordinary descriptors and `FREAD`/`FCLOSE`, followed by raw linked-header
 Dictionary Search, the task registry/synchronous run-to-completion executor,
 Timer Preemption Setup, Multicore Dispatch's honest one-core
-validation/fallback behavior, and the §8.2–§8.7 queue, affinity, flag,
-message, and named-lock state machines.
+validation/fallback behavior, the §8.2–§8.7 queue, affinity, flag, message,
+and named-lock state machines, and the §8.8–§8.9 cluster-control and MPU
+failure boundary.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -930,8 +931,8 @@ untouched. No operation validates pool membership, alignment, allocation, or
 directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
 flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
 and deferred targets are global and unlocked. The contiguous hosted frontier
-continues through Shared Resource Locks at line 7461; its next seam is
-Micro-Cluster Support at line 7462.
+continues through Cluster MPU at line 7568; the next block begins at line 7569
+and first requires `NET-STATUS` at line 7573.
 
 ### Documentation Access
 

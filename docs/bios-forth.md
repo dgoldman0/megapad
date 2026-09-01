@@ -873,15 +873,23 @@ The one-core hosted profile has no cluster caller or cluster-local state.
 while every nonzero store fails without consuming the mask. Both barrier
 words and all cluster privilege/MPU words fail without changing the caller's
 stacks. This is deliberately stricter than the current executable BIOS on a
-full core, where the unimplemented cluster CSR reads return zero and writes
-are ignored: reporting those values would turn absent hardware into apparent
-success and make the KDOS barrier wrapper poll forever.
+full core, where the unimplemented barrier and `CL-*` CSR reads return zero
+and writes are ignored. (`CLUSTER-EN!` is instead real SysInfo MMIO on that
+target.) Reporting the CSR zero/no-op behavior as hosted success would make
+absent hardware appear usable and make the KDOS barrier wrapper poll forever.
 
 `SPAD` still returns the exact native sentinel
 `0xFFFF_FE00_0000_0000`, but the hosted profile does not map scratchpad
 storage at that address. `MICRO?` retains the executable BIOS's unsigned
 threshold behavior, so with hosted `N-FULL = 1`, zero is false and every
 other uint64 value is true even though there are no hosted micro-core IDs.
+
+The checked-in native barrier implementations do not currently agree. The
+BIOS ABI identifies done as bit 8 and KDOS polls that bit; four-core-cluster
+RTL packs done at bit 4 and pulses it for one cycle, while the Python emulator
+exposes a sticky bit 8. Thus no reusable cross-backend barrier contract is
+qualified here; the hosted path's explicit failure avoids selecting any of
+those incompatible behaviors.
 
 ---
 

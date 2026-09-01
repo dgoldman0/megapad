@@ -767,14 +767,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 7461.
+ends at line 7568.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–7461 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, and the §8.2–§8.7 queue/affinity/flag/message/lock state machines |
-| 7462 onward | Next uncovered frontier | Micro-Cluster Support begins at line 7462, followed by the remaining ordinary KDOS source |
+| 39–7568 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, and §8.8–§8.9 cluster-control/MPU failure behavior |
+| 7569 onward | Next uncovered frontier | The forward-declaration block starts at line 7569 and first requires the not-yet-admitted hosted `NET-STATUS` BIOS word at line 7573 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1692,9 +1692,31 @@ abort strands ownership. Its return-stack use is balanced on the normal path
 and is not inside a `DO` loop. `LOCK-INFO` prints static assignments rather
 than live state and stops before the later networking lock 12.
 
-The contiguous frontier now ends at line 7461. The next clean seam is §8.8
-Micro-Cluster Support at line 7462, whose first executable definition needs
-the not-yet-admitted cluster-control BIOS boundary.
+Exact unchanged lines 7462–7568 add `NUM-CLUSTERS` and thirteen colon
+definitions through `.CL-MPU`: 107 LF records, 3,693 bytes, SHA-256
+`7f349876f58c132cf72f116c0fa764a97ff0963679abb78d961e4f9a08770932`,
+Git blob `3c13145b43c2eadc14841326f2fef22d34d01b6a`, and 398 bytes of
+hosted dictionary growth. Load publishes definitions only and leaves cluster,
+barrier, scratchpad, MPU, UART, storage, locks, and both public stacks alone.
+
+The source nevertheless hard-codes three clusters. Its signed ID check accepts
+0–2. Valid disables and `CLUSTERS-OFF` remain idempotent zero stores, while
+valid enables and `CLUSTERS-ON` fail with the computed nonzero request mask
+retained. Invalid IDs abort first. `CLUSTER-STATE` always prints three disabled
+rows; these are source-declared mask positions, not hosted hardware inventory.
+
+The barrier wrapper fails immediately rather than polling absent hardware.
+For small offsets that remain in the unmapped sentinel aperture, scratchpad
+fetch retains the computed address on fault, whereas scratchpad store consumes
+its byte and address before faulting. Offsets are unchecked, so cell wrapping
+can instead escape into mapped memory. Each cluster MPU wrapper exposes its
+literal first-failure ordering, including the partial `.CL-MPU` heading. BIOS
+`MICRO?` remains an unsigned threshold test, while KDOS's earlier classifiers
+are signed; `0x8000_0000_0000_0000` is the first cell on which they disagree.
+
+The contiguous frontier now ends at line 7568. The next block begins at line
+7569 and first needs the not-yet-admitted hosted `NET-STATUS` BIOS word at
+line 7573.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

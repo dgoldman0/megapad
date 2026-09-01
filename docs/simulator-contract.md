@@ -257,7 +257,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 7461.
+KDOS source frontier now ends at line 7568.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -371,7 +371,8 @@ source contains narrow direct-MMIO paths, including UART flush and audio
 control.
 
 An unsupported service advertises an absent capability and returns the
-existing unsupported or absent status.  It never silently reports success.
+existing unsupported or absent status when its ABI has one; otherwise it
+fails explicitly. It never silently reports success.
 Bit-exact results, checked spans, caller ownership, mutation order, status, and
 error behavior are compatibility claims.  Latency and modeled machine cycles
 are not.
@@ -1407,7 +1408,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 7461. Exact unchanged lines
+The contiguous source frontier now ends at line 7568. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2368,9 +2369,45 @@ releases only on normal return; a throw or abort strands ownership. Static
 `LOCK-INFO` labels are not live lock state and omit the later networking lock
 12.
 
-The contiguous source frontier now ends at line 7461. The next clean seam is
-Micro-Cluster Support at line 7462. Its first executable definition requires
-cluster-control BIOS words that are not yet admitted.
+Exact unchanged lines 7462 through 7568 contain 107 LF records and 3,693
+bytes, with SHA-256
+`7f349876f58c132cf72f116c0fa764a97ff0963679abb78d961e4f9a08770932`
+and Git blob `3c13145b43c2eadc14841326f2fef22d34d01b6a`. They publish
+`NUM-CLUSTERS` followed by thirteen colon definitions through `.CL-MPU`,
+advancing the hosted dictionary by 398 bytes. Loading publishes definitions
+only: it performs no cluster, barrier, scratchpad, MPU, UART, storage, lock,
+or explicit Timer operation and leaves both public stacks empty.
+
+The source hard-codes three clusters even though the hosted topology has none.
+Its signed validation accepts only IDs 0 through 2. `CLUSTERS-OFF` and valid
+`CLUSTER-DISABLE` calls succeed idempotently because they store zero;
+`CLUSTERS-ON` and valid `CLUSTER-ENABLE` calls fail at the zero-only BIOS
+boundary with their computed nonzero mask retained. Invalid IDs abort before
+reading the mask. `CLUSTER-STATE` always prints three disabled rows, which is
+a report of the source-declared request bits rather than hardware inventory.
+
+`HW-BARRIER-WAIT` fails immediately at `BARRIER-ARRIVE` instead of entering an
+unbounded poll. For an offset whose computed scratchpad address remains
+unmapped, `SPAD-C@` faults without replacing that address and `SPAD-C!`
+consumes its byte and address before the unmapped-store fault, preserving the
+BIOS store mutation order. The source does not bound the offset: wrapping cell
+addition can leave the sentinel aperture and access mapped Bank 0 or another
+address class, so this API is not fail-closed for arbitrary cells. Cluster
+privilege and MPU wrappers fail on their first primitive. In particular,
+setup retains `( base limit )`, enter/exit retain their newly pushed privilege
+value, off stops before either MPU write, and `.CL-MPU` retains its heading and
+privilege-label output before failing.
+
+Executable BIOS `MICRO?` compares unsigned against `N-FULL` and does not check
+`NCORES`. Earlier KDOS `MICRO-CORE?` and `FULL-CORE?` use signed comparisons;
+therefore the first sign-bit-set cell, `0x8000_0000_0000_0000`, is BIOS-micro
+but KDOS-full. This is a documented source/BIOS discrepancy, not silently
+normalized by the simulator.
+
+The contiguous frontier now ends at line 7568. The next block starts at line
+7569; its first three variables are otherwise loadable, but `NET-RX?` at line
+7573 requires the not-yet-admitted `NET-STATUS` BIOS boundary. The block is
+kept whole rather than claiming a partial forward-declaration seam.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

@@ -207,16 +207,21 @@
   waits up to 64 cycles. Completely timing-dependent.
 - **Severity:** **HIGH**
 
-### E-2. Hardware Barrier Auto-Clear Race
-- **File:** `rtl/core/mp64_cluster.v` lines 140–165
-- **Mechanism:** The cluster barrier tracks which cores have arrived via
-  `barrier_arrive` bits. When all cores arrive, `barrier_done` is set for one
-  cycle, then auto-clears. If a core reads `CSR_BARRIER_STATUS` on the exact
-  cycle of auto-clear, it may see `done=0` despite having arrived.
-- **Cycle-accuracy impact:** Barrier synchronization granularity is cycle-exact;
-  a 1-cycle polling window difference can cause a core to spin an extra
-  iteration.
-- **Severity:** **MEDIUM**
+### E-2. Hardware Barrier Encoding and Lifetime Mismatch
+- **Files:** `rtl/core/mp64_cluster.v`, `bios.asm`, `kdos.f`, and the Python
+  cluster model
+- **Mechanism:** The BIOS ABI identifies barrier-done as bit 8 and KDOS polls
+  that bit. The current RTL packs done immediately above the arrival vector,
+  which is bit 4 for the default four-core cluster, and exposes it for only
+  one cycle before clearing the arrivals. Current KDOS therefore never
+  observes RTL completion. Even after correcting the bit position, a polling
+  core that misses the pulse can spin forever. The Python emulator instead
+  exposes sticky bit 8 and clears the arrival vector, so later barriers can
+  observe stale completion and return immediately.
+- **Cycle-accuracy impact:** This is not merely an extra polling iteration.
+  Current backends have no common reusable barrier ABI: one path can deadlock
+  permanently, while another can complete a later barrier spuriously.
+- **Severity:** **CRITICAL**
 
 ### E-3. Tile Memory Priority Arbiter (Starvation)
 - **File:** `rtl/gpu/mp64_tile.v` lines 50–85
@@ -786,7 +791,7 @@
 | D-2  | IRQ handler bus txns  | MEDIUM   | ✓       |       |            |
 | D-3  | MPU fault bus txns    | LOW      | ✓       |       |            |
 | E-1  | Cluster shared units  | HIGH     | ✓       |       |            |
-| E-2  | Barrier auto-clear    | MEDIUM   | ✓       |       |            |
+| E-2  | Barrier ABI mismatch  | CRITICAL | ✓       |       |            |
 | E-3  | Tile mem priority     | HIGH     | ✓       |       |            |
 | E-4  | Mailbox requester ID  | MEDIUM   |         | ✓     |            |
 | E-5  | Spinlock no backoff   | LOW      | ✓       |       |            |
