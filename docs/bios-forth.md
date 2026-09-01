@@ -775,7 +775,7 @@ Low-level access to the network interface controller.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `NET-STATUS` | `( -- status )` | Read NIC status. Bit 1: RX available, bit 2: link, bit 3: error (sticky until `NET-RESET`), bit 4: RX DMA busy, bit 7: present. |
+| `NET-STATUS` | `( -- status )` | Read NIC status. Bit 0: TX busy, bit 1: RX available, bit 2: link up, bit 3: error (sticky until direct command-register RESET `0x04`), bit 4: RX DMA busy, bits 5–6: zero, bit 7: present. |
 | `NET-SEND` | `( addr len -- )` | Send a frame: set DMA address + length, issue SEND command. |
 | `NET-RECV` | `( addr -- actual )` | Receive a frame into `addr`; wait for RTL RX DMA completion before publishing the length. Returns 0 if nothing is available. |
 | `NET-MAC@` | `( -- addr )` | Return the MMIO address of the six MAC bytes. |

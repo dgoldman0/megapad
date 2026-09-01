@@ -869,7 +869,8 @@ loader and ANSI helpers, whole-file encryption, parent-byte directory
 navigation/mutation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
 the one-core queue/affinity/flag/message/lock state machines, and the
-cluster-control/MPU source boundary through line 7568.
+cluster-control/MPU source boundary, absent-network forward bridge, and
+§9.1–§9.4 ANSI screen registry/control layer through line 7838.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -887,8 +888,8 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-7568; the forward declarations begin at line 7569 and first require
-`NET-STATUS` at line 7573.
+7838; §9.5 begins at line 7839 with the Screen Definition Language and
+widget-vector vocabulary.
 
 ---
 
@@ -1177,10 +1178,9 @@ Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
-§8.2–§8.7, and §8.8–§8.9 through line 7568. Their provenance and edge
-contracts are recorded in the corresponding sections below and in
-`docs/simulator-contract.md`; the next block begins at line 7569 and first
-requires `NET-STATUS` at line 7573.
+§8.2–§8.7, §8.8–§8.9, and §9.1–§9.4 through line 7838. Their provenance and
+edge contracts are recorded in the corresponding sections below and in
+`docs/simulator-contract.md`; §9.5 begins at line 7839.
 
 ---
 
@@ -1822,7 +1822,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 7568. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 7838. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2195,8 +2195,8 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through Cluster MPU at line 7568; the next block begins at line 7569
-and first requires `NET-STATUS` at line 7573.
+continues through the §9.1–§9.4 screen registry/control layer at line 7838;
+§9.5 begins at line 7839.
 
 **Example — filesystem operations:**
 ```forth
@@ -2868,9 +2868,9 @@ for BIOS `MICRO?` and false for KDOS `MICRO-CORE?` (and true for KDOS
 `FULL-CORE?`). The simulator preserves and tests this discrepancy instead of
 choosing one interpretation silently.
 
-The contiguous frontier now ends at line 7568. The next block starts at line
-7569 with three forward variables; `NET-RX?` at line 7573 is its first blocked
-definition because `NET-STATUS` is not yet admitted.
+The next contiguous source block is qualified below. Its forward `NET-RX?`
+definition executes against the admitted absent-NIC status boundary rather
+than blocking source load.
 
 ---
 
@@ -2880,13 +2880,68 @@ The SCREENS system is a full-screen terminal UI built on **ANSI escape
 sequences**.  It provides a tabbed dashboard with 9 screens showing system
 status in real time.
 
+### Hosted unchanged-source frontier through §9.4
+
+Exact unchanged `kdos.f` lines 7569–7838 contain 270 LF records and 8,868
+bytes, with SHA-256
+`c982515e55f9e94af0122ae1cd9e02af902774105bf59f65eae5a491973dfb82`
+and Git blob `467892ab2c4d04851a9c8db7dc95eafe860f3ec8`. The block publishes
+58 definitions: the three §10 forward variables and `NET-RX?`, then two
+screen-capacity constants, eight raw registry tables, screen/UI state, ANSI
+controls, directory/document selectors, the registration/compaction API, and
+header/tab/footer words. Hosted dictionary growth is exactly 4,519 bytes.
+Load only publishes and initializes dictionary state. It does not poll a key,
+touch a filesystem or storage device, emit UART output, access NIC MMIO, or
+invoke a screen renderer. The eight `CREATE ... ALLOT` table spans are not
+cleared by source; unused entries have no defined initial value.
+
+The pseudo-BIOS absent-NIC status is zero, so unchanged `NET-RX?` returns
+canonical false without claiming link or device presence. ANSI helpers emit
+their literal byte protocol. In particular, `AT-XY ( col row -- )` writes row
+before column in `ESC[row;colH`, and `HBAR` writes DIM, 60 raw bytes of value
+`0xC4`, RESET, and CR/LF.
+
+`REGISTER-SCREEN` publishes zero-based IDs, initializes key/action/subscreen
+count for the new row, and returns `-1` without mutation when 16 rows are
+already live. A selectable first row resets `SCR-SEL` to zero. Each parent
+accepts eight subscreens; a ninth request is consumed and ignored.
+`UNREGISTER-SCREEN` compacts live rows and complete eight-cell subscreen
+blocks. It does not clear the vacated tails, so those physical cells remain
+stale outside `NSCREENS`/`SUB-COUNTS`. Removing the current row resets
+`SCREEN-ID`, `SCR-SEL`, and `SCR-MAX`, but not `SUBSCREEN-ID`; removing the
+last row leaves `SCREEN-ID = 1` with `NSCREENS = 0`. Handler setters,
+`ADD-SUBSCREEN`, `SCREEN-SUBS`, and `SCREEN-SELECTABLE?` trust their IDs or
+the global screen state and do no independent bounds validation.
+
+The following discrepancies are source-literal and are not repaired by the
+simulator:
+
+- `FIND-NTH-ACTIVE` drops its running counter on a match and then performs an
+  unconditional post-loop `DROP`. With only its declared input this
+  underflows after `FNA-FOUND` has been set; with an older caller cell it
+  silently consumes that cell before returning the slot. The no-match path
+  returns `-1` normally.
+- `SCREEN-HEADER` uses `NSCREENS @ 0 DO`, so zero screens do not form a
+  zero-trip loop. Calling it in that state wraps the loop domain and is unsafe.
+  `SCREEN-FOOTER` also assumes a live row when formatting the maximum ID and
+  consulting subscreen state.
+- Header and tab labels are dispatched as `label-xt ['] EXECUTE CATCH`. A
+  throwing label is visibly replaced with `?`, but the exact exception-stack
+  sequence leaves a saved data-stack-pointer cell on the caller's stack.
+
+The contiguous hosted frontier ends at line 7838. Line 7839 starts §9.5's
+Screen Definition Language and widget-vector vocabulary. This checkpoint is
+acceptance of the existing byte-oriented ANSI control path; it is not
+acceptance of a rich-terminal module, projection, compositor, or physical
+viewer.
+
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
 > thread-safe**.  `REGISTER-SCREEN`, `SWITCH-SCREEN`, `RENDER-SCREEN`, and
 > `HANDLE-KEY` must only be called from the main core (core 0).  Background
-> tasks on secondary cores that need to register or modify screens should
-> send a request via the mailbox (IPI) and let the main-core event loop
-> service it between iterations.
+> tasks need a caller-supplied handoff that causes the main core to perform
+> registration or mutation. KDOS does not define a screen-request mailbox ABI
+> or service one from `SCREEN-LOOP`.
 
 ### Starting the TUI
 

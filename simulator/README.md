@@ -770,14 +770,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 7568.
+ends at line 7838.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–7568 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, and §8.8–§8.9 cluster-control/MPU failure behavior |
-| 7569 onward | Next uncovered frontier | The forward-declaration block starts at line 7569 and first requires the not-yet-admitted hosted `NET-STATUS` BIOS word at line 7573 |
+| 39–7838 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, and §9.1–§9.4 ANSI screen tables, controls, lookup, registration, compaction, labels, and chrome |
+| 7839 onward | Next uncovered frontier | §9.5 begins the Screen Definition Language and widget-vector vocabulary; it has not yet been source-qualified |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1717,9 +1717,39 @@ literal first-failure ordering, including the partial `.CL-MPU` heading. BIOS
 `MICRO?` remains an unsigned threshold test, while KDOS's earlier classifiers
 are signed; `0x8000_0000_0000_0000` is the first cell on which they disagree.
 
-The contiguous frontier now ends at line 7568. The next block begins at line
-7569 and first needs the not-yet-admitted hosted `NET-STATUS` BIOS word at
-line 7573.
+Exact unchanged lines 7569–7838 then add the §10 forward variables and
+`NET-RX?`, followed by the §9.1–§9.4 ANSI screen registry/control layer: 270
+LF records, 8,868 bytes, SHA-256
+`c982515e55f9e94af0122ae1cd9e02af902774105bf59f65eae5a491973dfb82`,
+Git blob `467892ab2c4d04851a9c8db7dc95eafe860f3ec8`, 58 definitions, and
+4,519 bytes of hosted dictionary growth. Loading only initializes 22 variable
+cells and allocates eight tables; it performs no UART, key, filesystem,
+storage, NIC-MMIO, or renderer operation. The bare `CREATE ... ALLOT` table
+bodies retain prior memory bytes until registration writes a logical row.
+
+The absent `NET-STATUS = 0` makes `NET-RX?` return canonical false. The ANSI
+helpers preserve their byte ABI, including the row-before-column `AT-XY`
+sequence and `HBAR`'s 60 raw `0xC4` bytes. Registration returns zero-based IDs,
+initializes the key/action/subscreen-count cells for each admitted row, returns
+`-1` without mutation at 16 screens, and caps each parent's subscreens at
+eight. Unregistration compacts live rows but deliberately follows the source
+in leaving vacated screen and subscreen tails stale; removing the current
+screen resets its 1-based ID, selection, and maximum but not `SUBSCREEN-ID`.
+Several setters and readers trust their screen or parent ID without checking
+bounds.
+
+Qualification also pins defects in the unchanged source rather than repairing
+them. A successful `FIND-NTH-ACTIVE` match drops its running counter inside
+the loop and drops once more afterward: an otherwise empty caller underflows,
+while a deeper caller silently loses one pre-existing cell. `SCREEN-HEADER`
+uses a non-zero-trip `NSCREENS @ 0 DO`, so it is unsafe with zero screens, and
+the zero-screen footer consults stale row state. A throwing dynamic label is
+caught and rendered as `?`, but the source's `label-xt ['] EXECUTE CATCH`
+sequence leaves a saved data-stack-pointer cell on the public stack. These are
+documented source contracts, not hosted substitutions.
+
+The contiguous frontier now ends at line 7838. The next block begins at line
+7839 with the §9.5 Screen Definition Language and widget-vector vocabulary.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

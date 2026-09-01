@@ -257,7 +257,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 7568.
+KDOS source frontier now ends at line 7838.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -416,12 +416,12 @@ not cluster execution, scratchpad storage, barriers, privilege, or MPU
 enforcement.
 
 The NIC is absent from the admitted hosted profile. Pseudo-BIOS `NET-STATUS`
-returns zero, so RX-available, link, error, DMA-busy, and present are all
-clear. This is sufficient for ordinary feature/status branching but does not
-admit the direct NIC MMIO window, `NET-SEND`, `NET-RECV`, `NET-MAC@`, frame
-queues, DMA, host networking, or interrupt delivery. A direct access to the
-architectural NIC aperture therefore remains an MMIO fault rather than an
-alias of the pseudo-BIOS status.
+returns zero, so TX-busy, RX-available, link, error, DMA-busy, and present are
+all clear. This is sufficient for ordinary feature/status branching but does
+not admit the direct NIC MMIO window, `NET-SEND`, `NET-RECV`, `NET-MAC@`,
+frame queues, DMA, host networking, or interrupt delivery. A direct access to
+the architectural NIC aperture therefore remains an MMIO fault rather than
+an alias of the pseudo-BIOS status.
 
 The currently admitted UART surface is pseudo-BIOS byte I/O, not the physical
 UART window. Output bytes become observable synchronously, making the native
@@ -1416,7 +1416,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 7568. Exact unchanged lines
+The contiguous source frontier now ends at line 7838. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2412,10 +2412,52 @@ therefore the first sign-bit-set cell, `0x8000_0000_0000_0000`, is BIOS-micro
 but KDOS-full. This is a documented source/BIOS discrepancy, not silently
 normalized by the simulator.
 
-The contiguous frontier now ends at line 7568. The next block starts at line
-7569; its first three variables are otherwise loadable, but `NET-RX?` at line
-7573 requires the not-yet-admitted `NET-STATUS` BIOS boundary. The block is
-kept whole rather than claiming a partial forward-declaration seam.
+Exact unchanged lines 7569 through 7838 contain 270 LF records and 8,868
+bytes, with SHA-256
+`c982515e55f9e94af0122ae1cd9e02af902774105bf59f65eae5a491973dfb82`
+and Git blob `467892ab2c4d04851a9c8db7dc95eafe860f3ec8`. They publish 58
+definitions: two constants, eight `CREATE` tables, 22 variables, and 26 colon
+words. Hosted dictionary growth is exactly 4,519 bytes: 1,527 bytes of
+headers/semantic slots, 176 bytes of initialized variable bodies, and 2,816
+bytes of raw table allocation. Load invokes no UART, key input, filesystem,
+storage, direct NIC, or rendering operation. In particular, `ALLOT` does not
+clear the eight registry tables; only `VARIABLE` bodies and cells explicitly
+written by source or registration have defined initial content.
+
+Pseudo-BIOS `NET-STATUS = 0` makes unchanged `NET-RX?` return canonical false
+without claiming a NIC. `.HEXDIG`, `AT-XY`, `PAGE`/`CLS`, color controls, and
+`HBAR` retain their exact UART byte sequences; `HBAR` emits 60 raw `0xC4`
+bytes rather than a UTF-8 glyph. With `FS-OK = 0`, `SHOW-NTH-DOC` records its
+selector and returns without touching input or storage. Its mounted successful
+path remains deliberately interactive and blocks at `KEY` after publishing a
+document.
+
+`REGISTER-SCREEN` returns zero-based IDs, initializes each admitted row's
+key/action/subscreen-count cells, and returns `-1` without mutation once 16
+rows exist. `ADD-SUBSCREEN` admits eight entries per parent and silently
+consumes a ninth request. Neither it nor the handler setters validates an ID.
+`SCREEN-SUBS` and `SCREEN-SELECTABLE?` likewise assume a valid 1-based global
+`SCREEN-ID`. Unregistration shifts live rows and eight-cell subscreen blocks,
+but source-literally leaves every vacated tail cell stale. Removing the
+current screen resets `SCREEN-ID = 1`, `SCR-SEL = -1`, and `SCR-MAX = 0`, even
+when no rows remain; it does not reset `SUBSCREEN-ID`.
+
+The following unchanged-source discrepancies are part of this acceptance:
+
+- on a `FIND-NTH-ACTIVE` match, the in-loop `DROP` removes the running count
+  and the post-loop `DROP` then underflows an empty caller or consumes one
+  pre-existing caller cell; `FNA-FOUND` is nevertheless set before the fault;
+- `SCREEN-HEADER` uses plain `NSCREENS @ 0 DO`, so zero rows enter a wrapping
+  loop instead of producing an empty header, while the zero-row footer formats
+  `NSCREENS - 1` and reads stale row-zero subscreen state; and
+- failed label execution is converted to visible `?`, but the exact
+  `label-xt ['] EXECUTE CATCH` path leaves the saved data-stack-pointer cell
+  exposed after the throw instead of satisfying the declared empty result.
+
+The contiguous frontier now ends at line 7838. Line 7839 begins the §9.5
+Screen Definition Language and widget-vector block. Nothing in this slice
+loads `rich-terminal.f`, projects a rich frame, or advances the rich-terminal
+vertical.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
