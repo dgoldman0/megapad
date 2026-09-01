@@ -855,14 +855,15 @@ and Arena sections plus Buffer's general `IDLE`, registry, constructors,
 inspection, Arena integration, integer/FP16/BF16 operations, the kernel
 registry and sample kernels, the pipeline engine, checked block-device and
 bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
-storage-compatibility layer through line 4803.
+storage-compatibility and legacy file layers through line 5003.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
 guarded I/O, partition validation, transactional publication, selected-volume
-lifecycle, and diagnostic wrappers are executable semantic behavior rather
-than reporting-only shims. After blank line 4804, the next uncovered source at
-line 4805 begins the legacy file abstraction.
+lifecycle, diagnostic wrappers, permanent file descriptors, and composed
+head/full/tail sector I/O are executable semantic behavior rather than
+reporting-only shims. After blank line 5004, the next uncovered source at line
+5005 begins MP64FS.
 
 ---
 
@@ -1090,8 +1091,14 @@ Load allocates the singleton bodies without explicitly clearing their extents;
 virgin hosted memory supplies the zeros required by their first-construction
 contract. It also creates zero-initialized diagnostic variables, points
 `FS-VOLUME` at the still-invalid `SYSTEM-RAW-VOLUME`, and explicitly clears
-`FS-OK`, all without touching storage. After blank line 4804, line 4805 begins
-the next uncovered legacy file abstraction.
+`FS-OK`, all without touching storage. Exact lines 4804 through 5003 then add
+all 38 file-abstraction definitions through `FILES` in 200 lines and 6,781
+bytes, with SHA-256
+`b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`.
+Load initializes the registry count and scratch variables and allocates the
+registry and sector scratch without executing `FILE`, touching media, or
+printing. After blank line 5004, line 5005 begins the next uncovered MP64FS
+section.
 
 ---
 
@@ -1588,44 +1595,79 @@ validates the selected binding and says nothing about capabilities, staleness,
 
 ## §7.5 File Abstraction
 
-A **legacy file layer** built on raw sector access — before the named
-filesystem (§7.6) was added.  Files here are identified by their starting
-sector, not by name.  Up to **8 files** can be open.
+A legacy contiguous-file layer predating the named filesystem (§7.6). Each
+`FILE` permanently compiles a dictionary descriptor and a named constant. Its
+start sector is relative to whichever `FS-VOLUME` is selected when an operation
+runs; the descriptor captures no volume identity, generation, or ownership.
+Changing the selected volume therefore redirects every legacy descriptor.
 
 ### File Descriptor Layout
 
-File descriptors are allocated from a fixed pool of 16 slots (1,152 bytes
-total, allocated once at boot).  Each slot is 72 bytes; the returned
-`fdesc` pointer starts at offset +8, so field accessors are unchanged.
-Use `FCLOSE` to release a descriptor back to the pool when done.
+| Offset | Field | Meaning |
+|---:|---|---|
+| +0 | start sector | Relative LBA in the current selected volume. |
+| +8 | declared maximum sectors | Logical bound only; `FILE` allocates and reserves no sectors. |
+| +16 | used bytes | Logical end-of-file metadata, which may be grown without writing. |
+| +24 | cursor | Unchecked current byte offset. |
 
-```
-Pool slot layout:
-Offset   Field          Meaning
-───────  ─────────────  ─────────────────────────────────────
-−8       in_use         0 = free, −1 = in-use  (pool internal)
-+0       start_sector   First sector on disk
-+8       max_sectors    Allocated capacity in sectors
-+16      used_bytes     How many bytes have been written
-+24      cursor         Current read/write byte offset
-+32      dir_slot       Directory slot index  (OPEN'd files)
-+40      ext1_start     Second extent start sector
-+48      ext1_count     Second extent sector count
-```
+There is no open/close state. `FILE-TABLE` is only an eight-pointer display
+registry: the ninth and later `FILE` descriptors and constants remain usable
+but are silently omitted from `FILES`. These permanent four-cell descriptors
+are not the later MP64FS pool objects and must never be passed to `FCLOSE`,
+which interprets memory before and beyond its argument using a different
+layout.
+
+`FSCRATCH` exposes the one-sector working span used for partial I/O. Its source
+form (`VARIABLE` plus 511 `ALLOT` bytes) actually reserves 519 bytes, but only
+the first 512 form the operational scratch sector.
 
 ### Words
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `FILE` | `( start_sector max_sectors "name" -- )` | Create a file descriptor backed by disk sectors.  Defines a CONSTANT. |
-| `FSEEK` | `( pos fdesc -- )` | Set the cursor to byte position *pos*. |
+| `FILE` | `( start_sector max_sectors "name" -- )` | Permanently compile a four-cell descriptor and a constant; allocate, reserve, and validate no media. |
+| `FSEEK` | `( pos fdesc -- )` | Store an unchecked cursor value. |
 | `FREWIND` | `( fdesc -- )` | Reset cursor to 0 (start of file). |
 | `FSIZE` | `( fdesc -- n )` | Return the used byte count. |
-| `FTRUNCATE` | `( n fdesc -- )` | Set used bytes to *n* (clamped to capacity).  Adjusts cursor if past new size.  Does not zero freed bytes. |
-| `FWRITE` | `( addr len fdesc -- )` | Write *len* bytes from *addr* at the current cursor.  Advances cursor.  Bounds-checked against capacity. |
-| `FREAD` | `( addr len fdesc -- actual )` | Read up to *len* bytes at cursor into *addr*.  Returns actual bytes read.  Clamps to available data. |
+| `FTRUNCATE` | `( n fdesc -- )` | Change RAM metadata to `min(n, max*512)` and clamp the cursor; may grow or shrink and performs no I/O. |
+| `FWRITE` | `( addr len fdesc -- )` | In the admitted ordinary domain, write at the cursor and update cursor/used after all stages succeed. Out of space only prints a message. |
+| `FREAD` | `( addr len fdesc -- actual )` | In the admitted ordinary domain, read at most the available logical bytes and advance by the returned count. |
 | `F.INFO` | `( fdesc -- )` | Print file descriptor summary. |
-| `FILES` | `( -- )` | List all registered legacy file descriptors. |
+| `FILES` | `( -- )` | List indexed summaries for the first eight registered descriptors, not every `FILE`. |
+
+The admitted I/O domain requires ordinary nonnegative values no greater than
+`INT64_MAX`; nonwrapping `max_sectors*512`, `cursor+len`, and relative-sector
+arithmetic; `used <= capacity`; complete ordinary-RAM caller spans; protected,
+disjoint descriptor and global scratch storage; and a declared file extent
+contained in the currently selected volume. In that domain, `FWRITE` preserves
+partial head/tail surroundings with read-modify-write through `FSCRATCH`,
+`FREAD` serves partial head/tail bytes by scratch read/copy, and whole middle
+sectors transfer directly. In-bounds zero-length operations are no-ops, and
+`FREAD` returns zero at or beyond logical EOF.
+
+The implementation does not establish those preconditions. `FILE` permits
+file extents to overlap one another or selected-volume filesystem/partition
+metadata, and it accepts out-of-volume geometry. `FWRITE` performs only a
+wrapping `cursor+len > max*512` check using signed `>`; an ordinary nonwrapping
+out-of-capacity request prints `FWRITE: out of space` and returns normally
+without an ior or flag. `FREAD` uses signed `<` for its EOF guard. Both paths
+then use the currently executable unsigned `MIN`/`MAX`, whose signed public
+contract remains unresolved. High-bit and wrapping inputs are therefore
+unqualified; the current `FTRUNCATE -1` behavior, for example, clamps to
+capacity rather than resolving what the public signedness should mean.
+
+Descriptor fields are per-object, but construction/truncate use shared
+`FDESC`/`FT-N` and I/O uses shared `FW-*`/`FR-*` plus `FSCRATCH`; the layer is
+unlocked and non-reentrant. Per-sector checked locking does not make a
+partial-sector read-modify-write or a multi-sector operation atomic. A later
+storage abort may leave earlier media writes or destination bytes committed
+while descriptor cursor/used metadata remains unchanged. Seeking past EOF
+before a write and growing with `FTRUNCATE` expose unchanged old media in
+logical holes. No operation allocates media, automatically zero-fills holes or
+bytes exposed by truncate/growth, flushes, prevents overlap, or persists
+descriptor metadata. Raw accessors and publishers do not validate their
+descriptor pointers, and `F.INFO` reads fields sequentially rather than as a
+coherent snapshot.
 
 ---
 

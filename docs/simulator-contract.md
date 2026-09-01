@@ -119,8 +119,8 @@ consumes value and address before its first byte and leaves an already-written
 low-byte prefix committed if a later byte faults. `NEGATE` is ordinary
 two's-complement cell negation, including the self-negating sign-bit value.
 
-The current executable BIOS implements scalar `MIN` as an unsigned comparison,
-while the public Forth descriptions call it signed. That remains an
+The current executable BIOS implements scalar `MIN` and `MAX` as unsigned
+comparisons, while the public Forth descriptions call them signed. That remains an
 [open documentation/implementation discrepancy](bios-forth.md), not a hosted
 simulator decision about the eventual public contract. Source qualification
 records which input domain is insensitive to the mismatch and does not silently
@@ -1198,8 +1198,8 @@ generation swap during later array reads. The caller must provide pairwise-
 disjoint writable block descriptor, output, and workspace extents; the source
 does not prove those spans or make a scan a same-medium content snapshot.
 
-The contiguous source frontier now ends at line 4803. Exact unchanged lines
-4670 through 4803 contain 134 lines and 4,127 bytes (SHA-256
+Exact unchanged lines 4670 through 4803 contain 134 lines and 4,127 bytes
+(SHA-256
 `7ba6cb19989623363d2e78ac45ae81b1b7e4bb2ad51864005bfbb35b1f768199`).
 They publish 24 definitions through `DISK-INFO`: singleton raw storage
 binding, a borrowed selected-volume pointer, cache-validity gating, retained
@@ -1238,11 +1238,48 @@ from `B.DATA`, while ordinary constructors reserve only the logical payload;
 otherwise the operation exposes or overwrites up to 511 adjacent bytes. A
 zero-byte Buffer submits an invalid zero-sector request and aborts through the
 checked wrapper. `B.SAVE` performs no flush and proves no durability. Hosted
-acceptance uses an exact-sector Buffer and does not add hidden padding. After
-blank line 4804, line 4805 begins the next uncovered legacy file abstraction.
+acceptance uses an exact-sector Buffer and does not add hidden padding.
 `DISK-INFO` samples only ambient attachment presence; it neither opens nor
 validates the selected binding and does not report capabilities, staleness,
 `FS-OK`, or durability.
+
+The contiguous source frontier now ends at line 5003. Exact unchanged lines
+4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
+`b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
+They publish all 38 legacy file definitions through `FILES`: the eight-pointer
+display registry, one-sector scratch window, permanent four-cell dictionary
+descriptors, metadata words, head/full/tail file I/O, and UART publishers.
+Load initializes the count and variables and allocates the table and scratch;
+it creates no `FILE`, performs no storage operation, and prints nothing.
+
+`FILE` allocates or reserves no media and captures no volume identity. Its
+start LBA is relative to the volume selected at each operation, so rebinding
+redirects an existing descriptor. Only the first eight descriptor pointers
+enter `FILE-TABLE`; later constants remain usable but are omitted from
+`FILES`. There is no open/close lifecycle, and these 32-byte descriptors are
+not compatible with the later MP64FS descriptor pool or `FCLOSE`.
+
+Qualification covers ordinary nonnegative, nonwrapping geometry whose declared
+extent fits the selected volume and whose complete caller spans are mapped.
+Within that domain, `FWRITE` preserves partial-sector surroundings, DMAs whole
+middle sectors, and publishes cursor/used only after every stage succeeds;
+`FREAD` clamps to logical availability and returns zero at EOF. Acceptance
+executes a real head/full/tail round trip through `_DISK-*`, exact capacity and
+zero-length paths, metadata growth/clamping, registry publication, UART
+listing, and a late range abort that retains earlier sector writes without
+committing descriptor metadata. No file operation flushes.
+
+The unchanged source does not enforce that domain. `FSEEK` is unchecked;
+`FTRUNCATE` can grow and expose old bytes; file extents can overlap or escape
+the volume; and arithmetic can wrap. `FWRITE` mixes a wrapping end calculation
+with signed `>`, while `FREAD` uses signed `<`; both then depend on the current
+unsigned executable `MIN`/`MAX` behavior. High-bit values are unqualified.
+Shared `FDESC`, `FT-N`, `FW-*`, `FR-*`, and `FSCRATCH` make construction and
+I/O non-reentrant, and per-sector locking does not make read-modify-write or
+multi-sector work atomic. Failures can leave earlier destination or media
+effects, no logical hole is automatically zero-filled, all raw field access
+trusts its pointers, and descriptor metadata is never persisted. After blank
+line 5004, line 5005 begins the next uncovered MP64FS section.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

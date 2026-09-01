@@ -214,7 +214,7 @@ and execute `PARSE-NAME`, `NEEDS`, `ASSERT`, `.DEPTH`, and `0>=`. Acceptance
 checks transient `WORD` geometry without moving `HERE`, path clamping and tail
 clearing, low-to-high `CMOVE` overlap, exact quote payloads and abort output,
 pre-push `DEPTH`, wrapped scalar operations, signed `>`, and the current
-executable BIOS's unsigned `MIN` behavior. That `MIN` behavior mirrors an
+executable BIOS's unsigned `MIN`/`MAX` behavior. That behavior mirrors an
 [open documentation/implementation discrepancy](../docs/bios-forth.md), not a
 decision that unsigned comparison is the desired final API. Interpret-state
 `ABORT"` remains outside this supported slice because unchanged KDOS uses its
@@ -639,8 +639,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–4803 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage objects, raw/MBR/GPT discovery, then singleton storage compatibility |
-| 4804 onward | Next uncovered frontier | A blank seam precedes the legacy file abstraction at line 4805 |
+| 39–5003 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, then the legacy file abstraction |
+| 5004 onward | Next uncovered frontier | A blank seam precedes MP64FS at line 5005 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -837,9 +837,31 @@ exact-sector payload instead of masking the possible 511-byte overrun with
 simulator padding. `DISK-INFO` reports only ambient attachment presence, not a
 usable or current selected binding.
 
-Later slices continue after blank line 4804 with the legacy file abstraction
-at line 4805, then toward the persistent evaluator, ordinary checked
-module-loader surface, and deterministic cooperative task scheduler.
+The adjacent file-abstraction fixture is exact unchanged `kdos.f` lines
+4804–5003: 200 lines, 6,781 bytes, and SHA-256
+`b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`.
+It publishes 38 definitions through `FILES` without creating a descriptor,
+touching media, or printing at load time. Focused acceptance executes the real
+`FILE` defining word and silent eight-pointer registry cap, metadata and
+current unsigned clamp behavior, ordinary capacity and zero-length paths,
+complete head/full/tail file I/O, a late range abort after earlier sector
+writes, and exact `F.INFO`/`FILES` output.
+
+Legacy descriptors are permanent four-cell dictionary objects, not later
+MP64FS pool entries. They reserve no sectors and capture no volume identity;
+selection changes redirect them. Ordinary successful I/O requires
+nonnegative, nonwrapping geometry contained in the selected volume and
+complete caller spans. Unchanged source does not enforce that domain: seek is
+unchecked, truncate can expose old bytes, bounds mix signed comparisons with
+unsigned `MIN`/`MAX`, and file ranges can overlap or escape the volume.
+Descriptor fields are per-object, but construction, truncate, I/O, and sector
+scratch use unlocked globals and are non-reentrant. Multi-stage failures may
+leave earlier bytes committed without advancing descriptor metadata, and no
+file operation flushes or persists that metadata.
+
+Later slices continue after blank line 5004 with MP64FS at line 5005, then
+toward the persistent evaluator, ordinary checked module-loader surface, and
+deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work
