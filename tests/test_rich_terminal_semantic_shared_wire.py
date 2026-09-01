@@ -7,7 +7,7 @@ from copy import deepcopy
 
 import pytest
 
-from rich_terminal.retained_scene import ControlState, ObjectBounds, Point, RGBA
+from rich_terminal.retained_scene import ControlState, ObjectBounds, Point, RGBA, Sample
 from rich_terminal.retained_view import (
     GlyphRunDraw,
     MenuBarDraw,
@@ -15,15 +15,18 @@ from rich_terminal.retained_view import (
     MenuItemDraw,
     MenuSeparatorDraw,
     MeterDraw,
+    PlotDraw,
     PolylineDraw,
     ReadoutDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    SeriesHistoryDraw,
+    StatusDraw,
     TabDraw,
     TabSetDraw,
     TextAreaDraw,
     TextGridDraw,
-    StatusDraw,
+    WaveformDraw,
 )
 from rich_terminal.semantic_content import (
     SemanticContentFlag,
@@ -450,6 +453,108 @@ def test_instrument_wire_rejects_invalid_typed_values(
 ):
     wire = deepcopy(retained_draw_plane_to_wire(_instrument_plane()))
     wire["regions"][0]["draws"][draw_index][field] = value
+
+    with pytest.raises(error, match=match):
+        retained_draw_plane_from_wire(wire)
+
+
+def _series_plane() -> RetainedDrawPlane:
+    history = SeriesHistoryDraw(
+        1,
+        2,
+        7,
+        (Sample(10, -5), Sample(20, 15), Sample(40, 0)),
+    )
+    plot = PlotDraw(
+        30,
+        1,
+        FULL_BOUNDS,
+        7,
+        -10,
+        20,
+        RGBA(20, 210, 70, 255),
+        RGBA(20, 210, 70, 96),
+        True,
+        True,
+    )
+    waveform = WaveformDraw(
+        31,
+        2,
+        FULL_BOUNDS,
+        7,
+        -20,
+        20,
+        RGBA(230, 235, 244, 192),
+        RGBA(90, 90, 90, 255),
+        0,
+        True,
+    )
+    return RetainedDrawPlane(
+        True,
+        True,
+        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, (plot, waveform)),),
+        (history,),
+    )
+
+
+def test_series_history_is_copied_once_and_draws_carry_only_its_identity():
+    plane = _series_plane()
+
+    wire = retained_draw_plane_to_wire(plane)
+
+    assert retained_draw_plane_from_wire(wire) == plane
+    assert wire["series"] == [
+        {
+            "owner_id": 1,
+            "owner_generation": 2,
+            "series_id": 7,
+            "samples": [[10, -5], [20, 15], [40, 0]],
+        }
+    ]
+    plot, waveform = wire["regions"][0]["draws"]
+    assert plot["kind"] == "plot"
+    assert waveform["kind"] == "waveform"
+    assert plot["series_id"] == waveform["series_id"] == 7
+    assert "samples" not in plot and "samples" not in waveform
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error", "match"),
+    (
+        (
+            lambda wire: wire["series"][0]["samples"][1].__setitem__(0, 10),
+            ValueError,
+            "not strictly increasing",
+        ),
+        (
+            lambda wire: wire["series"][0]["samples"][0].__setitem__(1, True),
+            TypeError,
+            "not bool",
+        ),
+        (
+            lambda wire: wire["series"][0].update({"history_capacity": 8}),
+            ValueError,
+            "fields are not exact",
+        ),
+        (
+            lambda wire: wire.update({"series": []}),
+            ValueError,
+            "has no copied history",
+        ),
+        (
+            lambda wire: wire["regions"][0]["draws"][1].update(
+                {"zero_value": 21}
+            ),
+            ValueError,
+            "outside its range",
+        ),
+    ),
+)
+def test_series_wire_rejects_invalid_history_or_consumer_values(
+    mutate, error, match
+):
+    wire = deepcopy(retained_draw_plane_to_wire(_series_plane()))
+    mutate(wire)
 
     with pytest.raises(error, match=match):
         retained_draw_plane_from_wire(wire)

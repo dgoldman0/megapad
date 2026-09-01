@@ -25,18 +25,25 @@ from rich_terminal.retained_scene import (
     RegionDefinition,
     RetainedScene,
     RGBA,
+    Sample,
     SceneModelState,
     SceneUsage,
+    SeriesDefinition,
     MeterBody,
     StatusBody,
+    TimestampMode,
+    WaveformBody,
 )
 from rich_terminal.retained_view import (
     DisplayScope,
     MeterDraw,
+    PlotDraw,
     PolylineDraw,
     ReadoutDraw,
     RetainedViewError,
+    SeriesHistoryDraw,
     StatusDraw,
+    WaveformDraw,
     project_composite_draw_plane,
 )
 from rich_terminal.update_authority import TerminalGeometry
@@ -116,7 +123,7 @@ def _object(
     )
 
 
-def _owner_scene(owner, regions, objects) -> OwnerScene:
+def _owner_scene(owner, regions, objects, series=()) -> OwnerScene:
     utf8 = sum(
         (
             len(definition.body.text.encode("utf-8"))
@@ -134,11 +141,15 @@ def _owner_scene(owner, regions, objects) -> OwnerScene:
         objects=MappingProxyType(
             {definition.object_id: definition for definition in objects}
         ),
-        series=MappingProxyType({}),
+        series=MappingProxyType(
+            {definition.series_id: definition for definition in series}
+        ),
         usage=SceneUsage(
             regions=len(regions),
             objects=len(objects),
+            series=len(series),
             utf8_bytes=utf8,
+            sample_slots=sum(definition.history_capacity for definition in series),
         ),
     )
 
@@ -261,11 +272,11 @@ def test_hidden_planes_and_effectively_hidden_children_emit_no_draw_values():
     assert visible_plane.regions[0].draws == ()
 
 
-def test_projection_fails_closed_on_visible_unsupported_objects_and_projects_groups():
+def test_projection_fails_closed_on_a_missing_series_and_projects_groups():
     owner = _owner(5)
     region = _region(owner, 1)
     plot = _object(owner, 1, 1, PlotBody(1, 0, 10, WHITE, GREEN))
-    with pytest.raises(RetainedViewError, match="visible PLOT"):
+    with pytest.raises(RetainedViewError, match="refers to a missing series"):
         project_composite_draw_plane(
             _composite([_owner_scene(owner, [region], [plot])])
         )
@@ -406,6 +417,66 @@ def test_projection_rejects_a_readout_inconsistent_with_owner_utf8_usage():
 
     with pytest.raises(RetainedViewError, match="READOUT object 1 cannot be projected"):
         project_composite_draw_plane(_composite([forged]))
+
+
+def test_projection_copies_one_history_for_multiple_series_consumers():
+    owner = _owner(5)
+    region = _region(owner, 1)
+    history = SeriesDefinition(
+        owner,
+        7,
+        8,
+        TimestampMode.EXPLICIT,
+        0,
+        (
+            Sample(10, -5),
+            Sample(20, 15),
+            Sample(40, 0),
+        ),
+    )
+    group = _object(owner, 1, 1, GroupBody())
+    plot = _object(
+        owner,
+        2,
+        1,
+        PlotBody(7, -10, 20, GREEN, RGBA(20, 220, 80, 96), True, True),
+        z_order=1,
+        parent=1,
+    )
+    waveform = _object(
+        owner,
+        3,
+        1,
+        WaveformBody(7, -20, 20, WHITE, GREEN, 0, True),
+        z_order=2,
+        parent=1,
+    )
+
+    _, plane = project_composite_draw_plane(
+        _composite(
+            [_owner_scene(owner, [region], [waveform, plot, group], [history])]
+        )
+    )
+
+    assert plane.series == (
+        SeriesHistoryDraw(owner.owner_id, owner.owner_generation, 7, history.samples),
+    )
+    assert plane.series[0].samples is history.samples
+    projected_plot, projected_waveform = plane.regions[0].draws
+    assert isinstance(projected_plot, PlotDraw)
+    assert (
+        projected_plot.series_id,
+        projected_plot.minimum,
+        projected_plot.maximum,
+        projected_plot.fill_to_minimum,
+        projected_plot.draw_points,
+    ) == (7, -10, 20, True, True)
+    assert isinstance(projected_waveform, WaveformDraw)
+    assert (
+        projected_waveform.series_id,
+        projected_waveform.zero_value,
+        projected_waveform.draw_zero_line,
+    ) == (7, 0, True)
 
 
 def test_projection_never_traverses_the_hidden_rebuild_target():

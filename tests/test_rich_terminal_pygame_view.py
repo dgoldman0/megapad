@@ -6,15 +6,18 @@ import pytest
 
 from rich_terminal.apt1 import UINT32_MAX
 from rich_terminal.pygame_view import composite_draw_plane, unorm_high_edge, unorm_low_edge
-from rich_terminal.retained_scene import ObjectBounds, Point, RGBA
+from rich_terminal.retained_scene import ObjectBounds, Point, RGBA, Sample
 from rich_terminal.retained_view import (
     GlyphRunDraw,
     MeterDraw,
+    PlotDraw,
     PolylineDraw,
     ReadoutDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    SeriesHistoryDraw,
     StatusDraw,
+    WaveformDraw,
 )
 
 
@@ -350,3 +353,118 @@ def test_status_rasterizes_canonical_shape_and_active_state(
 
     assert tuple(surface.get_at((3, 3)))[:3] == center
     assert tuple(surface.get_at((0, 0)))[:3] == corner
+
+
+def _series_plane(draw, samples):
+    history = SeriesHistoryDraw(1, 1, draw.series_id, tuple(samples))
+    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (draw,))
+    return RetainedDrawPlane(True, True, (region,), (history,))
+
+
+def test_plot_maps_timestamps_and_clips_values_to_exact_object_edges():
+    pygame = pytest.importorskip("pygame")
+    surface = pygame.Surface((11, 11))
+    surface.fill((2, 4, 6))
+    font = _PixelFont(pygame)
+    plot = PlotDraw(
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        7,
+        -10,
+        10,
+        RGBA(20, 210, 70, 255),
+        RGBA(0, 0, 0, 0),
+        False,
+        False,
+    )
+    samples = (Sample(10, -20), Sample(20, 20), Sample(40, 0))
+
+    composite_draw_plane(
+        pygame, surface, _series_plane(plot, samples), font, 11, 11
+    )
+
+    assert tuple(surface.get_at((0, 10)))[:3] == (20, 210, 70)
+    assert tuple(surface.get_at((3, 0)))[:3] == (20, 210, 70)
+    assert tuple(surface.get_at((10, 5)))[:3] == (20, 210, 70)
+
+
+def test_plot_fill_uses_source_over_and_a_single_sample_is_centered():
+    pygame = pytest.importorskip("pygame")
+    font = _PixelFont(pygame)
+    filled_surface = pygame.Surface((10, 10))
+    filled_surface.fill((20, 40, 60))
+    filled = PlotDraw(
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        7,
+        0,
+        10,
+        RGBA(0, 0, 0, 0),
+        RGBA(200, 100, 0, 128),
+        True,
+        False,
+    )
+    composite_draw_plane(
+        pygame,
+        filled_surface,
+        _series_plane(filled, (Sample(10, 10), Sample(20, 10))),
+        font,
+        10,
+        10,
+    )
+
+    single_surface = pygame.Surface((9, 9))
+    single_surface.fill((2, 4, 6))
+    single = PlotDraw(
+        2,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        8,
+        0,
+        10,
+        RGBA(220, 30, 40, 255),
+        RGBA(0, 0, 0, 0),
+        False,
+        False,
+    )
+    composite_draw_plane(
+        pygame,
+        single_surface,
+        _series_plane(single, (Sample(99, 5),)),
+        font,
+        9,
+        9,
+    )
+
+    assert tuple(filled_surface.get_at((5, 5)))[:3] == pytest.approx(
+        (110, 70, 30), abs=1
+    )
+    assert tuple(single_surface.get_at((4, 4)))[:3] == (220, 30, 40)
+
+
+def test_waveform_draws_zero_line_even_when_committed_history_is_empty():
+    pygame = pytest.importorskip("pygame")
+    surface = pygame.Surface((9, 9))
+    surface.fill((2, 4, 6))
+    font = _PixelFont(pygame)
+    waveform = WaveformDraw(
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        7,
+        -10,
+        10,
+        RGBA(220, 30, 40, 255),
+        RGBA(90, 90, 90, 255),
+        0,
+        True,
+    )
+
+    composite_draw_plane(
+        pygame, surface, _series_plane(waveform, ()), font, 9, 9
+    )
+
+    assert tuple(surface.get_at((4, 4)))[:3] == (90, 90, 90)
+    assert tuple(surface.get_at((4, 3)))[:3] == (2, 4, 6)

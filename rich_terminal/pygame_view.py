@@ -17,6 +17,7 @@ from .retained_view import (
     MenuItemDraw,
     MenuSeparatorDraw,
     MeterDraw,
+    PlotDraw,
     PolylineDraw,
     ReadoutDraw,
     RetainedDrawPlane,
@@ -25,6 +26,7 @@ from .retained_view import (
     TabSetDraw,
     TextAreaDraw,
     TextGridDraw,
+    WaveformDraw,
 )
 from .semantic_content import SemanticTextRole, SemanticTextState
 
@@ -1601,7 +1603,7 @@ def _paint_polyline(pygame_module, surface, region, region_rect, draw) -> None:
         surface.set_clip(prior_clip)
 
 
-def _instrument_clip(pygame_module, surface, region, region_rect, draw):
+def _object_clip(pygame_module, surface, region, region_rect, draw):
     object_rect = _object_rect(pygame_module, region_rect, draw)
     clip = object_rect.clip(surface.get_rect()).clip(surface.get_clip())
     if region.clipped:
@@ -1610,7 +1612,7 @@ def _instrument_clip(pygame_module, surface, region, region_rect, draw):
 
 
 def _paint_readout(pygame_module, surface, font, region, region_rect, draw) -> None:
-    object_rect, clip = _instrument_clip(
+    object_rect, clip = _object_clip(
         pygame_module, surface, region, region_rect, draw
     )
     if clip.width <= 0 or clip.height <= 0:
@@ -1662,7 +1664,7 @@ def _contrast_rgba(color) -> tuple[int, int, int, int]:
 
 
 def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> None:
-    object_rect, clip = _instrument_clip(
+    object_rect, clip = _object_clip(
         pygame_module, surface, region, region_rect, draw
     )
     if clip.width <= 0 or clip.height <= 0:
@@ -1744,7 +1746,7 @@ def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> Non
 
 
 def _paint_status(pygame_module, surface, region, region_rect, draw) -> None:
-    object_rect, clip = _instrument_clip(
+    object_rect, clip = _object_clip(
         pygame_module, surface, region, region_rect, draw
     )
     if clip.width <= 0 or clip.height <= 0:
@@ -1782,6 +1784,129 @@ def _paint_status(pygame_module, surface, region, region_rect, draw) -> None:
     try:
         surface.set_clip(clip)
         surface.blit(layer, object_rect)
+    finally:
+        surface.set_clip(prior_clip)
+
+
+def _series_value_y(rect, value: int, minimum: int, maximum: int) -> int:
+    clamped = min(max(value, minimum), maximum)
+    extent = max(0, rect.height - 1)
+    return rect.bottom - 1 - ((clamped - minimum) * extent) // (maximum - minimum)
+
+
+def _series_points(rect, samples, minimum: int, maximum: int) -> tuple[tuple[int, int], ...]:
+    if not samples:
+        return ()
+    if len(samples) == 1:
+        x_positions = (rect.left + max(0, rect.width - 1) // 2,)
+    else:
+        first = samples[0].timestamp_us
+        timestamp_span = samples[-1].timestamp_us - first
+        extent = max(0, rect.width - 1)
+        x_positions = tuple(
+            rect.left + ((sample.timestamp_us - first) * extent) // timestamp_span
+            for sample in samples
+        )
+    return tuple(
+        (x, _series_value_y(rect, sample.value, minimum, maximum))
+        for x, sample in zip(x_positions, samples)
+    )
+
+
+def _alpha_polygon(pygame_module, surface, color, points) -> None:
+    rgba = tuple(color)
+    if not points or (len(rgba) == 4 and rgba[3] == 0):
+        return
+    if len(rgba) != 4 or rgba[3] == 0xFF:
+        pygame_module.draw.polygon(surface, rgba[:3], points)
+        return
+    left = min(point[0] for point in points)
+    top = min(point[1] for point in points)
+    right = max(point[0] for point in points) + 1
+    bottom = max(point[1] for point in points) + 1
+    layer = pygame_module.Surface((right - left, bottom - top), flags=pygame_module.SRCALPHA)
+    pygame_module.draw.polygon(
+        layer,
+        rgba,
+        tuple((point[0] - left, point[1] - top) for point in points),
+    )
+    surface.blit(layer, (left, top))
+
+
+def _paint_plot(pygame_module, surface, region, region_rect, draw, samples) -> None:
+    object_rect, clip = _object_clip(
+        pygame_module, surface, region, region_rect, draw
+    )
+    if clip.width <= 0 or clip.height <= 0 or not samples:
+        return
+    points = _series_points(object_rect, samples, draw.minimum, draw.maximum)
+    line = (*_rgb(draw.line), draw.line.alpha)
+    fill = (*_rgb(draw.fill), draw.fill.alpha)
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(clip)
+        if draw.fill_to_minimum and draw.fill.alpha:
+            baseline = object_rect.bottom - 1
+            if len(points) == 1:
+                _alpha_line(
+                    pygame_module,
+                    surface,
+                    fill,
+                    points[0],
+                    (points[0][0], baseline),
+                )
+            else:
+                _alpha_polygon(
+                    pygame_module,
+                    surface,
+                    fill,
+                    ((points[0][0], baseline), *points, (points[-1][0], baseline)),
+                )
+        for start, end in zip(points, points[1:]):
+            _alpha_line(pygame_module, surface, line, start, end)
+        if draw.draw_points or len(points) == 1:
+            for point in points:
+                _alpha_circle(pygame_module, surface, line, point, 1)
+    finally:
+        surface.set_clip(prior_clip)
+
+
+def _paint_waveform(
+    pygame_module,
+    surface,
+    region,
+    region_rect,
+    draw,
+    samples,
+) -> None:
+    object_rect, clip = _object_clip(
+        pygame_module, surface, region, region_rect, draw
+    )
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(clip)
+        if draw.draw_zero_line and draw.zero_line.alpha:
+            y = _series_value_y(
+                object_rect,
+                draw.zero_value,
+                draw.minimum,
+                draw.maximum,
+            )
+            _alpha_line(
+                pygame_module,
+                surface,
+                (*_rgb(draw.zero_line), draw.zero_line.alpha),
+                (object_rect.left, y),
+                (object_rect.right - 1, y),
+            )
+        points = _series_points(object_rect, samples, draw.minimum, draw.maximum)
+        trace = (*_rgb(draw.trace), draw.trace.alpha)
+        for start, end in zip(points, points[1:]):
+            _alpha_line(pygame_module, surface, trace, start, end)
+        if len(points) == 1:
+            _alpha_circle(pygame_module, surface, trace, points[0], 1)
     finally:
         surface.set_clip(prior_clip)
 
@@ -1909,6 +2034,7 @@ def composite_draw_plane_result(
     control_font = font if control_font is None else control_font
     hovered = _optional_identity("hovered", hovered)
     pressed = _optional_identity("pressed", pressed)
+    series_by_key = {history.key: history.samples for history in plane.series}
     targets: list[ControlHitTarget] = []
     for region in plane.regions:
         region_rect = pygame_module.Rect(
@@ -1962,6 +2088,28 @@ def composite_draw_plane_result(
                     region,
                     region_rect,
                     draw,
+                )
+            elif isinstance(draw, PlotDraw):
+                _paint_plot(
+                    pygame_module,
+                    surface,
+                    region,
+                    region_rect,
+                    draw,
+                    series_by_key[
+                        (region.owner_id, region.owner_generation, draw.series_id)
+                    ],
+                )
+            elif isinstance(draw, WaveformDraw):
+                _paint_waveform(
+                    pygame_module,
+                    surface,
+                    region,
+                    region_rect,
+                    draw,
+                    series_by_key[
+                        (region.owner_id, region.owner_generation, draw.series_id)
+                    ],
                 )
             elif isinstance(draw, MenuBarDraw):
                 targets.extend(

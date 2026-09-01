@@ -743,6 +743,7 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         "object_id": 17,
         "z_order": -2,
         "bounds": [1, 2, 3, 4],
+        "parent_bounds": [],
         "foreground": [5, 6, 7, 8],
         "background": [9, 10, 11, 12],
         "attributes": 0x40,

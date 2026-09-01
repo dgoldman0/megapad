@@ -31,15 +31,18 @@ from rich_terminal.retained_view import (
     MenuItemDraw,
     MenuSeparatorDraw,
     MeterDraw,
+    PlotDraw,
     PolylineDraw,
     ReadoutDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    SeriesHistoryDraw,
     StatusDraw,
     TabDraw,
     TabSetDraw,
     TextAreaDraw,
     TextGridDraw,
+    WaveformDraw,
 )
 from rich_terminal.retained_scene import (
     ControlKind,
@@ -47,6 +50,7 @@ from rich_terminal.retained_scene import (
     ObjectBounds,
     Point,
     RGBA,
+    Sample,
     validate_control_shape,
 )
 from rich_terminal.semantic_content import (
@@ -417,6 +421,40 @@ _STATUS_WIRE_FIELDS = (
     "value",
     "shape",
 )
+_PLOT_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "series_id",
+    "minimum",
+    "maximum",
+    "line",
+    "fill",
+    "fill_to_minimum",
+    "draw_points",
+)
+_WAVEFORM_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "series_id",
+    "minimum",
+    "maximum",
+    "trace",
+    "zero_line",
+    "zero_value",
+    "draw_zero_line",
+)
+_SERIES_HISTORY_WIRE_FIELDS = (
+    "owner_id",
+    "owner_generation",
+    "series_id",
+    "samples",
+)
 _MENU_BAR_WIRE_FIELDS = (
     "kind",
     "control_id",
@@ -516,6 +554,57 @@ def _bounds_path_from_wire(value, name: str) -> tuple[ObjectBounds, ...]:
     )
 
 
+def _series_history_to_wire(history: SeriesHistoryDraw) -> dict:
+    if not isinstance(history, SeriesHistoryDraw):
+        raise TypeError("history must be SeriesHistoryDraw")
+    return {
+        "owner_id": history.owner_id,
+        "owner_generation": history.owner_generation,
+        "series_id": history.series_id,
+        "samples": [
+            [sample.timestamp_us, sample.value] for sample in history.samples
+        ],
+    }
+
+
+def _sample_from_wire(value, name: str) -> Sample:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise TypeError(f"{name} must be a two-integer array")
+    return Sample(
+        _wire_integer(
+            value[0], f"{name} timestamp_us", minimum=0, maximum=UINT64_MAX
+        ),
+        _wire_integer(
+            value[1], f"{name} value", minimum=INT64_MIN, maximum=INT64_MAX
+        ),
+    )
+
+
+def _series_history_from_wire(data, name: str) -> SeriesHistoryDraw:
+    wire = _wire_object(data, name, _SERIES_HISTORY_WIRE_FIELDS)
+    samples_wire = wire["samples"]
+    if not isinstance(samples_wire, (list, tuple)):
+        raise TypeError(f"{name} samples must be an array")
+    return SeriesHistoryDraw(
+        owner_id=_wire_integer(
+            wire["owner_id"], f"{name} owner_id", minimum=1, maximum=UINT64_MAX
+        ),
+        owner_generation=_wire_integer(
+            wire["owner_generation"],
+            f"{name} owner_generation",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        series_id=_wire_integer(
+            wire["series_id"], f"{name} series_id", minimum=1, maximum=UINT64_MAX
+        ),
+        samples=tuple(
+            _sample_from_wire(sample, f"{name} sample {index}")
+            for index, sample in enumerate(samples_wire)
+        ),
+    )
+
+
 def _semantic_content_from_wire(value, name: str) -> SemanticTextContent:
     encoded = _wire_text(value, name)
     try:
@@ -610,6 +699,8 @@ def _retained_draw_to_wire(
         | ReadoutDraw
         | MeterDraw
         | StatusDraw
+        | PlotDraw
+        | WaveformDraw
         | MenuBarDraw
         | TextAreaDraw
         | TextGridDraw
@@ -723,6 +814,46 @@ def _retained_draw_to_wire(
             "value": draw.value,
             "shape": draw.shape,
         }
+    if isinstance(draw, PlotDraw):
+        return {
+            "kind": "plot",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "series_id": draw.series_id,
+            "minimum": draw.minimum,
+            "maximum": draw.maximum,
+            "line": [draw.line.red, draw.line.green, draw.line.blue, draw.line.alpha],
+            "fill": [draw.fill.red, draw.fill.green, draw.fill.blue, draw.fill.alpha],
+            "fill_to_minimum": draw.fill_to_minimum,
+            "draw_points": draw.draw_points,
+        }
+    if isinstance(draw, WaveformDraw):
+        return {
+            "kind": "waveform",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "series_id": draw.series_id,
+            "minimum": draw.minimum,
+            "maximum": draw.maximum,
+            "trace": [
+                draw.trace.red,
+                draw.trace.green,
+                draw.trace.blue,
+                draw.trace.alpha,
+            ],
+            "zero_line": [
+                draw.zero_line.red,
+                draw.zero_line.green,
+                draw.zero_line.blue,
+                draw.zero_line.alpha,
+            ],
+            "zero_value": draw.zero_value,
+            "draw_zero_line": draw.draw_zero_line,
+        }
     if isinstance(draw, MenuBarDraw):
         return {
             "kind": "menu_bar",
@@ -792,6 +923,7 @@ def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
     return {
         "retained_initialized": plane.retained_initialized,
         "retained_visible": plane.retained_visible,
+        "series": [_series_history_to_wire(history) for history in plane.series],
         "regions": [
             {
                 "owner_id": region.owner_id,
@@ -1009,6 +1141,8 @@ def _retained_draw_from_wire(
     | ReadoutDraw
     | MeterDraw
     | StatusDraw
+    | PlotDraw
+    | WaveformDraw
     | MenuBarDraw
     | TextAreaDraw
     | TextGridDraw
@@ -1213,6 +1347,83 @@ def _retained_draw_from_wire(
                 wire["shape"], f"{name} shape", minimum=0, maximum=2
             ),
         )
+    if kind == "plot":
+        wire = _wire_object(data, name, _PLOT_WIRE_FIELDS)
+        return PlotDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"], f"{name} z_order", minimum=INT32_MIN, maximum=INT32_MAX
+            ),
+            bounds=ObjectBounds(
+                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+            ),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+            series_id=_wire_integer(
+                wire["series_id"], f"{name} series_id", minimum=1, maximum=UINT64_MAX
+            ),
+            minimum=_wire_integer(
+                wire["minimum"], f"{name} minimum", minimum=INT64_MIN, maximum=INT64_MAX
+            ),
+            maximum=_wire_integer(
+                wire["maximum"], f"{name} maximum", minimum=INT64_MIN, maximum=INT64_MAX
+            ),
+            line=RGBA(
+                *_wire_integer_array(wire["line"], f"{name} line", 4, maximum=0xFF)
+            ),
+            fill=RGBA(
+                *_wire_integer_array(wire["fill"], f"{name} fill", 4, maximum=0xFF)
+            ),
+            fill_to_minimum=_wire_boolean(
+                wire["fill_to_minimum"], f"{name} fill_to_minimum"
+            ),
+            draw_points=_wire_boolean(wire["draw_points"], f"{name} draw_points"),
+        )
+    if kind == "waveform":
+        wire = _wire_object(data, name, _WAVEFORM_WIRE_FIELDS)
+        return WaveformDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"], f"{name} z_order", minimum=INT32_MIN, maximum=INT32_MAX
+            ),
+            bounds=ObjectBounds(
+                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+            ),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+            series_id=_wire_integer(
+                wire["series_id"], f"{name} series_id", minimum=1, maximum=UINT64_MAX
+            ),
+            minimum=_wire_integer(
+                wire["minimum"], f"{name} minimum", minimum=INT64_MIN, maximum=INT64_MAX
+            ),
+            maximum=_wire_integer(
+                wire["maximum"], f"{name} maximum", minimum=INT64_MIN, maximum=INT64_MAX
+            ),
+            trace=RGBA(
+                *_wire_integer_array(wire["trace"], f"{name} trace", 4, maximum=0xFF)
+            ),
+            zero_line=RGBA(
+                *_wire_integer_array(
+                    wire["zero_line"], f"{name} zero_line", 4, maximum=0xFF
+                )
+            ),
+            zero_value=_wire_integer(
+                wire["zero_value"],
+                f"{name} zero_value",
+                minimum=INT64_MIN,
+                maximum=INT64_MAX,
+            ),
+            draw_zero_line=_wire_boolean(
+                wire["draw_zero_line"], f"{name} draw_zero_line"
+            ),
+        )
     if kind == "menu_bar":
         wire = _wire_object(data, name, _MENU_BAR_WIRE_FIELDS)
         bounds = _wire_integer_array(wire["bounds"], f"{name} bounds", 4)
@@ -1260,7 +1471,14 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
     wire = _wire_object(
         data,
         "retained draw plane",
-        ("retained_initialized", "retained_visible", "regions"),
+        ("retained_initialized", "retained_visible", "series", "regions"),
+    )
+    series_wire = wire["series"]
+    if not isinstance(series_wire, (list, tuple)):
+        raise TypeError("retained draw series must be an array")
+    series = tuple(
+        _series_history_from_wire(history, f"retained series {history_index}")
+        for history_index, history in enumerate(series_wire)
     )
     regions_wire = wire["regions"]
     if not isinstance(regions_wire, (list, tuple)):
@@ -1339,6 +1557,7 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
             wire["retained_visible"], "retained draw visible"
         ),
         regions=tuple(regions),
+        series=series,
     )
 
 

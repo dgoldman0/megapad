@@ -30,13 +30,17 @@ from .retained_scene import (
     ObjectDefinition,
     OwnerScene,
     Point,
+    PlotBody,
     PolylineBody,
     ReadoutBody,
     RGBA,
     RegionDefinition,
     RetainedScene,
+    Sample,
     SceneModelState,
+    SeriesDefinition,
     StatusBody,
+    WaveformBody,
     validate_control_shape,
 )
 from .semantic_content import SemanticTextContent
@@ -472,6 +476,159 @@ class StatusDraw:
 
 
 @dataclass(frozen=True, slots=True)
+class SeriesHistoryDraw:
+    """One immutable committed history shared by visible consumers."""
+
+    owner_id: int
+    owner_generation: int
+    series_id: int
+    samples: tuple[Sample, ...]
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "series_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                ),
+            )
+        samples = tuple(self.samples)
+        if any(not isinstance(sample, Sample) for sample in samples):
+            raise TypeError("series history must contain only Sample values")
+        if any(
+            current.timestamp_us >= following.timestamp_us
+            for current, following in zip(samples, samples[1:])
+        ):
+            raise ValueError("series history timestamps are not strictly increasing")
+        object.__setattr__(
+            self,
+            "samples",
+            samples,
+        )
+
+    @property
+    def key(self) -> tuple[int, int, int]:
+        return self.owner_id, self.owner_generation, self.series_id
+
+
+@dataclass(frozen=True, slots=True)
+class PlotDraw:
+    """One plot referencing a separately copied committed history."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    series_id: int
+    minimum: int
+    maximum: int
+    line: RGBA
+    fill: RGBA
+    fill_to_minimum: bool
+    draw_points: bool
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_series_draw(self, include_zero_line=False)
+        object.__setattr__(
+            self,
+            "fill_to_minimum",
+            _boolean("fill_to_minimum", self.fill_to_minimum),
+        )
+        object.__setattr__(
+            self,
+            "draw_points",
+            _boolean("draw_points", self.draw_points),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WaveformDraw:
+    """One waveform referencing a separately copied committed history."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    series_id: int
+    minimum: int
+    maximum: int
+    trace: RGBA
+    zero_line: RGBA
+    zero_value: int
+    draw_zero_line: bool
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_series_draw(self, include_zero_line=True)
+        object.__setattr__(
+            self,
+            "draw_zero_line",
+            _boolean("draw_zero_line", self.draw_zero_line),
+        )
+
+
+def _validate_series_draw(draw, *, include_zero_line: bool) -> None:
+    object.__setattr__(
+        draw,
+        "object_id",
+        _integer("object_id", draw.object_id, minimum=1, maximum=UINT64_MAX),
+    )
+    object.__setattr__(
+        draw,
+        "z_order",
+        _integer("z_order", draw.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
+    )
+    if not isinstance(draw.bounds, ObjectBounds):
+        raise TypeError("bounds must be ObjectBounds")
+    object.__setattr__(
+        draw,
+        "series_id",
+        _integer("series_id", draw.series_id, minimum=1, maximum=UINT64_MAX),
+    )
+    for name in ("minimum", "maximum"):
+        object.__setattr__(
+            draw,
+            name,
+            _integer(
+                name,
+                getattr(draw, name),
+                minimum=INT64_MIN,
+                maximum=INT64_MAX,
+            ),
+        )
+    if draw.minimum >= draw.maximum:
+        raise ValueError("series consumer minimum must be less than maximum")
+    colors = (
+        (draw.trace, draw.zero_line)
+        if include_zero_line
+        else (draw.line, draw.fill)
+    )
+    if any(not isinstance(color, RGBA) for color in colors):
+        raise TypeError("series consumer colors must be RGBA")
+    if include_zero_line:
+        object.__setattr__(
+            draw,
+            "zero_value",
+            _integer(
+                "zero_value",
+                draw.zero_value,
+                minimum=INT64_MIN,
+                maximum=INT64_MAX,
+            ),
+        )
+        if not draw.minimum <= draw.zero_value <= draw.maximum:
+            raise ValueError("waveform zero line is outside its range")
+    object.__setattr__(
+        draw,
+        "parent_bounds",
+        _object_bounds_path("parent_bounds", draw.parent_bounds),
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class MenuItemDraw:
     """One visible semantic menu item with renderer-owned geometry."""
 
@@ -831,7 +988,15 @@ class TabSetDraw:
         object.__setattr__(self, "tabs", tabs)
 
 
-ObjectDraw = GlyphRunDraw | PolylineDraw | ReadoutDraw | MeterDraw | StatusDraw
+ObjectDraw = (
+    GlyphRunDraw
+    | PolylineDraw
+    | ReadoutDraw
+    | MeterDraw
+    | StatusDraw
+    | PlotDraw
+    | WaveformDraw
+)
 SemanticRootDraw = MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw
 RetainedDraw = ObjectDraw | SemanticRootDraw
 
@@ -841,6 +1006,8 @@ _OBJECT_DRAW_TYPES = (
     ReadoutDraw,
     MeterDraw,
     StatusDraw,
+    PlotDraw,
+    WaveformDraw,
 )
 
 
@@ -910,6 +1077,8 @@ class RetainedRegionDraw:
                     ReadoutDraw,
                     MeterDraw,
                     StatusDraw,
+                    PlotDraw,
+                    WaveformDraw,
                     MenuBarDraw,
                     TextAreaDraw,
                     TextGridDraw,
@@ -931,6 +1100,7 @@ class RetainedDrawPlane:
     retained_initialized: bool
     retained_visible: bool
     regions: tuple[RetainedRegionDraw, ...]
+    series: tuple[SeriesHistoryDraw, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -957,18 +1127,37 @@ class RetainedDrawPlane:
             raise ValueError("a hidden retained plane cannot contain draw regions")
         if self.retained_visible and not self.retained_initialized:
             raise ValueError("an uninitialized retained plane cannot be visible")
+        series = tuple(self.series)
+        if any(not isinstance(history, SeriesHistoryDraw) for history in series):
+            raise TypeError("series must contain only SeriesHistoryDraw values")
+        if tuple(sorted(series, key=lambda history: history.key)) != series:
+            raise ValueError("series histories are not in owner/series order")
+        series_by_key = {history.key: history for history in series}
+        if len(series_by_key) != len(series):
+            raise ValueError("series history identities are duplicated")
+        if not self.retained_visible and series:
+            raise ValueError("a hidden retained plane cannot contain series histories")
         control_ids_by_owner: dict[tuple[int, int], set[int]] = {}
+        referenced_series: set[tuple[int, int, int]] = set()
         for region in regions:
             owner = region.owner_id, region.owner_generation
             owner_control_ids = control_ids_by_owner.setdefault(owner, set())
             for draw in region.draws:
+                if isinstance(draw, (PlotDraw, WaveformDraw)):
+                    key = region.owner_id, region.owner_generation, draw.series_id
+                    if key not in series_by_key:
+                        raise ValueError("series consumer has no copied history")
+                    referenced_series.add(key)
                 if isinstance(draw, _OBJECT_DRAW_TYPES):
                     continue
                 draw_control_ids = _semantic_draw_control_ids(draw)
                 if owner_control_ids & draw_control_ids:
                     raise ValueError("owner semantic control IDs are duplicated")
                 owner_control_ids.update(draw_control_ids)
+        if referenced_series != set(series_by_key):
+            raise ValueError("draw plane contains an unreferenced series history")
         object.__setattr__(self, "regions", regions)
+        object.__setattr__(self, "series", series)
 
 
 def _effectively_visible(
@@ -1374,9 +1563,9 @@ def project_composite_draw_plane(
 ) -> tuple[DisplayScope, RetainedDrawPlane]:
     """Project one exact composite to generic renderer draw values.
 
-    A physically visible unsupported drawing object or a visible nested glyph
-    run is rejected. Invisible regions, objects, and group cascades do not become
-    draw commands.  The hidden rebuild target is intentionally never visited.
+    A physically visible unsupported drawing object is rejected. Invisible
+    regions, objects, and group cascades do not become draw commands. The
+    hidden rebuild target is intentionally never visited.
     """
 
     if not isinstance(view, CompositeTerminalView):
@@ -1432,6 +1621,7 @@ def project_composite_draw_plane(
         )
 
     projected_regions: list[RetainedRegionDraw] = []
+    projected_series: dict[tuple[int, int, int], SeriesHistoryDraw] = {}
     for owner_key, owner_scene in retained.active.owners.items():
         if not isinstance(owner_scene, OwnerScene):
             raise RetainedViewError("retained scene contains an invalid owner value")
@@ -1441,6 +1631,8 @@ def project_composite_draw_plane(
             raise RetainedViewError("retained region collection is not a map")
         if not isinstance(owner_scene.objects, Mapping):
             raise RetainedViewError("retained object collection is not a map")
+        if not isinstance(owner_scene.series, Mapping):
+            raise RetainedViewError("retained series collection is not a map")
 
         for region_key, region in owner_scene.regions.items():
             if not isinstance(region, RegionDefinition):
@@ -1483,6 +1675,23 @@ def project_composite_draw_plane(
                 raise RetainedViewError("retained object map or owner identity is invalid")
             if definition.region_id not in owner_scene.regions:
                 raise RetainedViewError("retained object refers to a missing region")
+
+        for series_key, definition in owner_scene.series.items():
+            if not isinstance(definition, SeriesDefinition):
+                raise RetainedViewError("retained series map contains an invalid value")
+            try:
+                normalized_series_key = _integer(
+                    "series map key",
+                    series_key,
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                )
+            except (TypeError, ValueError) as exc:
+                raise RetainedViewError(
+                    f"retained series map key is invalid: {exc}"
+                ) from exc
+            if normalized_series_key != definition.series_id or definition.owner != owner:
+                raise RetainedViewError("retained series map or owner identity is invalid")
 
         controls, control_children, control_roots = _validate_control_graph(owner_scene)
         for region in owner_scene.regions.values():
@@ -1588,6 +1797,59 @@ def project_composite_draw_plane(
                         )
                     )
                     continue
+                if isinstance(body, (PlotBody, WaveformBody)):
+                    series = owner_scene.series.get(body.series_id)
+                    if not isinstance(series, SeriesDefinition):
+                        raise RetainedViewError(
+                            f"{definition.kind.name} object {definition.object_id} "
+                            "refers to a missing series"
+                        )
+                    if series.owner != owner:
+                        raise RetainedViewError(
+                            f"{definition.kind.name} object {definition.object_id} "
+                            "refers to a series outside its owner"
+                        )
+                    history_key = owner.owner_id, owner.owner_generation, body.series_id
+                    if history_key not in projected_series:
+                        projected_series[history_key] = SeriesHistoryDraw(
+                            owner_id=owner.owner_id,
+                            owner_generation=owner.owner_generation,
+                            series_id=body.series_id,
+                            samples=series.samples,
+                        )
+                    if isinstance(body, PlotBody):
+                        draws.append(
+                            PlotDraw(
+                                object_id=definition.object_id,
+                                z_order=definition.z_order,
+                                bounds=bounds,
+                                series_id=body.series_id,
+                                minimum=body.minimum,
+                                maximum=body.maximum,
+                                line=body.line,
+                                fill=body.fill,
+                                fill_to_minimum=body.fill_to_minimum,
+                                draw_points=body.draw_points,
+                                parent_bounds=parent_bounds,
+                            )
+                        )
+                    else:
+                        draws.append(
+                            WaveformDraw(
+                                object_id=definition.object_id,
+                                z_order=definition.z_order,
+                                bounds=bounds,
+                                series_id=body.series_id,
+                                minimum=body.minimum,
+                                maximum=body.maximum,
+                                trace=body.trace,
+                                zero_line=body.zero_line,
+                                zero_value=body.zero_value,
+                                draw_zero_line=body.draw_zero_line,
+                                parent_bounds=parent_bounds,
+                            )
+                        )
+                    continue
                 raise RetainedViewError(
                     f"visible {definition.kind.name} object "
                     f"{definition.object_id} is unsupported by draw-plane rendering"
@@ -1624,6 +1886,9 @@ def project_composite_draw_plane(
         retained_initialized=retained.retained_initialized,
         retained_visible=True,
         regions=tuple(projected_regions),
+        series=tuple(
+            projected_series[key] for key in sorted(projected_series)
+        ),
     )
 
 
@@ -1637,6 +1902,7 @@ __all__ = [
     "MenuSeparatorDraw",
     "MeterDraw",
     "ObjectDraw",
+    "PlotDraw",
     "PolylineDraw",
     "ReadoutDraw",
     "RetainedDraw",
@@ -1644,10 +1910,12 @@ __all__ = [
     "RetainedDrawPlane",
     "RetainedViewError",
     "SemanticRootDraw",
+    "SeriesHistoryDraw",
     "StatusDraw",
     "TabDraw",
     "TabSetDraw",
     "TextAreaDraw",
     "TextGridDraw",
+    "WaveformDraw",
     "project_composite_draw_plane",
 ]
