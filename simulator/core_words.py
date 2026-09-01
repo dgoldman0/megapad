@@ -721,6 +721,18 @@ def _emit(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.write_uart_bytes(bytes((context.data.pop() & 0xFF,)))
 
 
+def _type(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    length = context.data.pop()
+    address = context.data.pop()
+    for _ in range(length):
+        runtime.write_uart_bytes(bytes((runtime.memory.read8(address),)))
+        address = u64(address + 1)
+
+
+def _space(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
+    runtime.write_uart_bytes(b" ")
+
+
 def _key_query(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(forth_flag(runtime.uart_input_available))
 
@@ -1563,6 +1575,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"FILL", lambda context: _fill(runtime, context)),
         (b"CMOVE", lambda context: _cmove(runtime, context)),
         (b"CONSTANT", lambda context: _constant(runtime, context)),
+        (b"TYPE", lambda context: _type(runtime, context)),
+        (b"SPACE", lambda context: _space(runtime, context)),
         (b"CREATE", lambda context: _create(runtime, context)),
         (b"VARIABLE", lambda context: _variable(runtime, context)),
         (b"HERE", lambda context: _here(runtime, context)),
