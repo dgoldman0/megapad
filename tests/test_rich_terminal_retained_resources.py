@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import FrozenInstanceError
 from types import MappingProxyType
 
 import pytest
@@ -151,9 +152,16 @@ def test_ordered_upload_publishes_only_verified_immutable_resource_state():
     resource = store.commit(owner, 7)
 
     assert store.upload is None
-    assert isinstance(resource._backing, bytearray)
     assert resource.read(0, len(data)) == data
     assert isinstance(resource.read(0, len(data)), bytes)
+    readonly = resource._readonly_view()
+    assert readonly.readonly
+    with pytest.raises(TypeError):
+        readonly[0] = 0xFF
+    with pytest.raises(TypeError):
+        readonly.obj[0] = 0xFF
+    readonly.release()
+    assert resource.read(0, len(data)) == data
     assert resource.digest == hashlib.sha3_256(data).digest()
     assert resource.width == 2
     assert resource.height == 2
@@ -385,11 +393,16 @@ def test_owner_retirement_is_exact_provenance_checked_and_stale_safe():
 
     before = store.state
     prepared = store.prepare_owner_retirement(owner)
+    assert prepared.owner == owner
+    with pytest.raises(FrozenInstanceError):
+        prepared.owner = _identity(2)
     assert store.state is before
     assert not prepared.state.resources
     assert not prepared.state.usage
     store.install_owner_retirement(prepared)
     assert store.state is prepared.state
+    assert prepared._source_state is None
+    assert prepared._source_owner_state is None
     assert not store.state.resources
     assert not store.state.usage
 
@@ -411,10 +424,14 @@ def test_prepared_resource_changes_publish_only_after_exact_install():
         byte_length=len(data),
         digest=hashlib.sha3_256(data).digest(),
     )
+    with pytest.raises(FrozenInstanceError):
+        begin.accepted_bytes = 99
     assert store.upload is None
     assert ledger.require_live(owner).high_water.resource == 0
     store.install_prepared(begin)
     assert store.upload == begin.upload
+    assert begin._new_upload is None
+    assert begin._source_state is None
     assert ledger.require_live(owner).high_water.resource == 1
 
     first = store.prepare_append(owner, 1, 0, data[:4])
@@ -422,6 +439,10 @@ def test_prepared_resource_changes_publish_only_after_exact_install():
     assert store.upload is not None and store.upload.accepted_bytes == 0
     store.install_prepared(first)
     assert store.upload is not None and store.upload.accepted_bytes == 4
+    assert first._chunk is None
+    assert first._source_state is None
+    with pytest.raises(RuntimeError, match="stale or foreign"):
+        store.install_prepared(first)
     with pytest.raises(RuntimeError, match="stale or foreign"):
         store.install_prepared(competing)
 
@@ -432,7 +453,31 @@ def test_prepared_resource_changes_publish_only_after_exact_install():
     assert store.upload is not None and store.upload.accepted_bytes == 4
     store.install_prepared(rejected.value.prepared)
     assert store.upload is None
+    assert rejected.value.prepared._source_state is None
+    assert rejected.value.prepared._new_upload is None
     assert store.usage(owner) == ResourceUsage()
+
+
+def test_prepared_commit_pixels_are_unreadable_until_writable_alias_is_retired():
+    ledger = _ledger()
+    owner = _identity(1)
+    ledger.open(owner, _quotas())
+    store = RetainedResourceStore(ledger)
+    data = bytes(range(16))
+    _begin(store, owner, 1, data)
+    store.append(owner, 1, 0, data)
+
+    prepared = store.prepare_commit(owner, 1)
+    assert prepared.resource is not None
+    with pytest.raises(RuntimeError, match="not committed"):
+        prepared.resource.read(0, len(data))
+    with pytest.raises(RuntimeError, match="not committed"):
+        prepared.resource._readonly_view()
+
+    resource = prepared.resource
+    store.install_prepared(prepared)
+    assert resource.read(0, len(data)) == data
+    assert store.resource(owner, 1) is resource
 
 
 def test_prepared_resource_change_is_bound_to_owner_ledger_state():
