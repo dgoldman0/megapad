@@ -21,6 +21,7 @@ from simulator.aes import (
 from simulator.errors import ExecutionError, ForthAbort
 from simulator.entropy import TRNG_RAND8, TRNG_RAND64, TRNG_SEED
 from simulator.memory import MMIO_BASE, SparseAddressSpace
+from simulator.mp64fs import validate_attached_mp64fs
 from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
     SYSINFO_EXTERNAL_BASE,
@@ -878,30 +879,70 @@ def _disk_transfer_checked(
         generation = None
         consumed = 3
 
-    core_id, _task_id = runtime.guest_identity(context)
-    if runtime.spinlocks.acquire(2, core_id) != 0:
-        completed, status = 0, STORAGE_RESULT_TIMEOUT
-    else:
-        try:
-            operation = (
-                runtime.storage.write_checked
-                if write
-                else runtime.storage.read_checked
-            )
-            completed, status = operation(
-                runtime.memory,
-                dma,
-                lba,
-                count,
-                generation=generation,
-            )
-        finally:
-            runtime.spinlocks.release(2, core_id)
+    completed, status = _disk_transfer_value(
+        runtime,
+        context,
+        dma,
+        lba,
+        count,
+        write=write,
+        generation=generation,
+    )
 
     for _ in range(consumed):
         context.data.pop()
     context.data.push(completed)
     context.data.push(status)
+
+
+def _disk_transfer_value(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    dma: int,
+    lba: int,
+    count: int,
+    *,
+    write: bool,
+    generation: int | None,
+) -> tuple[int, int]:
+    """Run one value-based checked transfer through native lock two."""
+
+    core_id, _task_id = runtime.guest_identity(context)
+    if runtime.spinlocks.acquire(2, core_id) != 0:
+        return 0, STORAGE_RESULT_TIMEOUT
+    try:
+        operation = (
+            runtime.storage.write_checked
+            if write
+            else runtime.storage.read_checked
+        )
+        return operation(
+            runtime.memory,
+            dma,
+            lba,
+            count,
+            generation=generation,
+        )
+    finally:
+        runtime.spinlocks.release(2, core_id)
+
+
+def _mp64fs_valid(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    def read_checked(dma: int, lba: int, count: int) -> tuple[int, int]:
+        return _disk_transfer_value(
+            runtime,
+            context,
+            dma,
+            lba,
+            count,
+            write=False,
+            generation=None,
+        )
+
+    context.data.push(validate_attached_mp64fs(runtime, context, read_checked))
 
 
 def _disk_flush_checked(
@@ -1657,6 +1698,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
                 context,
                 generation_bound=True,
             ),
+        ),
+        (
+            b"MP64FS-VALID?",
+            lambda context: _mp64fs_valid(runtime, context),
         ),
         (
             b"GF-A!",

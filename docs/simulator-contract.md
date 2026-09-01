@@ -55,7 +55,9 @@ ownership. Pure CRC mode parameters and recurrence/value transforms qualify;
 CRC instruction execution and checked transaction ownership do not. Frozen
 storage sector/command/status/result/capability numbers likewise qualify as a
 shared ABI registry; controller state, media ownership, DMA, checked execution,
-and completion/durability publication remain backend-local.
+and completion/durability publication remain backend-local. Pure marker-1
+MP64FS geometry and metadata acceptance qualify for `shared/`; the three
+checked reads and their scratch/controller effects remain backend-local.
 
 ## 2. Compatibility claims
 
@@ -1243,6 +1245,12 @@ acceptance uses an exact-sector Buffer and does not add hidden padding.
 validates the selected binding and does not report capabilities, staleness,
 `FS-OK`, or durability.
 
+The native hosted `MP64FS-VALID?` is qualified as an isolated BIOS
+prerequisite. It preserves the literal `1`/`0` result, fixed core-0 scratch
+layout, dynamic geometry, three checked reads, narrow occupied-entry
+predicate, and final attachment-generation check. This does not advance the
+contiguous source frontier or admit the following lifecycle words.
+
 The contiguous source frontier now ends at line 5134. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
@@ -1300,8 +1308,9 @@ directory readers decode every packed little-endian field. `FIND-FREE-SLOT`
 checks only entry byte zero. The admitted contract therefore assumes
 `1 <= FS-BMAP-N <= 16`, `13 + FS-BMAP-N < FS-TOTAL <= 65536`, in-range
 sectors and slots, a positive free-run count, complete cache spans, and a
-validator-conforming directory in which free entries are fully zero and live
-names begin nonzero.
+validator-conforming directory. Canonical producers zero all 48 bytes of a
+free slot, but executable BIOS validation and `FIND-FREE-SLOT` use only
+`name[0]`; a zero first byte makes the other 47 bytes irrelevant.
 
 These helpers are deliberately not hardened by simulator policy. They do not
 gate on `FS-OK` or validate pointers, indices, geometry, or counts.
@@ -1372,10 +1381,10 @@ whole-sector progress, status values, stale-handle behavior, and operation
 ordering remain observable.
 
 The admitted hosted service is pseudo-BIOS-only. It implements `DISK@`, the
-three media queries, and the six ordinary/generation-bound checked operations
-against one exact sector image. It does not implement the raw setup/command
-words or storage MMIO, BUSY/rejection visibility, RESET, DMA cadence,
-controller timeouts, fault injection, or device interrupts. One mutable
+three media queries, the six ordinary/generation-bound checked operations, and
+`MP64FS-VALID?` against one exact sector image. It does not implement the raw
+setup/command words or storage MMIO, BUSY/rejection visibility, RESET, DMA
+cadence, controller timeouts, fault injection, or device interrupts. One mutable
 service instance may be claimed by exactly one runtime. Host attachment,
 detachment, write-protection changes, and checked calls are management
 operations that the composition must serialize; this slice makes no
@@ -1395,6 +1404,24 @@ the checked layer returns stale (and marks any earlier confirmed chunks
 partial). The public adapter owns depthless filesystem lock
 2 exactly as the executable checked BIOS does; callers cannot safely wrap it
 in an outer acquisition of the same lock.
+
+`MP64FS-VALID?` reads raw LBA 0, the active bitmap, and the 12-sector
+directory into the executable BIOS scratch layout. Each ordinary checked read
+owns lock 2 separately; there is no lock spanning validation and no selected
+KDOS volume binding. It requires canonical marker-1 geometry, reserved
+metadata bits, occupied-entry type/parent rules, allocated extent bounds,
+zero extents for directories, and used bytes within combined capacity. It
+does not validate names or termination, uniqueness, flags, reserved fields,
+timestamps, CRCs, parent acyclicity or root reachability, extent disjointness,
+allocation ownership, orphan sectors, bitmap tail bits, or file data.
+
+The final attachment-generation comparison detects replacement but not writes
+to the same attached image, so the three reads are not a coherent content
+snapshot. Qualification is one-full-core/core-0 behavior. Executable BIOS
+derives scratch from `R2/2`, which is unsafe under secondary-core stack
+geometry, and mutates shared `var_mp64fs_*` state, which is non-reentrant. The
+hosted stateless predicate is not evidence that those native concurrency
+defects are repaired.
 
 A successful write means acceptance, not durability. For path-backed media, a
 successful flush writes the complete live image and performs the corresponding

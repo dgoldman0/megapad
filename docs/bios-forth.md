@@ -544,7 +544,7 @@ primitives.
 | `DISK-SECTORS` | `( -- count )` | Read the attached media capacity as an unsigned count of 512-byte sectors. |
 | `DISK-MEDIA-GEN` | `( -- generation )` | Read the current attachment generation as an unsigned 32-bit identity. It changes whenever media is attached, detached, or replaced. |
 | `DISK-CAPS` | `( -- caps )` | Read controller capabilities: read=bit 0, write=bit 1, flush=bit 2, precise result=bit 3, completion=bit 4, media generation=bit 5, generation guard=bit 6. |
-| `MP64FS-VALID?` | `( -- flag )` | Validate the attached marker, derived geometry, reserved bitmap, directory entries, parents, extents, and byte bounds. |
+| `MP64FS-VALID?` | `( -- flag )` | Return literal 1/0 after validating raw attached-device marker-1 geometry, reserved allocation bits, occupied-entry parent/type rules, allocated extent bounds, directory zero-extent rules, and used-byte capacity. |
 | `DISK-READ-CHECKED` | `( dma lba count -- completed status )` | Production read. Returns only confirmed whole sectors and the stable controller result byte. |
 | `DISK-WRITE-CHECKED` | `( dma lba count -- completed status )` | Production write. Completion is not durability; follow persistent updates with checked flush. |
 | `DISK-FLUSH-CHECKED` | `( -- status )` | Production ordering and durability barrier for all earlier successful writes. |

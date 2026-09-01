@@ -581,7 +581,7 @@ of compiled code.
 | 211 | `DISK-READ` | `( -- )` | | Diagnostic: issue raw READ command 0x01 without waiting |
 | 212 | `DISK-WRITE` | `( -- )` | | Diagnostic: issue raw WRITE command 0x02 without waiting |
 | 213 | `DISK-FLUSH` | `( -- )` | | Diagnostic: issue raw FLUSH command 0xFF without waiting |
-| 214 | `MP64FS-VALID?` | `( -- flag )` | | Validate the attached marker, derived geometry, reserved bitmap, complete directory, parents, extents, and byte bounds. |
+| 214 | `MP64FS-VALID?` | `( -- flag )` | | Return literal 1/0 after validating raw attached-device marker-1 geometry, reserved allocation bits, occupied-entry parent/type rules, allocated extent bounds, directory zero-extent rules, and used-byte capacity. |
 | 215 | `DISK-READ-CHECKED` | `( dma lba count -- completed status )` | | Production checked read: validates, locks, splits, waits for matching completion, and returns precise progress/result |
 | 216 | `DISK-WRITE-CHECKED` | `( dma lba count -- completed status )` | | Production checked write; successful completion is not a durability claim |
 | 217 | `DISK-FLUSH-CHECKED` | `( -- status )` | | Production ordering and durability barrier |

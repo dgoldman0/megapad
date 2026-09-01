@@ -76,6 +76,10 @@ The implemented slices provide:
   validation, generation-bound stale rejection, 255-sector chunking, precise
   whole-sector progress, and explicit flush semantics, but no raw storage MMIO
   or controller-timing claim;
+- the native `MP64FS-VALID?` prerequisite, preserving the executable BIOS's
+  literal `1`/`0` result, fixed scratch layout, three separately locked checked
+  reads, dynamic marker-1 geometry, narrow occupied-entry predicate, and final
+  attachment-generation check without strengthening its filesystem policy;
 - a runtime-local per-core Field-ALU service for the 15 general arithmetic/raw
   BIOS words and six X25519 staging words, backed by portable Field and RFC
   7748 value models and preserving native four-qword effects without emulating
@@ -869,13 +873,21 @@ acceptance covers geometry derivation, the complete 65,536-bit bitmap window,
 first-fit runs including the upper boundary, all packed field offsets, and the
 128-entry free-slot scan.
 
+Separately, the native hosted `MP64FS-VALID?` word is qualified as the BIOS
+prerequisite for the next source slice. It reads the raw attached device, not a
+selected KDOS volume, and retains the native three-read scratch and controller
+effects. That isolated native word does not advance the contiguous unchanged
+source frontier or admit `FS-LOAD`, `FS-SYNC`, `FORMAT`, `.ZSTR`, or later file
+commands.
+
 The admitted domain is validator-approved geometry, positive run counts,
 in-range sectors and slots, complete cache spans, and structurally valid
 directory entries. The unchanged words do not gate on `FS-OK` or validate
 their inputs. `FIND-FREE` only reports a run and shares `FF-*` scratch;
-`FIND-FREE-SLOT` inspects only `name[0]` and relies on the validator's
-free-entry invariant. Invalid ordinary-`DO` bounds can traverse the 64-bit
-cell space, so acceptance does not execute them.
+`FIND-FREE-SLOT` inspects only `name[0]`. Canonical producers zero all 48
+bytes of a free slot, but executable BIOS validation also uses only
+`name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
+traverse the 64-bit cell space, so acceptance does not execute them.
 
 Later slices continue after blank line 5135 with MP64FS loading and syncing at
 line 5136, then toward the persistent evaluator, ordinary checked

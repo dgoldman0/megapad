@@ -92,16 +92,17 @@ the secondary.
 
 ## Phase 4 — Bitmap ↔ Directory Cross-Validation
 
-**Problem:** No tool currently checks whether the bitmap and directory
-agree.  A stale bitmap bit (from a crash mid-`FS-SYNC`) silently leaks
-sectors.  A cleared bit on an allocated sector silently corrupts data.
+**Problem:** BIOS already requires every sector declared by an extent to have
+its allocation bit set, but it does not reconstruct ownership. A stale extra
+bit can silently leak a sector, and two entries can claim the same allocated
+sector.
 
 **Plan:**
-- `FS-CHECK` already walks files and verifies CRC.  Extend it:
+- Implement the still-planned runtime `FS-CHECK` so it:
   1. Rebuild a shadow bitmap from directory entries (both extents).
   2. Compare against on-disk bitmap bit-by-bit.
-  3. Report leaked sectors (bitmap=1, no file claims it) and
-     collisions (bitmap=0, but file claims it; or two files overlap).
+  3. Report leaked sectors (bitmap=1, no file claims it), missing allocation
+     bits, and collisions where two extents claim one sector.
 - `diskutil.py` `check()` gets the same logic.
 - Optional `FS-REPAIR` to fix the bitmap from directory truth.
 

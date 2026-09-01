@@ -1740,6 +1740,12 @@ supports 128 entries, 23-character names, and two extents per file.  See
 
 ### Hosted Foundation Checkpoint
 
+The native hosted `MP64FS-VALID?` prerequisite is qualified separately. It
+returns literal `1` or `0` after the executable BIOS's three raw checked reads
+and narrow geometry/metadata predicate. It does not select a KDOS volume, make
+the reads a coherent same-image content snapshot, or advance the contiguous
+unchanged-source frontier beyond line 5134.
+
 The hosted simulator continuously executes the unchanged source through
 `kdos.f` line 5134. This checkpoint allocates `FS-SUPER`, `FS-BMAP`, and
 `FS-DIR`; installs provisional `FS-TOTAL = 2048`, `FS-BMAP-N = 1`, and root
@@ -1772,9 +1778,9 @@ very large `BIT-MASK` positions can drive ordinary `DO` across the modulo
 unqualified and can produce nonsensical results under the source's signed
 comparison, although valid geometry still bounds that scan. `FIND-FREE` uses
 shared `FF-*` scratch and is not reentrant. `FIND-FREE-SLOT` deliberately
-checks only `name[0]`; its safe contract relies on the BIOS validator's
-invariant that a free entry is fully zero and every live entry has a nonempty
-name.
+checks only `name[0]`. Canonical producers zero all 48 bytes of a free entry,
+but the BIOS validator likewise ignores the remaining 47 bytes once the first
+byte is zero; full-zero tails are not validator-enforced.
 
 There is also a source-comment discrepancy at line 5026: the directory layout
 calls `mtime` “seconds since boot,” while the later unchanged `TICKS@` computes
@@ -1802,7 +1808,7 @@ the field to preserve the stale comment.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `FS-LOAD` | `( -- )` | Clear `FS-OK`, force the singleton raw binding, ask BIOS to validate the complete marker-1 filesystem, then cache its superblock, bitmap, and directory. A successful load sets `FS-OK`; it does not reset `CWD`. |
+| `FS-LOAD` | `( -- )` | Clear `FS-OK`, force the singleton raw binding, ask BIOS to validate accepted marker-1 geometry and metadata, then cache its superblock, bitmap, and directory. A successful load sets `FS-OK`; it does not reset `CWD`. |
 | `FS-SYNC` | `( -- )` | If loaded, write bitmap then directory and flush. It does not write the superblock and is not transactional. |
 | `FS-ENSURE` | `( -- )` | If `FS-OK` is false and a disk is present, invoke `FS-LOAD`; otherwise do nothing. A true marker is not revalidated. |
 | `FORMAT` | `( -- )` | **Initialize fresh filesystem metadata** using the attached capacity: write marker-1 geometry, mark metadata sectors, clear the directory, and flush. It does not wipe data sectors and is not transactional. |

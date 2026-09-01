@@ -15,8 +15,11 @@ scalar multiplication, the generic 256-point radix-2 NTT value transforms,
 deterministic ML-KEM-512 key-generation/encapsulation/decapsulation bytes, and
 FP16/BF16/binary32 bit-value conversions are such shared value models. The
 frozen storage sector size plus command, status, result, and capability values
-are likewise backend-neutral ABI constants. Controller registers, image
-ownership, checked-request execution, DMA, completion publication, and
+are likewise backend-neutral ABI constants. Marker-1 MP64FS geometry decoding
+and the executable BIOS's pure bitmap/directory acceptance predicate are also
+shared; scratch placement, checked reads, locking, attachment generation, and
+observable controller effects remain backend adapters. Controller registers,
+image ownership, checked-request execution, DMA, completion publication, and
 durability remain backend state and policy. Field, NTT, ML-KEM, and
 floating-point helpers similarly own pure result values only: mode and prime
 selectors, ACC/TSRC/TDST, retained buffers/registers, previous results,

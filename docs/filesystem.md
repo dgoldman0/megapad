@@ -41,6 +41,11 @@ geometry, bitmap, first-fit search, and packed directory helpers—not
 boundary does not replace or weaken the BIOS validator and is not evidence of
 durability or file-backed persistence.
 
+The hosted native `MP64FS-VALID?` prerequisite is qualified separately. It
+matches the executable BIOS's raw-device reads, geometry and metadata
+predicate, scratch layout, and generation check, but does not advance that
+contiguous unchanged-source frontier.
+
 ---
 
 ## Disk Geometry
@@ -92,7 +97,7 @@ geometry.  The first 4 bytes are the magic number — if they don't read
 | +18 | 2 | `data_start` | u16 LE | Exactly `dir_start + dir_sectors`. |
 | +20 | 1 | `max_files` | 128 (u8) | Maximum directory entries. |
 | +21 | 1 | `entry_size` | 48 (u8) | Bytes per directory entry. |
-| +22 | 490 | *reserved* | zeroes | Padding to fill the 512-byte sector. |
+| +22 | 490 | *reserved* | zeroes | Canonical producer padding; executable BIOS validation ignores it. |
 
 ### Allocation Bitmap (Starting at Sector 1)
 
@@ -129,10 +134,21 @@ Offset   Size   Field        Description
 
 128 entries × 48 bytes = 6,144 bytes = 12 sectors.
 
-An on-disk entry is **free** (empty) if `type == 0` and the name is all zeros.
-The low-level runtime `FIND-FREE-SLOT` helper checks only `name[0] == 0`; it
-relies on the BIOS validator and normal mutation paths to preserve the full
-free-entry invariant. It is not a validator for arbitrary cache bytes.
+Canonical producers encode a **free** slot by zeroing all 48 bytes. Executable
+BIOS validation and the low-level `FIND-FREE-SLOT` helper, however, use only
+`name[0]`: zero makes the slot empty and the other 47 bytes are ignored.
+Fully zero tails are therefore a producer convention, not a validator-enforced
+invariant.
+
+The BIOS predicate performs three raw whole-device checked reads: superblock,
+active bitmap, and the 12-sector directory. It checks canonical geometry,
+reserved allocation bits, occupied-entry parent/type rules, allocated extent
+bounds, directory zero-extent rules, and used-byte capacity. It does not check
+name termination or character policy, uniqueness, flags, reserved entry
+bytes, timestamps, CRCs, parent cycles or root reachability, extent
+disjointness, orphan allocations, bitmap tail bits, or file data. Those
+producer rules and stronger integrity properties remain format requirements
+or planned checks, not facts established by `MP64FS-VALID?`.
 
 #### Key Fields
 
@@ -230,6 +246,10 @@ so its parent is root.
 - The current directory's logical value is one byte (`0..127`, or `0xFF` for
   root), but runtime `CWD` stores it in a full 64-bit cell.
 
+These are canonical tree constraints. BIOS validation proves only that a
+non-root parent names an occupied directory entry; it accepts self-parenting,
+cycles, and directories unreachable from root.
+
 ### Example Directory Structure
 
 ```
@@ -252,6 +272,10 @@ Files can occupy up to **two extents** (contiguous runs of sectors).
 This reduces allocation failures caused by bitmap fragmentation while
 keeping the design simple — no block lists, no indirect sectors, no
 extent trees.
+
+BIOS validation requires every sector named by an extent to be allocated, but
+does not reconstruct ownership. Overlapping extents and allocated orphan
+sectors are accepted.
 
 ### Creating a File
 
@@ -370,7 +394,8 @@ The format reserves `data_crc32` for a CRC32 checksum of content bytes from
 byte 0 through `used_bytes - 1`. The hardware CRC DMA engine can compute that
 checksum at 8 bytes/cycle. Current KDOS file mutation paths do not yet keep the
 field current on every write; the automatic behavior below is the target
-contract rather than admitted runtime behavior.
+contract rather than admitted runtime behavior. `MP64FS-VALID?` does not read
+file data or verify this field.
 
 ### When CRC Is Computed
 

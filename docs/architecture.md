@@ -31,7 +31,7 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │              │  BIOS code + dict    │ │
     │              │  KDOS Forth dict     │ │
     │              │  Buffers & data      │ │
-    │              │  FS cache (3 KB)     │ │
+    │              │  FS cache (~14.5 KiB)│ │
     │              │  Task stacks (2 KB)  │ │
     │              │         ↓ HERE       │ │
     │              │         ...          │ │
@@ -400,8 +400,9 @@ READ, WRITE, or FLUSH to `GUARDED_CMD`.  A generation mismatch completes as
 `DISK-WRITE-CHECKED`, and `DISK-FLUSH-CHECKED`.  Raw `DISK-SEC!`,
 `DISK-DMA!`, `DISK-N!`, `DISK-READ`, `DISK-WRITE`, and `DISK-FLUSH` remain
 diagnostic compatibility words.  `DISK@` reads status, `DISK-SECTORS` reads
-attached capacity, and `MP64FS-VALID?` validates the complete attached
-filesystem before use.
+attached capacity, and `MP64FS-VALID?` validates marker-1 geometry, reserved
+allocation bits, and occupied directory-entry extent/parent bounds before
+use. It does not prove names, ownership, acyclicity, CRCs, or file data.
 
 ---
 
@@ -1319,7 +1320,7 @@ After a full KDOS boot with filesystem loaded:
 | KDOS core dictionary | Build-dependent | Bank 0 definitions and strings from `kdos.f` |
 | Userland dictionary | Build-dependent | `networking.f`, `tools.f`, and later user definitions in XMEM |
 | Buffers | ~10 KB | 6 demo buffers, histogram bins |
-| FS cache | ~7.5 KB | Superblock (512B) + bitmap (up to 1024B) + directory (6144B) |
+| FS cache | 14,869 B raw reservation | Operational windows: superblock (512 B) + bitmap capacity (8192 B) + directory (6144 B), plus three seven-byte declaration tails |
 | Task stacks | 2 KB | 8 × 256 bytes |
 | Frame buffer | 1.5 KB | NIC frame receive buffer |
 | Bank 0 headroom | Build-dependent | Core dictionary, heap, and stacks share the 1 MiB bank |
