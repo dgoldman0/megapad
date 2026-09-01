@@ -26,6 +26,8 @@ from rich_terminal.retained_scene import (
 )
 from rich_terminal.retained_wire import (
     CellMode,
+    ImageBody,
+    ImageFit,
     ObjectSetValue,
     ObjectSetVisibility,
     ObjectWireDefinition,
@@ -44,6 +46,13 @@ from rich_terminal.retained_wire import (
     RetainedResult,
     RetainedWireError,
     RetainedWireErrorCode,
+    ResourceAbort,
+    ResourceAbortReason,
+    ResourceBegin,
+    ResourceChunk,
+    ResourceCommit,
+    ResourceDrop,
+    ResourceFormat,
     SeriesWireDefinition,
     SeriesWireSamples,
     decode_object_definition,
@@ -56,6 +65,11 @@ from rich_terminal.retained_wire import (
     decode_present_commit,
     decode_region_definition,
     decode_region_drop,
+    decode_resource_abort,
+    decode_resource_begin,
+    decode_resource_chunk,
+    decode_resource_commit,
+    decode_resource_drop,
     decode_ret_caps,
     decode_ret_formats,
     decode_ret_query,
@@ -73,6 +87,11 @@ from rich_terminal.retained_wire import (
     encode_present_commit,
     encode_region_definition,
     encode_region_drop,
+    encode_resource_abort,
+    encode_resource_begin,
+    encode_resource_chunk,
+    encode_resource_commit,
+    encode_resource_drop,
     encode_ret_caps,
     encode_ret_formats,
     encode_ret_query,
@@ -294,6 +313,177 @@ def test_owner_lifecycle_scalars_and_result_semantics_are_exact():
     assert decode_owner_drop(encode_owner_drop(drop)) == drop
     with pytest.raises(ValueError, match="between 1"):
         OwnerDrop(0, 0, 1, 1)
+
+
+def test_resource_wire_values_match_the_exact_normative_payloads():
+    digest = bytes(range(32))
+    begin = ResourceBegin(
+        0x0102030405060708,
+        0x1112131415161718,
+        0x2122232425262728,
+        ResourceFormat.RGBA8,
+        2,
+        1,
+        0,
+        8,
+        digest,
+    )
+    begin_payload = struct.pack(
+        "<QQQIIIIQ32s",
+        begin.owner_id,
+        begin.owner_generation,
+        begin.resource_id,
+        1,
+        2,
+        1,
+        0,
+        8,
+        digest,
+    )
+    assert encode_resource_begin(begin) == begin_payload
+    assert decode_resource_begin(begin_payload) == begin
+    assert begin.digest == digest
+
+    source = bytearray(b"\x01\x02\x03\x04")
+    chunk = ResourceChunk(begin.owner_id, begin.owner_generation, begin.resource_id, 4, source)
+    source[0] = 0xFF
+    chunk_payload = struct.pack(
+        "<QQQQ",
+        begin.owner_id,
+        begin.owner_generation,
+        begin.resource_id,
+        4,
+    ) + b"\x01\x02\x03\x04"
+    assert encode_resource_chunk(chunk) == chunk_payload
+    assert decode_resource_chunk(chunk_payload) == chunk
+
+    commit = ResourceCommit(begin.owner_id, begin.owner_generation, begin.resource_id)
+    item_payload = struct.pack(
+        "<QQQ", begin.owner_id, begin.owner_generation, begin.resource_id
+    )
+    assert encode_resource_commit(commit) == item_payload
+    assert decode_resource_commit(item_payload) == commit
+
+    drop = ResourceDrop(begin.owner_id, begin.owner_generation, begin.resource_id)
+    assert encode_resource_drop(drop) == item_payload
+    assert decode_resource_drop(item_payload) == drop
+
+    abort = ResourceAbort(
+        begin.owner_id,
+        begin.owner_generation,
+        begin.resource_id,
+        ResourceAbortReason.RESET_REBUILD,
+    )
+    abort_payload = struct.pack(
+        "<QQQH6x",
+        begin.owner_id,
+        begin.owner_generation,
+        begin.resource_id,
+        1,
+    )
+    assert encode_resource_abort(abort) == abort_payload
+    assert decode_resource_abort(abort_payload) == abort
+
+
+@pytest.mark.parametrize(
+    ("message_type", "decode", "encode"),
+    (
+        (RetainedMessageType.RESOURCE_BEGIN, decode_resource_begin, encode_resource_begin),
+        (RetainedMessageType.RESOURCE_CHUNK, decode_resource_chunk, encode_resource_chunk),
+        (RetainedMessageType.RESOURCE_COMMIT, decode_resource_commit, encode_resource_commit),
+        (RetainedMessageType.RESOURCE_DROP, decode_resource_drop, encode_resource_drop),
+    ),
+)
+def test_resource_conformance_oracles_round_trip_at_the_payload_boundary(
+    message_type, decode, encode
+):
+    for payload in _oracle_payloads(message_type):
+        assert encode(decode(payload)) == payload
+
+
+def test_resource_abort_oracles_preserve_reasons_for_lifecycle_status_selection():
+    canonical = 0
+    invalid = 0
+    for payload in _oracle_payloads(RetainedMessageType.RESOURCE_ABORT):
+        reason = int.from_bytes(payload[24:26], "little")
+        if reason <= int(ResourceAbortReason.LOCAL_SHUTDOWN):
+            canonical += 1
+        else:
+            invalid += 1
+        assert encode_resource_abort(decode_resource_abort(payload)) == payload
+    assert canonical
+    assert invalid
+
+
+def test_resource_codecs_reject_noncanonical_lengths_padding_and_scalars():
+    begin = ResourceBegin(1, 1, 1, ResourceFormat.RGBA8, 1, 1, 0, 4, bytes(32))
+    begin_payload = bytearray(encode_resource_begin(begin))
+
+    for malformed in (begin_payload[:-1], begin_payload + b"\0"):
+        with pytest.raises(RetainedWireError) as caught:
+            decode_resource_begin(malformed)
+        assert caught.value.code is RetainedWireErrorCode.PAYLOAD
+
+    begin_payload[36:40] = (1).to_bytes(4, "little")
+    assert decode_resource_begin(begin_payload).flags == 1
+
+    begin_payload[36:40] = bytes(4)
+    begin_payload[24:28] = (2).to_bytes(4, "little")
+    assert decode_resource_begin(begin_payload).format == 2
+
+    empty_chunk = struct.pack("<QQQQ", 1, 1, 1, 0)
+    assert decode_resource_chunk(empty_chunk).data == b""
+
+    overflowing = ResourceChunk(1, 1, 1, UINT64_MAX, b"x")
+    assert encode_resource_chunk(overflowing).endswith(b"x")
+
+    abort_payload = bytearray(
+        encode_resource_abort(ResourceAbort(1, 1, 1, ResourceAbortReason.CALLER_CANCEL))
+    )
+    abort_payload[-1] = 1
+    with pytest.raises(RetainedWireError) as padding:
+        decode_resource_abort(abort_payload)
+    assert padding.value.code is RetainedWireErrorCode.RESERVED
+
+    for value, encode, decode in (
+        (ResourceCommit(1, 1, 1), encode_resource_commit, decode_resource_commit),
+        (ResourceDrop(1, 1, 1), encode_resource_drop, decode_resource_drop),
+        (
+            ResourceAbort(1, 1, 1, ResourceAbortReason.LOCAL_SHUTDOWN),
+            encode_resource_abort,
+            decode_resource_abort,
+        ),
+    ):
+        payload = encode(value)
+        for malformed in (payload[:-1], payload + b"\0"):
+            with pytest.raises(RetainedWireError) as caught:
+                decode(malformed)
+            assert caught.value.code is RetainedWireErrorCode.PAYLOAD
+
+
+def test_resource_codecs_preserve_semantic_errors_for_authority_precedence():
+    begin = ResourceBegin(
+        0,
+        0,
+        0,
+        99,
+        0,
+        0,
+        UINT32_MAX,
+        0,
+        bytes(32),
+    )
+    assert decode_resource_begin(encode_resource_begin(begin)) == begin
+
+    empty_overflow = ResourceChunk(0, 0, 0, UINT64_MAX, b"")
+    assert decode_resource_chunk(encode_resource_chunk(empty_overflow)) == empty_overflow
+
+    commit = ResourceCommit(0, 0, 0)
+    drop = ResourceDrop(0, 0, 0)
+    abort = ResourceAbort(0, 0, 0, 0xFFFF)
+    assert decode_resource_commit(encode_resource_commit(commit)) == commit
+    assert decode_resource_drop(encode_resource_drop(drop)) == drop
+    assert decode_resource_abort(encode_resource_abort(abort)) == abort
 
 
 @pytest.mark.parametrize(
@@ -634,6 +824,93 @@ def test_every_non_image_object_oracle_round_trips_through_typed_bodies():
     assert kinds == set(ObjectKind)
 
 
+def test_image_object_oracles_and_exact_body_round_trip_without_scene_state():
+    image_payloads = tuple(
+        payload
+        for message_type in (
+            RetainedMessageType.OBJECT_DEFINE,
+            RetainedMessageType.OBJECT_REPLACE,
+        )
+        for payload in _oracle_payloads(message_type)
+        if int.from_bytes(payload[24:26], "little") == 3
+    )
+    assert image_payloads
+    for payload in image_payloads:
+        definition = decode_object_definition(payload)
+        assert int(definition.kind) == 3
+        assert isinstance(definition.body, ImageBody)
+        assert encode_object_definition(definition) == payload
+
+    image = ObjectWireDefinition(
+        1,
+        2,
+        3,
+        4,
+        0,
+        ObjectBounds(0, 1, UINT32_MAX - 1, UINT32_MAX),
+        -5,
+        True,
+        ImageBody(9, ImageFit.COVER, 127),
+    )
+    expected = struct.pack(
+        "<QQQHHiQQIIIIQIB3x",
+        1,
+        2,
+        3,
+        3,
+        1,
+        -5,
+        4,
+        0,
+        0,
+        1,
+        UINT32_MAX - 1,
+        UINT32_MAX,
+        9,
+        2,
+        127,
+    )
+    assert encode_object_definition(image) == expected
+    assert decode_object_definition(expected) == image
+
+
+def test_image_body_rejects_bad_fit_padding_resource_and_length():
+    image = ObjectWireDefinition(
+        1,
+        1,
+        1,
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        0,
+        True,
+        ImageBody(1, ImageFit.CONTAIN, 255),
+    )
+    payload = bytearray(encode_object_definition(image))
+
+    payload[72:76] = (3).to_bytes(4, "little")
+    with pytest.raises(RetainedWireError) as fit:
+        decode_object_definition(payload)
+    assert fit.value.code is RetainedWireErrorCode.ENUM
+
+    payload[72:76] = (1).to_bytes(4, "little")
+    payload[77] = 1
+    with pytest.raises(RetainedWireError) as padding:
+        decode_object_definition(payload)
+    assert padding.value.code is RetainedWireErrorCode.RESERVED
+
+    payload[77] = 0
+    payload[64:72] = bytes(8)
+    with pytest.raises(RetainedWireError) as resource:
+        decode_object_definition(payload)
+    assert resource.value.code is RetainedWireErrorCode.SCALAR
+
+    payload[64:72] = (1).to_bytes(8, "little")
+    with pytest.raises(RetainedWireError) as trailing:
+        decode_object_definition(payload + b"\0")
+    assert trailing.value.code is RetainedWireErrorCode.PAYLOAD
+
+
 @pytest.mark.parametrize(
     "message_type",
     (RetainedMessageType.SERIES_APPEND, RetainedMessageType.SERIES_REPLACE),
@@ -757,10 +1034,10 @@ def test_object_decoders_reject_reserved_bits_enums_text_and_non_exact_bodies():
     assert reserved.value.code is RetainedWireErrorCode.RESERVED
 
     glyph_run[74:76] = bytes(2)
-    glyph_run[24:26] = (3).to_bytes(2, "little")
-    with pytest.raises(RetainedWireError) as image:
+    glyph_run[24:26] = (10).to_bytes(2, "little")
+    with pytest.raises(RetainedWireError) as unknown:
         decode_object_definition(glyph_run)
-    assert image.value.code is RetainedWireErrorCode.ENUM
+    assert unknown.value.code is RetainedWireErrorCode.ENUM
 
 
 def test_mutation_and_series_decoders_reject_padding_modes_and_count_aliases():

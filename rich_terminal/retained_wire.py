@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from enum import Enum, IntEnum
 
 from .apt1 import UINT16_MAX, UINT32_MAX, UINT64_MAX
-from .retained_model import OwnerQuotas, RetainedFeature, RetainedPolicy
+from .retained_model import (
+    OwnerQuotas,
+    ResourceFormat,
+    RetainedFeature,
+    RetainedPolicy,
+)
 from .retained_scene import (
     CONTROL_STATE_MASK,
     ControlKind,
@@ -48,6 +53,7 @@ from .semantic_content import (
 
 RET1_TAG = 0x31544552
 _RETAINED_FEATURE_MASK = 0x33F
+_IMAGE_OBJECT_TYPE = 3
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -55,6 +61,11 @@ _RET_FORMATS = struct.Struct("<IIIIIIIIIIQQQ")
 _OWNER_OPEN = struct.Struct("<QQIIIIQQQQ")
 _RET_RESULT = struct.Struct("<HHIQQQQQ")
 _OWNER_DROP = struct.Struct("<QQQQ")
+_RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ32s")
+_RESOURCE_CHUNK = struct.Struct("<QQQQ")
+_RESOURCE_ITEM = struct.Struct("<QQQ")
+# ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
+_RESOURCE_ABORT = struct.Struct("<QQQH6s")
 _PRESENT_BEGIN = struct.Struct("<QQQQIIIIIIII")
 _PRESENT_COMMIT = struct.Struct("<QII")
 _REGION_DEFINITION = struct.Struct("<QQQIIIIiI")
@@ -62,6 +73,8 @@ _OWNER_ITEM = struct.Struct("<QQQ")
 _OBJECT_PREFIX = struct.Struct("<QQQHHiQQIIII")
 _POLYLINE_BODY = struct.Struct("<II4BI")
 _POINT = struct.Struct("<II")
+# ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
+_IMAGE_BODY = struct.Struct("<QIB3s")
 _GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
 _READOUT_BODY = struct.Struct("<8BIIqqII")
 _METER_BODY = struct.Struct("<8BIIqqqQ")
@@ -118,6 +131,18 @@ class RetStatus(IntEnum):
     IN_USE = 5
     BAD_CONTENT = 6
     ABORTED = 7
+
+
+class ResourceAbortReason(IntEnum):
+    CALLER_CANCEL = 0
+    RESET_REBUILD = 1
+    LOCAL_SHUTDOWN = 2
+
+
+class ImageFit(IntEnum):
+    STRETCH = 0
+    CONTAIN = 1
+    COVER = 2
 
 
 class CellMode(IntEnum):
@@ -200,6 +225,20 @@ def _variable_payload(value, minimum_size: int, name: str) -> bytes:
             RetainedWireErrorCode.PAYLOAD,
             f"{name} payload is {len(raw)} bytes, expected at least {minimum_size}",
         )
+    return raw
+
+
+def _byte_string(value, name: str, *, exact_size: int | None = None) -> bytes:
+    """Copy one bytes-like semantic value without accepting integer aliases."""
+
+    if isinstance(value, (str, int)):
+        raise TypeError(f"{name} must be bytes-like")
+    try:
+        raw = bytes(memoryview(value))
+    except TypeError as exc:
+        raise TypeError(f"{name} must be bytes-like") from exc
+    if exact_size is not None and len(raw) != exact_size:
+        raise ValueError(f"{name} must be exactly {exact_size} bytes")
     return raw
 
 
@@ -539,6 +578,139 @@ class OwnerDrop:
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceBegin:
+    """Exact upload fields before authority/content status selection."""
+
+    owner_id: int
+    owner_generation: int
+    resource_id: int
+    format: ResourceFormat | int
+    width: int
+    height: int
+    flags: int
+    byte_length: int
+    sha3_256: bytes
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "resource_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=0, maximum=UINT64_MAX),
+            )
+        format_id = _integer("format", self.format, minimum=0, maximum=UINT32_MAX)
+        object.__setattr__(
+            self,
+            "format",
+            ResourceFormat(format_id) if format_id == int(ResourceFormat.RGBA8) else format_id,
+        )
+        for name in ("width", "height"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=0, maximum=UINT32_MAX),
+            )
+        flags = _integer("flags", self.flags, minimum=0, maximum=UINT32_MAX)
+        object.__setattr__(self, "flags", flags)
+        object.__setattr__(
+            self,
+            "byte_length",
+            _integer(
+                "byte_length", self.byte_length, minimum=0, maximum=UINT64_MAX
+            ),
+        )
+        object.__setattr__(
+            self,
+            "sha3_256",
+            _byte_string(self.sha3_256, "sha3_256", exact_size=32),
+        )
+
+    @property
+    def digest(self) -> bytes:
+        return self.sha3_256
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceChunk:
+    owner_id: int
+    owner_generation: int
+    resource_id: int
+    offset: int
+    data: bytes
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "resource_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=0, maximum=UINT64_MAX),
+            )
+        object.__setattr__(
+            self,
+            "offset",
+            _integer("offset", self.offset, minimum=0, maximum=UINT64_MAX),
+        )
+        data = _byte_string(self.data, "resource chunk data")
+        object.__setattr__(self, "data", data)
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceCommit:
+    owner_id: int
+    owner_generation: int
+    resource_id: int
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "resource_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=0, maximum=UINT64_MAX),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceDrop:
+    owner_id: int
+    owner_generation: int
+    resource_id: int
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "resource_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=0, maximum=UINT64_MAX),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceAbort:
+    owner_id: int
+    owner_generation: int
+    resource_id: int
+    reason: ResourceAbortReason | int
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "resource_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=0, maximum=UINT64_MAX),
+            )
+        reason = _integer("reason", self.reason, minimum=0, maximum=UINT16_MAX)
+        object.__setattr__(
+            self,
+            "reason",
+            (
+                ResourceAbortReason(reason)
+                if reason <= int(ResourceAbortReason.LOCAL_SHUTDOWN)
+                else reason
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PresentBegin:
     transaction_id: int
     base_revision: int
@@ -690,9 +862,34 @@ class RegionWireDefinition:
         return bool(self.flags & 0x2)
 
 
+@dataclass(frozen=True, slots=True)
+class ImageBody:
+    """Renderer-neutral IMAGE reference carried by an OBJECT definition."""
+
+    resource_id: int
+    fit: ImageFit
+    opacity: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "resource_id",
+            _integer(
+                "resource_id", self.resource_id, minimum=1, maximum=UINT64_MAX
+            ),
+        )
+        object.__setattr__(self, "fit", _enum("fit", ImageFit, self.fit))
+        object.__setattr__(
+            self,
+            "opacity",
+            _integer("opacity", self.opacity, minimum=0, maximum=0xFF),
+        )
+
+
 ObjectWireBody = (
     GroupBody
     | PolylineBody
+    | ImageBody
     | GlyphRunBody
     | ReadoutBody
     | MeterBody
@@ -705,6 +902,7 @@ ObjectWireBody = (
 _WIRE_BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
     PolylineBody: ObjectKind.POLYLINE,
+    ImageBody: _IMAGE_OBJECT_TYPE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
     ReadoutBody: ObjectKind.READOUT,
     MeterBody: ObjectKind.METER,
@@ -842,7 +1040,7 @@ class ControlEvent:
 
 @dataclass(frozen=True, slots=True)
 class ObjectWireDefinition:
-    """Complete non-image object definition before session binding."""
+    """Complete retained object definition before session binding."""
 
     owner_id: int
     owner_generation: int
@@ -876,10 +1074,10 @@ class ObjectWireDefinition:
         )
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         if type(self.body) not in _WIRE_BODY_KIND:
-            raise TypeError("body is not a supported non-image RETAINED-1 body")
+            raise TypeError("body is not a supported RETAINED-1 wire body")
 
     @property
-    def kind(self) -> ObjectKind:
+    def kind(self) -> ObjectKind | int:
         return _WIRE_BODY_KIND[type(self.body)]
 
 
@@ -1135,6 +1333,127 @@ def decode_owner_drop(payload) -> OwnerDrop:
         raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
 
 
+def encode_resource_begin(begin: ResourceBegin) -> bytes:
+    if not isinstance(begin, ResourceBegin):
+        raise TypeError("begin must be ResourceBegin")
+    return _RESOURCE_BEGIN.pack(
+        begin.owner_id,
+        begin.owner_generation,
+        begin.resource_id,
+        int(begin.format),
+        begin.width,
+        begin.height,
+        begin.flags,
+        begin.byte_length,
+        begin.sha3_256,
+    )
+
+
+def decode_resource_begin(payload) -> ResourceBegin:
+    raw = _payload(payload, _RESOURCE_BEGIN.size, "RESOURCE_BEGIN")
+    values = _RESOURCE_BEGIN.unpack(raw)
+    try:
+        return ResourceBegin(
+            *values[:7],
+            values[7],
+            values[8],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+
+
+def encode_resource_chunk(chunk: ResourceChunk) -> bytes:
+    if not isinstance(chunk, ResourceChunk):
+        raise TypeError("chunk must be ResourceChunk")
+    return _RESOURCE_CHUNK.pack(
+        chunk.owner_id,
+        chunk.owner_generation,
+        chunk.resource_id,
+        chunk.offset,
+    ) + chunk.data
+
+
+def decode_resource_chunk(payload) -> ResourceChunk:
+    raw = _variable_payload(payload, _RESOURCE_CHUNK.size, "RESOURCE_CHUNK")
+    owner_id, generation, resource_id, offset = _RESOURCE_CHUNK.unpack_from(raw)
+    try:
+        return ResourceChunk(
+            owner_id,
+            generation,
+            resource_id,
+            offset,
+            raw[_RESOURCE_CHUNK.size :],
+        )
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+
+
+def _encode_resource_item(request, expected_type, name: str) -> bytes:
+    if not isinstance(request, expected_type):
+        raise TypeError(f"request must be {expected_type.__name__}")
+    return _RESOURCE_ITEM.pack(
+        request.owner_id,
+        request.owner_generation,
+        request.resource_id,
+    )
+
+
+def _decode_resource_item(payload, result_type, name: str):
+    raw = _payload(payload, _RESOURCE_ITEM.size, name)
+    values = _RESOURCE_ITEM.unpack(raw)
+    try:
+        return result_type(*values)
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
+def encode_resource_commit(commit: ResourceCommit) -> bytes:
+    return _encode_resource_item(commit, ResourceCommit, "RESOURCE_COMMIT")
+
+
+def decode_resource_commit(payload) -> ResourceCommit:
+    return _decode_resource_item(payload, ResourceCommit, "RESOURCE_COMMIT")
+
+
+def encode_resource_drop(drop: ResourceDrop) -> bytes:
+    return _encode_resource_item(drop, ResourceDrop, "RESOURCE_DROP")
+
+
+def decode_resource_drop(payload) -> ResourceDrop:
+    return _decode_resource_item(payload, ResourceDrop, "RESOURCE_DROP")
+
+
+def encode_resource_abort(abort: ResourceAbort) -> bytes:
+    if not isinstance(abort, ResourceAbort):
+        raise TypeError("abort must be ResourceAbort")
+    return _RESOURCE_ABORT.pack(
+        abort.owner_id,
+        abort.owner_generation,
+        abort.resource_id,
+        int(abort.reason),
+        bytes(6),
+    )
+
+
+def decode_resource_abort(payload) -> ResourceAbort:
+    raw = _payload(payload, _RESOURCE_ABORT.size, "RESOURCE_ABORT")
+    owner_id, generation, resource_id, reason, reserved = _RESOURCE_ABORT.unpack(raw)
+    if reserved != bytes(6):
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "RESOURCE_ABORT padding is nonzero",
+        )
+    try:
+        return ResourceAbort(
+            owner_id,
+            generation,
+            resource_id,
+            reason,
+        )
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
+
+
 def encode_present_begin(begin: PresentBegin) -> bytes:
     if not isinstance(begin, PresentBegin):
         raise TypeError("begin must be PresentBegin")
@@ -1297,6 +1616,13 @@ def _encode_object_body(body: ObjectWireBody) -> bytes:
             _POINT.pack_into(result, offset, point.x, point.y)
             offset += _POINT.size
         return bytes(result)
+    if isinstance(body, ImageBody):
+        return _IMAGE_BODY.pack(
+            body.resource_id,
+            int(body.fit),
+            body.opacity,
+            bytes(3),
+        )
     if isinstance(body, GlyphRunBody):
         text = body.text.encode("utf-8", "strict")
         text_bytes = _integer(
@@ -1366,7 +1692,7 @@ def _encode_object_body(body: ObjectWireBody) -> bytes:
             int(body.draw_zero_line),
             0,
         )
-    raise TypeError("body is not a supported non-image RETAINED-1 body")
+    raise TypeError("body is not a supported RETAINED-1 wire body")
 
 
 def encode_object_definition(definition: ObjectWireDefinition) -> bytes:
@@ -1388,7 +1714,7 @@ def encode_object_definition(definition: ObjectWireDefinition) -> bytes:
     ) + _encode_object_body(definition.body)
 
 
-def _decode_object_body(kind: ObjectKind, raw: bytes) -> ObjectWireBody:
+def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
     try:
         if kind is ObjectKind.GROUP:
             _body_size(raw, 0, "GROUP")
@@ -1416,6 +1742,25 @@ def _decode_object_body(kind: ObjectKind, raw: bytes) -> ObjectWireBody:
                 RGBA(*values[2:6]),
                 bool(path_flags),
             )
+        if int(kind) == _IMAGE_OBJECT_TYPE:
+            _body_size(raw, _IMAGE_BODY.size, "IMAGE")
+            resource_id, fit, opacity, reserved = _IMAGE_BODY.unpack(raw)
+            if reserved != bytes(3):
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "IMAGE padding is nonzero",
+                )
+            if fit not in tuple(int(member) for member in ImageFit):
+                raise RetainedWireError(
+                    RetainedWireErrorCode.ENUM,
+                    "IMAGE fit is not canonical",
+                )
+            if not resource_id:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.SCALAR,
+                    "IMAGE resource ID must be nonzero",
+                )
+            return ImageBody(resource_id, ImageFit(fit), opacity)
         if kind is ObjectKind.GLYPH_RUN:
             if len(raw) < _GLYPH_RUN_BODY.size:
                 _body_size(raw, _GLYPH_RUN_BODY.size, "GLYPH_RUN prefix")
@@ -1547,7 +1892,7 @@ def _decode_object_body(kind: ObjectKind, raw: bytes) -> ObjectWireBody:
         raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
     raise RetainedWireError(
         RetainedWireErrorCode.ENUM,
-        f"object type {int(kind)} has no non-image codec",
+        f"object type {int(kind)} has no codec",
     )
 
 
@@ -1559,13 +1904,16 @@ def decode_object_definition(payload) -> ObjectWireDefinition:
             RetainedWireErrorCode.SCALAR,
             "OBJECT owner, generation, object, and region IDs must be nonzero",
         )
-    try:
-        kind = ObjectKind(values[3])
-    except ValueError as exc:
-        raise RetainedWireError(
-            RetainedWireErrorCode.ENUM,
-            f"object type {values[3]} has no non-image codec",
-        ) from exc
+    if values[3] == _IMAGE_OBJECT_TYPE:
+        kind: ObjectKind | int = _IMAGE_OBJECT_TYPE
+    else:
+        try:
+            kind = ObjectKind(values[3])
+        except ValueError as exc:
+            raise RetainedWireError(
+                RetainedWireErrorCode.ENUM,
+                f"object type {values[3]} has no codec",
+            ) from exc
     if values[4] & ~0x1:
         raise RetainedWireError(
             RetainedWireErrorCode.RESERVED,
@@ -1992,18 +2340,23 @@ def decode_series_drop(payload) -> RetainedItemReference:
 
 __all__ = [
     "CellMode", "ControlEvent", "ControlEventKind", "ControlKind", "ControlState",
-    "ControlWireDefinition", "ObjectSetValue", "ObjectSetVisibility", "ObjectWireBody",
+    "ControlWireDefinition", "ImageBody", "ImageFit", "ObjectSetValue",
+    "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
     "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RetainedItemReference",
     "RET1_TAG", "RetStatus", "SeriesWireBatch", "SeriesWireDefinition", "SeriesWireSamples",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",
-    "RetainedResult", "RetainedWireError", "RetainedWireErrorCode",
+    "RetainedResult", "RetainedWireError", "RetainedWireErrorCode", "ResourceAbort",
+    "ResourceAbortReason", "ResourceBegin", "ResourceChunk", "ResourceCommit",
+    "ResourceDrop", "ResourceFormat",
     "decode_control_definition", "decode_control_drop", "decode_control_event",
     "decode_control_replace",
     "decode_object_definition", "decode_object_drop", "decode_object_replace",
     "decode_object_set_value", "decode_object_set_visibility", "decode_owner_drop",
     "decode_owner_open", "decode_present_begin", "decode_present_commit",
     "decode_region_definition", "decode_region_drop", "decode_region_replace",
+    "decode_resource_abort", "decode_resource_begin", "decode_resource_chunk",
+    "decode_resource_commit", "decode_resource_drop",
     "decode_ret_caps", "decode_ret_formats", "decode_ret_query", "decode_ret_result",
     "decode_series_append", "decode_series_definition", "decode_series_drop",
     "decode_series_replace", "decode_series_samples", "encode_control_definition",
@@ -2013,6 +2366,8 @@ __all__ = [
     "encode_object_set_visibility", "encode_owner_drop", "encode_owner_open",
     "encode_present_begin", "encode_present_commit", "encode_region_definition",
     "encode_region_drop", "encode_region_replace", "encode_ret_caps", "encode_ret_formats",
+    "encode_resource_abort", "encode_resource_begin", "encode_resource_chunk",
+    "encode_resource_commit", "encode_resource_drop",
     "encode_ret_query", "encode_ret_result", "encode_series_append",
     "encode_series_definition", "encode_series_drop", "encode_series_replace",
     "encode_series_samples",

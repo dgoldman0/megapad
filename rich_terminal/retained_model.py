@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass, replace
-from enum import Enum, IntFlag
+from enum import Enum, IntEnum, IntFlag
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
@@ -28,6 +28,10 @@ class RetainedFeature(IntFlag):
     CADENCE = 1 << 5
     CONTROLS = 1 << 8
     CONTROL_COLLECTIONS = 1 << 9
+
+
+class ResourceFormat(IntEnum):
+    RGBA8 = 1
 
 
 _ALL_FEATURES = (
@@ -872,6 +876,7 @@ __all__ = [
     "OwnerRecord",
     "PreparedOwnerLedgerInstall",
     "ReservationTotals",
+    "ResourceFormat",
     "RetainedFeature",
     "RetainedPolicy",
 ]

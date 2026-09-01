@@ -14,7 +14,7 @@ import mmap
 import operator
 import os
 from dataclasses import dataclass, field
-from enum import Enum, IntEnum
+from enum import Enum
 from types import MappingProxyType
 from typing import Mapping
 
@@ -27,12 +27,9 @@ from .retained_model import (
     OwnerLedgerErrorCode,
     OwnerLedgerState,
     PreparedOwnerLedgerInstall,
+    ResourceFormat,
     RetainedFeature,
 )
-
-
-class ResourceFormat(IntEnum):
-    RGBA8 = 1
 
 
 class ResourceStoreErrorCode(str, Enum):
