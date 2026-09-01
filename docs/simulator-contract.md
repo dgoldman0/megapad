@@ -52,7 +52,10 @@ Code moves into `shared/` only after its API is expressed without either
 backend's concrete CPU, bus, scheduler, memory, or device objects.  In
 particular, a filename containing “shared” is not evidence of backend-neutral
 ownership. Pure CRC mode parameters and recurrence/value transforms qualify;
-CRC instruction execution and checked transaction ownership do not.
+CRC instruction execution and checked transaction ownership do not. Frozen
+storage sector/command/status/result/capability numbers likewise qualify as a
+shared ABI registry; controller state, media ownership, DMA, checked execution,
+and completion/durability publication remain backend-local.
 
 ## 2. Compatibility claims
 
@@ -133,6 +136,11 @@ the loop counter unless source has deliberately placed a balanced value above
 it.  `I`, `J`, `R@`, `R>`, `UNLOOP`, exceptions, and task switching must not be
 implemented using independent stacks that merely appear equivalent in simple
 programs.
+
+Hosted `ROLL` preserves the native mutation order: it consumes `u` before
+accessing the selected depth. If the bounded hosted stack then detects
+underflow, the offset remains consumed; native execution instead performs its
+ordinary unchecked stack-address access.
 
 The dictionary provides source-visible linked headers, flags and names,
 newest-definition lookup, shadowing, compilation state, `HERE`, `LATEST`, and
@@ -1117,8 +1125,9 @@ source's example `0 1 64 BUFFER` occupies one correct physical tile but
 describes 64 one-byte elements; `0 2 32 BUFFER` matches its stated 32-element
 descriptor.
 
-The contiguous source frontier now ends at line 3754. Exact unchanged lines
-3217 through 3754 contain 538 lines and 16,586 bytes (SHA-256
+The kernel/pipeline portion of the contiguous source frontier ends at line
+3754. Exact unchanged lines 3217 through 3754 contain 538 lines and 16,586
+bytes (SHA-256
 `ec724b8ca6f6887a2c4ce724edf9612726cf04a48416c29c2eb3ed9448949e40`).
 They publish 109 definitions: the 32-slot kernel registry and 23 populated
 descriptors, 18 registered byte/general descriptors plus five FP16 descriptors,
@@ -1151,9 +1160,22 @@ pins the resulting nontermination instead of treating zero as an empty loop.
 Earlier Buffer tail, count-owner, and multi-tile defects flow through their
 kernel wrappers unchanged.
 
-The next subsystem is Storage. Exact lines 3755 through 3771 publish
-`SECTOR = 512`, then the partial `DISK?` definition rolls back at the unbound
-`DISK@` on line 3771. `DISK@` is therefore the next semantic BIOS seam.
+The contiguous source frontier now ends at line 4099. Exact unchanged lines
+3755 through 4099 contain 345 lines and 11,424 bytes (SHA-256
+`e4d09d0801838fc9721ba68e39f2c5a5dbc139101c9c4a3489fb66cab9b248b1`).
+They publish 97 definitions through `VOL-FLUSH`: the storage constants and
+structured ior vocabulary, block-device and volume field readers, unsigned
+range predicate, cookie allocator, descriptor validators/lifecycle, guarded
+block I/O, raw and bounded volume constructors, reference accounting, and
+relative volume I/O. Source load performs no media operation and explicitly
+initializes only `STORAGE-COOKIE`.
+
+The next exact source probe is lines 4100 through 4192: 93 lines and 3,174
+bytes (SHA-256
+`cfd4036c01d32a5dc4e7434651b8d434b467c812899231e2b691ed40e5e30a7b`).
+It publishes 30 complete partition helpers through `_MBR-TYPE`, rolls back the
+partial following definition, and reaches the first unbound little-endian
+`L@` fetch on line 4192. `L@` is therefore the next semantic BIOS seam.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
@@ -1216,14 +1238,58 @@ filesystem code.  Sector size, media generation, checked submission,
 whole-sector progress, status values, stale-handle behavior, and operation
 ordering remain observable.
 
-A successful write means acceptance, not durability.  A successful flush is
-the durability boundary and performs the corresponding host flush/fsync work.
-Closing a simulator session is not a substitute for flush.  A faster host VFS
-binding may exist for nonconforming development use, but it cannot stand in for
-the ordinary storage journey in differential qualification.
+The admitted hosted service is pseudo-BIOS-only. It implements `DISK@`, the
+three media queries, and the six ordinary/generation-bound checked operations
+against one exact sector image. It does not implement the raw setup/command
+words or storage MMIO, BUSY/rejection visibility, RESET, DMA cadence,
+controller timeouts, fault injection, or device interrupts. One mutable
+service instance may be claimed by exactly one runtime. Host attachment,
+detachment, write-protection changes, and checked calls are management
+operations that the composition must serialize; this slice makes no
+host-thread atomicity claim. Attach, replace, and detach never implicitly
+flush the old image.
 
-Emulator and simulator runtime snapshots are separate formats.  Portable
-persistence evidence consists of media bytes and application-level data, not
+Checked read/write validates, in order, lock acquisition, presence, required
+capabilities, caller generation where supplied, nonzero count, unsigned LBA
+range, address overflow, and one complete ordinary physical DMA window. Write
+protection is the accepted controller result after that software preflight.
+An admitted transfer is synchronous and splits at 255-sector controller
+boundaries, publishing exact whole-sector progress and the terminal result of
+each accepted chunk. Software rejection before submission preserves the prior
+terminal controller tuple. A generation change at the guarded acceptance edge
+publishes `MEDIA_REMOVED`, zero transferred sectors, and one completion before
+the checked layer returns stale (and marks any earlier confirmed chunks
+partial). The public adapter owns depthless filesystem lock
+2 exactly as the executable checked BIOS does; callers cannot safely wrap it
+in an outer acquisition of the same lock.
+
+A successful write means acceptance, not durability. For path-backed media, a
+successful flush writes the complete live image and performs the corresponding
+host flush/fsync work. Closing a simulator session is not a substitute for
+flush. Pathless media is deliberately ephemeral: flush is an ordering barrier
+and successful semantic completion, but is not persistence evidence. Real
+file-backed fsync/close/reopen qualification remains deferred until the
+rich-terminal vertical acceptance gate permits persistence testing. A faster
+host VFS binding may exist for nonconforming development use, but it cannot
+stand in for the ordinary storage journey in differential qualification.
+
+The source-defined descriptors remain caller-owned memory. Construction
+requires a complete writable, nonoverlapping zero-or-original-live extent;
+copying or forging a live descriptor can corrupt reference accounting. Object
+cookies and constructor scratch are runtime-global and non-reentrant, and the
+validators do not prove that an arbitrary descriptor pointer names a safe
+span. Early object-layer failures preserve old block diagnostics, submitted
+read/write operations replace ior/completed/LBA/count, and submitted flush
+replaces only ior/completed. Read-only rejection intentionally precedes stale,
+range, and DMA checks for `BD-WRITE` and `VOL-WRITE`. These literal source
+behaviors are compatibility findings, not hosted repairs; the full ABI and
+lifetime rules are in
+[`block-volume-contract.md`](block-volume-contract.md).
+
+The current hosted service has no clone, sharing, or snapshot format, and a
+claimed instance cannot be installed into another runtime. Emulator and
+simulator runtime snapshots are separate formats. Portable persistence
+evidence consists of copied media bytes and application-level data, not
 backend runtime state.
 
 ## 9. Native and warm images
@@ -1262,6 +1328,11 @@ Claimed comparisons include:
   input ordering;
 - VFS-visible files, metadata, and post-flush media bytes; and
 - Desk, Pad, and Daybook state and ordinary interactions.
+
+Post-flush media comparison is required future vertical-acceptance evidence,
+not a result claimed by the present pre-rich-terminal slice. Current focused
+coverage is limited to semantic ordering, injected flush failure, and
+generation-stale no-effect behavior.
 
 Comparisons exclude absolute dictionary addresses, compiled native bytes,
 PC/register state, instruction/cycle counters, backend snapshots, and physical

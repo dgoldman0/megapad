@@ -13,9 +13,13 @@ byte/cell recurrences, AES/GHASH operations, the 24-round Keccak-f[1600]
 permutation, 256-bit Field arithmetic/raw-product values, and RFC 7748 X25519
 scalar multiplication, the generic 256-point radix-2 NTT value transforms,
 deterministic ML-KEM-512 key-generation/encapsulation/decapsulation bytes, and
-FP16/BF16/binary32 bit-value conversions are such shared value models. Field,
-NTT, ML-KEM, and floating-point helpers own pure result values only: mode and
-prime selectors, ACC/TSRC/TDST, retained buffers/registers, previous results,
+FP16/BF16/binary32 bit-value conversions are such shared value models. The
+frozen storage sector size plus command, status, result, and capability values
+are likewise backend-neutral ABI constants. Controller registers, image
+ownership, checked-request execution, DMA, completion publication, and
+durability remain backend state and policy. Field, NTT, ML-KEM, and
+floating-point helpers similarly own pure result values only: mode and prime
+selectors, ACC/TSRC/TDST, retained buffers/registers, previous results,
 guest-memory ordering, status, and fault publication remain simulator/emulator
 state. The FP16 encoder intentionally preserves the current executable
 emulator's subnormal carry behavior while that discrepancy is unresolved; it

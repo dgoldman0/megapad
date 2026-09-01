@@ -853,13 +853,14 @@ leave the floor unchanged, disable retry, and abort.
 The contiguous hosted frontier now includes the complete unchanged userland
 and Arena sections plus Buffer's general `IDLE`, registry, constructors,
 inspection, Arena integration, integer/FP16/BF16 operations, the kernel
-registry and sample kernels, and the pipeline engine through line 3754. Their
-checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
-allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
-block/wake boundary, Buffer publication order, and tile effects are executable
-semantic behavior rather than reporting-only shims. Storage begins next;
-`SECTOR` publishes before `DISK@` in `DISK?` at line 3771 reaches the first
-unadmitted BIOS seam.
+registry and sample kernels, the pipeline engine, and the checked
+block-device/bounded-volume layer through line 4099. Their checked bounds,
+Bank-0/XMEM HERE transitions, cross-zone definitions, allocator dispatch,
+descriptor lifecycle, snapshots, scoped stack, IDL block/wake boundary,
+Buffer publication order, tile effects, storage identity, and guarded I/O are
+executable semantic behavior rather than reporting-only shims. Partition
+discovery begins next; a probe retains 30 complete helpers before `L@` at line
+4192 reaches the first unadmitted BIOS seam.
 
 ---
 
@@ -1070,9 +1071,13 @@ Exact lines 3217 through 3754 add 109 kernel/pipeline definitions in 538 lines
 and 16,586 bytes, with SHA-256
 `ec724b8ca6f6887a2c4ce724edf9612726cf04a48416c29c2eb3ed9448949e40`.
 They leave 23 kernels, three populated pipelines, and six load-time Buffers in
-their ordinary registries. The next unsupported word is `DISK@` at line 3771;
-the preceding `SECTOR` constant remains published while partial `DISK?` rolls
-back.
+their ordinary registries. Exact lines 3755 through 4099 then add all 97
+storage-object definitions through `VOL-FLUSH` in 345 lines and 11,424 bytes,
+with SHA-256
+`e4d09d0801838fc9721ba68e39f2c5a5dbc139101c9c4a3489fb66cab9b248b1`.
+The next probe, exact lines 4100 through 4192, retains 30 complete partition
+helpers through `_MBR-TYPE` and stops at the unsupported `L@` word on line
+4192.
 
 ---
 
@@ -1469,6 +1474,51 @@ buffer-to-disk save/load using sector-based I/O.
 | `DISK-INFO` | `( -- )` | Print whether storage is present or not. |
 
 **Constant:** `SECTOR` = 512 (bytes per sector).
+
+The production object layer sits between those compatibility wrappers and the
+checked BIOS disk words. A block device captures one attachment generation;
+a volume is either the raw identity view or a validated half-open slice. The
+currently qualified hosted frontier includes these public words unchanged:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `BD-OPEN` | `( bd -- ior )` | Bind one caller-owned 128-byte descriptor to the current attachment. |
+| `BD-CLOSE` | `( bd -- ior )` | Clear an unreferenced descriptor; report busy while a volume refers to it. |
+| `BD-VALID?` / `BD-STALE?` | `( bd -- flag )` | Check permanent structure or current attachment identity. |
+| `BD-READ` / `BD-WRITE` | `( dma lba count bd -- completed ior )` | Perform generation-bound checked I/O and retain submitted-operation diagnostics. |
+| `BD-FLUSH` | `( bd -- ior )` | Perform a generation-bound checked flush. |
+| `VOL-RAW` | `( bd vol -- ior )` | Construct the identity slice over the complete block device. |
+| `VOL-SLICE` | `( base length scheme index bd vol -- ior )` | Transactionally replace a caller-owned 144-byte descriptor with a validated bounded slice. |
+| `VOL-CLOSE` | `( vol -- ior )` | Clear a volume and release its parent reference. |
+| `VOL-VALID?` / `VOL-STALE?` | `( vol -- flag )` | Check volume structure, parent cookie/bounds, or the complete generation chain. |
+| `VOL-READ` / `VOL-WRITE` | `( dma lba count vol -- completed ior )` | Validate a relative request and translate it through the parent block device. |
+| `VOL-FLUSH` | `( vol -- ior )` | Flush through the validated parent. |
+
+The range predicate is unsigned and subtraction-based: count must be nonzero,
+`count <= length`, and `lba <= length - count`. Bad descriptor precedes stale,
+which precedes range for ordinary checks. A valid descriptor's saved read-only
+flag is intentionally checked before stale/range/DMA for writes. Early
+software errors leave prior block diagnostics untouched; submitted read/write
+results replace ior, completed, LBA, and count, while submitted flush replaces
+only ior and completed.
+
+Descriptors are caller-owned lifecycle storage, not copyable values. Their
+complete extents must be writable and nonoverlapping, and must begin zeroed or
+as that caller's original live object. Copying or forging a live descriptor
+can unbalance the block reference count. Cookies and constructor scratch are
+global, wrapping, non-atomic KDOS state, and the structural validators do not
+preflight the descriptor span itself. See the normative
+[block/volume contract](block-volume-contract.md) for layouts, structured ior
+fields, and lifetime rules.
+
+The hosted fixture ends at `VOL-FLUSH`; `B.SECTORS`, `B.SAVE`, and `B.LOAD`
+remain later source. Independently of hosted admission, their current source
+rounds the logical Buffer byte count up to whole sectors and passes `B.DATA`
+directly as DMA storage. Unless the Buffer payload already includes the full
+rounded sector tail, `B.SAVE` reads and `B.LOAD` writes up to 511 bytes beyond
+that payload. A zero-byte Buffer also produces a zero-sector request, which the
+checked layer rejects. This discrepancy is recorded here rather than hidden by
+a simulator-only buffer reservation.
 
 ---
 

@@ -69,6 +69,7 @@ from simulator.platform import (
 from simulator.sha2 import HostedSHA2Service
 from simulator.tile import HostedTileService
 from simulator.spinlocks import HostedSpinlockBank
+from simulator.storage import HostedStorageService
 from simulator.source import (
     ASCII_SPACE,
     SourceBuffer,
@@ -431,6 +432,7 @@ class MegaForthRuntime:
         dictionary_start: int = 0x1000,
         memory: SparseAddressSpace | None = None,
         diagnostics: HostedDiagnosticsService | None = None,
+        storage: HostedStorageService | None = None,
         install_core_words: bool = True,
     ) -> None:
         if memory is not None and not isinstance(memory, SparseAddressSpace):
@@ -442,6 +444,8 @@ class MegaForthRuntime:
             raise TypeError(
                 "diagnostics must be a HostedDiagnosticsService or None"
             )
+        if storage is not None and not isinstance(storage, HostedStorageService):
+            raise TypeError("storage must be a HostedStorageService or None")
         if memory is None:
             from simulator.platform import create_one_core_address_space
 
@@ -490,6 +494,7 @@ class MegaForthRuntime:
             if diagnostics is None
             else diagnostics.clone()
         )
+        self.storage = HostedStorageService() if storage is None else storage
         self.tile = HostedTileService(
             self.memory,
             self.field,
@@ -568,6 +573,7 @@ class MegaForthRuntime:
 
             install_core(self)
             self.dictionary.protect_current_prefix_from_numeric_rollback()
+        self.storage.claim()
 
     @property
     def provided_modules(self) -> frozenset[bytes]:

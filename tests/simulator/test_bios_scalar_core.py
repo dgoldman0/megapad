@@ -8,6 +8,7 @@ from shared.cells import MASK64, TRUE
 from simulator.errors import ExecutionError
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
+from simulator.stacks import StackUnderflow
 
 
 def test_three_cell_rotations_match_bios_stack_order() -> None:
@@ -21,6 +22,41 @@ def test_three_cell_rotations_match_bios_stack_order() -> None:
 
     runtime.execute("-ROT", context=context)
     assert context.data.snapshot() == (11, 22, 33)
+
+
+@pytest.mark.parametrize(
+    ("offset", "expected"),
+    (
+        (0, (10, 20, 30, 40)),
+        (1, (10, 20, 40, 30)),
+        (2, (10, 30, 40, 20)),
+        (3, (20, 30, 40, 10)),
+    ),
+)
+def test_roll_moves_the_selected_cell_to_the_top(
+    offset: int,
+    expected: tuple[int, ...],
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    for value in (10, 20, 30, 40, offset):
+        context.data.push(value)
+
+    runtime.execute("ROLL", context=context)
+
+    assert context.data.snapshot() == expected
+
+
+def test_roll_consumes_its_offset_before_a_guarded_underflow() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(99)
+    context.data.push(2)
+
+    with pytest.raises(StackUnderflow, match="data stack underflow"):
+        runtime.execute("ROLL", context=context)
+
+    assert context.data.snapshot() == (99,)
 
 
 def test_allocator_logic_words_use_full_width_cells_and_signed_less_than() -> None:

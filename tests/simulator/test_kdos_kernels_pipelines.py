@@ -9,7 +9,7 @@ import re
 import pytest
 
 from shared.fp import FP16_FORMAT, fp32_to_bits
-from simulator.errors import ExecutionError, SourceError, StepBudgetExceeded
+from simulator.errors import ExecutionError, StepBudgetExceeded
 from simulator.runtime import MegaForthRuntime
 from simulator.stacks import StackUnderflow
 from tests.simulator.test_kdos_aes import (
@@ -38,10 +38,12 @@ SLICE_SHA256 = (
     "ec724b8ca6f6887a2c4ce724edf9612726cf04a48416c29c2eb3ed9448949e40"
 )
 SLICE_GIT_BLOB = "118d11a7f4dfc594612f0a3b3c2d87f697292b35"
-NEXT_SEAM_SHA256 = (
+ABSORBED_STORAGE_PREFIX_SHA256 = (
     "2c35db4a06a324409fb142afd84c2d8a59b5877fe2c721e0e6e960d803b06a9b"
 )
-NEXT_SEAM_GIT_BLOB = "c272534c08d711af11930474f3cf670277d343ca"
+ABSORBED_STORAGE_PREFIX_GIT_BLOB = (
+    "c272534c08d711af11930474f3cf670277d343ca"
+)
 
 DEFINITIONS = (
     b"KERN-COUNT",
@@ -308,7 +310,7 @@ def test_kernel_pipeline_slice_is_exact_and_loads_its_complete_state(
     assert runtime.drain_uart_output() == b""
 
 
-def test_next_contiguous_storage_source_stops_at_disk_status(
+def test_former_disk_status_seam_is_absorbed_into_the_storage_frontier(
     loaded_kernels_pipelines: MegaForthRuntime,
 ) -> None:
     runtime = loaded_kernels_pipelines
@@ -316,22 +318,27 @@ def test_next_contiguous_storage_source_stops_at_disk_status(
     next_source = b"".join(lines[LAST_LINE:3771])
     assert len(next_source) == 698
     assert next_source.count(b"\n") == 17
-    assert hashlib.sha256(next_source).hexdigest() == NEXT_SEAM_SHA256
-    assert _git_blob_id(next_source) == NEXT_SEAM_GIT_BLOB
+    assert (
+        hashlib.sha256(next_source).hexdigest()
+        == ABSORBED_STORAGE_PREFIX_SHA256
+    )
+    assert _git_blob_id(next_source) == ABSORBED_STORAGE_PREFIX_GIT_BLOB
     here_before = runtime.dictionary.here
 
-    with pytest.raises(SourceError, match="unknown word b'DISK@'") as caught:
-        runtime.evaluate(
-            next_source,
-            source_name=f"kdos.f@{MEGAPAD_REVISION}:3755-3771",
-        )
+    result = runtime.evaluate(
+        next_source,
+        source_name=f"kdos.f@{MEGAPAD_REVISION}:3755-3771",
+    )
 
-    assert caught.value.location.line == 17
-    assert caught.value.location.column == 22
+    assert tuple(word.name for word in result.definitions) == (
+        b"SECTOR",
+        b"DISK?",
+    )
     assert _execute(runtime, "SECTOR") == (512,)
-    assert runtime.find("DISK?") is None
-    assert runtime.dictionary.latest_word is runtime.find("SECTOR")
+    assert _execute(runtime, "DISK?") == (0,)
+    assert runtime.dictionary.latest_word is runtime.find("DISK?")
     assert runtime.dictionary.here > here_before
+    assert runtime.storage.completion == 0
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
 

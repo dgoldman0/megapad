@@ -30,6 +30,17 @@ Close operations are idempotent for already-invalid objects.  A caller must
 not copy a live descriptor byte-for-byte: cookies and reference ownership
 belong to the original object address.
 
+Validation is structural and does not span-preflight an arbitrary descriptor
+pointer or the nested parent pointer stored in a volume. A null pointer is
+handled by the public validators, but an otherwise forged, truncated,
+read-only, crossing, or unmapped object may fault while being inspected or
+cleared. `BD.REFS` increments and decrements use unchecked wrapping cell
+arithmetic. Copying authority can therefore double-release a parent or
+underflow/overflow its count; the wrapping cookie allocator also has an ABA
+horizon after `2^64-1` nonzero identities. Callers provide and protect the
+complete object extents rather than relying on these words as safe pointer
+probes.
+
 A descriptor destination is caller-owned lifecycle state, not arbitrary
 uninitialized storage.  Before its first construction it must be zero-filled;
 on later construction it may instead contain the same caller's live object,
@@ -171,7 +182,7 @@ The low 32 bits of a storage ior are stable:
 
 | Bits | Reader | Meaning |
 | --- | --- | --- |
-| 7..0 | `IOR>RAW` | Unmodified controller or source cause |
+| 7..0 | `IOR>RAW` | Low-seven-bit controller or source cause; controller `PARTIAL` bit 7 is split into `IOR-F-PARTIAL` rather than retained here |
 | 15..8 | `IOR>CODE` | Stable KDOS error class |
 | 23..16 | `IOR>DOMAIN` | Block, device, volume, or partition domain |
 | 31..24 | `IOR>FLAGS` | Partial, retryable, stale, corrupt, unsupported, or read-only |
@@ -181,11 +192,11 @@ Zero alone denotes success.  Public predicates include `IOR-PARTIAL?` and
 partition 4.  Range errors use code 18; partition capacity and workspace
 errors use codes 21 and 22 respectively.
 
-GPT's checked CRC source retains the BIOS status in `IOR>RAW`: missing
-reflected/raw capability is raw 1, partition code 23, and the unsupported
-flag; CRC ownership contention is raw 2 and partition code 24.  The scanner
-does not relabel either failure as corrupt media and does not fall back to a
-private software checksum.
+GPT's checked CRC source retains the low-seven-bit BIOS status in `IOR>RAW`.
+Missing reflected/raw capability is raw 1, partition code 23, and the
+unsupported flag; CRC ownership contention is raw 2 and partition code 24.
+The scanner does not relabel either failure as corrupt media and does not fall
+back to a private software checksum.
 
 ## Partition discovery API
 

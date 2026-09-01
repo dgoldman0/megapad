@@ -30,7 +30,7 @@ English description, and notes on edge cases where relevant.
 
 ---
 
-## Stack Manipulation (16 words)
+## Stack Manipulation (17 words)
 
 These words rearrange the data stack without performing any computation.
 If you are new to Forth, mastering `DUP SWAP DROP ROT OVER` is the
@@ -53,6 +53,7 @@ essential first step.
 | `2OVER` | `( a b c d -- a b c d a b )` | Copy the second pair to the top. |
 | `2ROT` | `( a b c d e f -- c d e f a b )` | Rotate the third pair to the top. |
 | `PICK` | `( xn ... x0 n -- xn ... x0 xn )` | Copy the *n*-th item (0 = top) to the top. |
+| `ROLL` | `( xu xu-1 ... x0 u -- xu-1 ... x0 xu )` | Remove the *u*-th item and move it to the top. `0 ROLL` is a no-op, `1 ROLL` is `SWAP`, and `2 ROLL` is `ROT`. |
 | `DEPTH` | `( -- n )` | Number of items currently on the stack. |
 
 **Example — swapping and duplicating:**

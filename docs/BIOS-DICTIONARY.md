@@ -250,8 +250,8 @@ or erase the last status and diagnostics.
 | 26 | `1-` | `( n -- n-1 )` | | Decrement by 1 |
 | 27 | `2*` | `( n -- n*2 )` | | Left shift by 1 (multiply by 2) |
 | 28 | `2/` | `( n -- n/2 )` | | Right shift by 1 (divide by 2, logical) |
-| 29 | `MIN` | `( a b -- min )` | | Signed minimum |
-| 30 | `MAX` | `( a b -- max )` | | Signed maximum |
+| 29 | `MIN` | `( a b -- min )` | | Documented signed minimum; the current executable comparison is unsigned (see the open discrepancy in [bios-forth.md](bios-forth.md)) |
+| 30 | `MAX` | `( a b -- max )` | | Documented signed maximum; the current executable comparison is unsigned (see the open discrepancy in [bios-forth.md](bios-forth.md)) |
 | 31 | `CELLS` | `( n -- n*8 )` | | Convert cell count to byte offset (cell = 8 bytes) |
 | 32 | `CELL+` | `( a -- a+8 )` | | Advance address by one cell (8 bytes) |
 
@@ -1032,7 +1032,7 @@ machine reset.
 
 | Category | Count |
 |----------|-------|
-| Stack Manipulation | 16 |
+| Stack Manipulation | 17 |
 | Arithmetic | 17 |
 | Logic & Bitwise | 6 |
 | Comparison | 13 |
@@ -1047,7 +1047,7 @@ machine reset.
 | Miscellaneous / System | 9 |
 | Tile Engine | 39 |
 | NIC | 4 |
-| Disk / Storage | 12 |
+| Disk / Storage | 17 |
 | Timer & Interrupts | 6 |
 | RTC / System Clock | 7 |
 | Multicore | 11 |

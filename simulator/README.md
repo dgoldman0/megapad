@@ -70,6 +70,11 @@ The implemented slices provide:
 - a runtime-local 16-entry semantic spinlock bank with physical-core ownership,
   depthless same-core reacquisition, nonblocking contention, and owner-only
   release for the ordinary pseudo-BIOS words;
+- a runtime-local, exclusively claimed block-media service behind the ten
+  production query/checked pseudo-BIOS words, with full physical-window DMA
+  validation, generation-bound stale rejection, 255-sector chunking, precise
+  whole-sector progress, and explicit flush semantics, but no raw storage MMIO
+  or controller-timing claim;
 - a runtime-local per-core Field-ALU service for the 15 general arithmetic/raw
   BIOS words and six X25519 staging words, backed by portable Field and RFC
   7748 value models and preserving native four-qword effects without emulating
@@ -114,8 +119,9 @@ task stack arenas and cooperative scheduling remain pending. The IDL seam
 blocks and resumes one compiled-word dispatch; it is not `PAUSE`, task
 round-robin, interrupt-vector delivery, DMA timing, or a device scheduler.
 Persistent compiler state across evaluator calls, public `STATE`, the BIOS
-evaluator surfaces, clocks, complete UART/MMIO service, media, and an ordinary
-complete KDOS load also remain. The simulator does not execute ROMs, MP64
+evaluator surfaces, clocks, complete UART/MMIO service, raw storage-controller
+access, and an ordinary complete KDOS load also remain. The simulator does not
+execute ROMs, MP64
 binaries, or MF64 native dictionaries, and it makes no machine-timing,
 snapshot, RTL, or hardware claim. Those remain the architectural emulator's
 and physical implementation's responsibility.
@@ -632,8 +638,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–3754 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, the kernel registry and sample kernels, and three live pipelines |
-| 3755 onward | Next uncovered frontier | Storage begins; `SECTOR` publishes and `DISK@` in `DISK?` at line 3771 is the next unadmitted word |
+| 39–4099 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, then checked block-device and bounded-volume storage objects |
+| 4100 onward | Next uncovered frontier | Partition discovery begins; a probe through line 4192 publishes 30 complete helpers before the first unadmitted little-endian `L@` fetch |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -750,12 +756,58 @@ underflows, and `krms-buf` divides by zero for mean square one. The moving
 average and convolution scratch buffers are fixed at 256 bytes; oversized
 cases are documented but not executed because they overwrite later dictionary
 state. Representative zero-sized kernel loops retain their unsafe `0 DO`
-behavior. Storage is next: exact lines 3755–3771 retain `SECTOR`, roll back
-partial `DISK?`, and stop at `DISK@`.
+behavior.
 
-Later slices continue the same contiguous prefix through storage and files
-toward the persistent evaluator, ordinary checked module-loader surface, and
-deterministic cooperative task scheduler.
+The adjacent storage fixture is exact unchanged `kdos.f` lines 3755–4099:
+345 lines, 11,424 bytes, and SHA-256
+`e4d09d0801838fc9721ba68e39f2c5a5dbc139101c9c4a3489fb66cab9b248b1`.
+It publishes all 97 definitions through `VOL-FLUSH`, including structured
+storage iors, caller-owned 128-byte block-device descriptors, caller-owned
+144-byte raw/bounded volume descriptors, generation-stale validation,
+reference lifetimes, and relative I/O. Load time performs no disk operation;
+it initializes only `STORAGE-COOKIE` explicitly, while the other construction
+scratch variables receive their normal zero-filled dictionary bodies.
+
+The hosted storage service executes only the public checked surface. One
+runtime claims one service instance, checked calls serialize through the same
+depthless lock 2 contract, and a request validates presence, required
+capabilities, caller generation, count, LBA range, and one complete physical
+DMA window before transfer. Read/write requests split at 255 sectors and
+report confirmed whole sectors. In-memory media is intentionally ephemeral:
+its successful flush is an ordering barrier, not durability evidence. A
+path-backed flush writes the complete live image and calls host flush/fsync,
+but real close/reopen persistence qualification remains deferred by the
+pre-rich-terminal resource gate. Raw setup/command words, the storage MMIO
+window, BUSY/rejection visibility, DMA cadence, injected controller faults,
+controller completion timing/timeouts, RESET, and host-thread/media-management
+races are not admitted by this slice. Foreign-owner contention for checked
+lock 2 still returns the public `TIMEOUT` cause immediately. The composition
+must serialize attach, detach, write-protection changes, and I/O as host
+management operations rather than concurrent controller events. Attach,
+replacement, and detach never flush the outgoing image implicitly.
+
+The unchanged object layer retains its literal caller-ownership hazards.
+Descriptor destinations must name complete writable, nonoverlapping extents
+and begin zeroed or as the caller's original live object. Copying or forging a
+live descriptor can unbalance block-device references; cookies and constructor
+scratch are runtime-global, non-atomic KDOS state; and validators check
+structure, identity, and slice bounds rather than proving the descriptor span
+itself safe. Early software rejection preserves old per-device diagnostics,
+while a submitted operation updates ior/completed and read/write LBA/count
+fields; flush updates only ior/completed. `BD-WRITE` and `VOL-WRITE` also
+return their saved read-only error before stale, range, or DMA checking. These
+are source behaviors, not simulator repairs.
+
+The next exact probe covers `kdos.f` lines 4100–4192: 93 lines, 3,174 bytes,
+and SHA-256
+`cfd4036c01d32a5dc4e7434651b8d434b467c812899231e2b691ed40e5e30a7b`.
+It retains 30 complete partition helpers through `_MBR-TYPE`, rolls back the
+partial following definition, and stops on `L@` at line 4192. That is the next
+semantic BIOS seam.
+
+Later slices continue the same contiguous prefix through partition discovery
+and files toward the persistent evaluator, ordinary checked module-loader
+surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

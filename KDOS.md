@@ -980,7 +980,12 @@ DISK-INFO                     \ Print "Storage: present" or "not attached"
 
 `B.SAVE` and `B.LOAD` compute the number of sectors from the buffer descriptor
 and issue one checked public request; the BIOS splits it into controller-sized
-chunks when necessary.
+chunks when necessary. The current source passes `B.DATA` directly while
+rounding `B.BYTES` up to complete sectors. Unless the allocation itself
+contains that full rounded tail, `B.SAVE` reads and `B.LOAD` writes up to 511
+bytes beyond the logical Buffer payload; a zero-byte Buffer produces a rejected
+zero-sector request. This is an open source/descriptor discrepancy, not an
+implicit promise that the checked storage layer pads or reserves the tail.
 
 ### 7.4 File Abstraction
 

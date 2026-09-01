@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Callable
 
 from shared.cells import CELL_BYTES, forth_flag, s64, u64
+from shared.storage import STORAGE_RESULT_TIMEOUT
 from simulator.aes import (
     AES_AAD_LENGTH,
     AES_COMMAND,
@@ -129,6 +130,18 @@ def _question_dup(context: ExecutionContext) -> None:
 def _pick(context: ExecutionContext) -> None:
     offset = context.data.pop()
     context.data.push(context.data.peek(offset))
+
+
+def _roll(context: ExecutionContext) -> None:
+    offset = context.data.pop()
+    if offset == 0:
+        return
+    selected = context.data.peek(offset)
+    above = [context.data.pop() for _ in range(offset)]
+    context.data.pop()
+    for value in reversed(above):
+        context.data.push(value)
+    context.data.push(selected)
 
 
 def _add(context: ExecutionContext) -> None:
@@ -805,6 +818,74 @@ def _spin_release(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.spinlocks.release(lock_id, core_id)
 
 
+def _disk_transfer_checked(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    *,
+    write: bool,
+    generation_bound: bool,
+) -> None:
+    if generation_bound:
+        dma = context.data.peek(3)
+        lba = context.data.peek(2)
+        count = context.data.peek(1)
+        generation = context.data.peek()
+        consumed = 4
+    else:
+        dma = context.data.peek(2)
+        lba = context.data.peek(1)
+        count = context.data.peek()
+        generation = None
+        consumed = 3
+
+    core_id, _task_id = runtime.guest_identity(context)
+    if runtime.spinlocks.acquire(2, core_id) != 0:
+        completed, status = 0, STORAGE_RESULT_TIMEOUT
+    else:
+        try:
+            operation = (
+                runtime.storage.write_checked
+                if write
+                else runtime.storage.read_checked
+            )
+            completed, status = operation(
+                runtime.memory,
+                dma,
+                lba,
+                count,
+                generation=generation,
+            )
+        finally:
+            runtime.spinlocks.release(2, core_id)
+
+    for _ in range(consumed):
+        context.data.pop()
+    context.data.push(completed)
+    context.data.push(status)
+
+
+def _disk_flush_checked(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+    *,
+    generation_bound: bool,
+) -> None:
+    generation = context.data.peek() if generation_bound else None
+    core_id, _task_id = runtime.guest_identity(context)
+    if runtime.spinlocks.acquire(2, core_id) != 0:
+        status = STORAGE_RESULT_TIMEOUT
+    else:
+        try:
+            status = runtime.storage.flush_checked(generation=generation)
+        finally:
+            runtime.spinlocks.release(2, core_id)
+
+    if generation_bound:
+        context.data.replace_top(status)
+    else:
+        context.data.push(status)
+
+
 def _x25519_scalar_store(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
@@ -1299,6 +1380,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"2SWAP", _two_swap),
         (b"?DUP", _question_dup),
         (b"PICK", _pick),
+        (b"ROLL", _roll),
         (b"+", _add),
         (b"-", _subtract),
         (b"*", _multiply),
@@ -1466,6 +1548,71 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (b"SPIN@", lambda context: _spin_fetch(runtime, context)),
         (b"SPIN!", lambda context: _spin_release(runtime, context)),
+        (b"DISK@", lambda context: context.data.push(runtime.storage.status)),
+        (
+            b"DISK-SECTORS",
+            lambda context: context.data.push(runtime.storage.total_sectors),
+        ),
+        (
+            b"DISK-MEDIA-GEN",
+            lambda context: context.data.push(runtime.storage.media_generation),
+        ),
+        (
+            b"DISK-CAPS",
+            lambda context: context.data.push(runtime.storage.capabilities),
+        ),
+        (
+            b"DISK-READ-CHECKED",
+            lambda context: _disk_transfer_checked(
+                runtime,
+                context,
+                write=False,
+                generation_bound=False,
+            ),
+        ),
+        (
+            b"DISK-WRITE-CHECKED",
+            lambda context: _disk_transfer_checked(
+                runtime,
+                context,
+                write=True,
+                generation_bound=False,
+            ),
+        ),
+        (
+            b"DISK-FLUSH-CHECKED",
+            lambda context: _disk_flush_checked(
+                runtime,
+                context,
+                generation_bound=False,
+            ),
+        ),
+        (
+            b"DISK-READ-GEN-CHECKED",
+            lambda context: _disk_transfer_checked(
+                runtime,
+                context,
+                write=False,
+                generation_bound=True,
+            ),
+        ),
+        (
+            b"DISK-WRITE-GEN-CHECKED",
+            lambda context: _disk_transfer_checked(
+                runtime,
+                context,
+                write=True,
+                generation_bound=True,
+            ),
+        ),
+        (
+            b"DISK-FLUSH-GEN-CHECKED",
+            lambda context: _disk_flush_checked(
+                runtime,
+                context,
+                generation_bound=True,
+            ),
+        ),
         (
             b"GF-A!",
             lambda context: _field_accumulator_store(runtime, context),
