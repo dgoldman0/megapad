@@ -238,7 +238,7 @@ secret boundary, or security proof.
   MMIO Keccak engine; focused coverage and the complete checkpoint-2 KDOS/TLS
   source-load gate are green
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
-- **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — sector-level file encryption (8 tests)
+- **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — one primary-extent whole-file GCM transaction with a slot-derived IV
 
 **Checkpoint-4 full Python regression**: 3,425 passed, with three conditional
 live-network skips. The ordered crypto/GPT gates and the complete serial RTL

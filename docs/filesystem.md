@@ -239,7 +239,7 @@ invariant of a NUL within the 24-byte name field.
 |-----|---------|-------------|
 | 0 | `readonly` | File should not be modified |
 | 1 | `system` | System file (e.g., `kdos.f`) |
-| 2 | `encrypted` | File data is AES-256-GCM encrypted (set by `FENCRYPT`) |
+| 2 | `encrypted` | File data is GCM-encrypted by `FENCRYPT` (intended AES-256; executable mode is ambient) |
 | 3 | `append` | Append-only — writes extend `used_bytes` within existing allocation |
 
 ---
@@ -930,11 +930,27 @@ format does not clear the inactive bitmap-cache tail.
 |------|-------------|
 | `FS-KEY!` | `( addr -- )` Set 256-bit encryption key for file operations |
 | `ENCRYPTED?` | `( fdesc -- flag )` Check whether a file's encrypted flag is set |
-| `FENCRYPT` | `( fdesc -- )` Encrypt file in-place using AES-256-GCM, set encrypted flag |
-| `FDECRYPT` | `( fdesc -- )` Decrypt file in-place, verify auth tag, clear encrypted flag |
+| `FENCRYPT` | `( fdesc -- result... )` Encrypt in-place using the ambient AES-GCM key mode; returns 0 on success/no-op, -1 for capacity or first-allocation failure, and malformed `0 -1` on second-allocation failure; storage/sync failures throw |
+| `FDECRYPT` | `( fdesc -- result... )` Authenticate and decrypt in-place; returns 0 on success/no-op, -1 for authentication or first-allocation failure, and malformed `0 -1` on second-allocation failure; storage/sync failures throw |
 
-Encryption operates at the sector level: each sector is encrypted as
-a separate AES-256-GCM block with a unique IV derived from sector
-index.  The authentication tag is stored alongside the ciphertext.
-A file must be `OPEN`ed before encrypting/decrypting.  Remember to
-`FCLOSE` the descriptor when done.
+The current source does **not** encrypt each sector independently. It performs
+one whole-file GCM transaction over `used_bytes` rounded up to 16 bytes, stores
+one 16-byte tag immediately after that ciphertext, then rounds the combined
+span to sectors for disk I/O. The IV is the little-endian directory-slot cell
+followed by four zero bytes; it is not derived from each sector. A file must be
+`OPEN`ed before either operation, must use one contiguous primary extent, and
+must reserve room for the rounded ciphertext plus tag.
+
+This interface is compatibility behavior, not production-safe nonce
+management. Decrypt/change/re-encrypt of one slot, or later reuse of that slot,
+repeats the IV under an unchanged key. File metadata and exact logical length
+are not authenticated as AAD, no key-set marker exists, and the source relies
+on the shared AES engine's ambient key mode rather than forcing AES-256. Bytes
+between `used_bytes` and the 16-byte boundary come from existing disk slack,
+not guaranteed zero padding. Payload and directory flag updates are separate
+writes; failure is nontransactional, and post-allocation aborts leak unwiped
+DMA buffers. `FENCRYPT` also trusts the returned output/tag without checking
+AES status. The wrapper ignores the MP64FS readonly flag, although lower layers
+still enforce device write protection. `FDECRYPT` returns 0 for a file that is
+not encrypted even though its nearby source comment says that case returns -1;
+an encrypted empty file also returns 0 without clearing its flag.

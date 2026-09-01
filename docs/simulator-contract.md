@@ -255,7 +255,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 6059.
+KDOS source frontier now ends at line 6200.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1332,7 +1332,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 6059. Exact unchanged lines
+The contiguous source frontier now ends at line 6200. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1845,8 +1845,80 @@ and unlocked.
 sequences through ordinary `EMIT`. `.N` emits a leading minus and explicit
 decimal digits for ordinary magnitudes below 1,000; magnitudes at least 1,000
 delegate to the existing base-sensitive `.` and inherit its trailing space.
-No separate terminal renderer or rich-terminal path is involved. The next
-uncovered seam is filesystem encryption at line 6060.
+No separate terminal renderer or rich-terminal path is involved.
+
+Exact unchanged lines 6060 through 6200 contain 141 LF records and 5,298
+bytes, with SHA-256
+`35a8f33b51da4e3a319f193e0c709a876207f940923637d0f56b0f8160c7f574`
+and Git blob `ed442875e780976b10553721137e515e3742ddcb`. The exact ledger is two
+CREATE bodies (`FS-KEY`, 32 bytes, and `FS-IV`, 12 bytes), flag constant 4,
+six zero-initialized VARIABLE cells, and seven colon definitions through
+`FDECRYPT`. Source loading reserves 92 explicit mutable bytes and publishes
+definitions only; it performs no heap allocation, AES operation, filesystem
+access, storage command, lock acquisition, or UART output. The source does not
+itself initialize the two raw CREATE/ALLOT bodies.
+
+The ordinary qualified domain is a live matching OPEN descriptor on stable
+mounted media with `FS-OK` true; one positive primary contiguous extent; a
+nonwrapping logical size whose 16-byte-rounded span plus tag fits that primary
+allocation; an explicitly installed 32-byte key; an idle shared AES engine in
+AES-256 mode; and synchronous non-reentrant execution. `FS-KEY!` copies exactly
+32 bytes. `_FE-MKIV` clears all twelve IV bytes and then writes the descriptor's
+directory slot as one little-endian cell, leaving four zero bytes. Flag helpers
+read and update the live directory cache through `F.SLOT`, preserve every bit
+other than bit 2, and do not snapshot flags in the descriptor.
+
+For nonempty unflagged input, `FENCRYPT` allocates and zeroes two complete
+sector-rounded Bank-0 buffers, reads `ceil(used/512)` primary sectors, runs one
+GCM transaction over `ceil16(used)` bytes, copies one tag immediately after the
+ciphertext, and writes `ceil((ceil16(used)+16)/512)` sectors. It then sets cache
+flag bit 2, rewrites the cached low-u32 used count, invokes the already-admitted
+bitmap/directory/flush `FS-SYNC`, frees both buffers, and returns zero. A second
+call while flagged returns zero before changing scratch or issuing I/O.
+
+`FDECRYPT` reads that ciphertext/tag span and stages output. Authentication
+failure returns true/-1 after freeing both buffers and performs no payload,
+cache, sync, or flush write. Authentication success writes only
+`ceil(used/512)` plaintext sectors, clears cache flag bit 2, rewrites used, syncs,
+frees, and returns zero. Neither successful direction changes the descriptor's
+cursor or used snapshot, name, type, parent, extents, mtime, or CRC. Focused
+acceptance compares ciphertext/tag bytes with an external AES-GCM oracle,
+checks exact storage-command counts and cache/media flags, proves heap recovery
+on normal and auth-failure paths, and proves logical plaintext roundtrip.
+
+Several discrepancies materially limit this interface. Zeroing BUF1 before a
+whole-sector read does not create zero padding: physical bytes between
+`used_bytes` and the 16-byte boundary overwrite those zeros and are encrypted
+and authenticated. The IV contains only the stable slot, so decrypt/change/
+re-encrypt or slot reuse repeats a nonce under one key; metadata and exact
+logical length are not AAD. No key-set marker exists, and the wrappers do not
+force AES-256, so an ambient AES-128 mode changes the algorithm despite the
+section title. The operations ignore secondary coordinates. Encrypt rejects
+insufficient primary tag capacity, while decrypt has no equivalent check and
+can read into a neighboring allocation if handed externally flagged metadata.
+
+The not-encrypted `FDECRYPT` branch returns zero even though its detailed source
+comment says that case returns -1. Empty encrypt returns zero without setting
+the flag; empty flagged decrypt returns zero without clearing it. A failed
+second DMA allocation frees the first buffer but leaves the failed zero address
+beneath -1, returning two cells. First-allocation failure returns only -1.
+FD-pool membership/generation binding, file type, and MP64FS policy flags are
+otherwise trusted rather than validated by this wrapper. The already-admitted
+lower storage path still enforces current media generation, volume range, and
+device write protection on each transfer.
+
+Payload, cache flag, directory writes, and flush are ordered but not one
+transaction. Any disk, AES, or sync exception after allocation bypasses both
+frees. A data-write failure may leave a ciphertext prefix with a plaintext
+flag; a later sync/flush failure may leave complete ciphertext plus changed
+cache and partial or complete directory media. Focused late-flush acceptance
+uses only the tiny in-memory storage service and pins the already-published
+payload/flag plus both live leaked allocations; it is not durability or crash
+recovery evidence. Key, IV, AES tag, plaintext/ciphertext buffers, and dangling
+buffer addresses are never wiped. `FENCRYPT` does not inspect AES status after
+`ENCRYPT`; it trusts the returned output and tag. All encryption, AES, FD,
+cache, allocator, diagnostic, and storage state is runtime-global and
+unlocked. The next uncovered seam is subdirectory navigation at line 6201.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

@@ -135,7 +135,10 @@ The implemented slices provide:
   `THROW` cleanup, and the literal pre-registry transaction hooks;
 - unchanged `APP-EVAL` and MP64FS `APP-LOAD` through their normal evaluator,
   loader-frame, allocation, extent-read, and transaction paths, plus the
-  adjacent canonical ANSI byte helpers.
+  adjacent canonical ANSI byte helpers;
+- unchanged MP64FS whole-file encryption through the ordinary open descriptor,
+  Bank-0 DMA allocator, AES-GCM words, guarded storage transfers, directory
+  cache, sync, and flush ordering.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 task stack arenas and cooperative scheduling remain pending. The IDL seam
@@ -715,14 +718,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 6059.
+ends at line 6200.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–6059 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, and ANSI byte helpers |
-| 6060 onward | Next uncovered frontier | Filesystem encryption begins at line 6060, followed by the remaining ordinary KDOS source |
+| 39–6200 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, and whole-file filesystem encryption |
+| 6201 onward | Next uncovered frontier | Subdirectory navigation begins at line 6201, followed by the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1257,7 +1260,7 @@ simulator does not insert a checked host loader behind them. Loader, resolver,
 parser, evaluator, filesystem-cache, and transaction state are global and
 unlocked.
 
-The current exact fixture is unchanged `kdos.f` lines 5945–6059: 115 LF records,
+The Application Loading fixture is unchanged `kdos.f` lines 5945–6059: 115 LF records,
 2,892 bytes, SHA-256
 `1c671d6f3677d9fb65e7c5b20a6af1b3d10323b28b5abb10d827cd80a58e5bb2`,
 and Git blob `c95aa1a3385d10587ed42292328b0c7c323e702f`. It publishes the five
@@ -1282,6 +1285,46 @@ state alone; read aborts still occur before the guard and inherit `LOAD`'s
 allocation/frame leak. The ANSI helpers are ordinary UART byte publishers, not
 a rich-terminal path.
 
+The following exact fixture is unchanged lines 6060–6200: 141 LF records,
+5,298 bytes, SHA-256
+`35a8f33b51da4e3a319f193e0c709a876207f940923637d0f56b0f8160c7f574`,
+and Git blob `ed442875e780976b10553721137e515e3742ddcb`. Its two CREATE bodies,
+constant, six variables, and seven colon words publish the complete
+filesystem-encryption family without running AES, allocating heap memory, or
+touching storage at load time.
+
+In the qualified synchronous one-core domain, a live matching descriptor names
+one positive primary contiguous extent with room for the 16-byte-rounded data
+plus one tag, `FS-OK` and media remain stable, and the shared AES engine begins
+idle in AES-256 mode. `FENCRYPT` allocates two Bank-0 DMA buffers, reads whole
+plaintext sectors, encrypts one whole-file padded span, writes ciphertext and
+tag, sets only flag bit 2, syncs bitmap and directory, flushes, and frees both
+buffers. `FDECRYPT` authenticates before any media/cache write; wrong-key
+failure performs only its ciphertext read and frees both buffers, while success
+writes plaintext, clears only bit 2, syncs, and frees. Focused acceptance uses
+an external AES-GCM byte oracle and proves logical roundtrip, exact
+storage-command counts, descriptor preservation, heap recovery, and the
+repeated ciphertext
+and tag produced when identical plaintext is encrypted again in the same slot
+after decrypt/flag-clear. A direct call while flagged is only a no-op; changed
+plaintext after flag-clear still dangerously reuses the nonce/keystream.
+
+This is compatibility evidence, not a safe new storage design. `_FE-MKIV`
+encodes only the directory slot plus four zeros, so slot reuse repeats a GCM
+nonce; metadata is not AAD, and the source neither checks that `FS-KEY!` ran nor
+forces AES-256 mode or checks AES status after encryption. Its apparent padding
+can contain preexisting disk slack, secondary extents are ignored, and decrypt
+omits encrypt's capacity check.
+Payload and metadata writes are nontransactional, post-allocation aborts leak
+unwiped buffers, and scratch cells retain freed addresses. The second-allocation
+failure branch returns `0 -1`; nonencrypted decrypt returns 0 despite its prose,
+and encrypted empty files remain flagged. A late flush-failure oracle preserves
+the already-written ciphertext and directory flag while proving both buffers
+remain allocated. No durability, crash-consistency, stale-descriptor,
+concurrency, or secure nonce-management claim follows. The wrapper also ignores
+MP64FS policy flags such as readonly; the lower storage path nevertheless
+enforces media generation, volume bounds, and device write protection.
+
 The earlier low-level helper domain is validator-approved geometry, positive
 run counts, in-range sectors and slots, complete cache spans, and structurally
 valid directory entries. Those helper words do not gate on `FS-OK` or validate
@@ -1291,7 +1334,7 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue with filesystem encryption at line 6060, then advance
+Later slices continue with subdirectory navigation at line 6201, then advance
 the remaining ordinary KDOS source toward its module registry and deterministic
 cooperative task scheduler.
 

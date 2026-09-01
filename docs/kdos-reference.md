@@ -2188,12 +2188,14 @@ FS-FREE                      \ check remaining space
 
 ### §7.6.1 Filesystem Encryption
 
-Optional at-rest encryption for MP64FS files using AES-256-GCM.  Operates
-on OPEN'd file descriptors.  Uses a system-level key stored in `FS-KEY`.
-The IV is derived deterministically from the file's directory slot number.
+Optional at-rest encryption for MP64FS files, intended to use AES-256-GCM.
+It operates on OPEN'd file descriptors and uses a system-level key stored in
+`FS-KEY`. The wrappers rely on the shared AES engine's ambient key mode, so the
+qualified AES-256 path requires that mode to be clean/default. The IV is
+derived deterministically from the file's directory slot number.
 
 On-disk layout of an encrypted file:
-- Sectors contain: ciphertext (zero-padded to 16-byte boundary) `||` 16-byte GCM tag
+- Sectors contain: ciphertext over a 16-byte-rounded physical prefix `||` one 16-byte GCM tag
 - `used_bytes` in directory = original plaintext length (unchanged)
 - `flags` bit 2 = encrypted
 
@@ -2201,8 +2203,8 @@ On-disk layout of an encrypted file:
 |------|-------------|-------------|
 | `FS-KEY!` | `( addr -- )` | Copy 32-byte encryption key into `FS-KEY`. |
 | `ENCRYPTED?` | `( fdesc -- flag )` | True (-1) if file has the encrypted flag set. |
-| `FENCRYPT` | `( fdesc -- ior )` | Encrypt an open file in-place on disk.  Returns 0 on success, -1 on error.  No-op if already encrypted or empty. |
-| `FDECRYPT` | `( fdesc -- flag )` | Decrypt an encrypted file in-place.  Returns 0 if auth passed, -1 if failed.  On auth failure the file is unchanged. |
+| `FENCRYPT` | `( fdesc -- result... )` | Encrypt an open file in-place. Returns 0 on success/no-op, -1 for capacity or first-allocation failure, and malformed `0 -1` on second-allocation failure. Storage/sync failures throw. |
+| `FDECRYPT` | `( fdesc -- result... )` | Authenticate and decrypt in-place. Returns 0 on success/no-op, -1 for authentication or first-allocation failure, and malformed `0 -1` on second-allocation failure. Storage/sync failures throw; authentication failure leaves disk/cache state unchanged. |
 
 **Example:**
 ```forth
@@ -2212,6 +2214,29 @@ DUP ENCRYPTED? .         \ 0 (not encrypted)
 DUP FENCRYPT .           \ 0 (success)
 FCLOSE                   \ release FD back to pool
 ```
+
+The executable implementation is a single whole-file GCM transaction over a
+primary contiguous extent, not per-sector encryption. It zeroes its staging
+buffer and then reads whole sectors, so bytes from `used_bytes` through the
+next 16-byte boundary are existing physical file slack rather than guaranteed
+zero padding. The IV contains only the little-endian directory slot and four
+zero bytes. Encrypting again after decrypt/flag-clear, or reusing a slot under
+the same key, therefore repeats a GCM nonce; a direct call while flagged is a
+no-op. File metadata is not authenticated as AAD. The source also trusts the
+shared AES engine's ambient key mode, has no key-set check, ignores secondary
+extents, omits the decrypt-side capacity check, and never checks AES status
+after encryption before trusting the returned output and tag.
+
+Payload and metadata updates are ordered but nontransactional. Disk, AES, or
+sync exceptions after allocation leak both unwiped DMA buffers; key, IV, and
+freed plaintext/ciphertext scratch persist. A failed second DMA allocation
+does free the first allocation but returns two cells, `0 -1`, rather than the
+documented single flag. The wrapper also ignores the MP64FS readonly flag;
+lower storage layers still enforce volume bounds, media generation, and device
+write protection. The detailed source comment says an unencrypted file
+returns -1, while the executable early no-op returns 0; an encrypted empty file
+returns 0 without clearing its flag. These are current source discrepancies,
+not guarantees a caller should build new secure storage around.
 
 ---
 
