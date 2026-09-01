@@ -189,6 +189,10 @@ def _absolute(context: ExecutionContext) -> None:
     context.data.push(-value if value < 0 else value)
 
 
+def _negate(context: ExecutionContext) -> None:
+    context.data.replace_top(-context.data.peek())
+
+
 def _minimum(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
@@ -334,6 +338,22 @@ def _c_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.replace_top(value)
 
 
+def _w_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.peek()
+    value = 0
+    for offset in range(2):
+        value |= runtime.memory.read8(u64(address + offset)) << (offset * 8)
+    context.data.replace_top(value)
+
+
+def _l_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.peek()
+    value = 0
+    for offset in range(4):
+        value |= runtime.memory.read8(u64(address + offset)) << (offset * 8)
+    context.data.replace_top(value)
+
+
 def _count(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.peek()
     length = runtime.memory.read8(address)
@@ -356,6 +376,26 @@ def _c_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
     runtime.memory.write8(address, value)
+
+
+def _w_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    value = context.data.pop()
+    for offset in range(2):
+        runtime.memory.write8(
+            u64(address + offset),
+            value >> (offset * 8),
+        )
+
+
+def _l_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    value = context.data.pop()
+    for offset in range(4):
+        runtime.memory.write8(
+            u64(address + offset),
+            value >> (offset * 8),
+        )
 
 
 def _plus_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -1386,6 +1426,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"*", _multiply),
         (b"/", _signed_divide),
         (b"MOD", _signed_modulo),
+        (b"NEGATE", _negate),
         (b"ABS", _absolute),
         (b"MIN", _minimum),
         (b"MAX", _maximum),
@@ -1413,10 +1454,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b">", _signed_greater),
         (b"@", lambda context: _fetch(runtime, context)),
         (b"C@", lambda context: _c_fetch(runtime, context)),
+        (b"W@", lambda context: _w_fetch(runtime, context)),
+        (b"L@", lambda context: _l_fetch(runtime, context)),
         (b"COUNT", lambda context: _count(runtime, context)),
         (b"!", lambda context: _store(runtime, context)),
         (b"OFF", lambda context: _off(runtime, context)),
         (b"C!", lambda context: _c_store(runtime, context)),
+        (b"W!", lambda context: _w_store(runtime, context)),
+        (b"L!", lambda context: _l_store(runtime, context)),
         (b"+!", lambda context: _plus_store(runtime, context)),
         (b"FILL", lambda context: _fill(runtime, context)),
         (b"CMOVE", lambda context: _cmove(runtime, context)),

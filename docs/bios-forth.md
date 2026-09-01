@@ -216,6 +216,13 @@ memory.  A **cell** is 8 bytes (one 64-bit word).
 | `DUMP` | `( addr n -- )` | Hex-dump *n* bytes in a readable format. |
 | `TALIGN` | `( -- )` | Align HERE to the next 64-byte boundary (tile-alignment). |
 
+`W@`, `W!`, `L@`, and `L!` perform separate byte accesses from low address to
+high address; they are not atomic wide-memory operations.  A late fetch fault
+leaves the input address on the stack, while a late store fault occurs after
+both inputs were consumed and may leave a low-byte prefix written.  Address
+increments wrap as 64-bit cells, and each byte is routed independently across
+ordinary memory or MMIO.
+
 **Example — reading and writing memory:**
 ```forth
 VARIABLE COUNTER          \ allocate a cell

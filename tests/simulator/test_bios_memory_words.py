@@ -5,7 +5,17 @@ from __future__ import annotations
 import pytest
 
 from shared.cells import FALSE, MASK64, TRUE
-from simulator.memory import CrossRegionAccessError, UnmappedAddressError
+from simulator.memory import (
+    MMIO_BASE,
+    CrossRegionAccessError,
+    MMIOAccessError,
+    UnmappedAddressError,
+)
+from simulator.platform import (
+    BOARD_ID_VERSION,
+    SYSINFO_OFFSET,
+    create_one_core_address_space,
+)
 from simulator.runtime import MegaForthRuntime
 
 
@@ -154,6 +164,80 @@ def test_byte_store_masks_to_the_low_byte_and_roundtrips_through_c_fetch() -> No
 
     assert runtime.memory.read_bytes(6, 3) == bytes.fromhex("00 AB 00")
     assert context.data.snapshot() == (0xAB,)
+
+
+def test_little_endian_word_and_long_memory_words_are_unaligned_and_masked() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+
+    runtime.evaluate(
+        b"0x1A2B3 3 W! 3 W@ "
+        b"0x1FEDCBA98 9 L! 9 L@",
+        context=context,
+    )
+
+    assert runtime.memory.read_bytes(2, 12) == bytes.fromhex(
+        "00 B3 A2 00 00 00 00 98 BA DC FE 00"
+    )
+    assert context.data.snapshot() == (0xA2B3, 0xFEDC_BA98)
+
+
+def test_little_endian_fetches_route_unaligned_sysinfo_as_separate_bytes() -> None:
+    memory = create_one_core_address_space()
+    runtime = MegaForthRuntime(memory=memory)
+    address = MMIO_BASE + SYSINFO_OFFSET + 1
+
+    with pytest.raises(MMIOAccessError, match="preflight"):
+        memory.read16(address)
+
+    assert runtime.evaluate(
+        f"{address} W@ {address} L@".encode("ascii")
+    ).semantic_steps > 0
+    assert runtime.main_context.data.snapshot() == (
+        (BOARD_ID_VERSION >> 8) & 0xFFFF,
+        (BOARD_ID_VERSION >> 8) & 0xFFFF_FFFF,
+    )
+
+
+@pytest.mark.parametrize(("word", "width"), (("W@", 2), ("L@", 4)))
+def test_little_endian_fetch_fault_preserves_its_address(
+    word: str,
+    width: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    bank0 = runtime.memory.regions[0]
+    crossing = bank0.limit - width + 1
+    context.data.push(crossing)
+
+    with pytest.raises(UnmappedAddressError):
+        runtime.execute(word, context=context)
+
+    assert context.data.snapshot() == (crossing,)
+    assert context.returns.snapshot() == ()
+
+
+@pytest.mark.parametrize(("word", "width"), (("W!", 2), ("L!", 4)))
+def test_little_endian_store_fault_consumes_inputs_after_partial_write(
+    word: str,
+    width: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    bank0 = runtime.memory.regions[0]
+    crossing = bank0.limit - width + 1
+    sentinel = bytes((0x50 + index for index in range(width - 1)))
+    runtime.memory.write_bytes(crossing, sentinel)
+    context.data.push(0xFEDC_BA98_7654_3210)
+    context.data.push(crossing)
+
+    with pytest.raises(UnmappedAddressError):
+        runtime.execute(word, context=context)
+
+    expected = (0xFEDC_BA98_7654_3210).to_bytes(8, "little")[: width - 1]
+    assert runtime.memory.read_bytes(crossing, width - 1) == expected
+    assert context.data.snapshot() == ()
+    assert context.returns.snapshot() == ()
 
 
 def test_fill_uses_addr_count_low_byte_order_in_the_shared_address_space() -> None:

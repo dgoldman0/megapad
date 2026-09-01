@@ -312,6 +312,12 @@ or erase the last status and diagnostics.
 | 68 | `FILL` | `( addr n byte -- )` | | Fill n bytes with byte value |
 | 69 | `DUMP` | `( addr n -- )` | | Hex dump n bytes (16 per line with address prefix) |
 
+The `W`/`L` fetch and store words issue low-to-high byte accesses rather than
+one atomic wide access.  Fetch publication occurs after the final byte; stores
+consume both stack inputs before the first byte and can retain a written prefix
+if a later access faults.  Address stepping wraps modulo 2^64 and routes every
+byte independently.
+
 ### I/O & Display (18 words)
 
 | # | Word | Stack Effect | Imm | Description |

@@ -15,7 +15,6 @@ from shared.storage import (
     STORAGE_CMD_WRITE,
     STORAGE_RESULT_MEDIA_REMOVED,
 )
-from simulator.errors import SourceError
 from simulator.memory import MMIO_BASE
 from simulator.runtime import MegaForthRuntime
 from simulator.storage import HostedStorageService
@@ -41,11 +40,6 @@ SLICE_SHA256 = (
     "e4d09d0801838fc9721ba68e39f2c5a5dbc139101c9c4a3489fb66cab9b248b1"
 )
 SLICE_GIT_BLOB = "efc0e23d5bab7ad71c101b65948b9e5e4ec2f8ad"
-NEXT_SEAM_SHA256 = (
-    "cfd4036c01d32a5dc4e7434651b8d434b467c812899231e2b691ed40e5e30a7b"
-)
-NEXT_SEAM_GIT_BLOB = "c687d9b0f2bf319b960774ed737b44b805a84f24"
-
 DEFINITIONS = (
     b"SECTOR",
     b"DISK?",
@@ -251,34 +245,6 @@ def test_storage_slice_is_exact_and_loads_without_touching_media(
     assert _constant(runtime, "SECTOR") == SECTOR_SIZE
     assert runtime.storage.completion == 0
     assert runtime.drain_uart_output() == b""
-
-
-def test_next_partition_source_stops_at_the_first_little_endian_fetch(
-    loaded_storage: MegaForthRuntime,
-) -> None:
-    runtime = loaded_storage
-    lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[LAST_LINE:4192])
-    assert len(next_source) == 3_174
-    assert next_source.count(b"\n") == 93
-    assert hashlib.sha256(next_source).hexdigest() == NEXT_SEAM_SHA256
-    assert _git_blob_id(next_source) == NEXT_SEAM_GIT_BLOB
-    here_before = runtime.dictionary.here
-
-    with pytest.raises(SourceError, match="unknown word b'L@'") as caught:
-        runtime.evaluate(
-            next_source,
-            source_name=f"kdos.f@{MEGAPAD_REVISION}:4100-4192",
-        )
-
-    assert caught.value.location.line == 93
-    assert caught.value.location.column == 37
-    assert runtime.find("_MBR-TYPE") is runtime.dictionary.latest_word
-    assert runtime.find("_MBR-BASE") is None
-    assert runtime.find("PART-WORKSPACE-MIN") is not None
-    assert runtime.dictionary.here > here_before
-    assert runtime.main_context.data.snapshot() == ()
-    assert runtime.main_context.returns.snapshot() == ()
 
 
 def test_structured_ior_translation_splits_cause_and_partial_flag(

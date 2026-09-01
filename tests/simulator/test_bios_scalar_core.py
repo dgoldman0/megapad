@@ -125,6 +125,28 @@ def test_signed_division_reports_architectural_traps(
         runtime.execute("/", context=context)
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (0, 0),
+        (1, MASK64),
+        (MASK64, 1),
+        (1 << 63, 1 << 63),
+    ),
+)
+def test_negate_is_twos_complement_cell_negation(
+    value: int,
+    expected: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(value)
+
+    runtime.execute("NEGATE", context=context)
+
+    assert context.data.snapshot() == (expected,)
+
+
 def test_max_preserves_current_unsigned_executable_bios_behavior() -> None:
     runtime = MegaForthRuntime()
     context = runtime.new_context()

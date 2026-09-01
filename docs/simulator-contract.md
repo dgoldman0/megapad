@@ -109,6 +109,16 @@ and performs the same exact unaligned eight-byte write as `!`, with a zero
 value. A crossing or unmapped failure occurs after that address is consumed
 and before any partial cell is published, matching executable BIOS ordering.
 
+`W@`, `W!`, `L@`, and `L!` retain the native BIOS's explicitly bytewise
+little-endian sequence rather than using an atomic 16- or 32-bit host access.
+Addresses advance modulo 2^64 and each low-to-high byte is routed
+independently, so unaligned MMIO reads need no wide-access alignment. A fetch
+replaces its address only after every byte succeeds; a late fault preserves
+the address even though earlier MMIO read effects may have occurred. A store
+consumes value and address before its first byte and leaves an already-written
+low-byte prefix committed if a later byte faults. `NEGATE` is ordinary
+two's-complement cell negation, including the self-negating sign-bit value.
+
 The current executable BIOS implements scalar `MIN` as an unsigned comparison,
 while the public Forth descriptions call it signed. That remains an
 [open documentation/implementation discrepancy](bios-forth.md), not a hosted
@@ -1160,8 +1170,8 @@ pins the resulting nontermination instead of treating zero as an empty loop.
 Earlier Buffer tail, count-owner, and multi-tile defects flow through their
 kernel wrappers unchanged.
 
-The contiguous source frontier now ends at line 4099. Exact unchanged lines
-3755 through 4099 contain 345 lines and 11,424 bytes (SHA-256
+Exact unchanged lines 3755 through 4099 contain 345 lines and 11,424 bytes
+(SHA-256
 `e4d09d0801838fc9721ba68e39f2c5a5dbc139101c9c4a3489fb66cab9b248b1`).
 They publish 97 definitions through `VOL-FLUSH`: the storage constants and
 structured ior vocabulary, block-device and volume field readers, unsigned
@@ -1170,12 +1180,25 @@ block I/O, raw and bounded volume constructors, reference accounting, and
 relative volume I/O. Source load performs no media operation and explicitly
 initializes only `STORAGE-COOKIE`.
 
-The next exact source probe is lines 4100 through 4192: 93 lines and 3,174
-bytes (SHA-256
-`cfd4036c01d32a5dc4e7434651b8d434b467c812899231e2b691ed40e5e30a7b`).
-It publishes 30 complete partition helpers through `_MBR-TYPE`, rolls back the
-partial following definition, and reaches the first unbound little-endian
-`L@` fetch on line 4192. `L@` is therefore the next semantic BIOS seam.
+The contiguous source frontier now ends at line 4669. Exact unchanged lines
+4100 through 4669 contain 570 lines and 18,979 bytes (SHA-256
+`bf46ad3acc9deaf380ac4229fe9196219fc0111df8d8f5a6650ffa95fb766112`).
+They publish 110 definitions through the locked public `MBR-SCAN`, `GPT-SCAN`,
+and `PART-SCAN` entry points: raw fallback, transactional MBR discovery, dual-
+copy GPT structure and CRC validation, staged volume publication, structured
+partition iors, caller-owned output/workspace, and KDOS-global parser scratch
+serialized by lock 0. Load time only constructs the dictionary and zero-filled
+scratch cells; it performs no disk, CRC, or lock operation.
+
+Hosted acceptance runs ordinary source against external raw, MBR, and GPT
+images. It covers holes and preserved source indices, a cross-sector GPT entry
+with an exact partial CRC tail, structured corruption/capacity/workspace
+failure, mode-4 absence and contention, old-reference release, and a media
+generation swap during later array reads. The caller must provide pairwise-
+disjoint writable block descriptor, output, and workspace extents; the source
+does not prove those spans or make a scan a same-medium content snapshot.
+Line 4670 begins the next uncovered singleton storage binding and compatibility
+wrapper section.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

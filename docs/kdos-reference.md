@@ -853,14 +853,15 @@ leave the floor unchanged, disable retry, and abort.
 The contiguous hosted frontier now includes the complete unchanged userland
 and Arena sections plus Buffer's general `IDLE`, registry, constructors,
 inspection, Arena integration, integer/FP16/BF16 operations, the kernel
-registry and sample kernels, the pipeline engine, and the checked
-block-device/bounded-volume layer through line 4099. Their checked bounds,
-Bank-0/XMEM HERE transitions, cross-zone definitions, allocator dispatch,
-descriptor lifecycle, snapshots, scoped stack, IDL block/wake boundary,
-Buffer publication order, tile effects, storage identity, and guarded I/O are
-executable semantic behavior rather than reporting-only shims. Partition
-discovery begins next; a probe retains 30 complete helpers before `L@` at line
-4192 reaches the first unadmitted BIOS seam.
+registry and sample kernels, the pipeline engine, checked block-device and
+bounded-volume objects, and raw/MBR/GPT partition discovery through line 4669.
+Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
+allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
+block/wake boundary, Buffer publication order, tile effects, storage identity,
+guarded I/O, partition validation, and transactional publication are executable
+semantic behavior rather than reporting-only shims. The next uncovered source
+at line 4670 begins the singleton raw storage binding and compatibility
+wrappers.
 
 ---
 
@@ -1075,9 +1076,12 @@ their ordinary registries. Exact lines 3755 through 4099 then add all 97
 storage-object definitions through `VOL-FLUSH` in 345 lines and 11,424 bytes,
 with SHA-256
 `e4d09d0801838fc9721ba68e39f2c5a5dbc139101c9c4a3489fb66cab9b248b1`.
-The next probe, exact lines 4100 through 4192, retains 30 complete partition
-helpers through `_MBR-TYPE` and stops at the unsupported `L@` word on line
-4192.
+Exact lines 4100 through 4669 then add all 110 partition-discovery definitions
+through `PART-SCAN` in 570 lines and 18,979 bytes, with SHA-256
+`bf46ad3acc9deaf380ac4229fe9196219fc0111df8d8f5a6650ffa95fb766112`.
+They implement raw fallback, MBR and dual-copy GPT validation, checked mode-4
+CRC chaining, staged volume publication, and serialized public scanners. Line
+4670 begins the next uncovered singleton storage binding.
 
 ---
 

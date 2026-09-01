@@ -28,9 +28,10 @@ The implemented slices provide:
   checked SHA3/SHAKE streaming, and raw Keccak-f[1600];
 - fail-closed construction for injected address spaces: their SysInfo
   capability qword must be readable and may advertise only admitted services;
-- BIOS-compatible unaligned `@`, `!`, and `+!` access, low-byte `C!`, byte
-  `FILL`, and full-cell `XOR` over that shared address space, plus the
-  arithmetic and comparison words needed by unchanged source;
+- BIOS-compatible unaligned `@`, `!`, and `+!` access, low-byte `C!`,
+  bytewise little-endian `W@`/`W!`/`L@`/`L!`, byte `FILL`, and full-cell
+  `XOR` over that shared address space, plus the arithmetic and comparison
+  words needed by unchanged source;
 - memory-backed linked dictionary headers and CREATE-family bodies, including
   signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
 - separate open-definition and compile/interpret state for `[` and `]`, plus
@@ -638,8 +639,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–4099 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, then checked block-device and bounded-volume storage objects |
-| 4100 onward | Next uncovered frontier | Partition discovery begins; a probe through line 4192 publishes 30 complete helpers before the first unadmitted little-endian `L@` fetch |
+| 39–4669 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage objects, then raw/MBR/GPT partition discovery |
+| 4670 onward | Next uncovered frontier | Singleton raw storage binding and compatibility wrappers begin before the file abstraction |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -798,16 +799,24 @@ fields; flush updates only ior/completed. `BD-WRITE` and `VOL-WRITE` also
 return their saved read-only error before stale, range, or DMA checking. These
 are source behaviors, not simulator repairs.
 
-The next exact probe covers `kdos.f` lines 4100–4192: 93 lines, 3,174 bytes,
-and SHA-256
-`cfd4036c01d32a5dc4e7434651b8d434b467c812899231e2b691ed40e5e30a7b`.
-It retains 30 complete partition helpers through `_MBR-TYPE`, rolls back the
-partial following definition, and stops on `L@` at line 4192. That is the next
-semantic BIOS seam.
+The adjacent partition fixture is exact unchanged `kdos.f` lines 4100–4669:
+570 lines, 18,979 bytes, and SHA-256
+`bf46ad3acc9deaf380ac4229fe9196219fc0111df8d8f5a6650ffa95fb766112`.
+It publishes all 110 raw/MBR/GPT discovery definitions through `PART-SCAN`.
+Load time performs no disk, CRC, or lock operation. Acceptance uses ordinary
+checked storage and source-defined descriptors against raw, MBR, and dual-copy
+GPT images, including a cross-sector entry and partial CRC tail, structured
+failure cleanup, CRC capability/ownership errors, and a guarded media swap
+during later metadata reads.
 
-Later slices continue the same contiguous prefix through partition discovery
-and files toward the persistent evaluator, ordinary checked module-loader
-surface, and deterministic cooperative task scheduler.
+The newly admitted `W@`, `W!`, `L@`, and `L!` preserve native low-to-high
+byte routing. Fetches retain their input address on a late fault; stores have
+already consumed both inputs and retain any written low-byte prefix. Partition
+callers must supply mutually disjoint live block, output-volume, and writable
+workspace extents; unchanged source does not preflight or prove that geometry.
+Later slices continue at line 4670 through the singleton storage binding and
+files toward the persistent evaluator, ordinary checked module-loader surface,
+and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

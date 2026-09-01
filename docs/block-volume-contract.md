@@ -210,9 +210,18 @@ PART-SCAN  ( bd volumes max workspace bytes -- count ior )
 
 `volumes` points to `max * /VOLUME` writable bytes whose slots satisfy the
 zero-or-live lifecycle rule above.  `workspace` points to at least
-`PART-WORKSPACE-MIN` writable bytes.  The buffers must not overlap the live
-block-device descriptor.  `count` is the number of consecutive valid volume
-objects beginning at `volumes`.
+`PART-WORKSPACE-MIN` writable bytes.  The output extent, workspace extent,
+and live block-device descriptor must be pairwise disjoint.  GPT reuses the
+workspace for repeated sector reads and temporarily zeros the header CRC field
+at `workspace + 16`; overlap can overwrite an already staged output slot or a
+live descriptor.  `count` is the number of consecutive valid volume objects
+beginning at `volumes`.
+
+These are caller-trusted extents, not checked-span interfaces.  The scanners
+do not preflight writability, prove disjointness, or check multiplication wrap
+in `max * /VOLUME`.  A forged live slot, truncated extent, or overlapping
+buffer can fault or corrupt guest state rather than returning a structured
+partition ior.
 
 The public scanners serialize their shared parser state with machine
 spinlock 0; callers must not enter them while already holding that lock.
@@ -226,7 +235,9 @@ later error—including invalid device identity, insufficient workspace, or
 insufficient output capacity—leaves every output slot clear and returns
 `count = 0`; callers never receive either a stale prior result or a valid
 prefix from a rejected table.  A null/zero output extent is rejected without
-dereferencing it.
+dereferencing it.  These guarantees cover structured returns under the caller
+preconditions.  The public wrapper releases lock 0 and rethrows an unexpected
+`THROW`; that exceptional path does not add a second output-clear pass.
 
 `PART-SCAN` is the policy entry point.  It recognizes a protective MBR and
 dispatches GPT, applies MBR validation to a nonempty ordinary table, and
@@ -287,6 +298,12 @@ The current contract does not silently recover one GPT copy from the other.
 Both headers, both arrays, and their mutual agreement are required; any
 single-copy corruption rejects the table transactionally.
 
+Generation guarding applies independently to every metadata read.  The scan
+does not hold the block lock across the whole operation and is therefore not a
+same-medium content snapshot against concurrent writes.  Attachment changes
+fail through the saved generation, but callers must serialize other writers
+while discovering partitions.
+
 All GPT CRC-32 values use checked hardware mode 4 (CRC-32/ISO-HDLC).  A header
 is checked in one transaction after temporarily zeroing its stored CRC field;
 the field is restored even when acquisition is unsupported or busy.  Entry
@@ -312,6 +329,8 @@ The executable storage-object suite must cover:
   capability absence, busy-owner preservation, and reacquisition after an
   injected later-sector read failure;
 - independent primary/backup header and primary/backup array CRC corruption;
-  and
 - corrupt signatures, extents, capacity, and workspace with no partial
-  volume publication.
+  volume publication;
+- disjoint caller-owned output/workspace geometry; and
+- exact output clearing without touching a canary beyond the caller's `max`
+  extent.
