@@ -73,6 +73,11 @@ class Idle:
 
 
 @dataclass(frozen=True, slots=True)
+class UartReadAttempt:
+    """Publish one queued UART byte and TRUE, or publish only FALSE."""
+
+
+@dataclass(frozen=True, slots=True)
 class RPush:
     pass
 
@@ -168,6 +173,7 @@ Operation: TypeAlias = (
     | BranchZero
     | Return
     | Idle
+    | UartReadAttempt
     | RPush
     | RPop
     | RPeek
@@ -202,5 +208,6 @@ __all__ = [
     "RPop",
     "RPush",
     "Unloop",
+    "UartReadAttempt",
     "WriteOutput",
 ]

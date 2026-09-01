@@ -20,6 +20,7 @@ from simulator.aes import (
 )
 from simulator.errors import ExecutionError, ForthAbort
 from simulator.entropy import TRNG_RAND8, TRNG_RAND64, TRNG_SEED
+from simulator.ir import Branch, BranchZero, Idle, Return, UartReadAttempt
 from simulator.memory import MMIO_BASE, SparseAddressSpace
 from simulator.mp64fs import validate_attached_mp64fs
 from simulator.platform import (
@@ -718,6 +719,10 @@ def _carriage_return(runtime: MegaForthRuntime, _context: ExecutionContext) -> N
 
 def _emit(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.write_uart_bytes(bytes((context.data.pop() & 0xFF,)))
+
+
+def _key_query(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    context.data.push(forth_flag(runtime.uart_input_available))
 
 
 def _epoch_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -2210,10 +2215,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"JIT-ON", _semantic_noop),
         (b"JIT-OFF", _semantic_noop),
         (b"ABORT", _abort),
+        (b"EMIT", lambda context: _emit(runtime, context)),
+        (b"CR", lambda context: _carriage_return(runtime, context)),
         (b".", lambda context: _dot(runtime, context)),
         (b"U.", lambda context: _unsigned_dot(runtime, context)),
-        (b"CR", lambda context: _carriage_return(runtime, context)),
-        (b"EMIT", lambda context: _emit(runtime, context)),
         (b"EPOCH@", lambda context: _epoch_fetch(runtime, context)),
         (b".ZSTR", lambda context: _dot_zstr(runtime, context)),
         (b"UCHAR", _uppercase_character),
@@ -2227,6 +2232,22 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
     for name, callback in primitives:
         runtime.define_primitive(name, callback)
+        if name == b"EMIT":
+            runtime.define_colon(
+                b"KEY",
+                (
+                    UartReadAttempt(),
+                    BranchZero(3),
+                    Branch(5),
+                    Idle(),
+                    Branch(0),
+                    Return(),
+                ),
+            )
+            runtime.define_primitive(
+                b"KEY?",
+                lambda context: _key_query(runtime, context),
+            )
 
     zero_cell = bytes(CELL_BYTES)
     eval_status = runtime.define_primitive(

@@ -8,9 +8,10 @@ compiled calls retain the execution token that was bound at compile time.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, NoReturn, TypeAlias
+from typing import Callable, NoReturn, TypeAlias, get_args
 
 from shared.cells import CELL_BYTES, MASK64, s64, u64
 from shared.crypto_caps import (
@@ -52,6 +53,7 @@ from simulator.ir import (
     RPush,
     Return,
     Unloop,
+    UartReadAttempt,
     WriteOutput,
 )
 from simulator.kem import HostedKEMService
@@ -626,6 +628,7 @@ class MegaForthRuntime:
         self._bios_evaluator: _BiosEvaluatorState | None = None
         self._active_dispatches: list[_DispatchFrame] = []
         self._next_dispatch_root_id = 1
+        self._uart_input: deque[int] = deque()
         self._uart_output = bytearray()
         if install_core_words:
             from simulator.core_words import install_core
@@ -703,6 +706,32 @@ class MegaForthRuntime:
         """Return stable diagnostics for the caller-backed BIOS index."""
 
         return self.dictionary_index.state
+
+    @property
+    def uart_input(self) -> bytes:
+        """Return an immutable snapshot of bytes waiting at the hosted UART."""
+
+        return bytes(self._uart_input)
+
+    @property
+    def uart_input_available(self) -> bool:
+        """Whether at least one byte is waiting in the hosted UART RX FIFO."""
+
+        return bool(self._uart_input)
+
+    def inject_uart_input(self, payload: bytes) -> None:
+        """Append one validated byte string to the hosted UART RX FIFO."""
+
+        if not isinstance(payload, bytes):
+            raise TypeError("UART input payload must be bytes")
+        self._uart_input.extend(payload)
+
+    def _take_uart_input_byte(self) -> int | None:
+        """Consume one queued UART byte, or report that RX remains empty."""
+
+        if not self._uart_input:
+            return None
+        return self._uart_input.popleft()
 
     @property
     def uart_output(self) -> bytes:
@@ -1461,6 +1490,41 @@ class MegaForthRuntime:
             PrimitiveDefinition(callback),
             immediate=immediate,
             initial_body=initial_body,
+        )
+
+    def define_colon(
+        self,
+        name: bytes | str,
+        operations: tuple[Operation, ...],
+        *,
+        immediate: bool = False,
+    ) -> Word:
+        """Publish one trusted, complete hosted-IR colon definition."""
+
+        if not isinstance(operations, tuple):
+            raise TypeError("colon operations must be a tuple")
+        if not operations:
+            raise ValueError("colon operations must not be empty")
+        operation_types = get_args(Operation)
+        if any(
+            not isinstance(operation, operation_types)
+            for operation in operations
+        ):
+            raise TypeError("colon operations contain an unsupported operation")
+        if not isinstance(operations[-1], Return):
+            raise ValueError("colon operations must end with Return")
+        operation_count = len(operations)
+        for operation in operations:
+            if isinstance(operation, (Branch, BranchZero, QuestionDo, Loop)):
+                if operation.target >= operation_count:
+                    raise ValueError("colon branch target escapes its definition")
+            elif isinstance(operation, InstallDoes):
+                if operation.entry_ip >= operation_count:
+                    raise ValueError("DOES> entry point escapes its definition")
+        return self._define_public_dictionary_word(
+            name,
+            ColonDefinition(operations),
+            immediate=immediate,
         )
 
     def define_constant(self, name: bytes | str, value: int) -> Word:
@@ -2657,6 +2721,17 @@ class MegaForthRuntime:
                         "dispatch; use run_until_blocked on a compiled word"
                     )
                 return _DispatchCursor(current.xt, ip + 1)
+            elif isinstance(operation, UartReadAttempt):
+                # Native KEY flushes its buffered TX stream before polling.
+                # Hosted UART output is published immediately, so that flush
+                # has no stateful counterpart here.
+                value = self._take_uart_input_byte()
+                if value is None:
+                    context.data.push(0)
+                else:
+                    context.data.push(value)
+                    context.data.push(MASK64)
+                ip += 1
             elif isinstance(operation, RPush):
                 context.returns.push(context.data.pop())
                 ip += 1

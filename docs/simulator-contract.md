@@ -70,7 +70,8 @@ The simulator claims compatibility for:
   data, public record layouts, and checked span behavior;
 - source-visible dictionary behavior, stable execution tokens, callbacks,
   deferred words, exceptions, allocators, and transactional source loading;
-- UART and ANSI output, portable filesystem/media bytes, network packets,
+- deterministic UART byte ingress, UART and ANSI output, portable
+  filesystem/media bytes, network packets,
   APT-1 frames, UIDL data, and application data;
 - ordinary Akashic UIDL/TUI, CELL fallback, rich publication, acknowledgement,
   and input lifecycles; and
@@ -299,6 +300,19 @@ a later IDL suspension after resumption receives the same fail-closed
 treatment: no partial lease survives, the original return stack is restored,
 and an `RP@`-observing context becomes non-reusable.
 
+The hosted BIOS `KEY` service uses that same boundary rather than treating an
+empty receive queue as zero or as end of input. Each runtime owns a FIFO byte
+queue populated only by explicit bytes-only host injection. `KEY?` reports a
+full-width Forth flag without consuming; `KEY` removes one byte immediately
+when present, otherwise executes one semantic `Idle`, retries after an admitted
+wake, and reblocks after an inputless wake. Input injection itself may occur
+while the exact dispatch is suspended, but continuation resumption still
+requires the matching one-shot admitted wake receipt; a UART host ordinarily
+delivers an interrupt wake. The service does not echo, synthesize input, or
+advance a clock. Interpreted source and nested host dispatch cannot yet detach
+their Python continuations, so a caller using those paths must prequeue enough
+input to avoid blocking.
+
 Task descriptors, per-task stacks, `PAUSE`, `TASK-YIELD`, `SCHEDULE`, exception
 ownership, and checkpoint behavior remain visible source semantics.  A future
 multicore profile must preserve publication order, generations, locks, and
@@ -362,6 +376,13 @@ Runtime construction requires that qword to be readable and rejects capability
 bits without an admitted service; missing or malformed SysInfo never enables a
 host fallback implicitly. Runtime construction likewise requires the admitted
 one-core topology qwords to report exactly one full core.
+
+The currently admitted UART surface is pseudo-BIOS byte I/O, not the physical
+UART window. Output bytes become observable synchronously, making the native
+TX flush before `KEY` an observational no-op. Input is the deterministic FIFO
+specified above. No UART status register, RX/TX ring geometry, capacity,
+overflow, baud rate, interrupt timing, or direct-MMIO behavior is claimed by
+this slice.
 
 The hosted diagnostic profile is intentionally backend-local. `PERF-CYCLES`
 is a persistent, wrapping count of dispatched semantic work, not

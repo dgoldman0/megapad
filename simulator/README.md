@@ -45,10 +45,12 @@ The implemented slices provide:
 - the installable BIOS dictionary-fault callback, including the dynamic
   Bank-0 stack margin, exact hosted-span fit acceptance, same-dispatch guest
   `THROW`, and fail-closed handling when the callback is zero or returns;
-- hosted UART output for the BIOS numeric printer and bytewise `.ZSTR`,
-  including its unbounded NUL scan and partial output on a later read fault,
-  complete-task `ABORT`, and the stable execution-token behavior needed by
-  source-defined `DEFER`/`IS`;
+- hosted UART byte I/O: immediate output for the BIOS numeric printer and
+  bytewise `.ZSTR`, plus a runtime-owned deterministic input FIFO behind
+  non-consuming `KEY?` and blocking one-byte `KEY`; output retains `.ZSTR`'s
+  unbounded NUL scan and partial publication on a later read fault, while the
+  same core slice provides complete-task `ABORT` and the stable execution-token
+  behavior needed by source-defined `DEFER`/`IS`;
 - a shared bit-exact six-mode CRC value model with simulator-owned checked
   transaction state, coherent SysInfo capability discovery, exact byte/cell
   feeds, raw/final release, and source-visible status behavior;
@@ -147,8 +149,9 @@ task stack arenas and cooperative scheduling remain pending. The IDL seam
 blocks and resumes one compiled-word dispatch; it is not `PAUSE`, task
 round-robin, interrupt-vector delivery, DMA timing, or a device scheduler.
 Public `SOURCE`, `>IN`, and `STATE`, interpret-time `[IF]`, `MS@` and the
-remaining RTC/calendar service, complete UART/MMIO service, raw
-storage-controller access, and an ordinary complete KDOS load still remain.
+remaining RTC/calendar service, raw UART MMIO, TX-ring capacity and timing,
+terminal geometry, raw storage-controller access, and an ordinary complete
+KDOS load still remain.
 The simulator does not
 execute ROMs, MP64
 binaries, or MF64 native dictionaries, and it makes no machine-timing,
@@ -217,6 +220,17 @@ assert isinstance(blocked, BlockedExecution)
 receipt = runtime.deliver_idle_wake(blocked.suspension, IdleWake.INTERRUPT)
 runtime.resume(blocked.suspension, receipt)
 ```
+
+Hosted UART ingress is explicit and replayable. `inject_uart_input` accepts
+only `bytes`, appends them FIFO, and `uart_input` returns an immutable snapshot
+without consuming it. `KEY?` returns a full-width Forth flag without changing
+the queue; `KEY` consumes exactly one byte when available. An empty `KEY`
+reaches the same `Idle` boundary shown above, and every inputless wake retries
+and blocks again instead of inventing a character or spinning. Because source
+evaluation and nested host dispatch cannot detach their Python continuation,
+callers invoking an input-reading word through `evaluate` must prequeue every
+byte it will consume. UART output is already published immediately, so the
+native `KEY` operation's pre-block TX flush has no additional hosted effect.
 
 ## Real-source proofs
 
