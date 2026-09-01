@@ -306,7 +306,7 @@ stack) or **compiled inline** (the `S"` and `."` pattern).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `S"` | `( -- addr len )` | In a definition, compile an inline string literal whose address and length are pushed at runtime. At the REPL, return a transient literal in the BIOS-private string buffer. The transient form is suitable for immediate CPU-only consumers such as `COMPARE`, but checked device words reject it as protected memory; compile the literal or copy it into caller-managed storage before passing it to checked crypto, entropy, or DMA interfaces. |
+| `S"` | `( -- addr len )` | In a definition, compile an inline NUL-terminated string literal whose stable address and length are pushed at runtime. At the REPL, return up to 255 bytes in one reused BIOS-private transient buffer. Caller-span-checked crypto, entropy, and DMA paths reject that protected span, although raw/static physical-span interfaces such as checked SHA-2 apply their own policy; compile or copy the literal before retaining it or passing it across an interface. |
 | `."` | *see below* | Print a string literal.  Works in **both** interpret and compile modes: in a definition it compiles inline and prints at runtime; at the REPL it prints immediately. |
 | `WORD` | `( delim -- addr )` | Parse the next token delimited by *delim* from the input buffer.  Returns a counted-string address. |
 | `COUNT` | `( c-addr -- addr len )` | Convert a counted string (length byte at c-addr) to an address+length pair. |
@@ -319,9 +319,16 @@ stack) or **compiled inline** (the `S"` and `."` pattern).
 ```forth
 : SAME?  ( a1 n1 a2 n2 -- )
     COMPARE 0= IF ." match" ELSE ." differ" THEN CR ;
-S" hello" S" hello" SAME?    \ prints "match"
-S" hello" S" world" SAME?    \ prints "differ"
+: SAME-LITERALS       S" hello" S" hello" SAME? ;
+: DIFFERENT-LITERALS  S" hello" S" world" SAME? ;
+SAME-LITERALS          \ prints "match"
+DIFFERENT-LITERALS     \ prints "differ"
 ```
+
+Two interpreted `S"` calls cannot safely supply both operands: the second
+call overwrites the same transient buffer used by the first. A shorter later
+literal writes its NUL terminator but does not clear the older tail beyond it.
+An absent closing quote is accepted through the current physical line.
 
 ---
 

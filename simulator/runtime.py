@@ -45,6 +45,7 @@ from simulator.ir import (
     Literal,
     Loop,
     Operation,
+    PushStringLiteral,
     QuestionDo,
     RestoreDataStackPointer,
     RestoreReturnStackPointer,
@@ -88,6 +89,8 @@ from simulator.timer import HostedTimerService
 _BIOS_EVALUATE_MAX_BYTES = 255
 _BIOS_EVALUATE_MAX_DEPTH = 16
 _BIOS_EVAL_TOKEN_CAPACITY = 256
+_BIOS_SQUOTE_BUFFER_BYTES = 256
+_BIOS_SQUOTE_MAX_PAYLOAD = _BIOS_SQUOTE_BUFFER_BYTES - 1
 
 
 @dataclass(slots=True)
@@ -266,6 +269,7 @@ class DirectiveKind(Enum):
     BACKSLASH_COMMENT = auto()
     PROVIDED = auto()
     DOT_QUOTE = auto()
+    S_QUOTE = auto()
     ABORT_QUOTE = auto()
     LEFT_BRACKET = auto()
     RIGHT_BRACKET = auto()
@@ -344,6 +348,7 @@ class _Compiler:
     compile_mode: bool = True
     operations: list[Operation] = field(default_factory=list)
     controls: list[_ControlFrame] = field(default_factory=list)
+    literal_pool: bytearray = field(default_factory=bytearray)
 
 
 @dataclass(slots=True)
@@ -649,7 +654,21 @@ class MegaForthRuntime:
             from simulator.core_words import install_core
 
             install_core(self)
-            self.dictionary.protect_current_prefix_from_numeric_rollback()
+        # BIOS S" interpret mode owns one reusable 255-byte payload plus its
+        # terminator. Keep it in the protected Bank-0 prefix rather than at
+        # transient HERE, so later definitions cannot change its address.
+        self._squote_buffer_address = self.dictionary.here
+        self._preflight_dictionary_growth(
+            _BIOS_SQUOTE_BUFFER_BYTES,
+            self.main_context,
+        )
+        self.dictionary.allot(_BIOS_SQUOTE_BUFFER_BYTES)
+        self.memory.fill(
+            self._squote_buffer_address,
+            _BIOS_SQUOTE_BUFFER_BYTES,
+            0,
+        )
+        self.dictionary.protect_current_prefix_from_numeric_rollback()
         self.storage.claim()
 
     @property
@@ -1513,11 +1532,14 @@ class MegaForthRuntime:
         operations: tuple[Operation, ...],
         *,
         immediate: bool = False,
+        literal_pool: bytes = b"",
     ) -> Word:
         """Publish one trusted, complete hosted-IR colon definition."""
 
         if not isinstance(operations, tuple):
             raise TypeError("colon operations must be a tuple")
+        if not isinstance(literal_pool, bytes):
+            raise TypeError("colon literal pool must be bytes")
         if not operations:
             raise ValueError("colon operations must not be empty")
         operation_types = get_args(Operation)
@@ -1536,10 +1558,20 @@ class MegaForthRuntime:
             elif isinstance(operation, InstallDoes):
                 if operation.entry_ip >= operation_count:
                     raise ValueError("DOES> entry point escapes its definition")
+            elif isinstance(operation, PushStringLiteral):
+                terminator = operation.offset + operation.length
+                if (
+                    terminator >= len(literal_pool)
+                    or literal_pool[terminator] != 0
+                ):
+                    raise ValueError(
+                        "colon string literal escapes its NUL-terminated body pool"
+                    )
         return self._define_public_dictionary_word(
             name,
             ColonDefinition(operations),
             immediate=immediate,
+            initial_body=literal_pool,
         )
 
     def define_constant(self, name: bytes | str, value: int) -> Word:
@@ -2096,6 +2128,40 @@ class MegaForthRuntime:
             else:
                 self.write_uart_bytes(payload)
             return
+        if kind is DirectiveKind.S_QUOTE:
+            compiling = (
+                state.compiler is not None
+                and state.compiler.compile_mode
+            )
+            if compiling:
+                assert state.compiler is not None
+                payload = self._parse_quoted_literal(
+                    state,
+                    unconditionally_skip_next=False,
+                )
+                if b"\0" in payload:
+                    self._compile_error(
+                        state,
+                        'compiled S" payload contains an embedded NUL',
+                    )
+                offset = len(state.compiler.literal_pool)
+                state.compiler.literal_pool.extend(payload)
+                state.compiler.literal_pool.append(0)
+                state.compiler.operations.append(
+                    PushStringLiteral(offset, len(payload))
+                )
+            else:
+                payload = self._parse_interpreted_s_quote(state)
+                state.context.data.require_push_capacity(2)
+                self.memory.write_bytes(
+                    self._squote_buffer_address,
+                    payload + b"\0",
+                )
+                state.context.data.push_pair(
+                    self._squote_buffer_address,
+                    len(payload),
+                )
+            return
         if kind is DirectiveKind.ABORT_QUOTE:
             if state.compiler is None or not state.compiler.compile_mode:
                 self._compile_error(state, 'ABORT" is compile-only')
@@ -2142,6 +2208,7 @@ class MegaForthRuntime:
             word = self._define_dictionary_word(
                 compiler.name,
                 ColonDefinition(operations),
+                initial_body=bytes(compiler.literal_pool),
                 context=state.context,
             )
             state.definitions.append(word)
@@ -2821,6 +2888,12 @@ class MegaForthRuntime:
                 context.returns.set_pointer(pointer)
                 context.data.pop()
                 ip += 1
+            elif isinstance(operation, PushStringLiteral):
+                context.data.push_pair(
+                    current.body_address + operation.offset,
+                    operation.length,
+                )
+                ip += 1
             elif isinstance(operation, WriteOutput):
                 self.write_uart_bytes(operation.payload)
                 ip += 1
@@ -2952,6 +3025,19 @@ class MegaForthRuntime:
         else:
             state.cursor.consume_byte(ASCII_SPACE)
         return state.cursor.consume_until(ord('"')).data
+
+    @staticmethod
+    def _parse_interpreted_s_quote(state: _EvaluationState) -> bytes:
+        """Consume the native one-byte delimiter and bounded transient text."""
+
+        state.cursor.consume_byte()
+        payload = bytearray()
+        while len(payload) < _BIOS_SQUOTE_MAX_PAYLOAD:
+            value = state.cursor.consume_byte()
+            if value is None or value == ord('"'):
+                break
+            payload.append(value)
+        return bytes(payload)
 
     def _parse_number(self, token: bytes) -> int | None:
         """Parse exactly the BIOS ``-``/``0x``/``BASE`` number grammar."""

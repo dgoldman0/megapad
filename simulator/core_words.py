@@ -1586,6 +1586,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"\\", DirectiveKind.BACKSLASH_COMMENT),
         (b"PROVIDED", DirectiveKind.PROVIDED),
         (b'."', DirectiveKind.DOT_QUOTE),
+        (b'S"', DirectiveKind.S_QUOTE),
         (b'ABORT"', DirectiveKind.ABORT_QUOTE),
     )
     for name, kind in directives:

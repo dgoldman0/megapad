@@ -108,6 +108,18 @@ class RPeekPair:
 
 
 @dataclass(frozen=True, slots=True)
+class PushStringLiteral:
+    """Push one address/length pair from the current colon's body pool."""
+
+    offset: int
+    length: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "offset", _target(self.offset))
+        object.__setattr__(self, "length", _target(self.length))
+
+
+@dataclass(frozen=True, slots=True)
 class Do:
     pass
 
@@ -195,6 +207,7 @@ Operation: TypeAlias = (
     | RPushPair
     | RPopPair
     | RPeekPair
+    | PushStringLiteral
     | Do
     | QuestionDo
     | Loop
@@ -218,6 +231,7 @@ __all__ = [
     "Literal",
     "Loop",
     "Operation",
+    "PushStringLiteral",
     "QuestionDo",
     "RestoreDataStackPointer",
     "RestoreReturnStackPointer",

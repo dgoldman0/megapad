@@ -174,6 +174,30 @@ address for the lifetime of its definition.  It works through `'`, `[']`,
 records.  No Python object identity or host function pointer may be exposed as
 an execution token.
 
+Compiled `S"` occurrences own distinct `payload + NUL` spans in their defining
+colon's guest-visible body. Their semantic operation pushes that body's stable
+address and source length, including when a created child enters a `DOES>`
+suffix. The bytes contribute to ordinary definition growth and disappear from
+the live dictionary metadata with that definition's rollback; they are not
+host strings or allocations performed on each call. They remain ordinary
+writable dictionary bytes, however, so raw stores or an unsafe `HERE` rewind
+can corrupt them. Qualified execution assumes the payload and terminator have
+not been modified: hosted IR retains the source length, whereas native
+`(S")` rescans to the first NUL on each call. Compiled source containing an
+embedded NUL is rejected rather than assigned one of those divergent lengths.
+
+Interpret-state `S"` instead reuses one zero-initialized 256-byte buffer in the
+protected Bank-0 prefix, publishes at most 255 payload bytes plus NUL, retains
+any older tail beyond the new terminator, and does not move `HERE`.
+
+Both hosted quote scans stop at the current physical-line boundary and accept
+that boundary as an implicit terminator. This is deliberately fail-closed for
+malformed input: current native interpret `S"` advances an end-of-line `>IN`
+before an equality-only bound check, while compiled `S"` scans for a quote or
+NUL without consulting the active TIB length, so stale bytes can be read after
+a bare or unterminated form. At the 255-byte interpret limit, hosted leaves the
+remaining source visible to the outer evaluator just as the native clamp does.
+
 The simulator preserves the semantic behavior of `CREATE`, `DOES>`, `>BODY`,
 `POSTPONE`, `:NONAME`, quotations, `DEFER`/`IS`, nested evaluation,
 `CATCH`/`THROW`, `ALLOT`, dictionary zones, and `DICT-ROLLBACK`.  It may express

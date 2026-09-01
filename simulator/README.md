@@ -130,9 +130,11 @@ The implemented slices provide:
   derived from an explicit host-injected seed, with the native supplemental
   seed and latched-unusable lifecycle but no hardware-entropy or
   cryptographic-randomness claim;
-- active-line `WORD` with its transient counted string at `HERE`, forward
-  `CMOVE`, byte fetch, stack depth, and compiled/interpret-state `."` plus the
-  supported compile-state `ABORT"` path;
+- active-line `WORD` with its transient counted string at `HERE`, plus `S"`
+  with distinct NUL-terminated compiled body literals and one protected,
+  reused 255-byte interpret buffer; forward `CMOVE`, byte fetch, stack depth,
+  compiled/interpret-state `."`, and the supported compile-state `ABORT"`
+  path;
 - a memory-backed canonical foreground data/return stack with exact downward
   cell geometry, retained continuation slots, `SP@`/`SP!` and `RP@`/`RP!`;
 - the unchanged source-defined KDOS Bank-0 heap, including lazy setup,
