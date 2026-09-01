@@ -415,6 +415,14 @@ These choices claim source-visible failure and classification behavior only,
 not cluster execution, scratchpad storage, barriers, privilege, or MPU
 enforcement.
 
+The NIC is absent from the admitted hosted profile. Pseudo-BIOS `NET-STATUS`
+returns zero, so RX-available, link, error, DMA-busy, and present are all
+clear. This is sufficient for ordinary feature/status branching but does not
+admit the direct NIC MMIO window, `NET-SEND`, `NET-RECV`, `NET-MAC@`, frame
+queues, DMA, host networking, or interrupt delivery. A direct access to the
+architectural NIC aperture therefore remains an MMIO fault rather than an
+alias of the pseudo-BIOS status.
+
 The currently admitted UART surface is pseudo-BIOS byte I/O, not the physical
 UART window. Output bytes become observable synchronously, making the native
 TX flush before `KEY` an observational no-op. Input is the deterministic FIFO

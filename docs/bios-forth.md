@@ -780,6 +780,12 @@ Low-level access to the network interface controller.
 | `NET-RECV` | `( addr -- actual )` | Receive a frame into `addr`; wait for RTL RX DMA completion before publishing the length. Returns 0 if nothing is available. |
 | `NET-MAC@` | `( -- addr )` | Return the MMIO address of the six MAC bytes. |
 
+The current hosted one-core profile admits only a pseudo-BIOS
+`NET-STATUS`, which returns zero to report that no NIC is present. It does not
+route the physical NIC MMIO window or claim send, receive, DMA, link, MAC,
+queue, or interrupt behavior; direct NIC MMIO remains faulting. The remaining
+three words in this table describe the native BIOS and are not yet hosted.
+
 ---
 
 ## System & Miscellaneous (9 words)

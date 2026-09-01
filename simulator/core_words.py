@@ -1802,6 +1802,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
             lambda context: _cluster_unavailable(context, "BARRIER-STATUS"),
         ),
         (b"SPAD", _cluster_spad),
+        (b"NET-STATUS", _push_zero),
         (b"DISK@", lambda context: context.data.push(runtime.storage.status)),
         (
             b"DISK-SECTORS",

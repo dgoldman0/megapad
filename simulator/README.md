@@ -34,6 +34,9 @@ The implemented slices provide:
   barriers and cluster MPU state are unavailable, `SPAD` returns the native
   sentinel without inventing storage, and `MICRO?` retains the BIOS unsigned
   classification rather than validating hosted core membership;
+- a pseudo-BIOS-only absent-NIC status boundary: `NET-STATUS` returns zero,
+  including a clear present bit, while no direct NIC MMIO window, ingress,
+  egress, DMA, MAC address, or link state is claimed;
 - fail-closed construction for injected address spaces: their SysInfo
   capability qword must be readable and may advertise only admitted services;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access, low-byte `C!`,
