@@ -27,21 +27,22 @@ behavior. It is not a blanket claim that every described maintenance workflow
 already exists in `kdos.f`. The current source defines secondary-extent
 metadata; its later loader concatenates both validated extents, `RMFILE` frees
 both, and `FD-FILL` copies both into a descriptor. Its `MKFILE` allocates only
-one contiguous primary run, while legacy `FREAD`/`FWRITE`, `CAT`, and
-`SAVE-BUFFER` do not generally traverse the secondary extent. It does not
+one contiguous primary run, while legacy `FREAD`/`FWRITE`, `CAT`,
+`SAVE-BUFFER`, and `LOAD-BUFFER` do not generally traverse the secondary
+extent. It does not
 currently define `FAPPEND`, `FS-CHECK`, `FS-COMPACT`, `STREAM-OPEN`, or
 `STREAM-WRITE`, and its ordinary file writes do not maintain `data_crc32` on
 every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 5471. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 5514. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
 bitmap, then exact-name lookup, `MKFILE`/`RMFILE`/`RENAME` metadata mutation,
-bounded primary-extent `CAT` publication, and cache-only total/largest-free and
-global occupancy reporting.
+bounded primary-extent `CAT` publication, cache-only total/largest-free and
+global occupancy reporting, and primary-extent `SAVE-BUFFER`/`LOAD-BUFFER`.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -50,12 +51,19 @@ and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`.
 The exact 5437–5471 fixture contains 35 LF lines and 984 bytes, with SHA-256
 `6ad3b135d3b2b69f651814349899f507d56dde4c876c8be9e0cd7aefd4a1d75c`
 and Git blob `1884c81ba2b8aa48082d472250f13a2265fd1def`.
+The exact 5472–5514 fixture contains 43 LF lines and 1,317 bytes, with SHA-256
+`7b4511333822c8f4aca8e3fd0768fa520d72e398a14529240bf6e66792627104`
+and Git blob `8b4645f16c7ac2f21036282a896b7ede6bad16b0`. Its six definitions, in source
+order, are `SB-SLOT`, `SB-DESC`, `SAVE-BUFFER`, `LB-SLOT`, `LB-DESC`, and
+`LOAD-BUFFER`; loading zeroes the four variables and installs the two colon
+bodies and strings without any filesystem, Buffer, media, diagnostic, flush,
+or output effect.
 `FS-LOAD` consumes the separately qualified native
 `MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
 metadata predicate, and generation check. This boundary is not evidence of
-file-backed close/reopen durability, `SAVE-BUFFER` or later filesystem commands,
-malformed mutation/content safety, allocator improvement, compaction, repair,
-or stronger filesystem validation.
+file-backed close/reopen durability, the FD Pool/`OPEN` family or later
+filesystem commands, malformed mutation/content safety, allocator improvement,
+compaction, repair, or stronger filesystem validation.
 
 ---
 
@@ -715,8 +723,8 @@ cache spans; direct helper use does not establish them. An already-true
 results eligible without I/O. The scans and `LF-*` scratch are global,
 unlocked, and not a coherent allocation snapshot. This remains reporting only;
 the planned runtime allocator improvements, `FS-CHECK`/repair, and
-`FS-COMPACT` sections below remain aspirational. Blank line 5472 is the next
-seam; `SAVE-BUFFER` begins at line 5473 and its definition starts at line 5478.
+`FS-COMPACT` sections below remain aspirational. Blank line 5472 is the leading
+seam of the admitted Buffer-I/O fixture described below.
 
 ### Directory Navigation
 
@@ -761,8 +769,50 @@ when the old name is absent.
 
 | Word | Description |
 |------|-------------|
-| `LOAD filename` | Open a Forth source file and EVALUATE each line |
-| `buf SAVE-BUFFER name` | Save a buffer's data to an existing named file |
+| `LOAD filename` | Later source outside the current hosted frontier; in full KDOS, open and evaluate a Forth source file |
+| `buf SAVE-BUFFER name` | Write an existing file's complete primary allocation from `B.DATA`, cache low-u32 `B.LEN` as `used_bytes`, then sync |
+| `buf LOAD-BUFFER name` | Read an existing file's complete primary allocation, including padding, into `B.DATA` without changing the Buffer descriptor |
+
+Both admitted words ensure and check the filesystem before storing the Buffer
+descriptor or parsing the name. With no filesystem they drop the descriptor,
+leave the name token for the outer evaluator, print `No filesystem`, and do not
+change the `SB-*`/`LB-*` scratch. A miss comes after the descriptor and parsed
+name are stored and the slot becomes `-1`, but before Buffer dereference or
+I/O. The save miss additionally suggests creating the file with `MKFILE`.
+
+On a match, the transfer length is the full primary allocation
+(`DE.COUNT * 512`), not `DE.USED`. Neither word follows the optional secondary
+extent. `SAVE-BUFFER` performs its generation-bound payload write first,
+stores the low 32 bits of cell-sized `B.LEN` in the cached directory entry,
+then invokes `FS-SYNC` (bitmap, directory, flush). It retains the entry's name,
+extents, type, flags, parent, `mtime`, and CRC. The current word therefore does
+not implement the automatic CRC-on-save target described later in this
+document and does not timestamp the update. A payload failure can retain a
+partial media prefix without changing cached `used_bytes`; a later sync or
+flush failure can leave payload and metadata partly published and the cache
+changed. This is deliberately documented nontransactionality, not durability.
+
+`LOAD-BUFFER` reads the complete allocation into `B.DATA`, including padding
+after `DE.USED`, and leaves `B.LEN`, every other Buffer field, and all file
+metadata unchanged. A failed generation-bound read can retain a partial
+Buffer prefix. Complete success reports cached `DE.USED`, whereas save reports
+`B.LEN`; both use signed `.` in the ambient `BASE`.
+
+`B.LEN` is an element count, while `B.BYTES` is byte capacity. Because the
+unchanged save word stores and labels `B.LEN` as bytes but transfers whole
+sectors, multi-byte Buffers expose a source-width discrepancy. Safe use with
+ordinary Buffer constructors requires a byte-width Buffer whose
+`B.LEN = B.BYTES = DE.COUNT * 512`, with the full `B.DATA` range mapped and
+readable for save or writable for load; the saved length must represent the
+intended unsigned 32-bit field, and save requires a writable selected volume.
+It also requires a stable mounted generation,
+a canonical matched non-directory file, one positive in-range primary extent,
+and no secondary extent. None of those descriptor, capacity, type, or extent
+conditions or the entry's read-only/system flags is checked here. Scratch
+cells, parser state, cache, and diagnostics
+are global and unlocked. Blank line 5515 is the next seam before the
+unqualified FD Pool heading at line 5516; its first constants appear at lines
+5532–5533.
 
 ### Documentation Access
 
@@ -782,8 +832,8 @@ when the old name is absent.
 | `FS-LOAD` | Load superblock + bitmap + directory into RAM |
 | `FS-SYNC` | Write RAM cache back to disk |
 | `FS-ENSURE` | Auto-load FS if not yet loaded |
-| `OPEN name` | Open a file, return a file descriptor from the FD pool for FREAD/FWRITE.  `OPEN` is a `DEFER` word (see §1). |
-| `FCLOSE fdesc` | Release a file descriptor back to the FD pool |
+| `OPEN name` | Later FD-pool source outside the current hosted frontier; in full KDOS it returns a descriptor for `FREAD`/`FWRITE` and is deferred |
+| `FCLOSE fdesc` | Later FD-pool source outside the current hosted frontier; in full KDOS it releases a descriptor |
 | `DIRENT n` | Address of directory entry *n* in the RAM cache (48 bytes each) |
 | `FIND-BY-NAME` | Return the first occupied current-directory entry whose complete 24-byte name matches zero-padded `NAMEBUF`; it does not check `FS-OK` |
 

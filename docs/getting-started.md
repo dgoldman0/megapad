@@ -331,9 +331,9 @@ RMFILE mydata            \ Delete it
 ### Saving a Buffer to Disk
 
 ```forth
-0 1 256 BUFFER results
+0 1 512 BUFFER results
 42 results B.FILL
-4 5 MKFILE results.dat   \ Create a data file (type 5)
+1 5 MKFILE results.dat   \ One sector, matching the Buffer backing
 results SAVE-BUFFER results.dat
 ```
 

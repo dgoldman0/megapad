@@ -1260,7 +1260,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5471. Exact unchanged lines
+The contiguous source frontier now ends at line 5514. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1508,9 +1508,63 @@ already-true `FS-OK`, so detached or replaced media can leave stale reporting
 eligible without storage I/O. The bitmap scans, directory scan, and `LF-*`
 scratch are global and unlocked, not one coherent allocation snapshot. This
 qualification admits reporting only, not allocation improvement, extent
-ownership validation, repair, compaction, or persistence. Blank line 5472 is
-the next uncovered seam, followed by the `SAVE-BUFFER` heading at line 5473
-and definition at line 5478.
+ownership validation, repair, compaction, or persistence.
+
+Exact unchanged lines 5472 through 5514 contain 43 LF lines and 1,317 bytes,
+with SHA-256
+`7b4511333822c8f4aca8e3fd0768fa520d72e398a14529240bf6e66792627104`
+and Git blob `8b4645f16c7ac2f21036282a896b7ede6bad16b0`. The exact source-order ledger is
+variable `SB-SLOT`, variable `SB-DESC`, colon `SAVE-BUFFER`, variable
+`LB-SLOT`, variable `LB-DESC`, and colon `LOAD-BUFFER`: four variables and two
+colon bodies, six definitions total. The variables initialize to zero. Loading
+only changes dictionary/allocation state and installs inline strings.
+It does not call `FS-ENSURE`, parse a name, dereference the supplied descriptor,
+touch filesystem cache or media, update diagnostics, flush, or emit UART data.
+
+Each word calls `FS-ENSURE` and tests `FS-OK` before saving its descriptor or
+parsing. If unavailable, it drops the descriptor, leaves the following name
+token unconsumed, prints ` No filesystem` and CRLF, and leaves all four scratch
+variables unchanged. A miss happens only after the appropriate descriptor and
+parsed-name result have been stored: the slot becomes `-1`, no Buffer field is
+read, no I/O occurs, and `SAVE-BUFFER` alone prints the `create with MKFILE
+first` hint.
+
+A match always transfers `DE.COUNT * 512` bytes at `DE.SEC`, regardless of
+`DE.USED`, and neither word inspects or follows `DE.EXT1-SEC`/`DE.EXT1-CNT`.
+`SAVE-BUFFER` first performs the generation-bound payload write from `B.DATA`,
+then writes the low 32 bits of the cell-sized `B.LEN` to cached `used_bytes`,
+then calls `FS-SYNC`, whose bitmap-write, directory-write, and flush order
+remains nontransactional. No other entry field changes: name, primary extent,
+type, flags, parent, `mtime`, CRC, and secondary extent are retained. Thus the
+word neither timestamps nor recomputes integrity metadata. A payload failure
+precedes the cache update and sync, but may retain a partial media prefix. A
+later sync/flush failure can leave the payload and some metadata on media and
+the new cached `used_bytes` visible without the success line.
+
+`LOAD-BUFFER` performs one generation-bound read of the complete primary
+allocation into `B.DATA`, including all allocation padding after `DE.USED`.
+It does not change `B.LEN`, any other Buffer field, or filesystem metadata.
+A failed read emits no success line but may leave the completed prefix in the
+Buffer. On success the unchanged strings report the saved `B.LEN` or cached
+`DE.USED` with signed `.` in the caller's ambient `BASE`; neither word changes
+`BASE`.
+
+The source's save metadata and message use `B.LEN`, while transfer capacity for
+a Buffer is `B.BYTES = B.WIDTH * B.LEN`. A multi-byte element count is therefore
+mislabeled and stored as bytes. The admitted ordinary-constructor domain uses
+a valid byte-width descriptor with
+`B.LEN = B.BYTES = DE.COUNT * 512`, a `B.DATA` span mapped and readable for
+save or mapped and writable for load, and a `B.LEN` representable as the
+intended unsigned 32-bit field. Save also requires a writable selected volume.
+Both words require a stable mounted generation,
+a canonical matched non-directory entry, one positive in-range primary extent,
+and no secondary extent. The source enforces none of those descriptor, type,
+capacity, length, or secondary-extent constraints and does not enforce
+per-entry read-only or system flags. `SB-*`, `LB-*`, name/parser
+state, cache, and storage diagnostics are global and unlocked; this slice adds
+no file lock or transactional recovery. Blank line 5515 is the next uncovered
+seam before the unqualified FD Pool heading at line 5516; its first constants
+are at lines 5532–5533.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

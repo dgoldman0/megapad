@@ -858,7 +858,8 @@ bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
 storage-compatibility, legacy file, and initial MP64FS cache/helper layers,
 the MP64FS load/sync/ensure/format lifecycle, cached directory listing, exact
 name lookup, metadata creation/deletion/rename, primary-extent file
-publication, and cache-only free-space reporting through line 5471.
+publication, cache-only free-space reporting, and primary-extent Buffer
+save/load through line 5514.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -868,10 +869,11 @@ head/full/tail sector I/O, MP64FS cache geometry, bitmap mutation/search,
 packed directory readers, raw-binding load, synchronization, conditional
 autoload, metadata formatting, compact type publication, direct-child listing,
 bitmap free-space reporting, exact-name lookup, deterministic timestamps,
-ordered metadata mutation, byte-exact `CAT` output, and global cached
-fragmentation reporting are executable semantic behavior rather than
-reporting-only shims. The frontier now ends at line 5471; blank line 5472
-precedes the `SAVE-BUFFER` heading at line 5473 and definition at line 5478.
+ordered metadata mutation, byte-exact `CAT` output, global cached
+fragmentation reporting, and ordered Buffer/file transfers are executable
+semantic behavior rather than reporting-only shims. The frontier now ends at
+line 5514; blank line 5515 precedes the unqualified FD Pool heading at line
+5516, whose first constants are at lines 5532–5533.
 
 ---
 
@@ -1137,8 +1139,16 @@ SHA-256
 and Git blob `1884c81ba2b8aa48082d472250f13a2265fd1def`. Load zero-initializes the two
 scratch variables and installs the two colon bodies and inline strings without
 ensuring the filesystem, scanning bitmap or directory cache, touching media or
-diagnostics, or publishing output. Blank line 5472 is the next uncovered seam
-before the `SAVE-BUFFER` heading at line 5473 and definition at line 5478.
+diagnostics, or publishing output. Exact unchanged lines 5472 through 5514
+then add `SB-SLOT`, `SB-DESC`, `SAVE-BUFFER`, `LB-SLOT`, `LB-DESC`, and
+`LOAD-BUFFER` in 43 LF lines and 1,317 bytes, with SHA-256
+`7b4511333822c8f4aca8e3fd0768fa520d72e398a14529240bf6e66792627104`
+and Git blob `8b4645f16c7ac2f21036282a896b7ede6bad16b0`. Load zero-initializes the four
+scratch variables and installs the two colon bodies and inline strings without
+ensuring or parsing, dereferencing a Buffer, touching cache, media, or
+diagnostics, flushing, or publishing output. Blank line 5515 is the next
+uncovered seam before the unqualified FD Pool heading at line 5516; the first
+constants are at lines 5532–5533.
 
 ---
 
@@ -1770,7 +1780,7 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
-### Hosted Lifecycle, Listing, Mutation, Content, and Free-Space Checkpoint
+### Hosted Lifecycle, Listing, Mutation, Content, Free-Space, and Buffer-I/O Checkpoint
 
 The native hosted `MP64FS-VALID?` returns literal `1` or `0` after up to three
 raw checked reads and the executable BIOS's narrow geometry/metadata
@@ -1779,7 +1789,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 5471. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 5514. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -1826,6 +1836,16 @@ installs two colon bodies and their inline strings without ensuring the
 filesystem, scanning cache, touching media or diagnostics, or publishing
 output. Focused execution qualifies cache-only reporting in the valid-geometry
 domain described below.
+
+Exact unchanged lines 5472–5514 add `SB-SLOT`, `SB-DESC`, `SAVE-BUFFER`,
+`LB-SLOT`, `LB-DESC`, and `LOAD-BUFFER` in 43 LF lines and 1,317 bytes, with
+SHA-256
+`7b4511333822c8f4aca8e3fd0768fa520d72e398a14529240bf6e66792627104`
+and Git blob `8b4645f16c7ac2f21036282a896b7ede6bad16b0`. Loading zeroes the four
+scratch variables and installs the two colon bodies and inline strings. It
+does not ensure or parse, dereference a Buffer, touch cache or media, update
+diagnostics, flush, or publish output. Focused execution qualifies only the
+single-primary-extent Buffer domain described below.
 
 | Word | Stack Effect | Admitted behavior |
 |------|--------------|-------------------|
@@ -1894,10 +1914,11 @@ the field to preserve the stale comment.
 | `CAT` | `( "name" -- )` | Read the complete primary extent into unreserved `HERE`, then emit exactly `DE.USED` bytes with LF converted to CRLF. It does not advance `HERE`, read a secondary extent, type-check, or append a newline. |
 | `FS-LARGEST-FREE` | `( -- sectors )` | Without an `FS-OK` gate, reset global scratch and return the largest clear run in the cached data-sector bitmap. |
 | `FS-FREE` | `( -- )` | Ensure the filesystem, then report cached total free sectors/bytes, largest run, and global occupied-entry count/max. |
-| `SAVE-BUFFER` | `( buf "name" -- )` | Save a KDOS buffer's data to a named file on disk (file must already exist).  Updates `used_bytes` in the directory. |
-| `OPEN` | `( "name" -- fdesc \| 0 )` | Open a file by name, returning a file descriptor from the FD pool for `FREAD`/`FWRITE` access.  Returns 0 if not found.  `OPEN` is a `DEFER` word — override with `' my-open IS OPEN` (e.g. for a VFS layer). |
-| `FCLOSE` | `( fdesc -- )` | Release a file descriptor back to the FD pool.  No-op if `fdesc` is 0. |
-| `LOAD` | `( "filename" -- )` | Open a Forth source file from disk, read it into memory, and EVALUATE each line.  This is how KDOS extensions and scripts are loaded. |
+| `SAVE-BUFFER` | `( buf "name" -- )` | Write the complete primary allocation from `B.DATA`, store low-u32 `B.LEN` as cached `used_bytes`, then sync. It does not follow a secondary extent or update `mtime`/CRC. |
+| `LOAD-BUFFER` | `( buf "name" -- )` | Read the complete primary allocation, including padding, into `B.DATA`. It does not change `B.LEN`, Buffer metadata, or file metadata. |
+| `OPEN` | `( "name" -- fdesc \| 0 )` | Later FD-pool source outside the current hosted frontier. In the full source it opens by name and returns a descriptor or zero; `OPEN` is deferred. |
+| `FCLOSE` | `( fdesc -- )` | Later FD-pool source outside the current hosted frontier; in the full source it releases a nonzero descriptor. |
+| `LOAD` | `( "filename" -- )` | Later evaluator source outside the current hosted frontier; in full KDOS it opens a Forth source file and evaluates each line. |
 | `SOURCE-EVALUATE-CHECKED` | `( addr len -- status )` | Compile a complete in-memory source buffer with deterministic status and diagnostics; stop at first failure. |
 | `DIRENT` | `( n -- addr )` | Address of directory entry *n* in the RAM cache (for low-level access). |
 
@@ -2014,16 +2035,59 @@ those preconditions; invalid ordinary-`DO` bounds remain excluded.
 stale cached results eligible without I/O. The two bitmap scans, directory
 scan, and global `LF-*` scratch are unlocked and not one coherent allocation
 snapshot. This adds no allocator, ownership validation, repair, compaction, or
-persistence claim. The frontier ends after `FS-FREE` at line 5471; blank line
-5472 precedes the unqualified `SAVE-BUFFER` heading at line 5473 and definition
-at line 5478.
+persistence claim.
+
+`SAVE-BUFFER` and `LOAD-BUFFER` both run `FS-ENSURE` and test `FS-OK` before
+storing their descriptor or parsing a filename. The no-filesystem exit drops
+the descriptor, leaves the name token for the outer evaluator, prints `No
+filesystem`, and preserves all four `SB-*`/`LB-*` scratch cells. A miss occurs
+after the descriptor is stored, parsing fills the global name state, and the
+slot scratch becomes `-1`, but before any Buffer dereference or storage I/O.
+The save miss includes `(create with MKFILE first)`; the load miss does not.
+
+A match transfers all `DE.COUNT` primary sectors at `DE.SEC`; `DE.USED` does
+not limit the transfer and neither word follows `DE.EXT1-SEC` or
+`DE.EXT1-CNT`. `SAVE-BUFFER` first makes the generation-bound payload write
+from `B.DATA`, then stores the low 32 bits of cell-sized `B.LEN` in cached
+`used_bytes`, then calls ordered, nontransactional `FS-SYNC`. Name, extents,
+type, flags, parent, `mtime`, and CRC are retained, so the payload can make the
+stored CRC stale and there is no automatic timestamp update. Payload failure
+happens before the metadata update but can leave a partial media prefix; a
+bitmap, directory, or flush failure during sync can leave payload and metadata
+partly published with changed cache state. Only complete success prints the
+saved `B.LEN`.
+
+`LOAD-BUFFER` reads the full primary allocation into `B.DATA`, including tail
+padding beyond `DE.USED`, while leaving `B.LEN`, every other Buffer field, and
+all file metadata unchanged. A failed generation-bound read prints no success
+line but can leave a partial Buffer prefix. Its success message reports cached
+`DE.USED`, not the transfer size. Both success numbers use signed `.` in the
+ambient `BASE`.
+
+The source uses `B.LEN` rather than `B.BYTES` for save metadata and output;
+with multi-byte elements it stores an element count mislabeled as bytes while
+still transferring whole sectors. Safe ordinary-constructor use therefore
+requires byte width, `B.LEN = B.BYTES = DE.COUNT * 512`, and a complete mapped
+`B.DATA` span readable for save or writable for load. `B.LEN` must represent
+the intended unsigned 32-bit field, and save requires a writable selected
+volume. The filesystem also must remain mounted to
+the same generation, and the canonical matched non-directory entry must have
+one positive in-range primary extent and no secondary extent. The source does
+not enforce these constraints or per-entry read-only/system flags. Scratch
+variables, parser state, cache, and
+storage diagnostics are global and unlocked. This is primary-extent Buffer I/O,
+not general two-extent persistence, CRC maintenance, or transaction recovery.
+The frontier ends at line 5514; blank line 5515 precedes the still-unqualified
+FD Pool heading at line 5516, with its first constants at lines 5532–5533.
 
 **Example — filesystem operations:**
 ```forth
 DIR                          \ list all files
 CAT getting-started          \ print a file's contents
 4 4 MKFILE my-notes          \ create a 4-sector file of type "doc"
-my-buffer SAVE-BUFFER my-data   \ save buffer to existing file
+0 1 512 BUFFER disk-page      \ one full sector of byte-width backing
+1 5 MKFILE my-data            \ matching one-sector data file
+disk-page SAVE-BUFFER my-data \ save the complete primary allocation
 LOAD my-script.f             \ evaluate a Forth source file
 FS-FREE                      \ check remaining space
 ```
@@ -2732,7 +2796,7 @@ p P.BENCH                \ benchmark
 DIR                      \ list files
 CAT filename             \ print file
 LOAD script.f            \ evaluate Forth source
-buf SAVE-BUFFER fname    \ save buffer to file
+buf SAVE-BUFFER fname    \ requires full-primary mapped backing; see §7.6
 ```
 
 **Managing modules:**

@@ -649,8 +649,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5471 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, cached listing, exact-name lookup, metadata creation/deletion/rename, primary-extent `CAT` publication, and cache-only free-space/fragmentation reporting |
-| 5472 onward | Next uncovered frontier | Blank line 5472 precedes the `SAVE-BUFFER` heading at line 5473 and definition at line 5478 |
+| 39–5514 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, cached listing, exact-name lookup, metadata creation/deletion/rename, primary-extent `CAT` publication, cache-only free-space/fragmentation reporting, and primary-extent Buffer save/load |
+| 5515 onward | Next uncovered frontier | Blank line 5515 precedes the unqualified FD Pool family headed at line 5516; its first constants are at lines 5532–5533 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1013,6 +1013,52 @@ global, and unlocked rather than one coherent allocation snapshot. This is
 observability only, not allocator, ownership-validation, repair, compaction,
 or persistence qualification.
 
+The Buffer-I/O fixture is exact unchanged `kdos.f` lines 5472–5514: 43 LF
+lines, 1,317 bytes, SHA-256
+`7b4511333822c8f4aca8e3fd0768fa520d72e398a14529240bf6e66792627104`,
+and Git blob `8b4645f16c7ac2f21036282a896b7ede6bad16b0`. Its exact source-order ledger
+is variable `SB-SLOT`, variable `SB-DESC`, colon `SAVE-BUFFER`, variable
+`LB-SLOT`, variable `LB-DESC`, and colon `LOAD-BUFFER`: six definitions total,
+with all four variables initialized to zero. Loading otherwise only installs
+the bodies and inline strings. It does not ensure or parse, dereference a
+Buffer, touch cache or media, change diagnostics, flush, or publish output.
+
+Both words ensure and reject an unavailable filesystem before storing the
+descriptor or parsing the filename; that exit drops the descriptor, leaves the
+name token for the outer evaluator, and prints `No filesystem`. A lookup miss
+occurs after the descriptor and `-1` slot have been saved in global scratch,
+but before descriptor dereference or I/O. `SAVE-BUFFER` adds its `create with
+MKFILE first` hint; `LOAD-BUFFER` does not.
+
+On a match, both words transfer the complete primary allocation
+(`DE.COUNT * 512` bytes at `DE.SEC`) and ignore `DE.USED` for transfer length
+and `DE.EXT1-SEC`/`DE.EXT1-CNT` entirely. `SAVE-BUFFER` orders a
+generation-bound payload write first, then stores the low 32 bits of `B.LEN`
+as cached `used_bytes`, then calls the ordered, nontransactional `FS-SYNC`.
+It retains the entry's `mtime`, CRC, flags, name, type, parent, and extent
+fields; in particular it does not recompute the CRC or timestamp. A sync or
+flush failure can therefore leave payload and some metadata written with the
+cache already changed, and a payload failure can leave a partial media prefix.
+`LOAD-BUFFER` reads the complete allocation, including padding after
+`DE.USED`, into `B.DATA`; it leaves `B.LEN`, the rest of the Buffer descriptor,
+and all directory metadata unchanged. A failed read can leave a partial Buffer
+prefix.
+
+The source stores and prints `B.LEN`, not `B.BYTES`; for width greater than
+one that is an element count mislabeled as bytes, even though full sectors are
+transferred. Safe use requires a stable mounted generation, a canonical
+matched non-directory file with one valid positive primary extent and no
+secondary extent, and a valid Buffer descriptor whose `B.DATA` backs at least
+the full allocation (readable for save and writable for load). For ordinary
+constructed Buffers, the unambiguous domain is byte width with
+`B.LEN = B.BYTES = DE.COUNT * 512`; `B.LEN` must also fit the intended unsigned
+32-bit `used_bytes` field, and save requires a writable selected volume. The
+source does not enforce per-entry read-only or system flags. Success messages
+print the saved `B.LEN` or cached
+`DE.USED` with signed `.` in ambient `BASE`. The `SB-*`/`LB-*` cells, parser
+state, filesystem cache, and storage diagnostics are global and unlocked; the
+words add no transaction or filesystem-level lock.
+
 The earlier low-level helper domain is validator-approved geometry, positive
 run counts, in-range sectors and slots, complete cache spans, and structurally
 valid directory entries. Those helper words do not gate on `FS-OK` or validate
@@ -1022,9 +1068,9 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue after blank line 5472 with `SAVE-BUFFER` at line 5478,
-then toward the persistent evaluator, ordinary checked module-loader surface,
-and deterministic cooperative task scheduler.
+Later slices continue after blank line 5515 with the FD Pool family headed at
+line 5516, then toward the persistent evaluator, ordinary checked module-loader
+surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work
