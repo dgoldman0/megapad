@@ -864,8 +864,8 @@ publication, cache-only free-space reporting, primary-extent Buffer save/load,
 the fixed FD pool with cached open/metadata-flush/final-close lifecycle, the
 checked source compiler, nested two-extent filesystem `LOAD`, application
 loader and ANSI helpers, whole-file encryption, parent-byte directory
-navigation/mutation, the Documentation Browser, Dictionary Search, and the
-task registry/synchronous executor through line 6724.
+navigation/mutation, the Documentation Browser, Dictionary Search, the task
+registry/synchronous executor, and Timer Preemption Setup through line 6758.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -883,7 +883,7 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-6724; Timer Preemption Setup begins at line 6725.
+6758; Multicore Dispatch begins at line 6759.
 
 ---
 
@@ -1170,11 +1170,11 @@ to `(FCLOSE-NOFS)`, binds deferred `OPEN` to `(OPEN)`, and finally rebinds
 only load effects; it does no filesystem or media I/O and emits nothing.
 Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
-navigation, the Documentation Browser, Dictionary Search, and the task
-registry/synchronous executor through line 6724. Their provenance and edge
-contracts are recorded in the corresponding sections below and in
-`docs/simulator-contract.md`; the next uncovered seam is Timer Preemption
-Setup at line 6725.
+navigation, the Documentation Browser, Dictionary Search, the task
+registry/synchronous executor, and Timer Preemption Setup through line 6758.
+Their provenance and edge contracts are recorded in the corresponding
+sections below and in `docs/simulator-contract.md`; the next uncovered seam is
+Multicore Dispatch at line 6759.
 
 ---
 
@@ -1816,7 +1816,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 6724. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 6758. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2189,8 +2189,8 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through the task registry/synchronous executor at line 6724; the
-next uncovered seam is Timer Preemption Setup at line 6725.
+continues through Timer Preemption Setup at line 6758; the next uncovered seam
+is Multicore Dispatch at line 6759.
 
 **Example — filesystem operations:**
 ```forth
@@ -2515,17 +2515,32 @@ mutation. Descriptor addresses and public count/table state are unchecked. A
 task exception can leave its status RUNNING, `SCHED-RUNNING = 1`, and
 `CURRENT-TASK` stale; normal completion also does not clear `CURRENT-TASK`.
 
-### Timer-preemption suffix (not yet hosted-qualified)
+### Timer Preemption Setup
 
-The next source block starts at line 6725; its first missing pseudo-BIOS word
-is `TIMER!` at line 6738. Even with real timer registers, that block alone is
-not preemption: `PREEMPT-ON` writes control value 5 (enable plus auto-reload,
-with IRQ disabled), and no word reads timer status or sets `PREEMPT-FLAG`.
-Only external or manual flagging reaches the checkpoint, whose `YIELD` does
-not suspend. `PREEMPT-OFF` writes control value 1, leaving the hardware counter
-enabled while clearing only the software gate. These are recorded source
-semantics, not behavior supplied or corrected behind the source by the hosted
-runtime.
+Exact unchanged lines 6725–6758 contain 34 LF records and 1,143 bytes,
+SHA-256
+`e55c6bf6e2df1fd6f543105822ac24217083dbeebe94bae0f631ac34d6dcd653`,
+and Git blob `a1955ae8ee10c8bee1de5455a55c725d752462ff`. They publish the
+zero-initialized `PREEMPT-ENABLED` variable, `PREEMPT-ON`, `PREEMPT-OFF`, and
+`_CORE-CHECKPOINT-TIMER`, then rebind deferred `CORE-CHECKPOINT`. Loading
+advances the hosted dictionary by 134 bytes but invokes no Timer word;
+ordinary evaluation steps can still advance an enabled hosted counter.
+
+Despite the subsection name, this is Timer configuration and a manual
+software gate, not preemption. `PREEMPT-ON` writes low-32 `TIME-SLICE` as the
+compare value and control 5: enabled plus auto-reload, with IRQ disabled. It
+then sets only `PREEMPT-ENABLED`. `PREEMPT-OFF` writes control 1, leaving the
+counter enabled while clearing only that software gate. Neither operation
+resets or acknowledges retained Timer status or pending IRQ state.
+
+The installed checkpoint never reads the Timer. With its gate disabled it
+does not consume even a set `PREEMPT-FLAG`; with the gate enabled it acts only
+on that independently populated flag, clears it, and calls the same
+non-suspending `YIELD`. Code after `CORE-CHECKPOINT` or `YIELD?` continues on
+the caller's stacks. No word in this slice turns a compare match into
+`PREEMPT-FLAG`, calls `TIMER-ACK`, suspends a task, or dispatches another XT.
+The hosted runtime preserves those unchanged semantics rather than silently
+supplying the missing scheduler connection.
 
 ---
 

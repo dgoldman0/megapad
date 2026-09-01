@@ -256,7 +256,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 6724.
+KDOS source frontier now ends at line 6758.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1378,7 +1378,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 6724. Exact unchanged lines
+The contiguous source frontier now ends at line 6758. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2185,8 +2185,30 @@ mutates the registry before parsing and publishing its constant, so a late
 source or dictionary fault retains that prefix. A task failure can retain a
 RUNNING descriptor, `SCHED-RUNNING = 1`, and stale `CURRENT-TASK`; success also
 does not clear `CURRENT-TASK`. Public counts, table cells, and descriptor
-addresses are not validated. The next clean seam is Timer Preemption Setup at
-line 6725; its first unavailable pseudo-BIOS service is `TIMER!` at line 6738.
+addresses are not validated.
+
+Exact unchanged lines 6725 through 6758 contain 34 LF records and 1,143 bytes,
+with SHA-256
+`e55c6bf6e2df1fd6f543105822ac24217083dbeebe94bae0f631ac34d6dcd653`
+and Git blob `a1955ae8ee10c8bee1de5455a55c725d752462ff`. They publish
+`PREEMPT-ENABLED`, `PREEMPT-ON`, `PREEMPT-OFF`, and
+`_CORE-CHECKPOINT-TIMER`, advancing the hosted dictionary by 134 bytes. Load
+zeroes the new variable and rebinds deferred `CORE-CHECKPOINT`; it executes no
+Timer word and changes no task, flag, UART, storage, RTC, or IDL state.
+Ordinary evaluation steps can nevertheless advance an enabled Timer counter.
+
+`PREEMPT-ON` writes low-32 `TIME-SLICE` to compare, writes control value 5,
+and sets the software gate. Value 5 enables the counter and auto-reload but
+leaves IRQ generation disabled. `PREEMPT-OFF` writes value 1, leaving the
+counter running while clearing only the software gate. These words neither
+reset nor acknowledge counter, sticky match, or pending IRQ state. The final
+checkpoint never reads that Timer state: only an independently set
+`PREEMPT-FLAG` reaches it. With the software gate off the flag is retained;
+with the gate on it is cleared before the unchanged non-suspending `YIELD`.
+Execution after the checkpoint continues, and no task XT is dispatched.
+Consequently this slice qualifies Timer configuration and manual checkpoint
+gating, not timer-driven preemption, scheduling fairness, or a time-slice
+contract. The next clean seam is Multicore Dispatch at line 6759.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

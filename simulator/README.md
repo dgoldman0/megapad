@@ -155,7 +155,9 @@ The implemented slices provide:
   `TYPE`/`SPACE`, and raw `LATEST` traversal;
 - the unchanged KDOS task registry and synchronous run-to-completion executor,
   including its descriptor/state bookkeeping and provisional deferred
-  checkpoint binding.
+  checkpoint binding;
+- unchanged KDOS Timer Preemption Setup through the ordinary retained Timer
+  ABI, including its software gate and final deferred checkpoint rebinding.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -751,14 +753,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 6724.
+ends at line 6758.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–6724 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, and the task registry/synchronous executor |
-| 6725 onward | Next uncovered frontier | Timer Preemption begins at line 6725, followed by multicore dispatch and the remaining ordinary KDOS source |
+| 39–6758 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, and Timer Preemption Setup |
+| 6759 onward | Next uncovered frontier | Multicore Dispatch begins at line 6759, followed by the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1514,11 +1516,28 @@ name publication or task execution failure retains prior registry, status,
 count/table state are unchecked. `T.FREE`, `T.BLOCKED`, saved stack fields,
 names, and priority ordering are otherwise inert in this block.
 
-The provisional checkpoint consumes only a manually set `PREEMPT-FLAG` and
-then calls the same non-suspending `YIELD`; it neither samples a timer nor
-switches tasks. The next slice begins with Timer Preemption at line 6725 and
-requires real retained timer-control state before the unchanged words can be
-loaded honestly.
+The exact following fixture is unchanged lines 6725–6758: 34 LF records,
+1,143 bytes, SHA-256
+`e55c6bf6e2df1fd6f543105822ac24217083dbeebe94bae0f631ac34d6dcd653`,
+and Git blob `a1955ae8ee10c8bee1de5455a55c725d752462ff`. It publishes the
+zero-initialized `PREEMPT-ENABLED` variable plus `PREEMPT-ON`, `PREEMPT-OFF`,
+and `_CORE-CHECKPOINT-TIMER`, advancing the hosted dictionary by 134 bytes.
+Load invokes no Timer word and explicitly rebinds deferred `CORE-CHECKPOINT`
+to the new action. Ordinary source-evaluation steps still advance an enabled
+hosted Timer counter under the global semantic-time contract.
+
+`PREEMPT-ON` stores low-32 `TIME-SLICE` as compare, writes control 5 (enabled
+plus auto-reload, with IRQ disabled), and raises only the software gate.
+`PREEMPT-OFF` writes control 1, so the counter remains enabled, and lowers only
+that gate. Neither word resets or acknowledges retained counter, status, or
+pending IRQ state. The installed checkpoint never reads Timer status or
+pending IRQ. It acts only when both the software gate and global
+`PREEMPT-FLAG` are nonzero, clears that flag, and calls the same non-suspending
+`YIELD`; code after `YIELD?` continues on the caller's stacks. No word in this
+slice connects a Timer match to `PREEMPT-FLAG`, switches a task, or calls
+`TIMER-ACK`. The source is therefore executable Timer configuration and manual
+checkpoint gating, not timer-driven preemption. Multicore Dispatch begins at
+line 6759.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work
