@@ -36,14 +36,17 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 5610. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 6296. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
 bitmap, then exact-name lookup, `MKFILE`/`RMFILE`/`RENAME` metadata mutation,
 bounded primary-extent `CAT` publication, cache-only total/largest-free and
-global occupancy reporting, primary-extent `SAVE-BUFFER`/`LOAD-BUFFER`, and the
-fixed FD pool with cached `OPEN`, used-metadata `FFLUSH`, and final `FCLOSE`.
+global occupancy reporting, primary-extent `SAVE-BUFFER`/`LOAD-BUFFER`, the
+fixed FD pool with cached `OPEN`, used-metadata `FFLUSH`, and final `FCLOSE`,
+then the checked source compiler, nested two-extent filesystem `LOAD`,
+application loader, ANSI byte helpers, whole-file encryption, and parent-byte
+subdirectory navigation/mutation.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -68,11 +71,19 @@ source-order ledger is `FD-MAX`, `FD-SLOT-SZ`, `FD-POOL`, `FD-SLOT`,
 pool, zeroes `OP-SLOT`, binds `FCLOSE` first to `(FCLOSE-NOFS)` and finally to
 `(FCLOSE)`, and binds `OPEN` to `(OPEN)`. It performs no filesystem or media
 I/O, synchronization, diagnostic update, or output.
+The exact 6201–6296 navigation fixture contains 96 LF records and 3,082 bytes,
+with SHA-256
+`dc7f065cfac1fc3eb6efd1de7f4b0f472ff40e66fa14666e1087c18047e1d6c8`
+and Git blob `b964ca87a1af44e54b22abd25116edd2a7e2a853`. Its ledger is the raw
+64-byte `_PWD-STK` body followed by `PWD`, `CD`, `MKDIR`, and `RMDIR`; loading
+publishes those words without a filesystem, cache, media, RTC, diagnostic,
+lock, or output effect.
+
 `FS-LOAD` consumes the separately qualified native
 `MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
 metadata predicate, and generation check. This boundary is not evidence of
-file-backed close/reopen durability, the `LOAD` family or later filesystem
-commands, multi-extent content I/O, malformed mutation/content safety,
+file-backed close/reopen durability, the Documentation Browser or later KDOS
+source, general multi-extent content I/O, malformed mutation/content safety,
 allocator improvement, compaction, repair, or stronger filesystem validation.
 
 ---
@@ -266,9 +277,12 @@ target for other entries.
 
 ### Path Resolution
 
-Paths use `/` as the separator.  Leading `/` means absolute (from root);
-otherwise the path is relative to the current directory.  `.` refers to
-the current directory and `..` refers to the parent.
+Path interpretation is command-specific. Host `diskutil` paths and KDOS's
+`_RESOLVE-PATH` helper for `LOAD`/`REQUIRE` use `/`-separated traversal;
+leading `/` starts at root and a `..` directory component moves to the parent.
+The public `CD` word below does **not** use that resolver: it recognizes only
+the complete tokens `..` and `/`, and otherwise treats its token as one direct
+child name. `.` has no special meaning in the current KDOS resolver or `CD`.
 
 To resolve `/tools/crypto/aes-test.f`:
 
@@ -285,7 +299,8 @@ so its parent is root.
 
 ### Constraints
 
-- Maximum directory depth is limited only by the 128-entry array.
+- The packed format can link up to 128 entries, but runtime `PWD` displays only
+  the eight components nearest CWD and silently omits higher ancestors.
 - Deleting a directory requires it to be empty (no entries with that
   index as their `parent`).
 - The current directory's logical value is one byte (`0..127`, or `0xFF` for
@@ -293,7 +308,9 @@ so its parent is root.
 
 These are canonical tree constraints. BIOS validation proves only that a
 non-root parent names an occupied directory entry; it accepts self-parenting,
-cycles, and directories unreachable from root.
+cycles, directories unreachable from root, and exact duplicate siblings.
+Runtime lookup is first-slot-wins. A parent cycle makes `PWD` loop instead of
+reaching root.
 
 ### Example Directory Structure
 
@@ -740,10 +757,28 @@ seam of the admitted Buffer-I/O fixture described below.
 
 | Word | Description |
 |------|-------------|
-| `CD path` | Change current directory (`CD /tools/crypto`, `CD ..`, `CD /`) |
-| `PWD` | Print working directory path |
-| `MKDIR name` | Create a subdirectory in the current directory |
-| `RMDIR name` | Remove an empty subdirectory |
+| `CD name` | Change to exact `..`, root `/`, or one direct type-8 child; embedded `/` is not a separator |
+| `PWD` | Print root or the retained suffix of at most eight components, with leading/trailing `/` |
+| `MKDIR name` | Create a metadata-only subdirectory in the lowest logically free slot, then sync |
+| `RMDIR name` | Clear one direct empty subdirectory and sync; nonempty rejection leaks its slot on the stack |
+
+`CD`, `MKDIR`, and `RMDIR` ensure/check the filesystem before parsing. With no
+filesystem they print `No filesystem` and leave the would-be name token for the
+outer evaluator. Beyond shared parser scratch, ordinary successful `CD` changes
+only volatile CWD and issues no storage command. The mutation words write the unchanged bitmap, complete
+directory, then flush; they allocate/free no data sectors and do not update the
+parent mtime.
+
+Safe runtime use requires a stable validator-approved cache, a root or live
+directory CWD, sibling-unique nonempty 1–23-byte NUL-terminated simple names,
+an acyclic root-reaching parent chain, and synchronous non-reentrant calls.
+`MKDIR` does not enforce that name domain: an empty token creates an invisible
+metadata-bearing but logically free slot; longer tokens silently truncate to
+23 bytes; and `..` or `/` entries are shadowed by CD's operators. Mutation
+ignores MP64FS policy flags, changes cache before nontransactional sync, and
+does not invalidate saved loader/REQUIRE CWD snapshots when a directory is
+removed. CWD, NAMEBUF/PATHBUF/PN-LEN parser state, `_PWD-STK`, and cache state
+are global and unlocked.
 
 ### Creating & Managing Files
 
@@ -779,7 +814,7 @@ when the old name is absent.
 
 | Word | Description |
 |------|-------------|
-| `LOAD filename` | Later source outside the current hosted frontier; in full KDOS, open and evaluate a Forth source file |
+| `LOAD filename` | Resolve an MP64FS Forth source path, concatenate validated primary/secondary extents, and evaluate its physical lines |
 | `buf SAVE-BUFFER name` | Write an existing file's complete primary allocation from `B.DATA`, cache low-u32 `B.LEN` as `used_bytes`, then sync |
 | `buf LOAD-BUFFER name` | Read an existing file's complete primary allocation, including padding, into `B.DATA` without changing the Buffer descriptor |
 
@@ -882,8 +917,9 @@ the in-use header, retaining descriptor/reserved cells and leaving file payload
 untouched. No operation validates pool membership, alignment, allocation, or
 directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
 flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
-and deferred targets are global and unlocked. The next uncovered seam is the
-`LOAD` heading at line 5611.
+and deferred targets are global and unlocked. The contiguous hosted frontier
+continues through navigation at line 6296; its next seam is the Documentation
+Browser heading at line 6297.
 
 ### Documentation Access
 

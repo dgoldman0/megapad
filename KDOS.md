@@ -201,7 +201,8 @@ secret boundary, or security proof.
 - **String utilities**: .ZSTR, SAMESTR?, NAMEBUF, PARSE-NAME (from input stream via WORD)
 - **Comparison operators**: >=, <= (defined atop BIOS < and >)
 - **MP64FS file system**: Named on-disk files with bitmap allocation and directory
-- **FS operations**: FORMAT, FS-LOAD, FS-SYNC, DIR, CATALOG, MKFILE, RMFILE, OPEN, FCLOSE, FFLUSH
+- **FS operations**: FORMAT, FS-LOAD, FS-SYNC, DIR, CATALOG, MKFILE,
+  RMFILE, OPEN, FCLOSE, FFLUSH, PWD, direct-component CD, MKDIR, RMDIR
 - **FD pool**: 16-slot fixed pool (1,152 bytes) — OPEN and OPEN-BY-SLOT allocate from pool, FCLOSE reclaims
 - **DEFER/IS**: Deferred word mechanism — OPEN is a DEFER word for VFS interception
 - **Bitmap allocator**: BIT-FREE?, BIT-SET, BIT-CLR, FIND-FREE (contiguous sector search)
@@ -239,6 +240,7 @@ secret boundary, or security proof.
   source-load gate are green
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
 - **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — one primary-extent whole-file GCM transaction with a slot-derived IV
+- **§7.6.2 Subdirectory Navigation**: PWD / CD / MKDIR / RMDIR — parent-byte cache navigation and metadata-only directory mutation
 
 **Checkpoint-4 full Python regression**: 3,425 passed, with three conditional
 live-network skips. The ordered crypto/GPT gates and the complete serial RTL
@@ -386,6 +388,7 @@ KDOS rewrite — new Forth words:
 - RAM caches: FS-SUPER, FS-BMAP, FS-DIR
 - FS-LOAD / FS-SYNC: disk ↔ RAM
 - FORMAT, DIR / CATALOG, MKFILE, RMFILE, OPEN
+- Parent-byte navigation: PWD, direct-component CD, MKDIR, RMDIR
 - FWRITE / FREAD with proper cursor advancement
 - FFLUSH: persist descriptor metadata
 

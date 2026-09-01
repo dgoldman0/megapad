@@ -138,7 +138,9 @@ The implemented slices provide:
   adjacent canonical ANSI byte helpers;
 - unchanged MP64FS whole-file encryption through the ordinary open descriptor,
   Bank-0 DMA allocator, AES-GCM words, guarded storage transfers, directory
-  cache, sync, and flush ordering.
+  cache, sync, and flush ordering;
+- unchanged parent-byte `PWD`, `CD`, `MKDIR`, and `RMDIR` through the ordinary
+  parser, directory cache, RTC timestamp, sync, and flush paths.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 task stack arenas and cooperative scheduling remain pending. The IDL seam
@@ -718,14 +720,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 6200.
+ends at line 6296.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–6200 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, and whole-file filesystem encryption |
-| 6201 onward | Next uncovered frontier | Subdirectory navigation begins at line 6201, followed by the remaining ordinary KDOS source |
+| 39–6296 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file filesystem encryption, and parent-byte subdirectory navigation/mutation |
+| 6297 onward | Next uncovered frontier | The Documentation Browser begins at line 6297, followed by the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1325,6 +1327,43 @@ concurrency, or secure nonce-management claim follows. The wrapper also ignores
 MP64FS policy flags such as readonly; the lower storage path nevertheless
 enforces media generation, volume bounds, and device write protection.
 
+The next exact fixture is unchanged lines 6201–6296: 96 LF records, 3,082
+bytes, SHA-256
+`dc7f065cfac1fc3eb6efd1de7f4b0f472ff40e66fa14666e1087c18047e1d6c8`,
+and Git blob `b964ca87a1af44e54b22abd25116edd2a7e2a853`. It publishes the raw
+64-byte `_PWD-STK` body and the four parent-byte navigation words without
+initializing that body or touching CWD, parser, filesystem/cache/media, RTC,
+diagnostics, locks, or UART state at load time.
+
+Within a stable validator-approved mounted cache and an acyclic parent tree,
+`PWD` prints root or at most the eight components nearest CWD, in root-to-leaf
+order within that retained suffix and with leading/trailing slashes. `CD`
+recognizes exact `..` and `/`; otherwise it resolves only one direct type-8
+child component and does not invoke the path resolver used by `LOAD`. `MKDIR`
+clears the lowest free
+48-byte slot, writes its zero-padded component, type, parent, and epoch-seconds
+mtime, then syncs the unchanged bitmap and changed directory. Empty `RMDIR`
+clears one direct type-8 child and performs the same sync. Neither operation
+allocates or frees payload sectors or updates the parent mtime.
+
+Focused acceptance pins exact path/diagnostic bytes, the eight-component PWD
+display limit, volatile-only CD transitions, lowest-slot metadata, unchanged
+bitmap/payload state, three-command successful syncs, rejection immutability,
+and cache/media retention before an unsupported late flush. It also preserves
+the source's nonempty-RMDIR stack discrepancy: that rejection returns with its
+target slot still present.
+
+The safe domain excludes parent cycles and non-NUL 24-byte names: metadata
+validation accepts both, while `PWD` respectively loops forever or lets
+`.ZSTR` read beyond the name field. `MKDIR` accepts an empty token as an
+invisible logically free entry and permits reserved `..` and `/` names that
+ordinary `CD` cannot reach. A failed filesystem gate occurs before operand
+parsing, and validator-accepted duplicate siblings are first-slot-wins.
+Mutation ignores MP64FS policy flags and is nontransactional; CWD,
+NAMEBUF/PATHBUF/PN-LEN parser state, `_PWD-STK`, and cache state are global and
+unlocked. Removing a directory also does not invalidate loader/REQUIRE CWD
+snapshots that still name it.
+
 The earlier low-level helper domain is validator-approved geometry, positive
 run counts, in-range sectors and slots, complete cache spans, and structurally
 valid directory entries. Those helper words do not gate on `FS-OK` or validate
@@ -1334,7 +1373,7 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue with subdirectory navigation at line 6201, then advance
+Later slices continue with the Documentation Browser at line 6297, then advance
 the remaining ordinary KDOS source toward its module registry and deterministic
 cooperative task scheduler.
 

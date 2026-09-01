@@ -255,7 +255,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 6200.
+KDOS source frontier now ends at line 6296.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1332,7 +1332,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 6200. Exact unchanged lines
+The contiguous source frontier now ends at line 6296. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1918,7 +1918,66 @@ recovery evidence. Key, IV, AES tag, plaintext/ciphertext buffers, and dangling
 buffer addresses are never wiped. `FENCRYPT` does not inspect AES status after
 `ENCRYPT`; it trusts the returned output and tag. All encryption, AES, FD,
 cache, allocator, diagnostic, and storage state is runtime-global and
-unlocked. The next uncovered seam is subdirectory navigation at line 6201.
+unlocked.
+
+Exact unchanged lines 6201 through 6296 contain 96 LF records and 3,082
+bytes, with SHA-256
+`dc7f065cfac1fc3eb6efd1de7f4b0f472ff40e66fa14666e1087c18047e1d6c8`
+and Git blob `b964ca87a1af44e54b22abd25116edd2a7e2a853`. The exact five-word ledger
+is the raw 64-byte `_PWD-STK` CREATE/ALLOT body followed by `PWD`, `CD`,
+`MKDIR`, and `RMDIR`. Loading reserves that body and publishes the four colon
+definitions without initializing the raw body or changing CWD, parser,
+filesystem/cache/media, RTC, diagnostics, locks, or UART state.
+
+For non-root `PWD` and the three filesystem-gated words, the qualified domain
+is a stable mounted validator-approved cache with
+`FS-OK` true, CWD equal to root 255 or a live directory slot, sibling-unique
+nonempty 1–23-byte NUL-terminated simple component names excluding reserved
+navigation tokens, and an acyclic parent chain that reaches root.
+Calls are synchronous and non-reentrant because CWD, the NAMEBUF/PATHBUF/PN-LEN
+parser state, `_PWD-STK`, and the filesystem cache are shared and unlocked.
+`PWD` itself does not ensure or
+check the filesystem. At root it emits ` /` and CRLF without touching cached
+entries. Otherwise it follows the complete parent chain, retains at most the
+eight slots nearest CWD, then emits those retained names in root-to-leaf order
+with one leading slash and a slash after every component.
+
+`CD`, `MKDIR`, and `RMDIR` ensure and check the filesystem before parsing; if
+the gate fails, the would-be operand remains for the outer evaluator. Exact
+`..` in `CD` moves to the cached parent except at root, exact `/` stores root
+255, and any other token is
+one direct current-directory component lookup whose entry type must be 8.
+Beyond shared parser scratch, its only state change is volatile CWD; it performs
+no sync or media command. In particular,
+`CD` does not use the separately admitted `_RESOLVE-PATH`: embedded slash
+syntax, `.`, and multi-component paths have no navigation meaning here.
+
+`MKDIR` rejects the first exact occupied sibling match, selects the lowest slot
+whose `name[0]` is zero, clears all 48 bytes, copies the zero-padded 24-byte
+NAMEBUF, writes type 8, the low CWD parent byte, and low-u32 epoch seconds, then
+runs the ordinary bitmap/directory/flush `FS-SYNC`. It allocates no sectors and
+does not update the parent mtime. `RMDIR` resolves one direct child, requires
+type 8, and rejects it if any occupied entry names that slot as parent. Empty
+success clears exactly 48 bytes and performs the same sync without freeing
+payload sectors or updating a parent.
+
+The source exposes several important edge behaviors. A parent self-loop or
+cycle accepted by metadata validation makes `PWD` nonterminating, and a
+validator-accepted 24-byte non-NUL name lets `.ZSTR` read beyond its field.
+Depths above eight display only the suffix nearest CWD and silently omit the
+ancestors farthest from CWD even though the walk continues to root. `MKDIR`
+accepts an empty token, producing a
+metadata-bearing entry that remains logically free because `name[0]` is zero.
+Tokens longer than 23 bytes silently operate on the truncated NAMEBUF prefix.
+It also permits the operationally reserved names `..` and `/`, which ordinary
+`CD` cannot reach as named children. Validator-accepted duplicate sibling names
+are first-slot-wins for lookup and mutation. Both mutation words ignore MP64FS
+policy flags, mutate cache before nontransactional sync, and can leave
+cache/media prefixes on an exception. `RMDIR` does not account for saved CWD
+snapshots in the loader/REQUIRE machinery, and its nonempty rejection drops
+only one of two target slot copies, returning with the slot leaked on the data
+stack. The next
+uncovered seam is the Documentation Browser at line 6297.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

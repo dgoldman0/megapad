@@ -859,8 +859,10 @@ storage-compatibility, legacy file, and initial MP64FS cache/helper layers,
 the MP64FS load/sync/ensure/format lifecycle, cached directory listing, exact
 name lookup, metadata creation/deletion/rename, primary-extent file
 publication, cache-only free-space reporting, primary-extent Buffer save/load,
-and the fixed FD pool with cached open/metadata-flush/final-close lifecycle
-through line 5610.
+the fixed FD pool with cached open/metadata-flush/final-close lifecycle, the
+checked source compiler, nested two-extent filesystem `LOAD`, application
+loader and ANSI helpers, whole-file encryption, and parent-byte directory
+navigation/mutation through line 6296.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -872,10 +874,10 @@ autoload, metadata formatting, compact type publication, direct-child listing,
 bitmap free-space reporting, exact-name lookup, deterministic timestamps,
 ordered metadata mutation, byte-exact `CAT` output, global cached
 fragmentation reporting, ordered Buffer/file transfers, descriptor allocation,
-cached open snapshots, used-metadata flush, and ordered close/release are
-executable semantic behavior rather than reporting-only shims. The frontier
-now ends at line 5610; the unqualified `LOAD` family begins with its heading at
-line 5611.
+cached open snapshots, used-metadata flush, ordered close/release, source
+evaluation/loading, encryption, and navigation/mutation are executable
+semantic behavior rather than reporting-only shims. The frontier now ends at
+line 6296; the Documentation Browser begins at line 6297.
 
 ---
 
@@ -1159,8 +1161,12 @@ ledger is `FD-MAX`, `FD-SLOT-SZ`, `FD-POOL`, `FD-SLOT`, `FD-ALLOC`,
 1,152-byte pool, zero-initializes `OP-SLOT`, initially binds deferred `FCLOSE`
 to `(FCLOSE-NOFS)`, binds deferred `OPEN` to `(OPEN)`, and finally rebinds
 `FCLOSE` to `(FCLOSE)`. Those dictionary/allocation/vector mutations are its
-only load effects; it does no filesystem or media I/O and emits nothing. The
-next uncovered seam is the `LOAD` heading at line 5611.
+only load effects; it does no filesystem or media I/O and emits nothing.
+Subsequent exact fixtures qualify the checked compiler and filesystem loader,
+application loader and ANSI helpers, filesystem encryption, and subdirectory
+navigation through line 6296. Their provenance and edge contracts are recorded
+in the corresponding sections below and in `docs/simulator-contract.md`; the
+next uncovered seam is the Documentation Browser at line 6297.
 
 ---
 
@@ -1792,7 +1798,7 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
-### Hosted Filesystem, Buffer-I/O, and FD-Lifecycle Checkpoint
+### Hosted Filesystem Frontier
 
 The native hosted `MP64FS-VALID?` returns literal `1` or `0` after up to three
 raw checked reads and the executable BIOS's narrow geometry/metadata
@@ -1801,7 +1807,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 5610. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 6296. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -1946,8 +1952,12 @@ the field to preserve the stale comment.
 | `OPEN` | `( "name" -- fdesc \| 0 )` | Ensure and find a cached name, allocate the lowest FD, and snapshot its directory fields with cursor zero; return zero on gate, miss, or exhaustion. |
 | `FFLUSH` | `( fdesc -- )` | Store low-u32 `F.USED` into the cached entry selected by `F.SLOT`, then call `FS-SYNC`; it does not write payload. |
 | `FCLOSE` | `( fdesc -- )` | Ignore zero; when `FS-OK` is true flush used metadata before release, otherwise silently release without persistence. |
-| `LOAD` | `( "filename" -- )` | Later evaluator source outside the current hosted frontier; in full KDOS it opens a Forth source file and evaluates each line. |
+| `LOAD` | `( "path" -- )` | Resolve an MP64FS Forth source path, concatenate its validated primary/secondary extents, and evaluate its physical lines. |
 | `SOURCE-EVALUATE-CHECKED` | `( addr len -- status )` | Compile a complete in-memory source buffer with deterministic status and diagnostics; stop at first failure. |
+| `PWD` | `( -- )` | Print root or at most the eight path components nearest CWD. It does not ensure/check the filesystem. |
+| `CD` | `( "component" -- )` | Move to exact `..`, root `/`, or one direct type-8 child; embedded slash syntax is not resolved. |
+| `MKDIR` | `( "component" -- )` | Create a metadata-only type-8 child in the lowest logically free slot, then sync. |
+| `RMDIR` | `( "component" -- )` | Clear and sync one direct empty type-8 child; nonempty rejection leaks the target slot cell. |
 | `DIRENT` | `( n -- addr )` | Address of directory entry *n* in the RAM cache (for low-level access). |
 
 `FS-LOAD` clears `FS-OK`, destructively binds raw storage, delegates to the
@@ -2169,8 +2179,9 @@ clears descriptor/reserved cells or file payload. No allocator/close/flush
 operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
-state, and deferred vectors are global and unlocked. The frontier ends at line
-5610; the next uncovered seam is the `LOAD` heading at line 5611.
+state, and deferred vectors are global and unlocked. The contiguous frontier
+continues through subdirectory navigation at line 6296; the next uncovered seam
+is the Documentation Browser heading at line 6297.
 
 **Example — filesystem operations:**
 ```forth
@@ -2180,7 +2191,7 @@ CAT getting-started          \ print a file's contents
 0 1 512 BUFFER disk-page      \ one full sector of byte-width backing
 1 5 MKFILE my-data            \ matching one-sector data file
 disk-page SAVE-BUFFER my-data \ save the complete primary allocation
-LOAD my-script.f             \ later source; outside this hosted frontier
+LOAD my-script.f             \ resolve and evaluate an MP64FS Forth source
 FS-FREE                      \ check remaining space
 ```
 
@@ -2237,6 +2248,56 @@ write protection. The detailed source comment says an unencrypted file
 returns -1, while the executable early no-op returns 0; an encrypted empty file
 returns 0 without clearing its flag. These are current source discrepancies,
 not guarantees a caller should build new secure storage around.
+
+---
+
+### §7.6.2 Subdirectory Navigation
+
+Runtime navigation uses the one-byte parent field in the flat MP64FS directory
+cache. Root is 255; a non-root value is a directory-entry slot.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `PWD` | `( -- )` | Print root or the retained current path with leading/trailing `/`. |
+| `CD` | `( "component" -- )` | Move to exact `..`, root `/`, or one direct type-8 child component. |
+| `MKDIR` | `( "component" -- )` | Create a metadata-only type-8 child in the lowest logically free slot and sync. |
+| `RMDIR` | `( "component" -- )` | Clear and sync one direct empty type-8 child; the nonempty rejection has the stack discrepancy below. |
+
+`PWD` does not call `FS-ENSURE`: root prints ` /` even without mounted media,
+while non-root operation trusts CWD and the cached parent graph. It walks until
+parent 255 but retains only the first eight slots nearest CWD, so a deeper path
+silently omits its highest ancestors. Each displayed component ends in `/`.
+
+`CD`, `MKDIR`, and `RMDIR` call `FS-ENSURE` and check `FS-OK` before parsing;
+a failed gate leaves the would-be operand for the outer evaluator. Exact `..`
+in `CD` moves to the cached parent except at root, exact `/` moves to root, and
+every other token is a single exact current-directory lookup that must have
+type 8. Despite older examples that show `CD /tools/crypto`, this word does not
+call `_RESOLVE-PATH`; embedded slash syntax and `.` are ordinary component
+bytes and normally miss. Successful CD is volatile and performs no sync or
+storage command.
+
+`MKDIR` rejects the first existing exact sibling, chooses the lowest entry whose
+`name[0]` is zero, clears all 48 bytes, copies the zero-padded 24-byte NAMEBUF,
+sets type 8 and the low CWD parent byte, and stores low-u32 epoch seconds as
+mtime. `RMDIR` requires a direct type-8 child and scans all occupied entries
+for children before clearing it. Both successful mutations use ordinary
+`FS-SYNC` (unchanged bitmap write, complete directory write, then flush), do
+not allocate/free data sectors, and do not update a parent mtime.
+
+The executable edge behavior is intentionally documented rather than hidden.
+A validator-accepted parent cycle makes `PWD` nonterminating, and a 24-byte
+non-NUL name lets `.ZSTR` read beyond the packed field. Empty `MKDIR` writes
+type/parent/mtime into a slot whose zero first name byte still makes it
+logically free. Tokens longer than 23 bytes silently operate on the truncated
+NAMEBUF prefix. Names `..` and `/` are accepted for creation but are shadowed
+by CD's operators. Validator-accepted duplicate siblings are first-slot-wins.
+MP64FS readonly/system policy bits are ignored. Cache is mutated before
+nontransactional sync, and a late failure can retain partial
+publication. On a nonempty-directory rejection, `RMDIR` drops only one of two
+target-slot copies and returns with `( -- slot )` instead of a clean stack.
+Shared CWD, NAMEBUF/PATHBUF/PN-LEN parser state, `_PWD-STK`, and cache state are
+unlocked.
 
 ---
 
