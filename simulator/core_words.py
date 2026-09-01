@@ -18,6 +18,7 @@ from simulator.aes import (
     AES_STATUS,
     AES_TAG,
 )
+from simulator.dictionary import MAX_NAME_BYTES
 from simulator.errors import ExecutionError, ForthAbort
 from simulator.entropy import TRNG_RAND8, TRNG_RAND64, TRNG_SEED
 from simulator.ir import Branch, BranchZero, Idle, Return, UartReadAttempt
@@ -366,6 +367,43 @@ def _count(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     length = runtime.memory.read8(address)
     context.data.replace_top(address + 1)
     context.data.push(length)
+
+
+def _ascii_upper(byte: int) -> int:
+    if 0x61 <= byte <= 0x7A:
+        return byte - 0x20
+    return byte
+
+
+def _find(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    counted_address = context.data.peek()
+    length = runtime.memory.read8(counted_address)
+    found = None
+
+    # Hosted definitions retain canonical names in semantic metadata.  Walk
+    # that live order explicitly so FIND still has the native linked search's
+    # newest-first, length-first byte access behavior without interpreting the
+    # semantic code slots as MP64 machine code.
+    if 0 < length <= MAX_NAME_BYTES:
+        for word in reversed(runtime.dictionary.words):
+            if len(word.name) != length:
+                continue
+            for offset, candidate_byte in enumerate(word.name):
+                query_byte = runtime.memory.read8(
+                    u64(counted_address + 1 + offset)
+                )
+                if _ascii_upper(query_byte) != _ascii_upper(candidate_byte):
+                    break
+            else:
+                found = word
+                break
+
+    context.data.require_push_capacity(1)
+    if found is None:
+        context.data.push(0)
+        return
+    context.data.replace_top(found.xt)
+    context.data.push(1 if found.immediate else -1)
 
 
 def _store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -1650,6 +1688,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"W@", lambda context: _w_fetch(runtime, context)),
         (b"L@", lambda context: _l_fetch(runtime, context)),
         (b"COUNT", lambda context: _count(runtime, context)),
+        (b"FIND", lambda context: _find(runtime, context)),
         (b"!", lambda context: _store(runtime, context)),
         (b"OFF", lambda context: _off(runtime, context)),
         (b"C!", lambda context: _c_store(runtime, context)),

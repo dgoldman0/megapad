@@ -174,6 +174,20 @@ address for the lifetime of its definition.  It works through `'`, `[']`,
 records.  No Python object identity or host function pointer may be exposed as
 an execution token.
 
+Public `FIND` searches the live, published semantic definitions newest-first
+for an exact-length counted name, folding only ASCII `a` through `z`. A hit
+replaces the counted-string address with the stable execution token and
+returns `1` for an immediate word or the all-ones cell for an ordinary word;
+a miss preserves the address and returns zero. Empty names, count bytes above
+the 127-byte dictionary-name limit, and non-ASCII names are ordinary misses.
+The count is read before lookup, and query bytes are read low-to-high only
+while comparing a candidate of the same length. Thus an impossible count does
+not require a mapped payload, while a later comparison fault leaves both
+stacks unchanged. The hosted bounded stack also proves room for the result
+flag before changing the input cell. This is a semantic linked search over
+live metadata: it neither consults nor mutates the optional dictionary side
+index, and it does not reinterpret semantic code slots as MP64 instructions.
+
 Compiled `S"` occurrences own distinct `payload + NUL` spans in their defining
 colon's guest-visible body. Their semantic operation pushes that body's stable
 address and source length, including when a created child enters a `DOES>`
@@ -2191,9 +2205,10 @@ a retained terminal, renderer, raw UART MMIO, capacity, or timing claim.
 and returns the original spelling at offset nine. This agrees with the
 executable BIOS's no-padding header layout; hosted semantic code slots can have
 different sizes because the slice never derives a code address or next header
-from a name. Raw guest header mutation affects these readers and walkers even
-though hosted dictionary lookup retains semantic metadata, so corrupted-state
-agreement between raw search and `FIND` is not claimed.
+from a name. Raw guest header mutation affects these readers and walkers,
+while hosted `FIND` retains live semantic name, immediacy, and execution-token
+metadata. Corrupted-state agreement between those raw searches and `FIND` is
+therefore not claimed.
 
 `ICONTAINS?` stores all four arguments in global scratch, treats an empty
 pattern as matching, rejects a pattern longer than its subject, and otherwise
