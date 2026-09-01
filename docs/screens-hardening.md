@@ -152,13 +152,17 @@ surface:
 
 | Issue | Detail |
 |-------|--------|
-| **No timeout** | `TUI-INPUT` blocks on `KEY` forever.  A stuck UART means a frozen TUI.  Consider a `KEY-TIMEOUT` variant. |
-| **No history** | No up-arrow recall of previous input.  Arrow keys are consumed and discarded. |
+| **No timeout** | `TUI-INPUT` blocks on `KEY` forever. A stuck UART or truncated CSI means a frozen TUI. Consider a `KEY-TIMEOUT` variant or a nonblocking parser. |
+| **Parameterized CSI stack leak** | The CSI loop drops only the final byte. A simple `ESC [ A` is balanced, but `ESC [ 1 ; 5 A` leaves `49 59 53` above `( buf maxlen pos )`; subsequent editing can use those leaked cells as buffer state. This contradicts the comment that CSI is consumed harmlessly. |
+| **No history** | No up-arrow recall of previous input. A simple final-byte arrow sequence is consumed and discarded; parameterized variants are affected by the stack leak above. |
 | **No cursor movement** | Left/right arrow within the line is not supported.  Backspace only erases from the end. |
 | **Buffer size trust** | `W.INPUT` passes `maxlen` to the backend, but the backend must enforce it.  A buggy custom backend installed via `WV-INPUT WV!` could overrun. |
 
-These are enhancements, not bugs — the current implementation is correct
-for its spec.  Listed here for completeness.
+History, cursor movement, timeout policy, and validation of replacement
+backends are hardening or feature work. The parameterized-CSI stack leak is a
+current correctness and memory-safety defect in the default backend; it is
+covered as unchanged-source behavior by the simulator rather than silently
+repaired there.
 
 ---
 
@@ -173,5 +177,6 @@ for its spec.  Listed here for completeness.
 | 5 | Unregistration (§1) | Medium | Medium | Compaction done; tail/reset cleanup open |
 | 6 | Key namespace docs (§6) | Low | Tiny | **Done** |
 | 7 | SCR-SEL reset (§7) | Low | Small | **Done** |
-| 8 | W.INPUT enhancements (§8) | Low | Large | Deferred |
+| 8 | Fix W.INPUT parameterized CSI leak (§8) | High | Small | Open |
 | 9 | Spinlock for multicore (§4 long-term) | Low | Medium | Deferred |
+| 10 | W.INPUT enhancements (§8) | Low | Large | Deferred |

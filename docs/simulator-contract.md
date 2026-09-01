@@ -291,7 +291,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 7838.
+KDOS source frontier now ends at line 8339.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1450,7 +1450,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 7838. Exact unchanged lines
+The contiguous source frontier now ends at line 8339. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2488,10 +2488,62 @@ The following unchanged-source discrepancies are part of this acceptance:
   `label-xt ['] EXECUTE CATCH` path leaves the saved data-stack-pointer cell
   exposed after the throw instead of satisfying the declared empty result.
 
-The contiguous frontier now ends at line 7838. Line 7839 begins the §9.5
-Screen Definition Language and widget-vector block. Nothing in this slice
-loads `rich-terminal.f`, projects a rich frame, or advances the rich-terminal
-vertical.
+Exact unchanged lines 7839 through 8339 contain 501 LF records and 18,051
+bytes, with SHA-256
+`a47d29e51c6754e24852bea08261b3119389e8a1849b9e39322bf1e9013cce7d`
+and Git blob `01a3e0eff93567b66441e071003b3e7a25809d3d`. They publish 86
+definitions: 16 constants, one 120-byte `WVEC` created body, 65 colon words,
+and four variables. The 17 string-bearing colon definitions contain 102
+compiled `S\"` literals in 1,939 body bytes. Total hosted dictionary growth is
+4,297 bytes: 2,206 bytes of headers and semantic slots, 1,939 bytes of literal
+pools, and 152 bytes of vector/variable bodies.
+
+Load executes `INSTALL-TUI`: slots 0 through 12 and 14 receive the ordinary
+ANSI TUI XTs, while the declared `WV-NONE` slot 13 retains its prior raw
+`ALLOT` byte pattern. The four statistics variables are zero-initialized.
+There is no key read, filesystem or storage I/O, direct NIC access, or UART
+publication during load. Public `W.*` dispatch, scalar row renderers, list
+selection, bounded line editing, document enumeration, and safe Home,
+Storage, Cores, and Buffer Statistics compositions execute through the
+unchanged vector vocabulary. Their current selected renderer still publishes
+ANSI bytes to UART; this is renderer-neutral source dispatch evidence, not a
+rich-frame, compositor, or physical-viewer checkpoint.
+
+The following additional source-literal discrepancies are accepted and left
+visible:
+
+- `WV@` and `WV!` neither check the 0-through-14 index nor validate the XT.
+  Slot 13 is not installed, so dispatching it without an explicit binding can
+  execute retained raw allocation bytes as an XT.
+- `TUI-DETAIL` tests `count >= selection` in its exit branch. It therefore
+  suppresses every valid selection (and the `selection = count` boundary),
+  while a larger selection prints the separator and executes the numeric
+  selection as an XT, leaving the supplied detail XT on the stack.
+- `TUI-INPUT` blocks indefinitely at `KEY`, including after a truncated CSI.
+  A simple sequence such as `ESC [ A` balances, but every non-final byte in a
+  parameterized CSI remains on the data stack. For example, `ESC [ 1 ; 5 A`
+  leaves `49 59 53` above `( buf maxlen pos )`, corrupting subsequent input
+  handling despite the source comment that CSI is consumed harmlessly.
+- `.STOR-ROW ( slot i -- )` prints and drops only `i`, returning `slot`.
+  `.DOC-FILE-LIST` resets numbering separately for each type, leaves
+  `DOC-TUT-COUNT` stale when no filesystem is mounted, and `.DOCS-BODY`
+  publishes only the final tutorial count as `SCR-MAX`; the later combined
+  document activation path consequently does not share the displayed index
+  model.
+- Selected `.STOR-BODY` reaches the already documented matched-path extra
+  `DROP` in `FIND-NTH-ACTIVE`. `.HOME-MEM-BUFS` uses `BUF-COUNT @ 0 DO`, so a
+  true zero count wraps instead of making a zero trip. `SCR-HOME-MEMORY`
+  computes free dictionary space from a hard-coded 65,536-byte ceiling rather
+  than the hosted dictionary region.
+- `.BSTATS-BODY` returns before clearing its four counters when `BUF-COUNT` is
+  zero, so prior values remain stale. The Home network views translate absent
+  `NET-RX?` into the user label `idle`; that label is not evidence that a NIC
+  exists.
+
+The contiguous frontier now ends at line 8339. Line 8340 begins the screen
+label, registration, key-handler, and event-loop tail of §9. Nothing in the
+qualified frontier loads `rich-terminal.f`, projects a rich frame, or advances
+the rich-terminal vertical.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

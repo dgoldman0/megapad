@@ -36,7 +36,7 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 7838. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 8339. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
@@ -51,8 +51,9 @@ ordinary descriptors and `FREAD`/`FCLOSE`, followed by raw linked-header
 Dictionary Search, the task registry/synchronous run-to-completion executor,
 Timer Preemption Setup, Multicore Dispatch's honest one-core
 validation/fallback behavior, the §8.2–§8.7 queue, affinity, flag, message,
-and named-lock state machines, and the §8.8–§8.9 cluster-control and MPU
-failure boundary.
+and named-lock state machines, the §8.8–§8.9 cluster-control and MPU failure
+boundary, absent-network forward bridge, ANSI screen registry/control layer,
+and §9.5–§9.6 widget-vector SDL and ordinary screen definitions.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -931,8 +932,9 @@ untouched. No operation validates pool membership, alignment, allocation, or
 directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
 flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
 and deferred targets are global and unlocked. The contiguous hosted frontier
-continues through the §9.1–§9.4 screen registry/control layer at line 7838;
-§9.5 begins at line 7839.
+continues through the §9.5–§9.6 widget-vector SDL and ordinary screen
+definitions at line 8339; §9's screen registration/event-loop tail begins at
+line 8340.
 
 ### Documentation Access
 

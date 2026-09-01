@@ -869,8 +869,9 @@ loader and ANSI helpers, whole-file encryption, parent-byte directory
 navigation/mutation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
 the one-core queue/affinity/flag/message/lock state machines, and the
-cluster-control/MPU source boundary, absent-network forward bridge, and
-§9.1–§9.4 ANSI screen registry/control layer through line 7838.
+cluster-control/MPU source boundary, absent-network forward bridge,
+§9.1–§9.4 ANSI screen registry/control layer, and §9.5–§9.6 widget-vector SDL
+and ordinary screen definitions through line 8339.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -888,8 +889,8 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-7838; §9.5 begins at line 7839 with the Screen Definition Language and
-widget-vector vocabulary.
+8339; line 8340 begins the screen label, registration, input-handler, and
+event-loop tail of §9.
 
 ---
 
@@ -1178,9 +1179,9 @@ Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
-§8.2–§8.7, §8.8–§8.9, and §9.1–§9.4 through line 7838. Their provenance and
+§8.2–§8.7, §8.8–§8.9, and §9.1–§9.6 through line 8339. Their provenance and
 edge contracts are recorded in the corresponding sections below and in
-`docs/simulator-contract.md`; §9.5 begins at line 7839.
+`docs/simulator-contract.md`; the remaining §9 tail begins at line 8340.
 
 ---
 
@@ -1822,7 +1823,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 7838. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 8339. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2195,8 +2196,9 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through the §9.1–§9.4 screen registry/control layer at line 7838;
-§9.5 begins at line 7839.
+continues through the §9.5–§9.6 widget-vector SDL and ordinary screen
+definitions at line 8339; the screen registration/event-loop tail begins at
+line 8340.
 
 **Example — filesystem operations:**
 ```forth
@@ -2929,11 +2931,57 @@ simulator:
   throwing label is visibly replaced with `?`, but the exact exception-stack
   sequence leaves a saved data-stack-pointer cell on the caller's stack.
 
-The contiguous hosted frontier ends at line 7838. Line 7839 starts §9.5's
-Screen Definition Language and widget-vector vocabulary. This checkpoint is
-acceptance of the existing byte-oriented ANSI control path; it is not
-acceptance of a rich-terminal module, projection, compositor, or physical
-viewer.
+### Hosted unchanged-source frontier through §9.6
+
+Exact unchanged lines 7839–8339 contain 501 LF records and 18,051 bytes, with
+SHA-256
+`a47d29e51c6754e24852bea08261b3119389e8a1849b9e39322bf1e9013cce7d`
+and Git blob `01a3e0eff93567b66441e071003b3e7a25809d3d`. They publish 86
+definitions: 16 constants, one 120-byte `WVEC` table, 65 colon words, and four
+variables. Seventeen colon definitions contain 102 compiled `S\"` operations
+and 1,939 bytes of guest-addressable literal storage. Together with 152 bytes
+of vector and variable bodies and 2,206 bytes of headers/semantic slots, the
+slice grows the hosted dictionary by exactly 4,297 bytes.
+
+The only load-time execution is `INSTALL-TUI`. It binds vector slots 0–12 and
+14 to the ANSI implementations, deliberately leaving raw `WV-NONE` slot 13
+untouched, and the four statistics variables begin at zero. Loading reads no
+key, emits no UART bytes, and performs no filesystem, storage, or direct NIC
+operation. Focused execution preserves the public `W.*` dispatch boundary and
+the literal ANSI output of the selected renderer. Ordinary safe Home, Storage,
+Cores, and Buffer Statistics compositions run through that same boundary, but
+byte-oriented TUI output is not acceptance of a rich-terminal module,
+projection, compositor, or physical viewer.
+
+The following discrepancies are source-literal and are not repaired by the
+simulator:
+
+- `WV@`/`WV!` accept any index or XT. `INSTALL-TUI` does not initialize slot
+  13, so dispatch through it before an explicit binding uses retained raw
+  allocation bytes.
+- `TUI-DETAIL` exits when `count >= selection`, suppressing every valid
+  selection and the `selection = count` boundary. A selection larger than the
+  count instead prints a separator, executes the numeric selection as an XT,
+  and leaves the intended detail XT on the stack.
+- `TUI-INPUT` waits indefinitely at `KEY`, including for a truncated CSI. A
+  single-final-byte CSI such as `ESC [ A` balances, but a parameterized
+  sequence such as `ESC [ 1 ; 5 A` leaves the non-final bytes `49 59 53` above
+  `( buf maxlen pos )`, corrupting subsequent input state. This contradicts
+  the source comment that other CSI sequences are consumed harmlessly.
+- `.STOR-ROW ( slot i -- )` returns `slot`. `.DOC-FILE-LIST` restarts its
+  visible index for each file type and leaves `DOC-TUT-COUNT` stale on the
+  unmounted path; `.DOCS-BODY` publishes only its final tutorial count as
+  `SCR-MAX`, whereas later activation uses a combined document selector.
+- Selected `.STOR-BODY` inherits the matched-path extra `DROP` in
+  `FIND-NTH-ACTIVE`. `.HOME-MEM-BUFS` uses non-zero-trip
+  `BUF-COUNT @ 0 DO`, and `SCR-HOME-MEMORY` assumes a fixed 65,536-byte
+  dictionary ceiling. `.BSTATS-BODY` exits on zero buffers before clearing
+  its counters, retaining stale values.
+- The Home views render absent `NET-RX?` as `idle`; this is a user label, not
+  evidence of NIC presence.
+
+The contiguous hosted frontier ends at line 8339. Line 8340 starts §9's
+screen-label, registration, input-handler, and event-loop tail.
 
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
