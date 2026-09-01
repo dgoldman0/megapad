@@ -186,18 +186,18 @@ are required semantics.  JIT controls may be semantic no-ops only when their
 documented effect is purely optimization.  Capability and status words must
 report the simulator's actual support.
 
-### Semantic BIOS evaluator prerequisite
+### Semantic evaluator and KDOS checked source
 
 The admitted hosted BIOS vocabulary includes `EVALUATE`, the early
 `EVALUATE-CHECKED`, `EVALUATE-FINISH`, `EVALUATOR-RESET`,
 `EVALUATOR-UNWIND`, `EVAL-STATUS`, `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH`,
 `EVAL-THROW`, and `EVAL-TOKEN`. `EVALUATE ( addr len -- )` interprets one
 physical input's raw bytes, including carriage returns, with a maximum length
-of 255. LF-delimited multi-line input belongs to the pending KDOS walker. An
-overlength request rejects before reading the guest address. The one-core
-compiler, open-definition state, and compile-time control stack persist across
-normal evaluator calls, permitting definitions and conditionals to span
-inputs.
+of 255. LF-delimited multi-line input belongs to KDOS
+`SOURCE-EVALUATE-CHECKED`. An overlength request rejects before reading the
+guest address. The one-core compiler, open-definition state, and compile-time
+control stack persist across normal evaluator calls, permitting definitions
+and conditionals to span inputs.
 
 The early BIOS `EVALUATE-CHECKED ( addr len -- status )` returns 0 for success,
 1 for the first undefined token, 2 for overlength input, and 3 for evaluator
@@ -227,12 +227,28 @@ state before the context can be reused. Nested guest evaluation remains
 charged to the active outer public step budget; it does not reset or enlarge
 that budget.
 
+Exact KDOS source shadows the early checked primitive with a guest `CATCH`
+wrapper. Normal evaluator statuses 0 through 3 pass through. A caught nonzero
+guest `THROW` consumes the restored evaluator arguments, records the exact code
+in `EVAL-THROW`, reconstructs abandoned input depth through
+`EVALUATOR-UNWIND`, records status 5, and returns normally.
+
+`SOURCE-EVALUATE-CHECKED ( addr len -- status )` walks LF-delimited physical
+input, strips one terminal CR from each line, skips blank lines, and supports a
+final line without LF. It publishes one-based `EVAL-LINE`, stops at the first
+nonzero line status, and calls `EVALUATE-FINISH` only after ordinary end of
+input. Status 4 therefore denotes unfinished compiler/control state. It does
+not roll the dictionary back: a transaction caller saves `HERE`/`LATEST`,
+invokes `DICT-ROLLBACK` after failure, and then calls `EVALUATOR-RESET`.
+Rollback removes already completed definitions in the transaction; reset
+discards the hidden unfinished compiler while retaining diagnostics.
+
 This state is runtime-global for the one admitted core and is not a concurrent
-evaluator contract. The prerequisite does not publish or qualify public
+evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
-interpret-time `[IF]`, the KDOS status-5 checked shadow,
-`SOURCE-EVALUATE-CHECKED`, or filesystem `LOAD`. Consequently it does not
-advance the contiguous KDOS source frontier beyond line 5610.
+or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
+source domain and different failure behavior, specified below. The contiguous
+KDOS source frontier now ends at line 5944.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1309,7 +1325,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5610. Exact unchanged lines
+The contiguous source frontier now ends at line 5944. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1688,8 +1704,82 @@ close path validates membership, alignment, allocation, or directory identity.
 A stale pointer to a lowest-first-reused address can therefore flush or release
 the new occupant (an ABA hazard), while a double close can race logical reuse.
 Pool headers, fdesc payloads, `OP-SLOT`, parser state, directory cache, and the
-deferred vectors are global and unlocked. The next uncovered seam is the
-`LOAD` heading at line 5611.
+deferred vectors are global and unlocked.
+
+Exact unchanged lines 5611 through 5944 contain 334 LF records and 11,337
+bytes, with SHA-256
+`efad4e40860bc7cdc484b58ac652d9b7286541a7adfdb156d4ae66a3f73ba9fe`
+and Git blob `8fd4577b4ac2128934672eb123ca78bf88468d52`. Their exact 50-definition ledger
+installs four loader globals, constants for a 16 × 56-byte nesting stack,
+frame/evaluator/transaction accessors, three deferred transaction actions,
+two-extent read helpers, path scratch and traversal, six evaluator-status
+constants, the KDOS checked-evaluator shadow, five whole-source walker cells,
+`SOURCE-EVALUATE-CHECKED`, and final raw filesystem `LOAD`. The transaction
+actions are all bound to `_LD-TXN-NOOP`; the later module registry owns their
+real commit/rollback meanings. Fixture evaluation allocates dictionary storage
+and explicitly clears `_LD-SP`, but performs no filesystem, storage, clock,
+lock, or UART operation.
+
+`LOAD` is a parsing word and is admitted only through an active ordinary source
+cursor. It calls `FS-ENSURE` before `PARSE-NAME`: an unavailable filesystem
+prints ` No filesystem` plus CRLF, returns before consuming the filename, and
+lets the enclosing interpreter process that token. After parsing, a lookup
+miss, zero `DE.USED`, or allocation failure emits its literal diagnostic and
+restores the saved loader frame without payload I/O or transaction actions.
+The fixed nesting stack saves `LD-BUF`, `LD-SZ`, `LD-CUR`, `LD-LEN`, CWD, the
+evaluator-depth checkpoint, and a transaction head; a seventeenth frame aborts
+with the source's `REQUIRE nested too deep` message.
+
+The admitted successful domain has valid stable mounted metadata; total path
+storage at most 127 bytes; each intermediate and final component at most 23
+bytes; and an in-range positive combined extent allocation. Source is
+LF-delimited, contains no retained CR, has physical lines at most 255 bytes,
+and ends with complete compiler/control state. A final line need not carry LF.
+The loader allocates the combined primary/secondary sector span, reads each
+complete run contiguously, and evaluates only `DE.USED`, so transferred
+allocation padding is not source. Relative nested loads inherit the containing
+directory during execution and restore each caller's CWD and walker globals.
+Qualification crosses the 512-byte extent seam inside a definition, then
+loads a sibling module normally.
+
+Normal completion calls transaction commit, frees the allocation, restores
+the frame, and then calls after-release. Nested action order is inner commit,
+inner after-release, outer commit, outer after-release. A guest `THROW` during
+walking is caught, evaluator depth is unwound to the frame checkpoint,
+rollback is called, the allocation/frame are released, after-release runs, and
+the exact exception is rethrown. The loader is reusable afterward. Because all
+three actions are still no-ops, a definition completed before that exception
+remains published. This is the literal pre-module-registry state, not a
+transactional dictionary guarantee.
+
+Path resolution has two admitted source defects. Intermediate and final copies
+have no component-length bound; oversized paths are excluded, and hosted
+semantic dictionary metadata cannot reproduce native linked-header corruption
+from such an overwrite. More visibly, `_RESOLVE-PATH` prints failure for a
+missing or nondirectory intermediate but returns no status. `LOAD` continues
+with that rejected component in `NAMEBUF`; it may print a second miss or load
+the component itself instead of the requested final file. Focused acceptance
+pins the latter result rather than adding simulator-only control flow.
+
+The data read occurs before `_LD-WALK-GUARDED`. A read `ABORT"` therefore skips
+evaluator unwind, transaction actions, free, and frame restore. The admitted
+failure oracle changes media generation at the second-extent acceptance edge:
+the first sector remains in `LD-BUF`, `FS-OK` and block diagnostics report
+stale, the lock is released, but the allocation is leaked, `_LD-SP` remains 56,
+CWD remains resolved, and `LD-BUF`/`LD-SZ` remain replaced. The affected
+runtime is disposable; the simulator does not conceal this ordering defect.
+
+`_LD-WALK` also calls raw `EVALUATE` without checking `EVAL-STATUS` and never
+calls `EVALUATE-FINISH`. It preserves CR instead of applying the checked
+walker's CRLF rule. Undefined and overlong lines can therefore be skipped,
+later lines can execute and clear the diagnostic, and unfinished compiler
+state can survive a nominally successful load. Acceptance demonstrates the
+undefined-middle-line continuation. `LOAD` additionally performs no file-type
+or flag check. Loader, path, parser, evaluator, cache, diagnostic, and
+transaction scratch is runtime-global and unlocked. These literal KDOS
+behaviors define the current contract; no direct host filesystem loader or
+simulator repair is substituted. The next uncovered seam is Application
+Loading at line 5945.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

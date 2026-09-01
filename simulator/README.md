@@ -122,10 +122,13 @@ The implemented slices provide:
   verification, and its dictionary/stack/heap proximity guard;
 - an exact-record bootstrap loader that supplies a shadowable `REQUIRE` before
   KDOS exists, with nested budgets, cycle detection, and registry-only failure
-  cleanup; and
+  cleanup;
 - the one-core semantic BIOS evaluator: raw guest `EVALUATE` through 255 bytes,
   checked statuses and diagnostics, persistent cross-call compiler/control
-  state, explicit finish/reset/unwind, and one inherited public step budget.
+  state, explicit finish/reset/unwind, and one inherited public step budget; and
+- the unchanged KDOS checked whole-source compiler and MP64FS `LOAD`, including
+  nested relative paths, concatenated primary/secondary extents, guest
+  `THROW` cleanup, and the literal pre-registry transaction hooks.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 task stack arenas and cooperative scheduling remain pending. The IDL seam
@@ -150,8 +153,9 @@ callback takes the BIOS diagnostic-and-ABORT fallback. Unbacked contexts from
 dictionary operations use the canonical foreground stack margin. Direct
 `runtime.dictionary` mutation remains a low-level host/test seam outside the
 guest ABI. The external interval and its source-defined switching words are
-now admitted, as is the persistent semantic BIOS evaluator. The later
-KDOS-owned checked wrapper and loader transaction remain pending. Hosted
+now admitted, as are the persistent semantic BIOS evaluator and KDOS-owned
+checked source/loader layer. The later module registry remains responsible for
+installing real loader transaction actions. Hosted
 Bank-0 relocation still refuses to move below the semantic dictionary's
 initial start even though native raw `ALLOT` has no equivalent lower-bound
 check. That pre-existing divergence is outside the userland transition and is
@@ -644,24 +648,25 @@ kept for the complete dispatch because unchanged KDOS pops a saved handler
 cell immediately before restoring the `HANDLER` variable. This conservative,
 fail-closed boundary covers that one-operation cleanup window and prevents a
 stale guest handler from reviving abandoned continuations. A host escape now
-clears hidden evaluator frames and unfinished compiler state; KDOS dictionary
-transaction ownership and exact loader cleanup remain pending. Ordinary source
+clears hidden evaluator frames and unfinished compiler state. KDOS
+module-registry transactions remain pending; the raw loader's exact cleanup
+and pre-guard leak are qualified below. Ordinary source
 `THROW` never escapes the outer public host boundary, including when it crosses
 a nested host primitive's `execute`/`evaluate` call. Guest `RP!` remains a raw
 aligned restore within its caller-owned stack span.
 
-### Semantic BIOS evaluator prerequisite
+### Semantic evaluator and checked source
 
 The hosted BIOS now exposes `EVALUATE`, the early `EVALUATE-CHECKED`,
 `EVALUATE-FINISH`, `EVALUATOR-RESET`, `EVALUATOR-UNWIND`, `EVAL-STATUS`,
 `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH`, `EVAL-THROW`, and `EVAL-TOKEN`.
 Guest `EVALUATE` consumes one physical input's supplied bytes rather than
 normalizing carriage returns and accepts at most 255 bytes. Direct LF-containing
-input remains outside this prerequisite; the pending KDOS walker owns physical
-line splitting. A 256-byte request is rejected before reading its address. The
-ordinary one-core compiler and its control-flow stack persist across
-successful calls, so a colon definition and its conditionals may span several
-evaluator inputs.
+input remains outside this primitive; KDOS `SOURCE-EVALUATE-CHECKED` owns
+physical-line splitting. A 256-byte request is rejected before reading its
+address. The ordinary one-core compiler and its control-flow stack persist
+across successful calls, so a colon definition and its conditionals may span
+several evaluator inputs.
 
 The early checked entry returns status 0 for success, 1 for an undefined
 token, 2 for an overlength input, and 3 for evaluator-depth exhaustion.
@@ -682,18 +687,27 @@ fail-closed cleanup of hidden evaluator depth and unfinished compiler state.
 Nested evaluation consumes the active outer public step budget and cannot
 acquire a fresh allowance.
 
-This prerequisite remains runtime-global and nonconcurrent and makes no claim
-for public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
-or interpret-time `[IF]`. It also does not admit KDOS's later status-5
-`EVALUATE-CHECKED` shadow, `SOURCE-EVALUATE-CHECKED`, or `LOAD`. The contiguous
-KDOS frontier therefore remains line 5610.
+Exact KDOS source now shadows the early checked entry with its `CATCH` wrapper.
+A caught guest exception records its exact code in `EVAL-THROW`, unwinds to the
+saved evaluator-depth checkpoint, and returns status 5 normally.
+`SOURCE-EVALUATE-CHECKED` walks LF-delimited input, strips one terminal CR from
+each physical line, skips blank physical lines, accepts a final line without LF,
+stops at the first nonzero status, and calls `EVALUATE-FINISH` at ordinary end
+of input. Caller-owned dictionary rollback followed by `EVALUATOR-RESET`
+removes completed and unfinished work while retaining the failure diagnostic.
+
+The evaluator remains runtime-global and nonconcurrent and makes no claim for
+public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
+interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
+literal failure behavior are recorded below. The contiguous KDOS frontier now
+ends at line 5944.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5610 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, cached listing, exact-name lookup, metadata creation/deletion/rename, primary-extent `CAT` and Buffer I/O, cache-only free-space reporting, and the fixed FD pool with cached `OPEN`/metadata flush/final close lifecycle |
-| 5611 onward | Next uncovered frontier | The unqualified `LOAD` family begins with its heading at line 5611 |
+| 39–5944 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, and nested two-extent filesystem `LOAD` |
+| 5945 onward | Next uncovered frontier | Application loading begins at line 5945, followed by the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1166,6 +1180,68 @@ pool descriptor. Reused addresses create an ABA hazard in which a stale handle
 can flush or close a new occupant; pool headers, descriptor cells, `OP-SLOT`,
 parser state, cache, and deferred bindings are global and unlocked.
 
+The adjacent loader fixture is exact unchanged `kdos.f` lines 5611–5944: 334
+LF records, 11,337 bytes, SHA-256
+`efad4e40860bc7cdc484b58ac652d9b7286541a7adfdb156d4ae66a3f73ba9fe`,
+and Git blob `8fd4577b4ac2128934672eb123ca78bf88468d52`. Its exact 50-definition ledger
+installs four loader globals, a 16 × 56-byte nesting stack, evaluator-depth and
+transaction accessors, three initially-no-op deferred transaction actions,
+two-extent read helpers, relative-path scratch and traversal, evaluator status
+constants, the KDOS `EVALUATE-CHECKED` shadow, the whole-source checked walker,
+and final `LOAD`. Loading the fixture performs no filesystem or storage work.
+
+`LOAD` must be reached through an active source cursor because `PARSE-NAME`
+consumes its filename from that cursor. It calls `FS-ENSURE` before parsing; a
+false marker prints `No filesystem` and leaves the would-be filename for the
+enclosing interpreter. Once mounted, a missing file, empty file, or allocation
+failure restores the saved loader globals and CWD without reads or transaction
+hooks. Each active frame saves `LD-BUF`, `LD-SZ`, `LD-CUR`, `LD-LEN`, CWD, an
+evaluator-depth checkpoint, and a future transaction head. Nesting is bounded
+at 16 frames by the source-defined `ABORT"`.
+
+Within the admitted domain, every path component and final name is at most 23
+bytes, total path storage is at most 127 bytes, cached metadata is valid and
+stable, and source is LF-delimited with no retained CR bytes. Every physical
+line is at most 255 bytes and compiler state is complete at file end. `LOAD`
+allocates the combined sector-rounded primary and secondary extents, reads and
+concatenates both complete runs, but evaluates only cached `DE.USED`. The
+allocation padding is therefore represented and transferred without becoming
+source. Nested relative loading observes the containing directory and restores
+each caller's CWD and walker globals. A final source line need not end in LF.
+
+The transaction actions remain bound to `_LD-TXN-NOOP` until the later module
+registry replaces them. Successful nested loads call commit and then release/
+after-release from inner to outer. A guest `THROW` during walking is caught,
+unwinds the evaluator checkpoint, calls rollback, releases/restores, calls
+after-release, and rethrows. That path is reusable and leak-free, but an early
+definition remains published because the current rollback action is literally
+a no-op. This is pre-registry behavior, not evidence of dictionary
+transactionality.
+
+Several source defects deliberately remain visible. `_RESOLVE-PATH` prints an
+intermediate-component error but returns no failure status; `LOAD` then looks
+up the rejected component left in `NAMEBUF` and can load it instead of the
+requested final path. Component and final-name copies are not length-bounded,
+which is why the admitted path domain above is narrow. Hosted semantic lookup
+also cannot reproduce native linked-header corruption caused by an overflowing
+copy, so oversized paths are not a differential claim.
+
+`_LD-READ-SLOT` executes before `_LD-WALK-GUARDED`. A read abort can therefore
+leave the sector-rounded allocation live, `_LD-SP` advanced, CWD resolved, and
+`LD-BUF`/`LD-SZ` replaced; no transaction action runs. Focused acceptance pins
+that exact second-extent stale-media outcome only in a disposable runtime.
+The filesystem marker and block diagnostics still fail closed, and the
+storage lock is released.
+
+Finally, `_LD-WALK` uses raw `EVALUATE`, retains CR, never reads `EVAL-STATUS`,
+and never calls `EVALUATE-FINISH`. An undefined or overlong line can be skipped
+while later lines execute and clear the diagnostic, and unfinished compiler
+state can escape a nominally successful load. `LOAD` also does not reject
+directories or inspect entry flags. These are unchanged KDOS behaviors; the
+simulator does not insert a checked host loader behind them. Loader, resolver,
+parser, evaluator, filesystem-cache, and transaction state are global and
+unlocked.
+
 The earlier low-level helper domain is validator-approved geometry, positive
 run counts, in-range sectors and slots, complete cache spans, and structurally
 valid directory entries. Those helper words do not gate on `FS-OK` or validate
@@ -1175,9 +1251,9 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue with the `LOAD` heading at line 5611 and its KDOS-owned
-checked wrapper, then toward the ordinary module-loader surface and
-deterministic cooperative task scheduler.
+Later slices continue with Application Loading at line 5945, then advance the
+remaining ordinary KDOS source toward its module registry and deterministic
+cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work
