@@ -56,6 +56,9 @@ The implemented slices provide:
   accounting, a distinct low-32-bit semantic `CYCLES` clock, retained
   non-destructive BIST observations, a real four-operation tile value
   self-test, and logical no-cache controls/zero cache counters;
+- a runtime-local deterministic RTC epoch subwindow at `+0xB08..+0xB0F`, with
+  explicit host set/advance controls, low-byte read latching, direct MMIO
+  access, and BIOS `EPOCH@`, but no automatic or wall-clock advancement;
 - a retained one-core semantic tile service for four integer lane widths plus
   FP16/BF16, integer and half-format ADD/SUB/MUL/SUM/MIN/MAX/SUMSQ/DOT,
   low-byte control registers, completed-operation accounting, and the
@@ -126,8 +129,9 @@ task stack arenas and cooperative scheduling remain pending. The IDL seam
 blocks and resumes one compiled-word dispatch; it is not `PAUSE`, task
 round-robin, interrupt-vector delivery, DMA timing, or a device scheduler.
 Persistent compiler state across evaluator calls, public `STATE`, the BIOS
-evaluator surfaces, clocks, complete UART/MMIO service, raw storage-controller
-access, and an ordinary complete KDOS load also remain. The simulator does not
+evaluator surfaces, `MS@` and the remaining RTC/calendar service, complete
+UART/MMIO service, raw storage-controller access, and an ordinary complete
+KDOS load also remain. The simulator does not
 execute ROMs, MP64
 binaries, or MF64 native dictionaries, and it makes no machine-timing,
 snapshot, RTL, or hardware claim. Those remain the architectural emulator's
@@ -645,8 +649,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5285 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, and cached `.FTYPE`/`DIR`/`CATALOG` listing |
-| 5286 onward | Next uncovered frontier | Blank line 5286 precedes the `FIND-BY-NAME` heading at line 5287 and definition at line 5292 |
+| 39–5408 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, cached listing, exact-name lookup, and metadata creation/deletion/rename |
+| 5409 onward | Next uncovered frontier | Blank line 5409 precedes the `CAT` heading at line 5410 and definition at line 5414 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -913,6 +917,45 @@ field; otherwise unchanged `DIR` and `CATALOG` can read and print adjacent
 entry bytes. `FS-ENSURE` also trusts an already-true `FS-OK`, so an absent or
 replaced attachment can still produce a stale cached listing.
 
+The adjacent lookup/mutation fixture is exact unchanged `kdos.f` lines
+5286–5408: 123 lines, 4,020 bytes, and SHA-256
+`a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
+It publishes five colon words and six zero-initialized scratch variables
+through `RENAME`. Loading performs no clock read, parsing, cache or media
+mutation, sync, or UART output. Focused execution uses pathless in-memory media
+and the explicit runtime epoch; it is not file-backed durability evidence.
+
+The hosted epoch register defaults to zero and changes only through explicit
+host set/advance or admitted direct MMIO writes. Reading its low byte latches
+all eight little-endian bytes, and `EPOCH@` reconstructs that latched `u64`.
+There is no automatic scheduling, monotonic-host, or wall-time advance.
+`TICKS@` applies signed `/ 1000`; `MKFILE` then stores only the low 32 bits in
+`mtime`. `MS@`, uptime, calendar, alarm, control, and realtime RTC behavior
+remain unqualified.
+
+`FIND-BY-NAME` compares all 24 name bytes, not only the visible NUL-terminated
+prefix, filters by `CWD`, and returns the first exact slot. Validator-accepted
+post-NUL tails and duplicate names can therefore make visible names unfindable
+or shadow a later entry. Admitted mutation requires a nonempty canonical name,
+positive in-range primary run, valid current parent, non-directory file type,
+and exclusive disjoint extents. `FS-LOAD` retains `CWD`; a stale parent from a
+previous image can make a newly created entry fail the next validation.
+
+`MKFILE` marks cached bitmap bits and constructs an empty entry before
+`FS-SYNC`, without clearing the claimed data sectors. `RMFILE` clears both
+extent bitmaps and the entry but never wipes payload; it is unsafe for a
+directory's zero primary count and can free sectors still referenced by an
+overlapping validator-accepted entry. `RENAME` changes only the name, does not
+update `mtime`, rejects a same-name rename, and an empty replacement makes the
+entry invisible without freeing its extents. Every path mutates cache before
+the bitmap/directory/flush sequence, so a later failure retains cache and may
+retain earlier media effects; retry can short-circuit against that cache.
+
+The parser is likewise unchanged: an unavailable-filesystem return occurs
+before `MKFILE`, `RMFILE`, or `RENAME` consumes its name tokens, and an
+old-name miss in `RENAME` leaves the proposed new token to the outer evaluator.
+These defects are recorded, not treated as a safe command domain.
+
 The admitted domain is validator-approved geometry, positive run counts,
 in-range sectors and slots, complete cache spans, and structurally valid
 directory entries. The unchanged words do not gate on `FS-OK` or validate
@@ -922,9 +965,9 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue after blank line 5286 with `FIND-BY-NAME` at line 5292,
-then toward the persistent evaluator, ordinary checked module-loader surface,
-and deterministic cooperative task scheduler.
+Later slices continue after blank line 5409 with `CAT` at line 5414, then
+toward the persistent evaluator, ordinary checked module-loader surface, and
+deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

@@ -31,6 +31,7 @@ from simulator.platform import (
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
 )
+from simulator.rtc import RTC_EPOCH, RTC_EPOCH_SIZE
 from simulator.runtime import (
     CreatedDefinition,
     DirectiveKind,
@@ -686,6 +687,15 @@ def _carriage_return(runtime: MegaForthRuntime, _context: ExecutionContext) -> N
 
 def _emit(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.write_uart_bytes(bytes((context.data.pop() & 0xFF,)))
+
+
+def _epoch_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    value = 0
+    for index in range(RTC_EPOCH_SIZE):
+        value |= runtime.memory.read8(
+            MMIO_BASE + RTC_EPOCH + index
+        ) << (index * 8)
+    context.data.push(value)
 
 
 def _dot_zstr(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -2137,6 +2147,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"U.", lambda context: _unsigned_dot(runtime, context)),
         (b"CR", lambda context: _carriage_return(runtime, context)),
         (b"EMIT", lambda context: _emit(runtime, context)),
+        (b"EPOCH@", lambda context: _epoch_fetch(runtime, context)),
         (b".ZSTR", lambda context: _dot_zstr(runtime, context)),
         (b"UCHAR", _uppercase_character),
         (b"TRUE", lambda context: context.data.push(-1)),

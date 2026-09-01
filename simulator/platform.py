@@ -28,6 +28,11 @@ from simulator.memory import (
     AddressClass,
     SparseAddressSpace,
 )
+from simulator.rtc import (
+    RTC_EPOCH,
+    RTC_EPOCH_LIMIT,
+    HostedRTCService,
+)
 from simulator.sha3 import SHA3_LIMIT, SHA3_OFFSET, HostedSHA3Service
 
 
@@ -254,7 +259,7 @@ class OneCoreSysInfo:
 class OneCorePlatformMMIO:
     """Route each admitted one-core MMIO window to its sole service state."""
 
-    __slots__ = ("aes", "entropy", "sha3", "sysinfo")
+    __slots__ = ("aes", "entropy", "rtc", "sha3", "sysinfo")
 
     def __init__(
         self,
@@ -263,6 +268,7 @@ class OneCorePlatformMMIO:
         aes: HostedAESService,
         sha3: HostedSHA3Service,
         entropy: HostedTRNGService,
+        rtc: HostedRTCService,
     ) -> None:
         if not isinstance(sysinfo, OneCoreSysInfo):
             raise TypeError("platform SysInfo must be a OneCoreSysInfo")
@@ -272,10 +278,13 @@ class OneCorePlatformMMIO:
             raise TypeError("platform SHA3 must be a HostedSHA3Service")
         if not isinstance(entropy, HostedTRNGService):
             raise TypeError("platform entropy must be a HostedTRNGService")
+        if not isinstance(rtc, HostedRTCService):
+            raise TypeError("platform RTC must be a HostedRTCService")
         self.sysinfo = sysinfo
         self.aes = aes
         self.sha3 = sha3
         self.entropy = entropy
+        self.rtc = rtc
 
     def preflight(self, offset: int, width: int, *, write: bool) -> None:
         self._service(offset, width, write=write).preflight(
@@ -301,6 +310,7 @@ class OneCorePlatformMMIO:
         | HostedAESService
         | HostedSHA3Service
         | HostedTRNGService
+        | HostedRTCService
     ):
         if isinstance(offset, int):
             if SYSINFO_OFFSET <= offset < SYSINFO_LIMIT:
@@ -312,6 +322,8 @@ class OneCorePlatformMMIO:
                 return self.sha3
             if TRNG_OFFSET <= offset < TRNG_LIMIT:
                 return self.entropy
+            if RTC_EPOCH <= offset < RTC_EPOCH_LIMIT:
+                return self.rtc
         raise PlatformMMIOAccessError(
             "access is outside every admitted platform MMIO window",
             offset=offset,
@@ -330,6 +342,7 @@ def create_one_core_address_space(
     crypto_capabilities: int = HOSTED_CRYPTO_CAPABILITIES,
     entropy_seed: bytes = DEFAULT_TRNG_SEED,
     entropy_usable: bool = True,
+    initial_epoch_ms: int = 0,
 ) -> SparseAddressSpace:
     """Return sparse guest memory with the one-core platform router attached."""
 
@@ -345,6 +358,7 @@ def create_one_core_address_space(
             entropy_seed,
             usable=entropy_usable,
         ),
+        rtc=HostedRTCService(initial_epoch_ms),
     )
     memory = SparseAddressSpace(
         bank0_size=bank0_size,

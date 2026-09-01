@@ -856,8 +856,8 @@ inspection, Arena integration, integer/FP16/BF16 operations, the kernel
 registry and sample kernels, the pipeline engine, checked block-device and
 bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
 storage-compatibility, legacy file, and initial MP64FS cache/helper layers,
-the MP64FS load/sync/ensure/format lifecycle, and cached directory listing
-through line 5285.
+the MP64FS load/sync/ensure/format lifecycle, cached directory listing, exact
+name lookup, and metadata creation/deletion/rename through line 5408.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -865,11 +865,11 @@ guarded I/O, partition validation, transactional publication, selected-volume
 lifecycle, diagnostic wrappers, permanent file descriptors, and composed
 head/full/tail sector I/O, MP64FS cache geometry, bitmap mutation/search,
 packed directory readers, raw-binding load, synchronization, conditional
-autoload, metadata formatting, compact type publication, direct-child
-listing, and bitmap free-space reporting are executable semantic behavior
-rather than reporting-only shims. The frontier now ends at line 5285; blank
-line 5286 precedes the `FIND-BY-NAME` heading at line 5287 and definition at
-line 5292.
+autoload, metadata formatting, compact type publication, direct-child listing,
+bitmap free-space reporting, exact-name lookup, deterministic timestamps, and
+ordered metadata mutation are executable semantic behavior rather than
+reporting-only shims. The frontier now ends at line 5408; blank line 5409
+precedes the `CAT` heading at line 5410 and definition at line 5414.
 
 ---
 
@@ -1117,9 +1117,13 @@ filesystem-state effect. Exact unchanged lines 5218 through 5285 then add
 `.FTYPE`, `DIR`, and `CATALOG` in 68 lines and 2,167 bytes, with SHA-256
 `c3c831bc183ee999c8b5a0d1fb4edd169890be1e5fa44ad726d3025923fdb3b7`.
 Loading those three definitions installs only dictionary bodies and inline
-strings, without binding, I/O, cache mutation, or output. Blank line 5286 is
-the next uncovered seam before the `FIND-BY-NAME` heading at line 5287 and
-definition at line 5292.
+strings, without binding, I/O, cache mutation, or output. Exact unchanged lines
+5286 through 5408 then add five colon definitions through `RENAME` and six
+zero-initialized scratch variables in 123 lines and 4,020 bytes, with SHA-256
+`a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
+Loading that slice performs no clock read, parse, cache or media mutation,
+sync, or output. Blank line 5409 is the next uncovered seam before the `CAT`
+heading at line 5410 and definition at line 5414.
 
 ---
 
@@ -1751,7 +1755,7 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
-### Hosted Lifecycle and Listing Checkpoint
+### Hosted Lifecycle, Listing, and Mutation Checkpoint
 
 The native hosted `MP64FS-VALID?` returns literal `1` or `0` after up to three
 raw checked reads and the executable BIOS's narrow geometry/metadata
@@ -1760,7 +1764,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 5285. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 5408. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -1781,6 +1785,14 @@ lines and 2,167 bytes, with SHA-256
 Loading them only installs three definitions and their inline strings.
 Focused execution qualifies pathless listing from the cached directory and
 bitmap; it is not file-backed persistence evidence.
+
+Exact unchanged lines 5286–5408 add five colon definitions through `RENAME`
+and six scratch variables in 123 lines and 4,020 bytes, with SHA-256
+`a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
+Load initializes those variables to zero without reading the epoch, parsing a
+name, touching filesystem state or media, syncing, or publishing output.
+Focused execution qualifies lookup and metadata mutation only on pathless
+in-memory media in the safe domain described below.
 
 | Word | Stack Effect | Admitted behavior |
 |------|--------------|-------------------|
@@ -1841,10 +1853,11 @@ the field to preserve the stale comment.
 | `.FTYPE` | `( type -- )` | Print `free`, `raw`, `text`, `forth`, `doc`, `data`, `tut`, `bdl`, `dir`, `stream`, or `link` for codes 0 through 10; otherwise print `?` and the signed value in the current `BASE`. |
 | `DIR` | `( -- )` | List entries whose parent is `CWD`, showing name, size, and type, followed by a free-space summary. |
 | `CATALOG` | `( -- )` | List name, byte size, primary sector count, numeric type, and flags, followed by a free-space summary. It does not print the start sector. |
-| `FIND-BY-NAME` | `( -- slot \| -1 )` | Search the directory for a file matching `NAMEBUF`.  Caller must call `PARSE-NAME` first.  Returns the slot index or −1. |
-| `MKFILE` | `( nsectors type "name" -- )` | Create a new file: allocate contiguous sectors, create directory entry, sync.  Checks for duplicate names. |
-| `RMFILE` | `( "name" -- )` | Delete a file: free its bitmap sectors, clear the directory entry, sync. |
-| `RENAME` | `( "oldname" "newname" -- )` | Rename a file.  Verifies the old name exists and the new name doesn't. |
+| `FIND-BY-NAME` | `( -- slot \| -1 )` | Return the first occupied entry in `CWD` whose complete 24-byte name equals `NAMEBUF`; caller must populate its zero-padded bytes first. It does not check `FS-OK`. |
+| `TICKS@` | `( -- seconds )` | Apply signed `/ 1000` to the explicit deterministic `EPOCH@` millisecond cell. |
+| `MKFILE` | `( nsectors type "name" -- )` | Reserve one positive contiguous primary run, construct an empty entry, timestamp it, then sync. It does not initialize data sectors or validate its type/name/count domain. |
+| `RMFILE` | `( "name" -- )` | Clear both cached extent runs and the complete entry, then sync. It does not wipe payload and is unsafe for a directory's zero primary count. |
+| `RENAME` | `( "oldname" "newname" -- )` | Replace only the 24-byte cached name and sync. It retains `mtime`, rejects the same name as taken, and does not validate an empty replacement. |
 | `CAT` | `( "name" -- )` | Print a file's contents to the terminal (reads sectors into memory, emits bytes). |
 | `FS-FREE` | `( -- )` | Report disk free space: free sectors, bytes, and file count. |
 | `SAVE-BUFFER` | `( buf "name" -- )` | Save a KDOS buffer's data to a named file on disk (file must already exist).  Updates `used_bytes` in the directory. |
@@ -1886,9 +1899,47 @@ cache and count free bitmap bits over `[FS-DSTART, FS-TOTAL)`. `DIR` publishes
 `DE.USED`, only the primary `DE.COUNT`, numeric type, and flags. All numeric
 fields use signed `.` in the current `BASE`. Neither command revalidates an
 already-true `FS-OK`, so an absent or replaced attachment can leave stale
-cache output eligible. The current hosted frontier ends after `CATALOG` at
-line 5285; `FIND-BY-NAME` and all later commands in this reference remain
-unqualified.
+cache output eligible.
+
+The hosted RTC surface is one runtime-local explicit epoch register at MMIO
+`+0xB08..+0xB0F`. It defaults to zero, advances only through a host request or
+direct write, wraps modulo 64 bits on host advance, and never consults host
+wall time. A low-byte read latches the current eight-byte little-endian value;
+`EPOCH@` performs that byte sequence. `MS@`, automatic time, uptime, calendar,
+alarm, control, and realtime behavior remain unqualified. `TICKS@` uses signed
+division; for admitted positive values it discards milliseconds, returns a
+full cell, and `MKFILE` stores only its low 32 bits in the entry.
+
+`FIND-BY-NAME` compares all 24 bytes and returns the first matching slot in
+`CWD`. Because the validator accepts duplicate names and stale nonzero bytes
+after a visible NUL, the visible spelling can fail lookup or a lower exact slot
+can shadow later entries. The admitted mutation domain requires a nonempty
+canonical component, a positive in-range primary run, a non-directory valid
+type, a parent that is valid in the current cache, and disjoint exclusively
+owned extents. `FS-LOAD` does not reset `CWD`, so a parent retained from a
+previous image can make a new entry invalid on the next load.
+
+`MKFILE` mutates bitmap and directory cache before `FS-SYNC`, records
+`used_bytes = 0`, leaves the secondary extent zero, and does not wipe the
+claimed sectors. An empty name instead allocates sectors while leaving the
+entry visibly free; type 8 with a positive allocation is not a valid directory.
+`RMFILE` clears both extent runs and the entry without erasing data. Its zero
+primary-count `DO` makes directory deletion unsafe, and validator-accepted
+overlapping extents let it free bits another entry still references.
+
+`RENAME` changes no metadata other than the name, including no `mtime` update.
+An empty new name hides the entry without freeing sectors. All three mutation
+words change cache before `FS-SYNC` writes bitmap, directory, then flushes.
+Late failure retains cache and possibly earlier media effects while non-stale
+failure can retain true `FS-OK`; retry can short-circuit on the changed cache.
+The state and scratch are global and unlocked.
+
+If no filesystem is available, these commands return before consuming their
+parsed name tokens, leaving them to the outer evaluator. An old-name miss in
+`RENAME` likewise leaves the proposed new token. Those parser defects, empty
+names, directory deletion, stale parents, and overlapping extents remain
+outside the safe hosted domain. The frontier ends after `RENAME` at line 5408;
+`CAT` and all later commands in this reference remain unqualified.
 
 **Example — filesystem operations:**
 ```forth

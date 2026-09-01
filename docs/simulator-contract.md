@@ -233,16 +233,25 @@ ownership, and checkpoint behavior remain visible source semantics.  A future
 multicore profile must preserve publication order, generations, locks, and
 barriers, but it still does not qualify physical races or arbitration.
 
-Two clock modes are permitted:
+Two eventual full-clock modes are permitted:
 
 - deterministic virtual uptime and epoch for tests and differential runs; and
 - host-monotonic pacing for interactive use.
 
-`MS@` and `EPOCH@` retain their public monotonic, wrapping, and timeout-ordering
-semantics.  Deterministic mode advances at documented scheduling/service
-boundaries so a polling loop can observe scheduled time without requiring
-billions of simulated machine instructions.  Simulator ticks are diagnostics,
-not MP64 cycles.
+The currently admitted surface is narrower and implements neither automatic
+mode. One runtime-local deterministic epoch-millisecond register is routed at
+MMIO `+0xB08..+0xB0F`; it defaults to zero and changes only through explicit
+host set/advance operations or admitted direct MMIO writes. Host advance is
+nonnegative and wraps modulo 64 bits. Reading the low byte latches the current
+value, later byte reads use that latch, and `EPOCH@` reads the eight ascending
+little-endian bytes into one `u64`. Supported direct access widths are 1, 2, 4,
+or 8 bytes wholly contained in that subwindow. Writes change current register
+bytes without changing the prior read latch.
+
+This qualification does not admit `MS@`, uptime registers, calendar, alarm,
+control/status, automatic scheduler-driven advancement, realtime pacing, or
+host wall time. Those remain part of the future full-clock modes above.
+Simulator ticks are diagnostics, not MP64 cycles.
 
 ## 6. Platform services
 
@@ -1251,7 +1260,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5285. Exact unchanged lines
+The contiguous source frontier now ends at line 5408. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1374,8 +1383,66 @@ numeric type, and flags. Their numeric fields use signed `.` in the current
 `BASE`. The cache and output are not a coherent concurrent snapshot, and
 `FS-ENSURE` does not revalidate an already-true `FS-OK`; detached or replaced
 media can therefore leave a stale listing eligible. Blank line 5286 is the
-next uncovered seam, followed by the `FIND-BY-NAME` heading at line 5287 and
-definition at line 5292.
+leading seam of the adjacent lookup/mutation fixture.
+
+Exact unchanged lines 5286 through 5408 add `FIND-BY-NAME`, `TICKS@`,
+`MKFILE`, `RMFILE`, and `RENAME`, plus six scratch variables, in 123 lines and
+4,020 bytes (SHA-256
+`a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`).
+Load zero-initializes `MK-NSEC`, `MK-TYPE`, `MK-SLOT`, `MK-START`, `RM-SLOT`,
+and `RN-SLOT` and installs the five colon definitions and their inline strings.
+It performs no epoch read, name parse, cache or media mutation, sync, or UART
+publication. Qualified execution uses pathless in-memory media and explicitly
+controlled deterministic epoch state.
+
+`TICKS@` applies the source's signed `/` to `EPOCH@ 1000`; admitted positive
+values therefore truncate milliseconds toward zero. It returns a complete
+cell despite its `u32` source comment, while `MKFILE`'s `L!` stores only the low
+32 bits as `mtime`. This qualifies neither high-bit signed epoch inputs nor an
+automatic clock.
+
+`FIND-BY-NAME` has no `FS-OK` gate. It scans occupied entries in ascending slot
+order, filters by `CWD`, and compares all 24 bytes against zero-padded
+`NAMEBUF`. The validator does not reject duplicate names or nonzero bytes after
+a NUL, so a visible match with a stale tail can fail and the first exact
+duplicate shadows later slots. The lookup and mutations share global
+`NAMEBUF`, `CWD`, caches, and scratch and are not reentrant or a coherent
+concurrent transaction.
+
+The admitted mutation domain requires a nonempty canonical single-component
+name, positive in-range primary allocation, a non-directory validator-approved
+type, valid current `CWD`, validator-approved geometry, and exclusive disjoint
+non-directory extents. `FS-LOAD` deliberately retains `CWD`; after rebinding,
+a stale parent can make `MKFILE` publish an entry rejected by the next mount.
+`MKFILE` accepts arbitrary type/count/name cells in source, and an empty name
+marks sectors before constructing an entry whose zero first byte remains free.
+Type 8 with a positive run is likewise invalid as a directory. The safe domain
+does not include these cases.
+
+`MKFILE` selects a slot and one complete run, mutates cached bitmap and entry,
+sets `used_bytes` and the secondary extent to zero, timestamps through
+`TICKS@`, and only then calls `FS-SYNC`. It neither initializes nor erases the
+claimed data sectors. `RMFILE` clears cached bits for both extents and zeros
+the entry before syncing, without wiping payload. Its ordinary primary-count
+`DO` is unsafe for a directory's zero extent. Because validation does not
+prove extent disjointness or ownership, deleting an overlapping accepted file
+can clear bits still referenced elsewhere.
+
+`RENAME` zeroes and replaces only the 24-byte name before syncing; it retains
+`mtime` and every other field. A same-name request is reported as taken, while
+an empty replacement makes the slot invisible without releasing extents.
+All three commands inherit `FS-SYNC`'s bitmap, directory, flush order. A later
+failure retains cache mutation and may retain earlier media writes; a
+non-stale failure can leave `FS-OK` true, and repeating the command can
+short-circuit against the changed cache rather than repair media.
+
+Parser consumption is also nontransactional. When the filesystem is
+unavailable, `MKFILE`, `RMFILE`, and `RENAME` return before `PARSE-NAME`, so
+their filename tokens remain for the outer evaluator. When `RENAME` cannot
+find its old name, it returns before parsing the proposed new name. These are
+preserved source defects, not admitted safe command forms. Blank line 5409 is
+the next uncovered seam, followed by the `CAT` heading at line 5410 and
+definition at line 5414.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

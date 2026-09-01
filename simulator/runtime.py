@@ -484,6 +484,7 @@ class MegaForthRuntime:
         self.aes = platform_mmio.aes
         self.sha3 = platform_mmio.sha3
         self.entropy = platform_mmio.entropy
+        self.rtc = platform_mmio.rtc
         self.sha2 = HostedSHA2Service(core_count=num_full)
         self.spinlocks = HostedSpinlockBank(core_count=num_cores)
         self.field = HostedFieldALUService(core_count=num_cores)

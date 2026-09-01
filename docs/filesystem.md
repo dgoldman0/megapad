@@ -35,15 +35,18 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 5285. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 5408. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
-bitmap. `FS-LOAD` consumes the separately qualified native
+bitmap, then exact-name lookup and `MKFILE`/`RMFILE`/`RENAME` metadata mutation.
+The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
+`a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
+`FS-LOAD` consumes the separately qualified native
 `MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
 metadata predicate, and generation check. This boundary is not evidence of
-file-backed close/reopen durability, `FIND-BY-NAME` or later file commands, or
-stronger filesystem validation.
+file-backed close/reopen durability, `CAT` or later file commands, malformed
+mutation safety, or stronger filesystem validation.
 
 ---
 
@@ -168,6 +171,13 @@ invariant of a NUL within the 24-byte name field.
   source path that explicitly updates it. The layout comment at `kdos.f` line
   5026 instead says “seconds since boot”; that comment disagrees with the
   executable `TICKS@` definition and this format specification.
+
+  The hosted epoch register is explicit and deterministic: it defaults to
+  zero, changes only through host control or direct MMIO writes, and does not
+  consult or advance with wall time. `TICKS@` uses signed division and returns
+  a full cell; `MKFILE` stores only its low 32 bits. `RENAME` does not update
+  this field. `MS@`, calendar, automatic, and realtime RTC behavior remain
+  unqualified.
 
 - **`data_crc32`** — CRC32 of the file's content bytes (not the full sector
   padding). The host tool populates it; automatic hardware recomputation on
@@ -306,6 +316,15 @@ a directory-full failure can leave those earlier image changes. Current KDOS
 contiguous primary run satisfies the complete request and leaves the secondary
 extent zero.
 
+The admitted KDOS path requires a positive run, nonempty canonical component,
+non-directory valid type, valid current parent, and validator-approved
+geometry. It checks duplicate, free slot, and free run before mutation, then
+marks cached bitmap bits, constructs an entry with `used_bytes = 0`, and calls
+`FS-SYNC`. It does not clear the allocated data sectors. An empty name allocates
+bits but leaves `name[0] = 0`, creating an invisible orphan; type 8 with its
+positive run is validator-invalid. Because `FS-LOAD` retains `CWD`, creation
+after rebinding can also publish a stale parent rejected by the next load.
+
 ### Appending to a File
 
 The intended append contract extends `used_bytes` within the existing
@@ -336,6 +355,24 @@ When `RMFILE` (or `diskutil delete`) removes a file:
 2. **Clear bitmap bits** for both extents (primary + secondary if present).
 3. **Zero the directory entry** (all 48 bytes set to 0).
 4. **Sync to disk.**
+
+KDOS performs the cache mutations before `FS-SYNC` and never wipes payload.
+`RMFILE` must not target a directory: its ordinary zero-count primary-extent
+`DO` traverses the modulo-cell range. It also assumes extents are disjoint and
+exclusively owned even though BIOS validation accepts overlaps; otherwise it
+can clear allocation bits still referenced by another entry.
+
+### Renaming a File
+
+`RENAME` compares complete zero-padded 24-byte names, changes only that name
+field, and then syncs. It does not update `mtime`; renaming to the same name is
+reported as taken. An empty replacement makes the entry invisible without
+releasing its sectors.
+
+All three metadata mutations precede the nontransactional bitmap, directory,
+flush sequence. A late failure leaves changed cache and can leave earlier media
+effects; non-stale failure can leave `FS-OK` true, and simply repeating the
+command can short-circuit against the changed cache rather than repair media.
 
 ---
 
@@ -625,8 +662,9 @@ bitmap bits over the data-sector range rather than reconstructing ownership
 from directory extents. `CATALOG` reports only the primary sector count, and
 all numeric fields use signed `.` in the current `BASE`. `FS-ENSURE` trusts an
 already-true `FS-OK`, so detached or replaced media can leave stale cache
-output eligible. This is pathless listing qualification, not close/reopen
-durability or admission of the later lookup and mutation commands.
+output eligible. This listing qualification and the adjacent admitted lookup
+and mutation slice are pathless; neither establishes close/reopen durability
+or admits `CAT` and the later commands.
 
 ### Directory Navigation
 
@@ -641,10 +679,17 @@ durability or admission of the later lookup and mutation commands.
 
 | Word | Description |
 |------|-------------|
-| `n type MKFILE name` | Create a new file with *n* sectors and *type* in current directory |
-| `RMFILE name` | Delete a file from current directory |
-| `RENAME old new` | Rename a file |
+| `n type MKFILE name` | Reserve one contiguous primary run and create an empty file in the current directory |
+| `RMFILE name` | Clear both extents and the entry without wiping payload; files only, not directories |
+| `RENAME old new` | Replace only the name; `mtime` is retained |
 | `FAPPEND` *(planned)* | `( addr len fd -- )` Append data to a file with the `append` flag; not currently defined in `kdos.f` |
+
+`FIND-BY-NAME` and these commands compare all 24 name bytes, not merely the
+visible prefix. Validator-accepted post-NUL tails can prevent a match, and the
+first exact duplicate shadows later entries. If the filesystem is unavailable,
+the mutation words return before parsing their name tokens, so those tokens
+remain for the outer evaluator. `RENAME` also leaves its proposed new token
+when the old name is absent.
 
 ### Integrity & Maintenance
 
@@ -688,7 +733,7 @@ durability or admission of the later lookup and mutation commands.
 | `OPEN name` | Open a file, return a file descriptor from the FD pool for FREAD/FWRITE.  `OPEN` is a `DEFER` word (see §1). |
 | `FCLOSE fdesc` | Release a file descriptor back to the FD pool |
 | `DIRENT n` | Address of directory entry *n* in the RAM cache (48 bytes each) |
-| `FIND-BY-NAME` | Search directory for a name within the current directory |
+| `FIND-BY-NAME` | Return the first occupied current-directory entry whose complete 24-byte name matches zero-padded `NAMEBUF`; it does not check `FS-OK` |
 
 The admitted lifecycle is ordered and nontransactional. `FS-LOAD` clears
 `FS-OK`, destructively rebinds raw storage, validates, then publishes
