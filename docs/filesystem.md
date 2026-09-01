@@ -35,16 +35,14 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 5134. It has qualified only the initial MP64FS cache, derived
-geometry, bitmap, first-fit search, and packed directory helpers—not
-`FS-LOAD`, `FS-SYNC`, `FORMAT`, or later file commands yet. This qualification
-boundary does not replace or weaken the BIOS validator and is not evidence of
-durability or file-backed persistence.
-
-The hosted native `MP64FS-VALID?` prerequisite is qualified separately. It
-matches the executable BIOS's raw-device reads, geometry and metadata
-predicate, scratch layout, and generation check, but does not advance that
-contiguous unchanged-source frontier.
+`kdos.f` line 5217. It qualifies the initial MP64FS cache, derived geometry,
+bitmap, first-fit search, packed directory helpers, and the unchanged
+`FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
+media. `FS-LOAD` consumes the separately qualified native
+`MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
+metadata predicate, and generation check. This boundary is not evidence of
+file-backed close/reopen durability, later file commands, or stronger
+filesystem validation.
 
 ---
 
@@ -140,8 +138,8 @@ BIOS validation and the low-level `FIND-FREE-SLOT` helper, however, use only
 Fully zero tails are therefore a producer convention, not a validator-enforced
 invariant.
 
-The BIOS predicate performs three raw whole-device checked reads: superblock,
-active bitmap, and the 12-sector directory. It checks canonical geometry,
+The BIOS predicate performs up to three raw whole-device checked reads in
+order: superblock, active bitmap, and the 12-sector directory. It checks canonical geometry,
 reserved allocation bits, occupied-entry parent/type rules, allocated extent
 bounds, directory zero-extent rules, and used-byte capacity. It does not check
 name termination or character policy, uniqueness, flags, reserved entry
@@ -672,6 +670,20 @@ present.
 | `FCLOSE fdesc` | Release a file descriptor back to the FD pool |
 | `DIRENT n` | Address of directory entry *n* in the RAM cache (48 bytes each) |
 | `FIND-BY-NAME` | Search directory for a name within the current directory |
+
+The admitted lifecycle is ordered and nontransactional. `FS-LOAD` clears
+`FS-OK`, destructively rebinds raw storage, validates, then publishes
+superblock geometry, bitmap, and directory; a late read failure can retain
+earlier caches and binding while leaving `FS-OK = 0`, and it never resets
+`CWD`. The validation and cache reads are not one coherent snapshot.
+
+`FS-SYNC` writes bitmap then directory and flushes, never the superblock;
+failure does not undo earlier writes. `FS-ENSURE` trusts a true `FS-OK` without
+checking attachment identity. `FORMAT` writes superblock, active bitmap, and
+directory before flush, and only flush success sets `FS-OK = -1` and root
+`CWD`. Failed format retains constructed caches, geometry, binding, and any
+completed metadata writes. Neither format nor sync erases data sectors, and
+format does not clear the inactive bitmap-cache tail.
 
 ### File Encryption
 

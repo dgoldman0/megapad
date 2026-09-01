@@ -643,8 +643,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5134 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache/geometry/bitmap/directory helpers |
-| 5135 onward | Next uncovered frontier | A blank seam precedes MP64FS loading and syncing at line 5136 |
+| 39–5217 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers and load/sync/ensure/format lifecycle |
+| 5218 onward | Next uncovered frontier | Blank line 5218 precedes the `.FTYPE` section heading at line 5219 and definition at line 5221 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -873,12 +873,23 @@ acceptance covers geometry derivation, the complete 65,536-bit bitmap window,
 first-fit runs including the upper boundary, all packed field offsets, and the
 128-entry free-slot scan.
 
-Separately, the native hosted `MP64FS-VALID?` word is qualified as the BIOS
-prerequisite for the next source slice. It reads the raw attached device, not a
-selected KDOS volume, and retains the native three-read scratch and controller
-effects. That isolated native word does not advance the contiguous unchanged
-source frontier or admit `FS-LOAD`, `FS-SYNC`, `FORMAT`, `.ZSTR`, or later file
-commands.
+The adjacent lifecycle fixture is exact unchanged `kdos.f` lines 5135–5217:
+83 lines, 2,999 bytes, and SHA-256
+`829268e2d06f11c19bda4a5fa0606e883fdf3ab4a3690a741f0cd2616ada4137`.
+It publishes only `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT`; loading the
+slice performs no binding, I/O, flush, UART output, or filesystem-state
+mutation. Focused execution now exercises the separately qualified native
+`MP64FS-VALID?` through ordinary `FS-LOAD`, including dynamic bitmap geometry,
+the six-read successful path, and progressive publication on late failure.
+
+`FS-LOAD` clears `FS-OK`, destructively selects raw storage, validates, then
+publishes superblock geometry, bitmap, and directory in order; only complete
+success restores `FS-OK`, and it never resets `CWD`. `FS-SYNC` writes bitmap
+then directory and flushes without writing the superblock. `FS-ENSURE` trusts
+an already-true marker without checking attachment identity. `FORMAT` writes
+new superblock, active bitmap, and directory metadata before flushing; only
+flush success publishes `FS-OK` and root `CWD`. None of these multi-stage paths
+rolls back earlier cache or media effects.
 
 The admitted domain is validator-approved geometry, positive run counts,
 in-range sectors and slots, complete cache spans, and structurally valid
@@ -889,9 +900,9 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue after blank line 5135 with MP64FS loading and syncing at
-line 5136, then toward the persistent evaluator, ordinary checked
-module-loader surface, and deterministic cooperative task scheduler.
+Later slices continue after blank line 5218 with `.FTYPE` at line 5219, then
+toward the persistent evaluator, ordinary checked module-loader surface, and
+deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

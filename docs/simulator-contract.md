@@ -1245,13 +1245,13 @@ acceptance uses an exact-sector Buffer and does not add hidden padding.
 validates the selected binding and does not report capabilities, staleness,
 `FS-OK`, or durability.
 
-The native hosted `MP64FS-VALID?` is qualified as an isolated BIOS
-prerequisite. It preserves the literal `1`/`0` result, fixed core-0 scratch
-layout, dynamic geometry, three checked reads, narrow occupied-entry
-predicate, and final attachment-generation check. This does not advance the
-contiguous source frontier or admit the following lifecycle words.
+The native hosted `MP64FS-VALID?` preserves the literal `1`/`0` result, fixed
+core-0 scratch layout, dynamic geometry, up to three checked reads (all three
+on the successful path), narrow occupied-entry predicate, and final
+attachment-generation check. The admitted `FS-LOAD` path now consumes that
+ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5134. Exact unchanged lines
+The contiguous source frontier now ends at line 5217. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1316,8 +1316,36 @@ These helpers are deliberately not hardened by simulator policy. They do not
 gate on `FS-OK` or validate pointers, indices, geometry, or counts.
 `BIT-MASK` is a scalar cell shift only for `0..63`, with bitmap callers using
 `0..7`; invalid ordinary-`DO` bounds can traverse the modulo-64-bit range.
-`FIND-FREE` uses shared `FF-*` scratch and is non-reentrant. After blank line
-5135, line 5136 begins the next uncovered loading and syncing section.
+`FIND-FREE` uses shared `FF-*` scratch and is non-reentrant.
+
+Exact unchanged lines 5135 through 5217 add four definitions through `FORMAT`
+in 83 lines and 2,999 bytes (SHA-256
+`829268e2d06f11c19bda4a5fa0606e883fdf3ab4a3690a741f0cd2616ada4137`).
+Loading the slice only installs definitions. Focused pathless in-memory
+execution qualifies raw-binding load, ordered cache synchronization,
+conditional autoload, and metadata-only marker-1 formatting.
+
+`FS-LOAD` clears `FS-OK` before presence and destructive raw rebinding. After
+BIOS validation it reads and publishes the superblock and geometry, then the
+bitmap, then the directory; only the last success sets `FS-OK`, and `CWD` is
+retained. A later abort can therefore leave the new binding, earlier caches,
+and geometry live while the filesystem remains unmounted. Validation and
+cache reads are separately locked operations, and the reread superblock is not
+revalidated, so this is not a coherent same-medium content snapshot.
+
+`FS-SYNC` writes bitmap, then directory, then flushes, never the superblock.
+Later failure does not undo earlier writes; non-stale failure can leave
+`FS-OK` true, while stale compatibility results clear it. `FS-ENSURE` is silent
+for false-plus-absent, invokes `FS-LOAD` only for false-plus-present, and never
+revalidates a true marker.
+
+`FORMAT` clears `FS-OK`, destructively binds raw storage, accepts capacities
+from 15 through 65,536 sectors, publishes geometry, then writes superblock,
+active bitmap, and directory before flushing. Only flush success sets
+`FS-OK = -1` and `CWD = 255`. Failure retains constructed caches, geometry,
+binding, and earlier media writes; data sectors and the inactive bitmap-cache
+tail are not erased. Blank line 5218 is the next uncovered seam, followed by
+the `.FTYPE` heading at line 5219 and definition at line 5221.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
@@ -1416,8 +1444,8 @@ timestamps, CRCs, parent acyclicity or root reachability, extent disjointness,
 allocation ownership, orphan sectors, bitmap tail bits, or file data.
 
 The final attachment-generation comparison detects replacement but not writes
-to the same attached image, so the three reads are not a coherent content
-snapshot. Qualification is one-full-core/core-0 behavior. Executable BIOS
+to the same attached image, so the successful path's three reads are not a
+coherent content snapshot. Qualification is one-full-core/core-0 behavior. Executable BIOS
 derives scratch from `R2/2`, which is unsafe under secondary-core stack
 geometry, and mutates shared `var_mp64fs_*` state, which is non-reentrant. The
 hosted stateless predicate is not evidence that those native concurrency

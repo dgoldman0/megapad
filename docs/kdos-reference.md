@@ -856,16 +856,17 @@ inspection, Arena integration, integer/FP16/BF16 operations, the kernel
 registry and sample kernels, the pipeline engine, checked block-device and
 bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
 storage-compatibility, legacy file, and initial MP64FS cache/helper layers
-through line 5134.
+plus the MP64FS load/sync/ensure/format lifecycle through line 5217.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
 guarded I/O, partition validation, transactional publication, selected-volume
 lifecycle, diagnostic wrappers, permanent file descriptors, and composed
-head/full/tail sector I/O, MP64FS cache geometry, bitmap mutation/search, and
-packed directory readers are executable semantic behavior rather than
-reporting-only shims. The frontier now ends at line 5134; after blank line
-5135, the next uncovered loading/syncing section begins at line 5136.
+head/full/tail sector I/O, MP64FS cache geometry, bitmap mutation/search,
+packed directory readers, raw-binding load, synchronization, conditional
+autoload, and metadata formatting are executable semantic behavior rather
+than reporting-only shims. The frontier now ends at line 5217; blank line
+5218 precedes the `.FTYPE` heading at line 5219 and definition at line 5221.
 
 ---
 
@@ -1104,9 +1105,13 @@ geometry, bitmap, allocation-search, and packed directory definitions in 131
 lines and 4,579 bytes, with SHA-256
 `caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062`.
 Load installs provisional 2,048-sector geometry, root `CWD`, zeroed scratch,
-and cold-hosted cache storage without validating or touching media. After
-blank line 5135, line 5136 begins the next uncovered loading and syncing
-section.
+and cold-hosted cache storage without validating or touching media. Exact
+lines 5135 through 5217 then add `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and
+`FORMAT` in 83 lines and 2,999 bytes, with SHA-256
+`829268e2d06f11c19bda4a5fa0606e883fdf3ab4a3690a741f0cd2616ada4137`.
+Loading those four definitions has no binding, I/O, flush, output, or
+filesystem-state effect. Blank line 5218 is the next uncovered seam before
+the `.FTYPE` heading at line 5219 and definition at line 5221.
 
 ---
 
@@ -1544,7 +1549,7 @@ example, an extra live volume reference leaves that volume and the block
 descriptor valid, clears the singleton raw volume, and makes the subsequent
 open return `BD-E-BUSY`. Nothing restores the old raw binding. `STORAGE-OPEN`
 also does not clear `FS-OK`: direct callers must invalidate filesystem cache
-state before rebinding. The ordinary later `FS-LOAD` and `FORMAT` paths do that
+state before rebinding. The now-admitted `FS-LOAD` and `FORMAT` paths do that
 themselves. `FS-VOLUME!` borrows rather than owns its selection, so the caller
 must keep that volume alive. A rejected selection leaves the previous pointer
 and cache marker unchanged.
@@ -1738,23 +1743,29 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
-### Hosted Foundation Checkpoint
+### Hosted Lifecycle Checkpoint
 
-The native hosted `MP64FS-VALID?` prerequisite is qualified separately. It
-returns literal `1` or `0` after the executable BIOS's three raw checked reads
-and narrow geometry/metadata predicate. It does not select a KDOS volume, make
-the reads a coherent same-image content snapshot, or advance the contiguous
-unchanged-source frontier beyond line 5134.
+The native hosted `MP64FS-VALID?` returns literal `1` or `0` after up to three
+raw checked reads and the executable BIOS's narrow geometry/metadata
+predicate. Ordinary admitted `FS-LOAD` now exercises it before publishing
+KDOS caches. It still does not select a KDOS volume or make its reads a
+coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 5134. This checkpoint allocates `FS-SUPER`, `FS-BMAP`, and
-`FS-DIR`; installs provisional `FS-TOTAL = 2048`, `FS-BMAP-N = 1`, and root
-`CWD = 255`; and publishes the geometry, bitmap, first-fit, and packed-entry
-helpers. It performs no storage I/O or validation and leaves `FS-OK = 0`.
-Those defaults and cold-cache bytes are therefore construction state, not a
-claim that a filesystem is mounted. The three `VARIABLE ... ALLOT`
-declarations each reserve seven bytes beyond their 512-, 8192-, and 6144-byte
-operational windows; the source does not explicitly clear the `ALLOT` tails.
+`kdos.f` line 5217. The foundation through line 5134 allocates `FS-SUPER`,
+`FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
+`FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
+first-fit, and packed-entry helpers. It performs no storage I/O or validation
+and leaves `FS-OK = 0`. Those defaults and cold-cache bytes are construction
+state, not a claim that a filesystem is mounted. The three
+`VARIABLE ... ALLOT` declarations each reserve seven bytes beyond their 512-,
+8192-, and 6144-byte operational windows; the source does not explicitly
+clear the `ALLOT` tails.
+
+Exact unchanged lines 5135–5217 add the four lifecycle definitions in 83
+lines and 2,999 bytes. Loading them has no side effects; focused execution
+qualifies raw-binding load, ordered cache synchronization, conditional
+autoload, and metadata-only formatting on pathless in-memory media.
 
 | Word | Stack Effect | Admitted behavior |
 |------|--------------|-------------------|
@@ -1826,6 +1837,26 @@ the field to preserve the stale comment.
 | `LOAD` | `( "filename" -- )` | Open a Forth source file from disk, read it into memory, and EVALUATE each line.  This is how KDOS extensions and scripts are loaded. |
 | `SOURCE-EVALUATE-CHECKED` | `( addr len -- status )` | Compile a complete in-memory source buffer with deterministic status and diagnostics; stop at first failure. |
 | `DIRENT` | `( n -- addr )` | Address of directory entry *n* in the RAM cache (for low-level access). |
+
+`FS-LOAD` clears `FS-OK`, destructively binds raw storage, delegates to the
+BIOS validator, then reads superblock/geometry, bitmap, and directory in that
+order. Only complete success sets `FS-OK`; `CWD` is retained. Validation and
+cache reads do not share one lock or generation-bound snapshot, the reread
+superblock is not revalidated, and a late abort can leave the binding,
+geometry, and earlier caches published.
+
+`FS-SYNC` writes bitmap then directory and flushes without writing the
+superblock or rolling back earlier writes. A non-stale late failure may retain
+true `FS-OK`; a stale compatibility result clears it. `FS-ENSURE` is silent
+for false-plus-absent and never revalidates a true marker.
+
+`FORMAT` clears `FS-OK`, destructively binds raw storage, accepts capacities
+15 through 65,536, publishes geometry, then writes superblock, active bitmap,
+and directory before flushing. Only flush success publishes true `FS-OK` and
+root `CWD`. Failure retains constructed caches and any earlier media writes;
+data sectors and the inactive bitmap-cache tail are untouched. The current
+frontier ends here: `.FTYPE`, `DIR`, and all later file commands in this
+reference remain unqualified hosted source.
 
 **Example — filesystem operations:**
 ```forth
