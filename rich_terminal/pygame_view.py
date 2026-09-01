@@ -16,6 +16,7 @@ from .retained_view import (
     MenuDraw,
     MenuItemDraw,
     MenuSeparatorDraw,
+    PolylineDraw,
     RetainedDrawPlane,
     TabDraw,
     TabSetDraw,
@@ -228,8 +229,11 @@ def _bounds_rect(pygame_module, region_rect, bounds):
     )
 
 
-def _object_rect(pygame_module, region_rect, draw: GlyphRunDraw):
-    return _bounds_rect(pygame_module, region_rect, draw.bounds)
+def _object_rect(pygame_module, region_rect, draw):
+    parent = region_rect
+    for bounds in draw.parent_bounds:
+        parent = _bounds_rect(pygame_module, parent, bounds)
+    return _bounds_rect(pygame_module, parent, draw.bounds)
 
 
 def _font_height(font, fallback: int) -> int:
@@ -1510,6 +1514,80 @@ def _draw_decoration(pygame_module, surface, slot, color, alpha, y):
     surface.blit(layer, slot)
 
 
+def _polyline_point(rect, point) -> tuple[int, int]:
+    """Map one UNORM32 point to an inclusive pixel center inside rect."""
+
+    width = max(0, rect.width - 1)
+    height = max(0, rect.height - 1)
+    return (
+        rect.left + (point.x * width) // UINT32_MAX,
+        rect.top + (point.y * height) // UINT32_MAX,
+    )
+
+
+def _alpha_circle(pygame_module, surface, color, center, radius: int) -> None:
+    rgba = tuple(color)
+    radius = max(1, radius)
+    if len(rgba) != 4 or rgba[3] == 0xFF:
+        pygame_module.draw.circle(surface, rgba[:3], center, radius)
+        return
+    if rgba[3] == 0:
+        return
+    diameter = 2 * radius + 1
+    bounds = pygame_module.Rect(
+        center[0] - radius,
+        center[1] - radius,
+        diameter,
+        diameter,
+    )
+    layer = pygame_module.Surface(bounds.size, flags=pygame_module.SRCALPHA)
+    pygame_module.draw.circle(layer, rgba, (radius, radius), radius)
+    surface.blit(layer, bounds)
+
+
+def _paint_polyline(pygame_module, surface, region, region_rect, draw) -> None:
+    object_rect = _object_rect(pygame_module, region_rect, draw)
+    clip = object_rect.clip(surface.get_rect())
+    if region.clipped:
+        clip = clip.clip(region_rect)
+    prior_clip = surface.get_clip()
+    clip = clip.clip(prior_clip)
+    if clip.width <= 0 or clip.height <= 0 or draw.color.alpha == 0:
+        return
+    minimum_extent = min(object_rect.width, object_rect.height)
+    if minimum_extent <= 0:
+        return
+    thickness = max(
+        1,
+        (draw.stroke_width * minimum_extent + UINT32_MAX - 1) // UINT32_MAX,
+    )
+    points = tuple(_polyline_point(object_rect, point) for point in draw.points)
+    segments = list(zip(points, points[1:]))
+    if draw.closed:
+        segments.append((points[-1], points[0]))
+    color = (*_rgb(draw.color), draw.color.alpha)
+    try:
+        surface.set_clip(clip)
+        for start, end in segments:
+            _alpha_line(
+                pygame_module,
+                surface,
+                color,
+                start,
+                end,
+                width=thickness,
+            )
+        # pygame's one-pixel line already supplies its endpoint pixels.  Wider
+        # strokes receive explicit round caps and joins so their appearance is
+        # independent of the platform line primitive's endpoint convention.
+        if thickness > 1:
+            radius = thickness // 2
+            for point in points:
+                _alpha_circle(pygame_module, surface, color, point, radius)
+    finally:
+        surface.set_clip(prior_clip)
+
+
 def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
     object_rect = _object_rect(pygame_module, region_rect, draw)
     clip = object_rect.clip(surface.get_rect())
@@ -1649,6 +1727,14 @@ def composite_draw_plane_result(
                     pygame_module,
                     surface,
                     font,
+                    region,
+                    region_rect,
+                    draw,
+                )
+            elif isinstance(draw, PolylineDraw):
+                _paint_polyline(
+                    pygame_module,
+                    surface,
                     region,
                     region_rect,
                     draw,

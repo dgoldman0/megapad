@@ -28,6 +28,7 @@ from rich_terminal.retained_view import (
     MenuDraw,
     MenuItemDraw,
     MenuSeparatorDraw,
+    PolylineDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
     TabDraw,
@@ -39,6 +40,7 @@ from rich_terminal.retained_scene import (
     ControlKind,
     ControlState,
     ObjectBounds,
+    Point,
     RGBA,
     validate_control_shape,
 )
@@ -353,15 +355,27 @@ def display_scope_from_wire(data: dict) -> DisplayScope:
     )
 
 
-_DRAW_WIRE_FIELDS = (
+_GLYPH_RUN_WIRE_FIELDS = (
     "kind",
     "object_id",
     "z_order",
     "bounds",
+    "parent_bounds",
     "foreground",
     "background",
     "attributes",
     "text",
+)
+_POLYLINE_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "points",
+    "stroke_width",
+    "color",
+    "closed",
 )
 _MENU_BAR_WIRE_FIELDS = (
     "kind",
@@ -439,6 +453,27 @@ def _semantic_content_to_wire(content: SemanticTextContent) -> str:
 
     payload = encode_semantic_text_content(content)
     return base64.b64encode(payload).decode("ascii")
+
+
+def _bounds_to_wire(bounds: ObjectBounds) -> list[int]:
+    if not isinstance(bounds, ObjectBounds):
+        raise TypeError("bounds must be ObjectBounds")
+    return [bounds.left, bounds.top, bounds.right, bounds.bottom]
+
+
+def _bounds_path_to_wire(bounds_path: tuple[ObjectBounds, ...]) -> list[list[int]]:
+    return [_bounds_to_wire(bounds) for bounds in bounds_path]
+
+
+def _bounds_path_from_wire(value, name: str) -> tuple[ObjectBounds, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{name} must be an array")
+    return tuple(
+        ObjectBounds(
+            *_wire_integer_array(item, f"{name}[{index}]", 4)
+        )
+        for index, item in enumerate(value)
+    )
 
 
 def _semantic_content_from_wire(value, name: str) -> SemanticTextContent:
@@ -529,19 +564,22 @@ def _menu_to_wire(menu: MenuDraw) -> dict:
 
 
 def _retained_draw_to_wire(
-    draw: GlyphRunDraw | MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw,
+    draw: (
+        GlyphRunDraw
+        | PolylineDraw
+        | MenuBarDraw
+        | TextAreaDraw
+        | TextGridDraw
+        | TabSetDraw
+    ),
 ) -> dict:
     if isinstance(draw, GlyphRunDraw):
         return {
             "kind": "glyph_run",
             "object_id": draw.object_id,
             "z_order": draw.z_order,
-            "bounds": [
-                draw.bounds.left,
-                draw.bounds.top,
-                draw.bounds.right,
-                draw.bounds.bottom,
-            ],
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
             "foreground": [
                 draw.foreground.red,
                 draw.foreground.green,
@@ -556,6 +594,23 @@ def _retained_draw_to_wire(
             ],
             "attributes": draw.attributes,
             "text": draw.text,
+        }
+    if isinstance(draw, PolylineDraw):
+        return {
+            "kind": "polyline",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "points": [[point.x, point.y] for point in draw.points],
+            "stroke_width": draw.stroke_width,
+            "color": [
+                draw.color.red,
+                draw.color.green,
+                draw.color.blue,
+                draw.color.alpha,
+            ],
+            "closed": draw.closed,
         }
     if isinstance(draw, MenuBarDraw):
         return {
@@ -837,12 +892,19 @@ def _tabset_from_wire(data, name: str) -> TabSetDraw:
 def _retained_draw_from_wire(
     data,
     name: str,
-) -> GlyphRunDraw | MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw:
+) -> (
+    GlyphRunDraw
+    | PolylineDraw
+    | MenuBarDraw
+    | TextAreaDraw
+    | TextGridDraw
+    | TabSetDraw
+):
     if not isinstance(data, Mapping):
         raise TypeError(f"{name} must be an object")
     kind = data.get("kind")
     if kind == "glyph_run":
-        wire = _wire_object(data, name, _DRAW_WIRE_FIELDS)
+        wire = _wire_object(data, name, _GLYPH_RUN_WIRE_FIELDS)
         bounds = _wire_integer_array(wire["bounds"], f"{name} bounds", 4)
         foreground = _wire_integer_array(
             wire["foreground"], f"{name} foreground", 4, maximum=0xFF
@@ -873,6 +935,52 @@ def _retained_draw_from_wire(
                 maximum=0x7F,
             ),
             text=_wire_text(wire["text"], f"{name} text"),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+        )
+    if kind == "polyline":
+        wire = _wire_object(data, name, _POLYLINE_WIRE_FIELDS)
+        points_wire = wire["points"]
+        if not isinstance(points_wire, (list, tuple)):
+            raise TypeError(f"{name} points must be an array")
+        return PolylineDraw(
+            object_id=_wire_integer(
+                wire["object_id"],
+                f"{name} object_id",
+                minimum=1,
+                maximum=UINT64_MAX,
+            ),
+            z_order=_wire_integer(
+                wire["z_order"],
+                f"{name} z_order",
+                minimum=INT32_MIN,
+                maximum=INT32_MAX,
+            ),
+            bounds=ObjectBounds(
+                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+            ),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+            points=tuple(
+                Point(
+                    *_wire_integer_array(point, f"{name} point {index}", 2)
+                )
+                for index, point in enumerate(points_wire)
+            ),
+            stroke_width=_wire_integer(
+                wire["stroke_width"],
+                f"{name} stroke_width",
+                minimum=1,
+                maximum=UINT32_MAX,
+            ),
+            color=RGBA(
+                *_wire_integer_array(
+                    wire["color"], f"{name} color", 4, maximum=0xFF
+                )
+            ),
+            closed=_wire_boolean(wire["closed"], f"{name} closed"),
         )
     if kind == "menu_bar":
         wire = _wire_object(data, name, _MENU_BAR_WIRE_FIELDS)

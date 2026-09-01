@@ -17,6 +17,8 @@ from rich_terminal.retained_scene import (
     ObjectBounds,
     ObjectDefinition,
     OwnerScene,
+    Point,
+    PolylineBody,
     RegionDefinition,
     RetainedScene,
     RGBA,
@@ -26,6 +28,7 @@ from rich_terminal.retained_scene import (
 )
 from rich_terminal.retained_view import (
     DisplayScope,
+    PolylineDraw,
     RetainedViewError,
     project_composite_draw_plane,
 )
@@ -247,7 +250,7 @@ def test_hidden_planes_and_effectively_hidden_children_emit_no_draw_values():
     assert visible_plane.regions[0].draws == ()
 
 
-def test_projection_fails_closed_on_visible_unsupported_and_nested_objects():
+def test_projection_fails_closed_on_visible_unsupported_objects_and_projects_groups():
     owner = _owner(5)
     region = _region(owner, 1)
     status = _object(owner, 1, 1, StatusBody(WHITE, GREEN, 1, 0))
@@ -256,7 +259,10 @@ def test_projection_fails_closed_on_visible_unsupported_and_nested_objects():
             _composite([_owner_scene(owner, [region], [status])])
         )
 
-    group = _object(owner, 2, 1, GroupBody())
+    group = replace(
+        _object(owner, 2, 1, GroupBody()),
+        bounds=ObjectBounds(0x10000000, 0x20000000, 0xEFFFFFFF, 0xDFFFFFFF),
+    )
     nested = _object(
         owner,
         3,
@@ -264,10 +270,53 @@ def test_projection_fails_closed_on_visible_unsupported_and_nested_objects():
         GlyphRunBody(WHITE, GREEN, 0, "nested"),
         parent=2,
     )
-    with pytest.raises(RetainedViewError, match="not parentless"):
-        project_composite_draw_plane(
-            _composite([_owner_scene(owner, [region], [nested, group])])
-        )
+    _, plane = project_composite_draw_plane(
+        _composite([_owner_scene(owner, [region], [nested, group])])
+    )
+
+    assert len(plane.regions[0].draws) == 1
+    draw = plane.regions[0].draws[0]
+    assert draw.text == "nested"
+    assert draw.parent_bounds == (group.bounds,)
+
+
+def test_projection_copies_polyline_geometry_and_nested_group_path():
+    owner = _owner(5)
+    region = _region(owner, 1)
+    outer = replace(
+        _object(owner, 2, 1, GroupBody()),
+        bounds=ObjectBounds(0, 0, 0xCFFFFFFF, 0xEFFFFFFF),
+    )
+    inner = replace(
+        _object(owner, 3, 1, GroupBody(), parent=2),
+        bounds=ObjectBounds(0x10000000, 0x20000000, 0xFFFFFFFF, 0xFFFFFFFF),
+    )
+    body = PolylineBody(
+        (Point(0, 0), Point(0x7FFFFFFF, 0xFFFFFFFF), Point(0xFFFFFFFF, 0)),
+        0x08000000,
+        GREEN,
+        True,
+    )
+    line = replace(
+        _object(owner, 4, 1, body, z_order=7, parent=3),
+        bounds=ObjectBounds(0x20000000, 0, 0xDFFFFFFF, 0xFFFFFFFF),
+    )
+
+    _, plane = project_composite_draw_plane(
+        _composite([_owner_scene(owner, [region], [line, inner, outer])])
+    )
+
+    assert len(plane.regions[0].draws) == 1
+    draw = plane.regions[0].draws[0]
+    assert isinstance(draw, PolylineDraw)
+    assert draw.object_id == 4
+    assert draw.z_order == 7
+    assert draw.bounds == line.bounds
+    assert draw.parent_bounds == (outer.bounds, inner.bounds)
+    assert draw.points == body.points
+    assert draw.stroke_width == body.stroke_width
+    assert draw.color == GREEN
+    assert draw.closed
 
 
 def test_projection_never_traverses_the_hidden_rebuild_target():

@@ -28,6 +28,8 @@ from .retained_scene import (
     ObjectBounds,
     ObjectDefinition,
     OwnerScene,
+    Point,
+    PolylineBody,
     RGBA,
     RegionDefinition,
     RetainedScene,
@@ -184,7 +186,7 @@ class DisplayScope:
 
 @dataclass(frozen=True, slots=True)
 class GlyphRunDraw:
-    """One visible, parentless styled glyph run in UNORM32 geometry."""
+    """One visible styled glyph run with an exact GROUP bounds path."""
 
     object_id: int
     z_order: int
@@ -193,6 +195,7 @@ class GlyphRunDraw:
     background: RGBA
     attributes: int
     text: str
+    parent_bounds: tuple[ObjectBounds, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -223,6 +226,86 @@ class GlyphRunDraw:
             self.text.encode("utf-8", "strict")
         except UnicodeEncodeError as exc:
             raise ValueError("glyph-run text contains a non-scalar surrogate") from exc
+        object.__setattr__(
+            self,
+            "parent_bounds",
+            _object_bounds_path("parent_bounds", self.parent_bounds),
+        )
+
+
+def _object_bounds_path(name: str, value) -> tuple[ObjectBounds, ...]:
+    bounds = tuple(value)
+    if any(not isinstance(item, ObjectBounds) for item in bounds):
+        raise TypeError(f"{name} must contain only ObjectBounds values")
+    return tuple(
+        ObjectBounds(item.left, item.top, item.right, item.bottom)
+        for item in bounds
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PolylineDraw:
+    """One visible straight-segment path with renderer-owned rasterization."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    points: tuple[Point, ...]
+    stroke_width: int
+    color: RGBA
+    closed: bool
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "object_id",
+            _integer("object_id", self.object_id, minimum=1, maximum=UINT64_MAX),
+        )
+        object.__setattr__(
+            self,
+            "z_order",
+            _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
+        )
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        object.__setattr__(
+            self,
+            "bounds",
+            ObjectBounds(
+                self.bounds.left,
+                self.bounds.top,
+                self.bounds.right,
+                self.bounds.bottom,
+            ),
+        )
+        points = tuple(self.points)
+        if len(points) < 2 or any(not isinstance(point, Point) for point in points):
+            raise ValueError("polyline draw requires at least two Point values")
+        object.__setattr__(
+            self,
+            "points",
+            tuple(Point(point.x, point.y) for point in points),
+        )
+        object.__setattr__(
+            self,
+            "stroke_width",
+            _integer(
+                "stroke_width",
+                self.stroke_width,
+                minimum=1,
+                maximum=UINT32_MAX,
+            ),
+        )
+        if not isinstance(self.color, RGBA):
+            raise TypeError("color must be RGBA")
+        if not isinstance(self.closed, bool):
+            raise TypeError("closed must be bool")
+        object.__setattr__(
+            self,
+            "parent_bounds",
+            _object_bounds_path("parent_bounds", self.parent_bounds),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,8 +668,11 @@ class TabSetDraw:
         object.__setattr__(self, "tabs", tabs)
 
 
+ObjectDraw = GlyphRunDraw | PolylineDraw
 SemanticRootDraw = MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw
-RetainedDraw = GlyphRunDraw | SemanticRootDraw
+RetainedDraw = ObjectDraw | SemanticRootDraw
+
+_OBJECT_DRAW_TYPES = (GlyphRunDraw, PolylineDraw)
 
 
 def _semantic_draw_control_ids(draw: SemanticRootDraw) -> set[int]:
@@ -601,7 +687,7 @@ def _semantic_draw_control_ids(draw: SemanticRootDraw) -> set[int]:
 
 
 def _draw_order_key(draw: RetainedDraw) -> tuple[int, int, int]:
-    if isinstance(draw, GlyphRunDraw):
+    if isinstance(draw, _OBJECT_DRAW_TYPES):
         return draw.z_order, 0, draw.object_id
     return draw.z_order, 1, draw.control_id
 
@@ -649,7 +735,14 @@ class RetainedRegionDraw:
         if any(
             not isinstance(
                 draw,
-                (GlyphRunDraw, MenuBarDraw, TextAreaDraw, TextGridDraw, TabSetDraw),
+                (
+                    GlyphRunDraw,
+                    PolylineDraw,
+                    MenuBarDraw,
+                    TextAreaDraw,
+                    TextGridDraw,
+                    TabSetDraw,
+                ),
             )
             for draw in draws
         ):
@@ -697,7 +790,7 @@ class RetainedDrawPlane:
             owner = region.owner_id, region.owner_generation
             owner_control_ids = control_ids_by_owner.setdefault(owner, set())
             for draw in region.draws:
-                if isinstance(draw, GlyphRunDraw):
+                if isinstance(draw, _OBJECT_DRAW_TYPES):
                     continue
                 draw_control_ids = _semantic_draw_control_ids(draw)
                 if owner_control_ids & draw_control_ids:
@@ -731,6 +824,35 @@ def _effectively_visible(
         if not isinstance(parent.body, GroupBody):
             raise RetainedViewError("retained object parent is not a GROUP")
         current = parent
+
+
+def _object_parent_bounds(
+    definition: ObjectDefinition,
+    objects,
+) -> tuple[ObjectBounds, ...]:
+    """Copy the root-to-leaf GROUP bounds path for one visible object."""
+
+    current = definition
+    reverse_path: list[ObjectBounds] = []
+    visited: set[int] = set()
+    while current.parent_object_id:
+        parent_id = current.parent_object_id
+        if parent_id in visited:
+            raise RetainedViewError("retained object graph contains a cycle")
+        visited.add(parent_id)
+        parent = objects.get(parent_id)
+        if parent is None:
+            raise RetainedViewError("retained object refers to a missing parent")
+        if parent.owner != definition.owner or parent.region_id != definition.region_id:
+            raise RetainedViewError("retained object parent crosses owner or region scope")
+        if not isinstance(parent.body, GroupBody):
+            raise RetainedViewError("retained object parent is not a GROUP")
+        reverse_path.append(parent.bounds)
+        current = parent
+    return tuple(
+        ObjectBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
+        for bounds in reversed(reverse_path)
+    )
 
 
 def _validate_owner_scope(owner_scene: OwnerScene, owner_key: int, view) -> None:
@@ -1202,27 +1324,43 @@ def project_composite_draw_plane(
                     continue
                 if isinstance(definition.body, GroupBody):
                     continue
-                if not isinstance(definition.body, GlyphRunBody):
-                    raise RetainedViewError(
-                        f"visible {definition.kind.name} object "
-                        f"{definition.object_id} is unsupported by draw-plane rendering"
-                    )
-                if definition.parent_object_id != 0:
-                    raise RetainedViewError(
-                        f"visible GLYPH_RUN object {definition.object_id} is not parentless"
-                    )
+                parent_bounds = _object_parent_bounds(
+                    definition,
+                    owner_scene.objects,
+                )
                 bounds = definition.bounds
                 body = definition.body
-                draws.append(
-                    GlyphRunDraw(
-                        object_id=definition.object_id,
-                        z_order=definition.z_order,
-                        bounds=bounds,
-                        foreground=body.foreground,
-                        background=body.background,
-                        attributes=body.attributes,
-                        text=body.text,
+                if isinstance(body, GlyphRunBody):
+                    draws.append(
+                        GlyphRunDraw(
+                            object_id=definition.object_id,
+                            z_order=definition.z_order,
+                            bounds=bounds,
+                            foreground=body.foreground,
+                            background=body.background,
+                            attributes=body.attributes,
+                            text=body.text,
+                            parent_bounds=parent_bounds,
+                        )
                     )
+                    continue
+                if isinstance(body, PolylineBody):
+                    draws.append(
+                        PolylineDraw(
+                            object_id=definition.object_id,
+                            z_order=definition.z_order,
+                            bounds=bounds,
+                            points=body.points,
+                            stroke_width=body.stroke_width,
+                            color=body.color,
+                            closed=body.closed,
+                            parent_bounds=parent_bounds,
+                        )
+                    )
+                    continue
+                raise RetainedViewError(
+                    f"visible {definition.kind.name} object "
+                    f"{definition.object_id} is unsupported by draw-plane rendering"
                 )
             for control_id in control_roots.get(region.region_id, ()):
                 if controls[control_id][2] & ControlState.VISIBLE:
@@ -1267,6 +1405,8 @@ __all__ = [
     "MenuEntryDraw",
     "MenuItemDraw",
     "MenuSeparatorDraw",
+    "ObjectDraw",
+    "PolylineDraw",
     "RetainedDraw",
     "RetainedRegionDraw",
     "RetainedDrawPlane",

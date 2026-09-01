@@ -7,13 +7,14 @@ from copy import deepcopy
 
 import pytest
 
-from rich_terminal.retained_scene import ControlState, ObjectBounds, RGBA
+from rich_terminal.retained_scene import ControlState, ObjectBounds, Point, RGBA
 from rich_terminal.retained_view import (
     GlyphRunDraw,
     MenuBarDraw,
     MenuDraw,
     MenuItemDraw,
     MenuSeparatorDraw,
+    PolylineDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
     TabDraw,
@@ -46,6 +47,22 @@ def _glyph(*, object_id: int = 11, z_order: int = 4) -> GlyphRunDraw:
         background=RGBA(17, 20, 28, 255),
         attributes=0,
         text="Desk",
+    )
+
+
+def _polyline(*, object_id: int = 12, z_order: int = 5) -> PolylineDraw:
+    return PolylineDraw(
+        object_id=object_id,
+        z_order=z_order,
+        bounds=ObjectBounds(0x10000000, 0, 0xEFFFFFFF, 0xFFFFFFFF),
+        points=(Point(0, 0), Point(0x7FFFFFFF, 0xFFFFFFFF), Point(0xFFFFFFFF, 0)),
+        stroke_width=0x08000000,
+        color=RGBA(20, 210, 70, 192),
+        closed=True,
+        parent_bounds=(
+            ObjectBounds(0, 0x10000000, 0xFFFFFFFF, 0xEFFFFFFF),
+            ObjectBounds(0x20000000, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        ),
     )
 
 
@@ -272,6 +289,87 @@ def test_semantic_menu_tree_round_trips_with_explicit_draw_tags():
     ]
     assert bar["menus"][0]["entries"][0]["label"] == "Save…"
     assert bar["menus"][0]["entries"][0]["shortcut"] == "Ctrl+S"
+
+
+def test_object_draws_round_trip_with_exact_group_paths_and_vector_geometry():
+    glyph = GlyphRunDraw(
+        object_id=11,
+        z_order=4,
+        bounds=FULL_BOUNDS,
+        foreground=RGBA(230, 235, 244, 255),
+        background=RGBA(17, 20, 28, 255),
+        attributes=0,
+        text="Desk",
+        parent_bounds=(ObjectBounds(0, 0, 0xDFFFFFFF, 0xFFFFFFFF),),
+    )
+    line = _polyline()
+    plane = RetainedDrawPlane(
+        True,
+        True,
+        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, (glyph, line)),),
+    )
+
+    wire = retained_draw_plane_to_wire(plane)
+
+    assert retained_draw_plane_from_wire(wire) == plane
+    glyph_wire, line_wire = wire["regions"][0]["draws"]
+    assert glyph_wire["parent_bounds"] == [[0, 0, 0xDFFFFFFF, 0xFFFFFFFF]]
+    assert set(line_wire) == {
+        "kind",
+        "object_id",
+        "z_order",
+        "bounds",
+        "parent_bounds",
+        "points",
+        "stroke_width",
+        "color",
+        "closed",
+    }
+    assert line_wire["kind"] == "polyline"
+    assert line_wire["points"] == [
+        [0, 0],
+        [0x7FFFFFFF, 0xFFFFFFFF],
+        [0xFFFFFFFF, 0],
+    ]
+    assert line_wire["closed"] is True
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error", "match"),
+    (
+        (
+            lambda draw: draw["points"][0].__setitem__(0, True),
+            TypeError,
+            "not bool",
+        ),
+        (
+            lambda draw: draw["parent_bounds"].append([0, 0, 1]),
+            TypeError,
+            "array of 4 integers",
+        ),
+        (
+            lambda draw: draw.update({"closed": 1}),
+            TypeError,
+            "must be bool",
+        ),
+        (
+            lambda draw: draw.update({"renderer_hint": "smooth"}),
+            ValueError,
+            "fields are not exact",
+        ),
+    ),
+)
+def test_polyline_wire_rejects_noncanonical_geometry(mutate, error, match):
+    plane = RetainedDrawPlane(
+        True,
+        True,
+        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, (_polyline(),)),),
+    )
+    wire = deepcopy(retained_draw_plane_to_wire(plane))
+    mutate(wire["regions"][0]["draws"][0])
+
+    with pytest.raises(error, match=match):
+        retained_draw_plane_from_wire(wire)
 
 
 @pytest.mark.parametrize(

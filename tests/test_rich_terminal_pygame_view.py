@@ -6,8 +6,13 @@ import pytest
 
 from rich_terminal.apt1 import UINT32_MAX
 from rich_terminal.pygame_view import composite_draw_plane, unorm_high_edge, unorm_low_edge
-from rich_terminal.retained_scene import ObjectBounds, RGBA
-from rich_terminal.retained_view import GlyphRunDraw, RetainedDrawPlane, RetainedRegionDraw
+from rich_terminal.retained_scene import ObjectBounds, Point, RGBA
+from rich_terminal.retained_view import (
+    GlyphRunDraw,
+    PolylineDraw,
+    RetainedDrawPlane,
+    RetainedRegionDraw,
+)
 
 
 def _run(object_id, z_order, foreground, background, text, *, attributes=0):
@@ -157,3 +162,81 @@ def test_transparent_foreground_suppresses_glyph_but_preserves_background_and_cl
     assert tuple(surface.get_at((4, 0)))[:3] == (80, 90, 100)
     assert font.rendered == []
     assert surface.get_clip() == pygame.Rect(4, 0, 4, 5)
+
+
+def test_polyline_uses_iterative_group_geometry_without_crossing_parent_bounds():
+    pygame = pytest.importorskip("pygame")
+    surface = pygame.Surface((10, 10))
+    surface.fill((2, 4, 6))
+    font = _PixelFont(pygame)
+    line = PolylineDraw(
+        object_id=1,
+        z_order=0,
+        bounds=ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        points=(Point(UINT32_MAX, 0), Point(UINT32_MAX, UINT32_MAX)),
+        stroke_width=1,
+        color=RGBA(20, 210, 70, 255),
+        closed=False,
+        parent_bounds=(ObjectBounds(0, 0, UINT32_MAX // 2, UINT32_MAX),),
+    )
+    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (line,))
+
+    composite_draw_plane(pygame, surface, _plane(region), font, 10, 10)
+
+    assert tuple(surface.get_at((4, 5)))[:3] == (20, 210, 70)
+    assert tuple(surface.get_at((5, 5)))[:3] == (2, 4, 6)
+
+
+def test_closed_polyline_adds_only_the_canonical_final_segment():
+    pygame = pytest.importorskip("pygame")
+    font = _PixelFont(pygame)
+
+    def paint(closed):
+        surface = pygame.Surface((9, 9))
+        surface.fill((2, 4, 6))
+        line = PolylineDraw(
+            1,
+            0,
+            ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+            (
+                Point(0, 0),
+                Point(UINT32_MAX, 0),
+                Point(UINT32_MAX, UINT32_MAX),
+            ),
+            1,
+            RGBA(220, 30, 40, 255),
+            closed,
+        )
+        region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (line,))
+        composite_draw_plane(pygame, surface, _plane(region), font, 9, 9)
+        return surface
+
+    open_surface = paint(False)
+    closed_surface = paint(True)
+
+    assert tuple(open_surface.get_at((4, 4)))[:3] == (2, 4, 6)
+    assert tuple(closed_surface.get_at((4, 4)))[:3] == (220, 30, 40)
+
+
+def test_translucent_polyline_obeys_the_caller_clip_and_source_over_blending():
+    pygame = pytest.importorskip("pygame")
+    surface = pygame.Surface((10, 5))
+    surface.fill((20, 40, 60))
+    surface.set_clip(pygame.Rect(5, 0, 5, 5))
+    font = _PixelFont(pygame)
+    line = PolylineDraw(
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        (Point(0, 0), Point(UINT32_MAX, 0)),
+        1,
+        RGBA(200, 100, 0, 128),
+        False,
+    )
+    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (line,))
+
+    composite_draw_plane(pygame, surface, _plane(region), font, 10, 5)
+
+    assert tuple(surface.get_at((4, 0)))[:3] == (20, 40, 60)
+    assert tuple(surface.get_at((7, 0)))[:3] == pytest.approx((110, 70, 30), abs=1)
+    assert surface.get_clip() == pygame.Rect(5, 0, 5, 5)
