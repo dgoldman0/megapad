@@ -183,9 +183,10 @@ The implemented slices provide:
 - unchanged KDOS cluster-control and MPU failure behavior, complete §9 ANSI
   screens, §10 Data Port bindings, Dashboard and Help publication, and §15
   Pipeline Bundle tracking/declarative words plus §18 Ring Buffer primitives
-  and §19 Hash Table primitives through line 9383, without claiming networking
-  transport, real bundle-file integration, concurrent collection execution,
-  scheduling, rendering, or rich-terminal output.
+  and §19 Hash Table primitives, followed by the §20 Module System through line
+  9853, without claiming networking transport, real bundle-file integration,
+  concurrent collection execution, scheduling, rendering, or rich-terminal
+  output.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -781,14 +782,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 9383.
+ends at line 9853.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–9383 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19 Hash Table Primitives |
-| 9384 onward | Next uncovered frontier | Line 9384 is the separator; §20 Module System begins at line 9385 |
+| 39–9853 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, §19 Hash Table Primitives, and §20 Module System |
+| 9854 onward | Next uncovered frontier | Line 9854 is the separator; §14 Startup begins at line 9855 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -798,8 +799,10 @@ cross more definitions per slice, the frontier increments should grow, and
 qualified islands should be absorbed until ordinary complete `kdos.f` is one
 continuous load.
 
-The bootstrap loader is not KDOS module-loader evidence. It has no filesystem
-or dictionary transaction and must be shadowed by KDOS's ordinary `REQUIRE`.
+The bootstrap loader was scaffolding, not KDOS module-loader evidence. The
+ordinary unchanged `REQUIRE` path is now qualified separately through §20 and
+shadows that bootstrap behavior with filesystem lookup, exact module identity,
+cycle breaking, and provisional-ID rollback.
 The Arena checkpoint executes all 31 unchanged definitions across general
 `ALLOCATE`/`FREE`, raw XMEM, and HBW backing. It covers caller-placed and
 dictionary descriptors, exact-fit and failed bump allocation, reclaim/reset,
@@ -1866,7 +1869,7 @@ The unchanged source retains these discrepancies:
 - Full Help advertises `POLL`, `INGEST`, and Bundle words before they exist at
   the line-8943 boundary. The Bundle words arrive in the following §15 slice;
   the transport words, including the promised `RECV-FRAME`, `ROUTE-FRAME`,
-  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent at line 9383. Help/comment
+  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent at line 9853. Help/comment
   publication is qualified, not any transport operation.
 
 Exact unchanged lines 8944–9121 add §15 Pipeline Bundles: 178 LF records,
@@ -2079,12 +2082,83 @@ uncontended CRC, one nonnested caller, and a nonmutating callback with the
 exact stack effect. Tombstone-before-duplicate updates remain defective even
 inside otherwise valid geometry and are pinned rather than corrected.
 
-The contiguous frontier now ends at line 9383. Line 9384 is the separator;
-§20 Module System begins at line 9385. Real disk-backed bundle integration,
-actual scheduling/cadence, concurrent ring/hash qualification, module loading,
-mask-driven rendering, physical presentation, and all rich-terminal work
-remain deferred. This advance does not implement `rich-terminal.f` or advance
-the rich-terminal vertical.
+The §19 source ends at line 9383; the qualified §20 slice below continues the
+contiguous frontier. Real disk-backed bundle integration, actual
+scheduling/cadence, concurrent ring/hash qualification, mask-driven rendering,
+physical presentation, and all rich-terminal work remain deferred.
+
+### KDOS §20 Module System
+
+Exact unchanged lines 9384–9853 add the complete Module System: 470 LF
+records, 14,215 bytes, SHA-256
+`41fcc105a23c047a624cf208d63985df9f526f0c5c25ae5e19679ed8a2f6b02f`,
+and Git blob `fbb7e5cf16b59f01c66eac0479ef70c6e3168ded`. The fixture includes the
+line-9854 §14 separator and has 471 LF records, 14,287 bytes, SHA-256
+`4cbbe9c1e684ef24f2a9a033c3ac3bf671d4bd893ad1ce7c5bd7e7941a00a98c`,
+and Git blob `9ca3dd84f7367a64fc4514925b857aba557bc423`. §14 Startup begins at line
+9855 and is not part of this slice.
+
+The source publishes 68 definitions: 39 colons, 17 variables, six ordinary
+constants, three `CREATE` objects, two deferred words, and one `XBUF`-produced
+constant. Its 762 name bytes, 329 body bytes, and 1,156 fixed hosted bytes
+advance the canonical dictionary by exactly 2,247 bytes. Load creates the
+zeroed 16-cell inline bucket vector and `( inline, 16, 0, 0, lock-5 )`
+registry, writes `PROVIDED\0`, binds module allocation to the Bank-0 DMA heap,
+and replaces all three loader transaction hooks. The canonical XMEM path also
+reserves the persistent 128-byte `_REQ-CWD-STK`, advancing and protecting the
+XMEM frontier without clearing its bytes. It constructs no module node and
+performs no filesystem, lock, hash, UART, RTC, rendering, or rich-terminal
+operation at load time.
+
+Eight seconds-scale tests pin that ledger and exercise exact case-sensitive
+FNV-1a identities, duplicate-neutral insertion, ordinary bounds and node OOM,
+stable-node 16-to-32-bucket growth, retryable growth OOM, frame-wide commit and
+rollback, lexical prescan boundaries, pre-registration OOM cleanup and retry,
+an ordinary mounted in-memory MP64FS self-cycle, duplicate `REQUIRE`, exact
+`MODULES` bytes, and a committed child dependency surviving parent failure.
+Definitions completed before a later throw deliberately remain, proving that
+the transaction owns provisional IDs rather than the dictionary.
+
+Unchanged source retains these limits:
+
+- Prescan recognizes only exact uppercase `PROVIDED` as the first
+  byte-32-delimited token of an LF record. Tabs are not skipped, CR remains in
+  a CRLF ID, only the first match is considered, and compiler state is ignored.
+  A different spelling/layout can execute later but loses duplicate skipping
+  and pre-evaluation cycle breaking.
+- A matching physical line over 255 bytes or without an ID produces an empty
+  synthetic match and then throws `-4101`; a later valid declaration is not
+  considered. Parsed words cannot spell every arbitrary byte sequence accepted
+  by `PROVIDED-SPAN`, and `MODULES` emits stored bytes without escaping.
+- Ordinary IDs are limited to 1–246 bytes, but the upper check is signed. A
+  high-bit length bypasses it and enters unchecked hashing, allocation, and
+  copying; that is an unsafe source discrepancy, not a supported signed range.
+- Duplicate `REQUIRE` skips evaluation only after filesystem ensure/lookup,
+  transfer allocation/read, loader-frame save, and prescan. It is neutral for
+  persistent registry/dictionary state, not free of I/O or allocator scratch
+  effects. Identity is independent of path and content, so any already stored
+  prescan ID suppresses the selected file.
+- `REQUIRE` inherits raw `LOAD`: no file-type/flags gate and no final
+  `EVAL-STATUS`/`EVALUATE-FINISH` validation. Undefined, overlong, or unfinished
+  source that does not throw can nominally commit IDs. Read/prescan faults occur
+  before guarded-walk cleanup and can strand a transfer frame.
+- Rollback removes only provisional IDs. Completed definitions, output,
+  object/media effects, and committed nested dependencies survive parent
+  failure. Committed nodes have no public unload/reset and consume Bank-0 heap
+  for the runtime's life; failed bucket growth affects lookup cost only.
+- Registry, loader, path, prescan, growth, and listing scratch is global. Public
+  words are core-0-only; the registry shares depthless lock 5 with §19 hash
+  writers, and `MODULES` holds lock 5 before UART lock 1. Reentry, concurrency,
+  pre-held locks, malformed descriptors, and exceptional locked paths are not
+  qualified.
+
+The useful admitted domain is one core, canonical registry/loader state,
+immutable mapped ID spans of 1–246 bytes, an exact uppercase first-token
+declaration on bounded LF source, available Bank-0 node storage, and no
+reentry or pre-held shared lock. The contiguous frontier now ends at line
+9853. Line 9854 is the separator and §14 Startup begins at line 9855. This
+advance does not implement `rich-terminal.f` or move the rich-terminal
+vertical.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

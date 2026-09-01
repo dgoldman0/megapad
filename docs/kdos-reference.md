@@ -876,7 +876,8 @@ cluster-control/MPU source boundary, absent-network forward bridge,
 screen definitions, dispatch, registration, handlers, and event loop, and the
 §10 Data Port structures and bindings, §11 placeholder, §12 Dashboard,
 §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19 Hash Table
-Primitives source through line 9383.
+Primitives, followed by the complete §20 Module System source through line
+9853.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -894,9 +895,8 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-9383; line 9384 is the next section sentinel and line 9385 begins §20 Module
-System. The source has no §14, §16, or §17 block at the corresponding
-section-numbering boundaries.
+9853; line 9854 is the next section sentinel and line 9855 begins §14 Startup.
+There are no §16 or §17 blocks at their earlier section-numbering boundaries.
 
 ---
 
@@ -1186,9 +1186,10 @@ application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
 §8.2–§8.7, §8.8–§8.9, complete §9, §10–§13, §15, §18, and §19 through line
-9383. Their provenance and edge contracts are recorded in the corresponding
-sections below and in `docs/simulator-contract.md`; §20 begins at line 9385
-after the line-9384 sentinel.
+9383, followed by §20 through line 9853. Their provenance and edge contracts
+are recorded in the corresponding sections below and in
+`docs/simulator-contract.md`; §14 Startup begins at line 9855 after the
+line-9854 sentinel.
 
 ---
 
@@ -1830,7 +1831,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 9383. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 9853. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2206,8 +2207,8 @@ state, and deferred vectors are global and unlocked. The contiguous frontier
 continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
 Dashboard, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19
-Hash Table Primitives through line 9383; §20 Module System begins at line 9385
-after the line-9384 sentinel.
+Hash Table Primitives through line 9383, followed by §20 Module System through
+line 9853; §14 Startup begins at line 9855 after the line-9854 sentinel.
 
 **Example — filesystem operations:**
 ```forth
@@ -3033,11 +3034,11 @@ The following tail discrepancies are source-literal:
   screen/subscreen registrations until the fixed tables fill.
 
 This §9 block ends at line 8568. The contiguous hosted frontier now continues
-through §10–§13, §15, §18, and §19 and ends at line 9383, before the
-line-9384 sentinel and §20 at line 9385. The admitted source completes the
-existing ANSI TUI, Pipeline Bundle tracking layer, and source-defined Ring
-Buffer and Hash Table primitives but does not accept a rich-terminal module,
-projection, compositor, or viewer.
+through §10–§13, §15, §18, §19, and §20 and ends at line 9853, before the
+line-9854 sentinel and §14 Startup at line 9855. The admitted source completes
+the existing ANSI TUI, Pipeline Bundle tracking layer, source-defined Ring
+Buffer and Hash Table primitives, and Module System but does not accept a
+rich-terminal module, projection, compositor, or viewer.
 
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
@@ -3219,10 +3220,10 @@ The following limits and discrepancies are unchanged source behavior:
   to §15 without a §14 block here.
 
 The historical §10–§13 fixture ends at line 8943. The contiguous hosted
-frontier now continues through §15, §18, and §19 and ends at line 9383, before
-the line-9384 sentinel and §20 at line 9385. This qualification adds no
-rich-terminal module, projection, compositor, physical viewer, or other
-rich-terminal work.
+frontier now continues through §15, §18, §19, and §20 and ends at line 9853,
+before the line-9854 sentinel and §14 Startup at line 9855. This qualification
+adds no rich-terminal module, projection, compositor, physical viewer, or
+other rich-terminal work.
 
 ### Frame Protocol
 
@@ -3321,6 +3322,10 @@ Stack & diagnostics.
 ---
 
 ## §14 Startup
+
+This executable block begins at `kdos.f` line 9855 and is the next unqualified
+frontier after the currently admitted line 9853. The behavior below describes
+the source/design; it is not yet hosted startup acceptance evidence.
 
 The startup section runs automatically when the KDOS core loads.  It:
 
@@ -3553,9 +3558,10 @@ value except for `BDL-DRY`.
 - `BUNDLE-LOAD` and `BUNDLE-INFO` do not inspect `FTYPE-BUNDLE`, directory
   flags, or even require a nonempty bundle structure. They inherit raw
   `LOAD`'s ability to evaluate any named nonempty entry as unrestricted Forth.
-- Raw `LOAD` is not a dictionary or object transaction. `_LD-TXN-ROLLBACK` is
-  a no-op at this frontier; the later §20 mechanism rolls back provisional
-  module identities, not arbitrary words or objects. A failed load can retain
+- Raw `LOAD` is not a dictionary or object transaction. The §15 slice
+  initially installs no-op loader transaction hooks; the now-qualified §20
+  Module System rebinds them to roll back provisional module identities, not
+  arbitrary words or objects. A failed load can retain
   partial definitions, descriptors, registry links, counts, tracking/config
   stores, output, and any other source effect. Re-loading is likewise not
   idempotent: `BDL-BEGIN` resets only tracking, while names shadow and
@@ -3727,10 +3733,10 @@ strictly positive element size and capacity, ample dictionary space, valid
 mapped source/destination spans of at least element size, canonical fields
 maintained only by these words, no pre-held/contentious lock 4, and no
 concurrent descriptor or payload mutation. The §18 source ends at line 9214;
-the following qualified §19 slice advances the contiguous frontier through
-line 9383. Neither qualification loads `rich-terminal.f`, renders or
-composites a frame, reaches a physical viewer, or advances rich-terminal
-input.
+the following qualified §19 and §20 slices advance the contiguous frontier
+through line 9853. None of these qualifications loads `rich-terminal.f`,
+renders or composites a frame, reaches a physical viewer, or advances
+rich-terminal input.
 
 ---
 
@@ -3915,30 +3921,81 @@ reader/writer overlap, and no pre-held/contentious lock 5. `HT-EACH` additionall
 requires a nonthrowing, result-free callback that neither recurses nor mutates
 the table. Unique-map callers must avoid updating an existing key when an
 earlier tombstone can occur in its probe chain; the simplest admitted subset
-does not update collision clusters after deletion. The contiguous frontier
-ends at line 9383; line 9384 is the §20 sentinel and line 9385 begins Module
-System. This qualification adds no rich-terminal module, rendering,
-composition, physical viewing, or input work.
+does not update collision clusters after deletion. The following qualified
+§20 slice advances the contiguous frontier through line 9853; line 9854 is
+the §14 Startup sentinel. Neither qualification adds a rich-terminal module,
+rendering, composition, physical viewing, or input work.
 
 ---
 
 ## §20 Module Registry
 
-KDOS modules identify themselves with exact, case-sensitive evaluator tokens.
-A logical module ID is independent of the MP64FS filename or path passed to
+### Hosted unchanged-source qualification
+
+Exact unchanged `kdos.f` lines 9384 through 9853 contain 470 LF records and
+14,215 bytes, with SHA-256
+`41fcc105a23c047a624cf208d63985df9f526f0c5c25ae5e19679ed8a2f6b02f`
+and Git blob `fbb7e5cf16b59f01c66eac0479ef70c6e3168ded`. The checked fixture includes
+the following one-line §14 Startup sentinel at line 9854. That 471-LF-record,
+14,287-byte fixture has SHA-256
+`4cbbe9c1e684ef24f2a9a033c3ac3bf671d4bd893ad1ce7c5bd7e7941a00a98c`
+and Git blob `9ca3dd84f7367a64fc4514925b857aba557bc423`. Line 9855 begins §14 Startup.
+The enclosing `kdos.f` Git blob is
+`fd017b16dbd3ef4746d0e3467e980c015cf5a664`, from revision
+`ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
+
+The slice publishes 68 definitions: 39 colon words, 17 zero-initialized
+variables, six ordinary constants, three `CREATE` objects, two `DEFER` words,
+and one constant produced by `XBUF`. Their 762 name bytes, 329 dictionary-body
+bytes, and 1,156 fixed hosted header/semantic-slot bytes advance the canonical
+hosted dictionary by exactly 2,247 bytes. `_MOD-INLINE` contributes 128 zero
+bytes; `_MOD-REG` initializes to the inline address, 16 buckets, zero entries,
+an inline ownership flag of zero, and lock 5; `_PS-TAG` contains
+`PROVIDED` plus NUL. `_MOD-ALLOCATE`/`_MOD-FREE` bind to Bank-0
+`DMA-ALLOCATE`/`DMA-FREE`, and the three existing loader transaction hooks bind
+to the module commit, rollback, and after-release actions.
+
+The canonical XMEM-present load additionally allocates the 128-byte
+`_REQ-CWD-STK` through `XBUF`, advancing both `XMEM-HERE` and `XMEM-FLOOR` by
+128 while retaining the preexisting bytes. With an empty free list it leaves
+`FL-NEED = 128`, `FL-PREV = 0`, and `FL-CURR = 0`. No registry node or heap
+bucket is allocated at load time. Apart from dictionary publication, that one
+XMEM reservation, deferred rebinding, and ordinary timer progress, loading
+performs no filesystem/media access, hash, lock, parser input, UART output,
+RTC mutation, scheduling, rendering, or rich-terminal work. The noncanonical
+no-XMEM fallback would place those 128 bytes in the dictionary instead and
+would therefore grow the hosted dictionary by 2,375 bytes; it is not the
+qualified composition.
+
+Eight focused tests qualify exact/case-sensitive identity, FNV-1a hashing,
+duplicate neutrality, ordinary ID bounds, node OOM, stable-node rehash growth,
+retry after best-effort bucket-allocation failure, full loader-frame
+commit/rollback, prescan token and line boundaries, pre-registration OOM
+cleanup before source execution, a real pathless in-memory MP64FS self-cycle,
+duplicate `REQUIRE`, exact `MODULES` output, and a committed nested dependency
+surviving parent rollback. The tests use the ordinary source definitions and
+existing filesystem/loader words; the simulator adds no module shortcut or
+new runtime capability.
+
+### Public identity contract
+
+Parsed KDOS modules identify themselves with exact, case-sensitive evaluator
+tokens. `PROVIDED-SPAN` instead accepts the exact bytes of a mapped
+caller-owned span; those bytes need not be printable or parseable later. A
+logical module ID is independent of the MP64FS filename or path passed to
 `REQUIRE`; filesystem component limits therefore do not truncate or otherwise
-change module identity.  IDs are bounded to 1 through 246 bytes.  That is the
-largest `PROVIDED ` declaration accepted by the evaluator's 255-byte physical
-line (minus the eight-letter word and its separating blank), and the same
-envelope applies to caller-owned `PROVIDED-SPAN` values and `MODULE?`.  Empty
-or longer IDs throw rather than aliasing a shorter name.
+change module identity. The qualified useful domain is 1 through 246 bytes.
+That is the largest `PROVIDED ` declaration accepted by the evaluator's
+255-byte physical line (minus the eight-letter word and its separating blank).
+Empty and ordinary longer IDs throw rather than aliasing a shorter name. The
+signed high-bit length discrepancy is recorded below and is not admitted.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `PROVIDED` | `( "id" -- )` | Register the exact ID.  A duplicate is an allocation-neutral no-op.  A new entry leaves no result; an entry-allocation failure throws. |
 | `PROVIDED-SPAN` | `( id-addr id-len -- )` | Register the exact caller-owned byte span with the same duplicate, allocation, and active-loader transaction semantics as `PROVIDED`. |
 | `MODULE?` | `( "id" -- flag )` | Return one flag indicating whether the exact ID is pending or committed. |
-| `REQUIRE` | `( "path" -- )` | Resolve and load a Forth source file.  When its first prescanned `PROVIDED` ID is already present, skip evaluation as a stack-neutral no-op.  A newly evaluated source may intentionally leave its own data-stack results. |
+| `REQUIRE` | `( "path" -- )` | Resolve and load a Forth source file. When its first exact-uppercase, first-token `PROVIDED` ID is already present, skip evaluation as a stack-neutral no-op. A newly evaluated source may intentionally leave its own data-stack results. |
 | `MODULES` | `( -- )` | Print every exact registered ID and the exact count, leaving no data-stack cells.  Enumeration order is unspecified. |
 
 All five public operations are core-0-only.  Registration bookkeeping never
@@ -3946,8 +4003,10 @@ appears on the public data stack: `PROVIDED`, `PROVIDED-SPAN`, and `REQUIRE`
 leave no private status cells, `MODULE?` leaves exactly its flag, and `MODULES`
 only prints.  If
 `REQUIRE` evaluates a new source, values intentionally left by that source are
-preserved.  If the exact ID was already registered, the source is not evaluated
-and the duplicate load changes neither the stack nor persistent allocation.
+preserved. If the exact ID was already registered, the source is not evaluated
+and the duplicate load changes neither the stack nor persistent allocation;
+it still performs the filesystem lookup, transfer allocation/read, and
+prescan described below.
 
 ### Storage and growth
 
@@ -3984,6 +4043,64 @@ This is a registry transaction, not transactional compilation: definitions,
 output, and other source effects completed before the throw are not rewound.
 After the source is corrected, its rolled-back IDs can be registered and loaded
 normally on retry.
+
+### Executable limits and source discrepancies
+
+- Prescan is lexical, not evaluator-aware. It considers only the first token
+  of each LF-delimited physical line, skips byte 32 only, requires the exact
+  uppercase bytes `PROVIDED`, and returns the first match. A leading tab does
+  not count as whitespace, a trailing CR remains part of the ID, lowercase
+  `provided` is not found even though dictionary lookup later executes it
+  case-insensitively, and a token inside an unfinished colon definition is not
+  distinguished from interpret state. Sources outside this narrow spelling
+  and layout lose duplicate skipping and pre-evaluation cycle breaking.
+- A first matching line longer than 255 bytes, or a matching line with no ID,
+  returns `( 0 0 true )`; insertion then throws `_MOD-E-BAD-ID` and no later
+  declaration is considered. Only the first prescanned ID is installed before
+  evaluation. Later `PROVIDED` declarations join the active transaction only
+  when execution reaches them.
+- The public upper-bound checks use signed `>`. Ordinary nonnegative lengths
+  above 246 are rejected, but a cell with bit 63 set can bypass that comparison
+  and then drive wrapped allocation, hashing, `CMOVE`, or unmapped access.
+  Such lengths are unsafe, are not a signed-ID extension, and are outside the
+  qualified domain.
+- Caller spans are trusted and are hashed before allocation and copying. An
+  unmapped span faults, while mutation during a reentrant allocator callback
+  can publish copied bytes under the hash computed for their earlier contents.
+  Arbitrary accepted bytes can include blanks, NULs, newlines, or terminal
+  controls; some such IDs cannot be reconstructed through parsed `MODULE?`
+  and `MODULES` emits them without escaping.
+- A duplicate `REQUIRE` is evaluation-neutral, not I/O-neutral: it still runs
+  `FS-ENSURE`, resolves and looks up the path, allocates and reads the complete
+  transfer, saves a loader frame, and prescans it before releasing the frame.
+  Storage completion state and other raw-loader side effects can therefore
+  change even though dictionary, registry, and persistent allocation do not.
+- The loader does not require a module file type or flags and inherits raw
+  `LOAD` transfer and evaluator limits. The read and prescan occur before
+  `_LD-WALK-GUARDED`; a storage throw, malformed descriptor fault, or memory
+  fault in that interval is not covered by its release/rollback cleanup and
+  can strand the transfer allocation and loader frame. Evaluation rollback is
+  registry-only: already completed definitions, output, storage mutation, and
+  other guest effects survive a later source throw.
+- Relative path handling inherits `_RESOLVE-PATH` and fixed parser storage.
+  A missing intermediate component reports through that resolver but does not
+  establish a transactional failure boundary before `_MOD-LOAD-BODY`
+  continues; oversized component sequences can overrun the fixed path scratch.
+  Qualification covers direct root filenames and a bounded nested dependency,
+  not those malformed paths.
+- Registry buckets, loader globals, prescan scratch, CWD stack state, and list
+  scratch are runtime-global and not reentrant. Module operations are public
+  only on core 0. Registry lock 5 is also the global hash-table writer lock.
+  `MODULES` holds it and then UART lock 1 while it exposes raw ID bytes in
+  bucket/chain order. Its `CATCH` releases both locks
+  for an ordinary guest `THROW`, but acquisition faults, machine faults, or a
+  competing reverse lock order remain outside the contract.
+- Nodes are stable Bank-0 allocations and growth occurs only after entry count
+  exceeds twice the bucket count. Bucket growth is best-effort and allocation
+  failure leaves the old registry usable; node allocation failure is fatal.
+  Count, hash-chain links, descriptor cells, allocator results, and arithmetic
+  are otherwise trusted. There is no public removal, reset, or reclamation of
+  committed module IDs.
 
 ```forth
 PROVIDED example.codec       \ parsed exact-ID registration

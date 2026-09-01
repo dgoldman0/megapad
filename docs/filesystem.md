@@ -36,7 +36,7 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 9383. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 9853. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
@@ -56,13 +56,17 @@ boundary, absent-network forward bridge, the complete §9 ANSI screen registry,
 widgets, definitions, dispatch, handlers, and event loop, then §10 Data Port
 structures and bindings, the §11 placeholder, §12 Dashboard, §13 Help, and
 §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19 Hash Table
-Primitives. §20 Module System begins at line 9385 after the line-9384 sentinel;
-there are no §16 or §17 source blocks at the earlier numbering boundary.
+Primitives, followed by the complete §20 Module System. §14 Startup begins at
+line 9855 after the line-9854 sentinel; there are no §16 or §17 source blocks
+at their earlier numbering boundary.
 
 The §15 `BUNDLE-LOAD` and `BUNDLE-INFO` words are thin wrappers around this
 same raw `LOAD`. They do not enforce file type 7 or directory flags and inherit
 its LF-record evaluation, unchecked evaluator completion/status, false-`FS-OK`
 name-consumption edge, and nontransactional dictionary/object effects.
+The now-qualified §20 hooks can roll back provisional module IDs declared
+during such a load, but still do not transact definitions, bundle objects,
+media changes, or other source effects.
 `BUNDLE-INFO` only makes the three `BDL-BUF`/`BDL-KERN`/`BDL-PIPE` wrappers
 skip construction; it is not a general dry-run or validation boundary. Exact
 Pipeline Bundle provenance and discrepancies are recorded in
@@ -74,6 +78,19 @@ source discrepancies are also recorded in `docs/kdos-reference.md`.
 The §19 hash-table words are likewise in-memory dictionary objects and add no
 filesystem or media behavior; the same reference records their exact probing
 contract and source-literal limits.
+
+The §20 `REQUIRE` path now shadows the bootstrap loader with ordinary MP64FS
+lookup and the existing validated two-extent transfer machinery. It
+prescans the first exact-uppercase, first-token `PROVIDED` identity, installs
+that ID provisionally to break cycles, evaluates through the ordinary raw
+loader, and restores CWD/loader state on its guarded paths. Focused acceptance
+uses mounted pathless in-memory module files for a self-cycle, duplicate skip,
+pre-registration OOM cleanup/retry, and a nested child commit whose parent
+rolls back. The module loader does not enforce file type or directory flags;
+its transaction owns provisional IDs only, not definitions, output, objects,
+or media effects. Duplicate `REQUIRE` still allocates, reads, and prescans the
+file before it skips evaluation, so it is not an I/O-free cache hit.
+
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -955,8 +972,9 @@ and deferred targets are global and unlocked. The contiguous hosted frontier
 continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
 Dashboard, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19
-Hash Table Primitives through line 9383; §20 begins at line 9385 after the
-line-9384 sentinel. The bundle wrappers still inherit raw `LOAD` semantics
+Hash Table Primitives through line 9383, followed by §20 Module System through
+line 9853; §14 Startup begins at line 9855 after the line-9854 sentinel. The
+bundle wrappers still inherit raw `LOAD` semantics
 rather than forming a typed or transactional filesystem layer. Exact
 provenance and the source-literal limits of that later frontier are recorded
 in `docs/kdos-reference.md`. This frontier change performs no rich-terminal

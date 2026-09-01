@@ -307,7 +307,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 9383.
+KDOS source frontier now ends at line 9853.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1466,7 +1466,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 9383. Exact unchanged lines
+The contiguous source frontier now ends at line 9853. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2688,7 +2688,7 @@ The following source-literal discrepancies remain visible:
   following qualified §15 slice, but the surrounding §10 source also promises
   `RECV-FRAME`, `ROUTE-FRAME`, `PORT-SEND`, and the deferred networking layer.
   None of those transport names, including `PORT-SEND-SLICE`, is executable
-  at the current line-9383 frontier; qualified Help text does not qualify a
+  at the current line-9853 frontier; qualified Help text does not qualify a
   transport operation.
 
 Exact unchanged lines 8944 through 9121 add §15 Pipeline Bundles in 178 LF
@@ -3010,12 +3010,102 @@ The unchanged source retains these discrepancies and unsafe domains:
   which can alias the next slot or following header. These cases are pinned as
   literal degeneracies, not safe general-purpose maps.
 
-The contiguous frontier now ends at line 9383. Line 9384 is the separator and
-§20 Module System begins at line 9385. Real bundle-file/disk integration,
-scheduler or cadence behavior, concurrent ring/hash qualification, module
-loading, rendering, physical viewing, and every rich-terminal
-module/projection/compositor/input seam remain deferred. This source advance
-does not implement `rich-terminal.f` or move the rich-terminal vertical.
+The §19 source ends at line 9383; the §20 qualification below continues the
+contiguous frontier. Real bundle-file integration, scheduler or cadence
+behavior, concurrent ring/hash qualification, rendering, physical viewing,
+and every rich-terminal module/projection/compositor/input seam remain
+deferred.
+
+### Unchanged KDOS §20 module-system contract
+
+Exact unchanged lines 9384 through 9853 contain 470 LF records and 14,215
+bytes, with SHA-256
+`41fcc105a23c047a624cf208d63985df9f526f0c5c25ae5e19679ed8a2f6b02f`
+and Git blob `fbb7e5cf16b59f01c66eac0479ef70c6e3168ded`. The checked fixture adds the
+line-9854 §14 Startup separator: 471 LF records, 14,287 bytes, SHA-256
+`4cbbe9c1e684ef24f2a9a033c3ac3bf671d4bd893ad1ce7c5bd7e7941a00a98c`,
+and Git blob `9ca3dd84f7367a64fc4514925b857aba557bc423`. Line 9855 begins Startup and is
+not admitted by that sentinel. The enclosing `kdos.f` remains Git blob
+`fd017b16dbd3ef4746d0e3467e980c015cf5a664` at revision
+`ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
+
+The slice publishes 68 words: 39 colons, 17 zero-initialized variables, six
+ordinary constants, three `CREATE` objects, two `DEFER` objects, and one
+`XBUF`-produced constant. Its 762 name bytes, 329 dictionary-body bytes, and
+1,156 fixed hosted header/semantic-slot bytes produce exactly 2,247 bytes of
+dictionary growth in the canonical XMEM-present composition. Load initializes
+128 zero inline-bucket bytes and the five-cell registry
+`( inline, 16, 0, 0, 5 )`, writes `PROVIDED` plus NUL, binds the private
+allocator/free seam to `DMA-ALLOCATE`/`DMA-FREE`, and rebinds the three loader
+transaction hooks. `XBUF` reserves the 128-byte `_REQ-CWD-STK`, advances both
+XMEM frontier/floor cells, preserves the old bytes, and, for the canonical
+empty free list, leaves `FL-NEED = 128`, `FL-PREV = FL-CURR = 0`. No registry
+node or grown bucket is allocated. The no-XMEM fallback would instead add the
+128 bytes to dictionary growth for a 2,375-byte total and is not this profile.
+
+Eight focused tests pin those effects and the ordinary one-core behavior. They
+cover exact case-sensitive FNV-1a identity, duplicate neutrality, useful ID
+bounds, node OOM, stable-node rehash from 16 to 32 buckets, retryable bucket
+OOM, full-frame commit/rollback, prescan boundaries, pre-registration OOM
+cleanup and retry before any source prefix executes, mounted in-memory MP64FS
+self-cycle and duplicate skipping, exact list output, and nested child commit
+surviving parent rollback. The source definitions, MP64FS lookup/transfer,
+loader frames, allocator, and evaluator run unchanged; there is no hosted
+module registry or direct file shortcut.
+
+The admitted public contract is exact byte identity on core 0. Parsed
+`PROVIDED` and `MODULE?` use case-sensitive BL-delimited tokens;
+`PROVIDED-SPAN` accepts an immutable mapped caller span. Useful IDs are 1–246
+bytes. A duplicate insertion is persistent-allocation-neutral. New nodes own
+their copied ID bytes in the Bank-0 heap and remain stable across bucket growth
+and XMEM resets. Growth is best-effort when entry count exceeds twice bucket
+count; a failed bucket allocation retains a usable pending registry, whereas a
+failed node allocation throws `-4100`. Successful source completion commits
+every frame-owned ID; a source throw removes those provisional IDs, but a
+dependency committed by a completed nested frame survives.
+
+Literal source discrepancies bound that contract:
+
+- Prescan is lexical rather than compiler-aware. It sees only exact uppercase
+  `PROVIDED` in the first byte-32-delimited position of an LF record, retains a
+  CR, ignores tabs as whitespace, and stops at the first match. Lowercase or a
+  different layout can execute later through case-insensitive dictionary
+  lookup but loses duplicate suppression and pre-evaluation cycle breaking.
+- A first matching line longer than 255 bytes or without an ID synthesizes an
+  empty match and then throws `-4101`; no later declaration is considered.
+  `PROVIDED-SPAN` also accepts raw blanks, NULs, newlines, and control bytes
+  that parsed `MODULE?` cannot reproduce and `MODULES` emits unescaped.
+- The 246-byte upper check uses signed `>`. A high-bit cell bypasses it and
+  enters unchecked hashing, wrapped allocation, and copying. Caller mapping,
+  immutability, allocator reentry, arithmetic, node fields, bucket geometry,
+  count, and lock descriptors are not independently validated.
+- Duplicate `REQUIRE` still ensures the filesystem, resolves/looks up the
+  path, allocates and reads the transfer, saves a loader frame, and prescans
+  before it skips evaluation. It is persistent-state-neutral, not I/O-neutral;
+  module identity is also independent of file path and content.
+- Module loading inherits raw `LOAD`: it applies no file-type/flags gate and
+  does not validate final `EVAL-STATUS` or call `EVALUATE-FINISH`. Undefined,
+  overlong, or unfinished source that does not throw can nominally commit.
+  Read/prescan faults happen before guarded-walk cleanup and can strand the
+  loader allocation/frame.
+- Rollback is limited to provisional registry nodes. Completed definitions,
+  output, object/media effects, and committed child modules survive. There is
+  no public unload/reset for committed nodes; they consume Bank-0 heap for the
+  runtime's life, and old inline bucket bytes remain stale after rehash.
+- Registry, loader, path, prescan, growth, and list scratch is global. Lock 5
+  is shared with hash-table writers; `MODULES` takes it before UART lock 1 and
+  prints bucket/chain order. Reentry, concurrency, pre-held locks, reverse
+  lock ordering, malformed state, and non-guest machine faults are outside the
+  focused contract.
+
+The safe domain is one core with canonical uncorrupted registry/loader state,
+immutable mapped 1–246-byte IDs, a genuine exact-uppercase first-token
+declaration on bounded LF records, direct root filenames, available
+Bank-0 node storage, production-compatible nonthrowing allocator bindings,
+and no reentry or pre-held shared lock. The contiguous frontier now ends at
+line 9853; line 9854 is the separator and §14 Startup begins at line 9855.
+Nothing in this advance implements `rich-terminal.f` or moves the
+rich-terminal vertical.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
