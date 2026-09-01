@@ -730,7 +730,18 @@ kernel-descriptor:
 **Dashboard**:
 - `K.IN`, `K.OUT`, `K.FOOT`, `K.FLAGS` — field accessors
 - `K.INFO` — print kernel descriptor
-- `KERNELS` — list all registered kernels (up to 16)
+- `KERNELS` — list all registered kernels (up to 32)
+
+The 32-entry table is a literal source capacity. A later `KERNEL` still
+allocates its descriptor and defines the constant but is silently omitted from
+the registry; there is no unregister path. Several sample implementations are
+also intentionally documented as current discrepancies: `kavg` is an identity
+copy for a nonzero input of at most 256 bytes: it records its window and byte
+count but performs no averaging. `kdelta` emits `src[0]` rather than zero for
+its first result, short `kpeak` zeroes the destination and then underflows its
+cleanup, and `krms-buf` divides by zero when mean square is one. `kavg` and
+`kconvolve3` use fixed 256-byte scratch with no length check. Their oversized
+domains can overwrite following dictionary state and should not be used.
 
 ### 5.3 Pipeline (IMPLEMENTED)
 
@@ -764,6 +775,13 @@ my-pipe P.BENCH             \ Time each step
 - `P.BENCH` — execute and print cycle count per step
 - `P.INFO` — print pipeline descriptor
 - `PIPES` — list all registered pipelines (up to 8)
+
+Once the eight-entry pipeline registry is full, `PIPELINE` still allocates and
+defines a constant but silently omits it from the registry, and `P.ADD`
+silently ignores another XT. `P.GET`
+and `P.SET` are unchecked. `P.CLEAR` stores zero only into the count; old XT
+cells remain in the descriptor. Capacities, counts, and shared construction
+scratch are trusted rather than validated.
 
 **Built-in demo pipelines** (with demo-a, demo-b, demo-c buffers):
 - `pipe-fill-sum` — fill demo-a with 42, sum via tile engine (→ 2688)
@@ -1084,7 +1102,13 @@ KDOS | bufs=3  kerns=7  pipes=3  files=0  disk=no  HERE=24576
 ' my-operation .BENCH      \ Prints "cycles=NNN"
 ```
 
-Uses the CYCLES word (reads timer MMIO) and EXECUTE for indirect call.
+On hardware this uses `CYCLES`, the intended wrapping 32-bit Timer COUNT, and
+`EXECUTE` for indirect call. The hosted simulator substitutes the low 32 bits
+of a per-runtime semantic-work clock that is distinct from `PERF-CYCLES` and
+unaffected by `PERF-RESET`; it is deterministic work evidence, not MP64 timing.
+The current RTL SoC Timer wiring exposes only `COUNT_LO` to `CYCLES` and accepts
+only `COMPARE_LO` from `TIMER!`, unlike emulator/native and the documented
+32-bit ABI, so that discrepancy remains open.
 
 ---
 

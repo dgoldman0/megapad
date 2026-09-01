@@ -2,9 +2,10 @@
 
 The source simulator has no MP64 pipeline, cache, tile datapath, or destructive
 RAM test engine.  It still provides the safe public diagnostic observations so
-ordinary KDOS can load unchanged.  ``PERF-CYCLES`` is backend-local semantic
-work rather than machine cycles; unsafe or unsupported active tests fail
-explicitly instead of manufacturing a hardware pass.
+ordinary KDOS can load unchanged.  ``PERF-CYCLES`` and the separate hosted
+``CYCLES`` clock count backend-local semantic work rather than machine cycles;
+unsafe or unsupported active tests fail explicitly instead of manufacturing a
+hardware pass.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ class HostedDiagnosticsService:
         "_perf_extmem",
         "_perf_stalls",
         "_perf_tileops",
+        "_semantic_cycles",
         "_tile_detail",
         "_tile_status",
     )
@@ -54,6 +56,7 @@ class HostedDiagnosticsService:
         self,
         *,
         perf_cycles: int = 0,
+        semantic_cycles: int = 0,
         bist_status: int = BIST_IDLE,
         bist_fail_address: int = 0,
         bist_fail_data: int = 0,
@@ -61,6 +64,10 @@ class HostedDiagnosticsService:
         self._perf_cycles = self._require_cell(
             perf_cycles,
             label="performance work counter",
+        )
+        self._semantic_cycles = self._require_cell(
+            semantic_cycles,
+            label="semantic cycle counter",
         )
         self._perf_enabled = True
         self._perf_stalls = 0
@@ -101,9 +108,16 @@ class HostedDiagnosticsService:
     def perf_extmem(self) -> int:
         return self._perf_extmem
 
+    @property
+    def semantic_cycles(self) -> int:
+        """Return the persistent hosted work clock used by BIOS ``CYCLES``."""
+
+        return self._semantic_cycles
+
     def account_work(self) -> None:
         """Count one admitted semantic dispatcher unit with cell wrapping."""
 
+        self._semantic_cycles = u64(self._semantic_cycles + 1)
         if self._perf_enabled:
             self._perf_cycles = u64(self._perf_cycles + 1)
 
@@ -118,6 +132,7 @@ class HostedDiagnosticsService:
 
         clone = HostedDiagnosticsService(
             perf_cycles=self._perf_cycles,
+            semantic_cycles=self._semantic_cycles,
             bist_status=self._bist_status,
             bist_fail_address=self._bist_fail_address,
             bist_fail_data=self._bist_fail_data,

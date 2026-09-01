@@ -98,10 +98,13 @@ two's-complement values.  False is zero and true is
 `0xffffffffffffffff`.  Memory is byte addressed and little endian, including
 unaligned loads and stores.
 
-The admitted scalar vocabulary includes full-cell `XOR` and the ordinary
-`C!` byte store. `C!` preflights exactly one addressed byte and stores the low
-eight bits of its value, including for unaligned ordinary or admitted MMIO
-addresses; it does not widen into a cell transfer.
+The admitted scalar vocabulary includes full-cell `XOR`, the ordinary `C!`
+byte store, and `OFF`. `C!` preflights exactly one addressed byte and stores
+the low eight bits of its value, including for unaligned ordinary or admitted
+MMIO addresses; it does not widen into a cell transfer. `OFF` pops its address
+and performs the same exact unaligned eight-byte write as `!`, with a zero
+value. A crossing or unmapped failure occurs after that address is consumed
+and before any partial cell is published, matching executable BIOS ordering.
 
 The current executable BIOS implements scalar `MIN` as an unsigned comparison,
 while the public Forth descriptions call it signed. That remains an
@@ -274,6 +277,16 @@ logical optimization state, dispatch remains immediately coherent, and its
 hit/miss observations are zero. None of these diagnostic substitutions is
 evidence for pipeline timing, physical RAM coverage, tile hardware, or a
 physical instruction cache.
+
+Pseudo-BIOS `CYCLES` is a separate per-runtime semantic-work clock. It is
+shared by that runtime's contexts, isolated between runtimes, unaffected by
+`PERF-RESET`, and exposed as a zero-extended wrapping low 32-bit value to match
+the intended Timer COUNT ABI. The successful `CYCLES` dispatch contributes the
+tick it returns. Raw Timer MMIO and hardware cadence are not admitted.
+Emulator/native implement the intended 32-bit timer accesses, while the current
+RTL SoC byte peripheral wiring exposes only `COUNT_LO` to `CYCLES` and accepts
+only `COMPARE_LO` from `TIMER!`; that backend discrepancy is not normalized into
+another hosted mode.
 
 The admitted one-core legacy tile service binds `TMODE!`, `TCTRL!`,
 `TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TMUL`, `TDOT`, `TSUM`,
@@ -1085,7 +1098,7 @@ and SCALE use `0 DO`, enter the body, and cannot complete normally before
 64-bit index wrap, although an invalid memory access can fault first. These
 defects are pinned rather than repaired by host objects.
 
-The contiguous source frontier now ends at line 3216. Exact unchanged lines
+Exact unchanged lines
 3110 through 3216 publish `F.SUM`, `F.DOT`, `F.SUMSQ`, `F.ADD`, `F.MUL`,
 `BF.SUM`, and `BF.DOT`. These words treat every complete physical tile as 32
 little-endian half lanes without validating descriptor type, width, whether
@@ -1102,9 +1115,45 @@ prior mode, and reductions leave TCTRL at one. A tile-loop memory fault or
 budget fault before the final `0 TMODE!` leaves FP16/BF16 mode installed. The
 source's example `0 1 64 BUFFER` occupies one correct physical tile but
 describes 64 one-byte elements; `0 2 32 BUFFER` matches its stated 32-element
-descriptor. The next Forth-only registry, sample-kernel, and pipeline source
-compiles through `P.ADD`; `OFF` in `P.CLEAR` at line 3673 is the next
-unsupported BIOS seam.
+descriptor.
+
+The contiguous source frontier now ends at line 3754. Exact unchanged lines
+3217 through 3754 contain 538 lines and 16,586 bytes (SHA-256
+`ec724b8ca6f6887a2c4ce724edf9612726cf04a48416c29c2eb3ed9448949e40`).
+They publish 109 definitions: the 32-slot kernel registry and 23 populated
+descriptors, 18 registered byte/general descriptors plus five FP16 descriptors,
+the eight-slot pipeline registry, three fully populated demo pipelines, and six ordinary
+registered Buffer objects. Loading executes the normal defining words and
+allocates 2,752 Buffer payload bytes; it does not construct host-only kernel or
+pipeline objects. Normal demo execution reaches the existing Buffer/tile paths
+and ordinary UART publisher.
+
+Registry limits and source lifecycle remain literal. A kernel or pipeline
+created after its table fills still allocates a descriptor and defines its
+constant but is silently omitted from the registry. `P.ADD` silently discards
+an XT at capacity; `P.CLEAR` zeros only the count and leaves old step cells;
+`P.GET`/`P.SET`, counts, capacities, and shared construction scratch are
+unchecked and non-reentrant. Negative or corrupted values can index before a
+table, rewind `HERE`, or drive an unsafe loop. There is no unregister/destroy
+path.
+
+Several sample names describe intent more strongly than their current source.
+`kavg` only copies through its fixed 256-byte scratch and ignores the recorded
+window; `kdelta` emits `src[0]`, not zero, for its first result. `kpeak` handles
+ordinary inputs but zeroes the destination and then underflows during cleanup
+when the byte count is below three. The registered `krms-buf` divides by zero
+for mean square one and its fixed Newton iterations are not exact over the
+whole byte domain; the unused `krms` loses its descriptor. `kconvolve3` also
+uses fixed 256-byte scratch. Oversized copies can overwrite following
+dictionary state and are documented rather than exercised. Eleven byte/tile
+loops in this slice use unguarded `0 DO`; representative bounded acceptance
+pins the resulting nontermination instead of treating zero as an empty loop.
+Earlier Buffer tail, count-owner, and multi-tile defects flow through their
+kernel wrappers unchanged.
+
+The next subsystem is Storage. Exact lines 3755 through 3771 publish
+`SECTOR = 512`, then the partial `DISK?` definition rolls back at the unbound
+`DISK@` on line 3771. `DISK@` is therefore the next semantic BIOS seam.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

@@ -118,6 +118,32 @@ def _normalize_cycles(output: bytes) -> bytes:
     return normalized
 
 
+def test_cycles_is_a_separate_low32_semantic_work_clock() -> None:
+    runtime = MegaForthRuntime()
+
+    assert _execute(runtime, "CYCLES") == (1,)
+    assert runtime.diagnostics.semantic_cycles == 1
+    assert runtime.diagnostics.perf_cycles == 1
+
+    assert _execute(runtime, "PERF-RESET") == ()
+    assert runtime.diagnostics.semantic_cycles == 2
+    assert runtime.diagnostics.perf_cycles == 0
+    assert _execute(runtime, "CYCLES") == (3,)
+    assert runtime.diagnostics.perf_cycles == 1
+
+    second_context = runtime.new_context()
+    runtime.execute("CYCLES", context=second_context)
+    assert second_context.data.snapshot() == (4,)
+    isolated = MegaForthRuntime()
+    assert _execute(isolated, "CYCLES") == (1,)
+
+    wrapped = MegaForthRuntime(
+        diagnostics=HostedDiagnosticsService(semantic_cycles=0xFFFF_FFFF)
+    )
+    assert _execute(wrapped, "CYCLES") == (0,)
+    assert wrapped.diagnostics.semantic_cycles == 0x1_0000_0000
+
+
 def test_diagnostic_slice_is_exact_and_publishes_complete_ledger(
     loaded_diagnostics: MegaForthRuntime,
 ) -> None:

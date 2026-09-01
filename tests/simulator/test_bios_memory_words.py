@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from shared.cells import FALSE, MASK64, TRUE
-from simulator.memory import UnmappedAddressError
+from simulator.memory import CrossRegionAccessError, UnmappedAddressError
 from simulator.runtime import MegaForthRuntime
 
 
@@ -112,6 +112,38 @@ def test_unaligned_fetch_store_and_plus_store_share_wrapping_guest_memory() -> N
         "11 22 33 44 55 66 77 88"
     )
     assert context.data.snapshot() == (0x8877_6655_4433_2211, 1)
+
+
+def test_off_zeroes_one_unaligned_cell_and_consumes_its_address() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    runtime.memory.write_bytes(
+        2,
+        bytes.fromhex("AA 11 22 33 44 55 66 77 88 BB"),
+    )
+    context.data.push(3)
+
+    runtime.execute("OFF", context=context)
+
+    assert runtime.memory.read_bytes(2, 10) == b"\xAA" + bytes(8) + b"\xBB"
+    assert context.data.snapshot() == ()
+
+
+def test_off_consumes_the_address_before_a_crossing_store_fault() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    bank0 = runtime.memory.regions[0]
+    crossing = bank0.limit - 4
+    sentinel = bytes.fromhex("11 22 33 44")
+    runtime.memory.write_bytes(crossing, sentinel)
+    context.data.push(crossing)
+
+    with pytest.raises(CrossRegionAccessError):
+        runtime.execute("OFF", context=context)
+
+    assert runtime.memory.read_bytes(crossing, len(sentinel)) == sentinel
+    assert context.data.snapshot() == ()
+    assert context.returns.snapshot() == ()
 
 
 def test_byte_store_masks_to_the_low_byte_and_roundtrips_through_c_fetch() -> None:

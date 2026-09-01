@@ -17,7 +17,7 @@ from shared.fp import (
     fp16_to_float,
     fp32_to_bits,
 )
-from simulator.errors import SourceError, StepBudgetExceeded
+from simulator.errors import StepBudgetExceeded
 from simulator.memory import CrossRegionAccessError, HBW_BASE
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime
@@ -138,7 +138,7 @@ def _define_fp_buffer(
     return descriptor, _execute(runtime, "B.DATA", descriptor)[0]
 
 
-def test_fp_buffer_slice_is_exact_and_next_real_seam_is_off(
+def test_next_contiguous_kernel_pipeline_slice_is_now_admitted(
     loaded_buffer_fp: MegaForthRuntime,
 ) -> None:
     runtime = loaded_buffer_fp
@@ -148,27 +148,22 @@ def test_fp_buffer_slice_is_exact_and_next_real_seam_is_off(
     assert runtime.tile.control == 0
 
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[LAST_LINE:3673])
-    here_before = runtime.dictionary.here
-    latest_before = runtime.dictionary.latest
+    next_source = b"".join(lines[LAST_LINE:3754])
+    assert len(next_source) == 16_586
+    assert next_source.count(b"\n") == 538
+    assert next_source.startswith(b"\n\\ ====")
+    assert next_source.endswith(b"' p3-stats  pipe-thresh P.ADD\n")
 
-    with pytest.raises(SourceError, match="unknown word b'OFF'") as caught:
-        runtime.evaluate(
-            next_source,
-            source_name=f"kdos.f@{MEGAPAD_REVISION}:3217-3673",
-        )
+    result = runtime.evaluate(
+        next_source,
+        source_name=f"kdos.f@{MEGAPAD_REVISION}:3217-3754",
+    )
 
-    assert next_source.count(b"\n") == 457
-    assert caught.value.location.line == 457
-    assert caught.value.location.column == lines[3672].index(b"OFF")
-    kernel = runtime.find("KERNEL")
-    pipeline_add = runtime.find("P.ADD")
-    assert kernel is not None
-    assert pipeline_add is not None
-    assert runtime.find("P.CLEAR") is None
-    assert runtime.dictionary.here > here_before
-    assert runtime.dictionary.latest == pipeline_add.header_address
-    assert runtime.dictionary.latest != latest_before
+    assert len(result.definitions) == 109
+    assert result.definitions[0].name == b"KERN-COUNT"
+    assert result.definitions[-1].name == b"pipe-thresh"
+    for name in ("KERNEL", "P.CLEAR", "BENCH", "pipe-thresh"):
+        assert runtime.find(name) is not None
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
 

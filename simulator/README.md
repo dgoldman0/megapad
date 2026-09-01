@@ -50,8 +50,9 @@ The implemented slices provide:
   transaction state, coherent SysInfo capability discovery, exact byte/cell
   feeds, raw/final release, and source-visible status behavior;
 - a per-runtime pseudo-BIOS diagnostic profile with persistent semantic-work
-  accounting, retained non-destructive BIST observations, a real four-operation
-  tile value self-test, and logical no-cache controls/zero cache counters;
+  accounting, a distinct low-32-bit semantic `CYCLES` clock, retained
+  non-destructive BIST observations, a real four-operation tile value
+  self-test, and logical no-cache controls/zero cache counters;
 - a retained one-core semantic tile service for four integer lane widths plus
   FP16/BF16, integer and half-format ADD/SUB/MUL/SUM/MIN/MAX/SUMSQ/DOT,
   low-byte control registers, completed-operation accounting, and the
@@ -631,8 +632,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–3216 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, the complete Arena allocator, semantic `IDLE`, Buffer construction, and integer/FP16/BF16 Buffer operations; blank separators have no definitions |
-| 3217 onward | Next uncovered frontier | Kernel and pipeline source compiles through `P.ADD`; `OFF` in `P.CLEAR` at line 3673 is the next unadmitted word |
+| 39–3754 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, the kernel registry and sample kernels, and three live pipelines |
+| 3755 onward | Next uncovered frontier | Storage begins; `SECTOR` publishes and `DISK@` in `DISK?` at line 3771 is the next unadmitted word |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -722,9 +723,39 @@ point. Reserved-mode aliases and high-accumulator-word behavior also differ.
 These remain recorded discrepancies rather than claims of hardware parity.
 The source example `0 1 64 BUFFER` has the right physical byte count but does
 not describe 32 two-byte elements; `0 2 32 BUFFER` does.
-Later slices continue the same contiguous prefix through the registry, sample
-kernels, and pipeline sections toward the persistent evaluator, ordinary
-checked module-loader surface, and deterministic cooperative task scheduler.
+
+The next 538-line, 16,586-byte fixture is exact `kdos.f` lines 3217–3754
+(SHA-256
+`ec724b8ca6f6887a2c4ce724edf9612726cf04a48416c29c2eb3ed9448949e40`).
+It publishes 109 definitions through ordinary source: 23 kernel descriptors,
+six registered Buffer constants, and three populated pipelines plus their
+registry/accessor/kernel/step words. Load-time state is `KERN-COUNT=23`,
+`PIPE-COUNT=3`, and `BUF-COUNT=6`, with no UART output. All three demos run
+their normal bound XTs and ordinary Buffer paths; `BENCH` reports deterministic
+hosted work, not MP64 timing.
+
+The hosted `OFF` word performs an exact zero-cell store. Hosted `CYCLES` is the
+wrapping low 32 bits of a separate per-runtime semantic-work clock, shared by
+that runtime's contexts and unaffected by `PERF-RESET`; raw Timer MMIO remains
+unimplemented. Emulator/native perform the intended full 32-bit Timer accesses,
+while current RTL SoC wiring exposes only `COUNT_LO` to `CYCLES` and accepts
+only `COMPARE_LO` from `TIMER!`, an explicit backend discrepancy.
+
+The source's limits and defects remain observable. Full kernel/pipeline
+registries silently omit later entries after still allocating their descriptors
+and constants. `P.ADD` silently ignores a full pipeline, while `P.CLEAR` leaves
+stale XT cells behind. `kavg` is currently an identity copy, `kdelta` emits the
+first input byte rather than zero, short `kpeak` zeroes its destination then
+underflows, and `krms-buf` divides by zero for mean square one. The moving
+average and convolution scratch buffers are fixed at 256 bytes; oversized
+cases are documented but not executed because they overwrite later dictionary
+state. Representative zero-sized kernel loops retain their unsafe `0 DO`
+behavior. Storage is next: exact lines 3755–3771 retain `SECTOR`, roll back
+partial `DISK?`, and stop at `DISK@`.
+
+Later slices continue the same contiguous prefix through storage and files
+toward the persistent evaluator, ordinary checked module-loader surface, and
+deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

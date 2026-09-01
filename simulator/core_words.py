@@ -334,6 +334,11 @@ def _store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.memory.write64(address, value)
 
 
+def _off(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    runtime.memory.write64(address, 0)
+
+
 def _c_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
@@ -1328,6 +1333,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"C@", lambda context: _c_fetch(runtime, context)),
         (b"COUNT", lambda context: _count(runtime, context)),
         (b"!", lambda context: _store(runtime, context)),
+        (b"OFF", lambda context: _off(runtime, context)),
         (b"C!", lambda context: _c_store(runtime, context)),
         (b"+!", lambda context: _plus_store(runtime, context)),
         (b"FILL", lambda context: _fill(runtime, context)),
@@ -1740,6 +1746,13 @@ def install_core(runtime: MegaForthRuntime) -> None:
             lambda context: _push_diagnostic(
                 context,
                 runtime.diagnostics.perf_cycles,
+            ),
+        ),
+        (
+            b"CYCLES",
+            lambda context: _push_diagnostic(
+                context,
+                runtime.diagnostics.semantic_cycles & 0xFFFF_FFFF,
             ),
         ),
         (

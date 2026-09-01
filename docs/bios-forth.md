@@ -187,7 +187,7 @@ All comparisons return a **flag**: `-1` for true, `0` for false.
 
 ---
 
-## Memory Access (18 words)
+## Memory Access (20 words)
 
 The Megapad-64 is a **64-bit little-endian** machine with byte-addressable
 memory.  A **cell** is 8 bytes (one 64-bit word).
@@ -196,6 +196,8 @@ memory.  A **cell** is 8 bytes (one 64-bit word).
 |------|-------------|-------------|
 | `@` | `( addr -- x )` | Fetch a cell (8 bytes) from memory. |
 | `!` | `( x addr -- )` | Store a cell (8 bytes) to memory. |
+| `+!` | `( n addr -- )` | Add *n* to the cell at *addr*, wrapping modulo 2^64. |
+| `OFF` | `( addr -- )` | Store a zero cell at *addr*. |
 | `C@` | `( addr -- c )` | Fetch a single byte. |
 | `C!` | `( c addr -- )` | Store a single byte. |
 | `W@` | `( addr -- u16 )` | Fetch a 16-bit unsigned halfword. |
@@ -245,10 +247,22 @@ words all produce human-readable ASCII output.
 | `WORDS` | `( -- )` | Print all words in the dictionary. |
 | `BYE` | `( -- )` | Flush the TX buffer and halt the CPU (exit Forth). |
 | `TX-FLUSH` | `( -- )` | Explicitly drain the TX ring buffer to the host. |
-| `CYCLES` | `( -- u )` | Read the free-running cycle counter (for timing). |
+| `CYCLES` | `( -- u )` | Read the zero-extended, wrapping 32-bit Timer COUNT value. |
 | `MS` | `( n -- )` | Delay approximately *n* milliseconds. |
 | `HEX` | `( -- )` | Set numeric output base to 16. |
 | `DECIMAL` | `( -- )` | Set numeric output base to 10. |
+
+The hosted simulator has no MP64 timer cadence. Its pseudo-BIOS `CYCLES`
+returns the low 32 bits of a separate persistent semantic-dispatch clock; the
+clock is shared by contexts in one runtime, isolated between runtimes, and is
+not reset by `PERF-RESET`. Raw Timer MMIO remains unadmitted. This is distinct
+from the hosted 64-bit `PERF-CYCLES` work counter and is not hardware timing.
+
+The intended executable/emulator Timer accesses are full 32-bit little-endian
+loads and stores. The current RTL SoC integration routes the Timer as a byte
+peripheral: `CYCLES` sees only zero-extended `COUNT_LO`, and `TIMER!` updates
+only `COMPARE_LO`. This is an unresolved backend discrepancy rather than an
+extra hosted compatibility mode.
 
 **Example — printing a greeting:**
 ```forth
@@ -822,7 +836,7 @@ BEGIN 1 CORE-STATUS 0= UNTIL  \ wait until core 1 finishes
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `PERF-CYCLES` | `( -- n )` | Read the cycle counter (CSR 0x68). |
+| `PERF-CYCLES` | `( -- n )` | Read the 64-bit per-core performance cycle counter (CSR 0x68). |
 | `PERF-STALLS` | `( -- n )` | Read the stall counter (CSR 0x69). |
 | `PERF-TILEOPS` | `( -- n )` | Read the tile operation counter (CSR 0x6A). |
 | `PERF-EXTMEM` | `( -- n )` | Read the external memory beat counter (CSR 0x6B). |

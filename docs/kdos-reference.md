@@ -852,13 +852,13 @@ leave the floor unchanged, disable retry, and abort.
 
 The contiguous hosted frontier now includes the complete unchanged userland
 and Arena sections plus Buffer's general `IDLE`, registry, constructors,
-inspection, Arena integration, and integer/FP16/BF16 operations through line
-3216. Their
+inspection, Arena integration, integer/FP16/BF16 operations, the kernel
+registry and sample kernels, and the pipeline engine through line 3754. Their
 checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, and tile effects are executable
-semantic behavior rather than reporting-only shims. The next kernel/pipeline
-source compiles through `P.ADD`; `OFF` in `P.CLEAR` at line 3673 is the first
+semantic behavior rather than reporting-only shims. Storage begins next;
+`SECTOR` publishes before `DISK@` in `DISK?` at line 3771 reaches the first
 unadmitted BIOS seam.
 
 ---
@@ -1066,9 +1066,13 @@ Hosted qualification covers complete-tile integer effects and retains the
 source defects documented in §3. Exact lines 3110 through 3216 then publish
 the seven FP16/BF16 Buffer words in 107 lines and 2,869 bytes, with SHA-256
 `cea60476207e132760c32cf2fb82773d6325d6d1895f0e7d73c40bf667b75065`.
-The next unsupported word is `OFF` at line 3673; completed kernel and pipeline
-definitions before that failure remain published under ordinary evaluator
-semantics, but are not part of this semantically qualified fixture.
+Exact lines 3217 through 3754 add 109 kernel/pipeline definitions in 538 lines
+and 16,586 bytes, with SHA-256
+`ec724b8ca6f6887a2c4ce724edf9612726cf04a48416c29c2eb3ed9448949e40`.
+They leave 23 kernels, three populated pipelines, and six load-time Buffers in
+their ordinary registries. The next unsupported word is `DISK@` at line 3771;
+the preceding `SECTOR` constant remains published while partial `DISK?` rolls
+back.
 
 ---
 
@@ -1282,6 +1286,11 @@ Offset   Field         Meaning
 
 **Variables:** `KERN-COUNT`, `KERN-TABLE` (32-slot registry), `KDESC` (internal temp).
 
+The limit is a literal source table, not a checked allocator contract. Once 32
+entries are present, `KERNEL` still allocates its descriptor and defines the
+named constant but silently omits it from `KERN-TABLE`. There is no unregister
+or reclamation path, and shared `KDESC` makes construction non-reentrant.
+
 ---
 
 ## §5 Sample Kernels
@@ -1337,6 +1346,26 @@ Forth word, plus a descriptor constant (named `<kernel>-desc`).
 
 **Scratch buffers:** `mavg-scratch` (256 bytes), `hist-bins` (256×8-byte bins), `conv-scratch` (256 bytes).
 
+The current executable source has important differences from several intended
+descriptions above. `kavg` records its window but only copies the input through
+`mavg-scratch`; it performs no averaging. `kdelta` initializes its previous
+value to zero, so the first result is `src[0]`, not zero. `kpeak` produces the
+documented result for byte counts of at least three, but for shorter buffers it
+zeroes the destination and then executes one excess `DROP`, causing stack
+underflow. The registered `krms-buf` divides by zero when mean square is one,
+and eight Newton iterations do not produce the exact RMS over the entire byte
+domain; the separate unused `krms` loses its descriptor before `B.BYTES`.
+`kavg` and `kconvolve3` copy an unchecked byte count through fixed 256-byte
+scratch, so larger buffers overwrite following dictionary state. `khistogram`
+uses one global result buffer. These behaviors are source discrepancies, not
+simulator replacements.
+
+Unguarded `0 DO` also appears in `kthresh`, `kclamp`, `kavg`, `khistogram`,
+`kdelta`, both RMS words, `kcorrelate`, `kconvolve3`, `kinvert`, and `kcount`.
+Their zero-sized domains enter the loop and do not complete normally before
+index wrap or another fault. Tile wrappers additionally inherit the Buffer
+tail, descriptor-count, and multi-tile behaviors documented in §3.
+
 **Example — basic signal analysis:**
 ```forth
 0 1 256 BUFFER sensor-data      \ create a 256-byte buffer
@@ -1385,6 +1414,22 @@ Offset   Field      Meaning
 | `P.BENCH` | `( pipe -- )` | Execute and individually time each pipeline step. |
 | `P.INFO` | `( pipe -- )` | Print pipeline descriptor details. |
 | `PIPES` | `( -- )` | List all registered pipelines. |
+
+Pipeline checks are similarly minimal. Once eight registry slots are full,
+`PIPELINE` still allocates and defines its constant but silently omits the
+entry. `P.ADD` silently drops an XT at capacity; `P.GET` and `P.SET` do no
+bounds checking. `P.CLEAR` resets only the count, so old XT cells remain
+readable and can be exposed again by a later count change. Capacity/count
+corruption, including negative cells, is not rejected, and construction uses
+shared `PDESC`, `P-XT`, and `P-PIPE` scratch.
+
+On the machine, `BENCH` reads the intended wrapping 32-bit Timer COUNT through
+`CYCLES`. The hosted profile instead returns the low 32 bits of a separate
+per-runtime semantic-work clock, unaffected by `PERF-RESET`; it makes execution
+order measurable but is not MP64 timing. Current RTL SoC Timer wiring exposes
+only `COUNT_LO` to `CYCLES` and accepts only `COMPARE_LO` from `TIMER!`, while
+emulator/native provide the intended 32-bit accesses. This remains an explicit
+backend discrepancy.
 
 ### Demo Pipelines
 
