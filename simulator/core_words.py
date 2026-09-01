@@ -998,9 +998,13 @@ def _cluster_spad(context: ExecutionContext) -> None:
     context.data.push(_CLUSTER_SPAD_ADDRESS)
 
 
-def _micro_question(context: ExecutionContext) -> None:
-    core_id = context.data.pop()
-    context.data.push(forth_flag(core_id >= 1))
+def _micro_question(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    core_id = context.data.peek()
+    full_cores = runtime.memory.read64(MMIO_BASE + SYSINFO_NUM_FULL)
+    context.data.replace_top(forth_flag(core_id >= full_cores))
 
 
 def _disk_transfer_checked(
@@ -1740,6 +1744,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
             lambda context: _sysinfo_fetch(runtime, context, SYSINFO_NUM_FULL),
         ),
         (
+            b"MICRO?",
+            lambda context: _micro_question(runtime, context),
+        ),
+        (
             b"HBW-BASE",
             lambda context: _sysinfo_fetch(runtime, context, SYSINFO_HBW_BASE),
         ),
@@ -1794,7 +1802,6 @@ def install_core(runtime: MegaForthRuntime) -> None:
             lambda context: _cluster_unavailable(context, "BARRIER-STATUS"),
         ),
         (b"SPAD", _cluster_spad),
-        (b"MICRO?", _micro_question),
         (b"DISK@", lambda context: context.data.push(runtime.storage.status)),
         (
             b"DISK-SECTORS",

@@ -158,3 +158,9 @@ def test_cluster_words_are_live_primitives_without_guest_shadow_state() -> None:
         word = runtime.find(name)
         assert word is not None
         assert isinstance(word.implementation, PrimitiveDefinition)
+
+    n_full = runtime.find("N-FULL")
+    micro = runtime.find("MICRO?")
+    assert n_full is not None
+    assert micro is not None
+    assert runtime.memory.read64(micro.header_address) == n_full.header_address
