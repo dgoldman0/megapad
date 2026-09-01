@@ -164,7 +164,10 @@ The implemented slices provide:
   ABI, including its software gate and final deferred checkpoint rebinding;
 - unchanged KDOS Multicore Dispatch on the explicit one-full-core BIOS
   profile, including status/introspection, spinlock wrappers, and the ordinary
-  sequential pipeline fallback without a fabricated worker or speedup.
+  sequential pipeline fallback without a fabricated worker or speedup;
+- unchanged KDOS per-core queues, work stealing, affinity, per-core flag
+  polling, software message inboxes, and named lock wrappers through §8.7,
+  qualified as one-core state machines rather than multicore execution.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -760,14 +763,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 6922.
+ends at line 7461.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–6922 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, and one-core Multicore Dispatch |
-| 6923 onward | Next uncovered frontier | Per-Core Run Queues begins at line 6923, followed by the remaining ordinary KDOS source |
+| 39–7461 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, and the §8.2–§8.7 queue/affinity/flag/message/lock state machines |
+| 7462 onward | Next uncovered frontier | Micro-Cluster Support begins at line 7462, followed by the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1588,7 +1591,95 @@ argument on the data stack despite `( pipe -- )`, reports `NCORES` rather than
 participating full cores, measures retained semantic Timer work rather than
 speedup, and does not normalize a wrapping `CYCLES` subtraction.
 
-The next clean seam is Per-Core Run Queues at line 6923.
+The exact adjacent §8.2–§8.7 fixture is unchanged lines 6923–7461: 539 LF
+records, 17,203 bytes, SHA-256
+`4e36452b9d65c41843f8b015065303375efae8667824c5bf606c30da6af32625`,
+and Git blob `022981afa233362debb10678b250ac044d8454d9`. It publishes 91
+definitions—17 constants, 17 variables, and 57 colon definitions—and advances
+the hosted dictionary by 7,365 bytes. Load runs the source initializers for 16
+run queues, eight affinity cells, 16 per-core flags, 16 message inboxes, and
+four handler cells, then rebinds `CORE-CHECKPOINT`. It performs no dispatch,
+UART, lock, explicit Timer, storage, RTC, or IDL operation; ordinary semantic
+evaluation can still advance an enabled Timer counter.
+
+Nine source declarations over-reserve their advertised arrays by seven bytes
+each because an eight-byte `VARIABLE` body is followed by `desired-size - 1`
+bytes of `ALLOT`. The discrepancy totals 63 bytes: `RQ-SLOTS` reserves 1,031
+rather than 1,024 bytes; each run-queue index table, preemption table, and
+message index table reserves 135 rather than 128; `AFF-TABLE` reserves 71
+rather than 64; `MSG-INBOX` reserves 3,079 rather than 3,072; and
+`MSG-HTABLE` reserves 39 rather than 32.
+
+The advertised eight-entry run queues and message inboxes are sentinel rings
+with usable capacity seven. Pop, clear, and receive advance indices but retain
+stale slot bytes. A zero XT can be queued even though dequeue cannot
+distinguish it from empty for several consumers. Queue, affinity, flag, and
+message addressors generally do not validate their indices; focused hosted
+qualification therefore uses canonical table bounds and only actual core 0
+for execution.
+
+`SCHED-CORE 0` is useful but synchronous: it dequeues FIFO XTs and executes
+them inline on the caller's stacks and exception context. Dequeue commits
+before execution, so a throw loses that item and retains later items. Each XT
+must be stack-neutral because the retained core ID sits below it. `SCHED-ALL`
+is unusable at one core: both secondary passes use plain `NCORES 1 DO`.
+Equal bounds enter at phantom core 1 instead of zero-tripping. The loop first
+walks dormant tables 1–15, then unchecked addresses beyond the initialized
+arrays; it can observe arbitrary dictionary bytes and fault or attempt a
+dispatch. Only an uninterrupted full-cell index cycle would reach the loop
+exit. The bounded hosted proof exhausts its step budget before the core-0
+drain and leaves queue 0 untouched. If a phantom queue is populated, it can
+be popped before strict `CORE-RUN` rejects the target. `SCHED-BALANCED` and
+`SCHED-AFFINE` inherit this defect.
+
+Work stealing is unsynchronized queue motion, not an automatic worker
+facility. `BALANCE` is a no-op with one full core. Direct stealing can move
+work into dormant queue tables; victim equal to thief rotates one item, and a
+full destination aborts after the victim was already popped. `RQ-BUSIEST`
+scans only advertised full-core queues.
+
+`SPAWN-ON 0` enqueues first, then conditionally adds a READY task descriptor
+with no saved stacks or name. At registry saturation it still queues the XT
+but creates no descriptor. A registered XT is already in the queue, yet
+`SCHED-AFFINE` enqueues every READY descriptor again, marks it RUNNING before
+dispatch, and has no path here that marks it DONE. Affinity access rejects
+only task indices at or above eight; negative indices and all stored core
+values are unchecked. The hosted qualification records these partial-mutation
+and duplicate-publication rules without invoking the broken all-core tail.
+
+Per-core preemption remains manual flag polling. `PREEMPT-ON-ALL` programs
+control 7 and raises the software gate, but no admitted ISR or source word
+turns Timer pending state into `PREEMPT-FLAGS`. The final checkpoint ignores
+the older global `PREEMPT-FLAG`; a manually set core-0 flag is cleared before
+non-suspending `SCHED-YIELD`, and execution continues. Worker checkpointing
+only clears a flag. `PREEMPT-OFF-ALL` writes control 1, so the Timer keeps
+running, clears the gate and all software flags, and does not acknowledge
+sticky match or pending IRQ state.
+
+IPI Messaging is a shared-memory inbox without an IPI or wake notification.
+Self-send/receive is the meaningful one-core path and broadcast excludes self,
+returning zero. Staging and receive scratch are global, with send staging
+written before lock 7 and receive results reread after unlock, so the lock does
+not make the path reentrant. A successful `MSG-RECV` leaks `COREID` below the
+documented four results, producing `( core type sender payload -1 )`; the empty
+path returns exactly four zeroes. That leak propagates through
+`MSG-DISPATCH`, beneath the handler's `sender payload type`, and makes
+`MSG-FLUSH` return an initial zero plus one `COREID + 1` cell per message
+instead of a count. Target IDs and setter message types are unchecked, and
+negative handler types can index before the table.
+
+The named resource words remain opt-in, depthless physical-core lock wrappers.
+They do not prove that dictionary, UART, heap, or other ordinary operations
+acquire those locks, and separate semantic tasks on hosted core 0 are the same
+owner. Nested acquisition adds no depth, so one inner release ends the outer
+critical section. `WITH-LOCK` releases only after normal XT return; a throw or
+abort strands ownership. Its return-stack use is balanced on the normal path
+and is not inside a `DO` loop. `LOCK-INFO` prints static assignments rather
+than live state and stops before the later networking lock 12.
+
+The contiguous frontier now ends at line 7461. The next clean seam is §8.8
+Micro-Cluster Support at line 7462, whose first executable definition needs
+the not-yet-admitted cluster-control BIOS boundary.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

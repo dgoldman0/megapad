@@ -257,7 +257,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 6922.
+KDOS source frontier now ends at line 7461.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1387,7 +1387,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 6922. Exact unchanged lines
+The contiguous source frontier now ends at line 7461. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2262,8 +2262,95 @@ work rather than physical speedup, performs non-normalized wrapping
 subtraction, and leaks its original pipeline argument despite the declared
 stack effect.
 
-The contiguous source frontier now ends at line 6922. The next clean seam is
-Per-Core Run Queues at line 6923.
+Exact unchanged lines 6923 through 7461 contain 539 LF records and 17,203
+bytes, with SHA-256
+`4e36452b9d65c41843f8b015065303375efae8667824c5bf606c30da6af32625`
+and Git blob `022981afa233362debb10678b250ac044d8454d9`. They publish 91
+definitions: 17 constants, 17 variables, and 57 colon definitions. The exact
+hosted dictionary advance is 7,365 bytes. Load runs `RQ-INIT`, `AFF-INIT`,
+`PREEMPT-FLAGS-INIT`, `MSG-INIT`, and `MSG-HINIT`, then rebinds deferred
+`CORE-CHECKPOINT` to `_CORE-CHECKPOINT-PER-CORE`. It invokes no dispatch,
+UART, lock, explicit Timer, storage, RTC, or IDL service and leaves both public
+stacks empty. Semantic evaluation may advance an already-enabled Timer counter.
+
+The declared queue/table layout has a systematic seven-byte discrepancy.
+Each of nine `VARIABLE ... desired-size - 1 ALLOT` declarations includes the
+variable's existing eight-byte body and therefore reserves `desired-size + 7`
+bytes. Their initialized operational spans remain 4,896 bytes; the raw bodies
+and allotments reserve 4,959 bytes. Those 63 slack bytes are retained rather
+than normalized by the host.
+
+Run queues are eight-index sentinel rings with capacity seven. Empty state is
+head equal to tail; pop and clear do not erase slots, and XT zero can be
+enqueued although consumers cannot distinguish it from an empty result.
+Address/count operations validate neither core IDs nor mutable indices. The
+qualified execution domain is canonical indices and core 0. `SCHED-CORE 0`
+dequeues FIFO and executes each nonzero XT synchronously on the caller's
+stacks. The core ID remains below the XT, so bodies must be stack-neutral.
+Dequeue commits before XT execution; failure loses that item and leaves later
+queue entries retained.
+
+`SCHED-ALL` is not a one-core no-op. Each secondary pass uses plain
+`NCORES 1 DO`; equal bounds enter at index 1 rather than zero-tripping. The
+loop walks dormant tables 1–15 and then unchecked addresses beyond the
+initialized arrays, where arbitrary dictionary bytes may provoke a fault or
+dispatch attempt. Only an uninterrupted full-cell index cycle would reach the
+loop exit. Bounded hosted evidence stops before the core-0 drain and proves
+that queue 0 remains untouched. A populated phantom queue can be popped before
+`CORE-RUN` rejects its ID. `SCHED-BALANCED` and `SCHED-AFFINE` inherit this
+defect and are admitted only for bounded failure/state evidence, not successful
+scheduling.
+
+Work stealing mutates the same unlocked ring tables synchronously. `BALANCE`
+is a no-op at one full core. Direct `STEAL-FROM`/`WORK-STEAL` can address
+dormant tables; victim equal to thief rotates an item, zero XT is popped and
+reported as failure, and a full-target abort occurs after the victim pop.
+There is no worker-driven, automatic, or concurrent stealing contract.
+
+Affinity is registry metadata with partial publication. `AFFINITY!` and
+`AFFINITY@` reject only task indices at or above eight, not negative indices,
+and never validate stored core IDs. `SPAWN-ON 0` enqueues first, then, while
+the registry has space, appends a 48-byte READY descriptor with priority 128,
+zero saved stacks/name, and a table/affinity entry. At saturation it still
+queues but publishes no descriptor. `SCHED-AFFINE` queues that already-queued
+READY XT again, marks the descriptor RUNNING before its broken `SCHED-ALL`
+tail, and does not mark it DONE.
+
+Per-core preemption is retained software state, not task preemption.
+`PREEMPT-ON-ALL` writes low-32 `TIME-SLICE`, Timer control 7, and the global
+gate, but no admitted ISR or unchanged KDOS word maps Timer pending state to a
+per-core flag. The final checkpoint ignores the older global
+`PREEMPT-FLAG`. On core 0 a manually populated table flag is cleared before
+non-suspending `SCHED-YIELD`; a worker checkpoint only clears and continues.
+`PREEMPT-OFF-ALL` writes control 1, leaving the counter enabled, clears the
+gate and all 16 flags, and neither resets nor acknowledges sticky match or
+pending IRQ state.
+
+Messages are shared-memory sentinel inboxes, also capacity seven, with no IPI
+or wake notification. The one-core qualified path is synchronous self-send
+and receive; broadcast excludes self and returns zero. IDs and table indices
+are largely unchecked. Global send scratch is written before lock 7 and
+receive scratch is reread after unlocking, so the source is not reentrant or
+made race-free by the lock. Successful `MSG-RECV` accidentally retains
+`COREID`, producing `( core type sender payload -1 )`, while its empty path
+returns the documented four zeroes. `MSG-DISPATCH` retains that core beneath
+handler inputs/results. `MSG-FLUSH` consequently returns an initial zero plus
+one `COREID + 1` cell per consumed message rather than a count. Handler store
+has no type bound, and handler lookup accepts negative signed types as less
+than four and can address before the table.
+
+Named resource locks are opt-in wrappers around physical-core ownership, not
+proof that the named subsystems acquire them. All hosted semantic tasks share
+core ID 0. Same-core acquisition is depthless, one release ends a nested
+critical section, and a foreign-owner wait cannot progress through the
+non-suspending checkpoint. `WITH-LOCK` balances its `>R`/`R>` sequence and
+releases only on normal return; a throw or abort strands ownership. Static
+`LOCK-INFO` labels are not live lock state and omit the later networking lock
+12.
+
+The contiguous source frontier now ends at line 7461. The next clean seam is
+Micro-Cluster Support at line 7462. Its first executable definition requires
+cluster-control BIOS words that are not yet admitted.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

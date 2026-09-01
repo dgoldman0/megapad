@@ -305,11 +305,14 @@ and interrupts are enabled (IE=1), the timer fires `IVEC_TIMER`.  With
 auto-reload (bit 2), the counter resets to 0 on match, creating a periodic
 interrupt.
 
-KDOS uses this for **cooperative preemption checkpoints** — `PREEMPT-ON`
-configures a 50,000-cycle timer with auto-reload, and `CORE-CHECKPOINT`
-(`YIELD?`) checks the per-core flag set by the timer handler. Core 0 may
-retire its current KDOS task; secondary one-shot workers acknowledge the
-checkpoint without touching the core-0 scheduler.
+The architectural intent is **cooperative preemption checkpoints**. Current
+unchanged KDOS is narrower: early `PREEMPT-ON` writes control 5, leaving IRQ
+generation disabled; later `PREEMPT-ON-ALL` writes control 7 and rebinds
+`CORE-CHECKPOINT` to a per-core flag table, but the source installs no handler
+that maps Timer status to those flags. A manually populated core-0 flag is
+cleared before non-suspending `SCHED-YIELD`, after which execution continues;
+a worker checkpoint only clears and continues. The hosted semantic profile
+does not synthesize the missing interrupt-to-flag or task-switch path.
 
 ---
 
@@ -1343,7 +1346,7 @@ interrupt or trap fires:
 | Vector | Used By | Purpose |
 |--------|---------|---------|
 | `IVEC_BUS_FAULT` (5) | BIOS | Catches accesses beyond memory bounds or unmapped MMIO offsets (bus timeout); prints fault address and aborts |
-| `IVEC_TIMER` (7) | KDOS scheduler | Sets `PREEMPT-FLAG` for cooperative preemption |
+| `IVEC_TIMER` (7) | Intended KDOS scheduler | Architectural timer vector; the currently qualified KDOS source does not install the flag-setting ISR |
 | `IVEC_DIV_ZERO` (4) | Hardware | Traps on division by zero |
 | `IVEC_RTC` (16) | Application | Fires on alarm match; cleared by writing 0x01 to STATUS (+0x19) |
 

@@ -194,6 +194,9 @@ secret boundary, or security proof.
 - **Multicore dispatch surface**: Source validation, status, lock wrappers,
   and pipeline fallback are qualified on one full core; no secondary worker,
   concurrency, or parallel speedup is implemented by the hosted profile
+- **Per-core state tables**: Run queues, affinity, manual preemption flags,
+  software message inboxes, and named locks are executable on one core, with
+  the source limitations below rather than a simulated multicore scheduler
 - **Interactive screens**: Full-screen ANSI TUI with 9 screens and keyboard navigation
 - **ANSI terminal**: ESC, CSI, AT-XY, PAGE, SGR colors, BOLD, DIM, REVERSE
 - **Screen system**: SCREENS entry point, RENDER-SCREEN, HANDLE-KEY event loop
@@ -1202,6 +1205,26 @@ branch is not round-robin, uses shared scratch, does not check worker
 availability, and can violate ordered dependencies. `P.BENCH-PAR` also leaks
 its input pipeline. Exact provenance and the complete edge contract are in
 `docs/kdos-reference.md` §8.1.
+
+**Run-queue through lock discrepancy:** The §8.2–§8.7 source surface is
+executable as one-core state tables, not as a multicore OS. The eight-index
+run queues and inboxes have sentinel-ring capacity seven. `SCHED-CORE 0` runs
+FIFO XTs inline, but both passes in `SCHED-ALL` repeat the equal-bound plain
+`DO` defect. They enter phantom queue tables, then unchecked addresses beyond
+the initialized arrays; bounded hosted execution does not reach the core-0
+drain. Balanced and affinity schedulers inherit that tail. Work stealing is
+unlocked explicit queue motion, and `BALANCE` is a one-core no-op.
+
+`SPAWN-ON` queues before registration, can retain a queue-only XT when the
+task table is full, and produces a READY descriptor which `SCHED-AFFINE`
+queues a second time before marking it RUNNING. Per-core preemption flags are
+manual: Timer control 7 has no ISR-to-flag connection, and checkpointing only
+clears a flag and continues. Messaging is a software inbox without an IPI;
+successful `MSG-RECV` leaks an extra core cell, which propagates through
+dispatch and flush. Named locks are depthless physical-core conventions;
+`WITH-LOCK` strands ownership on exceptional exit. Complete stack effects,
+load provenance, and index hazards are recorded in `docs/kdos-reference.md`
+§8.2–§8.7.
 
 **BIOS timer/interrupt words** (bios.asm):
 | Word | Stack | Description |

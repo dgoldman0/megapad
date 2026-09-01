@@ -199,15 +199,24 @@ Implemented network components, bottom-up:
     shared NIO byte stream. The returned socket is qualified through
     application I/O and graceful close.
 
-### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
+### Layer 3: Multi-Core OS (Items 19–24) — source surface present
 
-19. ✅ **Per-core run queues**
-20. ✅ **Work stealing** — `BALANCE` converges sparse and skewed queues to a
-    maximum count difference of one without stack leakage
-21. ✅ **Core affinity**
-22. ✅ **Per-core preemption** — timer IRQ on all cores
-23. ✅ **IPI messaging** — mailbox for structured inter-core messages
-24. ✅ **Shared resource locks** — dictionary, UART, filesystem
+19. ⚠️ **Per-core run queues** — core-0 FIFO execution is qualified; the
+    one-core `SCHED-ALL` path has an equal-bound `DO` defect
+20. ⚠️ **Work stealing** — `BALANCE` converges canonical multi-queue
+    counts, but it is unlocked explicit table motion and a one-core no-op
+21. ⚠️ **Core affinity** — metadata and queue publication exist, with
+    duplicate/partial state and the broken `SCHED-ALL` tail
+22. ⚠️ **Per-core preemption** — manual flag polling exists; the admitted
+    hosted path has no Timer-IRQ-to-flag or suspending-switch connection
+23. ⚠️ **IPI messaging** — shared-memory inboxes exist without an IPI
+    notification, and successful receive leaks an extra core cell
+24. ⚠️ **Shared resource locks** — named depthless wrappers exist but are
+    opt-in and not exception-safe
+
+These entries record source availability, not completed hosted multicore
+execution. The semantic simulator currently advertises one full core and
+synthesizes no worker, concurrency, preemption, IPI delivery, or speedup.
 
 ### Layer 5: Field ALU & Post-Quantum Crypto (Items 34–38) — ✅ DONE
 
@@ -295,7 +304,8 @@ AES, SHA3, SHA256, HKDF, X25519, Field ALU, NTT, KEM, PQ exchange,
 HBW/ext-mem allocators, userland isolation), §2 Buffers, §3 Tile ops
 (+ FP16/BF16), §4 Kernel registry, §5 Sample kernels, §6 Pipeline
 engine, §7 Storage (filesystem, encryption, subdirectories, doc
-browser), §8 Scheduler (preemptive, multicore, work stealing), §9 TUI
+browser), §8 Scheduler (synchronous task registry plus multicore-oriented
+queue, affinity, flag, messaging, and lock source surfaces), §9 TUI
 (9 screens + subscreens, widget SDL), §10 Data port transport, §11
 Benchmarking, §12 Dashboard, §13 Help system, §14 Startup, §15 Pipeline
 bundles, §16 Network stack (Ethernet → ARP → IPv4 → ICMP → UDP → DHCP
@@ -426,7 +436,7 @@ or hardware extension.
 Layer 0  Items  1– 4  Foundation                              ✅ DONE
 Layer 1  Items  5– 8  Crypto Stack                            ✅ DONE
 Layer 2  Items  9–18  Network Stack bounded profile            ✅ COMPLETE
-Layer 3  Items 19–24  Multi-Core OS                           ✅ DONE
+Layer 3  Items 19–24  Multi-Core OS                           ⚠️ SOURCE SURFACE; HOSTED ONE-CORE ONLY
 Layer 4  Items 25–30  Application-Level                       🔄 3 of 6 open
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto          ✅ DONE
 Layer 6  Items 39–42  Architecture & Portability               ✅ DONE
