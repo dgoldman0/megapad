@@ -22,15 +22,20 @@ from rich_terminal.apt1 import UINT32_MAX, UINT64_MAX
 from rich_terminal.retained_view import (
     INT32_MAX,
     INT32_MIN,
+    INT64_MAX,
+    INT64_MIN,
     DisplayScope,
     GlyphRunDraw,
     MenuBarDraw,
     MenuDraw,
     MenuItemDraw,
     MenuSeparatorDraw,
+    MeterDraw,
     PolylineDraw,
+    ReadoutDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    StatusDraw,
     TabDraw,
     TabSetDraw,
     TextAreaDraw,
@@ -377,6 +382,41 @@ _POLYLINE_WIRE_FIELDS = (
     "color",
     "closed",
 )
+_READOUT_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "foreground",
+    "background",
+    "text",
+)
+_METER_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "foreground",
+    "background",
+    "vertical",
+    "show_value",
+    "minimum",
+    "maximum",
+    "value",
+)
+_STATUS_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "inactive",
+    "active",
+    "value",
+    "shape",
+)
 _MENU_BAR_WIRE_FIELDS = (
     "kind",
     "control_id",
@@ -567,6 +607,9 @@ def _retained_draw_to_wire(
     draw: (
         GlyphRunDraw
         | PolylineDraw
+        | ReadoutDraw
+        | MeterDraw
+        | StatusDraw
         | MenuBarDraw
         | TextAreaDraw
         | TextGridDraw
@@ -611,6 +654,74 @@ def _retained_draw_to_wire(
                 draw.color.alpha,
             ],
             "closed": draw.closed,
+        }
+    if isinstance(draw, ReadoutDraw):
+        return {
+            "kind": "readout",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "foreground": [
+                draw.foreground.red,
+                draw.foreground.green,
+                draw.foreground.blue,
+                draw.foreground.alpha,
+            ],
+            "background": [
+                draw.background.red,
+                draw.background.green,
+                draw.background.blue,
+                draw.background.alpha,
+            ],
+            "text": draw.text,
+        }
+    if isinstance(draw, MeterDraw):
+        return {
+            "kind": "meter",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "foreground": [
+                draw.foreground.red,
+                draw.foreground.green,
+                draw.foreground.blue,
+                draw.foreground.alpha,
+            ],
+            "background": [
+                draw.background.red,
+                draw.background.green,
+                draw.background.blue,
+                draw.background.alpha,
+            ],
+            "vertical": draw.vertical,
+            "show_value": draw.show_value,
+            "minimum": draw.minimum,
+            "maximum": draw.maximum,
+            "value": draw.value,
+        }
+    if isinstance(draw, StatusDraw):
+        return {
+            "kind": "status",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "inactive": [
+                draw.inactive.red,
+                draw.inactive.green,
+                draw.inactive.blue,
+                draw.inactive.alpha,
+            ],
+            "active": [
+                draw.active.red,
+                draw.active.green,
+                draw.active.blue,
+                draw.active.alpha,
+            ],
+            "value": draw.value,
+            "shape": draw.shape,
         }
     if isinstance(draw, MenuBarDraw):
         return {
@@ -895,6 +1006,9 @@ def _retained_draw_from_wire(
 ) -> (
     GlyphRunDraw
     | PolylineDraw
+    | ReadoutDraw
+    | MeterDraw
+    | StatusDraw
     | MenuBarDraw
     | TextAreaDraw
     | TextGridDraw
@@ -981,6 +1095,123 @@ def _retained_draw_from_wire(
                 )
             ),
             closed=_wire_boolean(wire["closed"], f"{name} closed"),
+        )
+    if kind == "readout":
+        wire = _wire_object(data, name, _READOUT_WIRE_FIELDS)
+        return ReadoutDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"],
+                f"{name} z_order",
+                minimum=INT32_MIN,
+                maximum=INT32_MAX,
+            ),
+            bounds=ObjectBounds(
+                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+            ),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+            foreground=RGBA(
+                *_wire_integer_array(
+                    wire["foreground"], f"{name} foreground", 4, maximum=0xFF
+                )
+            ),
+            background=RGBA(
+                *_wire_integer_array(
+                    wire["background"], f"{name} background", 4, maximum=0xFF
+                )
+            ),
+            text=_wire_text(wire["text"], f"{name} text"),
+        )
+    if kind == "meter":
+        wire = _wire_object(data, name, _METER_WIRE_FIELDS)
+        return MeterDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"],
+                f"{name} z_order",
+                minimum=INT32_MIN,
+                maximum=INT32_MAX,
+            ),
+            bounds=ObjectBounds(
+                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+            ),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+            foreground=RGBA(
+                *_wire_integer_array(
+                    wire["foreground"], f"{name} foreground", 4, maximum=0xFF
+                )
+            ),
+            background=RGBA(
+                *_wire_integer_array(
+                    wire["background"], f"{name} background", 4, maximum=0xFF
+                )
+            ),
+            vertical=_wire_boolean(wire["vertical"], f"{name} vertical"),
+            show_value=_wire_boolean(wire["show_value"], f"{name} show_value"),
+            minimum=_wire_integer(
+                wire["minimum"],
+                f"{name} minimum",
+                minimum=INT64_MIN,
+                maximum=INT64_MAX,
+            ),
+            maximum=_wire_integer(
+                wire["maximum"],
+                f"{name} maximum",
+                minimum=INT64_MIN,
+                maximum=INT64_MAX,
+            ),
+            value=_wire_integer(
+                wire["value"],
+                f"{name} value",
+                minimum=INT64_MIN,
+                maximum=INT64_MAX,
+            ),
+        )
+    if kind == "status":
+        wire = _wire_object(data, name, _STATUS_WIRE_FIELDS)
+        return StatusDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"],
+                f"{name} z_order",
+                minimum=INT32_MIN,
+                maximum=INT32_MAX,
+            ),
+            bounds=ObjectBounds(
+                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+            ),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+            inactive=RGBA(
+                *_wire_integer_array(
+                    wire["inactive"], f"{name} inactive", 4, maximum=0xFF
+                )
+            ),
+            active=RGBA(
+                *_wire_integer_array(
+                    wire["active"], f"{name} active", 4, maximum=0xFF
+                )
+            ),
+            value=_wire_integer(
+                wire["value"],
+                f"{name} value",
+                minimum=INT64_MIN,
+                maximum=INT64_MAX,
+            ),
+            shape=_wire_integer(
+                wire["shape"], f"{name} shape", minimum=0, maximum=2
+            ),
         )
     if kind == "menu_bar":
         wire = _wire_object(data, name, _MENU_BAR_WIRE_FIELDS)

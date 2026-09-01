@@ -25,15 +25,18 @@ from .retained_scene import (
     ControlState,
     GroupBody,
     GlyphRunBody,
+    MeterBody,
     ObjectBounds,
     ObjectDefinition,
     OwnerScene,
     Point,
     PolylineBody,
+    ReadoutBody,
     RGBA,
     RegionDefinition,
     RetainedScene,
     SceneModelState,
+    StatusBody,
     validate_control_shape,
 )
 from .semantic_content import SemanticTextContent
@@ -42,6 +45,8 @@ from .update_authority import TerminalGeometry
 
 INT32_MIN = -(1 << 31)
 INT32_MAX = (1 << 31) - 1
+INT64_MIN = -(1 << 63)
+INT64_MAX = (1 << 63) - 1
 
 
 class RetainedViewError(ValueError):
@@ -210,7 +215,9 @@ class GlyphRunDraw:
         )
         if not isinstance(self.bounds, ObjectBounds):
             raise TypeError("bounds must be ObjectBounds")
-        if not isinstance(self.foreground, RGBA) or not isinstance(self.background, RGBA):
+        if not isinstance(self.foreground, RGBA) or not isinstance(
+            self.background, RGBA
+        ):
             raise TypeError("glyph-run colors must be RGBA")
         attributes = _integer(
             "attributes", self.attributes, minimum=0, maximum=0xFFFF
@@ -301,6 +308,162 @@ class PolylineDraw:
             raise TypeError("color must be RGBA")
         if not isinstance(self.closed, bool):
             raise TypeError("closed must be bool")
+        object.__setattr__(
+            self,
+            "parent_bounds",
+            _object_bounds_path("parent_bounds", self.parent_bounds),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReadoutDraw:
+    """One canonical formatted instrument value."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    foreground: RGBA
+    background: RGBA
+    text: str
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "object_id",
+            _integer("object_id", self.object_id, minimum=1, maximum=UINT64_MAX),
+        )
+        object.__setattr__(
+            self,
+            "z_order",
+            _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
+        )
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        if not isinstance(self.foreground, RGBA) or not isinstance(self.background, RGBA):
+            raise TypeError("readout colors must be RGBA")
+        if not isinstance(self.text, str):
+            raise TypeError("readout text must be str")
+        if (
+            not self.text
+            or "\0" in self.text
+            or "\r" in self.text
+            or "\n" in self.text
+        ):
+            raise ValueError(
+                "readout text must be nonempty and contain no NUL, CR, or LF"
+            )
+        try:
+            self.text.encode("utf-8", "strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("readout text contains a non-scalar surrogate") from exc
+        object.__setattr__(
+            self,
+            "parent_bounds",
+            _object_bounds_path("parent_bounds", self.parent_bounds),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class MeterDraw:
+    """One bounded scalar meter with renderer-owned orientation and label."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    foreground: RGBA
+    background: RGBA
+    vertical: bool
+    show_value: bool
+    minimum: int
+    maximum: int
+    value: int
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "object_id",
+            _integer("object_id", self.object_id, minimum=1, maximum=UINT64_MAX),
+        )
+        object.__setattr__(
+            self,
+            "z_order",
+            _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
+        )
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        if not isinstance(self.foreground, RGBA) or not isinstance(
+            self.background, RGBA
+        ):
+            raise TypeError("meter colors must be RGBA")
+        object.__setattr__(self, "vertical", _boolean("vertical", self.vertical))
+        object.__setattr__(
+            self,
+            "show_value",
+            _boolean("show_value", self.show_value),
+        )
+        for name in ("minimum", "maximum", "value"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=INT64_MIN,
+                    maximum=INT64_MAX,
+                ),
+            )
+        if (
+            self.minimum >= self.maximum
+            or not self.minimum <= self.value <= self.maximum
+        ):
+            raise ValueError("meter range/value is invalid")
+        object.__setattr__(
+            self,
+            "parent_bounds",
+            _object_bounds_path("parent_bounds", self.parent_bounds),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class StatusDraw:
+    """One binary numeric indicator with a renderer-neutral shape."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    inactive: RGBA
+    active: RGBA
+    value: int
+    shape: int
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "object_id",
+            _integer("object_id", self.object_id, minimum=1, maximum=UINT64_MAX),
+        )
+        object.__setattr__(
+            self,
+            "z_order",
+            _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
+        )
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        if not isinstance(self.inactive, RGBA) or not isinstance(self.active, RGBA):
+            raise TypeError("status colors must be RGBA")
+        object.__setattr__(
+            self,
+            "value",
+            _integer("value", self.value, minimum=INT64_MIN, maximum=INT64_MAX),
+        )
+        object.__setattr__(
+            self,
+            "shape",
+            _integer("shape", self.shape, minimum=0, maximum=2),
+        )
         object.__setattr__(
             self,
             "parent_bounds",
@@ -668,11 +831,17 @@ class TabSetDraw:
         object.__setattr__(self, "tabs", tabs)
 
 
-ObjectDraw = GlyphRunDraw | PolylineDraw
+ObjectDraw = GlyphRunDraw | PolylineDraw | ReadoutDraw | MeterDraw | StatusDraw
 SemanticRootDraw = MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw
 RetainedDraw = ObjectDraw | SemanticRootDraw
 
-_OBJECT_DRAW_TYPES = (GlyphRunDraw, PolylineDraw)
+_OBJECT_DRAW_TYPES = (
+    GlyphRunDraw,
+    PolylineDraw,
+    ReadoutDraw,
+    MeterDraw,
+    StatusDraw,
+)
 
 
 def _semantic_draw_control_ids(draw: SemanticRootDraw) -> set[int]:
@@ -738,6 +907,9 @@ class RetainedRegionDraw:
                 (
                     GlyphRunDraw,
                     PolylineDraw,
+                    ReadoutDraw,
+                    MeterDraw,
+                    StatusDraw,
                     MenuBarDraw,
                     TextAreaDraw,
                     TextGridDraw,
@@ -1358,6 +1530,64 @@ def project_composite_draw_plane(
                         )
                     )
                     continue
+                if isinstance(body, ReadoutBody):
+                    try:
+                        utf8_bound = _integer(
+                            "owner UTF-8 usage",
+                            owner_scene.usage.utf8_bytes,
+                            minimum=0,
+                            maximum=UINT64_MAX,
+                        )
+                        text = body.formatted_bytes(
+                            min(utf8_bound, UINT32_MAX)
+                        ).decode("utf-8", "strict")
+                    except (AttributeError, TypeError, ValueError) as exc:
+                        raise RetainedViewError(
+                            f"READOUT object {definition.object_id} cannot be projected: {exc}"
+                        ) from exc
+                    draws.append(
+                        ReadoutDraw(
+                            object_id=definition.object_id,
+                            z_order=definition.z_order,
+                            bounds=bounds,
+                            foreground=body.foreground,
+                            background=body.background,
+                            text=text,
+                            parent_bounds=parent_bounds,
+                        )
+                    )
+                    continue
+                if isinstance(body, MeterBody):
+                    draws.append(
+                        MeterDraw(
+                            object_id=definition.object_id,
+                            z_order=definition.z_order,
+                            bounds=bounds,
+                            foreground=body.foreground,
+                            background=body.background,
+                            vertical=body.vertical,
+                            show_value=body.show_value,
+                            minimum=body.minimum,
+                            maximum=body.maximum,
+                            value=body.value,
+                            parent_bounds=parent_bounds,
+                        )
+                    )
+                    continue
+                if isinstance(body, StatusBody):
+                    draws.append(
+                        StatusDraw(
+                            object_id=definition.object_id,
+                            z_order=definition.z_order,
+                            bounds=bounds,
+                            inactive=body.inactive,
+                            active=body.active,
+                            value=body.value,
+                            shape=body.shape,
+                            parent_bounds=parent_bounds,
+                        )
+                    )
+                    continue
                 raise RetainedViewError(
                     f"visible {definition.kind.name} object "
                     f"{definition.object_id} is unsupported by draw-plane rendering"
@@ -1405,13 +1635,16 @@ __all__ = [
     "MenuEntryDraw",
     "MenuItemDraw",
     "MenuSeparatorDraw",
+    "MeterDraw",
     "ObjectDraw",
     "PolylineDraw",
+    "ReadoutDraw",
     "RetainedDraw",
     "RetainedRegionDraw",
     "RetainedDrawPlane",
     "RetainedViewError",
     "SemanticRootDraw",
+    "StatusDraw",
     "TabDraw",
     "TabSetDraw",
     "TextAreaDraw",

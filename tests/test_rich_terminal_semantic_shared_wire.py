@@ -14,13 +14,16 @@ from rich_terminal.retained_view import (
     MenuDraw,
     MenuItemDraw,
     MenuSeparatorDraw,
+    MeterDraw,
     PolylineDraw,
+    ReadoutDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
     TabDraw,
     TabSetDraw,
     TextAreaDraw,
     TextGridDraw,
+    StatusDraw,
 )
 from rich_terminal.semantic_content import (
     SemanticContentFlag,
@@ -367,6 +370,86 @@ def test_polyline_wire_rejects_noncanonical_geometry(mutate, error, match):
     )
     wire = deepcopy(retained_draw_plane_to_wire(plane))
     mutate(wire["regions"][0]["draws"][0])
+
+    with pytest.raises(error, match=match):
+        retained_draw_plane_from_wire(wire)
+
+
+def _instrument_plane() -> RetainedDrawPlane:
+    parent_bounds = (ObjectBounds(0, 0, 0xEFFFFFFF, 0xFFFFFFFF),)
+    draws = (
+        ReadoutDraw(
+            20,
+            1,
+            FULL_BOUNDS,
+            RGBA(230, 235, 244, 192),
+            RGBA(17, 20, 28, 255),
+            "-12.5 dB",
+            parent_bounds,
+        ),
+        MeterDraw(
+            21,
+            2,
+            FULL_BOUNDS,
+            RGBA(20, 210, 70, 255),
+            RGBA(17, 20, 28, 255),
+            True,
+            True,
+            -50,
+            50,
+            25,
+            parent_bounds,
+        ),
+        StatusDraw(
+            22,
+            3,
+            FULL_BOUNDS,
+            RGBA(90, 90, 90, 255),
+            RGBA(250, 190, 40, 160),
+            -1,
+            2,
+            parent_bounds,
+        ),
+    )
+    return RetainedDrawPlane(
+        True,
+        True,
+        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, draws),),
+    )
+
+
+def test_instrument_draws_round_trip_as_distinct_typed_values():
+    plane = _instrument_plane()
+
+    wire = retained_draw_plane_to_wire(plane)
+
+    assert retained_draw_plane_from_wire(wire) == plane
+    readout, meter, status = wire["regions"][0]["draws"]
+    assert readout["kind"] == "readout"
+    assert readout["text"] == "-12.5 dB"
+    assert meter["kind"] == "meter"
+    assert (meter["minimum"], meter["maximum"], meter["value"]) == (-50, 50, 25)
+    assert meter["vertical"] is True
+    assert status["kind"] == "status"
+    assert (status["value"], status["shape"]) == (-1, 2)
+
+
+@pytest.mark.parametrize(
+    ("draw_index", "field", "value", "error", "match"),
+    (
+        (0, "text", 12, TypeError, "must be str"),
+        (0, "text", "", ValueError, "must be nonempty"),
+        (1, "vertical", 1, TypeError, "must be bool"),
+        (1, "value", 51, ValueError, "meter range/value is invalid"),
+        (2, "shape", 3, ValueError, "between 0 and 2"),
+        (2, "value", True, TypeError, "not bool"),
+    ),
+)
+def test_instrument_wire_rejects_invalid_typed_values(
+    draw_index, field, value, error, match
+):
+    wire = deepcopy(retained_draw_plane_to_wire(_instrument_plane()))
+    wire["regions"][0]["draws"][draw_index][field] = value
 
     with pytest.raises(error, match=match):
         retained_draw_plane_from_wire(wire)

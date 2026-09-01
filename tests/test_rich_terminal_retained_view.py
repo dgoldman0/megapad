@@ -19,17 +19,24 @@ from rich_terminal.retained_scene import (
     OwnerScene,
     Point,
     PolylineBody,
+    PlotBody,
+    ReadoutBody,
+    ReadoutFormat,
     RegionDefinition,
     RetainedScene,
     RGBA,
     SceneModelState,
     SceneUsage,
+    MeterBody,
     StatusBody,
 )
 from rich_terminal.retained_view import (
     DisplayScope,
+    MeterDraw,
     PolylineDraw,
+    ReadoutDraw,
     RetainedViewError,
+    StatusDraw,
     project_composite_draw_plane,
 )
 from rich_terminal.update_authority import TerminalGeometry
@@ -111,9 +118,13 @@ def _object(
 
 def _owner_scene(owner, regions, objects) -> OwnerScene:
     utf8 = sum(
-        len(definition.body.text.encode("utf-8"))
+        (
+            len(definition.body.text.encode("utf-8"))
+            if isinstance(definition.body, GlyphRunBody)
+            else len(definition.body.formatted_bytes(0xFFFFFFFF))
+        )
         for definition in objects
-        if isinstance(definition.body, GlyphRunBody)
+        if isinstance(definition.body, (GlyphRunBody, ReadoutBody))
     )
     return OwnerScene(
         owner=owner,
@@ -224,7 +235,7 @@ def test_hidden_planes_and_effectively_hidden_children_emit_no_draw_values():
         owner,
         1,
         1,
-        StatusBody(WHITE, GREEN, 1, 0),
+        PlotBody(1, 0, 10, WHITE, GREEN),
     )
     hidden_scope, hidden_plane = project_composite_draw_plane(
         _composite([_owner_scene(owner, [region], [unsupported])], visible=False)
@@ -253,10 +264,10 @@ def test_hidden_planes_and_effectively_hidden_children_emit_no_draw_values():
 def test_projection_fails_closed_on_visible_unsupported_objects_and_projects_groups():
     owner = _owner(5)
     region = _region(owner, 1)
-    status = _object(owner, 1, 1, StatusBody(WHITE, GREEN, 1, 0))
-    with pytest.raises(RetainedViewError, match="visible STATUS"):
+    plot = _object(owner, 1, 1, PlotBody(1, 0, 10, WHITE, GREEN))
+    with pytest.raises(RetainedViewError, match="visible PLOT"):
         project_composite_draw_plane(
-            _composite([_owner_scene(owner, [region], [status])])
+            _composite([_owner_scene(owner, [region], [plot])])
         )
 
     group = replace(
@@ -319,6 +330,84 @@ def test_projection_copies_polyline_geometry_and_nested_group_path():
     assert draw.closed
 
 
+def test_projection_formats_and_copies_instruments_without_renderer_hints():
+    owner = _owner(5)
+    region = _region(owner, 1)
+    group = replace(
+        _object(owner, 1, 1, GroupBody()),
+        bounds=ObjectBounds(0x10000000, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+    )
+    readout = _object(
+        owner,
+        2,
+        1,
+        ReadoutBody(
+            WHITE,
+            GREEN,
+            ReadoutFormat.FIXED,
+            1,
+            -125,
+            10,
+            " dB",
+        ),
+        z_order=1,
+        parent=1,
+    )
+    meter = _object(
+        owner,
+        3,
+        1,
+        MeterBody(GREEN, WHITE, False, True, -50, 50, 25),
+        z_order=2,
+        parent=1,
+    )
+    status = _object(
+        owner,
+        4,
+        1,
+        StatusBody(WHITE, GREEN, -1, 2),
+        z_order=3,
+        parent=1,
+    )
+
+    _, plane = project_composite_draw_plane(
+        _composite([_owner_scene(owner, [region], [status, meter, readout, group])])
+    )
+
+    projected_readout, projected_meter, projected_status = plane.regions[0].draws
+    assert isinstance(projected_readout, ReadoutDraw)
+    assert projected_readout.text == "-12.5 dB"
+    assert projected_readout.parent_bounds == (group.bounds,)
+    assert isinstance(projected_meter, MeterDraw)
+    assert (
+        projected_meter.minimum,
+        projected_meter.maximum,
+        projected_meter.value,
+        projected_meter.vertical,
+        projected_meter.show_value,
+    ) == (-50, 50, 25, False, True)
+    assert isinstance(projected_status, StatusDraw)
+    assert (projected_status.value, projected_status.shape) == (-1, 2)
+
+
+def test_projection_rejects_a_readout_inconsistent_with_owner_utf8_usage():
+    owner = _owner(5)
+    region = _region(owner, 1)
+    readout = _object(
+        owner,
+        1,
+        1,
+        ReadoutBody(WHITE, GREEN, ReadoutFormat.INTEGER, 0, 1234, 1, " V"),
+    )
+    forged = replace(
+        _owner_scene(owner, [region], [readout]),
+        usage=SceneUsage(regions=1, objects=1, utf8_bytes=2),
+    )
+
+    with pytest.raises(RetainedViewError, match="READOUT object 1 cannot be projected"):
+        project_composite_draw_plane(_composite([forged]))
+
+
 def test_projection_never_traverses_the_hidden_rebuild_target():
     owner = _owner(5)
     region = _region(owner, 1)
@@ -340,7 +429,7 @@ def test_projection_never_traverses_the_hidden_rebuild_target():
                             hidden_owner,
                             1,
                             1,
-                            StatusBody(WHITE, GREEN, 1, 0),
+                            PlotBody(1, 0, 10, WHITE, GREEN),
                         )
                     ],
                 )

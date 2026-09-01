@@ -16,8 +16,11 @@ from .retained_view import (
     MenuDraw,
     MenuItemDraw,
     MenuSeparatorDraw,
+    MeterDraw,
     PolylineDraw,
+    ReadoutDraw,
     RetainedDrawPlane,
+    StatusDraw,
     TabDraw,
     TabSetDraw,
     TextAreaDraw,
@@ -473,7 +476,17 @@ def _paint_bounded_scalar_text(
                 and cursor < clip.right
                 and slot_right > clip.left
             ):
-                glyph = font.render(character, True, tuple(color)[:3])
+                rgba = tuple(color)
+                if len(rgba) == 4 and rgba[3] == 0:
+                    cursor += advance
+                    continue
+                glyph = font.render(character, True, rgba[:3])
+                if len(rgba) == 4 and rgba[3] != 0xFF:
+                    glyph = glyph.copy()
+                    glyph.fill(
+                        (255, 255, 255, rgba[3]),
+                        special_flags=pygame_module.BLEND_RGBA_MULT,
+                    )
                 glyph_rect = glyph.get_rect()
                 glyph_left = cursor
                 glyph_top = center_y - glyph_rect.height // 2
@@ -1588,6 +1601,191 @@ def _paint_polyline(pygame_module, surface, region, region_rect, draw) -> None:
         surface.set_clip(prior_clip)
 
 
+def _instrument_clip(pygame_module, surface, region, region_rect, draw):
+    object_rect = _object_rect(pygame_module, region_rect, draw)
+    clip = object_rect.clip(surface.get_rect()).clip(surface.get_clip())
+    if region.clipped:
+        clip = clip.clip(region_rect)
+    return object_rect, clip
+
+
+def _paint_readout(pygame_module, surface, font, region, region_rect, draw) -> None:
+    object_rect, clip = _instrument_clip(
+        pygame_module, surface, region, region_rect, draw
+    )
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(clip)
+        _rounded_rect(
+            pygame_module,
+            surface,
+            object_rect,
+            (*_rgb(draw.background), draw.background.alpha),
+            radius=0,
+        )
+        if not draw.text or draw.foreground.alpha == 0:
+            return
+        padding = min(
+            max(1, min(object_rect.width, object_rect.height) // 10),
+            object_rect.width // 2,
+        )
+        left = object_rect.left + padding
+        right = object_rect.right - padding
+        available = max(0, right - left)
+        tab_advance = max(1, _font_height(font, object_rect.height) * 2)
+        text_width = _bounded_text_width(font, draw.text, available, tab_advance)
+        if text_width <= available:
+            left = right - text_width
+        _paint_bounded_scalar_text(
+            pygame_module,
+            surface,
+            font,
+            draw.text,
+            (*_rgb(draw.foreground), draw.foreground.alpha),
+            clip,
+            left=left,
+            right=right,
+            top=object_rect.top,
+            bottom=object_rect.bottom,
+            tab_advance=tab_advance,
+        )
+    finally:
+        surface.set_clip(prior_clip)
+
+
+def _contrast_rgba(color) -> tuple[int, int, int, int]:
+    luminance = 299 * color.red + 587 * color.green + 114 * color.blue
+    channel = 0 if luminance >= 128_000 else 255
+    return channel, channel, channel, 255
+
+
+def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> None:
+    object_rect, clip = _instrument_clip(
+        pygame_module, surface, region, region_rect, draw
+    )
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(clip)
+        background = (*_rgb(draw.background), draw.background.alpha)
+        foreground = (*_rgb(draw.foreground), draw.foreground.alpha)
+        _rounded_rect(
+            pygame_module,
+            surface,
+            object_rect,
+            background,
+            radius=0,
+        )
+        span = draw.maximum - draw.minimum
+        progress = draw.value - draw.minimum
+        extent = object_rect.height if draw.vertical else object_rect.width
+        filled = (progress * extent) // span
+        if draw.value == draw.maximum:
+            filled = extent
+        if filled:
+            if draw.vertical:
+                fill_rect = pygame_module.Rect(
+                    object_rect.left,
+                    object_rect.bottom - filled,
+                    object_rect.width,
+                    filled,
+                )
+            else:
+                fill_rect = pygame_module.Rect(
+                    object_rect.left,
+                    object_rect.top,
+                    filled,
+                    object_rect.height,
+                )
+            _rounded_rect(
+                pygame_module,
+                surface,
+                fill_rect,
+                foreground,
+                radius=0,
+            )
+        if draw.show_value:
+            text = str(draw.value)
+            center_covered = (
+                filled * 2 >= extent if not draw.vertical else filled * 2 > extent
+            )
+            base = draw.foreground if center_covered else draw.background
+            text_color = _contrast_rgba(base)
+            padding = min(
+                max(1, min(object_rect.width, object_rect.height) // 10),
+                object_rect.width // 2,
+            )
+            left = object_rect.left + padding
+            right = object_rect.right - padding
+            available = max(0, right - left)
+            tab_advance = max(1, _font_height(font, object_rect.height) * 2)
+            text_width = _bounded_text_width(font, text, available, tab_advance)
+            if text_width <= available:
+                left += (available - text_width) // 2
+                right = left + text_width
+            _paint_bounded_scalar_text(
+                pygame_module,
+                surface,
+                font,
+                text,
+                text_color,
+                clip,
+                left=left,
+                right=right,
+                top=object_rect.top,
+                bottom=object_rect.bottom,
+                tab_advance=tab_advance,
+            )
+    finally:
+        surface.set_clip(prior_clip)
+
+
+def _paint_status(pygame_module, surface, region, region_rect, draw) -> None:
+    object_rect, clip = _instrument_clip(
+        pygame_module, surface, region, region_rect, draw
+    )
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    color = draw.active if draw.value else draw.inactive
+    if color.alpha == 0:
+        return
+    side = min(object_rect.width, object_rect.height)
+    if side <= 0:
+        return
+    shape_rect = pygame_module.Rect(
+        (object_rect.width - side) // 2,
+        (object_rect.height - side) // 2,
+        side,
+        side,
+    )
+    layer = pygame_module.Surface(object_rect.size, flags=pygame_module.SRCALPHA)
+    rgba = (*_rgb(color), color.alpha)
+    if draw.shape == 0:
+        pygame_module.draw.ellipse(layer, rgba, shape_rect)
+    elif draw.shape == 1:
+        pygame_module.draw.rect(layer, rgba, shape_rect)
+    else:
+        pygame_module.draw.polygon(
+            layer,
+            rgba,
+            (
+                (shape_rect.centerx, shape_rect.top),
+                (shape_rect.right - 1, shape_rect.centery),
+                (shape_rect.centerx, shape_rect.bottom - 1),
+                (shape_rect.left, shape_rect.centery),
+            ),
+        )
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(clip)
+        surface.blit(layer, object_rect)
+    finally:
+        surface.set_clip(prior_clip)
+
+
 def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
     object_rect = _object_rect(pygame_module, region_rect, draw)
     clip = object_rect.clip(surface.get_rect())
@@ -1733,6 +1931,32 @@ def composite_draw_plane_result(
                 )
             elif isinstance(draw, PolylineDraw):
                 _paint_polyline(
+                    pygame_module,
+                    surface,
+                    region,
+                    region_rect,
+                    draw,
+                )
+            elif isinstance(draw, ReadoutDraw):
+                _paint_readout(
+                    pygame_module,
+                    surface,
+                    font,
+                    region,
+                    region_rect,
+                    draw,
+                )
+            elif isinstance(draw, MeterDraw):
+                _paint_meter(
+                    pygame_module,
+                    surface,
+                    font,
+                    region,
+                    region_rect,
+                    draw,
+                )
+            elif isinstance(draw, StatusDraw):
+                _paint_status(
                     pygame_module,
                     surface,
                     region,

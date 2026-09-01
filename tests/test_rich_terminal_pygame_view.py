@@ -9,9 +9,12 @@ from rich_terminal.pygame_view import composite_draw_plane, unorm_high_edge, uno
 from rich_terminal.retained_scene import ObjectBounds, Point, RGBA
 from rich_terminal.retained_view import (
     GlyphRunDraw,
+    MeterDraw,
     PolylineDraw,
+    ReadoutDraw,
     RetainedDrawPlane,
     RetainedRegionDraw,
+    StatusDraw,
 )
 
 
@@ -240,3 +243,110 @@ def test_translucent_polyline_obeys_the_caller_clip_and_source_over_blending():
     assert tuple(surface.get_at((4, 0)))[:3] == (20, 40, 60)
     assert tuple(surface.get_at((7, 0)))[:3] == pytest.approx((110, 70, 30), abs=1)
     assert surface.get_clip() == pygame.Rect(5, 0, 5, 5)
+
+
+def test_readout_right_aligns_canonical_text_and_preserves_color_alpha():
+    pygame = pytest.importorskip("pygame")
+    surface = pygame.Surface((10, 5))
+    surface.fill((2, 4, 6))
+    font = _PixelFont(pygame)
+    readout = ReadoutDraw(
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        RGBA(200, 100, 0, 128),
+        RGBA(20, 40, 60, 255),
+        "12",
+    )
+    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (readout,))
+
+    composite_draw_plane(pygame, surface, _plane(region), font, 10, 5)
+
+    assert tuple(surface.get_at((0, 0)))[:3] == (20, 40, 60)
+    assert tuple(surface.get_at((6, 2)))[:3] == (20, 40, 60)
+    assert tuple(surface.get_at((7, 2)))[:3] == pytest.approx((110, 70, 30), abs=1)
+    assert tuple(surface.get_at((8, 2)))[:3] == pytest.approx((110, 70, 30), abs=1)
+    assert {rendered[0] for rendered in font.rendered} == {"1", "2"}
+
+
+def test_meter_maps_horizontal_and_vertical_ranges_with_exact_integer_edges():
+    pygame = pytest.importorskip("pygame")
+    font = _PixelFont(pygame)
+
+    horizontal_surface = pygame.Surface((8, 4))
+    horizontal = MeterDraw(
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        RGBA(20, 210, 70, 255),
+        RGBA(10, 20, 30, 255),
+        False,
+        False,
+        0,
+        100,
+        25,
+    )
+    horizontal_region = RetainedRegionDraw(
+        1, 1, 1, 0, 0, 1, 1, 0, True, (horizontal,)
+    )
+    composite_draw_plane(
+        pygame, horizontal_surface, _plane(horizontal_region), font, 8, 4
+    )
+
+    vertical_surface = pygame.Surface((4, 8))
+    vertical = MeterDraw(
+        2,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        RGBA(220, 30, 40, 255),
+        RGBA(10, 20, 30, 255),
+        True,
+        False,
+        -10,
+        10,
+        0,
+    )
+    vertical_region = RetainedRegionDraw(
+        1, 1, 1, 0, 0, 1, 1, 0, True, (vertical,)
+    )
+    composite_draw_plane(
+        pygame, vertical_surface, _plane(vertical_region), font, 4, 8
+    )
+
+    assert tuple(horizontal_surface.get_at((1, 2)))[:3] == (20, 210, 70)
+    assert tuple(horizontal_surface.get_at((2, 2)))[:3] == (10, 20, 30)
+    assert tuple(vertical_surface.get_at((2, 3)))[:3] == (10, 20, 30)
+    assert tuple(vertical_surface.get_at((2, 4)))[:3] == (220, 30, 40)
+
+
+@pytest.mark.parametrize(
+    ("shape", "value", "center", "corner"),
+    (
+        (0, 1, (20, 210, 70), (2, 4, 6)),
+        (1, 1, (20, 210, 70), (20, 210, 70)),
+        (2, 1, (20, 210, 70), (2, 4, 6)),
+        (1, 0, (90, 90, 90), (90, 90, 90)),
+    ),
+)
+def test_status_rasterizes_canonical_shape_and_active_state(
+    shape, value, center, corner
+):
+    pygame = pytest.importorskip("pygame")
+    surface = pygame.Surface((7, 7))
+    surface.fill((2, 4, 6))
+    font = _PixelFont(pygame)
+    status = StatusDraw(
+        1,
+        0,
+        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        RGBA(90, 90, 90, 255),
+        RGBA(20, 210, 70, 255),
+        value,
+        shape,
+    )
+    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (status,))
+
+    composite_draw_plane(pygame, surface, _plane(region), font, 7, 7)
+
+    assert tuple(surface.get_at((3, 3)))[:3] == center
+    assert tuple(surface.get_at((0, 0)))[:3] == corner
