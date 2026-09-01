@@ -191,6 +191,9 @@ secret boundary, or security proof.
 - **Timer controls**: PREEMPT-ON/PREEMPT-OFF configure a software gate and
   timer registers, but the current source does not connect timer status to a
   suspending task switch
+- **Multicore dispatch surface**: Source validation, status, lock wrappers,
+  and pipeline fallback are qualified on one full core; no secondary worker,
+  concurrency, or parallel speedup is implemented by the hosted profile
 - **Interactive screens**: Full-screen ANSI TUI with 9 screens and keyboard navigation
 - **ANSI terminal**: ESC, CSI, AT-XY, PAGE, SGR colors, BOLD, DIM, REVERSE
 - **Screen system**: SCREENS entry point, RENDER-SCREEN, HANDLE-KEY event loop
@@ -1188,6 +1191,18 @@ reaches the non-suspending `YIELD`; `PREEMPT-OFF` writes control value 1, so it
 leaves the counter enabled and clears only the software gate. The words do not
 currently implement timer preemption.
 
+**Multicore-dispatch discrepancy:** The qualified hosted topology advertises
+one full core. `CORE-RUN` therefore has no valid target, `CORE-WAIT 0` observes
+only an idle worker slot, and `P.RUN-PAR` takes ordinary ordered `P.RUN`
+without dispatch or speedup. Direct `WAKE-CORE` fails rather than inventing a
+worker. Both all-core wait loops use plain `DO`; with equal bounds at one they
+enter phantom core 1, so strict `CORE-STATUS` makes them and `BARRIER` fail
+instead of silently treating them as no-ops. The larger-topology pipeline
+branch is not round-robin, uses shared scratch, does not check worker
+availability, and can violate ordered dependencies. `P.BENCH-PAR` also leaks
+its input pipeline. Exact provenance and the complete edge contract are in
+`docs/kdos-reference.md` §8.1.
+
 **BIOS timer/interrupt words** (bios.asm):
 | Word | Stack | Description |
 |---|---|---|
@@ -1514,7 +1529,8 @@ Summary:
 - **Phase 5**: Data Ports (✅ v0.7)
 - **Phase 6**: Advanced Kernels & Real-World Data (✅ v0.8)
 - **Phase 7**: User Experience (✅ v0.9a–v0.9e, v1.0)
-- **Phase 8**: Multicore (✅ v1.1 — BIOS multicore words, KDOS dispatch, parallel pipelines)
+- **Phase 8**: Multicore (source surface qualified on one core; secondary
+  dispatch, synchronization, and parallel speedup remain unimplemented)
 
 ---
 

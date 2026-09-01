@@ -161,7 +161,10 @@ The implemented slices provide:
   including its descriptor/state bookkeeping and provisional deferred
   checkpoint binding;
 - unchanged KDOS Timer Preemption Setup through the ordinary retained Timer
-  ABI, including its software gate and final deferred checkpoint rebinding.
+  ABI, including its software gate and final deferred checkpoint rebinding;
+- unchanged KDOS Multicore Dispatch on the explicit one-full-core BIOS
+  profile, including status/introspection, spinlock wrappers, and the ordinary
+  sequential pipeline fallback without a fabricated worker or speedup.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -757,14 +760,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 6758.
+ends at line 6922.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–6758 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, and Timer Preemption Setup |
-| 6759 onward | Next uncovered frontier | Multicore Dispatch begins at line 6759, followed by the remaining ordinary KDOS source |
+| 39–6922 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, and one-core Multicore Dispatch |
+| 6923 onward | Next uncovered frontier | Per-Core Run Queues begins at line 6923, followed by the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1540,8 +1543,52 @@ pending IRQ. It acts only when both the software gate and global
 `YIELD`; code after `YIELD?` continues on the caller's stacks. No word in this
 slice connects a Timer match to `PREEMPT-FLAG`, switches a task, or calls
 `TIMER-ACK`. The source is therefore executable Timer configuration and manual
-checkpoint gating, not timer-driven preemption. Multicore Dispatch begins at
-line 6759.
+checkpoint gating, not timer-driven preemption.
+
+The exact adjacent Multicore Dispatch fixture is unchanged lines 6759–6922:
+164 LF records, 5,713 bytes, SHA-256
+`03dc68d356a186f11b63fedd818863e75da51886d6290b38ba2c769325ffa90f`,
+and Git blob `c919439c3c81cf5e35a270f47b7b122867df6a89`. Its source-order ledger has
+15 publications: `CORE-RUN`, `CORE-WAIT`, `ALL-CORES-WAIT`,
+`ALL-FULL-WAIT`, `BARRIER`, `LOCK`, `UNLOCK`, `CORES`, the five
+zero-initialized variables `PAR-PIPE`, `PAR-STEP`, `PAR-CORE`, `PAR-P`, and
+`PAR-N`, then `P.RUN-PAR` and `P.BENCH-PAR`. The ten colon definitions and
+five eight-byte variable bodies advance the hosted dictionary by 415 bytes.
+Load invokes no core, lock, UART, storage, RTC, or IDL service and leaves both
+stacks empty; ordinary semantic evaluation alone can advance the enabled
+Timer counter.
+
+The hosted profile deliberately remains one full core. `CORE-STATUS 0`
+reports an idle worker slot, not a stopped primary, while direct `WAKE-CORE`
+fails without consuming its XT/core operands because no secondary execution
+context exists. Consequently source `CORE-RUN` rejects self, negative, and
+above-range core IDs before reaching the BIOS boundary; `CORE-WAIT 0` returns
+immediately; `CORES` reports only core 0; and `P.RUN-PAR` executes ordinary
+`P.RUN` in source order. It leaves every `PAR-*` variable zero and makes no
+concurrency or speedup claim. `PAR-PIPE`, `PAR-STEP`, and `PAR-CORE` are never
+read by this source block despite its wrapper commentary.
+
+Several literal source discrepancies remain visible. Both all-core wait words
+use plain `DO` with equal start and limit on this profile, so they enter a
+phantom core-1 iteration instead of zero-tripping; strict `CORE-STATUS` makes
+`ALL-CORES-WAIT`, `ALL-FULL-WAIT`, and `BARRIER` fail promptly. `LOCK` is a
+busy spin with non-suspending `YIELD?`; same-core reacquisition succeeds
+without increasing a depth, and one `UNLOCK` releases it. There is no
+contention-progress, fairness, timing, or explicit memory-fence contract.
+
+The unexecuted multicore `P.RUN-PAR` branch is not round-robin: it assigns at
+most one step to each secondary full core, runs all remaining steps on core 0,
+then waits. Shared `PAR-P`/`PAR-N` make it non-reentrant; it does not check
+worker availability or validate XTs/descriptors and can violate dependencies
+in an ordered pipeline. The source concurrency comment also overstates
+`AALLOT`: `CURRENT-ARENA`, `ARENA-STK`, and `ARENA-SP` are global and
+unlocked, so only direct allocation through an exclusively owned Arena
+descriptor is defensible. Finally, `P.BENCH-PAR` leaves its original pipeline
+argument on the data stack despite `( pipe -- )`, reports `NCORES` rather than
+participating full cores, measures retained semantic Timer work rather than
+speedup, and does not normalize a wrapping `CYCLES` subtraction.
+
+The next clean seam is Per-Core Run Queues at line 6923.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

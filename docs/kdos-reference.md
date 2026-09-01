@@ -865,7 +865,8 @@ the fixed FD pool with cached open/metadata-flush/final-close lifecycle, the
 checked source compiler, nested two-extent filesystem `LOAD`, application
 loader and ANSI helpers, whole-file encryption, parent-byte directory
 navigation/mutation, the Documentation Browser, Dictionary Search, the task
-registry/synchronous executor, and Timer Preemption Setup through line 6758.
+registry/synchronous executor, Timer Preemption Setup, and Multicore
+Dispatch's one-core validation/fallback behavior through line 6922.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -883,7 +884,7 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-6758; Multicore Dispatch begins at line 6759.
+6922; Per-Core Run Queues begins at line 6923.
 
 ---
 
@@ -1171,10 +1172,11 @@ only load effects; it does no filesystem or media I/O and emits nothing.
 Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
-registry/synchronous executor, and Timer Preemption Setup through line 6758.
+registry/synchronous executor, Timer Preemption Setup, and Multicore Dispatch
+through line 6922.
 Their provenance and edge contracts are recorded in the corresponding
 sections below and in `docs/simulator-contract.md`; the next uncovered seam is
-Multicore Dispatch at line 6759.
+Per-Core Run Queues at line 6923.
 
 ---
 
@@ -1816,7 +1818,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 6758. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 6922. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2189,8 +2191,8 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through Timer Preemption Setup at line 6758; the next uncovered seam
-is Multicore Dispatch at line 6759.
+continues through Multicore Dispatch at line 6922; the next uncovered seam is
+Per-Core Run Queues at line 6923.
 
 **Example — filesystem operations:**
 ```forth
@@ -2546,24 +2548,45 @@ supplying the missing scheduler connection.
 
 ## §8.1 Multicore Dispatch
 
-KDOS v1.1 adds multicore dispatch on top of the BIOS multicore primitives
-(COREID, NCORES, WAKE-CORE, CORE-STATUS, SPIN@, SPIN!).
+Exact unchanged `kdos.f` lines 6759–6922 contain 164 LF records and 5,713
+bytes, with SHA-256
+`03dc68d356a186f11b63fedd818863e75da51886d6290b38ba2c769325ffa90f`
+and Git blob `c919439c3c81cf5e35a270f47b7b122867df6a89`. Their source-order ledger is
+`CORE-RUN`, `CORE-WAIT`, `ALL-CORES-WAIT`, `ALL-FULL-WAIT`, `BARRIER`,
+`LOCK`, `UNLOCK`, `CORES`, `PAR-PIPE`, `PAR-STEP`, `PAR-CORE`, `PAR-P`,
+`PAR-N`, `P.RUN-PAR`, and `P.BENCH-PAR`: ten colon definitions and five
+variables. Load zeroes the five eight-byte variable bodies and advances the
+hosted dictionary by 415 bytes. It invokes no core, lock, UART, storage, RTC,
+or IDL service and leaves both public stacks empty; an already-enabled hosted
+Timer counter can still advance with ordinary semantic evaluation steps.
+
+The hosted topology is deliberately one full core. `CORE-STATUS 0` reports
+the idle worker slot associated with the primary, not an idle or stopped
+primary. Every other core ID is rejected. Direct hosted `WAKE-CORE` fails
+without consuming its XT/core operands, creates no secondary context, and
+does not resolve or execute its XT.
 
 ### Dispatch Words
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `CORE-RUN` | `( xt core -- )` | Dispatch XT to a secondary core via `WAKE-CORE`.  Does nothing if core is 0 (primary) or already busy. |
-| `CORE-WAIT` | `( core -- )` | Busy-wait until the given core finishes (polls `CORE-STATUS` until 0). |
-| `ALL-CORES-WAIT` | `( -- )` | Wait for all secondary cores to become idle. |
-| `BARRIER` | `( -- )` | Synchronize: waits for all secondary cores to finish. |
+| `CORE-RUN` | `( xt core -- )` | Rejects core 0 with `Cannot dispatch to self`; negative and `core >= NCORES` values abort as `Invalid core ID`. The one-core profile therefore has no valid source dispatch target and never reaches `WAKE-CORE`. It does not test worker busy state or XT validity on a topology that does have a target. |
+| `CORE-WAIT` | `( core -- )` | Polls `CORE-STATUS` with non-suspending `YIELD?`. Core 0 returns immediately in this profile; other IDs fail at the strict BIOS boundary. There is no timeout. |
+| `ALL-CORES-WAIT` | `( -- )` | Intended to visit secondary cores, but uses plain `NCORES 1 DO`; equal bounds enter at phantom core 1 rather than zero-trip, so the hosted profile fails promptly. |
+| `ALL-FULL-WAIT` | `( -- )` | Has the same equal-bound `DO` defect using `N-FULL-CORES`. |
+| `BARRIER` | `( -- )` | Calls defective `ALL-CORES-WAIT`. Even on a larger topology this would only poll worker XT slots; the source supplies no explicit memory fence. |
+
+The strict one-core failure is intentional evidence of the unchanged source,
+not a hosted rewrite to `?DO`. These wait words also assume a core-0 caller
+without enforcing it. Because `YIELD?` does not switch contexts, any wait that
+does observe a busy slot is a pure busy-spin in the current scheduler model.
 
 ### Synchronization Words
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `LOCK` | `( n -- )` | Acquire spinlock *n* with busy-wait (calls `SPIN@` in a loop). |
-| `UNLOCK` | `( n -- )` | Release spinlock *n* (calls `SPIN!`). |
+| `LOCK` | `( n -- )` | Poll `SPIN@` with non-suspending `YIELD?` until the underlying lock reports success. Same-core reacquisition succeeds but adds no depth. |
+| `UNLOCK` | `( n -- )` | Call `SPIN!`. One release after repeated same-core acquisition frees the lock; a nonowner release is the BIOS owner-only no-op. |
 
 The 16 hardware locks have one machine-wide allocation: 0 dictionary, 1 UART,
 2 filesystem, 3 heap, 4 ring buffers, 5 hash tables, 6 application runtime
@@ -2573,31 +2596,56 @@ the short TLS credential-registry/cancellation lock, and 12 the KDOS network
 packet-workspace/NIC-descriptor owner. Locks 13 through 15 are currently
 unassigned. Subsystems must not privately reuse a number from this map.
 
+These wrappers add no fairness, queueing, timeout, contention-progress, or
+memory-order contract. In particular, one-core contention cannot progress.
+
 ### Parallel Pipeline Execution
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `P.RUN-PAR` | `( pipe -- )` | Run pipeline steps in parallel across available cores.  Distributes steps round-robin to secondary cores via `CORE-RUN`, then waits for all to complete. |
+| `P.RUN-PAR` | `( pipe -- )` | With `N-FULL-CORES = 1`, immediately call ordinary `P.RUN`, preserving ordered synchronous execution and handling an empty pipeline without dispatch. |
+| `P.BENCH-PAR` | documented `( pipe -- )`; actual `( pipe -- pipe )` | Print the step/core counts and semantic `CYCLES` delta around the same path. It leaks its original input pipeline. |
+
+The hosted fallback leaves `PAR-PIPE`, `PAR-STEP`, `PAR-CORE`, `PAR-P`, and
+`PAR-N` zero and makes no worker, concurrency, or speedup claim. The first
+three variables are never read anywhere in this block despite comments about
+predefined wrappers.
+
+The larger-topology source branch is also narrower than its name and comments
+suggest. It gives at most one initial step to each secondary full core, runs
+every remaining step serially on core 0, and waits. It is not round-robin and
+does not reuse workers. It neither checks worker availability nor validates
+the pipeline, count, or step XTs. `PAR-P` and `PAR-N` are shared global
+scratch, making calls non-reentrant, and concurrent execution can violate the
+dependency order promised by an ordinary pipeline. `P.BENCH-PAR` prints
+`NCORES`, not the number of participating full cores, measures deterministic
+semantic Timer work rather than physical speedup, and does not normalize a
+wrapping `CYCLES` subtraction.
+
+The source concurrency comment is not an allocation contract. Direct
+`ARENA-ALLOT` can be isolated only when each worker exclusively owns its Arena
+descriptor. `AALLOT` remains unsafe as a blanket secondary-core operation
+because `CURRENT-ARENA`, `ARENA-STK`, and `ARENA-SP` are runtime-global and
+unlocked; inter-core scratch is not automatically local.
 
 ### Introspection
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `CORES` | `( -- )` | Display per-core status (screen-compatible).  Shows core ID, idle/busy state for each hardware core. |
+| `CORES` | `( -- )` | List advertised cores. The hosted profile prints only core 0 as `[self] RUNNING`; it does not call `CORE-STATUS` for self. |
 
-**Example — parallel pipeline execution:**
+**One-core behavior:**
+
 ```forth
-4 PIPELINE my-pipe
-: step1 42 a B.FILL ;
-: step2 99 b B.FILL ;
-: step3 a b c B.ADD ;
-: step4 c B.SUM . ;
-' step1 my-pipe P.ADD
-' step2 my-pipe P.ADD
-' step3 my-pipe P.ADD
-' step4 my-pipe P.ADD
-my-pipe P.RUN-PAR     \ steps 1 & 2 run on different cores
+CORES                  \ one [self] RUNNING row
+my-pipe P.RUN-PAR      \ exactly the ordinary sequential P.RUN path
+' work 0 CORE-RUN      \ aborts: Cannot dispatch to self
+BARRIER                \ exposes the equal-bound DO bug at phantom core 1
 ```
+
+This qualifies the source API and its actual one-core branch. It is not
+evidence that secondary-core execution, physical parallelism, or speedup is
+implemented.
 
 ---
 
@@ -3103,14 +3151,13 @@ TASKS                    \ list tasks
 SCHEDULE                 \ run READY table entries synchronously
 ```
 
-**Multicore:**
+**Multicore source surface on the hosted one-core profile:**
 ```forth
-' work 1 CORE-RUN       \ dispatch to core 1
-1 CORE-WAIT             \ wait for core 1
-BARRIER                 \ wait for all cores
-0 LOCK  0 UNLOCK        \ spinlock acquire/release
-pipe P.RUN-PAR           \ parallel pipeline
-CORES                    \ show core status
+0 CORE-WAIT             \ idle worker-slot check returns
+0 LOCK  0 UNLOCK        \ depthless same-core lock wrapper
+pipe P.RUN-PAR          \ ordinary ordered P.RUN fallback
+CORES                   \ show only core 0 as self/running
+\ CORE-RUN has no valid target; BARRIER exposes equal-bound DO defect
 ```
 
 **Dashboard:**

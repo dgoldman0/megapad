@@ -256,7 +256,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 6758.
+KDOS source frontier now ends at line 6922.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1386,7 +1386,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 6758. Exact unchanged lines
+The contiguous source frontier now ends at line 6922. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2216,7 +2216,53 @@ with the gate on it is cleared before the unchanged non-suspending `YIELD`.
 Execution after the checkpoint continues, and no task XT is dispatched.
 Consequently this slice qualifies Timer configuration and manual checkpoint
 gating, not timer-driven preemption, scheduling fairness, or a time-slice
-contract. The next clean seam is Multicore Dispatch at line 6759.
+contract.
+
+Exact unchanged lines 6759 through 6922 contain 164 LF records and 5,713
+bytes, with SHA-256
+`03dc68d356a186f11b63fedd818863e75da51886d6290b38ba2c769325ffa90f`
+and Git blob `c919439c3c81cf5e35a270f47b7b122867df6a89`. Their 15 source-order
+publications are eight initial colon definitions through `CORES`, five
+zero-initialized `PAR-*` variables, then `P.RUN-PAR` and `P.BENCH-PAR`.
+Together the ten colon definitions and five eight-byte variable bodies advance
+the hosted dictionary by 415 bytes. Loading invokes no core, lock, UART,
+storage, RTC, or IDL operation and leaves the public data and return stacks
+empty. The enabled retained Timer counter may advance only through ordinary
+semantic evaluation metering.
+
+The topology contract remains one full core. `COREID` and both core counts are
+one-core values. `CORE-STATUS` accepts only ID 0 and returns zero for its idle
+worker slot; that result does not say that the executing primary is idle.
+`WAKE-CORE` always fails without consuming the XT and core operands, creates
+no worker, and never resolves or executes the XT. Thus unchanged `CORE-RUN`
+has no valid target: it rejects core 0 as self and every negative or
+above-range value as invalid before `WAKE-CORE`. `CORE-WAIT 0` returns,
+`CORES` lists only core 0 as self/running, and `P.RUN-PAR` takes ordinary
+ordered `P.RUN`; it dispatches nothing, provides no parallel speedup, and
+leaves all five `PAR-*` variables zero.
+
+This does not silently repair source defects. `ALL-CORES-WAIT` and
+`ALL-FULL-WAIT` use plain `DO`; with equal start and limit at one they enter a
+phantom core-1 iteration instead of zero-tripping. Strict `CORE-STATUS` makes
+both and derived `BARRIER` fail promptly. `LOCK` polls the underlying owner
+lock with non-suspending `YIELD?`; same-core acquisition is depthless and
+contention cannot progress on this profile. No fairness, timing, queueing, or
+explicit memory-fence property is inferred from those wrappers.
+
+The source-only multicore pipeline branch dispatches at most one initial step
+to each secondary full core, runs all remaining steps on core 0, and waits; it
+is neither round-robin nor worker reuse. Shared `PAR-P`/`PAR-N` make it
+non-reentrant, while `PAR-PIPE`/`PAR-STEP`/`PAR-CORE` are dead. It does not
+check worker availability or validate pipeline descriptors and XTs and can
+break ordered pipeline dependencies. The accompanying `AALLOT` safety claim
+is also invalid because `CURRENT-ARENA`, `ARENA-STK`, and `ARENA-SP` are
+global and unlocked. `P.BENCH-PAR` reports total cores, uses semantic Timer
+work rather than physical speedup, performs non-normalized wrapping
+subtraction, and leaks its original pipeline argument despite the declared
+stack effect.
+
+The contiguous source frontier now ends at line 6922. The next clean seam is
+Per-Core Run Queues at line 6923.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
