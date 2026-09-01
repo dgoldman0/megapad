@@ -35,22 +35,27 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 5436. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 5471. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
 bitmap, then exact-name lookup, `MKFILE`/`RMFILE`/`RENAME` metadata mutation,
-and bounded primary-extent `CAT` publication.
+bounded primary-extent `CAT` publication, and cache-only total/largest-free and
+global occupancy reporting.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
 `e645378a2f4a6a6f5e5e46716a9d12513397bdfa6ec441aba9af51d36ff86f23`
 and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`.
+The exact 5437–5471 fixture contains 35 LF lines and 984 bytes, with SHA-256
+`6ad3b135d3b2b69f651814349899f507d56dde4c876c8be9e0cd7aefd4a1d75c`
+and Git blob `1884c81ba2b8aa48082d472250f13a2265fd1def`.
 `FS-LOAD` consumes the separately qualified native
 `MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
 metadata predicate, and generation check. This boundary is not evidence of
-file-backed close/reopen durability, `FS-LARGEST-FREE` or later filesystem
-commands, malformed mutation/content safety, or stronger filesystem validation.
+file-backed close/reopen durability, `SAVE-BUFFER` or later filesystem commands,
+malformed mutation/content safety, allocator improvement, compaction, repair,
+or stronger filesystem validation.
 
 ---
 
@@ -658,7 +663,8 @@ present.
 | `DIR` | List files in current directory (name, size, type) + free space summary |
 | `CATALOG` | List name, bytes, primary sector count, numeric type, and flags + free-space summary |
 | `CAT filename` | Print file contents to terminal |
-| `FS-FREE` | Report free space (sectors, bytes, file count) |
+| `FS-LARGEST-FREE` | Return the largest cached contiguous free run; low-level and unguarded |
+| `FS-FREE` | Report cached free sectors/bytes, largest run, and global occupied entries/max |
 
 The qualified hosted `DIR` and `CATALOG` paths inspect occupied direct
 children of `CWD` in the global cache. Their free-space summaries count clear
@@ -687,7 +693,30 @@ It ignores a validator-approved secondary extent, so content beyond primary
 capacity comes from stale unread bytes after the DMA span. A failed read emits
 no file content but can leave a partial scratch prefix. `CAT-SLOT`, parser state,
 diagnostics, and the `HERE` scratch are global and unlocked. Blank line 5437 is
-the next seam; `FS-LARGEST-FREE` begins at line 5438.
+the leading seam of the admitted free-space reporting slice.
+
+Loading that slice only zeroes `LF-BEST` and `LF-RUN` and installs
+`FS-LARGEST-FREE`, `FS-FREE`, and their inline strings; it performs no ensure,
+cache scan, media/diagnostic access, or output. `FS-LARGEST-FREE` itself has no
+`FS-OK` gate. It resets its global scratch and scans the cached data-sector
+bitmap, retaining the largest run even when it reaches `FS-TOTAL`.
+
+`FS-FREE` ensures and checks the filesystem first. Failure prints
+`No filesystem` without scanning or changing `LF-*`. Success separately scans the
+cache for total clear bits and the largest clear run, then counts all occupied
+directory entries globally by nonzero `name[0]`. The count ignores `CWD`,
+includes directories, and is nevertheless labeled `files`. The report uses
+signed `.` in the current `BASE` for free sectors, `free * 512` bytes, largest
+contiguous sectors, occupied entries, and the 128-entry maximum.
+
+Safe reporting requires validator-approved positive geometry and complete
+cache spans; direct helper use does not establish them. An already-true
+`FS-OK` is not revalidated, so replaced or detached media can leave stale
+results eligible without I/O. The scans and `LF-*` scratch are global,
+unlocked, and not a coherent allocation snapshot. This remains reporting only;
+the planned runtime allocator improvements, `FS-CHECK`/repair, and
+`FS-COMPACT` sections below remain aspirational. Blank line 5472 is the next
+seam; `SAVE-BUFFER` begins at line 5473 and its definition starts at line 5478.
 
 ### Directory Navigation
 

@@ -857,8 +857,8 @@ registry and sample kernels, the pipeline engine, checked block-device and
 bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
 storage-compatibility, legacy file, and initial MP64FS cache/helper layers,
 the MP64FS load/sync/ensure/format lifecycle, cached directory listing, exact
-name lookup, metadata creation/deletion/rename, and primary-extent file
-publication through line 5436.
+name lookup, metadata creation/deletion/rename, primary-extent file
+publication, and cache-only free-space reporting through line 5471.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -868,10 +868,10 @@ head/full/tail sector I/O, MP64FS cache geometry, bitmap mutation/search,
 packed directory readers, raw-binding load, synchronization, conditional
 autoload, metadata formatting, compact type publication, direct-child listing,
 bitmap free-space reporting, exact-name lookup, deterministic timestamps,
-ordered metadata mutation, and byte-exact `CAT` output are executable semantic
-behavior rather than reporting-only shims. The frontier now ends at line 5436;
-blank line 5437 precedes the `FS-LARGEST-FREE` heading at line 5438 and
-definition at line 5443.
+ordered metadata mutation, byte-exact `CAT` output, and global cached
+fragmentation reporting are executable semantic behavior rather than
+reporting-only shims. The frontier now ends at line 5471; blank line 5472
+precedes the `SAVE-BUFFER` heading at line 5473 and definition at line 5478.
 
 ---
 
@@ -1130,8 +1130,15 @@ and `CAT` in 28 LF lines and 838 bytes, with SHA-256
 and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`. Load zero-initializes
 `CAT-SLOT` and installs `CAT` and its inline strings without parsing, ensuring
 the filesystem, touching cache or media, updating storage diagnostics, or
-publishing output. Blank line 5437 is the next uncovered seam before the
-`FS-LARGEST-FREE` heading at line 5438 and definition at line 5443.
+publishing output. Exact unchanged lines 5437 through 5471 then add `LF-BEST`,
+`LF-RUN`, `FS-LARGEST-FREE`, and `FS-FREE` in 35 LF lines and 984 bytes, with
+SHA-256
+`6ad3b135d3b2b69f651814349899f507d56dde4c876c8be9e0cd7aefd4a1d75c`
+and Git blob `1884c81ba2b8aa48082d472250f13a2265fd1def`. Load zero-initializes the two
+scratch variables and installs the two colon bodies and inline strings without
+ensuring the filesystem, scanning bitmap or directory cache, touching media or
+diagnostics, or publishing output. Blank line 5472 is the next uncovered seam
+before the `SAVE-BUFFER` heading at line 5473 and definition at line 5478.
 
 ---
 
@@ -1763,7 +1770,7 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
-### Hosted Lifecycle, Listing, Mutation, and Content Checkpoint
+### Hosted Lifecycle, Listing, Mutation, Content, and Free-Space Checkpoint
 
 The native hosted `MP64FS-VALID?` returns literal `1` or `0` after up to three
 raw checked reads and the executable BIOS's narrow geometry/metadata
@@ -1772,7 +1779,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 5436. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 5471. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -1810,6 +1817,15 @@ and installs the colon body and inline strings without parsing, ensuring the
 filesystem, accessing cache or media, updating diagnostics, or publishing
 output. Focused execution qualifies only the bounded primary-extent domain
 described below.
+
+Exact unchanged lines 5437–5471 add `LF-BEST`, `LF-RUN`,
+`FS-LARGEST-FREE`, and `FS-FREE` in 35 LF lines and 984 bytes, with SHA-256
+`6ad3b135d3b2b69f651814349899f507d56dde4c876c8be9e0cd7aefd4a1d75c`
+and Git blob `1884c81ba2b8aa48082d472250f13a2265fd1def`. Loading zeroes the scratch and
+installs two colon bodies and their inline strings without ensuring the
+filesystem, scanning cache, touching media or diagnostics, or publishing
+output. Focused execution qualifies cache-only reporting in the valid-geometry
+domain described below.
 
 | Word | Stack Effect | Admitted behavior |
 |------|--------------|-------------------|
@@ -1876,7 +1892,8 @@ the field to preserve the stale comment.
 | `RMFILE` | `( "name" -- )` | Clear both cached extent runs and the complete entry, then sync. It does not wipe payload and is unsafe for a directory's zero primary count. |
 | `RENAME` | `( "oldname" "newname" -- )` | Replace only the 24-byte cached name and sync. It retains `mtime`, rejects the same name as taken, and does not validate an empty replacement. |
 | `CAT` | `( "name" -- )` | Read the complete primary extent into unreserved `HERE`, then emit exactly `DE.USED` bytes with LF converted to CRLF. It does not advance `HERE`, read a secondary extent, type-check, or append a newline. |
-| `FS-FREE` | `( -- )` | Report disk free space: free sectors, bytes, and file count. |
+| `FS-LARGEST-FREE` | `( -- sectors )` | Without an `FS-OK` gate, reset global scratch and return the largest clear run in the cached data-sector bitmap. |
+| `FS-FREE` | `( -- )` | Ensure the filesystem, then report cached total free sectors/bytes, largest run, and global occupied-entry count/max. |
 | `SAVE-BUFFER` | `( buf "name" -- )` | Save a KDOS buffer's data to a named file on disk (file must already exist).  Updates `used_bytes` in the directory. |
 | `OPEN` | `( "name" -- fdesc \| 0 )` | Open a file by name, returning a file descriptor from the FD pool for `FREAD`/`FWRITE` access.  Returns 0 if not found.  `OPEN` is a `DEFER` word — override with `' my-open IS OPEN` (e.g. for a VFS layer). |
 | `FCLOSE` | `( fdesc -- )` | Release a file descriptor back to the FD pool.  No-op if `fdesc` is 0. |
@@ -1975,9 +1992,31 @@ The word enforces none of the type, capacity, or scratch bounds. It ignores
 the validator-approved secondary
 extent, so a two-extent file crossing the primary boundary instead emits stale
 unread bytes after the DMA span. `CAT-SLOT`, parser buffers, storage diagnostics,
-and the unreserved `HERE` scratch are global and unlocked. The frontier ends
-after `CAT` at line 5436; blank line 5437 precedes the unqualified
-`FS-LARGEST-FREE` family beginning at line 5438.
+and the unreserved `HERE` scratch are global and unlocked. The `CAT` fixture
+ends at line 5436; blank line 5437 leads into the admitted free-space reporting
+fixture.
+
+`FS-LARGEST-FREE` resets `LF-BEST` and `LF-RUN`, then reads every cached bitmap
+bit in `[FS-DSTART, FS-TOTAL)`. Updating the best on each clear bit includes a
+trailing run. It has no `FS-OK` check or output. `FS-FREE` first ensures and
+checks the filesystem; failure prints `No filesystem` and returns before either
+scan, preserving prior `LF-*` values. Success separately counts clear bits,
+invokes the largest-run helper, and counts all 128 entries whose first name
+byte is nonzero. That occupied count ignores `CWD`, includes directories and
+all parents, and is labeled `files` in the unchanged output. It prints free
+sectors, their byte product, largest contiguous sectors, and occupied/max using
+signed `.` in the current `BASE`.
+
+The admitted reporting domain requires validator-approved positive geometry
+and complete cached bitmap/directory spans. Direct helper use does not establish
+those preconditions; invalid ordinary-`DO` bounds remain excluded.
+`FS-ENSURE` trusts already-true `FS-OK`, so detached or replaced media can leave
+stale cached results eligible without I/O. The two bitmap scans, directory
+scan, and global `LF-*` scratch are unlocked and not one coherent allocation
+snapshot. This adds no allocator, ownership validation, repair, compaction, or
+persistence claim. The frontier ends after `FS-FREE` at line 5471; blank line
+5472 precedes the unqualified `SAVE-BUFFER` heading at line 5473 and definition
+at line 5478.
 
 **Example — filesystem operations:**
 ```forth

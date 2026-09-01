@@ -1260,7 +1260,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5436. Exact unchanged lines
+The contiguous source frontier now ends at line 5471. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1474,9 +1474,43 @@ non-directory file, one small positive primary extent, no secondary extent,
 two-extent file whose used content crosses the primary boundary causes `CAT`
 to emit stale unread bytes already following the primary DMA span. `CAT-SLOT`,
 `NAMEBUF`, `PATHBUF`, `PN-LEN`, storage diagnostics, and the unreserved `HERE`
-scratch are global and unlocked. Blank line 5437 is the next uncovered seam,
-followed by the `FS-LARGEST-FREE` heading at line 5438 and definition at line
-5443.
+scratch are global and unlocked. Blank line 5437 leads into the adjacent
+free-space reporting fixture.
+
+Exact unchanged lines 5437 through 5471 contain 35 LF lines and 984 bytes,
+with SHA-256
+`6ad3b135d3b2b69f651814349899f507d56dde4c876c8be9e0cd7aefd4a1d75c`
+and Git blob `1884c81ba2b8aa48082d472250f13a2265fd1def`. They define zero-initialized
+`LF-BEST` and `LF-RUN`, then `FS-LARGEST-FREE` and `FS-FREE`. Loading only
+mutates the dictionary and installs inline strings: it performs no filesystem
+ensure, bitmap or directory scan, cache or media access, diagnostic update, or
+UART publication.
+
+`FS-LARGEST-FREE` is an unguarded cached-bitmap helper. It resets both global
+scratch cells, scans `[FS-DSTART, FS-TOTAL)` in ascending order, resets the
+current run on allocated bits, and updates the best length on every free bit,
+including a trailing run. `FS-FREE` first calls `FS-ENSURE`; if `FS-OK` remains
+false, it prints ` No filesystem` plus CRLF and returns without scanning or
+changing `LF-BEST`/`LF-RUN`.
+
+On availability, `FS-FREE` makes three separate cache observations: total
+clear bitmap bits, the largest clear run, and every directory entry with
+nonzero `name[0]`. The occupied count is global across all parents, includes
+directories, and does not reconstruct ownership. It publishes total sectors,
+their product with 512 bytes, largest contiguous sectors, occupied entries,
+and the literal 128-entry maximum. Every number uses signed `.` in the current
+`BASE`.
+
+The admitted domain requires validator-approved positive geometry and complete
+cache spans. Direct `FS-LARGEST-FREE` does not establish that precondition, and
+invalid ordinary-`DO` bounds are excluded. `FS-ENSURE` does not revalidate an
+already-true `FS-OK`, so detached or replaced media can leave stale reporting
+eligible without storage I/O. The bitmap scans, directory scan, and `LF-*`
+scratch are global and unlocked, not one coherent allocation snapshot. This
+qualification admits reporting only, not allocation improvement, extent
+ownership validation, repair, compaction, or persistence. Blank line 5472 is
+the next uncovered seam, followed by the `SAVE-BUFFER` heading at line 5473
+and definition at line 5478.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
