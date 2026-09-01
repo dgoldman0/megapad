@@ -1038,6 +1038,236 @@ def test_resource_results_are_request_aware_and_chunks_settle_on_credit() -> Non
     assert advance < accepted_store < visible < clear
 
 
+def test_series_lifecycle_exposes_one_typed_native_cell_abi() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    mode = _definition(source, "_PT-SERIES-MODE?")
+    feature = _definition(source, "_PT-RET-SERIES?")
+
+    for declaration in (
+        "0 CONSTANT PT-SERIES-TIMESTAMP-EXPLICIT",
+        "1 CONSTANT PT-SERIES-TIMESTAMP-UNIFORM",
+        "0x3000 CONSTANT _PT-M-SERIES-DEFINE",
+        "0x3001 CONSTANT _PT-M-SERIES-APPEND",
+        "0x3002 CONSTANT _PT-M-SERIES-REPLACE",
+        "0x3003 CONSTANT _PT-M-SERIES-DROP",
+    ):
+        assert declaration in source
+    assert "PT-SERIES-TIMESTAMP-EXPLICIT =" in mode
+    assert "PT-SERIES-TIMESTAMP-UNIFORM = OR" in mode
+    assert "PT-RETAINED-AVAILABLE? 0=" in feature
+    assert "_PT-RET-SERIES AND 0<>" in feature
+
+    assert (
+        "\\ Stack: owner generation series capacity timestamp-mode interval-us\n"
+        "\\        session -- status\n"
+        ": PT-SERIES-DEFINE"
+    ) in source
+    for word in ("PT-SERIES-APPEND", "PT-SERIES-REPLACE"):
+        assert (
+            "\\ Stack: owner generation series timestamp-mode "
+            "first-timestamp-us\n"
+            "\\        samples-a samples-u session -- status\n"
+            f": {word}"
+        ) in source
+    assert (
+        ": PT-SERIES-DROP  "
+        "( owner generation series session -- status )"
+    ) in source
+
+    # The guest surface borrows exactly the caller's native-cell span.  It
+    # allocates no retained sample cache and introduces no local policy cap.
+    series = source[
+        source.index("\\ Bounded SERIES is a renderer-neutral") :
+        source.index("\\ GLYPH_RUN is the complete styled-cell draw primitive")
+    ]
+    assert "CREATE " not in series
+    assert "ALLOT" not in series
+    assert " CONSTANT " not in series
+    assert " MOVE" not in series
+    assert "samples-a samples-u" in series
+    assert "_PT.S.RET-FORMATS 28 + L@" in series
+    assert "_PT.S.RET-FORMATS 32 + L@" in series
+
+
+def test_series_define_is_feature_gated_and_exactly_encoded() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    fields = _definition(source, "_PT-SERIES-DEFINE-FIELDS?")
+    write = _definition(source, "_PT-SERIES-DEFINE-WRITE")
+    public = _definition(source, "PT-SERIES-DEFINE")
+
+    assert "_PT-SERDEF-OWNER @ 0=" in fields
+    assert "_PT-SERDEF-GENERATION @ 0= OR" in fields
+    assert "_PT-SERDEF-ID @ 0= OR" in fields
+    assert "_PT-SERDEF-CAPACITY @ DUP 0= SWAP _PT-U32? 0= OR" in fields
+    assert "_PT.S.RET-FORMATS 32 + L@ U>" in fields
+    assert "_PT-SERIES-MODE? 0=" in fields
+    explicit = fields.index("PT-SERIES-TIMESTAMP-EXPLICIT = IF")
+    uniform = fields.index("ELSE", explicit)
+    assert "_PT-SERDEF-INTERVAL @ 0=" in fields[explicit:uniform]
+    assert "_PT-SERDEF-INTERVAL @ 0<>" in fields[uniform:]
+
+    assert "_PT-VALID-S? 0=" in write
+    assert "_PT-OP-LOST?" in write
+    assert "_PT-RET-SERIES? 0=" in write
+    assert "_PT-SERDEF-TYPE @ _PT-M-SERIES-DEFINE <>" in write
+    assert "_PT-SERIES-DEFINE-FIELDS? 0=" in write
+    assert "_PT-SERDEF-TYPE @ _PT-PO-TYPE !" in write
+    assert "40 _PT-PO-U !" in write
+    assert "_PT-SERDEF-S @ _PT-PO-S !" in write
+    admit = write.index("_PT-PO-ADMIT")
+    for store in (
+        "_PT-SERDEF-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-SERDEF-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-SERDEF-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "_PT-SERDEF-CAPACITY @ _PT-FRAME-PAYLOAD 24 + L!",
+        "_PT-SERDEF-MODE @ _PT-FRAME-PAYLOAD 28 + L!",
+        "_PT-SERDEF-INTERVAL @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
+    ):
+        assert store in write
+        assert admit < write.index(store)
+    assert write.index("_PT-SERDEF-INTERVAL @", admit) < write.index("_PT-PO-SEND")
+    assert "_PT-M-SERIES-DEFINE _PT-SERIES-DEFINE-WRITE" in public
+
+
+def test_series_samples_are_checked_ordered_and_encoded_cell_by_cell() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    source_span = _definition(source, "_PT-SERIES-SOURCE?")
+    ordered = _definition(source, "_PT-SERIES-EXPLICIT-ORDERED?")
+    fields = _definition(source, "_PT-SERIES-SAMPLES-FIELDS?")
+    payload = _definition(source, "_PT-SERIES-SAMPLES-PAYLOAD!")
+    body = _definition(source, "_PT-SERIES-SAMPLES-BODY")
+    write = _definition(source, "_PT-SERIES-SAMPLES-WRITE")
+    scrub = _definition(source, "_PT-SERIES-SCRUB")
+    append = _definition(source, "PT-SERIES-APPEND")
+    replace = _definition(source, "PT-SERIES-REPLACE")
+
+    # samples-u is an exact nonempty native-cell byte span.  Checked end
+    # arithmetic and disjointness keep frame construction from overwriting
+    # either the caller source or PT's own session state.
+    assert "_PT-SS-A @ 0= _PT-SS-U @ 0= OR" in source_span
+    assert "_PT-SS-A @ 1 CELLS 1- AND" in source_span
+    assert "_PT-SS-A @ _PT-SS-U @ _PT-UADD?" in source_span
+    assert "_PT-SS-END !" in source_span
+    assert source_span.count("_PT-RANGES-OVERLAP?") == 2
+    assert "/PT-SESSION" in source_span
+    assert "_PT.S.TX-A @" in source_span
+    assert "_PT.S.TX-U @" in source_span
+
+    explicit = fields.index("PT-SERIES-TIMESTAMP-EXPLICIT = IF")
+    uniform = fields.index("ELSE", explicit)
+    maxima = fields.index("_PT.S.RET-FORMATS 28 + L@", uniform)
+    assert "_PT-SS-FIRST @ IF FALSE EXIT THEN" in fields[explicit:uniform]
+    assert "16 _PT-SS-STRIDE !" in fields[explicit:uniform]
+    assert "8 _PT-SS-STRIDE !" in fields[uniform:maxima]
+    assert "_PT-SS-STRIDE @ _PT-UMUL?" in fields
+    assert "_PT-SS-MAX-BYTES !" in fields
+    assert "_PT-SS-U @ U<" in fields
+    assert "_PT-SS-U @ _PT-SS-STRIDE @ MOD" in fields
+    assert "_PT-SS-U @ _PT-SS-STRIDE @ / DUP _PT-SS-COUNT !" in fields
+    assert "DUP 0= SWAP _PT-U32? 0= OR" in fields
+    assert "_PT.S.RET-FORMATS 32 + L@ U>" in fields
+    assert "_PT-SS-U @ 40 _PT-UADD?" in fields
+    assert "_PT-SS-PAYLOAD-U !" in fields
+    assert "_PT-SERIES-SOURCE? 0=" in fields
+    assert "_PT-SERIES-EXPLICIT-ORDERED?" in fields
+
+    assert "_PT-SS-A @ @ _PT-SS-LAST-TIMESTAMP !" in ordered
+    assert "_PT-SS-A @ I 2* CELLS + @" in ordered
+    assert "_PT-SS-LAST-TIMESTAMP @ U> 0=" in ordered
+    assert "FALSE UNLOOP EXIT" in ordered
+
+    # Both sample representations are serialized from native cells.  A raw
+    # MOVE would accidentally make caller memory layout part of the wire ABI.
+    for store in (
+        "_PT-SS-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-SS-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-SS-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "_PT-SS-COUNT @ _PT-FRAME-PAYLOAD 24 + L!",
+        "_PT-SS-MODE @ _PT-FRAME-PAYLOAD 28 + L!",
+        "_PT-SS-FIRST @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
+    ):
+        assert store in payload
+    assert "_PT-SS-A @ I 2* CELLS + DUP @" in payload
+    assert "_PT-FRAME-PAYLOAD 40 + I 16 * + _PT-U64!" in payload
+    assert "1 CELLS + @" in payload
+    assert "_PT-FRAME-PAYLOAD 48 + I 16 * + _PT-U64!" in payload
+    assert "_PT-SS-A @ I CELLS + @" in payload
+    assert "_PT-FRAME-PAYLOAD 40 + I 8 * + _PT-U64!" in payload
+    assert "MOVE" not in payload
+
+    assert "_PT-RET-SERIES? 0=" in body
+    assert "_PT-M-SERIES-APPEND =" in body
+    assert "_PT-M-SERIES-REPLACE = OR" in body
+    assert "_PT-SERIES-SAMPLES-FIELDS? 0=" in body
+    assert "_PT-SS-PAYLOAD-U @ _PT-PO-U !" in body
+    assert body.index("_PT-PO-ADMIT") < body.index(
+        "_PT-SERIES-SAMPLES-PAYLOAD!"
+    ) < body.index("_PT-PO-SEND")
+    assert "CATCH" in write
+    assert "_PT-SERIES-SCRUB" in write
+    for pointer in (
+        "_PT-SS-A",
+        "_PT-SS-U",
+        "_PT-SS-END",
+        "_PT-SS-LAST-TIMESTAMP",
+        "_PT-SS-MAX-BYTES",
+    ):
+        assert f"0 {pointer} !" in scrub
+    assert "_PT-M-SERIES-APPEND _PT-SERIES-SAMPLES-WRITE" in append
+    assert "_PT-M-SERIES-REPLACE _PT-SERIES-SAMPLES-WRITE" in replace
+
+
+def test_series_drop_and_shared_present_accounting_are_exact() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    define = _definition(source, "_PT-SERIES-DEFINE-WRITE")
+    samples = _definition(source, "_PT-SERIES-SAMPLES-BODY")
+    drop = _definition(source, "PT-SERIES-DROP")
+    admit = _definition(source, "_PT-PO-ADMIT")
+    send = _definition(source, "_PT-PO-SEND")
+
+    assert "_PT-VALID-S? 0=" in drop
+    assert "_PT-OP-LOST?" in drop
+    assert "_PT-RET-SERIES? 0=" in drop
+    assert "_PT-SDROP-OWNER @ 0=" in drop
+    assert "_PT-SDROP-GENERATION @ 0= OR" in drop
+    assert "_PT-SDROP-ID @ 0= OR" in drop
+    assert "_PT-M-SERIES-DROP _PT-PO-TYPE !" in drop
+    assert "24 _PT-PO-U !" in drop
+    admitted = drop.index("_PT-PO-ADMIT")
+    for store in (
+        "_PT-SDROP-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-SDROP-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-SDROP-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+    ):
+        assert store in drop
+        assert admitted < drop.index(store)
+    assert drop.index("_PT-SDROP-ID @", admitted) < drop.index("_PT-PO-SEND")
+
+    for writer in (define, samples, drop):
+        assert "_PT-PO-ADMIT" in writer
+        assert "_PT-PO-SEND" in writer
+    for gate in (
+        "_PT.S.TX-OPEN? @ 0=",
+        "_PT.S.TX-KIND @ _PT-TX-PRESENT <>",
+        "_PT.S.TX-RET-MODE @ PT-RET-NONE =",
+        "_PT.S.SPAN-REMAIN @",
+        "_PT.S.TX-SPANS-DONE @",
+        "_PT.S.TX-CELLS-DONE @",
+        "_PT.S.CURSOR-DONE? @",
+    ):
+        assert gate in admit
+    assert "_PT.S.TX-RET-OPS-DONE @ 1 _PT-UADD?" in admit
+    assert "_PT.S.TX-RET-OPS @ U>" in admit
+    assert "_PT-PO-U @ 40 _PT-UADD?" in admit
+    assert "_PT.S.TX-RET-BYTES-DONE @ SWAP _PT-UADD?" in admit
+    assert "_PT.S.TX-RET-BYTES @ U>" in admit
+    assert "_PT-PO-TYPE @ _PT-PO-U @ _PT-PO-S @ _PT-FRAME-BEGIN" in admit
+    queued = send.index("TRUE _PT-PO-S @ _PT-FRAME-QUEUE")
+    ops = send.index("_PT.S.TX-RET-OPS-DONE !", queued)
+    byte_count = send.index("_PT.S.TX-RET-BYTES-DONE !", ops)
+    assert queued < ops < byte_count
+
+
 def test_soft_reset_aborts_the_old_epoch_upload_before_reset_ack() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     apply_reset = _definition(source, "_PT-APPLY-PENDING-RESET")

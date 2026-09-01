@@ -73,15 +73,16 @@ The module owns:
   settlement;
 * PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
   DEFINE/REPLACE/DROP operations, typed GLYPH_RUN DEFINE/REPLACE operations,
-  and typed semantic-control DEFINE/REPLACE/DROP operations; and
+  typed bounded-series DEFINE/APPEND/REPLACE/DROP operations, and typed
+  semantic-control DEFINE/REPLACE/DROP operations; and
 * close, hard failure, soft cache reset, and fallback.
 
 It does not own consumer focus, host regions, widgets, retained semantic
 objects, owner/item allocation policy, quota derivation, replay planning, or
 the Akashic front/back cell buffers. The core retained writers accept bounded
 wire-neutral intent from a single internal rich-terminal engine; they are not
-an independently discoverable scene or mutation API. Other object kinds and
-series remain outside the currently implemented writer subset.
+an independently discoverable scene or mutation API. Other object kinds
+remain outside the currently implemented writer subset.
 
 The module admits in-place RETAINED-1 feature bit 8 `RET_CONTROLS`, supplies
 typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers, and decodes
@@ -156,6 +157,15 @@ PT-REGION-DEFINE    ( owner generation region x y cols rows z flags session
 PT-REGION-REPLACE   ( owner generation region x y cols rows z flags session
                       -- status )
 PT-REGION-DROP      ( owner generation region session -- status )
+PT-SERIES-DEFINE    ( owner generation series capacity timestamp-mode
+                      interval-us session -- status )
+PT-SERIES-APPEND    ( owner generation series timestamp-mode
+                      first-timestamp-us samples-a samples-u session
+                      -- status )
+PT-SERIES-REPLACE   ( owner generation series timestamp-mode
+                      first-timestamp-us samples-a samples-u session
+                      -- status )
+PT-SERIES-DROP      ( owner generation series session -- status )
 PT-GLYPH-RUN-DEFINE ( owner generation object region parent
                       left top right bottom z visible
                       fg-red fg-green fg-blue fg-alpha
@@ -364,6 +374,18 @@ caller-provided TX scratch, exact negotiated payload and declared transaction
 bytes, plus the owner's terminal-side aggregate UTF-8 quota. No separate
 control-text capacity is introduced.
 
+`PT-SERIES-TIMESTAMP-EXPLICIT` and `PT-SERIES-TIMESTAMP-UNIFORM` select the
+two protocol timestamp modes. APPEND and REPLACE take an aligned borrowed span
+of native 64-bit semantic cells, not a packed wire body. UNIFORM interprets one
+signed value cell per sample and carries `first-timestamp-us` in the prefix;
+EXPLICIT requires that prefix field to be zero and interprets timestamp/value
+cell pairs. PT derives the positive sample count from the exact span length,
+checks divisibility, negotiated per-append bounds, source range and
+disjointness, and strictly increasing timestamps within an explicit payload.
+It then encodes every timestamp and value little-endian into private TX scratch.
+The upper engine retains per-series definitions/history and replay authority;
+PT introduces no series table or hard-coded history capacity of its own.
+
 The mode constants are `PT-CELL-NONE`, `PT-CELL-DELTA`,
 `PT-CELL-REPLACE`, `PT-RET-NONE`, `PT-RET-DELTA`,
 `PT-RET-REPLACE-START`, `PT-RET-REPLACE-CONTINUE`,
@@ -483,9 +505,10 @@ The current Pygame acceptance runner continues through the ordinary
 Daybook-to-Pad shared-resource handoff and closes the selected software/viewer
 checkpoint. Immutable RGBA resource upload, IMAGE model publication, exact
 shared-session offers, viewer verification, and physical IMAGE composition now
-have focused qualification. Remaining object kinds, series, full semantic
-replay, retained resize, physical UART delivery, and a hardware panel sink
-remain separate and unqualified.
+have focused qualification. Bounded SERIES wire/model/view support and the
+typed MegaPad publication boundary also have focused qualification. Remaining
+object kinds, full semantic replay, retained resize, physical UART delivery,
+and a hardware panel sink remain separate and unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
 

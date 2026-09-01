@@ -879,6 +879,375 @@ class TestRichTerminalForth(_KDOSTestBase):
             struct.pack(f"<{len(expected_facts)}q", *expected_facts),
         )
 
+    def test_series_writers_emit_exact_native_cell_bytes_and_accounting(self) -> None:
+        """Pack both timestamp modes through the universal SERIES ABI."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PT-SER-RX 8192 ALLOT",
+                "CREATE PT-SER-TX 8192 ALLOT",
+                "CREATE PT-SER-EVENT PT-EVENT-SIZE ALLOT",
+                "CREATE PT-SER-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PT-SER-SESSION PT-SER-SESSION-STORAGE 7 + -8 AND ;",
+                "CREATE PT-SER-UNIFORM-A-STORAGE 16 7 + ALLOT",
+                ": PT-SER-UNIFORM-A PT-SER-UNIFORM-A-STORAGE 7 + -8 AND ;",
+                "CREATE PT-SER-UNIFORM-B-STORAGE 16 7 + ALLOT",
+                ": PT-SER-UNIFORM-B PT-SER-UNIFORM-B-STORAGE 7 + -8 AND ;",
+                "CREATE PT-SER-EXPLICIT-A-STORAGE 32 7 + ALLOT",
+                ": PT-SER-EXPLICIT-A PT-SER-EXPLICIT-A-STORAGE 7 + -8 AND ;",
+                "CREATE PT-SER-EXPLICIT-B-STORAGE 32 7 + ALLOT",
+                ": PT-SER-EXPLICIT-B PT-SER-EXPLICIT-B-STORAGE 7 + -8 AND ;",
+                "CREATE PT-SER-EXPLICIT-BAD-STORAGE 32 7 + ALLOT",
+                ": PT-SER-EXPLICIT-BAD PT-SER-EXPLICIT-BAD-STORAGE 7 + -8 AND ;",
+                "CREATE PT-SER-MAX-SAMPLES-STORAGE 40 7 + ALLOT",
+                ": PT-SER-MAX-SAMPLES PT-SER-MAX-SAMPLES-STORAGE 7 + -8 AND ;",
+                "CREATE PT-SER-MARK-BUFFER 8 ALLOT",
+                "CREATE PT-SER-STATUSES 20 8 * ALLOT",
+                "CREATE PT-SER-FACTS 9 8 * ALLOT",
+                "VARIABLE PT-SER-STATUS-I",
+                "VARIABLE PT-SER-FACT-I",
+                ": PT-SER-STATUS!  ( status -- )",
+                "  PT-SER-STATUSES PT-SER-STATUS-I @ 8 * + !",
+                "  PT-SER-STATUS-I @ 1+ PT-SER-STATUS-I ! ;",
+                ": PT-SER-FACT!  ( value -- )",
+                "  PT-SER-FACTS PT-SER-FACT-I @ 8 * + !",
+                "  PT-SER-FACT-I @ 1+ PT-SER-FACT-I ! ;",
+                ": PT-SER-MARK  ( u -- )",
+                "  PT-SER-MARK-BUFFER _PT-U64!",
+                "  PT-SER-MARK-BUFFER 8 TYPE TX-FLUSH ;",
+                ": PT-SER-DATA!",
+                "  -7 PT-SER-UNIFORM-A !",
+                "  0x1122334455667788 PT-SER-UNIFORM-A 8 + !",
+                "  9 PT-SER-UNIFORM-B !",
+                "  -10 PT-SER-UNIFORM-B 8 + !",
+                "  1000 PT-SER-EXPLICIT-A !",
+                "  -11 PT-SER-EXPLICIT-A 8 + !",
+                "  2000 PT-SER-EXPLICIT-A 16 + !",
+                "  22 PT-SER-EXPLICIT-A 24 + !",
+                "  3000 PT-SER-EXPLICIT-B !",
+                "  -33 PT-SER-EXPLICIT-B 8 + !",
+                "  4000 PT-SER-EXPLICIT-B 16 + !",
+                "  44 PT-SER-EXPLICIT-B 24 + !",
+                "  5000 PT-SER-EXPLICIT-BAD !",
+                "  1 PT-SER-EXPLICIT-BAD 8 + !",
+                "  5000 PT-SER-EXPLICIT-BAD 16 + !",
+                "  2 PT-SER-EXPLICIT-BAD 24 + !",
+                "  1 PT-SER-MAX-SAMPLES !",
+                "  2 PT-SER-MAX-SAMPLES 8 + !",
+                "  3 PT-SER-MAX-SAMPLES 16 + !",
+                "  4 PT-SER-MAX-SAMPLES 24 + !",
+                "  5 PT-SER-MAX-SAMPLES 32 + ! ;",
+                ": PT-SER-PRIME",
+                "  PT-SER-STATUSES 20 8 * 0 FILL",
+                "  PT-SER-FACTS 9 8 * 0 FILL",
+                "  PT-SER-STATUS-I OFF PT-SER-FACT-I OFF",
+                "  PT-SER-DATA!",
+                "  PT-SER-RX 8192 PT-SER-TX 8192",
+                "    PT-SER-EVENT PT-EVENT-SIZE PT-SER-SESSION",
+                "    PT-INIT PT-SER-STATUS!",
+                "  PT-ST-ACTIVE PT-SER-SESSION _PT.S.STATE !",
+                "  128 PT-SER-SESSION _PT.S.PEER-MAX-PAY !",
+                "  4096 PT-SER-SESSION _PT.S.PEER-MAX-TX !",
+                "  4096 PT-SER-SESSION _PT.S.PEER-GRANT !",
+                "  4096 PT-SER-SESSION _PT.S.PEER-INITIAL !",
+                "  0 PT-SER-SESSION _PT.S.PEER-SENT !",
+                "  0 PT-SER-SESSION _PT.S.TX-SEQ !",
+                "  0x4142434445464748 PT-SER-SESSION _PT.S.SESSION-ID !",
+                "  9 PT-SER-SESSION _PT.S.EPOCH !",
+                "  -1 PT-SER-SESSION _PT.S.RET-ENABLED? !",
+                "  _PT-RD-AVAILABLE PT-SER-SESSION _PT.S.RET-STATE !",
+                "  0x19 PT-SER-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
+                "  8 PT-SER-SESSION _PT.S.RET-CAPS 36 + L!",
+                "  7 PT-SER-SESSION _PT.S.RET-CAPS 40 + L!",
+                "  1024 PT-SER-SESSION _PT.S.RET-CAPS 48 + _PT-U64!",
+                "  4 PT-SER-SESSION _PT.S.RET-FORMATS 28 + L!",
+                "  8 PT-SER-SESSION _PT.S.RET-FORMATS 32 + L!",
+                "  64 PT-SER-SESSION _PT.S.RET-FORMATS 40 + _PT-U64!",
+                "  -1 PT-SER-SESSION _PT.S.TX-OPEN? !",
+                "  _PT-TX-PRESENT PT-SER-SESSION _PT.S.TX-KIND !",
+                "  PT-CELL-NONE PT-SER-SESSION _PT.S.TX-CELL-MODE !",
+                "  PT-RET-DELTA PT-SER-SESSION _PT.S.TX-RET-MODE !",
+                "  7 PT-SER-SESSION _PT.S.TX-RET-OPS !",
+                "  640 PT-SER-SESSION _PT.S.TX-RET-BYTES ! ;",
+                ": PT-SER-OWNER  ( -- owner generation )",
+                "  0x0102030405060708 0x1112131415161718 ;",
+                ": PT-SER-RUN",
+                "  PT-SER-PRIME",
+                "  0x3130303047454253 PT-SER-MARK",
+                "  PT-SER-OWNER 0x2122232425262728 4 2 0",
+                "    PT-SER-SESSION PT-SERIES-DEFINE PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728 4",
+                "    PT-SERIES-TIMESTAMP-EXPLICIT 1",
+                "    PT-SER-SESSION PT-SERIES-DEFINE PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728 0",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 50",
+                "    PT-SER-SESSION PT-SERIES-DEFINE PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728 9",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 50",
+                "    PT-SER-SESSION PT-SERIES-DEFINE PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728 2 1000",
+                "    PT-SER-UNIFORM-A 16 PT-SER-SESSION",
+                "    PT-SERIES-APPEND PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 1000",
+                "    0 0 PT-SER-SESSION PT-SERIES-APPEND PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 1000",
+                "    PT-SER-UNIFORM-A 12 PT-SER-SESSION",
+                "    PT-SERIES-APPEND PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 1000",
+                "    PT-SER-SESSION _PT.S.TX-A @ 16 PT-SER-SESSION",
+                "    PT-SERIES-APPEND PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 1000",
+                "    PT-SER-MAX-SAMPLES 40 PT-SER-SESSION",
+                "    PT-SERIES-APPEND PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x292A2B2C2D2E2F30",
+                "    PT-SERIES-TIMESTAMP-EXPLICIT 0",
+                "    PT-SER-EXPLICIT-BAD 32 PT-SER-SESSION",
+                "    PT-SERIES-APPEND PT-SER-STATUS!",
+                "  PT-SER-SESSION _PT.S.TX-RET-OPS-DONE @ PT-SER-FACT!",
+                "  PT-SER-SESSION _PT.S.TX-RET-BYTES-DONE @ PT-SER-FACT!",
+                "  PT-SER-SESSION _PT.S.TX-SEQ @ PT-SER-FACT!",
+                "  PT-SER-SESSION _PT.S.PEER-SENT @ PT-SER-FACT!",
+                "  PT-SER-OWNER 0x2122232425262728 4",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 50",
+                "    PT-SER-SESSION PT-SERIES-DEFINE PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x292A2B2C2D2E2F30 4",
+                "    PT-SERIES-TIMESTAMP-EXPLICIT 0",
+                "    PT-SER-SESSION PT-SERIES-DEFINE PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 1000",
+                "    PT-SER-UNIFORM-A 16 PT-SER-SESSION",
+                "    PT-SERIES-APPEND PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728",
+                "    PT-SERIES-TIMESTAMP-UNIFORM 2000",
+                "    PT-SER-UNIFORM-B 16 PT-SER-SESSION",
+                "    PT-SERIES-REPLACE PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x292A2B2C2D2E2F30",
+                "    PT-SERIES-TIMESTAMP-EXPLICIT 0",
+                "    PT-SER-EXPLICIT-A 32 PT-SER-SESSION",
+                "    PT-SERIES-APPEND PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x292A2B2C2D2E2F30",
+                "    PT-SERIES-TIMESTAMP-EXPLICIT 0",
+                "    PT-SER-EXPLICIT-B 32 PT-SER-SESSION",
+                "    PT-SERIES-REPLACE PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x2122232425262728 PT-SER-SESSION",
+                "    PT-SERIES-DROP PT-SER-STATUS!",
+                "  PT-SER-OWNER 0x292A2B2C2D2E2F30 PT-SER-SESSION",
+                "    PT-SERIES-DROP PT-SER-STATUS!",
+                "  PT-SER-SESSION _PT.S.TX-RET-OPS-DONE @ PT-SER-FACT!",
+                "  PT-SER-SESSION _PT.S.TX-RET-BYTES-DONE @ PT-SER-FACT!",
+                "  PT-SER-SESSION _PT.S.TX-SEQ @ PT-SER-FACT!",
+                "  PT-SER-SESSION _PT.S.PEER-SENT @ PT-SER-FACT!",
+                "  DEPTH PT-SER-STATUS!",
+                "  PT-SER-STATUS-I @ PT-SER-FACT!",
+                "  0x32303030444E4553 PT-SER-MARK",
+                "  0x3330303053545353 PT-SER-MARK",
+                "  PT-SER-STATUSES PT-SER-STATUS-I @ 8 * TYPE",
+                "  0x3430303045545353 PT-SER-MARK",
+                "  0x3530303054434653 PT-SER-MARK",
+                "  PT-SER-FACTS PT-SER-FACT-I @ 8 * TYPE",
+                "  0x3630303045434653 PT-SER-MARK ;",
+                "PT-SER-RUN BYE",
+            ]
+        )
+        program = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data:
+                if position >= len(program):
+                    break
+                chunk = _next_line_chunk(program, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+                continue
+            executed = system.run_batch(
+                min(RUN_BATCH_STEPS, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += max(executed, 1)
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(program), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "series writer byte oracle exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "dictionary overflow",
+            "Stack underflow",
+            "Stack overflow",
+            "Return stack overflow",
+            "nested definition",
+            "branch out of range",
+            "control-flow",
+            "*** BUS FAULT",
+            "*** PRIVILEGE FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+
+        owner = 0x0102030405060708
+        generation = 0x1112131415161718
+        series1 = 0x2122232425262728
+        series2 = 0x292A2B2C2D2E2F30
+
+        def definition(series: int, mode: int, interval: int) -> bytes:
+            return struct.pack(
+                "<QQQIIQ",
+                owner,
+                generation,
+                series,
+                4,
+                mode,
+                interval,
+            )
+
+        def samples(
+            series: int,
+            message_type: RetainedMessageType,
+            mode: int,
+            first_timestamp: int,
+            cells: bytes,
+        ) -> tuple[RetainedMessageType, bytes]:
+            stride = 8 if mode == 1 else 16
+            return message_type, struct.pack(
+                "<QQQIIQ",
+                owner,
+                generation,
+                series,
+                len(cells) // stride,
+                mode,
+                first_timestamp,
+            ) + cells
+
+        uniform_a = struct.pack("<qq", -7, 0x1122334455667788)
+        uniform_b = struct.pack("<qq", 9, -10)
+        explicit_a = struct.pack("<QqQq", 1000, -11, 2000, 22)
+        explicit_b = struct.pack("<QqQq", 3000, -33, 4000, 44)
+        operations = [
+            (
+                RetainedMessageType.SERIES_DEFINE,
+                definition(series1, 1, 50),
+            ),
+            (
+                RetainedMessageType.SERIES_DEFINE,
+                definition(series2, 0, 0),
+            ),
+            samples(
+                series1,
+                RetainedMessageType.SERIES_APPEND,
+                1,
+                1000,
+                uniform_a,
+            ),
+            samples(
+                series1,
+                RetainedMessageType.SERIES_REPLACE,
+                1,
+                2000,
+                uniform_b,
+            ),
+            samples(
+                series2,
+                RetainedMessageType.SERIES_APPEND,
+                0,
+                0,
+                explicit_a,
+            ),
+            samples(
+                series2,
+                RetainedMessageType.SERIES_REPLACE,
+                0,
+                0,
+                explicit_b,
+            ),
+            (
+                RetainedMessageType.SERIES_DROP,
+                struct.pack("<QQQ", owner, generation, series1),
+            ),
+        ]
+        expected = b"".join(
+            encode_frame(
+                Frame(
+                    message_type,
+                    0x4142434445464748,
+                    sequence,
+                    9,
+                    payload,
+                ),
+                max_payload=128,
+            )
+            for sequence, (message_type, payload) in enumerate(operations)
+        )
+
+        begin_marker = b"SBEG0001"
+        end_marker = b"SEND0002"
+        status_marker = b"SSTS0003"
+        status_end_marker = b"SSTE0004"
+        facts_marker = b"SFCT0005"
+        facts_end_marker = b"SFCE0006"
+        begin = raw.index(begin_marker) + len(begin_marker)
+        end_at = raw.index(end_marker, begin)
+        end = end_at + len(end_marker)
+        self.assertEqual(raw[begin:end_at], expected)
+
+        expected_statuses = (
+            0,
+            3,
+            3,
+            3,
+            3,
+            3,
+            3,
+            3,
+            3,
+            3,
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            0,
+        )
+        status_begin = raw.index(status_marker, end) + len(status_marker)
+        status_end = raw.index(status_end_marker, status_begin)
+        self.assertEqual(
+            raw[status_begin:status_end],
+            struct.pack(f"<{len(expected_statuses)}q", *expected_statuses),
+        )
+
+        expected_facts = (0, 0, 0, 0, 7, 640, 7, 640, 20)
+        facts_begin = raw.index(facts_marker, status_end) + len(facts_marker)
+        facts_end = raw.index(facts_end_marker, facts_begin)
+        self.assertEqual(
+            raw[facts_begin:facts_end],
+            struct.pack(f"<{len(expected_facts)}q", *expected_facts),
+        )
+
     def test_real_core_snapshot_key_resize_and_synchronized_close(self) -> None:
         memory, ext_memory, cpu_state = self._snapshot_data()
         system = make_system(
