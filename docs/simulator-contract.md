@@ -394,6 +394,26 @@ fails without consuming either XT or core ID, because no valid secondary
 target exists. It never resolves or executes the XT and creates no host thread,
 worker slot, mailbox, IPI, asynchronous completion, or hidden no-op success.
 
+It also has no micro-core cluster. `CLUSTER-EN@` returns zero, and
+`CLUSTER-EN!` accepts only zero as an idempotent disable; a nonzero mask fails
+before it is consumed. This semantic BIOS substitution is coherent with the
+direct hosted SysInfo value at `+0x18`, while the direct SysInfo window remains
+read-only. `BARRIER-ARRIVE` and `BARRIER-STATUS` fail without stack mutation,
+so software cannot mistake an absent barrier for completion or enter a hidden
+infinite poll. `CL-PRIV*` and `CL-MPU-*` similarly fail without consuming a
+store operand or pushing a fetch value because there is no caller-relative
+cluster register domain.
+
+`SPAD` remains an address-producing BIOS word and returns the architectural
+sentinel `0xFFFF_FE00_0000_0000`; the simulator maps no storage there, so an
+access fails through the normal unmapped-memory contract. `MICRO?` preserves
+the executable BIOS's unsigned `id >= N-FULL` classification rather than
+performing topology validation. With `N-FULL = 1`, ID zero is false and every
+other uint64 cell is true, including cells that cannot name a hosted core.
+These choices claim source-visible failure and classification behavior only,
+not cluster execution, scratchpad storage, barriers, privilege, or MPU
+enforcement.
+
 The currently admitted UART surface is pseudo-BIOS byte I/O, not the physical
 UART window. Output bytes become observable synchronously, making the native
 TX flush before `KEY` an observational no-op. Input is the deterministic FIFO

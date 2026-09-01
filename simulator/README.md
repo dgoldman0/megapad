@@ -30,6 +30,10 @@ The implemented slices provide:
   idle secondary-worker slot, other IDs are rejected, and `WAKE-CORE` rejects
   every request without consuming or executing its XT because no secondary
   core exists;
+- an explicit no-cluster boundary: the cluster-enable mask remains zero,
+  barriers and cluster MPU state are unavailable, `SPAD` returns the native
+  sentinel without inventing storage, and `MICRO?` retains the BIOS unsigned
+  classification rather than validating hosted core membership;
 - fail-closed construction for injected address spaces: their SysInfo
   capability qword must be readable and may advertise only admitted services;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access, low-byte `C!`,
@@ -1570,6 +1574,17 @@ immediately; `CORES` reports only core 0; and `P.RUN-PAR` executes ordinary
 `P.RUN` in source order. It leaves every `PAR-*` variable zero and makes no
 concurrency or speedup claim. `PAR-PIPE`, `PAR-STEP`, and `PAR-CORE` are never
 read by this source block despite its wrapper commentary.
+
+That topology also has no micro-core cluster. `CLUSTER-EN@` therefore returns
+zero; `CLUSTER-EN!` consumes zero as an idempotent disable but rejects every
+nonzero mask before consuming it. The direct hosted SysInfo window remains
+read-only and reports the same zero capability mask. Barrier and cluster-MPU
+words fail without changing their caller-visible stacks rather than reporting
+fake completion or register state. `SPAD` still returns the BIOS address
+sentinel `0xFFFF_FE00_0000_0000`, but no memory is mapped there, so a later
+access faults normally. `MICRO?` is the literal unsigned BIOS threshold test:
+with `N-FULL = 1`, zero is false and every other 64-bit cell is true even
+though none names a hosted core.
 
 Several literal source discrepancies remain visible. Both all-core wait words
 use plain `DO` with equal start and limit on this profile, so they enter a

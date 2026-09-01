@@ -851,6 +851,40 @@ BEGIN 1 CORE-STATUS 0= UNTIL  \ wait until core 1 finishes
 
 ---
 
+## Micro-Cluster Control and Cluster MPU (12 words)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CLUSTER-EN!` | `( mask -- )` | Write the SysInfo cluster-enable mask. |
+| `CLUSTER-EN@` | `( -- mask )` | Read the SysInfo cluster-enable mask. |
+| `BARRIER-ARRIVE` | `( -- )` | Signal this micro-core's arrival at its cluster barrier. |
+| `BARRIER-STATUS` | `( -- n )` | Read the cluster barrier arrival/done state. |
+| `SPAD` | `( -- addr )` | Return the cluster scratchpad address sentinel. |
+| `MICRO?` | `( id -- flag )` | Return true when unsigned `id >= N-FULL`; this classifies an encoding and does not validate it against `NCORES`. |
+| `CL-PRIV!` | `( n -- )` | Set the caller's cluster privilege state. |
+| `CL-PRIV@` | `( -- n )` | Read the caller's cluster privilege state. |
+| `CL-MPU-BASE!` | `( n -- )` | Set the caller's cluster MPU lower bound. |
+| `CL-MPU-LIMIT!` | `( n -- )` | Set the caller's cluster MPU upper bound. |
+| `CL-MPU-BASE@` | `( -- n )` | Read the caller's cluster MPU lower bound. |
+| `CL-MPU-LIMIT@` | `( -- n )` | Read the caller's cluster MPU upper bound. |
+
+The one-core hosted profile has no cluster caller or cluster-local state.
+`CLUSTER-EN@` returns zero; storing zero succeeds as an idempotent disable,
+while every nonzero store fails without consuming the mask. Both barrier
+words and all cluster privilege/MPU words fail without changing the caller's
+stacks. This is deliberately stricter than the current executable BIOS on a
+full core, where the unimplemented cluster CSR reads return zero and writes
+are ignored: reporting those values would turn absent hardware into apparent
+success and make the KDOS barrier wrapper poll forever.
+
+`SPAD` still returns the exact native sentinel
+`0xFFFF_FE00_0000_0000`, but the hosted profile does not map scratchpad
+storage at that address. `MICRO?` retains the executable BIOS's unsigned
+threshold behavior, so with hosted `N-FULL = 1`, zero is false and every
+other uint64 value is true even though there are no hosted micro-core IDs.
+
+---
+
 ## Performance Counters (5 words)
 
 | Word | Stack Effect | Description |

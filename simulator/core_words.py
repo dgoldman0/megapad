@@ -44,6 +44,7 @@ from simulator.sha3 import SHA3_CONTROL, SHA3_STATUS
 
 
 _EVAL_TOKEN_BYTES = 256
+_CLUSTER_SPAD_ADDRESS = 0xFFFF_FE00_0000_0000
 
 
 def _dup(context: ExecutionContext) -> None:
@@ -967,6 +968,41 @@ def _core_status(context: ExecutionContext) -> None:
     context.data.replace_top(0)
 
 
+def _cluster_enable_store(context: ExecutionContext) -> None:
+    mask = context.data.peek()
+    if mask != 0:
+        raise ExecutionError(
+            "CLUSTER-EN! cannot enable micro-core clusters in the one-core "
+            f"hosted profile, got mask 0x{mask:016x}; the mask was not "
+            "consumed"
+        )
+    context.data.pop()
+
+
+def _cluster_unavailable(
+    context: ExecutionContext,
+    word: str,
+    *,
+    operand: bool = False,
+) -> None:
+    suffix = ""
+    if operand:
+        value = context.data.peek()
+        suffix = f"; operand 0x{value:016x} was not consumed"
+    raise ExecutionError(
+        f"{word} is unavailable without a hosted micro-core cluster{suffix}"
+    )
+
+
+def _cluster_spad(context: ExecutionContext) -> None:
+    context.data.push(_CLUSTER_SPAD_ADDRESS)
+
+
+def _micro_question(context: ExecutionContext) -> None:
+    core_id = context.data.pop()
+    context.data.push(forth_flag(core_id >= 1))
+
+
 def _disk_transfer_checked(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
@@ -1747,6 +1783,18 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"SPIN!", lambda context: _spin_release(runtime, context)),
         (b"WAKE-CORE", _wake_core_unavailable),
         (b"CORE-STATUS", _core_status),
+        (b"CLUSTER-EN!", _cluster_enable_store),
+        (b"CLUSTER-EN@", _push_zero),
+        (
+            b"BARRIER-ARRIVE",
+            lambda context: _cluster_unavailable(context, "BARRIER-ARRIVE"),
+        ),
+        (
+            b"BARRIER-STATUS",
+            lambda context: _cluster_unavailable(context, "BARRIER-STATUS"),
+        ),
+        (b"SPAD", _cluster_spad),
+        (b"MICRO?", _micro_question),
         (b"DISK@", lambda context: context.data.push(runtime.storage.status)),
         (
             b"DISK-SECTORS",
@@ -2232,6 +2280,42 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (
             b"MPU-LIMIT@",
             lambda context: _mpu_limit_fetch(runtime, context),
+        ),
+        (
+            b"CL-PRIV!",
+            lambda context: _cluster_unavailable(
+                context,
+                "CL-PRIV!",
+                operand=True,
+            ),
+        ),
+        (
+            b"CL-PRIV@",
+            lambda context: _cluster_unavailable(context, "CL-PRIV@"),
+        ),
+        (
+            b"CL-MPU-BASE!",
+            lambda context: _cluster_unavailable(
+                context,
+                "CL-MPU-BASE!",
+                operand=True,
+            ),
+        ),
+        (
+            b"CL-MPU-LIMIT!",
+            lambda context: _cluster_unavailable(
+                context,
+                "CL-MPU-LIMIT!",
+                operand=True,
+            ),
+        ),
+        (
+            b"CL-MPU-BASE@",
+            lambda context: _cluster_unavailable(context, "CL-MPU-BASE@"),
+        ),
+        (
+            b"CL-MPU-LIMIT@",
+            lambda context: _cluster_unavailable(context, "CL-MPU-LIMIT@"),
         ),
         (
             b"BACKGROUND",
