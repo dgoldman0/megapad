@@ -260,11 +260,15 @@ words all produce human-readable ASCII output.
 | `HEX` | `( -- )` | Set numeric output base to 16. |
 | `DECIMAL` | `( -- )` | Set numeric output base to 10. |
 
-The hosted simulator has no MP64 timer cadence. Its pseudo-BIOS `CYCLES`
-returns the low 32 bits of a separate persistent semantic-dispatch clock; the
-clock is shared by contexts in one runtime, isolated between runtimes, and is
-not reset by `PERF-RESET`. Raw Timer MMIO remains unadmitted. This is distinct
-from the hosted 64-bit `PERF-CYCLES` work counter and is not hardware timing.
+The hosted simulator has no MP64 timer cadence. Its pseudo-BIOS `CYCLES` reads
+a retained 32-bit Timer counter which advances once per admitted semantic guest
+step, including the `CYCLES` operation before its read. The counter is shared
+by contexts in one runtime, isolated between runtimes, and unaffected by
+`PERF-RESET`. `TIMER!`, `TIMER-CTRL!`, and `TIMER-ACK` preserve compare,
+enable/freeze, auto-reload, sticky match, and conditional IRQ-latch semantics.
+Raw Timer MMIO, vector delivery, and automatic IDL wake remain unadmitted. This
+Timer is distinct from the hosted 64-bit semantic-work/performance diagnostics
+and is deterministic semantic time, not hardware timing.
 
 The intended executable/emulator Timer accesses are full 32-bit little-endian
 loads and stores. The current RTL SoC integration routes the Timer as a byte

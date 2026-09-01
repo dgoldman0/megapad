@@ -407,14 +407,31 @@ hit/miss observations are zero. None of these diagnostic substitutions is
 evidence for pipeline timing, physical RAM coverage, tile hardware, or a
 physical instruction cache.
 
-Pseudo-BIOS `CYCLES` is a separate per-runtime semantic-work clock. It is
-shared by that runtime's contexts, isolated between runtimes, unaffected by
-`PERF-RESET`, and exposed as a zero-extended wrapping low 32-bit value to match
-the intended Timer COUNT ABI. The successful `CYCLES` dispatch contributes the
-tick it returns. Raw Timer MMIO and hardware cadence are not admitted.
-Emulator/native implement the intended 32-bit timer accesses, while the current
-RTL SoC byte peripheral wiring exposes only `COUNT_LO` to `CYCLES` and accepts
-only `COMPARE_LO` from `TIMER!`; that backend discrepancy is not normalized into
+Pseudo-BIOS `CYCLES` reads a retained per-runtime 32-bit Timer counter. The
+Timer is shared by that runtime's contexts, isolated between runtimes, starts
+in the post-BIOS enabled state, and advances once before each admitted semantic
+operation. It wraps at 32 bits and is unaffected by `PERF-RESET`; the internal
+64-bit semantic-work diagnostic remains separate. The successful `CYCLES`
+dispatch therefore contributes the tick it returns. Disabling timer control
+freezes `CYCLES` even though semantic-work accounting continues.
+
+`TIMER!` atomically retains the input cell's low 32 bits as compare and
+`TIMER-CTRL!` retains its low byte. Control bit 0 enables advancement, bit 1
+enables IRQ latching on a match, and bit 2 selects auto-reload. A newly reached
+compare value sets sticky status bit 0, latches pending IRQ only when bit 1 is
+set, and resets the counter to zero only when bit 2 is set. Compare equal to
+the current counter is not immediate; compare zero next matches only after a
+complete wrap. Compare/control writes do not clear counter, status, or an
+already pending latch. `TIMER-ACK` clears sticky match and pending IRQ.
+
+An `IDL` operation advances the Timer before suspension. No Timer step occurs
+while the dispatch is detached or merely because the host delivers a wake;
+resumed guest operations advance it normally. Pending IRQ state does not
+vector, mutate `PREEMPT-FLAG`, or authorize/wake `IDL`. Raw Timer MMIO,
+hardware cadence, and wall-clock pacing are not admitted. Emulator/native
+implement the intended 32-bit timer accesses, while the current RTL SoC byte
+peripheral wiring exposes only `COUNT_LO` to `CYCLES` and accepts only
+`COMPARE_LO` from `TIMER!`; that backend discrepancy is not normalized into
 another hosted mode.
 
 The admitted one-core legacy tile service binds `TMODE!`, `TCTRL!`,

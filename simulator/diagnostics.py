@@ -2,8 +2,9 @@
 
 The source simulator has no MP64 pipeline, cache, tile datapath, or destructive
 RAM test engine.  It still provides the safe public diagnostic observations so
-ordinary KDOS can load unchanged.  ``PERF-CYCLES`` and the separate hosted
-``CYCLES`` clock count backend-local semantic work rather than machine cycles;
+ordinary KDOS can load unchanged.  ``PERF-CYCLES`` and the separate internal
+semantic-work counter count backend-local dispatcher work rather than machine
+cycles.  Pseudo-BIOS ``CYCLES`` belongs to the runtime-local Timer service;
 unsafe or unsupported active tests fail explicitly instead of manufacturing a
 hardware pass.
 """
@@ -110,7 +111,7 @@ class HostedDiagnosticsService:
 
     @property
     def semantic_cycles(self) -> int:
-        """Return the persistent hosted work clock used by BIOS ``CYCLES``."""
+        """Return the persistent hosted semantic-work diagnostic."""
 
         return self._semantic_cycles
 

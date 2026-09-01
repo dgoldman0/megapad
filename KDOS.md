@@ -1115,9 +1115,10 @@ KDOS | bufs=3  kerns=7  pipes=3  files=0  disk=no  HERE=24576
 ```
 
 On hardware this uses `CYCLES`, the intended wrapping 32-bit Timer COUNT, and
-`EXECUTE` for indirect call. The hosted simulator substitutes the low 32 bits
-of a per-runtime semantic-work clock that is distinct from `PERF-CYCLES` and
-unaffected by `PERF-RESET`; it is deterministic work evidence, not MP64 timing.
+`EXECUTE` for indirect call. The hosted simulator retains a runtime-local
+32-bit Timer driven once per admitted semantic guest step. It is distinct from
+the semantic-work/performance diagnostics and unaffected by `PERF-RESET`; it
+is deterministic work evidence, not MP64 timing.
 The current RTL SoC Timer wiring exposes only `COUNT_LO` to `CYCLES` and accepts
 only `COMPARE_LO` from `TIMER!`, unlike emulator/native and the documented
 32-bit ABI, so that discrepancy remains open.

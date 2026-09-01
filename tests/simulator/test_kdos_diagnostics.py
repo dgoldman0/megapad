@@ -23,6 +23,7 @@ from simulator.diagnostics import (
 )
 from simulator.errors import ExecutionError
 from simulator.runtime import MegaForthRuntime
+from simulator.timer import HostedTimerService, UINT32_MASK
 from simulator.tile import (
     TILE_BYTES,
     tile_add_u8,
@@ -118,7 +119,7 @@ def _normalize_cycles(output: bytes) -> bytes:
     return normalized
 
 
-def test_cycles_is_a_separate_low32_semantic_work_clock() -> None:
+def test_cycles_reads_the_separate_runtime_local_timer_clock() -> None:
     runtime = MegaForthRuntime()
 
     assert _execute(runtime, "CYCLES") == (1,)
@@ -138,10 +139,12 @@ def test_cycles_is_a_separate_low32_semantic_work_clock() -> None:
     assert _execute(isolated, "CYCLES") == (1,)
 
     wrapped = MegaForthRuntime(
-        diagnostics=HostedDiagnosticsService(semantic_cycles=0xFFFF_FFFF)
+        diagnostics=HostedDiagnosticsService(semantic_cycles=0xFFFF_FFFF),
+        timer=HostedTimerService(counter=UINT32_MASK),
     )
     assert _execute(wrapped, "CYCLES") == (0,)
     assert wrapped.diagnostics.semantic_cycles == 0x1_0000_0000
+    assert wrapped.timer.counter == 0
 
 
 def test_diagnostic_slice_is_exact_and_publishes_complete_ledger(

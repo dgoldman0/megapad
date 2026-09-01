@@ -55,9 +55,13 @@ The implemented slices provide:
   transaction state, coherent SysInfo capability discovery, exact byte/cell
   feeds, raw/final release, and source-visible status behavior;
 - a per-runtime pseudo-BIOS diagnostic profile with persistent semantic-work
-  accounting, a distinct low-32-bit semantic `CYCLES` clock, retained
-  non-destructive BIST observations, a real four-operation tile value
-  self-test, and logical no-cache controls/zero cache counters;
+  accounting, retained non-destructive BIST observations, a real
+  four-operation tile value self-test, and logical no-cache controls/zero
+  cache counters;
+- a retained runtime-local 32-bit Timer behind `CYCLES`, `TIMER!`,
+  `TIMER-CTRL!`, and `TIMER-ACK`, driven deterministically by semantic guest
+  steps with enable/freeze, wrap, compare, auto-reload, sticky status, and IRQ
+  latch state but no raw MMIO or interrupt delivery;
 - a runtime-local deterministic RTC epoch subwindow at `+0xB08..+0xB0F`, with
   explicit host set/advance controls, low-byte read latching, direct MMIO
   access, and BIOS `EPOCH@`, but no automatic or wall-clock advancement;
@@ -855,12 +859,25 @@ registry/accessor/kernel/step words. Load-time state is `KERN-COUNT=23`,
 their normal bound XTs and ordinary Buffer paths; `BENCH` reports deterministic
 hosted work, not MP64 timing.
 
-The hosted `OFF` word performs an exact zero-cell store. Hosted `CYCLES` is the
-wrapping low 32 bits of a separate per-runtime semantic-work clock, shared by
-that runtime's contexts and unaffected by `PERF-RESET`; raw Timer MMIO remains
-unimplemented. Emulator/native perform the intended full 32-bit Timer accesses,
-while current RTL SoC wiring exposes only `COUNT_LO` to `CYCLES` and accepts
-only `COMPARE_LO` from `TIMER!`, an explicit backend discrepancy.
+The hosted `OFF` word performs an exact zero-cell store. Hosted `CYCLES` reads
+the retained runtime-local 32-bit Timer counter after its own semantic step.
+That Timer starts in the post-BIOS enabled state, advances once per admitted
+guest step, wraps at 32 bits, and is shared by all contexts in the runtime.
+`TIMER!` retains the low 32 bits of a cell atomically; `TIMER-CTRL!` retains the
+low byte, including unknown bits, while enable, IRQ-enable, and auto-reload are
+bits 0–2. A compare match sets sticky status, conditionally latches pending IRQ
+state, and resets the counter only when auto-reload is selected. `TIMER-ACK`
+clears the match bit and pending latch. Writes otherwise preserve counter,
+status, and pending state, and `PERF-RESET` affects none of them.
+
+This is deterministic semantic time, not MP64 cadence or wall time. An `IDL`
+operation contributes its step before suspension; the Timer then freezes while
+the dispatch is detached, and host wake delivery itself does not advance it.
+Pending IRQ is observable host state only: it does not vector, set a KDOS flag,
+or wake `IDL`. Raw Timer MMIO remains unimplemented. Emulator/native perform
+the intended full 32-bit Timer accesses, while current RTL SoC wiring exposes
+only `COUNT_LO` to `CYCLES` and accepts only `COMPARE_LO` from `TIMER!`, an
+explicit backend discrepancy.
 
 The source's limits and defects remain observable. Full kernel/pipeline
 registries silently omit later entries after still allocating their descriptors

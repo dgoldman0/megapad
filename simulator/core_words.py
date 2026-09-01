@@ -737,6 +737,20 @@ def _key_query(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(forth_flag(runtime.uart_input_available))
 
 
+def _timer_compare_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.timer.write_compare(context.data.pop())
+
+
+def _timer_control_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.timer.write_control(context.data.pop())
+
+
 def _epoch_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     value = 0
     for index in range(RTC_EPOCH_SIZE):
@@ -2059,9 +2073,18 @@ def install_core(runtime: MegaForthRuntime) -> None:
             b"CYCLES",
             lambda context: _push_diagnostic(
                 context,
-                runtime.diagnostics.semantic_cycles & 0xFFFF_FFFF,
+                runtime.timer.counter,
             ),
         ),
+        (
+            b"TIMER!",
+            lambda context: _timer_compare_store(runtime, context),
+        ),
+        (
+            b"TIMER-CTRL!",
+            lambda context: _timer_control_store(runtime, context),
+        ),
+        (b"TIMER-ACK", lambda _context: runtime.timer.acknowledge()),
         (
             b"PERF-STALLS",
             lambda context: _push_diagnostic(

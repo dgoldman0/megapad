@@ -1526,12 +1526,13 @@ corruption, including negative cells, is not rejected, and construction uses
 shared `PDESC`, `P-XT`, and `P-PIPE` scratch.
 
 On the machine, `BENCH` reads the intended wrapping 32-bit Timer COUNT through
-`CYCLES`. The hosted profile instead returns the low 32 bits of a separate
-per-runtime semantic-work clock, unaffected by `PERF-RESET`; it makes execution
-order measurable but is not MP64 timing. Current RTL SoC Timer wiring exposes
-only `COUNT_LO` to `CYCLES` and accepts only `COMPARE_LO` from `TIMER!`, while
-emulator/native provide the intended 32-bit accesses. This remains an explicit
-backend discrepancy.
+`CYCLES`. The hosted profile now preserves that register behavior in a
+runtime-local Timer advanced once per admitted semantic guest step. It is
+unaffected by `PERF-RESET` and makes execution order measurable, but it has no
+MP64 cadence, raw MMIO, or interrupt delivery. Current RTL SoC Timer wiring
+exposes only `COUNT_LO` to `CYCLES` and accepts only `COMPARE_LO` from
+`TIMER!`, while emulator/native provide the intended 32-bit accesses. This
+remains an explicit backend discrepancy.
 
 ### Demo Pipelines
 

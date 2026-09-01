@@ -79,6 +79,7 @@ from simulator.source import (
     SourceLocation,
 )
 from simulator.stacks import DataStack, ReturnEntry, ReturnStack
+from simulator.timer import HostedTimerService
 
 
 _BIOS_EVALUATE_MAX_BYTES = 255
@@ -485,6 +486,7 @@ class MegaForthRuntime:
         dictionary_start: int = 0x1000,
         memory: SparseAddressSpace | None = None,
         diagnostics: HostedDiagnosticsService | None = None,
+        timer: HostedTimerService | None = None,
         storage: HostedStorageService | None = None,
         install_core_words: bool = True,
     ) -> None:
@@ -497,6 +499,8 @@ class MegaForthRuntime:
             raise TypeError(
                 "diagnostics must be a HostedDiagnosticsService or None"
             )
+        if timer is not None and not isinstance(timer, HostedTimerService):
+            raise TypeError("timer must be a HostedTimerService or None")
         if storage is not None and not isinstance(storage, HostedStorageService):
             raise TypeError("storage must be a HostedStorageService or None")
         if memory is None:
@@ -547,6 +551,11 @@ class MegaForthRuntime:
             HostedDiagnosticsService()
             if diagnostics is None
             else diagnostics.clone()
+        )
+        self.timer = (
+            HostedTimerService()
+            if timer is None
+            else timer.clone()
         )
         self.storage = HostedStorageService() if storage is None else storage
         self.tile = HostedTileService(
@@ -1364,7 +1373,7 @@ class MegaForthRuntime:
         self._execute_dictionary_fault_guarded(
             request,
             request.context,
-            _StepMeter(None, self.diagnostics.account_work),
+            _StepMeter(None, self._account_semantic_step),
         )
         raise AssertionError("dictionary fault callback returned to its caller")
 
@@ -2890,8 +2899,14 @@ class MegaForthRuntime:
                 )
             meter = self._active_dispatches[-1].meter
             return meter, meter.steps
-        meter = _StepMeter(step_budget, self.diagnostics.account_work)
+        meter = _StepMeter(step_budget, self._account_semantic_step)
         return meter, 0
+
+    def _account_semantic_step(self) -> None:
+        """Advance each runtime-local work clock for one admitted step."""
+
+        self.diagnostics.account_work()
+        self.timer.advance()
 
     @staticmethod
     def _parse_quoted_literal(
