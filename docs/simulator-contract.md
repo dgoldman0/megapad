@@ -1260,7 +1260,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5514. Exact unchanged lines
+The contiguous source frontier now ends at line 5610. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1562,9 +1562,85 @@ and no secondary extent. The source enforces none of those descriptor, type,
 capacity, length, or secondary-extent constraints and does not enforce
 per-entry read-only or system flags. `SB-*`, `LB-*`, name/parser
 state, cache, and storage diagnostics are global and unlocked; this slice adds
-no file lock or transactional recovery. Blank line 5515 is the next uncovered
-seam before the unqualified FD Pool heading at line 5516; its first constants
-are at lines 5532–5533.
+no file lock or transactional recovery.
+
+Exact unchanged lines 5515 through 5610 contain 96 LF lines and 3,397 bytes,
+with SHA-256
+`16637705bd8d26e0e92b14605ba0e4e772ec2d5d5c9eb02bbd107714c8650c78`
+and Git blob `e01ffa80d946b2cddd50e37bcefd9421a1b8dbb9`. Their exact 14-definition
+ledger is, in source order, constants `FD-MAX` and `FD-SLOT-SZ`, created word
+`FD-POOL`, colons `FD-SLOT`, `FD-ALLOC`, and `(FCLOSE-NOFS)`, deferred word
+`FCLOSE`, colon `FD-FILL`, variable `OP-SLOT`, colon `(OPEN)`, deferred word
+`OPEN`, then colons `F.SLOT`, `FFLUSH`, and `(FCLOSE)`.
+
+Load allocates `16 * 72 = 1,152` bytes after `FD-POOL`, explicitly zero-fills
+that entire span, and initializes `OP-SLOT` to zero. It creates `FCLOSE`, binds
+it to `(FCLOSE-NOFS)`, later creates `OPEN` and binds it to `(OPEN)`, then after
+compiling `FFLUSH` and `(FCLOSE)` rebinds the existing `FCLOSE` to `(FCLOSE)`.
+The final deferred targets are exactly `(OPEN)` and `(FCLOSE)`; there is one
+dictionary word for each public defer. These dictionary, allocation, fill, and
+deferred-vector mutations are the only load-time effects: loading performs no
+filesystem ensure or parse, cache/media I/O, sync or flush, diagnostic update,
+clock access, or UART output.
+
+Each 72-byte slot has an in-use cell at slot `+0`; its returned fdesc points to
+slot `+8`. Relative to fdesc, the cells are primary start `+0`, primary maximum
+sector count `+8`, used bytes `+16`, cursor `+24`, directory slot `+32`,
+secondary start `+40`, secondary count `+48`, and reserved `+56`. `FD-SLOT`
+is unchecked address arithmetic. `FD-ALLOC` scans indices 0 through 15,
+selects the first zero in-use cell, stores `-1`, and returns slot `+8`; it
+returns zero when all headers are nonzero. It never clears payload cells.
+`FD-FILL` snapshots the selected cached directory entry into offsets `+0` through
+`+48` and resets the cursor to zero, but does not overwrite reserved `+56`.
+The reserved cell is zero after cold load and retained across fill, close, and
+reuse. `(FCLOSE-NOFS)` remains a directly callable word after the deferred
+rebind: zero is a no-op, while nonzero unconditionally clears the cell at
+`fdesc - 8` without flushing or clearing payload.
+
+Final `OPEN` calls `FS-ENSURE` and rejects false `FS-OK` before parsing. That
+path returns zero, leaves the filename token and `OP-SLOT` unchanged, and
+prints ` No filesystem` plus CRLF. After parsing, a lookup miss stores `-1` in
+`OP-SLOT`, prints ` Not found: ` plus the parsed name and CRLF, and returns zero
+without allocation. Pool exhaustion occurs only after a successful match;
+`OP-SLOT` retains the match, `FD-ALLOC` returns zero, `OPEN` prints ` No free FD
+slots` plus CRLF, and no slot changes. Success returns the lowest available
+fdesc, snapshots the cache with cursor zero, and emits nothing. When `FS-OK`
+was already true, every miss, exhaust, and success path is storage-I/O-free and
+success reads no file payload; an initial false marker may allow `FS-ENSURE` to
+invoke the already-qualified `FS-LOAD` before the gate.
+
+`OPEN` does not reject a directory or inspect type/flags, capture a storage
+binding or generation, revalidate a true `FS-OK`, prevent duplicate opens, or
+link independent cursor/used snapshots. Directory mutation, cache reload, or
+media rebinding can stale a live descriptor. Multiple descriptors for one
+entry are allowed, and later flush order alone decides the cached/on-media used
+count. `FD-FILL` copies secondary coordinates, but neither this fixture nor
+that structural snapshot qualifies multi-extent `FREAD`, `FWRITE`, or any
+other data I/O.
+
+`FFLUSH` gates directly on `FS-OK` before accessing the supplied address. A
+false marker drops it, prints ` FS not loaded` plus CRLF, and performs no cache
+or media mutation. With a true marker, it reads `F.USED` and `F.SLOT`, stores
+only the low 32 bits of used into cached directory offset 28, then calls
+`FS-SYNC`. It does not write payload or change name, extents, type, flags,
+parent, `mtime`, or CRC. It validates neither fdesc membership/directory-slot
+range nor used against the allocated extent capacity; `L!` truncates any cell
+to low u32. The cache mutation precedes bitmap write, directory write, and
+flush, so a sync abort retains the changed cache and any completed media
+prefix. Direct `FFLUSH` does not release the descriptor.
+
+Final `FCLOSE` first treats zero as a no-op. For nonzero input it samples
+`FS-OK`: true calls `FFLUSH`, and only a normal return clears the in-use header;
+an abort keeps the descriptor allocated even though cache or media may already
+have changed. False skips persistence silently and clears the header, thereby
+discarding any dirty used count. Every release clears only the header: all
+fdesc cells, the reserved cell, and the file payload remain intact. Neither
+close path validates membership, alignment, allocation, or directory identity.
+A stale pointer to a lowest-first-reused address can therefore flush or release
+the new occupant (an ABA hazard), while a double close can race logical reuse.
+Pool headers, fdesc payloads, `OP-SLOT`, parser state, directory cache, and the
+deferred vectors are global and unlocked. The next uncovered seam is the
+`LOAD` heading at line 5611.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

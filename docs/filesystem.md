@@ -36,13 +36,14 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 5514. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 5610. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
 bitmap, then exact-name lookup, `MKFILE`/`RMFILE`/`RENAME` metadata mutation,
 bounded primary-extent `CAT` publication, cache-only total/largest-free and
-global occupancy reporting, and primary-extent `SAVE-BUFFER`/`LOAD-BUFFER`.
+global occupancy reporting, primary-extent `SAVE-BUFFER`/`LOAD-BUFFER`, and the
+fixed FD pool with cached `OPEN`, used-metadata `FFLUSH`, and final `FCLOSE`.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -58,12 +59,21 @@ order, are `SB-SLOT`, `SB-DESC`, `SAVE-BUFFER`, `LB-SLOT`, `LB-DESC`, and
 `LOAD-BUFFER`; loading zeroes the four variables and installs the two colon
 bodies and strings without any filesystem, Buffer, media, diagnostic, flush,
 or output effect.
+The exact 5515–5610 fixture contains 96 LF lines and 3,397 bytes, with SHA-256
+`16637705bd8d26e0e92b14605ba0e4e772ec2d5d5c9eb02bbd107714c8650c78`
+and Git blob `e01ffa80d946b2cddd50e37bcefd9421a1b8dbb9`. Its 14-definition
+source-order ledger is `FD-MAX`, `FD-SLOT-SZ`, `FD-POOL`, `FD-SLOT`,
+`FD-ALLOC`, `(FCLOSE-NOFS)`, `FCLOSE`, `FD-FILL`, `OP-SLOT`, `(OPEN)`,
+`OPEN`, `F.SLOT`, `FFLUSH`, and `(FCLOSE)`. Load zero-fills the 1,152-byte
+pool, zeroes `OP-SLOT`, binds `FCLOSE` first to `(FCLOSE-NOFS)` and finally to
+`(FCLOSE)`, and binds `OPEN` to `(OPEN)`. It performs no filesystem or media
+I/O, synchronization, diagnostic update, or output.
 `FS-LOAD` consumes the separately qualified native
 `MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
 metadata predicate, and generation check. This boundary is not evidence of
-file-backed close/reopen durability, the FD Pool/`OPEN` family or later
-filesystem commands, malformed mutation/content safety, allocator improvement,
-compaction, repair, or stronger filesystem validation.
+file-backed close/reopen durability, the `LOAD` family or later filesystem
+commands, multi-extent content I/O, malformed mutation/content safety,
+allocator improvement, compaction, repair, or stronger filesystem validation.
 
 ---
 
@@ -810,9 +820,70 @@ a canonical matched non-directory file, one positive in-range primary extent,
 and no secondary extent. None of those descriptor, capacity, type, or extent
 conditions or the entry's read-only/system flags is checked here. Scratch
 cells, parser state, cache, and diagnostics
-are global and unlocked. Blank line 5515 is the next seam before the
-unqualified FD Pool heading at line 5516; its first constants appear at lines
-5532–5533.
+are global and unlocked. Blank line 5515 leads into the admitted FD-pool slice.
+
+### File Descriptor Pool and Cached Open
+
+The pool has 16 fixed 72-byte slots and is fully zeroed at source load. A
+returned fdesc points eight bytes into its slot:
+
+| Slot offset | fdesc offset | Field |
+|---:|---:|---|
+| `+0` | — | in-use header (`0` free, `-1` allocated) |
+| `+8` | `+0` | primary start sector |
+| `+16` | `+8` | primary maximum sector count |
+| `+24` | `+16` | used bytes |
+| `+32` | `+24` | cursor |
+| `+40` | `+32` | cached directory slot |
+| `+48` | `+40` | secondary start sector |
+| `+56` | `+48` | secondary sector count |
+| `+64` | `+56` | reserved |
+
+`FD-ALLOC` scans lowest slot first, marks the first free header, and returns
+its fdesc; it returns zero at 16-slot exhaustion. It never clears payload.
+`FD-FILL` snapshots the cached directory fields through secondary count and
+sets cursor to zero, but does not touch reserved `+56`. That cell begins zero
+and is retained across fill, close, and reuse, as are all payload cells when a
+slot is merely released and allocated again. The named `(FCLOSE-NOFS)` helper
+remains directly callable: zero is a no-op and nonzero clears only the header,
+always bypassing persistence.
+
+`OPEN` calls `FS-ENSURE` and checks `FS-OK` before parsing. Gate failure prints
+`No filesystem`, returns zero, and leaves the name token and `OP-SLOT`
+unchanged. A miss records `-1`, prints the parsed name, and returns zero before
+allocation. Exhaustion retains the matched slot, prints `No free FD slots`,
+and returns zero. Success selects the lowest free descriptor, snapshots cached
+primary/secondary coordinates, used count, and directory slot, resets cursor,
+and produces no output. With an already-true `FS-OK`, open performs no storage
+or payload I/O; only an initial `FS-ENSURE` load can do metadata I/O.
+
+This snapshot has no binding/generation identity and does not revalidate a
+true `FS-OK`, type, flags, or directory status. It permits multiple opens of
+the same entry and does not coordinate their independent cursor and used
+counts. Directory mutation, cache reload, and storage rebinding can stale an
+open descriptor, while later flush order among duplicates can overwrite a
+newer used count. The copied secondary fields document descriptor layout only;
+they do not qualify multi-extent `FREAD`, `FWRITE`, or other content I/O.
+
+`FFLUSH` checks `FS-OK` before descriptor access. A false marker prints `FS not
+loaded`, drops the descriptor, and does nothing else. With a true marker it
+stores only low-u32 `F.USED` in the cached directory entry selected by
+`F.SLOT`, then calls nontransactional `FS-SYNC`. It never writes file payload
+or changes the name, extents, type, flags, parent, `mtime`, or CRC. It validates
+neither fdesc/directory-slot identity nor used against capacity; `L!` truncates
+the cell to low u32. The cache changes before bitmap/directory writes and flush,
+so failure can retain the new cache value and a partial media prefix.
+
+Final `FCLOSE` treats zero as a no-op. For nonzero input with true `FS-OK`, it
+calls `FFLUSH` and releases only after a successful return; a flush failure
+keeps the header allocated while cache/media effects may remain. With false
+`FS-OK`, it silently discards persistence and releases. Release clears only
+the in-use header, retaining descriptor/reserved cells and leaving file payload
+untouched. No operation validates pool membership, alignment, allocation, or
+directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
+flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
+and deferred targets are global and unlocked. The next uncovered seam is the
+`LOAD` heading at line 5611.
 
 ### Documentation Access
 
@@ -832,8 +903,10 @@ unqualified FD Pool heading at line 5516; its first constants appear at lines
 | `FS-LOAD` | Load superblock + bitmap + directory into RAM |
 | `FS-SYNC` | Write RAM cache back to disk |
 | `FS-ENSURE` | Auto-load FS if not yet loaded |
-| `OPEN name` | Later FD-pool source outside the current hosted frontier; in full KDOS it returns a descriptor for `FREAD`/`FWRITE` and is deferred |
-| `FCLOSE fdesc` | Later FD-pool source outside the current hosted frontier; in full KDOS it releases a descriptor |
+| `FD-ALLOC` | Allocate the lowest free fixed-pool slot, returning its retained fdesc or zero |
+| `OPEN name` | Ensure and find a cached name, allocate an FD, and snapshot its directory fields; deferred to `(OPEN)` |
+| `FFLUSH fdesc` | Cache low-u32 `F.USED` and run `FS-SYNC`; no payload write |
+| `FCLOSE fdesc` | Flush used metadata before release when `FS-OK`; otherwise silently release; deferred to `(FCLOSE)` |
 | `DIRENT n` | Address of directory entry *n* in the RAM cache (48 bytes each) |
 | `FIND-BY-NAME` | Return the first occupied current-directory entry whose complete 24-byte name matches zero-padded `NAMEBUF`; it does not check `FS-OK` |
 

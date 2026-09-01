@@ -649,8 +649,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5514 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, cached listing, exact-name lookup, metadata creation/deletion/rename, primary-extent `CAT` publication, cache-only free-space/fragmentation reporting, and primary-extent Buffer save/load |
-| 5515 onward | Next uncovered frontier | Blank line 5515 precedes the unqualified FD Pool family headed at line 5516; its first constants are at lines 5532–5533 |
+| 39–5610 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, cached listing, exact-name lookup, metadata creation/deletion/rename, primary-extent `CAT` and Buffer I/O, cache-only free-space reporting, and the fixed FD pool with cached `OPEN`/metadata flush/final close lifecycle |
+| 5611 onward | Next uncovered frontier | The unqualified `LOAD` family begins with its heading at line 5611 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1059,6 +1059,70 @@ print the saved `B.LEN` or cached
 state, filesystem cache, and storage diagnostics are global and unlocked; the
 words add no transaction or filesystem-level lock.
 
+The adjacent FD fixture is exact unchanged `kdos.f` lines 5515–5610: 96 LF
+lines, 3,397 bytes, SHA-256
+`16637705bd8d26e0e92b14605ba0e4e772ec2d5d5c9eb02bbd107714c8650c78`,
+and Git blob `e01ffa80d946b2cddd50e37bcefd9421a1b8dbb9`. Its 14-definition
+source-order ledger is `FD-MAX`, `FD-SLOT-SZ`, `FD-POOL`, `FD-SLOT`,
+`FD-ALLOC`, `(FCLOSE-NOFS)`, `FCLOSE`, `FD-FILL`, `OP-SLOT`, `(OPEN)`,
+`OPEN`, `F.SLOT`, `FFLUSH`, and `(FCLOSE)`. Loading allocates and zero-fills
+the fixed 16 × 72-byte, 1,152-byte pool and zero-initializes `OP-SLOT`.
+It creates `FCLOSE`, first binds it to `(FCLOSE-NOFS)`, creates and binds
+`OPEN` to `(OPEN)`, then rebinds the same `FCLOSE` deferred word to final
+`(FCLOSE)`. The final targets are therefore `(OPEN)` and `(FCLOSE)`. Loading
+does no ensure, parse, cache or media I/O, synchronization, diagnostic update,
+or UART output.
+
+Each 72-byte slot begins with an eight-byte in-use header. The returned
+descriptor is `slot + 8` and contains start sector at `+0`, maximum primary
+sectors at `+8`, used bytes at `+16`, cursor at `+24`, directory slot at `+32`,
+secondary start/count at `+40`/`+48`, and a reserved cell at `+56`. `FD-ALLOC`
+scans slots lowest first, marks the first zero header `-1`, and returns its
+descriptor; exhaustion returns zero. Allocation and either close body clear
+no descriptor payload. `FD-FILL` snapshots the seven fields through secondary
+count from the cached directory, resets cursor to zero, and deliberately leaves
+the reserved cell unchanged. It begins as zero but remains retained across
+close and reuse. The named `(FCLOSE-NOFS)` body also remains directly callable:
+zero is a no-op, while nonzero clears only the preceding header and always
+bypasses persistence.
+
+`OPEN` ensures and gates availability before parsing. Failure returns zero and
+prints `No filesystem`, leaving the name token and `OP-SLOT` unchanged. A miss
+stores `-1` in `OP-SLOT`, prints the parsed name, and returns zero before pool
+allocation. Exhaustion retains the matched slot in `OP-SLOT`, prints `No free
+FD slots`, and returns zero. Success allocates the lowest slot and snapshots
+the cached entry with cursor zero, without payload I/O or output. With
+`FS-OK` already true the whole lookup/open path is cache-only; `FS-ENSURE` may
+still perform `FS-LOAD` when it begins false.
+
+The source does not reject directories, types, or flags, bind a descriptor to
+a storage generation, revalidate cached geometry, prevent multiple opens, or
+coordinate independent used/cursor snapshots. An already-true stale `FS-OK`
+remains trusted, the first exact duplicate still shadows later entries, and
+out-of-order flushes of multiple descriptors can overwrite newer `used_bytes`.
+Although `FD-FILL` copies secondary-extent coordinates, this slice qualifies no
+multi-extent read or write behavior.
+
+`FFLUSH` checks `FS-OK` before descriptor access. A false marker drops the
+argument and prints `FS not loaded` without cache or media effects. Otherwise
+it stores only the low 32 bits of `F.USED` into the cached entry selected by
+`F.SLOT`, then calls the existing nontransactional `FS-SYNC`; it does not write
+file payload or update `mtime`, CRC, flags, or any extent. It validates neither
+the descriptor/directory slot nor used against allocated capacity; `L!` simply
+truncates the cell to low u32. A sync failure occurs after the cache mutation
+and can leave partial bitmap/directory/flush effects.
+
+Final `FCLOSE` ignores zero before reading `FS-OK`. With a true marker it calls
+`FFLUSH` and releases the slot only after that call returns; a flush abort keeps
+the header allocated while retaining the changed cache and any partial media
+effects. With a false marker it silently skips persistence and releases the
+slot, discarding the dirty used count. Successful release clears only the
+header, retaining every descriptor and reserved cell and leaving file payload
+untouched. No operation validates that an address is a currently allocated
+pool descriptor. Reused addresses create an ABA hazard in which a stale handle
+can flush or close a new occupant; pool headers, descriptor cells, `OP-SLOT`,
+parser state, cache, and deferred bindings are global and unlocked.
+
 The earlier low-level helper domain is validator-approved geometry, positive
 run counts, in-range sectors and slots, complete cache spans, and structurally
 valid directory entries. Those helper words do not gate on `FS-OK` or validate
@@ -1068,9 +1132,9 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue after blank line 5515 with the FD Pool family headed at
-line 5516, then toward the persistent evaluator, ordinary checked module-loader
-surface, and deterministic cooperative task scheduler.
+Later slices continue with the `LOAD` heading at line 5611, then toward the
+persistent evaluator, ordinary checked module-loader surface, and deterministic
+cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

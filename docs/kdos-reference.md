@@ -858,8 +858,9 @@ bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
 storage-compatibility, legacy file, and initial MP64FS cache/helper layers,
 the MP64FS load/sync/ensure/format lifecycle, cached directory listing, exact
 name lookup, metadata creation/deletion/rename, primary-extent file
-publication, cache-only free-space reporting, and primary-extent Buffer
-save/load through line 5514.
+publication, cache-only free-space reporting, primary-extent Buffer save/load,
+and the fixed FD pool with cached open/metadata-flush/final-close lifecycle
+through line 5610.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -870,10 +871,11 @@ packed directory readers, raw-binding load, synchronization, conditional
 autoload, metadata formatting, compact type publication, direct-child listing,
 bitmap free-space reporting, exact-name lookup, deterministic timestamps,
 ordered metadata mutation, byte-exact `CAT` output, global cached
-fragmentation reporting, and ordered Buffer/file transfers are executable
-semantic behavior rather than reporting-only shims. The frontier now ends at
-line 5514; blank line 5515 precedes the unqualified FD Pool heading at line
-5516, whose first constants are at lines 5532–5533.
+fragmentation reporting, ordered Buffer/file transfers, descriptor allocation,
+cached open snapshots, used-metadata flush, and ordered close/release are
+executable semantic behavior rather than reporting-only shims. The frontier
+now ends at line 5610; the unqualified `LOAD` family begins with its heading at
+line 5611.
 
 ---
 
@@ -1146,9 +1148,19 @@ then add `SB-SLOT`, `SB-DESC`, `SAVE-BUFFER`, `LB-SLOT`, `LB-DESC`, and
 and Git blob `8b4645f16c7ac2f21036282a896b7ede6bad16b0`. Load zero-initializes the four
 scratch variables and installs the two colon bodies and inline strings without
 ensuring or parsing, dereferencing a Buffer, touching cache, media, or
-diagnostics, flushing, or publishing output. Blank line 5515 is the next
-uncovered seam before the unqualified FD Pool heading at line 5516; the first
-constants are at lines 5532–5533.
+diagnostics, flushing, or publishing output. Blank line 5515 leads into exact
+unchanged lines 5515 through 5610. That 96-LF-line,
+3,397-byte slice has SHA-256
+`16637705bd8d26e0e92b14605ba0e4e772ec2d5d5c9eb02bbd107714c8650c78`
+and Git blob `e01ffa80d946b2cddd50e37bcefd9421a1b8dbb9`. Its exact source-order
+ledger is `FD-MAX`, `FD-SLOT-SZ`, `FD-POOL`, `FD-SLOT`, `FD-ALLOC`,
+`(FCLOSE-NOFS)`, `FCLOSE`, `FD-FILL`, `OP-SLOT`, `(OPEN)`, `OPEN`, `F.SLOT`,
+`FFLUSH`, and `(FCLOSE)`: 14 definitions. Load allocates and zero-fills the
+1,152-byte pool, zero-initializes `OP-SLOT`, initially binds deferred `FCLOSE`
+to `(FCLOSE-NOFS)`, binds deferred `OPEN` to `(OPEN)`, and finally rebinds
+`FCLOSE` to `(FCLOSE)`. Those dictionary/allocation/vector mutations are its
+only load effects; it does no filesystem or media I/O and emits nothing. The
+next uncovered seam is the `LOAD` heading at line 5611.
 
 ---
 
@@ -1780,7 +1792,7 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
-### Hosted Lifecycle, Listing, Mutation, Content, Free-Space, and Buffer-I/O Checkpoint
+### Hosted Filesystem, Buffer-I/O, and FD-Lifecycle Checkpoint
 
 The native hosted `MP64FS-VALID?` returns literal `1` or `0` after up to three
 raw checked reads and the executable BIOS's narrow geometry/metadata
@@ -1789,7 +1801,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 5514. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 5610. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -1846,6 +1858,18 @@ scratch variables and installs the two colon bodies and inline strings. It
 does not ensure or parse, dereference a Buffer, touch cache or media, update
 diagnostics, flush, or publish output. Focused execution qualifies only the
 single-primary-extent Buffer domain described below.
+
+Exact unchanged lines 5515–5610 add the fixed FD pool, cached `OPEN`,
+used-metadata `FFLUSH`, and final auto-flushing `FCLOSE` in 96 LF lines and
+3,397 bytes, with SHA-256
+`16637705bd8d26e0e92b14605ba0e4e772ec2d5d5c9eb02bbd107714c8650c78`
+and Git blob `e01ffa80d946b2cddd50e37bcefd9421a1b8dbb9`. Its 14 definitions are
+`FD-MAX`, `FD-SLOT-SZ`, `FD-POOL`, `FD-SLOT`, `FD-ALLOC`, `(FCLOSE-NOFS)`,
+`FCLOSE`, `FD-FILL`, `OP-SLOT`, `(OPEN)`, `OPEN`, `F.SLOT`, `FFLUSH`, and
+`(FCLOSE)` in source order. Loading zero-fills the 1,152-byte pool and zeroes
+`OP-SLOT`; it binds `FCLOSE` first to `(FCLOSE-NOFS)` and finally to
+`(FCLOSE)`, and binds `OPEN` to `(OPEN)`. It performs no ensure, parse,
+filesystem/cache/media I/O, sync, flush, diagnostic update, or output.
 
 | Word | Stack Effect | Admitted behavior |
 |------|--------------|-------------------|
@@ -1916,8 +1940,12 @@ the field to preserve the stale comment.
 | `FS-FREE` | `( -- )` | Ensure the filesystem, then report cached total free sectors/bytes, largest run, and global occupied-entry count/max. |
 | `SAVE-BUFFER` | `( buf "name" -- )` | Write the complete primary allocation from `B.DATA`, store low-u32 `B.LEN` as cached `used_bytes`, then sync. It does not follow a secondary extent or update `mtime`/CRC. |
 | `LOAD-BUFFER` | `( buf "name" -- )` | Read the complete primary allocation, including padding, into `B.DATA`. It does not change `B.LEN`, Buffer metadata, or file metadata. |
-| `OPEN` | `( "name" -- fdesc \| 0 )` | Later FD-pool source outside the current hosted frontier. In the full source it opens by name and returns a descriptor or zero; `OPEN` is deferred. |
-| `FCLOSE` | `( fdesc -- )` | Later FD-pool source outside the current hosted frontier; in the full source it releases a nonzero descriptor. |
+| `FD-SLOT` | `( n -- addr )` | Compute an unchecked 72-byte pool-slot address. |
+| `FD-ALLOC` | `( -- fdesc \| 0 )` | Mark and return the lowest free slot's `slot + 8`, retaining its payload; return zero when all 16 headers are busy. |
+| `F.SLOT` | `( fdesc -- slot )` | Read the cached directory-slot snapshot at fdesc `+32`. |
+| `OPEN` | `( "name" -- fdesc \| 0 )` | Ensure and find a cached name, allocate the lowest FD, and snapshot its directory fields with cursor zero; return zero on gate, miss, or exhaustion. |
+| `FFLUSH` | `( fdesc -- )` | Store low-u32 `F.USED` into the cached entry selected by `F.SLOT`, then call `FS-SYNC`; it does not write payload. |
+| `FCLOSE` | `( fdesc -- )` | Ignore zero; when `FS-OK` is true flush used metadata before release, otherwise silently release without persistence. |
 | `LOAD` | `( "filename" -- )` | Later evaluator source outside the current hosted frontier; in full KDOS it opens a Forth source file and evaluates each line. |
 | `SOURCE-EVALUATE-CHECKED` | `( addr len -- status )` | Compile a complete in-memory source buffer with deterministic status and diagnostics; stop at first failure. |
 | `DIRENT` | `( n -- addr )` | Address of directory entry *n* in the RAM cache (for low-level access). |
@@ -2077,8 +2105,72 @@ not enforce these constraints or per-entry read-only/system flags. Scratch
 variables, parser state, cache, and
 storage diagnostics are global and unlocked. This is primary-extent Buffer I/O,
 not general two-extent persistence, CRC maintenance, or transaction recovery.
-The frontier ends at line 5514; blank line 5515 precedes the still-unqualified
-FD Pool heading at line 5516, with its first constants at lines 5532–5533.
+
+The FD pool contains 16 fixed 72-byte slots. The fdesc returned to callers is
+eight bytes past the slot base so the pre-existing `F.*` accessors keep their
+offsets:
+
+| Slot offset | fdesc offset | Field |
+|---:|---:|---|
+| `+0` | — | `in_use`: zero free, `-1` allocated |
+| `+8` | `+0` | primary start sector |
+| `+16` | `+8` | maximum primary sector count |
+| `+24` | `+16` | used bytes |
+| `+32` | `+24` | cursor |
+| `+40` | `+32` | cached directory slot |
+| `+48` | `+40` | secondary start sector |
+| `+56` | `+48` | secondary sector count |
+| `+64` | `+56` | reserved |
+
+`FD-ALLOC` scans from slot zero upward, marks the first zero header `-1`, and
+returns its fdesc. Exhaustion returns zero. Allocation never clears the eight
+payload cells. `FD-FILL` overwrites the seven cells through secondary count
+from the directory cache, setting cursor to zero, but leaves reserved `+56`
+alone. Consequently the reserved cell starts zero after the pool's load-time
+fill and survives all subsequent fill, close, and reuse operations. The named
+`(FCLOSE-NOFS)` body remains callable after final rebinding: zero is a no-op,
+and nonzero clears only `fdesc - 8` with no flush or payload clearing.
+
+Final deferred `OPEN` ensures and checks the filesystem before parsing. A
+failed gate returns zero and prints `No filesystem`, while leaving the filename
+token and `OP-SLOT` unchanged. A name miss sets `OP-SLOT = -1`, prints the name,
+and returns zero before allocation. Exhaustion retains the matched slot in
+`OP-SLOT`, prints `No free FD slots`, and returns zero. Success chooses the
+lowest free fdesc, snapshots primary and secondary coordinates, used count,
+and directory slot, resets its cursor, and prints nothing. When `FS-OK` is
+already true, these paths use only parser/cache/pool state and perform no
+storage or payload I/O; `FS-ENSURE` may run `FS-LOAD` when the marker begins
+false.
+
+The descriptor is a mutable snapshot, not an open-file identity. `OPEN` does
+not check file type or flags, reject directories, capture the selected storage
+binding/generation, revalidate a true `FS-OK`, prevent several descriptors for
+one entry, or coordinate their independent cursor/used values. A directory
+mutation, reload, or volume replacement can stale it, and close order among
+duplicate opens can overwrite a newer used count. Copying secondary extent
+coordinates into the structure qualifies only the snapshot layout; no
+multi-extent `FREAD`, `FWRITE`, or other content I/O is admitted here.
+
+`FFLUSH` rejects false `FS-OK` before dereferencing its argument, printing
+`FS not loaded` and returning without I/O. Otherwise it copies only the low 32
+bits of `F.USED` into cached `used_bytes` for `F.SLOT`, then invokes
+nontransactional `FS-SYNC`. It leaves the descriptor allocated, writes no file
+payload, and retains every other directory field, including `mtime`, CRC, and
+flags. It checks neither descriptor/directory-slot validity nor used against
+allocated capacity; `L!` truncates the cell to low u32. Cache mutation occurs
+before bitmap/directory writes and flush, so an abort can leave changed cache
+and partially published media.
+
+Final deferred `FCLOSE` returns immediately for zero. With true `FS-OK`, it
+calls `FFLUSH` and clears the in-use header only after a successful return; an
+abort leaves the slot allocated despite any cache/media prefix. With false
+`FS-OK`, it silently skips persistence and releases the slot. Release never
+clears descriptor/reserved cells or file payload. No allocator/close/flush
+operation validates pool membership, alignment, allocation state, or directory
+identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
+fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
+state, and deferred vectors are global and unlocked. The frontier ends at line
+5610; the next uncovered seam is the `LOAD` heading at line 5611.
 
 **Example — filesystem operations:**
 ```forth
@@ -2088,7 +2180,7 @@ CAT getting-started          \ print a file's contents
 0 1 512 BUFFER disk-page      \ one full sector of byte-width backing
 1 5 MKFILE my-data            \ matching one-sector data file
 disk-page SAVE-BUFFER my-data \ save the complete primary allocation
-LOAD my-script.f             \ evaluate a Forth source file
+LOAD my-script.f             \ later source; outside this hosted frontier
 FS-FREE                      \ check remaining space
 ```
 
