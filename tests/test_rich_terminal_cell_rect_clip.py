@@ -455,3 +455,6 @@ def test_forth_public_payload_offsets_and_cell_geometry_are_locked():
     assert "_PT-CT-ROWS @ _PT-FRAME-PAYLOAD 64 + L!" in source
     assert "_PT-OB-LEFT" not in source
     assert "_PT-CT-BOTTOM" not in source
+    assert "_PT-PR-XEND @ 0> 0=" in source
+    assert "_PT-PR-YEND @ 0> 0=" in source
+    assert "0<=" not in source
