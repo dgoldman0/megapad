@@ -35,14 +35,15 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 5217. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 5285. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
-media. `FS-LOAD` consumes the separately qualified native
+media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
+bitmap. `FS-LOAD` consumes the separately qualified native
 `MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
 metadata predicate, and generation check. This boundary is not evidence of
-file-backed close/reopen durability, later file commands, or stronger
-filesystem validation.
+file-backed close/reopen durability, `FIND-BY-NAME` or later file commands, or
+stronger filesystem validation.
 
 ---
 
@@ -147,6 +148,15 @@ bytes, timestamps, CRCs, parent cycles or root reachability, extent
 disjointness, orphan allocations, bitmap tail bits, or file data. Those
 producer rules and stronger integrity properties remain format requirements
 or planned checks, not facts established by `MP64FS-VALID?`.
+
+`DIR` and `CATALOG` pass every occupied entry name directly to BIOS `.ZSTR`.
+That word consumes its address, publishes bytes one at a time until the first
+NUL, and has no length bound; it also publishes control and escape bytes
+without sanitizing them. A later memory fault preserves its already published
+prefix. Because the validator does not require termination, an accepted
+occupied entry can make those listings publish adjacent metadata or entries.
+Hosted listing qualification therefore requires the canonical producer
+invariant of a NUL within the 24-byte name field.
 
 #### Key Fields
 
@@ -608,6 +618,15 @@ present.
 | `CATALOG` | List name, bytes, primary sector count, numeric type, and flags + free-space summary |
 | `CAT filename` | Print file contents to terminal |
 | `FS-FREE` | Report free space (sectors, bytes, file count) |
+
+The qualified hosted `DIR` and `CATALOG` paths inspect occupied direct
+children of `CWD` in the global cache. Their free-space summaries count clear
+bitmap bits over the data-sector range rather than reconstructing ownership
+from directory extents. `CATALOG` reports only the primary sector count, and
+all numeric fields use signed `.` in the current `BASE`. `FS-ENSURE` trusts an
+already-true `FS-OK`, so detached or replaced media can leave stale cache
+output eligible. This is pathless listing qualification, not close/reopen
+durability or admission of the later lookup and mutation commands.
 
 ### Directory Navigation
 

@@ -855,8 +855,9 @@ and Arena sections plus Buffer's general `IDLE`, registry, constructors,
 inspection, Arena integration, integer/FP16/BF16 operations, the kernel
 registry and sample kernels, the pipeline engine, checked block-device and
 bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
-storage-compatibility, legacy file, and initial MP64FS cache/helper layers
-plus the MP64FS load/sync/ensure/format lifecycle through line 5217.
+storage-compatibility, legacy file, and initial MP64FS cache/helper layers,
+the MP64FS load/sync/ensure/format lifecycle, and cached directory listing
+through line 5285.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -864,9 +865,11 @@ guarded I/O, partition validation, transactional publication, selected-volume
 lifecycle, diagnostic wrappers, permanent file descriptors, and composed
 head/full/tail sector I/O, MP64FS cache geometry, bitmap mutation/search,
 packed directory readers, raw-binding load, synchronization, conditional
-autoload, and metadata formatting are executable semantic behavior rather
-than reporting-only shims. The frontier now ends at line 5217; blank line
-5218 precedes the `.FTYPE` heading at line 5219 and definition at line 5221.
+autoload, metadata formatting, compact type publication, direct-child
+listing, and bitmap free-space reporting are executable semantic behavior
+rather than reporting-only shims. The frontier now ends at line 5285; blank
+line 5286 precedes the `FIND-BY-NAME` heading at line 5287 and definition at
+line 5292.
 
 ---
 
@@ -1110,8 +1113,13 @@ lines 5135 through 5217 then add `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and
 `FORMAT` in 83 lines and 2,999 bytes, with SHA-256
 `829268e2d06f11c19bda4a5fa0606e883fdf3ab4a3690a741f0cd2616ada4137`.
 Loading those four definitions has no binding, I/O, flush, output, or
-filesystem-state effect. Blank line 5218 is the next uncovered seam before
-the `.FTYPE` heading at line 5219 and definition at line 5221.
+filesystem-state effect. Exact unchanged lines 5218 through 5285 then add
+`.FTYPE`, `DIR`, and `CATALOG` in 68 lines and 2,167 bytes, with SHA-256
+`c3c831bc183ee999c8b5a0d1fb4edd169890be1e5fa44ad726d3025923fdb3b7`.
+Loading those three definitions installs only dictionary bodies and inline
+strings, without binding, I/O, cache mutation, or output. Blank line 5286 is
+the next uncovered seam before the `FIND-BY-NAME` heading at line 5287 and
+definition at line 5292.
 
 ---
 
@@ -1743,7 +1751,7 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
-### Hosted Lifecycle Checkpoint
+### Hosted Lifecycle and Listing Checkpoint
 
 The native hosted `MP64FS-VALID?` returns literal `1` or `0` after up to three
 raw checked reads and the executable BIOS's narrow geometry/metadata
@@ -1752,7 +1760,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 5217. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 5285. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -1766,6 +1774,13 @@ Exact unchanged lines 5135–5217 add the four lifecycle definitions in 83
 lines and 2,999 bytes. Loading them has no side effects; focused execution
 qualifies raw-binding load, ordered cache synchronization, conditional
 autoload, and metadata-only formatting on pathless in-memory media.
+
+Exact unchanged lines 5218–5285 add `.FTYPE`, `DIR`, and `CATALOG` in 68
+lines and 2,167 bytes, with SHA-256
+`c3c831bc183ee999c8b5a0d1fb4edd169890be1e5fa44ad726d3025923fdb3b7`.
+Loading them only installs three definitions and their inline strings.
+Focused execution qualifies pathless listing from the cached directory and
+bitmap; it is not file-backed persistence evidence.
 
 | Word | Stack Effect | Admitted behavior |
 |------|--------------|-------------------|
@@ -1823,6 +1838,7 @@ the field to preserve the stale comment.
 | `FS-SYNC` | `( -- )` | If loaded, write bitmap then directory and flush. It does not write the superblock and is not transactional. |
 | `FS-ENSURE` | `( -- )` | If `FS-OK` is false and a disk is present, invoke `FS-LOAD`; otherwise do nothing. A true marker is not revalidated. |
 | `FORMAT` | `( -- )` | **Initialize fresh filesystem metadata** using the attached capacity: write marker-1 geometry, mark metadata sectors, clear the directory, and flush. It does not wipe data sectors and is not transactional. |
+| `.FTYPE` | `( type -- )` | Print `free`, `raw`, `text`, `forth`, `doc`, `data`, `tut`, `bdl`, `dir`, `stream`, or `link` for codes 0 through 10; otherwise print `?` and the signed value in the current `BASE`. |
 | `DIR` | `( -- )` | List entries whose parent is `CWD`, showing name, size, and type, followed by a free-space summary. |
 | `CATALOG` | `( -- )` | List name, byte size, primary sector count, numeric type, and flags, followed by a free-space summary. It does not print the start sector. |
 | `FIND-BY-NAME` | `( -- slot \| -1 )` | Search the directory for a file matching `NAMEBUF`.  Caller must call `PARSE-NAME` first.  Returns the slot index or −1. |
@@ -1854,9 +1870,25 @@ for false-plus-absent and never revalidates a true marker.
 15 through 65,536, publishes geometry, then writes superblock, active bitmap,
 and directory before flushing. Only flush success publishes true `FS-OK` and
 root `CWD`. Failure retains constructed caches and any earlier media writes;
-data sectors and the inactive bitmap-cache tail are untouched. The current
-frontier ends here: `.FTYPE`, `DIR`, and all later file commands in this
-reference remain unqualified hosted source.
+data sectors and the inactive bitmap-cache tail are untouched.
+
+`.ZSTR` consumes its address before reading, publishes nonzero bytes one at a
+time, stops without publishing the first NUL, and has no hidden length limit.
+It does not sanitize or escape control bytes. If a later byte read faults, its
+UART prefix remains visible. The BIOS validator accepts an occupied name
+without a NUL in its 24-byte field, so unchanged `DIR` and `CATALOG` can then
+publish adjacent entry bytes. Hosted listing admission requires canonical
+producer-terminated names; it does not repair that validator gap.
+
+`DIR` and `CATALOG` read occupied direct children of `CWD` from the global
+cache and count free bitmap bits over `[FS-DSTART, FS-TOTAL)`. `DIR` publishes
+`DE.USED`, compact `.FTYPE` output, and `/` for type 8. `CATALOG` publishes
+`DE.USED`, only the primary `DE.COUNT`, numeric type, and flags. All numeric
+fields use signed `.` in the current `BASE`. Neither command revalidates an
+already-true `FS-OK`, so an absent or replaced attachment can leave stale
+cache output eligible. The current hosted frontier ends after `CATALOG` at
+line 5285; `FIND-BY-NAME` and all later commands in this reference remain
+unqualified.
 
 **Example — filesystem operations:**
 ```forth

@@ -688,6 +688,16 @@ def _emit(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.write_uart_bytes(bytes((context.data.pop() & 0xFF,)))
 
 
+def _dot_zstr(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    while True:
+        value = runtime.memory.read8(address)
+        if value == 0:
+            return
+        runtime.write_uart_bytes(bytes((value,)))
+        address = u64(address + 1)
+
+
 def _uppercase_character(context: ExecutionContext) -> None:
     value = context.data.pop()
     if ord("a") <= value <= ord("z"):
@@ -2127,6 +2137,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"U.", lambda context: _unsigned_dot(runtime, context)),
         (b"CR", lambda context: _carriage_return(runtime, context)),
         (b"EMIT", lambda context: _emit(runtime, context)),
+        (b".ZSTR", lambda context: _dot_zstr(runtime, context)),
         (b"UCHAR", _uppercase_character),
         (b"TRUE", lambda context: context.data.push(-1)),
         (b"FALSE", _push_zero),

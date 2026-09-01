@@ -1251,7 +1251,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5217. Exact unchanged lines
+The contiguous source frontier now ends at line 5285. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1344,8 +1344,38 @@ from 15 through 65,536 sectors, publishes geometry, then writes superblock,
 active bitmap, and directory before flushing. Only flush success sets
 `FS-OK = -1` and `CWD = 255`. Failure retains constructed caches, geometry,
 binding, and earlier media writes; data sectors and the inactive bitmap-cache
-tail are not erased. Blank line 5218 is the next uncovered seam, followed by
-the `.FTYPE` heading at line 5219 and definition at line 5221.
+tail are not erased.
+
+Exact unchanged lines 5218 through 5285 add `.FTYPE`, `DIR`, and `CATALOG` in
+68 lines and 2,167 bytes (SHA-256
+`c3c831bc183ee999c8b5a0d1fb4edd169890be1e5fa44ad726d3025923fdb3b7`).
+Loading them installs only three definitions and inline strings; it performs
+no binding, storage operation, cache mutation, or UART publication. The
+qualified execution path is pathless hosted listing from an admitted cached
+filesystem, not file-backed persistence evidence.
+
+The hosted BIOS `.ZSTR` consumes its address before its first read, reads and
+publishes each nonzero byte in order, stops without publishing the first NUL,
+and has no hidden length limit. It performs no decoding, character-policy
+check, or escaping, so nonzero control bytes reach UART unchanged. A later
+memory fault retains the already published prefix. `MP64FS-VALID?` does not
+require a NUL in an occupied entry's 24-byte name, so such a
+validator-accepted entry can make unchanged `DIR` or `CATALOG` publish adjacent
+metadata and entries until a later zero or fault. Listing admission therefore
+requires the canonical producer invariant of a terminator within the name
+field rather than strengthening either word. The focused finite-spill oracle
+preserves native discrepancy parity; it does not widen that admitted domain.
+
+Both listings select occupied direct children of `CWD` from the global cache
+and count bitmap free bits over `[FS-DSTART, FS-TOTAL)`, rather than deriving
+free space from extents. `DIR` prints `DE.USED`, compact `.FTYPE` labels, and a
+slash for type 8. `CATALOG` prints `DE.USED`, the primary `DE.COUNT` only,
+numeric type, and flags. Their numeric fields use signed `.` in the current
+`BASE`. The cache and output are not a coherent concurrent snapshot, and
+`FS-ENSURE` does not revalidate an already-true `FS-OK`; detached or replaced
+media can therefore leave a stale listing eligible. Blank line 5286 is the
+next uncovered seam, followed by the `FIND-BY-NAME` heading at line 5287 and
+definition at line 5292.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

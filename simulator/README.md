@@ -45,8 +45,10 @@ The implemented slices provide:
 - the installable BIOS dictionary-fault callback, including the dynamic
   Bank-0 stack margin, exact hosted-span fit acceptance, same-dispatch guest
   `THROW`, and fail-closed handling when the callback is zero or returns;
-- hosted UART output for the BIOS numeric printer, complete-task `ABORT`, and
-  the stable execution-token behavior needed by source-defined `DEFER`/`IS`;
+- hosted UART output for the BIOS numeric printer and bytewise `.ZSTR`,
+  including its unbounded NUL scan and partial output on a later read fault,
+  complete-task `ABORT`, and the stable execution-token behavior needed by
+  source-defined `DEFER`/`IS`;
 - a shared bit-exact six-mode CRC value model with simulator-owned checked
   transaction state, coherent SysInfo capability discovery, exact byte/cell
   feeds, raw/final release, and source-visible status behavior;
@@ -643,8 +645,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5217 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers and load/sync/ensure/format lifecycle |
-| 5218 onward | Next uncovered frontier | Blank line 5218 precedes the `.FTYPE` section heading at line 5219 and definition at line 5221 |
+| 39–5285 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, and cached `.FTYPE`/`DIR`/`CATALOG` listing |
+| 5286 onward | Next uncovered frontier | Blank line 5286 precedes the `FIND-BY-NAME` heading at line 5287 and definition at line 5292 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -891,6 +893,26 @@ new superblock, active bitmap, and directory metadata before flushing; only
 flush success publishes `FS-OK` and root `CWD`. None of these multi-stage paths
 rolls back earlier cache or media effects.
 
+The adjacent listing fixture is exact unchanged `kdos.f` lines 5218–5285: 68
+lines, 2,167 bytes, and SHA-256
+`c3c831bc183ee999c8b5a0d1fb4edd169890be1e5fa44ad726d3025923fdb3b7`.
+It publishes only `.FTYPE`, `DIR`, and `CATALOG`; loading the slice only
+installs their definitions and inline strings, with no binding, storage I/O,
+filesystem-state mutation, or UART output. Focused pathless execution lists
+occupied direct children of `CWD` from the cached directory and counts free
+bitmap bits over `[FS-DSTART, FS-TOTAL)`. `DIR` renders compact type names and
+marks type 8 with `/`; `CATALOG` reports only the primary `DE.COUNT` extent.
+All numeric fields use signed `.` in the caller's current `BASE`.
+
+Hosted `.ZSTR` consumes its address before reading and immediately publishes
+each nonzero byte until the first NUL. It has no hidden length bound, does not
+emit the NUL, and retains already-published bytes if a later read faults. The
+BIOS validator accepts an occupied 24-byte name with no terminator, so listing
+qualification requires the canonical producer invariant of a NUL within that
+field; otherwise unchanged `DIR` and `CATALOG` can read and print adjacent
+entry bytes. `FS-ENSURE` also trusts an already-true `FS-OK`, so an absent or
+replaced attachment can still produce a stale cached listing.
+
 The admitted domain is validator-approved geometry, positive run counts,
 in-range sectors and slots, complete cache spans, and structurally valid
 directory entries. The unchanged words do not gate on `FS-OK` or validate
@@ -900,9 +922,9 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue after blank line 5218 with `.FTYPE` at line 5219, then
-toward the persistent evaluator, ordinary checked module-loader surface, and
-deterministic cooperative task scheduler.
+Later slices continue after blank line 5286 with `FIND-BY-NAME` at line 5292,
+then toward the persistent evaluator, ordinary checked module-loader surface,
+and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

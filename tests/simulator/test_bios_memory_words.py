@@ -166,6 +166,40 @@ def test_byte_store_masks_to_the_low_byte_and_roundtrips_through_c_fetch() -> No
     assert context.data.snapshot() == (0xAB,)
 
 
+def test_dot_zstr_emits_raw_bytes_through_but_not_including_nul() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    runtime.memory.write_bytes(101, b"hello\xff\x80\0tail")
+    context.data.push(0xA55A)
+    context.data.push(101)
+
+    runtime.execute(".ZSTR", context=context)
+
+    assert context.data.snapshot() == (0xA55A,)
+    assert context.returns.snapshot() == ()
+    assert runtime.drain_uart_output() == b"hello\xff\x80"
+
+    context.data.push(108)
+    runtime.execute(".ZSTR", context=context)
+    assert context.data.snapshot() == (0xA55A,)
+    assert runtime.drain_uart_output() == b""
+
+
+def test_dot_zstr_retains_partial_output_after_an_unmapped_read() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    bank0_limit = runtime.memory.regions[0].limit
+    runtime.memory.write_bytes(bank0_limit - 2, b"AB")
+    context.data.push(bank0_limit - 2)
+
+    with pytest.raises(UnmappedAddressError):
+        runtime.execute(".ZSTR", context=context)
+
+    assert context.data.snapshot() == ()
+    assert context.returns.snapshot() == ()
+    assert runtime.drain_uart_output() == b"AB"
+
+
 def test_little_endian_word_and_long_memory_words_are_unaligned_and_masked() -> None:
     runtime = MegaForthRuntime()
     context = runtime.new_context()
