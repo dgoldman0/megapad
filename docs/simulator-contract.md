@@ -307,7 +307,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 8943.
+KDOS source frontier now ends at line 9121.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1466,7 +1466,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 8943. Exact unchanged lines
+The contiguous source frontier now ends at line 9121. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2638,8 +2638,8 @@ lookup covers found and missing words and the broken related-word result. The
 complete 7,431-byte `HELP` publication has SHA-256
 `c1d44c8970fa800f943db3e9b081cdaaf642af429c6cf4f9df27bcc63a2f1d07`.
 This evidence does not execute the heap-reporting `.MEM`, `MEM-REPORT`, or
-full `DASHBOARD` paths and does not qualify the later networking transport or
-Pipeline Bundle implementation.
+full `DASHBOARD` paths and does not qualify the later networking transport;
+the following Pipeline Bundle implementation is qualified separately below.
 
 The following source-literal discrepancies remain visible:
 
@@ -2683,17 +2683,130 @@ The following source-literal discrepancies remain visible:
   never below ten, so every lookup reports zero related words. If that branch
   were reached, `TYPE` would leave only `( count entry )` and the following
   `ROT` would underflow.
-- `.HELP-ALL` advertises `POLL`, `INGEST`, and later Bundle words even though
-  those definitions are absent at this frontier. The surrounding §10 source
-  comments also promise `RECV-FRAME`, `ROUTE-FRAME`, `PORT-SEND`, and the
-  deferred networking layer. None of those names, including
-  `PORT-SEND-SLICE`, is executable here; the qualified Help text does not
-  qualify any transport operation.
+- `.HELP-ALL` advertises `POLL`, `INGEST`, and Bundle words before those
+  definitions exist at the line-8943 boundary. The Bundle words arrive in the
+  following qualified §15 slice, but the surrounding §10 source also promises
+  `RECV-FRAME`, `ROUTE-FRAME`, `PORT-SEND`, and the deferred networking layer.
+  None of those transport names, including `PORT-SEND-SLICE`, is executable
+  at the current line-9121 frontier; qualified Help text does not qualify a
+  transport operation.
 
-The contiguous frontier now ends at line 8943. Line 8944 is the separator for
-§15 Pipeline Bundles. Nothing in this slice loads `rich-terminal.f`, creates
-a rich projection, composites a frame, reaches a physical viewer, or otherwise
-advances the rich-terminal vertical.
+Exact unchanged lines 8944 through 9121 add §15 Pipeline Bundles in 178 LF
+records and 5,801 bytes, with SHA-256
+`370c6c6d17470ae7ea0c8a94ca5ede4ddcae04a8c9e0badcb007cc5358ef919f`
+and Git blob `a7f49a7d29bbfa61d043dae73854924e74f4b2f8`. The checked fixture includes
+the following §18 separator at line 9122: 179 LF records and 5,873 bytes, with
+SHA-256
+`8791e5eecef059d052ecd8b69976317857c41c29ae475e18cc53d79761d8b922`
+and Git blob `3690e82c7a15e69fa69c84186fdda0caa5937d42`.
+
+The slice publishes 27 definitions: `FTYPE-BUNDLE`, fourteen state variables,
+and twelve colon words from `BDL-RESET` through `.BUNDLE`. Its 261 name bytes,
+112 bytes of variable bodies, and 459 fixed hosted header/semantic-slot bytes
+advance the dictionary by exactly 832 bytes. The compiled `."` publishers are
+semantic output operations and add no guest literal pool.
+
+All fourteen variables are explicitly initialized at load. `BDL-ACTIVE`,
+`BDL-DRY`, `BDL-VER`, the three `BDL-N*` counts, `BDL-SCHED-I`,
+`BDL-SCHED-F`, `BDL-POL-PERM`, and `BDL-POL-RET` become zero;
+`BDL-SCHED-P` becomes all-ones (`-1`), `BDL-POL-EXP` becomes 3,
+`BDL-SCR-DEF` becomes 1, and `BDL-SCR-MASK` becomes 255. `FTYPE-BUNDLE` is
+7. Those dictionary stores are the only load-time execution: no bundle word
+parses an active-input operand, emits UART output, constructs an object,
+accesses filesystem/storage/NIC state, operates a lock, mutates the RTC,
+schedules work, or renders.
+
+Focused direct acceptance covers reset/begin state, all three configuration
+setters, and the dry and live declaration branches. `BDL-RESET` preserves
+`BDL-DRY` while restoring the other defaults; `BDL-BEGIN` then records the
+supplied version and sets `BDL-ACTIVE`. In dry mode, `BDL-BUF`, `BDL-KERN`,
+and `BDL-PIPE` consume their complete numeric inputs and line-local names and
+increment only their bundle counters. In live mode they call the unchanged
+`BUFFER`, `KERNEL`, and `PIPELINE` constructors before incrementing those
+counters. Focused live construction uses small ordinary objects in a
+disposable runtime.
+
+Both `BDL-END` report branches and both `.BUNDLE` display branches have
+byte-exact output evidence. Dry `BDL-END` reports all tracked fields without
+changing `TIME-SLICE` or `SCREEN-ID`; live `BDL-END` conditionally copies the
+tracked interval to `TIME-SLICE`, always copies the tracked default screen to
+`SCREEN-ID`, prints the loaded counts, and clears `BDL-ACTIVE`. Direct dry
+declarations overwrite only transient `WORD` bytes at `HERE`: they do not
+advance `HERE`/`LATEST`, publish their requested names, or change the Buffer,
+Kernel, or Pipeline registries.
+
+Wrapper qualification remains disk-free. Each wrapper's hosted IR is checked
+to call the exact `LOAD` execution token captured when §15 compiles; this pins
+`BUNDLE-LOAD`'s leading `BDL-DRY = 0` store and `BUNDLE-INFO`'s leading-one,
+call, trailing-zero sequence without touching a disk. For behavioral INFO
+evidence, a dedicated runtime publishes a shadow `LOAD` before compiling the
+slice. That shadow consumes the outer line's filename and evaluates a bounded
+synthetic bundle in the same context. A normal `BUNDLE-INFO` presents
+`BDL-DRY = 1`, exercises all three dry name paths without constructing
+objects, and then clears the flag to zero.
+
+The caught failure oracle executes a real guest `THROW` from the nested
+synthetic source. It proves that `BUNDLE-INFO`'s trailing clear is skipped:
+`BDL-DRY = 1`, `BDL-ACTIVE = 1`, version 9, and the partial count tuple
+`(1,0,0)` persist. The three real registries, `HERE`, and `LATEST` remain
+unchanged because dry mode created no resources and `BDL-END` was not reached.
+The shadow must precede slice compilation because compiled `Call` operations
+retain an XT; defining a newer `LOAD` later cannot redirect them, and removing
+the captured shadow would leave stale calls.
+
+The following source-literal limits remain part of the contract:
+
+- `BDL-ACTIVE` is bookkeeping only. No declarative word or `BDL-END` checks
+  it, and neither wrapper requires a file to contain one balanced
+  `BDL-BEGIN ... BDL-END` sequence. Empty or truncated input can retain old
+  fields or leave the bundle active.
+- Version zero is accepted by `BDL-BEGIN`, but `.BUNDLE` tests `BDL-VER`
+  rather than `BDL-ACTIVE`; it reports `(no bundle loaded)` for an active
+  version-zero declaration and reports nonzero retained state after END.
+- Live END applies only two fragments of configuration. It uses
+  `BDL-SCHED-P` only as a `-1` sentinel, writes the interval but neither
+  schedules that pipeline nor acts on the auto/repeat flags, and writes the
+  default screen without validation. It never applies `BDL-SCR-MASK`. The
+  initialized and example mask 255 has only eight bits although §9 registers
+  nine screens; a nine-screen mask would require 511.
+- The bundle counts are independent wrapping cells, not verified resource
+  counts. Dry declarations increment them without resources. Live Kernel and
+  Pipeline declarations continue to allocate descriptors and named constants,
+  and increment bundle counts, after the ordinary registries saturate at 32
+  and 8; those objects are omitted from registry listings. The Buffer registry
+  is linked and unbounded except by dictionary capacity.
+- A bundle is arbitrary Forth source evaluated by general `LOAD`.
+  `FTYPE-BUNDLE` is never checked, versions and declaration fields are not
+  validated, and dry mode affects only the three `BDL-*` object declarations.
+  Any other word in a supposedly inspected bundle executes normally.
+- `BUNDLE-INFO` is therefore not side-effect-free. Even a conventional dry
+  bundle resets and rewrites shared tracking state and emits its report;
+  arbitrary source can do more. Its `BDL-DRY` cleanup occurs only after a
+  normal `LOAD` return, so a guest throw strands dry mode and partial tracking
+  as the caught oracle demonstrates.
+- Both wrappers inherit raw `LOAD` behavior. A false filesystem marker prints
+  its diagnostic before consuming the filename, leaving that token to the
+  enclosing evaluator. Mounted loading uses raw `EVALUATE`, ignores
+  `EVAL-STATUS`, and never calls `EVALUATE-FINISH`; an undefined or overlong
+  line can be skipped before later source runs, and unfinished compiler state
+  can escape a nominally successful bundle load.
+- No bundle-level transaction, rollback, unload, ownership record, or
+  idempotence mechanism exists. The current loader transaction actions are
+  still no-ops, so completed definitions and live resources survive a later
+  throw. `BDL-RESET` clears tracking but neither frees objects nor restores an
+  already-applied `TIME-SLICE`/`SCREEN-ID`; repeated live loading can shadow
+  names, duplicate resources, and drive bounded registries into saturation.
+- Policy permissions, retention, and export are reporting-only cells. Nothing
+  in this slice enforces them. The scheduling flags and screen mask are also
+  reporting-only. All bundle state, parser/evaluator state, registries, and
+  constructor scratch are global and unlocked, with no nesting, core, or
+  concurrent-owner isolation.
+
+The contiguous frontier now ends at line 9121. Line 9122 is the separator for
+§18 Ring Buffer primitives. Real bundle-file/disk integration, scheduler or
+cadence behavior, mask-driven screen selection, rendering, physical viewing,
+and every rich-terminal module/projection/compositor/input seam remain
+deferred.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

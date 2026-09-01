@@ -872,8 +872,8 @@ the one-core queue/affinity/flag/message/lock state machines, and the
 cluster-control/MPU source boundary, absent-network forward bridge,
 §9.1–§9.4 ANSI screen registry/control layer, the complete §9 widget SDL,
 screen definitions, dispatch, registration, handlers, and event loop, and the
-§10 Data Port structures and bindings, §11 placeholder, §12 Dashboard, and
-§13 Help source through line 8943.
+§10 Data Port structures and bindings, §11 placeholder, §12 Dashboard,
+§13 Help, and §15 Pipeline Bundles source through line 9121.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -891,8 +891,8 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-8943, immediately before §15 Pipeline Bundles; the source has no §14 block at
-this boundary.
+9121, immediately before §18 Ring Buffer Primitives. The source has no §14,
+§16, or §17 block at the corresponding section-numbering boundaries.
 
 ---
 
@@ -1181,10 +1181,10 @@ Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
-§8.2–§8.7, §8.8–§8.9, complete §9, and §10–§13 through line 8943. Their
-provenance and edge contracts are recorded in the corresponding sections
-below and in `docs/simulator-contract.md`; §15 begins at the following source
-boundary.
+§8.2–§8.7, §8.8–§8.9, complete §9, §10–§13, and §15 through line
+9121. Their provenance and edge contracts are recorded in the corresponding
+sections below and in `docs/simulator-contract.md`; §18 begins at the following
+source boundary.
 
 ---
 
@@ -1826,7 +1826,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 8943. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 9121. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -1939,7 +1939,7 @@ the field to preserve the stale comment.
 | 4 | doc | Documentation topic |
 | 5 | data | Structured data |
 | 6 | tutorial | Step-by-step lesson |
-| 7 | bundle | Pipeline bundle (declarative config) |
+| 7 | bundle | Pipeline bundle convention (unrestricted Forth source) |
 | 8 | directory | Parent for hierarchical entries |
 | 9 | stream | Circular stream data |
 | 10 | link | Symbolic link target |
@@ -2201,7 +2201,8 @@ fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
 continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
-Dashboard, and §13 Help through line 8943; §15 is next.
+Dashboard, §13 Help, and §15 Pipeline Bundles through line 9121; §18 is
+next.
 
 **Example — filesystem operations:**
 ```forth
@@ -3027,9 +3028,10 @@ The following tail discrepancies are source-literal:
   screen/subscreen registrations until the fixed tables fill.
 
 This §9 block ends at line 8568. The contiguous hosted frontier now continues
-through §10–§13 and ends at line 8943, immediately before §15. The admitted
-source completes the existing ANSI TUI but does not accept a rich-terminal
-module, projection, compositor, or viewer.
+through §10–§13 and §15 and ends at line 9121, immediately before §18. The
+admitted source completes the existing ANSI TUI and the Pipeline Bundle
+tracking layer but does not accept a rich-terminal module, projection,
+compositor, or viewer.
 
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
@@ -3210,8 +3212,9 @@ The following limits and discrepancies are unchanged source behavior:
   is only a placeholder, and the source numbering proceeds from §13 directly
   to §15 without a §14 block here.
 
-The contiguous hosted frontier ends at line 8943, immediately before §15.
-This qualification adds no rich-terminal module, projection, compositor,
+The historical §10–§13 fixture ends at line 8943. The contiguous hosted
+frontier now continues through §15 and ends at line 9121, immediately before
+§18. This qualification adds no rich-terminal module, projection, compositor,
 physical viewer, or other rich-terminal work.
 
 ### Frame Protocol
@@ -3337,165 +3340,234 @@ Users can re-enable JIT for their own code with `JIT-ON`.
 
 ## §15 Pipeline Bundles
 
-Pipeline bundles are **versioned, declarative configuration files** that
-define complete data processing pipelines in a single loadable artifact.
-They combine buffer schemas, kernel registrations, pipeline definitions,
-scheduling config, access policies, and dashboard screen settings into one
-atomic unit.
+The source describes a Pipeline Bundle as a versioned, declarative type-7
+file. Executably, it is unrestricted Forth source which conventionally calls
+the `BDL-*` tracking words. The layer can create ordinary Buffer, Kernel, and
+Pipeline objects and record scheduling, policy, and dashboard values, but it
+does not make the source declarative, atomic, validated, or isolated. Type 7
+is an intended filesystem classification; neither bundle wrapper enforces it.
 
-Bundles are stored as type-7 files on disk and can be loaded in **live mode**
-(creating real objects) or **dry-run mode** (inspection without side effects).
+### Hosted unchanged-source qualification
 
-### Why Bundles?
+Exact unchanged `kdos.f` lines 8944 through 9121 contain 178 LF records and
+5,801 bytes, with SHA-256
+`370c6c6d17470ae7ea0c8a94ca5ede4ddcae04a8c9e0badcb007cc5358ef919f`
+and Git blob `a7f49a7d29bbfa61d043dae73854924e74f4b2f8`. The checked
+fixture includes the following one-line section sentinel at line 9122,
+exactly `\ =====================================================================`
+with its terminating LF. That 179-LF-record, 5,873-byte fixture has SHA-256
+`8791e5eecef059d052ecd8b69976317857c41c29ae475e18cc53d79761d8b922`
+and Git blob `3690e82c7a15e69fa69c84186fdda0caa5937d42`. Line 9123
+begins §18 Ring Buffer Primitives; there are no §16 or §17 source blocks at
+this boundary. The enclosing `kdos.f` Git blob is
+`fd017b16dbd3ef4746d0e3467e980c015cf5a664`, from revision
+`ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
 
-Instead of writing imperative Forth scripts like:
+The slice publishes 27 definitions in this exact source order:
+
+1. Constant: `FTYPE-BUNDLE`.
+2. Variables: `BDL-ACTIVE`, `BDL-DRY`, `BDL-VER`, `BDL-NBUFS`,
+   `BDL-NKERNS`, `BDL-NPIPES`, `BDL-SCHED-P`, `BDL-SCHED-I`,
+   `BDL-SCHED-F`, `BDL-POL-PERM`, `BDL-POL-RET`, `BDL-POL-EXP`,
+   `BDL-SCR-DEF`, and `BDL-SCR-MASK`.
+3. Colon words: `BDL-RESET`, `BDL-BEGIN`, `BDL-BUF`, `BDL-KERN`,
+   `BDL-PIPE`, `BDL-SCHED`, `BDL-POLICY`, `BDL-SCREEN`, `BDL-END`,
+   `BUNDLE-LOAD`, `BUNDLE-INFO`, and `.BUNDLE`.
+
+That is one constant, 14 variables, and 12 colon definitions. Their names
+occupy 261 bytes. Each variable has an eight-byte hosted body; the constant
+and every colon word have a zero-byte hosted body, for 112 body bytes total.
+The 27 fixed 17-byte header/semantic slots occupy 459 bytes, so exact hosted
+dictionary growth is `459 + 261 + 112 = 832` bytes. Compiled `."` payloads
+are hosted output operations, not guest dictionary body pools.
+
+Load sets `FTYPE-BUNDLE = 7` and leaves these exact scalar values:
+`BDL-ACTIVE = 0`, `BDL-DRY = 0`, `BDL-VER = 0`, all three declaration counts
+zero, `BDL-SCHED-P = -1`, `BDL-SCHED-I = 0`, `BDL-SCHED-F = 0`,
+`BDL-POL-PERM = 0`, `BDL-POL-RET = 0`, `BDL-POL-EXP = 3`,
+`BDL-SCR-DEF = 1`, and `BDL-SCR-MASK = 255`. Apart from ordinary definition
+publication and those 14 explicit initializers, loading has no bundle,
+filesystem, storage, UART, key, lock, RTC, screen-render, or Timer-control
+effect. Ordinary evaluator progress may advance the Timer counter. It does
+not create any Buffer, Kernel, or Pipeline object.
+
+The existing hosted compiler already supplies every primitive this slice
+actually invokes: variables/constants/colon compilation, scalar memory and
+output operations, `WORD`, the ordinary `BUFFER`, `KERNEL`, and `PIPELINE`
+constructors, `LOAD`, `TIME-SLICE`, and `SCREEN-ID`. No simulator-only
+scheduler, policy engine, visibility filter, loader transaction, or screen
+renderer is supplied to make the comments appear true when KDOS does not
+implement that behavior.
+
+Focused acceptance under the rich-terminal gate is deliberately
+seconds-scale. It pins the fixture, definition linkage/body spans, exact
+initializers, and load-time purity; directly exercises reset/begin/configure
+and both live and dry `BDL-END` output; proves dry declarations leave only the
+transient counted `WORD` bytes at unchanged `HERE`; creates one tiny live
+Buffer/Kernel/Pipeline through the ordinary constructors; and records the
+version-zero `.BUNDLE` discrepancy. A disk-free harness compiles this slice
+against a small shadow `LOAD`, pins `BUNDLE-LOAD`'s exact live-mode call IR,
+proves that a normally returning `BUNDLE-INFO` enters then clears dry mode,
+and proves that a throwing `LOAD` leaves `BDL-DRY = 1` with any preceding
+tracking/source effects intact. A successful formatted-media round trip
+remains a persistence qualification and is deferred by the gate. This slice
+does not load
+`rich-terminal.f`, project or composite a frame, render `SCREENS`, reach a
+physical viewer, or advance any other rich-terminal work.
+
+### Intended source shape
+
+The conventional form is:
+
 ```forth
-0 1 256 BUFFER temp
-0 1 256 BUFFER output
-1 1 0 1 KERNEL my-kern
-4 PIPELINE my-pipe
-' step1 my-pipe P.ADD
-```
-
-You write a **declarative bundle**:
-```forth
-1 BDL-BEGIN               \ version 1
+1 BDL-BEGIN
 0 1 256 BDL-BUF temp
 0 1 256 BDL-BUF output
 1 1 0 1 BDL-KERN my-kern
 4 BDL-PIPE my-pipe
-0 10000 3 BDL-SCHED       \ pipe 0, 10k cycle interval, auto+repeat
-7 30 0 BDL-POLICY         \ read-only, 30-day retention, no export
-1 255 BDL-SCREEN          \ default screen 1, all screens visible
+0 10000 3 BDL-SCHED       \ stored pipe/interval/auto+repeat fields
+1 30 0 BDL-POLICY         \ readonly bit, 30-day field, no export bits
+1 255 BDL-SCREEN          \ stored default and low-eight-bit mask
 BDL-END
 ```
 
-Then load it: `BUNDLE-LOAD my-config` or inspect it: `BUNDLE-INFO my-config`.
+This ordering is a caller convention, not a grammar checked by KDOS.
+`BUNDLE-LOAD name` and `BUNDLE-INFO name` pass the named file to raw `LOAD`.
 
 ### Bundle Lifecycle
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `BDL-BEGIN` | `( version -- )` | **Start a new bundle definition.**  Resets tracking state (but preserves dry-run flag), sets the bundle version, and marks the bundle as active.  All subsequent `BDL-*` calls belong to this bundle. |
-| `BDL-END` | `( -- )` | **Finalize the bundle.**  In dry-run mode, prints a detailed summary (version, object counts, scheduling, policies, dashboard config).  In live mode, applies `TIME-SLICE` and `SCREEN-ID` settings, then prints `"Bundle vN loaded: X bufs Y kerns Z pipes"`. |
-| `BDL-RESET` | `( -- )` | **Clear bundle state.**  Resets version, counts, and config to zero but *preserves* the `BDL-DRY` flag so `BUNDLE-INFO` dry-runs work correctly.  Called automatically by `BDL-BEGIN`. |
+| `BDL-BEGIN` | `( version -- )` | Run `BDL-RESET`, store the unvalidated version, and set `BDL-ACTIVE` to one. It preserves `BDL-DRY`. |
+| `BDL-END` | `( -- )` | In dry mode, print all tracked fields. In live mode, copy `BDL-SCHED-I` to `TIME-SLICE` only when `BDL-SCHED-P <> -1`, copy `BDL-SCR-DEF` directly to `SCREEN-ID`, and print the counts. Finally clear `BDL-ACTIVE`. |
+| `BDL-RESET` | `( -- )` | Restore all initial tracking/config values except `BDL-DRY`, which is deliberately preserved. |
 
 ### Bundle Object Creation
 
-These words create KDOS objects (buffers, kernels, pipelines) or skip creation
-if in dry-run mode.
+These words call the ordinary KDOS constructors in live mode. In dry mode
+they drop the numeric arguments and consume the next blank-delimited name with
+`BL WORD DROP`. A count increments after a successful branch; it is tracking
+state, not an ownership list.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `BDL-BUF` | `( type width length "name" -- )` | **Add a buffer to the bundle.**  In live mode, calls `BUFFER` to create the buffer.  In dry-run mode, skips creation but increments the buffer count.  All modes track the count for `BDL-END` reporting. |
-| `BDL-KERN` | `( n_in n_out footprint flags "name" -- )` | **Add a kernel to the bundle.**  In live mode, calls `KERNEL` to register it.  In dry-run mode, skips registration but increments the kernel count. |
-| `BDL-PIPE` | `( capacity "name" -- )` | **Add a pipeline to the bundle.**  In live mode, calls `PIPELINE` to create it.  In dry-run mode, skips creation but increments the pipeline count. |
+| `BDL-BUF` | `( type width length "name" -- )` | Call `BUFFER`, or consume only the name in dry mode; then increment `BDL-NBUFS`. |
+| `BDL-KERN` | `( n_in n_out footprint flags "name" -- )` | Call `KERNEL`, or consume only the name in dry mode; then increment `BDL-NKERNS`. |
+| `BDL-PIPE` | `( capacity "name" -- )` | Call `PIPELINE`, or consume only the name in dry mode; then increment `BDL-NPIPES`. |
 
 ### Bundle Configuration
 
-These words set global system config for scheduling, policies, and dashboard.
-They store values in bundle state variables; `BDL-END` applies them in live mode.
+These words only store fields. `BDL-END` consumes the schedule interval and
+default screen as described above; the other fields are reporting-only.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `BDL-SCHED` | `( pipe-idx interval flags -- )` | **Set scheduling config.**  *pipe-idx* is which pipeline to schedule (0-based), *interval* is the timer cycle interval, *flags* is a bitmask: bit 0 = auto-start on load, bit 1 = repeat indefinitely.  Stores values in `BDL-SCHED-P/I/F`. |
-| `BDL-POLICY` | `( permissions retention export -- )` | **Set access policy.**  *permissions*: 0=read-write, 7=read-only.  *retention*: days to keep data (0=forever).  *export*: 0=no external export, 1=allow.  Stores in `BDL-POL-PERM/RET/EXP`. |
-| `BDL-SCREEN` | `( default-screen screen-mask -- )` | **Set dashboard config.**  *default-screen* (1–9) is the initial screen on `SCREENS`.  *screen-mask* is a bitmask of visible screens (511 = all 9 visible).  Stores in `BDL-SCR-DEF/MASK`. |
+| `BDL-SCHED` | `( pipe-idx interval flags -- )` | Store all three cells. By convention flag bit 0 means auto-start and bit 1 means repeat, but no scheduler consumes either flag or the pipeline index. |
+| `BDL-POLICY` | `( permissions retention export -- )` | Store all three cells. Permission bit 0 is readonly and bit 1 is system; export bit 0 is NIC and bit 1 is disk. Retention is an opaque numeric field here. No policy is enforced. |
+| `BDL-SCREEN` | `( default-screen screen-mask -- )` | Store both unchecked cells. The mask is never consumed; only the default is copied to `SCREEN-ID` by a live `BDL-END`. |
 
 ### Loading & Inspection
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `BUNDLE-LOAD` | `( "name" -- )` | **Load a bundle from disk in live mode.**  Sets `BDL-DRY=0`, then calls `LOAD` to read and evaluate the file.  The bundle file should contain `BDL-BEGIN ... BDL-END`.  All objects are created and config is applied. |
-| `BUNDLE-INFO` | `( "name" -- )` | **Dry-run inspect a bundle without creating objects.**  Sets `BDL-DRY=1`, calls `LOAD` to evaluate the file (which skips object creation but tracks counts), then resets `BDL-DRY=0`.  `BDL-END` prints a detailed summary.  Use this to preview a bundle before loading it. |
-| `.BUNDLE` | `( -- )` | **Show current bundle state.**  If a bundle is active (`BDL-ACTIVE=1`), prints version, buffer/kernel/pipeline counts, scheduling config, policies, and dashboard settings.  If no bundle is loaded, prints `"(no bundle loaded)"`. |
+| `BUNDLE-LOAD` | `( "name" -- )` | Store zero in `BDL-DRY`, then invoke raw filesystem `LOAD`. No type, flags, bundle structure, or completion check is added. |
+| `BUNDLE-INFO` | `( "name" -- )` | Store one in `BDL-DRY`, invoke raw `LOAD`, then store zero only if `LOAD` returns normally. Only the three object-declaration words respect dry mode. |
+| `.BUNDLE` | `( -- )` | Print `"(no bundle loaded)"` exactly when `BDL-VER` is zero; otherwise print tracking/config fields. It does not inspect or print `BDL-ACTIVE` or `BDL-DRY`. |
 
 ### State Variables
 
-These are internal tracking variables — you don't normally call them directly.
+These are global, writable tracking variables. `BDL-RESET` restores the shown
+value except for `BDL-DRY`.
 
-| Variable | Meaning |
-|----------|--------|
-| `BDL-ACTIVE` | 1 if a bundle is currently being defined, 0 otherwise. |
-| `BDL-DRY` | 1 = dry-run mode (skip object creation), 0 = live mode. |
-| `BDL-VER` | Bundle version number. |
-| `BDL-NBUFS` | Count of buffers added via `BDL-BUF`. |
-| `BDL-NKERNS` | Count of kernels added via `BDL-KERN`. |
-| `BDL-NPIPES` | Count of pipelines added via `BDL-PIPE`. |
-| `BDL-SCHED-P` | Scheduled pipeline index (0-based). |
-| `BDL-SCHED-I` | Scheduling interval in cycles. |
-| `BDL-SCHED-F` | Scheduling flags (bit 0=auto-start, bit 1=repeat). |
-| `BDL-POL-PERM` | Policy: permissions (0=RW, 7=RO). |
-| `BDL-POL-RET` | Policy: retention in days. |
-| `BDL-POL-EXP` | Policy: export allowed (0=no, 1=yes). |
-| `BDL-SCR-DEF` | Dashboard: default screen (1–9). |
-| `BDL-SCR-MASK` | Dashboard: screen visibility bitmask (511 = all 9). |
+| Variable | Initial value | Executable meaning |
+|----------|---------------|--------------------|
+| `BDL-ACTIVE` | 0 | Set by `BDL-BEGIN` and cleared by `BDL-END`; otherwise unread. |
+| `BDL-DRY` | 0 | Nonzero makes only `BDL-BUF`, `BDL-KERN`, and `BDL-PIPE` skip construction. |
+| `BDL-VER` | 0 | Unvalidated reporting value and `.BUNDLE`'s presence test. |
+| `BDL-NBUFS` | 0 | Successful `BDL-BUF` declaration count. |
+| `BDL-NKERNS` | 0 | Successful `BDL-KERN` declaration count. |
+| `BDL-NPIPES` | 0 | Successful `BDL-PIPE` declaration count. |
+| `BDL-SCHED-P` | -1 | Sentinel controls whether live end copies the interval; it does not select a pipeline. |
+| `BDL-SCHED-I` | 0 | Value copied to `TIME-SLICE` when the pipe field is not -1. |
+| `BDL-SCHED-F` | 0 | Reporting-only auto/repeat bits. |
+| `BDL-POL-PERM` | 0 | Reporting-only readonly/system bits. |
+| `BDL-POL-RET` | 0 | Reporting-only retention field. |
+| `BDL-POL-EXP` | 3 | Reporting-only NIC/disk export bits. |
+| `BDL-SCR-DEF` | 1 | Value copied directly to `SCREEN-ID` by every live end. |
+| `BDL-SCR-MASK` | 255 | Reporting-only mask; this default covers eight bits, not all nine documented screens. |
 
 ### File Type Constant
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `FTYPE-BUNDLE` | 7 | File type code for pipeline bundles.  Used when creating bundle files with `MKFILE`. |
+| `FTYPE-BUNDLE` | 7 | Intended file type for bundles. Neither wrapper reads or enforces it. |
 
-### Example — Complete Bundle Workflow
+### Executable limits and source discrepancies
 
-**1. Create a bundle file:**
-```forth
-\ In a text editor or via CAT, create demo-bundle:
-1 BDL-BEGIN
-0 1 256 BDL-BUF sensor-in
-0 1 256 BDL-BUF sensor-out
-1 1 0 1 BDL-KERN ksmooth
-4 BDL-PIPE data-flow
-0 10000 3 BDL-SCHED     \ pipe 0, 10k cycles, auto+repeat
-7 30 0 BDL-POLICY       \ read-only, 30 days, no export
-2 255 BDL-SCREEN        \ start on screen 2, all visible
-BDL-END
-```
-
-**2. Inject it into the filesystem:**
-```forth
-4 7 MKFILE demo-bundle   \ 4 sectors, type=bundle
-\ (then manually write the content, or use diskutil.py)
-```
-
-**3. Inspect before loading:**
-```forth
-BUNDLE-INFO demo-bundle
-\ Output:
-\   Bundle v1 (dry-run)
-\   - 2 buffers
-\   - 1 kernel
-\   - 1 pipeline
-\   - Schedule: pipe 0 @ 10000 cycles, flags=3
-\   - Policy: perm=7 ret=30 export=0
-\   - Screen: default=2 mask=255
-```
-
-**4. Load for real:**
-```forth
-BUNDLE-LOAD demo-bundle
-\ Output: Bundle v1 loaded: 2 bufs 1 kerns 1 pipes
-
-BUFFERS         \ see sensor-in, sensor-out
-KERNELS         \ see ksmooth
-PIPES           \ see data-flow
-.BUNDLE         \ show active bundle state
-```
-
-**5. Use the loaded objects:**
-```forth
-sensor-in B.INFO
-data-flow P.RUN
-```
-
-### Design Notes
-
-- **Idempotency**: `BDL-BEGIN` resets state, so you can re-load a bundle.
-- **Dry-run safety**: `BUNDLE-INFO` uses `BDL-DRY=1` to prevent side effects — perfect for CI/CD validation or pre-flight checks.
-- **Versioning**: The version number is for human tracking; KDOS doesn't enforce compatibility yet, but future versions could add migration logic.
-- **File format**: Bundles are plain Forth source files (type=7) that call `BDL-*` words.  They're human-readable and can be edited with any text editor.
-- **Config application**: `BDL-SCHED/POLICY/SCREEN` set global state; if you load multiple bundles, the last one wins.  For production, load one bundle per environment.
+- `BDL-ACTIVE` is write-only. No declaration or finalizer checks it, so
+  declarations and `BDL-END` run without `BDL-BEGIN`, in arbitrary order, or
+  after an earlier end. A file with no begin or no end is not rejected.
+- Versions are not checked for range or compatibility. `.BUNDLE` uses
+  `BDL-VER @ 0=` instead of active state: a completed positive-version bundle
+  still displays after `BDL-ACTIVE` becomes zero, while a version-zero bundle
+  can apply its live effects and then be reported as absent.
+- A live `BDL-END` does not select, start, or repeat a pipeline. The stored
+  pipeline index is only compared with -1; the interval is copied to
+  `TIME-SLICE`, and the flags are ignored. This does not reprogram an already
+  running Timer. Bundle state contains no object-membership association.
+- A live end always stores `BDL-SCR-DEF` directly in `SCREEN-ID`, even when no
+  explicit `BDL-SCREEN` appeared and `BDL-BEGIN` merely restored the default
+  of one. It performs no range check, does not call `SWITCH-SCREEN`, does not
+  reset `SUBSCREEN-ID`, `SCR-SEL`, or `SCR-MAX`, and does not render. The mask
+  is unused; the default 255 has only eight set bits despite nine screens.
+- Policy and export fields are reporting-only. Permission bit 0 means
+  readonly and bit 1 system; export bit 0 means NIC and bit 1 disk. Thus the
+  earlier shorthand `0=RW, 7=RO` and `0=no, 1=allow` was not the source's bit
+  contract, and no combination enforces access, retention, or export.
+- Declaration counts are calls, not a list of live bundle members. The Kernel
+  registry saturates at 32 and the Pipeline registry at eight while their
+  constructors can still publish orphan descriptors/constants; bundle counts
+  continue rising. Types, widths, lengths, footprints, capacities, indices,
+  flags, names, and count overflow are not validated here. A live constructor
+  failure leaves every earlier object/effect intact and skips only that call's
+  trailing count increment.
+- Dry declaration branches consume a name with `BL WORD DROP`, leaving its
+  transient counted bytes at the unchanged dictionary frontier. They do not
+  validate the numeric arguments or name and do not model whether the live
+  constructor would succeed.
+- `BDL-RESET` intentionally preserves `BDL-DRY`; a caller that directly set a
+  nonzero dry value stays dry across begin/reset. `.BUNDLE` displays neither
+  active nor dry state. `BUNDLE-INFO` also replaces the previously tracked
+  "current bundle", so a later `.BUNDLE` describes the inspection.
+- `BUNDLE-INFO` is not a side-effect-free validator. Dry mode affects only the
+  three object wrappers; begin/config/end tracking, output, definitions, and
+  arbitrary Forth in the file still execute and commit. If `LOAD` throws, the
+  trailing clear is unreachable and `BDL-DRY` remains one.
+- `BUNDLE-LOAD` and `BUNDLE-INFO` do not inspect `FTYPE-BUNDLE`, directory
+  flags, or even require a nonempty bundle structure. They inherit raw
+  `LOAD`'s ability to evaluate any named nonempty entry as unrestricted Forth.
+- Raw `LOAD` is not a dictionary or object transaction. `_LD-TXN-ROLLBACK` is
+  a no-op at this frontier; the later §20 mechanism rolls back provisional
+  module identities, not arbitrary words or objects. A failed load can retain
+  partial definitions, descriptors, registry links, counts, tracking/config
+  stores, output, and any other source effect. Re-loading is likewise not
+  idempotent: `BDL-BEGIN` resets only tracking, while names shadow and
+  descriptors/registries/resources accumulate with no ownership or unload
+  operation.
+- The underlying line loader evaluates LF-delimited records without checking
+  `EVAL-STATUS` or `EVALUATE-FINISH`. An undefined or overlong line can be
+  skipped while later lines, including `BDL-END`, execute; a later line can
+  replace the diagnostic, and unfinished compiler state can escape a nominal
+  success. The wrapper may consequently publish its "loaded" summary after a
+  malformed earlier line. `BUNDLE-INFO` therefore is not syntax validation.
+- When the filesystem gate is false, raw `LOAD` can return before consuming
+  its name. In an enclosing evaluator, the would-be filename may then be
+  interpreted as the next ordinary token. Bundle wrappers add no protection.
+- Bundle tracking cells, parser scratch, constructors, registries, global
+  `TIME-SLICE`, and screen state are unguarded and non-reentrant. The safe
+  focused hosted domain is one core, canonical `BDL-BEGIN`/small valid
+  declarations/one `BDL-END`, valid names and screen value, unsaturated
+  registries, ample dictionary/allocation space, and no concurrent mutation.
 
 ---
 

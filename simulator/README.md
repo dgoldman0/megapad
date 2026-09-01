@@ -179,7 +179,12 @@ The implemented slices provide:
   sequential pipeline fallback without a fabricated worker or speedup;
 - unchanged KDOS per-core queues, work stealing, affinity, per-core flag
   polling, software message inboxes, and named lock wrappers through §8.7,
-  qualified as one-core state machines rather than multicore execution.
+  qualified as one-core state machines rather than multicore execution;
+- unchanged KDOS cluster-control and MPU failure behavior, complete §9 ANSI
+  screens, §10 Data Port bindings, Dashboard and Help publication, and §15
+  Pipeline Bundle tracking/declarative words through line 9121, without
+  claiming networking transport, real bundle-file integration, scheduling,
+  rendering, or rich-terminal output.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -775,14 +780,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 8943.
+ends at line 9121.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–8943 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, and §13 Help |
-| 8944 onward | Next uncovered frontier | §15 begins the Pipeline Bundle state and declarative binding layer |
+| 39–9121 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, and §15 Pipeline Bundles |
+| 9122 onward | Next uncovered frontier | §18 begins the Ring Buffer primitives after the line-9122 separator |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1826,7 +1831,8 @@ the zero-related-word defect, and pins the complete 7,431-byte `HELP` output
 at SHA-256
 `c1d44c8970fa800f943db3e9b081cdaaf642af429c6cf4f9df27bcc63a2f1d07`.
 It does not execute `.MEM`, `MEM-REPORT`, or full `DASHBOARD`, and it does not
-qualify the later UDP transport or Pipeline Bundle implementation.
+qualify the later UDP transport; the following Pipeline Bundle block is
+qualified separately.
 
 The unchanged source retains these discrepancies:
 
@@ -1856,14 +1862,81 @@ The unchanged source retains these discrepancies:
   and tests the entry address instead of the count. It always reports zero;
   if the branch were reachable, `TYPE` would leave too little stack for its
   following `ROT`.
-- Full Help advertises absent `POLL`, `INGEST`, and later Bundle words. The
-  surrounding §10 comments also promise `RECV-FRAME`, `ROUTE-FRAME`, and
-  `PORT-SEND`; `PORT-SEND-SLICE` is likewise absent. Help/comment publication
-  is qualified, not any of those operations.
+- Full Help advertises `POLL`, `INGEST`, and Bundle words before they exist at
+  the line-8943 boundary. The Bundle words arrive in the following §15 slice;
+  the transport words, including the promised `RECV-FRAME`, `ROUTE-FRAME`,
+  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent at line 9121. Help/comment
+  publication is qualified, not any transport operation.
 
-The contiguous frontier now ends at line 8943. Line 8944 begins §15
-Pipeline Bundles. This slice does not load `rich-terminal.f` or advance any
-rich projection, compositor, physical-viewer, or revision-bound-input seam.
+Exact unchanged lines 8944–9121 add §15 Pipeline Bundles: 178 LF records,
+5,801 bytes, SHA-256
+`370c6c6d17470ae7ea0c8a94ca5ede4ddcae04a8c9e0badcb007cc5358ef919f`,
+and Git blob `a7f49a7d29bbfa61d043dae73854924e74f4b2f8`. The exact fixture includes
+the line-9122 §18 separator and has 179 LF records, 5,873 bytes, SHA-256
+`8791e5eecef059d052ecd8b69976317857c41c29ae475e18cc53d79761d8b922`,
+and Git blob `3690e82c7a15e69fa69c84186fdda0caa5937d42`.
+
+The slice publishes 27 definitions: one constant, fourteen variables, and
+twelve colons. Its 261 name bytes, 112 variable-body bytes, and 459 fixed
+header/semantic-slot bytes produce exactly 832 bytes of hosted dictionary
+growth. `FTYPE-BUNDLE` is 7. Load explicitly initializes all fourteen cells:
+ACTIVE, DRY, version, three object counts, schedule interval/flags, and policy
+permissions/retention are zero; schedule pipe is `-1`, policy export is 3,
+screen default is 1, and screen mask is 255. Those stores are the only
+load-time effects; no bundle word parses an active-input operand, constructs
+an object, performs device I/O, emits output, schedules work, or renders.
+
+Focused direct evidence covers reset/begin, every configuration setter, and
+the dry and live declaration paths. Dry Buffer/Kernel/Pipeline declarations
+consume their line-local names and increment bundle counts without advancing
+`HERE`/`LATEST` or touching the real registries. Live declarations call the
+ordinary constructors before incrementing. Exact output covers dry and live
+`BDL-END` plus both `.BUNDLE` displays. Dry END only reports; live END writes a
+configured interval to `TIME-SLICE` when a schedule is present, writes the
+default screen to `SCREEN-ID`, reports the counts, and clears ACTIVE.
+
+The public wrappers are qualified without a disk image. Their compiled IR is
+pinned to the exact `LOAD` XT captured at §15 compile time, including
+`BUNDLE-LOAD`'s leading DRY-zero store and `BUNDLE-INFO`'s
+leading-one/call/trailing-zero sequence. In a dedicated runtime, a shadow
+`LOAD` is published before the slice and consumes the outer filename before
+evaluating bounded synthetic bundle source in the same context. Normal INFO
+presents DRY one, traverses all dry name paths without real objects, and then
+clears DRY. A caught guest `THROW` proves the defect: INFO skips its trailing
+clear and retains DRY one, ACTIVE one, and partial tracking written before the
+throw, while real registries remain untouched.
+
+Unchanged source retains these limits:
+
+- ACTIVE is never enforced, and version zero is accepted even though
+  `.BUNDLE` uses version zero—not ACTIVE—as its `(no bundle loaded)` test.
+- END applies only interval and default screen. It does not schedule the
+  selected pipeline, act on auto/repeat flags, apply the screen mask, validate
+  a screen, or enforce policy. Mask 255 has eight bits despite the nine
+  registered screens; policy, schedule flags, and mask remain reporting-only.
+- Bundle counts are independent wrapping cells. Dry counts have no resources;
+  live Kernel/Pipeline descriptors and constants continue after registry
+  saturation at 32/8 and are omitted from listings, while Buffer growth is
+  bounded only by dictionary capacity.
+- Bundle files are arbitrary Forth with no `FTYPE-BUNDLE`, version, syntax, or
+  field gate. INFO's dry flag affects only three declaration words, so ordinary
+  source still runs and even a conventional inspection rewrites globals and
+  emits output.
+- The wrappers inherit raw `LOAD`: absent filesystems diagnose before parsing
+  the filename; mounted loading ignores `EVAL-STATUS`, never calls
+  `EVALUATE-FINISH`, can continue after an undefined/overlong line, and can
+  return with unfinished compiler state.
+- There is no general rollback, unload, resource ownership, or idempotence.
+  Loader transaction hooks are still no-ops; completed work survives a later
+  throw, reset does not free resources or undo applied state, and repeated live
+  loads can shadow names, duplicate objects, and saturate registries.
+- Tracking, DRY mode, parser/evaluator state, registries, and constructor
+  scratch are global and unlocked, with no nesting or concurrent ownership.
+
+The contiguous frontier now ends at line 9121. Line 9122 begins the separator
+for §18 Ring Buffer primitives. Real disk-backed bundle integration, actual
+scheduling/cadence, mask-driven rendering, physical presentation, and all
+rich-terminal work remain deferred.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

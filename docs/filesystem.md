@@ -36,7 +36,7 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 8943. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 9121. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
@@ -54,7 +54,18 @@ validation/fallback behavior, the §8.2–§8.7 queue, affinity, flag, message,
 and named-lock state machines, the §8.8–§8.9 cluster-control and MPU failure
 boundary, absent-network forward bridge, the complete §9 ANSI screen registry,
 widgets, definitions, dispatch, handlers, and event loop, then §10 Data Port
-structures and bindings, the §11 placeholder, §12 Dashboard, and §13 Help.
+structures and bindings, the §11 placeholder, §12 Dashboard, §13 Help, and
+§15 Pipeline Bundles. §18 Ring Buffer Primitives is next; there are no §16
+or §17 source blocks at this boundary.
+
+The §15 `BUNDLE-LOAD` and `BUNDLE-INFO` words are thin wrappers around this
+same raw `LOAD`. They do not enforce file type 7 or directory flags and inherit
+its LF-record evaluation, unchecked evaluator completion/status, false-`FS-OK`
+name-consumption edge, and nontransactional dictionary/object effects.
+`BUNDLE-INFO` only makes the three `BDL-BUF`/`BDL-KERN`/`BDL-PIPE` wrappers
+skip construction; it is not a general dry-run or validation boundary. Exact
+Pipeline Bundle provenance and discrepancies are recorded in
+`docs/kdos-reference.md`.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -254,7 +265,7 @@ invariant of a NUL within the 24-byte name field.
 | 4 | `FTYPE_DOC` | Documentation | Browsable with `DOC` and `DESCRIBE` |
 | 5 | `FTYPE_DATA` | Structured data | Application data, saved buffers |
 | 6 | `FTYPE_TUT` | Tutorial | Step-by-step lessons, browsable with `TUTORIAL` |
-| 7 | `FTYPE_BUNDLE` | Pipeline bundle | Declarative config, loadable with `BUNDLE-LOAD` |
+| 7 | `FTYPE_BUNDLE` | Pipeline bundle | Unrestricted Forth-source convention; wrappers do not enforce the type |
 | 8 | `FTYPE_DIR` | Directory | Subdirectory (no data sectors) |
 | 9 | `FTYPE_STREAM` | Stream | Circular ring buffer (see §Stream Files) |
 | 10 | `FTYPE_LINK` | Symbolic link | Target path stored in data (see §Symbolic Links) |
@@ -610,7 +621,7 @@ When injecting a file, use `--type` to set the file type:
 | `doc` | 4 | Documentation topic |
 | `data` | 5 | Structured data |
 | `tutorial` | 6 | Tutorial/lesson |
-| `bundle` | 7 | Pipeline bundle (declarative config) |
+| `bundle` | 7 | Pipeline bundle convention (unrestricted Forth source) |
 | `stream` | 9 | Stream (circular ring buffer) |
 | `link` | 10 | Symbolic link |
 
@@ -935,9 +946,12 @@ flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
 and deferred targets are global and unlocked. The contiguous hosted frontier
 continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
-Dashboard, and §13 Help through line 8943; §15 is next. Exact provenance and
-the source-literal limits of that later frontier are recorded in
-`docs/kdos-reference.md`.
+Dashboard, §13 Help, and §15 Pipeline Bundles through line 9121; §18 is
+next. The bundle wrappers still inherit raw `LOAD` semantics rather than
+forming a typed or transactional filesystem layer. Exact provenance and the
+source-literal limits of that later frontier are recorded in
+`docs/kdos-reference.md`. This frontier change performs no rich-terminal
+module, projection, compositor, renderer, or physical-viewer work.
 
 ### Documentation Access
 
