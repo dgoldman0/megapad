@@ -8,6 +8,7 @@ from shared.cells import MASK64
 from simulator.ir import Call, Return
 from simulator.memory import AddressClass, UnmappedAddressError
 from simulator.runtime import ColonDefinition, ExecutionContext, MegaForthRuntime
+from simulator.stacks import DataStack, StackOverflow
 
 
 _SCRATCH = 0x0007_0000
@@ -103,6 +104,25 @@ def test_find_selects_the_newest_case_insensitive_live_binding_and_rollback() ->
     assert restored_context.data.snapshot() == (original.xt, MASK64)
 
 
+def test_find_uses_live_metadata_instead_of_mutated_guest_header_bytes() -> None:
+    runtime = MegaForthRuntime()
+    word = runtime.define_primitive("RAW-PROBE", lambda _context: None)
+    original_address = _put_counted(runtime, b"RAW-PROBE")
+    mutated_address = _put_counted(
+        runtime,
+        b"RAW-MUTED",
+        address=_SCRATCH + 0x20,
+    )
+    runtime.memory.write8(word.header_address + 8, 0x80 | len(word.name))
+    runtime.memory.write_bytes(word.header_address + 9, b"RAW-MUTED")
+
+    original = _execute_find(runtime, original_address)
+    mutated = _execute_find(runtime, mutated_address)
+
+    assert original.data.snapshot() == (word.xt, MASK64)
+    assert mutated.data.snapshot() == (mutated_address, 0)
+
+
 @pytest.mark.parametrize(
     "payload",
     (
@@ -177,6 +197,46 @@ def test_find_later_payload_fault_preserves_data_and_return_stacks() -> None:
 
     assert context.data.snapshot() == (0x0123_4567_89AB_CDEF, address)
     assert context.returns.snapshot() == (0x0BAD_F00D,)
+
+
+def test_find_bounded_result_capacity_is_checked_after_lookup_without_mutation() -> None:
+    runtime = MegaForthRuntime()
+    address = _put_counted(runtime, b"DUP")
+    context = ExecutionContext(
+        data=DataStack(
+            memory=runtime.memory,
+            floor=0x800,
+            empty_pointer=0x808,
+        )
+    )
+    context.data.push(address)
+
+    with pytest.raises(StackOverflow):
+        runtime.execute("FIND", context=context)
+
+    assert context.data.snapshot() == (address,)
+    assert context.returns.snapshot() == ()
+
+
+def test_find_payload_fault_precedes_bounded_result_capacity_fault() -> None:
+    runtime = MegaForthRuntime()
+    runtime.define_primitive("WXYZ", lambda _context: None)
+    address = _bank0_limit(runtime) - 3
+    runtime.memory.write_bytes(address, b"\x04WX")
+    context = ExecutionContext(
+        data=DataStack(
+            memory=runtime.memory,
+            floor=0x800,
+            empty_pointer=0x808,
+        )
+    )
+    context.data.push(address)
+
+    with pytest.raises(UnmappedAddressError):
+        runtime.execute("FIND", context=context)
+
+    assert context.data.snapshot() == (address,)
+    assert context.returns.snapshot() == ()
 
 
 def test_find_compiles_as_an_ordinary_call_and_runs_inside_a_colon() -> None:

@@ -132,11 +132,11 @@ The implemented slices provide:
   cryptographic-randomness claim;
 - active-line `WORD` with its transient counted string at `HERE`, plus
   newest-first exact-length counted-string `FIND` over live published
-  definitions with ASCII case folding and native immediate/ordinary result
-  flags; `S"` with distinct NUL-terminated compiled body literals and one
-  protected, reused 255-byte interpret buffer; forward `CMOVE`, byte fetch,
-  stack depth, compiled/interpret-state `."`, and the supported compile-state
-  `ABORT"` path;
+  definitions with ASCII case folding and native-valued immediate/ordinary
+  result flags; `S"` with distinct NUL-terminated compiled body literals and
+  one protected, reused 255-byte interpret buffer; forward `CMOVE`, byte
+  fetch, stack depth, compiled/interpret-state `."`, and the supported
+  compile-state `ABORT"` path;
 - a memory-backed canonical foreground data/return stack with exact downward
   cell geometry, retained continuation slots, `SP@`/`SP!` and `RP@`/`RP!`;
 - the unchanged source-defined KDOS Bank-0 heap, including lazy setup,

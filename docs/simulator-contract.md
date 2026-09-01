@@ -183,10 +183,12 @@ the 127-byte dictionary-name limit, and non-ASCII names are ordinary misses.
 The count is read before lookup, and query bytes are read low-to-high only
 while comparing a candidate of the same length. Thus an impossible count does
 not require a mapped payload, while a later comparison fault leaves both
-stacks unchanged. The hosted bounded stack also proves room for the result
-flag before changing the input cell. This is a semantic linked search over
-live metadata: it neither consults nor mutates the optional dictionary side
-index, and it does not reinterpret semantic code slots as MP64 instructions.
+stacks unchanged. After lookup, the hosted bounded stack proves room for the
+result flag before changing the input cell, so a payload fault takes precedence
+over a capacity fault and either failure is stack-atomic. This is a semantic
+newest-first search over live metadata: it does not consult or mutate the
+optional dictionary side index, follow guest link bytes, or reinterpret
+semantic code slots as MP64 instructions.
 
 Compiled `S"` occurrences own distinct `payload + NUL` spans in their defining
 colon's guest-visible body. Their semantic operation pushes that body's stable
