@@ -68,8 +68,9 @@ The module owns:
   and lifecycle-bounded access to the accepted records;
 * the shared CELL/PRESENT transaction-ID, revision, sequence, byte, credit, and
   completion gate;
-* core OWNER_OPEN/OWNER_DROP lifecycle publication and exact RET_RESULT
-  reconciliation;
+* core OWNER_OPEN/OWNER_DROP and immutable RGBA8 resource lifecycle
+  publication, exact RET_RESULT reconciliation, and covering-CREDIT chunk
+  settlement;
 * PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
   DEFINE/REPLACE/DROP operations, typed GLYPH_RUN DEFINE/REPLACE operations,
   and typed semantic-control DEFINE/REPLACE/DROP operations; and
@@ -79,8 +80,8 @@ It does not own consumer focus, host regions, widgets, retained semantic
 objects, owner/item allocation policy, quota derivation, replay planning, or
 the Akashic front/back cell buffers. The core retained writers accept bounded
 wire-neutral intent from a single internal rich-terminal engine; they are not
-an independently discoverable scene or mutation API. Other object kinds,
-resources, and series remain outside the currently implemented writer subset.
+an independently discoverable scene or mutation API. Other object kinds and
+series remain outside the currently implemented writer subset.
 
 The module admits in-place RETAINED-1 feature bit 8 `RET_CONTROLS`, supplies
 typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers, and decodes
@@ -139,6 +140,13 @@ PT-OWNER-OPEN       ( owner generation region-q resource-q object-q series-q
                       resource-byte-q utf8-byte-q sample-slot-q session
                       -- status )
 PT-OWNER-DROP       ( owner generation session -- status )
+PT-RESOURCE-BEGIN   ( owner generation resource format width height flags
+                      byte-length sha3-a sha3-u session -- status )
+PT-RESOURCE-CHUNK   ( owner generation resource offset data-a data-u session
+                      -- status )
+PT-RESOURCE-COMMIT  ( owner generation resource session -- status )
+PT-RESOURCE-DROP    ( owner generation resource session -- status )
+PT-RESOURCE-ABORT   ( owner generation resource reason session -- status )
 
 PT-PRESENT-BEGIN    ( cols rows cell-spans cells retained-ops
                       retained-frame-bytes cell-mode retained-mode session
@@ -295,7 +303,14 @@ than weakening that CELL rule. `PT-COMPLETION-POLL` returns one fixed 80-byte
 native descriptor containing completion kind, completed request type, status,
 detail, transaction ID, revision, owner tuple, item, and accepted bytes.
 OWNER_OPEN always completes through RET_RESULT. OWNER_DROP and PRESENT complete
-through TX_RESULT. Once retained discovery is positive, successful legacy CELL
+through TX_RESULT. RESOURCE_BEGIN, RESOURCE_COMMIT, RESOURCE_DROP, and
+RESOURCE_ABORT complete through RET_RESULT, as does a rejected RESOURCE_CHUNK.
+An accepted RESOURCE_CHUNK has no wire result: only cumulative CREDIT covering
+its complete frame proves acceptance. At that exact watermark PT publishes a
+local RET-kind completion with request RESOURCE_CHUNK, status RET_OK, the exact
+upload tuple, and that chunk's data-byte count. It neither advances the local
+accepted offset nor admits another lifecycle writer before that boundary.
+Once retained discovery is positive, successful legacy CELL
 deltas also produce a completion so the upper engine observes their place in
 the shared transaction/revision domain; CELL-only callers retain the original
 automatic settlement behavior. PT accepts a nonzero PRESENT result without
@@ -311,6 +326,26 @@ resize still requires its first PRESENT CELL_REPLACE. It returns
 negotiated. A crossed soft reset similarly holds result completion and its
 new-epoch acknowledgement in order; cumulative CREDIT and caller-requested
 close wait until that bounded settlement is complete.
+
+The resource API exposes only format `PT-RESOURCE-RGBA8`. BEGIN requires the
+exact 32-byte SHA3-256 span, positive negotiated dimensions, flags zero, and
+checked `width * height * 4 == byte-length`. CHUNK requires a nonempty,
+contiguous exact-offset span no larger than the advertised resource-chunk
+maximum or negotiated payload ceiling. Borrowed digest and chunk spans remain
+valid only for the call and must be disjoint from the session and TX scratch;
+invalid or blocked calls emit no bytes and make no local lifecycle progress.
+Only one exact upload tuple is tracked session-wide. Its declared length and
+covering-CREDIT-confirmed offset are protocol state inside the caller-sized
+session record, not a retained image allocation or fixed image-capacity policy.
+
+`PT-RESOURCE-ABORT-CALLER-CANCEL`,
+`PT-RESOURCE-ABORT-RESET-REBUILD`, and
+`PT-RESOURCE-ABORT-LOCAL-SHUTDOWN` are the three wire reasons. If a soft reset
+crosses an open upload, PT first settles an in-flight chunk, then emits the
+exact old-epoch RESET_REBUILD abort from the tracked tuple and waits for its
+RET_RESULT and exposed completion to be polled. Only then may it publish the
+new-epoch RESET_ACK. The upper engine therefore does not acquire a second
+transport-cleanup state machine.
 
 `PT-PRESENT-BEGIN` derives transaction ID, base revision, geometry generation,
 and exact declared bytes. `retained-frame-bytes` is the exact sum of complete
@@ -446,9 +481,11 @@ virtual-cycle model continues to drive devices, scheduling, and replay.
 
 The current Pygame acceptance runner continues through the ordinary
 Daybook-to-Pad shared-resource handoff and closes the selected software/viewer
-checkpoint. Other object kinds, resources, series, full semantic replay,
-retained resize, physical UART delivery, and a hardware panel sink remain
-separate and unqualified.
+checkpoint. Immutable RGBA resource upload, IMAGE model publication, exact
+shared-session offers, viewer verification, and physical IMAGE composition now
+have focused qualification. Remaining object kinds, series, full semantic
+replay, retained resize, physical UART delivery, and a hardware panel sink
+remain separate and unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint
 

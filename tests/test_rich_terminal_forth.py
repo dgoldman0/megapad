@@ -373,6 +373,512 @@ class TestRichTerminalForth(_KDOSTestBase):
         self.assertEqual(status.group(1), b"0 4 3 0 3 0 ")
         self.assertEqual(raw[begin:end], expected)
 
+    def test_resource_lifecycle_bytes_completions_credit_and_reset_gate(self) -> None:
+        """Exercise the complete immutable-resource guest lifecycle boundary."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PT-RES-RX 8192 ALLOT",
+                "CREATE PT-RES-TX 8192 ALLOT",
+                "CREATE PT-RES-EVENT PT-EVENT-SIZE ALLOT",
+                "CREATE PT-RES-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PT-RES-SESSION PT-RES-SESSION-STORAGE 7 + -8 AND ;",
+                "CREATE PT-RES-SHA3 32 ALLOT",
+                "CREATE PT-RES-PIXEL 4 ALLOT",
+                "CREATE PT-RES-RESULT 48 ALLOT",
+                "CREATE PT-RES-CREDIT 8 ALLOT",
+                "CREATE PT-RES-RESET 16 ALLOT",
+                "CREATE PT-RES-MARK-BUFFER 8 ALLOT",
+                "CREATE PT-RES-COMPLETIONS PT-COMPLETION-SIZE 10 * ALLOT",
+                "CREATE PT-RES-SCRATCH PT-COMPLETION-SIZE ALLOT",
+                "CREATE PT-RES-STATUSES 36 8 * ALLOT",
+                "CREATE PT-RES-FACTS 13 8 * ALLOT",
+                "VARIABLE PT-RES-COMP-I",
+                "VARIABLE PT-RES-POLL-FAIL",
+                "VARIABLE PT-RES-POLL-S",
+                "VARIABLE PT-RES-POLL-HAS",
+                "VARIABLE PT-RES-NONE-S",
+                "VARIABLE PT-RES-NONE-HAS",
+                "VARIABLE PT-RES-STATUS-I",
+                "VARIABLE PT-RES-FACT-I",
+                "VARIABLE PT-RES-RR-REQUEST",
+                "VARIABLE PT-RES-RR-STATUS",
+                "VARIABLE PT-RES-RR-ITEM",
+                "VARIABLE PT-RES-RR-ACCEPTED",
+                ": PT-RES-STATUS!  ( status -- )",
+                "  PT-RES-STATUSES PT-RES-STATUS-I @ 8 * + !",
+                "  PT-RES-STATUS-I @ 1+ PT-RES-STATUS-I ! ;",
+                ": PT-RES-FACT!  ( value -- )",
+                "  PT-RES-FACTS PT-RES-FACT-I @ 8 * + !",
+                "  PT-RES-FACT-I @ 1+ PT-RES-FACT-I ! ;",
+                ": PT-RES-MARK  ( u -- )",
+                "  PT-RES-MARK-BUFFER _PT-U64!",
+                "  PT-RES-MARK-BUFFER 8 TYPE TX-FLUSH ;",
+                ": PT-RES-SHA3!",
+                "  0x0706050403020100 PT-RES-SHA3 _PT-U64!",
+                "  0x1716151413121110 PT-RES-SHA3 8 + _PT-U64!",
+                "  0x2726252423222120 PT-RES-SHA3 16 + _PT-U64!",
+                "  0x3736353433323130 PT-RES-SHA3 24 + _PT-U64!",
+                "  0xDDCCBBAA PT-RES-PIXEL L! ;",
+                ": PT-RES-PRIME",
+                "  PT-RES-COMPLETIONS PT-COMPLETION-SIZE 10 * 0 FILL",
+                "  PT-RES-SCRATCH PT-COMPLETION-SIZE 0 FILL",
+                "  PT-RES-STATUSES 36 8 * 0 FILL",
+                "  PT-RES-FACTS 13 8 * 0 FILL",
+                "  PT-RES-COMP-I OFF PT-RES-POLL-FAIL OFF",
+                "  PT-RES-STATUS-I OFF PT-RES-FACT-I OFF",
+                "  PT-RES-NONE-S OFF PT-RES-NONE-HAS OFF",
+                "  PT-RES-SHA3!",
+                "  PT-RES-RX 8192 PT-RES-TX 8192",
+                "    PT-RES-EVENT PT-EVENT-SIZE PT-RES-SESSION",
+                "    PT-INIT PT-RES-STATUS!",
+                "  PT-ST-ACTIVE PT-RES-SESSION _PT.S.STATE !",
+                "  256 PT-RES-SESSION _PT.S.PEER-MAX-PAY !",
+                "  4096 PT-RES-SESSION _PT.S.PEER-MAX-TX !",
+                "  2048 PT-RES-SESSION _PT.S.PEER-GRANT !",
+                "  2048 PT-RES-SESSION _PT.S.PEER-INITIAL !",
+                "  0 PT-RES-SESSION _PT.S.PEER-SENT !",
+                "  0 PT-RES-SESSION _PT.S.TX-SEQ !",
+                "  0x4142434445464748 PT-RES-SESSION _PT.S.SESSION-ID !",
+                "  9 PT-RES-SESSION _PT.S.EPOCH !",
+                "  7 PT-RES-SESSION _PT.S.REVISION !",
+                "  -1 PT-RES-SESSION _PT.S.RET-ENABLED? !",
+                "  _PT-RD-AVAILABLE PT-RES-SESSION _PT.S.RET-STATE !",
+                "  0x5 PT-RES-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
+                "  8 PT-RES-SESSION _PT.S.RET-CAPS 28 + L!",
+                "  4 PT-RES-SESSION _PT.S.RET-CAPS 44 + L!",
+                "  64 PT-RES-SESSION _PT.S.RET-CAPS 56 + _PT-U64!",
+                "  1 PT-RES-SESSION _PT.S.RET-FORMATS L!",
+                "  1 PT-RES-SESSION _PT.S.RET-FORMATS 4 + L!",
+                "  PT-RESOURCE-RGBA8 PT-RES-SESSION _PT.S.RET-FORMATS 8 + L!",
+                "  4 PT-RES-SESSION _PT.S.RET-FORMATS 12 + L!",
+                "  4 PT-RES-SESSION _PT.S.RET-FORMATS 16 + L! ;",
+                ": PT-RES-BEGIN-ARGS  ( resource -- ... )",
+                "  0x0102030405060708 0x1112131415161718 ROT",
+                "  PT-RESOURCE-RGBA8 1 1 0 4 ;",
+                ": PT-RES-BEGIN  ( resource -- status )",
+                "  PT-RES-BEGIN-ARGS PT-RES-SHA3 32 PT-RES-SESSION",
+                "  PT-RESOURCE-BEGIN ;",
+                ": PT-RES-ITEM-ARGS  ( resource -- owner generation resource )",
+                "  0x0102030405060708 0x1112131415161718 ROT ;",
+                ": PT-RES-SAVE-COMPLETION",
+                "  PT-RES-COMPLETIONS",
+                "    PT-RES-COMP-I @ PT-COMPLETION-SIZE * +",
+                "    PT-RES-SESSION PT-COMPLETION-POLL",
+                "  PT-RES-POLL-HAS ! PT-RES-POLL-S !",
+                "  PT-RES-POLL-S @ PT-S-OK <> IF",
+                "    PT-RES-POLL-FAIL @ 1+ PT-RES-POLL-FAIL !",
+                "  THEN",
+                "  PT-RES-POLL-HAS @ 0= IF",
+                "    PT-RES-POLL-FAIL @ 1+ PT-RES-POLL-FAIL !",
+                "  THEN",
+                "  PT-RES-COMP-I @ 1+ PT-RES-COMP-I ! ;",
+                ": PT-RES-POLL-NONE",
+                "  PT-RES-SCRATCH PT-COMPLETION-SIZE 0 FILL",
+                "  PT-RES-SCRATCH PT-RES-SESSION PT-COMPLETION-POLL",
+                "  PT-RES-NONE-HAS ! PT-RES-NONE-S !",
+                "  PT-RES-NONE-S @ PT-S-OK <> IF",
+                "    PT-RES-POLL-FAIL @ 1+ PT-RES-POLL-FAIL !",
+                "  THEN",
+                "  PT-RES-NONE-HAS @ IF",
+                "    PT-RES-POLL-FAIL @ 1+ PT-RES-POLL-FAIL !",
+                "  THEN ;",
+                ": PT-RES-RET-RESULT  ( request status item accepted -- status )",
+                "  PT-RES-RR-ACCEPTED ! PT-RES-RR-ITEM !",
+                "  PT-RES-RR-STATUS ! PT-RES-RR-REQUEST !",
+                "  PT-RES-RESULT 48 0 FILL",
+                "  PT-RES-RR-REQUEST @ PT-RES-RESULT W!",
+                "  PT-RES-RR-STATUS @ PT-RES-RESULT 2 + W!",
+                "  0x0102030405060708 PT-RES-RESULT 8 + _PT-U64!",
+                "  0x1112131415161718 PT-RES-RESULT 16 + _PT-U64!",
+                "  PT-RES-RR-ITEM @ PT-RES-RESULT 24 + _PT-U64!",
+                "  7 PT-RES-RESULT 32 + _PT-U64!",
+                "  PT-RES-RR-ACCEPTED @ PT-RES-RESULT 40 + _PT-U64!",
+                "  PT-RES-SESSION _PT-RX-S !",
+                "  PT-RES-RESULT _PT-RX-P !",
+                "  _PT-M-RET-RESULT _PT-RX-TYPE !",
+                "  48 _PT-RX-LEN ! 0 _PT-RX-SEQNO !",
+                "  PT-RES-SESSION _PT-DISPATCH-RET-RESULT ;",
+                ": PT-RES-CREDIT-ONE-SHORT",
+                "  2243 PT-RES-CREDIT _PT-U64!",
+                "  PT-RES-SESSION _PT-RX-S !",
+                "  PT-RES-CREDIT _PT-RX-P !",
+                "  _PT-M-CREDIT _PT-RX-TYPE !",
+                "  8 _PT-RX-LEN ! 0 _PT-RX-SEQNO !",
+                "  PT-RES-SESSION _PT-DISPATCH-CREDIT ;",
+                ": PT-RES-CREDIT-COVER",
+                "  2244 PT-RES-CREDIT _PT-U64!",
+                "  PT-RES-SESSION _PT-RX-S !",
+                "  PT-RES-CREDIT _PT-RX-P !",
+                "  _PT-M-CREDIT _PT-RX-TYPE !",
+                "  8 _PT-RX-LEN ! 0 _PT-RX-SEQNO !",
+                "  PT-RES-SESSION _PT-DISPATCH-CREDIT ;",
+                ": PT-RES-SOFT-RESET",
+                "  PT-RES-RESET 16 0 FILL",
+                "  10 PT-RES-RESET L!",
+                "  7 PT-RES-RESET 8 + _PT-U64!",
+                "  PT-RES-SESSION _PT-RX-S !",
+                "  PT-RES-RESET _PT-RX-P !",
+                "  _PT-M-SOFT-RESET-REQUEST _PT-RX-TYPE !",
+                "  16 _PT-RX-LEN ! 0 _PT-RX-SEQNO !",
+                "  PT-RES-SESSION _PT-DISPATCH-SOFT-RESET ;",
+                ": PT-RES-RUN",
+                "  PT-RES-PRIME",
+                "  0x3130303047454252 PT-RES-MARK",
+                "  0x2122232425262728 PT-RES-BEGIN-ARGS",
+                "    PT-RES-SHA3 31 PT-RES-SESSION PT-RESOURCE-BEGIN",
+                "    PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-BEGIN-ARGS",
+                "    PT-RES-SESSION _PT.S.TX-A @ 32 PT-RES-SESSION",
+                "    PT-RESOURCE-BEGIN PT-RES-STATUS!",
+                "  0x1 PT-RES-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
+                "  0x2122232425262728 PT-RES-BEGIN PT-RES-STATUS!",
+                "  0x5 PT-RES-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
+                "  0x2122232425262728 PT-RES-BEGIN PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS PT-RES-SESSION",
+                "    PT-RESOURCE-DROP PT-RES-STATUS!",
+                "  PT-REQUEST-RESOURCE-BEGIN PT-RET-OK",
+                "    0x2122232425262728 0 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS 0",
+                "    PT-RES-PIXEL 4 PT-RES-SESSION PT-RESOURCE-CHUNK",
+                "    PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS 0",
+                "    0 0 PT-RES-SESSION PT-RESOURCE-CHUNK PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS 0",
+                "    PT-RES-SESSION _PT.S.TX-A @ 4 PT-RES-SESSION",
+                "    PT-RESOURCE-CHUNK PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS 0",
+                "    PT-RES-PIXEL 4 PT-RES-SESSION PT-RESOURCE-CHUNK",
+                "    PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS PT-RES-SESSION",
+                "    PT-RESOURCE-COMMIT PT-RES-STATUS!",
+                "  PT-RES-POLL-NONE",
+                "  PT-RES-CREDIT-ONE-SHORT PT-RES-STATUS!",
+                "  PT-RES-POLL-NONE",
+                "  PT-RES-CREDIT-COVER PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS PT-RES-SESSION",
+                "    PT-RESOURCE-COMMIT PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS PT-RES-SESSION",
+                "    PT-RESOURCE-COMMIT PT-RES-STATUS!",
+                "  PT-REQUEST-RESOURCE-COMMIT PT-RET-OK",
+                "    0x2122232425262728 4 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  0x2122232425262728 PT-RES-ITEM-ARGS PT-RES-SESSION",
+                "    PT-RESOURCE-DROP PT-RES-STATUS!",
+                "  PT-REQUEST-RESOURCE-DROP PT-RET-OK",
+                "    0x2122232425262728 0 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  0x292A2B2C2D2E2F30 PT-RES-BEGIN PT-RES-STATUS!",
+                "  PT-REQUEST-RESOURCE-BEGIN PT-RET-OK",
+                "    0x292A2B2C2D2E2F30 0 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  0x292A2B2C2D2E2F30 PT-RES-ITEM-ARGS 9 PT-RES-SESSION",
+                "    PT-RESOURCE-ABORT PT-RES-STATUS!",
+                "  0x292A2B2C2D2E2F30 PT-RES-ITEM-ARGS",
+                "    PT-RESOURCE-ABORT-CALLER-CANCEL PT-RES-SESSION",
+                "    PT-RESOURCE-ABORT PT-RES-STATUS!",
+                "  PT-REQUEST-RESOURCE-ABORT PT-RET-ABORTED",
+                "    0x292A2B2C2D2E2F30 0 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  0x3132333435363738 PT-RES-BEGIN PT-RES-STATUS!",
+                "  PT-REQUEST-RESOURCE-BEGIN PT-RET-OK",
+                "    0x3132333435363738 0 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  0x3132333435363738 PT-RES-ITEM-ARGS 0",
+                "    PT-RES-PIXEL 4 PT-RES-SESSION PT-RESOURCE-CHUNK",
+                "    PT-RES-STATUS!",
+                "  PT-REQUEST-RESOURCE-CHUNK PT-RET-INVALID",
+                "    0x3132333435363738 0 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  0x393A3B3C3D3E3F40 PT-RES-BEGIN PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  0x393A3B3C3D3E3F40 PT-RES-BEGIN PT-RES-STATUS!",
+                "  PT-REQUEST-RESOURCE-BEGIN PT-RET-OK",
+                "    0x393A3B3C3D3E3F40 0 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  PT-RES-SAVE-COMPLETION",
+                "  PT-RES-SOFT-RESET PT-RES-STATUS!",
+                "  PT-RES-SESSION _PT.S.EPOCH @ PT-RES-FACT!",
+                "  PT-RES-SESSION _PT.S.RESET-PENDING? @ PT-RES-FACT!",
+                "  0x32303030444C4852 PT-RES-MARK",
+                "  PT-REQUEST-RESOURCE-ABORT PT-RET-ABORTED",
+                "    0x393A3B3C3D3E3F40 0 PT-RES-RET-RESULT PT-RES-STATUS!",
+                "  PT-RES-SESSION _PT-APPLY-PENDING-RESET PT-RES-STATUS!",
+                "  PT-RES-SESSION _PT.S.EPOCH @ PT-RES-FACT!",
+                "  PT-RES-SESSION _PT.S.RESET-PENDING? @ PT-RES-FACT!",
+                "  0x333030304C4F5052 PT-RES-MARK",
+                "  PT-RES-SAVE-COMPLETION",
+                "  PT-RES-SESSION _PT-APPLY-PENDING-RESET PT-RES-STATUS!",
+                "  PT-RES-SESSION _PT.S.EPOCH @ PT-RES-FACT!",
+                "  PT-RES-SESSION _PT.S.RESET-PENDING? @ PT-RES-FACT!",
+                "  PT-RES-SESSION _PT.S.REVISION @ PT-RES-FACT!",
+                "  PT-RES-SESSION _PT.S.STATE @ PT-RES-FACT!",
+                "  DEPTH PT-RES-STATUS!",
+                "  PT-RES-COMP-I @ PT-RES-FACT!",
+                "  PT-RES-POLL-FAIL @ PT-RES-FACT!",
+                "  PT-RES-NONE-S @ PT-RES-FACT!",
+                "  PT-RES-NONE-HAS @ PT-RES-FACT!",
+                "  PT-RES-STATUS-I @ PT-RES-FACT!",
+                "  0x34303030444E4552 PT-RES-MARK",
+                "  0x3530303053545352 PT-RES-MARK",
+                "  PT-RES-STATUSES PT-RES-STATUS-I @ 8 * TYPE",
+                "  0x3630303045545352 PT-RES-MARK",
+                "  0x37303030504D4352 PT-RES-MARK",
+                "  PT-RES-COMPLETIONS",
+                "    PT-RES-COMP-I @ PT-COMPLETION-SIZE * TYPE",
+                "  0x38303030454D4352 PT-RES-MARK",
+                "  0x3930303054434652 PT-RES-MARK",
+                "  PT-RES-FACTS PT-RES-FACT-I @ 8 * TYPE",
+                "  0x3031303045434652 PT-RES-MARK ;",
+                "PT-RES-RUN BYE",
+            ]
+        )
+        program = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data:
+                if position >= len(program):
+                    break
+                chunk = _next_line_chunk(program, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+                continue
+            executed = system.run_batch(
+                min(RUN_BATCH_STEPS, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += max(executed, 1)
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(program), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "resource lifecycle byte oracle exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "dictionary overflow",
+            "Stack underflow",
+            "Stack overflow",
+            "Return stack overflow",
+            "nested definition",
+            "branch out of range",
+            "control-flow",
+            "*** BUS FAULT",
+            "*** PRIVILEGE FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+
+        owner = 0x0102030405060708
+        generation = 0x1112131415161718
+        resource1 = 0x2122232425262728
+        resource2 = 0x292A2B2C2D2E2F30
+        resource3 = 0x3132333435363738
+        resource4 = 0x393A3B3C3D3E3F40
+        digest = struct.pack(
+            "<QQQQ",
+            0x0706050403020100,
+            0x1716151413121110,
+            0x2726252423222120,
+            0x3736353433323130,
+        )
+
+        def resource_begin(resource: int) -> bytes:
+            return struct.pack(
+                "<QQQIIIIQ32s",
+                owner,
+                generation,
+                resource,
+                1,
+                1,
+                1,
+                0,
+                4,
+                digest,
+            )
+
+        def resource_item(resource: int) -> bytes:
+            return struct.pack("<QQQ", owner, generation, resource)
+
+        outgoing = [
+            (RetainedMessageType.RESOURCE_BEGIN, resource_begin(resource1), 9),
+            (
+                RetainedMessageType.RESOURCE_CHUNK,
+                struct.pack("<QQQQ", owner, generation, resource1, 0)
+                + bytes.fromhex("aabbccdd"),
+                9,
+            ),
+            (RetainedMessageType.RESOURCE_COMMIT, resource_item(resource1), 9),
+            (RetainedMessageType.RESOURCE_DROP, resource_item(resource1), 9),
+            (RetainedMessageType.RESOURCE_BEGIN, resource_begin(resource2), 9),
+            (
+                RetainedMessageType.RESOURCE_ABORT,
+                struct.pack("<QQQH6x", owner, generation, resource2, 0),
+                9,
+            ),
+            (RetainedMessageType.RESOURCE_BEGIN, resource_begin(resource3), 9),
+            (
+                RetainedMessageType.RESOURCE_CHUNK,
+                struct.pack("<QQQQ", owner, generation, resource3, 0)
+                + bytes.fromhex("aabbccdd"),
+                9,
+            ),
+            (RetainedMessageType.RESOURCE_BEGIN, resource_begin(resource4), 9),
+            (
+                RetainedMessageType.RESOURCE_ABORT,
+                struct.pack("<QQQH6x", owner, generation, resource4, 1),
+                9,
+            ),
+        ]
+        expected_before_hold = b"".join(
+            encode_frame(
+                Frame(
+                    message_type,
+                    0x4142434445464748,
+                    sequence,
+                    epoch,
+                    payload,
+                ),
+                max_payload=256,
+            )
+            for sequence, (message_type, payload, epoch) in enumerate(outgoing)
+        )
+        expected_ack = encode_frame(
+            Frame(
+                0x0008,
+                0x4142434445464748,
+                len(outgoing),
+                10,
+                struct.pack("<IHH", 10, 0, 0),
+            ),
+            max_payload=256,
+        )
+
+        begin_marker = b"RBEG0001"
+        hold_marker = b"RHLD0002"
+        poll_marker = b"RPOL0003"
+        end_marker = b"REND0004"
+        status_marker = b"RSTS0005"
+        status_end_marker = b"RSTE0006"
+        completion_marker = b"RCMP0007"
+        completion_end_marker = b"RCME0008"
+        facts_marker = b"RFCT0009"
+        facts_end_marker = b"RFCE0010"
+        begin = raw.index(begin_marker) + len(begin_marker)
+        hold_at = raw.index(hold_marker, begin)
+        hold = hold_at + len(hold_marker)
+        poll_at = raw.index(poll_marker, hold)
+        poll = poll_at + len(poll_marker)
+        end_at = raw.index(end_marker, poll)
+        end = end_at + len(end_marker)
+        self.assertEqual(raw[begin:hold_at], expected_before_hold)
+        self.assertEqual(raw[hold:poll_at], b"")
+        self.assertEqual(raw[poll:end_at], expected_ack)
+
+        expected_statuses = (
+            0,
+            3,
+            3,
+            4,
+            0,
+            1,
+            0,
+            1,
+            3,
+            3,
+            0,
+            1,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            3,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        status_begin = raw.index(status_marker, end) + len(status_marker)
+        status_end = raw.index(status_end_marker, status_begin)
+        self.assertEqual(
+            raw[status_begin:status_end],
+            struct.pack(f"<{len(expected_statuses)}q", *expected_statuses),
+        )
+
+        completion_rows = (
+            (0x1000, 0, resource1, 0),
+            (0x1001, 0, resource1, 4),
+            (0x1002, 0, resource1, 4),
+            (0x1003, 0, resource1, 0),
+            (0x1000, 0, resource2, 0),
+            (0x000C, 7, resource2, 0),
+            (0x1000, 0, resource3, 0),
+            (0x1001, 1, resource3, 0),
+            (0x1000, 0, resource4, 0),
+            (0x000C, 7, resource4, 0),
+        )
+        expected_completions = b"".join(
+            struct.pack(
+                "<10Q",
+                2,
+                request,
+                status,
+                0,
+                0,
+                7,
+                owner,
+                generation,
+                resource,
+                accepted,
+            )
+            for request, status, resource, accepted in completion_rows
+        )
+        completion_begin = raw.index(completion_marker, status_end) + len(
+            completion_marker
+        )
+        completion_end = raw.index(completion_end_marker, completion_begin)
+        self.assertEqual(raw[completion_begin:completion_end], expected_completions)
+
+        expected_facts = (9, -1, 9, -1, 10, 0, 0, 4, 10, 0, 0, 0, 36)
+        facts_begin = raw.index(facts_marker, completion_end) + len(facts_marker)
+        facts_end = raw.index(facts_end_marker, facts_begin)
+        self.assertEqual(
+            raw[facts_begin:facts_end],
+            struct.pack(f"<{len(expected_facts)}q", *expected_facts),
+        )
+
     def test_real_core_snapshot_key_resize_and_synchronized_close(self) -> None:
         memory, ext_memory, cpu_state = self._snapshot_data()
         system = make_system(

@@ -227,7 +227,7 @@ def test_close_intent_is_one_bounded_writer_barrier() -> None:
     close = _definition(source, "PT-CLOSE")
     service = _definition(source, "PT-SERVICE")
 
-    assert "880 CONSTANT /PT-SESSION" in source
+    assert "952 CONSTANT /PT-SESSION" in source
     assert ": _PT.S.CLOSE-PENDING?  ( s -- a ) 872 + ;" in source
     for field in (
         "_PT.S.AWAIT?",
@@ -735,6 +735,354 @@ def test_owner_lifecycle_uses_ret_result_and_shared_drop_tx_result() -> None:
     assert "_PT-AWAIT-OWNER-DROP" in owner_drop
     assert "_PT.S.LIFE-TYPE @" in ret_result
     assert "_PT-COMPLETE-RET!" in ret_result
+
+
+def test_resource_lifecycle_exposes_one_generic_typed_abi() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+
+    for declaration in (
+        "1 CONSTANT PT-RESOURCE-RGBA8",
+        "0 CONSTANT PT-RESOURCE-ABORT-CALLER-CANCEL",
+        "1 CONSTANT PT-RESOURCE-ABORT-RESET-REBUILD",
+        "2 CONSTANT PT-RESOURCE-ABORT-LOCAL-SHUTDOWN",
+        "0x000C CONSTANT _PT-M-RESOURCE-ABORT",
+        "0x1000 CONSTANT _PT-M-RESOURCE-BEGIN",
+        "0x1001 CONSTANT _PT-M-RESOURCE-CHUNK",
+        "0x1002 CONSTANT _PT-M-RESOURCE-COMMIT",
+        "0x1003 CONSTANT _PT-M-RESOURCE-DROP",
+        "_PT-M-RESOURCE-BEGIN  CONSTANT PT-REQUEST-RESOURCE-BEGIN",
+        "_PT-M-RESOURCE-CHUNK  CONSTANT PT-REQUEST-RESOURCE-CHUNK",
+        "_PT-M-RESOURCE-COMMIT CONSTANT PT-REQUEST-RESOURCE-COMMIT",
+        "_PT-M-RESOURCE-DROP   CONSTANT PT-REQUEST-RESOURCE-DROP",
+        "_PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT",
+    ):
+        assert declaration in source
+
+    assert "952 CONSTANT /PT-SESSION" in source
+    for accessor in (
+        ": _PT.S.LIFE-ITEM       ( s -- a ) 880 + ;",
+        ": _PT.S.LIFE-WATERMARK  ( s -- a ) 888 + ;",
+        ": _PT.S.LIFE-BYTES      ( s -- a ) 896 + ;",
+        ": _PT.S.UPLOAD?         ( s -- a ) 904 + ;",
+        ": _PT.S.UPLOAD-OWNER    ( s -- a ) 912 + ;",
+        ": _PT.S.UPLOAD-GENERATION ( s -- a ) 920 + ;",
+        ": _PT.S.UPLOAD-ITEM     ( s -- a ) 928 + ;",
+        ": _PT.S.UPLOAD-LENGTH   ( s -- a ) 936 + ;",
+        ": _PT.S.UPLOAD-OFFSET   ( s -- a ) 944 + ;",
+    ):
+        assert accessor in source
+
+    assert (
+        "\\ Stack: owner generation resource format width height flags byte-length\n"
+        "\\        sha3-a sha3-u session -- status\n"
+        ": PT-RESOURCE-BEGIN"
+    ) in source
+    assert (
+        "\\ Stack: owner generation resource offset data-a data-u session -- status\n"
+        ": PT-RESOURCE-CHUNK"
+    ) in source
+    assert (
+        ": PT-RESOURCE-COMMIT  "
+        "( owner generation resource session -- status )"
+    ) in source
+    assert (
+        ": PT-RESOURCE-DROP  "
+        "( owner generation resource session -- status )"
+    ) in source
+    assert (
+        ": PT-RESOURCE-ABORT\n"
+        "    ( owner generation resource reason session -- status )"
+    ) in source
+
+
+def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    frame_begin = _definition(source, "_PT-FRAME-BEGIN")
+    source_safe = _definition(source, "_PT-RESOURCE-SOURCE?")
+    ordinary = _definition(source, "_PT-RESOURCE-ORDINARY-ADMIT")
+    begin_fields = _definition(source, "_PT-RESOURCE-BEGIN-FIELDS?")
+    begin_body = _definition(source, "_PT-RESOURCE-BEGIN-BODY")
+    begin = _definition(source, "PT-RESOURCE-BEGIN")
+    begin_scrub = _definition(source, "_PT-RESOURCE-BEGIN-SCRUB")
+    chunk_fields = _definition(source, "_PT-RESOURCE-CHUNK-FIELDS?")
+    chunk_body = _definition(source, "_PT-RESOURCE-CHUNK-BODY")
+    chunk = _definition(source, "PT-RESOURCE-CHUNK")
+    chunk_scrub = _definition(source, "_PT-RESOURCE-CHUNK-SCRUB")
+
+    # Borrowed digest and chunk bytes must be valid and disjoint from both
+    # storage regions that PT can overwrite while constructing the frame.
+    assert "_PT-RANGE-VALID?" in source_safe
+    assert source_safe.count("_PT-RANGES-OVERLAP?") == 2
+    assert "/PT-SESSION" in source_safe
+    assert "_PT.S.TX-A @" in source_safe
+    assert "_PT.S.TX-U @" in source_safe
+    assert "_PT-F-TOTAL @ 0 FILL" in frame_begin
+
+    # RESOURCE_BEGIN has exact RGBA8 dimensions/length/hash semantics and
+    # consumes ordinary cumulative credit only after every bound is proven.
+    for invariant in (
+        "_PT-RBG-FORMAT @ PT-RESOURCE-RGBA8 <>",
+        "_PT-RBG-FLAGS @ 0<>",
+        "_PT-RBG-WIDTH @ DUP 0= SWAP _PT-U32? 0= OR",
+        "_PT-RBG-HEIGHT @ DUP 0= SWAP _PT-U32? 0= OR",
+        "_PT.S.RET-FORMATS 12 + L@ U>",
+        "_PT.S.RET-FORMATS 16 + L@ U>",
+        "_PT-RBG-WIDTH @ _PT-RBG-HEIGHT @ _PT-UMUL?",
+        "4 _PT-UMUL?",
+        "_PT-RBG-LENGTH @ <>",
+        "_PT.S.RET-CAPS 56 + _PT-U64@ U>",
+        "_PT-RBG-DIGEST-U @ 32 <>",
+        "_PT-RESOURCE-SOURCE?",
+    ):
+        assert invariant in begin_fields
+    assert "_PT.S.RET-CAPS 8 + _PT-U64@ 0x04 AND 0=" in begin_body
+    assert "_PT-RETAINED-LIFECYCLE-STATE?" in begin_body
+    assert "_PT-RESULT-BUSY?" in begin_body
+    assert "_PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN" in begin_body
+    assert "120 _PT-RBG-S @ _PT-RESOURCE-ORDINARY-ADMIT" in begin_body
+    assert "_PT-M-RESOURCE-BEGIN 80" in begin_body
+    for store in (
+        "_PT-RBG-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-RBG-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-RBG-ITEM @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "_PT-RBG-FORMAT @ _PT-FRAME-PAYLOAD 24 + L!",
+        "_PT-RBG-WIDTH @ _PT-FRAME-PAYLOAD 28 + L!",
+        "_PT-RBG-HEIGHT @ _PT-FRAME-PAYLOAD 32 + L!",
+        "_PT-RBG-FLAGS @ _PT-FRAME-PAYLOAD 36 + L!",
+        "_PT-RBG-LENGTH @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
+        "_PT-RBG-DIGEST-A @ 32 _PT-FRAME-PAYLOAD 48 + SWAP MOVE",
+    ):
+        assert store in begin_body
+    sent = begin_body.index("TRUE _PT-RBG-S @ _PT-FRAME-SEND")
+    assert sent < begin_body.index("TRUE _PT-RBG-S @ _PT.S.UPLOAD? !")
+    assert sent < begin_body.index("_PT-RESOURCE-LIFE!")
+    assert "CATCH" in begin
+    assert "_PT-RESOURCE-BEGIN-SCRUB" in begin
+    for pointer in ("_PT-RBG-DIGEST-A", "_PT-RBG-DIGEST-U", "_PT-RSA"):
+        assert f"0 {pointer} !" in begin_scrub
+
+    # RESOURCE_CHUNK is sequential and non-empty.  Its covering watermark is
+    # initial credit plus the post-send cumulative byte count, not a per-frame
+    # acknowledgement surrogate.
+    for invariant in (
+        "_PT.S.UPLOAD-OWNER @ <>",
+        "_PT.S.UPLOAD-GENERATION @ <> OR",
+        "_PT.S.UPLOAD-ITEM @ <> OR",
+        "_PT.S.UPLOAD-OFFSET @ <>",
+        "_PT-RCH-DATA-U @ DUP 0= SWAP _PT-U32? 0= OR",
+        "_PT.S.RET-CAPS 44 + L@ U>",
+        "_PT-RCH-OFFSET @ _PT-RCH-DATA-U @ _PT-UADD?",
+        "_PT.S.UPLOAD-LENGTH @ U>",
+        "32 _PT-RCH-DATA-U @ _PT-UADD?",
+        "40 _PT-UADD?",
+        "_PT-RESOURCE-SOURCE?",
+    ):
+        assert invariant in chunk_fields
+    post_send = chunk_fields.index("_PT.S.PEER-SENT @ SWAP _PT-UADD?")
+    initial = chunk_fields.index("_PT.S.PEER-INITIAL @ _PT-UADD?", post_send)
+    watermark = chunk_fields.index("_PT-RCH-WATERMARK !", initial)
+    assert post_send < initial < watermark
+    assert "_PT-RCH-FRAME-U @ _PT-RCH-S @" in chunk_body
+    assert "_PT-RESOURCE-ORDINARY-ADMIT" in chunk_body
+    assert "_PT-M-RESOURCE-CHUNK _PT-RCH-PAYLOAD-U @" in chunk_body
+    for store in (
+        "_PT-RCH-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-RCH-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-RCH-ITEM @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "_PT-RCH-OFFSET @ _PT-FRAME-PAYLOAD 24 + _PT-U64!",
+        "_PT-FRAME-PAYLOAD 32 + SWAP MOVE",
+    ):
+        assert store in chunk_body
+    sent = chunk_body.index("TRUE _PT-RCH-S @ _PT-FRAME-SEND")
+    assert sent < chunk_body.index("_PT-RESOURCE-LIFE!")
+    assert "CATCH" in chunk
+    assert "_PT-RESOURCE-CHUNK-SCRUB" in chunk
+    for pointer in ("_PT-RCH-DATA-A", "_PT-RCH-DATA-U", "_PT-RSA"):
+        assert f"0 {pointer} !" in chunk_scrub
+
+    assert "_PT.S.PEER-SENT @" in ordinary
+    assert "_PT.S.PEER-GRANT @ U>" in ordinary
+    assert "PT-S-WOULD-BLOCK EXIT" in ordinary
+
+
+def test_resource_commit_drop_and_abort_preserve_lifecycle_authority() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    item = _definition(source, "_PT-RESOURCE-ITEM-WRITE")
+    exact = _definition(source, "_PT-RESOURCE-ITEM-EXACT?")
+    commit = _definition(source, "PT-RESOURCE-COMMIT")
+    drop = _definition(source, "PT-RESOURCE-DROP")
+    abort = _definition(source, "PT-RESOURCE-ABORT")
+    tracked_abort = _definition(source, "_PT-RESOURCE-ABORT-TRACKED")
+
+    for field in (
+        "_PT.S.UPLOAD-OWNER @ =",
+        "_PT.S.UPLOAD-GENERATION @ = AND",
+        "_PT.S.UPLOAD-ITEM @ = AND",
+    ):
+        assert field in exact
+    commit_branch = item.index("_PT-RRI-TYPE @ _PT-M-RESOURCE-COMMIT = IF")
+    drop_branch = item.index("ELSE", commit_branch)
+    admit = item.index("64 _PT-RRI-S @ _PT-RESOURCE-ORDINARY-ADMIT", drop_branch)
+    assert "_PT.S.UPLOAD? @ 0=" in item[commit_branch:drop_branch]
+    assert "_PT-RESOURCE-ITEM-EXACT?" in item[commit_branch:drop_branch]
+    assert "_PT.S.UPLOAD-OFFSET @" in item[commit_branch:drop_branch]
+    assert "_PT.S.UPLOAD-LENGTH @ <>" in item[commit_branch:drop_branch]
+    assert "_PT-M-RESOURCE-DROP <>" in item[drop_branch:admit]
+    assert "_PT-RETAINED-LIFECYCLE-STATE?" in item[drop_branch:admit]
+    assert "_PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN" in item[drop_branch:admit]
+    assert "_PT-RRI-TYPE @ 24" in item
+    for store in (
+        "_PT-RRI-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-RRI-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-RRI-ITEM @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+    ):
+        assert store in item
+    assert "TRUE _PT-RRI-S @ _PT-FRAME-SEND" in item
+    assert item.index("TRUE _PT-RRI-S @ _PT-FRAME-SEND") < item.index(
+        "_PT-RESOURCE-LIFE!"
+    )
+    assert "_PT-M-RESOURCE-COMMIT _PT-RESOURCE-ITEM-WRITE" in commit
+    assert "_PT-M-RESOURCE-DROP _PT-RESOURCE-ITEM-WRITE" in drop
+
+    assert "_PT.S.UPLOAD? @ 0=" in abort
+    for field in (
+        "_PT.S.UPLOAD-OWNER @ <>",
+        "_PT.S.UPLOAD-GENERATION @ <> OR",
+        "_PT.S.UPLOAD-ITEM @ <> OR",
+    ):
+        assert field in abort
+    assert "PT-RESOURCE-ABORT-LOCAL-SHUTDOWN U>" in abort
+    assert "_PT-RESOURCE-ABORT-TRACKED" in abort
+    assert "_PT-M-RESOURCE-ABORT 32" in tracked_abort
+    for store in (
+        "_PT.S.UPLOAD-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT.S.UPLOAD-ITEM @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "_PT-URA-REASON @ _PT-FRAME-PAYLOAD 24 + W!",
+    ):
+        assert store in tracked_abort
+    assert "FALSE _PT-URA-S @ _PT-FRAME-SEND" in tracked_abort
+    assert tracked_abort.index("FALSE _PT-URA-S @ _PT-FRAME-SEND") < (
+        tracked_abort.index("TRUE _PT-URA-S @ _PT.S.LIFE-AWAIT? !")
+    )
+    for field in (
+        "_PT.S.LIFE-TYPE !",
+        "_PT.S.LIFE-OWNER !",
+        "_PT.S.LIFE-GENERATION !",
+        "_PT.S.LIFE-ITEM !",
+        "_PT.S.LIFE-WATERMARK !",
+        "_PT.S.LIFE-BYTES !",
+    ):
+        assert field in tracked_abort
+
+
+def test_resource_results_are_request_aware_and_chunks_settle_on_credit() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    statuses = _definition(source, "_PT-RET-RESULT-STATUS?")
+    result = _definition(source, "_PT-DISPATCH-RET-RESULT")
+    credit = _definition(source, "_PT-DISPATCH-CREDIT")
+    complete_chunk = _definition(source, "_PT-COMPLETE-CHUNK-CREDIT")
+
+    begin_branch = statuses.index("_PT-M-RESOURCE-BEGIN = IF")
+    chunk_branch = statuses.index("_PT-M-RESOURCE-CHUNK = IF", begin_branch)
+    commit_branch = statuses.index("_PT-M-RESOURCE-COMMIT = IF", chunk_branch)
+    drop_branch = statuses.index("_PT-M-RESOURCE-DROP = IF", commit_branch)
+    abort_branch = statuses.index("_PT-M-RESOURCE-ABORT = IF", drop_branch)
+    chunk_statuses = statuses[chunk_branch:commit_branch]
+    assert "PT-RET-INVALID" in chunk_statuses
+    assert "PT-RET-STALE-OWNER" in chunk_statuses
+    assert "PT-RET-OK" not in chunk_statuses
+    assert "PT-RET-DUPLICATE-ID _PT-U<=" in statuses[begin_branch:chunk_branch]
+    assert "PT-RET-BAD-CONTENT" in statuses[commit_branch:drop_branch]
+    assert "PT-RET-IN-USE" in statuses[drop_branch:abort_branch]
+    assert "PT-RET-ABORTED" in statuses[abort_branch:]
+
+    assert "_PT-RX-LEN @ 48 <>" in result
+    assert "_PT.S.LIFE-AWAIT? @ 0=" in result
+    assert "_PT.S.LIFE-TYPE @ <>" in result
+    assert "_PT-RET-RESULT-STATUS?" in result
+    for field in (
+        "_PT.S.LIFE-OWNER @ <>",
+        "_PT.S.LIFE-GENERATION @ <>",
+        "_PT.S.LIFE-ITEM @ <>",
+        "_PT.S.REVISION @ <>",
+    ):
+        assert field in result
+    accepted = result.index("_PT-RX-P @ 40 + _PT-U64@ _PT-CMP-ACCEPTED !")
+    completion = result.index("_PT-COMPLETE-RET!", accepted)
+    assert "_PT-M-RESOURCE-COMMIT =" in result[accepted:completion]
+    assert "PT-RET-OK = AND" in result[accepted:completion]
+    assert "_PT.S.UPLOAD-LENGTH @ <>" in result[accepted:completion]
+    assert "_PT-CMP-ACCEPTED @ 0<>" in result[accepted:completion]
+    assert result.index("_PT-COMPLETE-RET!", accepted) < result.index(
+        "_PT-LIFE-CLEAR", completion
+    )
+
+    # Success for CHUNK is inferred only from a covering cumulative CREDIT.
+    # It becomes an ordinary pollable RET completion carrying exactly the
+    # bytes from the tracked chunk before the lifecycle wait is released.
+    life = credit.index("_PT.S.LIFE-AWAIT? @")
+    request = credit.index("_PT-M-RESOURCE-CHUNK = AND", life)
+    covering = credit.index("_PT.S.LIFE-WATERMARK @ _PT-U>=", request)
+    synthesize = credit.index("_PT-COMPLETE-CHUNK-CREDIT", covering)
+    assert life < request < covering < synthesize
+    advance = complete_chunk.index("_PT.S.UPLOAD-OFFSET @")
+    accepted_store = complete_chunk.index(
+        "_PT.S.LIFE-BYTES @ R@ _PT.S.COMP-ACCEPTED !", advance
+    )
+    visible = complete_chunk.index("TRUE R@ _PT.S.COMPLETE? !", accepted_store)
+    clear = complete_chunk.index("_PT-LIFE-CLEAR", visible)
+    assert "PT-COMPLETE-RET R@ _PT.S.COMP-KIND !" in complete_chunk
+    assert "PT-REQUEST-RESOURCE-CHUNK R@ _PT.S.COMP-REQUEST !" in complete_chunk
+    assert "PT-RET-OK R@ _PT.S.COMP-STATUS !" in complete_chunk
+    assert advance < accepted_store < visible < clear
+
+
+def test_soft_reset_aborts_the_old_epoch_upload_before_reset_ack() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    apply_reset = _definition(source, "_PT-APPLY-PENDING-RESET")
+    soft_reset = _definition(source, "_PT-DISPATCH-SOFT-RESET")
+    tracked_abort = _definition(source, "_PT-RESOURCE-ABORT-TRACKED")
+    ret_result = _definition(source, "_PT-DISPATCH-RET-RESULT")
+    ret_reset = _definition(source, "_PT-RET-RESET")
+
+    blockers = apply_reset.index("_PT.S.LIFE-AWAIT? @ OR")
+    completion = apply_reset.index("_PT.S.COMPLETE? @ OR", blockers)
+    # A previously latched CLOSE owns the only legal frame at the final
+    # sequence number.  That narrow path subsumes reset (and CLOSE teardown
+    # destroys the upload), because a RESOURCE_ABORT cannot be encoded there.
+    close = apply_reset.index("_PT.S.CLOSE-PENDING? @", completion)
+    final_slot = apply_reset.index(
+        "_PT.S.TX-SEQ @ 0xFFFFFFFFFFFFFFFF =", close
+    )
+    subsume_pending = apply_reset.index("_PT.S.RESET-PENDING? OFF", final_slot)
+    subsume_epoch = apply_reset.index("_PT.S.RESET-EPOCH OFF", subsume_pending)
+    subsume_exit = apply_reset.index("PT-S-OK EXIT", subsume_epoch)
+    upload = apply_reset.index("_PT.S.UPLOAD? @ IF", subsume_exit)
+    reason = apply_reset.index("PT-RESOURCE-ABORT-RESET-REBUILD", upload)
+    abort = apply_reset.index("_PT-RESOURCE-ABORT-TRACKED", reason)
+    epoch = apply_reset.index("_PT.S.RESET-EPOCH @ OVER _PT.S.EPOCH !", abort)
+    reset_state = apply_reset.index("_PT-RET-RESET", epoch)
+    ack = apply_reset.index("_PT-SEND-RESET-ACK", reset_state)
+    assert blockers < completion < close < final_slot
+    assert final_slot < subsume_pending < subsume_epoch < subsume_exit < upload
+    assert upload < reason < abort < epoch < reset_state < ack
+    assert "DROP PT-S-OK EXIT" in apply_reset[abort:epoch]
+
+    # The valid request is latched while the old epoch is still authoritative;
+    # applying it either waits on an existing lifecycle result/completion or
+    # creates the exact tracked abort result wait above.
+    latch_epoch = soft_reset.index("_PT.S.RESET-EPOCH !")
+    latch_pending = soft_reset.index("TRUE OVER _PT.S.RESET-PENDING? !", latch_epoch)
+    apply = soft_reset.index("_PT-APPLY-PENDING-RESET", latch_pending)
+    assert latch_epoch < latch_pending < apply
+    assert "FALSE _PT-URA-S @ _PT-FRAME-SEND" in tracked_abort
+    assert "_PT-M-RESOURCE-ABORT _PT-URA-S @ _PT.S.LIFE-TYPE !" in tracked_abort
+    abort_result = ret_result.index("_PT-M-RESOURCE-ABORT = IF")
+    assert ret_result.index("_PT-UPLOAD-CLEAR", abort_result) < ret_result.index(
+        "_PT-COMPLETE-RET!", abort_result
+    )
+    assert "DUP _PT-UPLOAD-CLEAR" in ret_reset
 
 
 def test_retained_resize_and_reset_barriers_preserve_the_wire_profile() -> None:
