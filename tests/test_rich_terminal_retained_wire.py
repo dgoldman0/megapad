@@ -821,7 +821,7 @@ def test_every_non_image_object_oracle_round_trips_through_typed_bodies():
     assert decode_object_definition(encode_object_definition(glyph_run)) == glyph_run
     kinds.add(glyph_run.kind)
 
-    assert kinds == set(ObjectKind)
+    assert kinds == set(ObjectKind) - {ObjectKind.IMAGE}
 
 
 def test_image_object_oracles_and_exact_body_round_trip_without_scene_state():

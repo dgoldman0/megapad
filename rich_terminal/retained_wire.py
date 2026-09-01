@@ -27,6 +27,8 @@ from .retained_scene import (
     GLYPH_RUN_ATTRIBUTE_MASK,
     GroupBody,
     GlyphRunBody,
+    ImageBody,
+    ImageFit,
     MeterBody,
     ObjectBounds,
     ObjectKind,
@@ -53,7 +55,6 @@ from .semantic_content import (
 
 RET1_TAG = 0x31544552
 _RETAINED_FEATURE_MASK = 0x33F
-_IMAGE_OBJECT_TYPE = 3
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -137,12 +138,6 @@ class ResourceAbortReason(IntEnum):
     CALLER_CANCEL = 0
     RESET_REBUILD = 1
     LOCAL_SHUTDOWN = 2
-
-
-class ImageFit(IntEnum):
-    STRETCH = 0
-    CONTAIN = 1
-    COVER = 2
 
 
 class CellMode(IntEnum):
@@ -862,30 +857,6 @@ class RegionWireDefinition:
         return bool(self.flags & 0x2)
 
 
-@dataclass(frozen=True, slots=True)
-class ImageBody:
-    """Renderer-neutral IMAGE reference carried by an OBJECT definition."""
-
-    resource_id: int
-    fit: ImageFit
-    opacity: int
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "resource_id",
-            _integer(
-                "resource_id", self.resource_id, minimum=1, maximum=UINT64_MAX
-            ),
-        )
-        object.__setattr__(self, "fit", _enum("fit", ImageFit, self.fit))
-        object.__setattr__(
-            self,
-            "opacity",
-            _integer("opacity", self.opacity, minimum=0, maximum=0xFF),
-        )
-
-
 ObjectWireBody = (
     GroupBody
     | PolylineBody
@@ -902,7 +873,7 @@ ObjectWireBody = (
 _WIRE_BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
     PolylineBody: ObjectKind.POLYLINE,
-    ImageBody: _IMAGE_OBJECT_TYPE,
+    ImageBody: ObjectKind.IMAGE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
     ReadoutBody: ObjectKind.READOUT,
     MeterBody: ObjectKind.METER,
@@ -1742,7 +1713,7 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
                 RGBA(*values[2:6]),
                 bool(path_flags),
             )
-        if int(kind) == _IMAGE_OBJECT_TYPE:
+        if kind is ObjectKind.IMAGE:
             _body_size(raw, _IMAGE_BODY.size, "IMAGE")
             resource_id, fit, opacity, reserved = _IMAGE_BODY.unpack(raw)
             if reserved != bytes(3):
@@ -1904,16 +1875,13 @@ def decode_object_definition(payload) -> ObjectWireDefinition:
             RetainedWireErrorCode.SCALAR,
             "OBJECT owner, generation, object, and region IDs must be nonzero",
         )
-    if values[3] == _IMAGE_OBJECT_TYPE:
-        kind: ObjectKind | int = _IMAGE_OBJECT_TYPE
-    else:
-        try:
-            kind = ObjectKind(values[3])
-        except ValueError as exc:
-            raise RetainedWireError(
-                RetainedWireErrorCode.ENUM,
-                f"object type {values[3]} has no codec",
-            ) from exc
+    try:
+        kind = ObjectKind(values[3])
+    except ValueError as exc:
+        raise RetainedWireError(
+            RetainedWireErrorCode.ENUM,
+            f"object type {values[3]} has no codec",
+        ) from exc
     if values[4] & ~0x1:
         raise RetainedWireError(
             RetainedWireErrorCode.RESERVED,

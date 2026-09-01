@@ -5,10 +5,12 @@ targets, validates exact owner authority and final references, accounts each
 target independently against OWNER_OPEN reservations, and publishes a prepared
 scene together with its one atomic owner-ledger high-water candidate.
 
-Resource objects and uploads are intentionally not in this layer.  Retained
-object definitions, scalar/visibility mutations, and bounded series histories
-are complete semantic values; every update preserves the definition-time
-checks below and publishes only through the same immutable transaction seam.
+Resource bytes and uploads are intentionally not in this layer.  Renderer-
+neutral IMAGE definitions carry exact-owner resource IDs which are validated
+through a read-only resource-store dependency.  Object definitions,
+scalar/visibility mutations, and bounded series histories are complete semantic
+values; every update preserves the definition-time checks below and publishes
+only through the same immutable transaction seam.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ from .retained_model import (
     PreparedOwnerLedgerInstall,
     RetainedFeature,
 )
+from .retained_resources import ResourceStoreState, RetainedResourceStore
 from .semantic_content import SemanticTextContent
 
 
@@ -97,12 +100,19 @@ class RebuildRequirement(str, Enum):
 class ObjectKind(IntEnum):
     GROUP = 1
     POLYLINE = 2
+    IMAGE = 3
     GLYPH_RUN = 4
     READOUT = 5
     METER = 6
     STATUS = 7
     PLOT = 8
     WAVEFORM = 9
+
+
+class ImageFit(IntEnum):
+    STRETCH = 0
+    CONTAIN = 1
+    COVER = 2
 
 
 class ControlKind(IntEnum):
@@ -311,6 +321,36 @@ class PolylineBody:
         if not isinstance(self.color, RGBA):
             raise TypeError("color must be RGBA")
         object.__setattr__(self, "closed", _boolean("closed", self.closed))
+
+
+@dataclass(frozen=True, slots=True)
+class ImageBody:
+    """One renderer-neutral reference to an exact-owner immutable RGBA resource."""
+
+    resource_id: int
+    fit: ImageFit
+    opacity: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "resource_id",
+            _integer(
+                "resource_id", self.resource_id, minimum=1, maximum=UINT64_MAX
+            ),
+        )
+        if isinstance(self.fit, bool):
+            raise TypeError("fit must not be bool")
+        try:
+            fit = ImageFit(self.fit)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("fit is not a RETAINED-1 IMAGE fit") from exc
+        object.__setattr__(self, "fit", fit)
+        object.__setattr__(
+            self,
+            "opacity",
+            _integer("opacity", self.opacity, minimum=0, maximum=0xFF),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -531,6 +571,7 @@ def _validate_series_consumer(body, *, include_zero_line: bool) -> None:
 ObjectBody = (
     GroupBody
     | PolylineBody
+    | ImageBody
     | GlyphRunBody
     | ReadoutBody
     | MeterBody
@@ -543,6 +584,7 @@ ObjectBody = (
 _BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
     PolylineBody: ObjectKind.POLYLINE,
+    ImageBody: ObjectKind.IMAGE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
     ReadoutBody: ObjectKind.READOUT,
     MeterBody: ObjectKind.METER,
@@ -983,6 +1025,7 @@ class PreparedSceneInstall:
     lease: TransactionLease
     _model_token: object
     _source_state: SceneModelState
+    _resource_state: ResourceStoreState
     _staging: _SceneStaging
 
 
@@ -1001,6 +1044,7 @@ class PreparedOwnerRetirement:
     lease: TransactionLease
     _model_token: object
     _source_state: SceneModelState
+    _resource_state: ResourceStoreState
 
 
 class RetainedSceneModel:
@@ -1011,15 +1055,21 @@ class RetainedSceneModel:
         *,
         clock: TerminalUpdateAuthority,
         owners: OwnerLedger,
+        resources: RetainedResourceStore,
         geometry: TerminalGeometry,
     ) -> None:
         if not isinstance(clock, TerminalUpdateAuthority):
             raise TypeError("clock must be TerminalUpdateAuthority")
         if not isinstance(owners, OwnerLedger):
             raise TypeError("owners must be OwnerLedger")
+        if not isinstance(resources, RetainedResourceStore):
+            raise TypeError("resources must be RetainedResourceStore")
+        if resources.owner_ledger is not owners:
+            raise ValueError("resources and scene must share one exact owner ledger")
         owners.policy.validate_geometry(geometry)
         self._clock = clock
         self._owners = owners
+        self._resources = resources
         self._token = object()
         empty = RetainedScene(MappingProxyType({}))
         self._state = SceneModelState(
@@ -1045,6 +1095,34 @@ class RetainedSceneModel:
     @property
     def transaction_open(self) -> bool:
         return self._staging is not None
+
+    def resource_referenced(self, owner: OwnerIdentity, resource_id: int) -> bool:
+        """Whether either committed scene plane references one exact resource.
+
+        Transaction-private staging is intentionally excluded: RESOURCE_DROP is
+        serialized outside transactions, while active and committed hidden
+        targets are the two authoritative reference planes.
+        """
+
+        if not isinstance(owner, OwnerIdentity):
+            raise TypeError("owner must be OwnerIdentity")
+        normalized_id = _integer(
+            "resource_id", resource_id, minimum=1, maximum=UINT64_MAX
+        )
+        state = self._state
+        for scene in (state.active, state.hidden):
+            if scene is None:
+                continue
+            owner_scene = scene.owners.get(owner.owner_id)
+            if owner_scene is None or owner_scene.owner != owner:
+                continue
+            if any(
+                isinstance(definition.body, ImageBody)
+                and definition.body.resource_id == normalized_id
+                for definition in owner_scene.objects.values()
+            ):
+                return True
+        return False
 
     def require_interactable_control(
         self,
@@ -1631,7 +1709,6 @@ class RetainedSceneModel:
             self._fail(SceneErrorCode.STATE, "DELTA requires at least one operation")
 
         candidate = self._freeze_staging(staging)
-        self._validate_scene(candidate)
         if (
             selected is CommitDisposition.COMMIT_AND_REVEAL
             and staging.mode in (RetainedMode.LAYOUT_START, RetainedMode.LAYOUT_CONTINUE)
@@ -1682,8 +1759,18 @@ class RetainedSceneModel:
                     else RebuildRequirement.LAYOUT
                 ),
             )
+        resource_state = self._resources.state
+        self._validate_scene(state.active, resource_state)
+        if state.hidden is not None and state.hidden is not state.active:
+            self._validate_scene(state.hidden, resource_state)
         prepared = PreparedSceneInstall(
-            state, ledger, staging.lease, self._token, old, staging
+            state=state,
+            ledger=ledger,
+            lease=staging.lease,
+            _model_token=self._token,
+            _source_state=old,
+            _resource_state=resource_state,
+            _staging=staging,
         )
         staging.prepared = True
         return prepared
@@ -1727,6 +1814,10 @@ class RetainedSceneModel:
             if source.hidden is None
             else self._scene_without_owner(source.hidden, owner)
         )
+        resource_state = self._resources.state
+        self._validate_scene(active, resource_state)
+        if hidden is not None and hidden is not active:
+            self._validate_scene(hidden, resource_state)
         try:
             revision = self._clock.next_revision(lease)
         except TerminalUpdateError as exc:
@@ -1742,6 +1833,7 @@ class RetainedSceneModel:
             lease=lease,
             _model_token=self._token,
             _source_state=source,
+            _resource_state=resource_state,
         )
 
     def install_owner_retirement(
@@ -1766,6 +1858,7 @@ class RetainedSceneModel:
         if (
             prepared._model_token is not self._token
             or prepared._source_state is not self._state
+            or prepared._resource_state is not self._resources.state
             or self._staging is not None
         ):
             raise RuntimeError("prepared owner retirement is stale or foreign")
@@ -1788,6 +1881,7 @@ class RetainedSceneModel:
         if (
             prepared._model_token is not self._token
             or prepared._source_state is not self._state
+            or prepared._resource_state is not self._resources.state
             or prepared._staging is not self._staging
             or prepared._staging.rejected
             or not prepared._staging.prepared
@@ -2088,6 +2182,8 @@ class RetainedSceneModel:
             required = RetainedFeature.CORE
         elif kind in (ObjectKind.GROUP, ObjectKind.POLYLINE):
             required = RetainedFeature.VECTOR
+        elif kind is ObjectKind.IMAGE:
+            required = RetainedFeature.RGBA_IMAGE
         elif kind in (ObjectKind.PLOT, ObjectKind.WAVEFORM):
             required = RetainedFeature.SERIES
         else:
@@ -2182,6 +2278,31 @@ class RetainedSceneModel:
                     SceneErrorCode.GRAPH,
                     "object series must be defined before its consumer",
                 )
+        if isinstance(definition.body, ImageBody):
+            self._validate_image_resource(
+                definition.owner,
+                definition.body.resource_id,
+                self._resources.state,
+            )
+
+    def _validate_image_resource(
+        self,
+        owner: OwnerIdentity,
+        resource_id: int,
+        resource_state: ResourceStoreState,
+    ) -> None:
+        resource = resource_state.resources.get(
+            (owner.owner_id, owner.owner_generation, resource_id)
+        )
+        if (
+            resource is None
+            or resource.owner != owner
+            or resource.resource_id != resource_id
+        ):
+            self._fail(
+                SceneErrorCode.GRAPH,
+                "IMAGE refers to an absent exact-owner resource",
+            )
 
     def _require_owner(self, owner: OwnerIdentity):
         try:
@@ -2189,7 +2310,11 @@ class RetainedSceneModel:
         except OwnerLedgerError as exc:
             self._fail(SceneErrorCode.AUTHORITY, str(exc))
 
-    def _validate_scene(self, scene: RetainedScene) -> None:
+    def _validate_scene(
+        self,
+        scene: RetainedScene,
+        resource_state: ResourceStoreState,
+    ) -> None:
         for owner_scene in scene.owners.values():
             self._validate_usage(owner_scene.owner, owner_scene.usage)
             for object_key, definition in owner_scene.objects.items():
@@ -2206,6 +2331,12 @@ class RetainedSceneModel:
                         self._fail(SceneErrorCode.GRAPH, "object parent belongs to another region")
                 if isinstance(definition.body, (PlotBody, WaveformBody)) and definition.body.series_id not in owner_scene.series:
                     self._fail(SceneErrorCode.GRAPH, "object refers to an absent series")
+                if isinstance(definition.body, ImageBody):
+                    self._validate_image_resource(
+                        definition.owner,
+                        definition.body.resource_id,
+                        resource_state,
+                    )
 
             # Resolve every parent chain once.  The prior per-object walk was
             # worst-case quadratic for a valid deep GROUP tree.
@@ -2312,6 +2443,8 @@ __all__ = [
     "GLYPH_RUN_ATTRIBUTE_MASK",
     "HiddenTargetKind",
     "GlyphRunBody",
+    "ImageBody",
+    "ImageFit",
     "MeterBody",
     "ObjectBounds",
     "ObjectDefinition",

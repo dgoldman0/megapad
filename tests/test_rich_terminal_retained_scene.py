@@ -19,6 +19,7 @@ from rich_terminal.retained_model import (
     RetainedFeature,
     RetainedPolicy,
 )
+from rich_terminal.retained_resources import RetainedResourceStore
 from rich_terminal.retained_scene import (
     CommitDisposition,
     ExplicitSamples,
@@ -131,7 +132,12 @@ def _domain(
     )
     identity = _owner()
     owners.open(identity, _quotas() if quotas is None else quotas)
-    scene = RetainedSceneModel(clock=clock, owners=owners, geometry=GEOMETRY)
+    scene = RetainedSceneModel(
+        clock=clock,
+        owners=owners,
+        resources=RetainedResourceStore(owners),
+        geometry=GEOMETRY,
+    )
     return clock, owners, identity, scene
 
 

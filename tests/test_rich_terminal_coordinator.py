@@ -30,6 +30,7 @@ from rich_terminal.retained_scene import (
     RetainedMode,
     RetainedSceneModel,
 )
+from rich_terminal.retained_resources import RetainedResourceStore
 
 
 SESSION_ID = 0x0123456789ABCDEF
@@ -98,6 +99,7 @@ def _domain():
     retained = RetainedSceneModel(
         clock=clock,
         owners=owners,
+        resources=RetainedResourceStore(owners),
         geometry=GEOMETRY,
     )
     coordinator = TerminalOutputCoordinator(

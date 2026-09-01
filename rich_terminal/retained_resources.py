@@ -483,6 +483,12 @@ class RetainedResourceStore:
         return self._state
 
     @property
+    def owner_ledger(self) -> OwnerLedger:
+        """The exact authority ledger shared by this resource store."""
+
+        return self._owners
+
+    @property
     def upload(self) -> ResourceUploadView | None:
         return None if self._upload is None else self._upload.view
 

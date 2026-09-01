@@ -35,6 +35,7 @@ from rich_terminal.retained_scene import (
     SceneModelState,
     SceneUsage,
 )
+from rich_terminal.retained_resources import RetainedResourceStore
 from rich_terminal.retained_wire import (
     ControlEvent,
     ControlEventKind,
@@ -144,7 +145,12 @@ def _control_scene(
             sample_slots=0,
         ),
     )
-    model = RetainedSceneModel(clock=clock, owners=owners, geometry=geometry)
+    model = RetainedSceneModel(
+        clock=clock,
+        owners=owners,
+        resources=RetainedResourceStore(owners),
+        geometry=geometry,
+    )
     controls: dict[int, ControlDefinition] = {}
     if controls_enabled:
         visible_enabled = ControlState.VISIBLE | ControlState.ENABLED

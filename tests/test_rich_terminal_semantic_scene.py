@@ -29,6 +29,7 @@ from rich_terminal.retained_scene import (
     SceneErrorCode,
     SceneModelError,
 )
+from rich_terminal.retained_resources import RetainedResourceStore
 from rich_terminal.semantic_content import (
     SemanticContentFlag,
     SemanticTextContent,
@@ -109,7 +110,12 @@ def _domain(
         owner,
         OwnerQuotas(1, 0, object_quota, 0, 0, 192, 0),
     )
-    scene = RetainedSceneModel(clock=clock, owners=ledger, geometry=GEOMETRY)
+    scene = RetainedSceneModel(
+        clock=clock,
+        owners=ledger,
+        resources=RetainedResourceStore(ledger),
+        geometry=GEOMETRY,
+    )
     return clock, ledger, owner, scene
 
 
