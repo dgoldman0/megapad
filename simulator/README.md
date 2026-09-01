@@ -639,8 +639,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5003 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, then the legacy file abstraction |
-| 5004 onward | Next uncovered frontier | A blank seam precedes MP64FS at line 5005 |
+| 39–5134 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache/geometry/bitmap/directory helpers |
+| 5135 onward | Next uncovered frontier | A blank seam precedes MP64FS loading and syncing at line 5136 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -859,9 +859,27 @@ scratch use unlocked globals and are non-reentrant. Multi-stage failures may
 leave earlier bytes committed without advancing descriptor metadata, and no
 file operation flushes or persists that metadata.
 
-Later slices continue after blank line 5004 with MP64FS at line 5005, then
-toward the persistent evaluator, ordinary checked module-loader surface, and
-deterministic cooperative task scheduler.
+The adjacent MP64FS foundation fixture is exact unchanged `kdos.f` lines
+5004–5134: 131 lines, 4,579 bytes, and SHA-256
+`caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062`.
+It publishes 32 definitions through `FIND-FREE-SLOT`. Load installs
+provisional geometry and root `CWD`, reserves the three global cache windows,
+and leaves `FS-OK` false without validating or touching storage. Focused
+acceptance covers geometry derivation, the complete 65,536-bit bitmap window,
+first-fit runs including the upper boundary, all packed field offsets, and the
+128-entry free-slot scan.
+
+The admitted domain is validator-approved geometry, positive run counts,
+in-range sectors and slots, complete cache spans, and structurally valid
+directory entries. The unchanged words do not gate on `FS-OK` or validate
+their inputs. `FIND-FREE` only reports a run and shares `FF-*` scratch;
+`FIND-FREE-SLOT` inspects only `name[0]` and relies on the validator's
+free-entry invariant. Invalid ordinary-`DO` bounds can traverse the 64-bit
+cell space, so acceptance does not execute them.
+
+Later slices continue after blank line 5135 with MP64FS loading and syncing at
+line 5136, then toward the persistent evaluator, ordinary checked
+module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

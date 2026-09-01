@@ -6,8 +6,7 @@ uses the same derived-geometry rule from 15 through 65536 sectors (32 MiB).
 The host utility still defaults to **1 MiB** (2048 × 512-byte sectors) and
 the filesystem supports up to
 **128 named files** with 23-character names, hierarchical subdirectories,
-two-extent allocation, RTC timestamps, and hardware-verified CRC32
-integrity.
+two-extent metadata, RTC timestamp fields, and a CRC32 integrity field.
 
 This document covers:
 
@@ -20,6 +19,27 @@ This document covers:
 - CRC32 data integrity (hardware-accelerated)
 - The Python `diskutil.py` tool for managing disk images
 - The KDOS Forth words for runtime filesystem access
+
+## Implementation Status
+
+This document specifies the on-disk format and also records intended MP64FS
+behavior. It is not a blanket claim that every described maintenance workflow
+already exists in `kdos.f`. The current source defines secondary-extent
+metadata; its later loader concatenates both validated extents, `RMFILE` frees
+both, and `FD-FILL` copies both into a descriptor. Its `MKFILE` allocates only
+one contiguous primary run, while legacy `FREAD`/`FWRITE`, `CAT`, and
+`SAVE-BUFFER` do not generally traverse the secondary extent. It does not
+currently define `FAPPEND`, `FS-CHECK`, `FS-COMPACT`, `STREAM-OPEN`, or
+`STREAM-WRITE`, and its ordinary file writes do not maintain `data_crc32` on
+every update. Those portions below are design/host-tool behavior until
+matching runtime words land and are qualified.
+
+The hosted simulator's contiguous unchanged-source frontier currently ends at
+`kdos.f` line 5134. It has qualified only the initial MP64FS cache, derived
+geometry, bitmap, first-fit search, and packed directory helpers—not
+`FS-LOAD`, `FS-SYNC`, `FORMAT`, or later file commands yet. This qualification
+boundary does not replace or weaken the BIOS validator and is not evidence of
+durability or file-backed persistence.
 
 ---
 
@@ -109,7 +129,10 @@ Offset   Size   Field        Description
 
 128 entries × 48 bytes = 6,144 bytes = 12 sectors.
 
-An entry is **free** (empty) if `type == 0` and the name is all zeros.
+An on-disk entry is **free** (empty) if `type == 0` and the name is all zeros.
+The low-level runtime `FIND-FREE-SLOT` helper checks only `name[0] == 0`; it
+relies on the BIOS validator and normal mutation paths to preserve the full
+free-entry invariant. It is not a validator for arbitrary cache bytes.
 
 #### Key Fields
 
@@ -118,11 +141,14 @@ An entry is **free** (empty) if `type == 0` and the name is all zeros.
 
 - **`mtime`** — Last-modified timestamp as seconds since Unix epoch,
   read from the RTC's epoch counter (`EPOCH@ 1000 /`).  Set on every
-  write or rename.
+  source path that explicitly updates it. The layout comment at `kdos.f` line
+  5026 instead says “seconds since boot”; that comment disagrees with the
+  executable `TICKS@` definition and this format specification.
 
-- **`data_crc32`** — CRC32 of the file's content bytes (not the full
-  sector padding).  Computed by the hardware CRC DMA engine on every
-  write.  See §Integrity below.
+- **`data_crc32`** — CRC32 of the file's content bytes (not the full sector
+  padding). The host tool populates it; automatic hardware recomputation on
+  every KDOS write is intended but not currently implemented. See §Integrity
+  below.
 
 - **`ext1_start` / `ext1_count`** — Optional second extent.  If a file
   cannot fit in one contiguous run, a second run is allocated.  A file's
@@ -201,8 +227,8 @@ so its parent is root.
 - Maximum directory depth is limited only by the 128-entry array.
 - Deleting a directory requires it to be empty (no entries with that
   index as their `parent`).
-- The current directory is tracked at runtime as a single byte (the
-  current directory's index, or `0xFF` for root).
+- The current directory's logical value is one byte (`0..127`, or `0xFF` for
+  root), but runtime `CWD` stores it in a full 64-bit cell.
 
 ### Example Directory Structure
 
@@ -229,31 +255,31 @@ extent trees.
 
 ### Creating a File
 
-When `MKFILE` (or `diskutil inject`) creates a file:
+The host-side `diskutil inject` path can create a two-extent layout. Its exact
+publication order is:
 
-1. **Find a free directory slot** — scan entries for `type == 0`.
-2. **Check for duplicate names** — abort if a file with the same name
-   exists in the same parent directory.
-3. **Try single-extent allocation** — scan the bitmap for a contiguous
-   run of N free sectors.  If found, set `start_sec` and `sec_count`.
-4. **Fall back to two-extent allocation** — if no single run of N
-   sectors is available, find the largest free run (becomes the primary
-   extent), then find a second run for the remainder (becomes the
-   secondary extent at `ext1_start` / `ext1_count`).
-5. **Mark sectors allocated** — set the corresponding bits in the bitmap.
-6. **Write the directory entry** — name, extents, type, parent, mtime.
-7. **Compute CRC32** — if data is provided, feed it through the hardware
-   CRC DMA engine and store the result in `data_crc32`.
-8. **Sync to disk** — write bitmap + directory sectors back to the image.
+1. Validate the formatted image, name, parent path, and duplicate-name rule.
+2. Try one complete free run; if none exists, choose the largest primary run
+   and then a second run for the remainder.
+3. Mark both runs and publish the bitmap to the in-memory image.
+4. Write the content across the primary and secondary runs.
+5. Compute CRC32 with the host implementation.
+6. Find the first directory slot whose `name[0]` is zero, construct the entry,
+   and publish the directory to the image.
 
-If two extents still cannot satisfy the request, allocation fails.
+If two extents cannot satisfy the request, allocation fails. This host path is
+not transactional: because the slot check follows bitmap and content writes,
+a directory-full failure can leave those earlier image changes. Current KDOS
+`MKFILE` does not implement the two-run fallback; it succeeds only when one
+contiguous primary run satisfies the complete request and leaves the secondary
+extent zero.
 
 ### Appending to a File
 
-When the `append` flag (bit 3) is set, writes extend `used_bytes` within
-the existing allocation without re-allocating.  The word `FAPPEND`
-computes the byte offset, determines which extent the write falls in,
-and writes the data.
+The intended append contract extends `used_bytes` within the existing
+allocation without re-allocating when the append flag (bit 3) is set. A future
+`FAPPEND` word would compute the byte offset, select the extent, and write the
+data; current `kdos.f` does not define that word.
 
 If `used_bytes` reaches total capacity (`(sec_count + ext1_count) × 512`),
 the append fails — the file must be recreated with a larger allocation.
@@ -306,16 +332,16 @@ To read a stream's contents in chronological order:
    allocation (oldest data), then from byte 0 to `used_bytes - 1`
    (newest data).
 
-The `data_crc32` field on a stream file covers the *current* buffer
-contents at the time of the last CRC update.  Since streams are
-append-heavy, CRC is only recalculated on explicit `FS-CHECK`.
+The intended `data_crc32` field on a stream file covers the *current* buffer
+contents at the time of the last CRC update. Since streams are append-heavy,
+the design calls for recalculation only during the planned `FS-CHECK` pass.
 
 ### Forth Words
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `STREAM-OPEN` | `( "name" -- fd )` | Open a stream file, return descriptor |
-| `STREAM-WRITE` | `( addr len fd -- )` | Write bytes to stream (wraps on overflow) |
+| `STREAM-OPEN` *(planned)* | `( "name" -- fd )` | Open a stream file; not currently defined in `kdos.f` |
+| `STREAM-WRITE` *(planned)* | `( addr len fd -- )` | Circular write; not currently defined in `kdos.f` |
 
 ---
 
@@ -340,10 +366,11 @@ in its data sector(s).  The target is a NUL-terminated path string
 
 ## CRC32 Data Integrity
 
-Every file's `data_crc32` field stores a CRC32 checksum of its content
-bytes (from byte 0 to `used_bytes - 1`).  This checksum is computed
-by the **hardware CRC DMA engine** (8 bytes/cycle), making it fast
-enough to run on every write without noticeable overhead.
+The format reserves `data_crc32` for a CRC32 checksum of content bytes from
+byte 0 through `used_bytes - 1`. The hardware CRC DMA engine can compute that
+checksum at 8 bytes/cycle. Current KDOS file mutation paths do not yet keep the
+field current on every write; the automatic behavior below is the target
+contract rather than admitted runtime behavior.
 
 ### When CRC Is Computed
 
@@ -354,9 +381,9 @@ enough to run on every write without noticeable overhead.
 
 ### Verification
 
-The `FS-CHECK` word walks every non-free, non-directory entry, reads its
-data via DMA, computes CRC32, and compares against the stored
-`data_crc32`.  Mismatches are reported with the entry index and name.
+A planned `FS-CHECK` word would walk every non-free, non-directory entry, read
+its data via DMA, compute CRC32, and compare against the stored `data_crc32`.
+`kdos.f` does not currently define it. Intended diagnostics look like:
 
 ```
 > FS-CHECK
@@ -377,8 +404,9 @@ If a mismatch is found:
 ## Defragmentation
 
 Over time, file creation and deletion can leave the bitmap fragmented.
-`FS-COMPACT` consolidates free space by moving file data into contiguous
-regions and collapsing two-extent files into single extents.
+A planned `FS-COMPACT` operation would consolidate free space by moving file
+data into contiguous regions and collapsing two-extent files into single
+extents. `kdos.f` does not currently define it.
 
 ### Algorithm
 
@@ -554,7 +582,7 @@ present.
 | Word | Description |
 |------|-------------|
 | `DIR` | List files in current directory (name, size, type) + free space summary |
-| `CATALOG` | Detailed listing (extents, bytes, type, parent, mtime, CRC) |
+| `CATALOG` | List name, bytes, primary sector count, numeric type, and flags + free-space summary |
 | `CAT filename` | Print file contents to terminal |
 | `FS-FREE` | Report free space (sectors, bytes, file count) |
 
@@ -574,21 +602,21 @@ present.
 | `n type MKFILE name` | Create a new file with *n* sectors and *type* in current directory |
 | `RMFILE name` | Delete a file from current directory |
 | `RENAME old new` | Rename a file |
-| `FAPPEND` | `( addr len fd -- )` Append data to a file with the `append` flag |
+| `FAPPEND` *(planned)* | `( addr len fd -- )` Append data to a file with the `append` flag; not currently defined in `kdos.f` |
 
 ### Integrity & Maintenance
 
 | Word | Description |
 |------|-------------|
-| `FS-CHECK` | Verify CRC32 of all files against stored checksums (hw-accelerated) |
-| `FS-COMPACT` | Defragment: pack files, collapse two-extent files to single extent |
+| `FS-CHECK` *(planned)* | Verify CRC32 of all files against stored checksums; not currently defined in `kdos.f` |
+| `FS-COMPACT` *(planned)* | Defragment and collapse two-extent files; not currently defined in `kdos.f` |
 
 ### Stream Files
 
 | Word | Description |
 |------|-------------|
-| `STREAM-OPEN name` | Open a stream file, return descriptor |
-| `STREAM-WRITE` | `( addr len fd -- )` Write bytes to stream (circular, wraps on overflow) |
+| `STREAM-OPEN name` *(planned)* | Open a stream file; not currently defined in `kdos.f` |
+| `STREAM-WRITE` *(planned)* | `( addr len fd -- )` Circular write; not currently defined in `kdos.f` |
 
 ### Loading & Saving
 

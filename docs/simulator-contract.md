@@ -1243,7 +1243,7 @@ acceptance uses an exact-sector Buffer and does not add hidden padding.
 validates the selected binding and does not report capabilities, staleness,
 `FS-OK`, or durability.
 
-The contiguous source frontier now ends at line 5003. Exact unchanged lines
+The contiguous source frontier now ends at line 5134. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1279,7 +1279,36 @@ I/O non-reentrant, and per-sector locking does not make read-modify-write or
 multi-sector work atomic. Failures can leave earlier destination or media
 effects, no logical hole is automatically zero-filled, all raw field access
 trusts its pointers, and descriptor metadata is never persisted. After blank
-line 5004, line 5005 begins the next uncovered MP64FS section.
+line 5004, exact unchanged lines 5005 through 5134 admit the initial MP64FS
+foundation. Including that leading seam, its fixture contains 131 lines and
+4,579 bytes (SHA-256
+`caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062`)
+and publishes 32 definitions through `FIND-FREE-SLOT`.
+
+Load allocates three runtime-global cache windows, initializes provisional
+geometry (`FS-TOTAL = 2048`, `FS-BMAP-N = 1`) and root `CWD = 255`, and leaves
+`FS-OK = 0`. It performs no validation, binding, I/O, flush, locking, or UART
+publication. Virgin hosted memory supplies the observed cold zeros; the
+unchanged source does not clear the `ALLOT` tails. Because each declaration
+starts with an eight-byte `VARIABLE` body and then uses `size 1- ALLOT`, the
+raw reservations are 519, 8,199, and 6,151 bytes for operational windows of
+512, 8,192, and 6,144 bytes.
+
+The cache and bitmap helpers can represent all 65,536 sector bits;
+`FIND-FREE` reports the first complete free run without allocating it; and the
+directory readers decode every packed little-endian field. `FIND-FREE-SLOT`
+checks only entry byte zero. The admitted contract therefore assumes
+`1 <= FS-BMAP-N <= 16`, `13 + FS-BMAP-N < FS-TOTAL <= 65536`, in-range
+sectors and slots, a positive free-run count, complete cache spans, and a
+validator-conforming directory in which free entries are fully zero and live
+names begin nonzero.
+
+These helpers are deliberately not hardened by simulator policy. They do not
+gate on `FS-OK` or validate pointers, indices, geometry, or counts.
+`BIT-MASK` is a scalar cell shift only for `0..63`, with bitmap callers using
+`0..7`; invalid ordinary-`DO` bounds can traverse the modulo-64-bit range.
+`FIND-FREE` uses shared `FF-*` scratch and is non-reentrant. After blank line
+5135, line 5136 begins the next uncovered loading and syncing section.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

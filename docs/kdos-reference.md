@@ -855,15 +855,17 @@ and Arena sections plus Buffer's general `IDLE`, registry, constructors,
 inspection, Arena integration, integer/FP16/BF16 operations, the kernel
 registry and sample kernels, the pipeline engine, checked block-device and
 bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
-storage-compatibility and legacy file layers through line 5003.
+storage-compatibility, legacy file, and initial MP64FS cache/helper layers
+through line 5134.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
 guarded I/O, partition validation, transactional publication, selected-volume
 lifecycle, diagnostic wrappers, permanent file descriptors, and composed
-head/full/tail sector I/O are executable semantic behavior rather than
-reporting-only shims. After blank line 5004, the next uncovered source at line
-5005 begins MP64FS.
+head/full/tail sector I/O, MP64FS cache geometry, bitmap mutation/search, and
+packed directory readers are executable semantic behavior rather than
+reporting-only shims. The frontier now ends at line 5134; after blank line
+5135, the next uncovered loading/syncing section begins at line 5136.
 
 ---
 
@@ -1097,7 +1099,13 @@ bytes, with SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`.
 Load initializes the registry count and scratch variables and allocates the
 registry and sector scratch without executing `FILE`, touching media, or
-printing. After blank line 5004, line 5005 begins the next uncovered MP64FS
+printing. Exact lines 5004 through 5134 then add all 32 initial MP64FS cache,
+geometry, bitmap, allocation-search, and packed directory definitions in 131
+lines and 4,579 bytes, with SHA-256
+`caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062`.
+Load installs provisional 2,048-sector geometry, root `CWD`, zeroed scratch,
+and cold-hosted cache storage without validating or touching media. After
+blank line 5135, line 5136 begins the next uncovered loading and syncing
 section.
 
 ---
@@ -1730,6 +1738,50 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
+### Hosted Foundation Checkpoint
+
+The hosted simulator continuously executes the unchanged source through
+`kdos.f` line 5134. This checkpoint allocates `FS-SUPER`, `FS-BMAP`, and
+`FS-DIR`; installs provisional `FS-TOTAL = 2048`, `FS-BMAP-N = 1`, and root
+`CWD = 255`; and publishes the geometry, bitmap, first-fit, and packed-entry
+helpers. It performs no storage I/O or validation and leaves `FS-OK = 0`.
+Those defaults and cold-cache bytes are therefore construction state, not a
+claim that a filesystem is mounted. The three `VARIABLE ... ALLOT`
+declarations each reserve seven bytes beyond their 512-, 8192-, and 6144-byte
+operational windows; the source does not explicitly clear the `ALLOT` tails.
+
+| Word | Stack Effect | Admitted behavior |
+|------|--------------|-------------------|
+| `FS-DIR-START` | `( -- sector )` | Derive `1 + FS-BMAP-N`. |
+| `FS-DSTART` | `( -- sector )` | Derive the first data sector, `13 + FS-BMAP-N`. |
+| `BIT-MASK` | `( bitpos -- mask )` | Compute a cell-width `1 << bitpos`; bitmap callers pass only `0..7`. |
+| `BIT-FREE?` | `( sector -- flag )` | Test the corresponding cached bitmap bit. |
+| `BIT-SET` / `BIT-CLR` | `( sector -- )` | Mutate the corresponding cached bitmap bit. |
+| `FIND-FREE` | `( count -- sector \| -1 )` | Return the first complete free run in `[FS-DSTART, FS-TOTAL)` without reserving it. |
+| `DIRENT` | `( slot -- addr )` | Address one of the 128 packed 48-byte cache entries. |
+| `DE.SEC` … `DE.EXT1-CNT` | `( de -- value )` | Read the packed little-endian directory fields. |
+| `FIND-FREE-SLOT` | `( -- slot \| -1 )` | Return the first entry whose name byte zero is zero. |
+
+The admitted helper domain assumes validator-approved geometry
+(`1 <= FS-BMAP-N <= 16`, `13 + FS-BMAP-N < FS-TOTAL <= 65536`), an in-range
+sector, a positive `FIND-FREE` count, a `DIRENT` index in `0..127`, and
+complete cache spans. The helpers do not check `FS-OK`, bounds, or geometry.
+Equal or reversed geometry bounds in `FIND-FREE` and out-of-domain negative or
+very large `BIT-MASK` positions can drive ordinary `DO` across the modulo
+64-bit cell space. Nonpositive and high-bit run counts are separately
+unqualified and can produce nonsensical results under the source's signed
+comparison, although valid geometry still bounds that scan. `FIND-FREE` uses
+shared `FF-*` scratch and is not reentrant. `FIND-FREE-SLOT` deliberately
+checks only `name[0]`; its safe contract relies on the BIOS validator's
+invariant that a free entry is fully zero and every live entry has a nonempty
+name.
+
+There is also a source-comment discrepancy at line 5026: the directory layout
+calls `mtime` “seconds since boot,” while the later unchanged `TICKS@` computes
+`EPOCH@ 1000 /`, i.e. Unix epoch seconds. The on-disk specification and
+executable producer agree on epoch seconds; the simulator does not reinterpret
+the field to preserve the stale comment.
+
 ### File Type Codes
 
 | Code | Name | Typical Use |
@@ -1742,17 +1794,20 @@ supports 128 entries, 23-character names, and two extents per file.  See
 | 5 | data | Structured data |
 | 6 | tutorial | Step-by-step lesson |
 | 7 | bundle | Pipeline bundle (declarative config) |
+| 8 | directory | Parent for hierarchical entries |
+| 9 | stream | Circular stream data |
+| 10 | link | Symbolic link target |
 
 ### Words
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `FS-LOAD` | `( -- )` | Load and validate marker-1 superblock geometry against `DISK-SECTORS`, then cache the complete bitmap and directory.  Sets `FS-OK`. |
-| `FS-SYNC` | `( -- )` | Write the in-RAM bitmap and directory back to disk.  Call after any changes. |
-| `FS-ENSURE` | `( -- )` | Auto-load the filesystem if not yet loaded. |
-| `FORMAT` | `( -- )` | **Initialize a fresh filesystem** using the attached media capacity.  Writes marker 1 and derived geometry, marks every metadata sector allocated, and clears the directory. |
-| `DIR` | `( -- )` | List all files showing name, size, and type.  Also shows a free-space summary. |
-| `CATALOG` | `( -- )` | Detailed directory listing with sector start, sector count, byte size, and type. |
+| `FS-LOAD` | `( -- )` | Clear `FS-OK`, force the singleton raw binding, ask BIOS to validate the complete marker-1 filesystem, then cache its superblock, bitmap, and directory. A successful load sets `FS-OK`; it does not reset `CWD`. |
+| `FS-SYNC` | `( -- )` | If loaded, write bitmap then directory and flush. It does not write the superblock and is not transactional. |
+| `FS-ENSURE` | `( -- )` | If `FS-OK` is false and a disk is present, invoke `FS-LOAD`; otherwise do nothing. A true marker is not revalidated. |
+| `FORMAT` | `( -- )` | **Initialize fresh filesystem metadata** using the attached capacity: write marker-1 geometry, mark metadata sectors, clear the directory, and flush. It does not wipe data sectors and is not transactional. |
+| `DIR` | `( -- )` | List entries whose parent is `CWD`, showing name, size, and type, followed by a free-space summary. |
+| `CATALOG` | `( -- )` | List name, byte size, primary sector count, numeric type, and flags, followed by a free-space summary. It does not print the start sector. |
 | `FIND-BY-NAME` | `( -- slot \| -1 )` | Search the directory for a file matching `NAMEBUF`.  Caller must call `PARSE-NAME` first.  Returns the slot index or −1. |
 | `MKFILE` | `( nsectors type "name" -- )` | Create a new file: allocate contiguous sectors, create directory entry, sync.  Checks for duplicate names. |
 | `RMFILE` | `( "name" -- )` | Delete a file: free its bitmap sectors, clear the directory entry, sync. |
@@ -1770,7 +1825,7 @@ supports 128 entries, 23-character names, and two extents per file.  See
 ```forth
 DIR                          \ list all files
 CAT getting-started          \ print a file's contents
-4 MKFILE my-notes            \ create a 4-sector file of type "doc"
+4 4 MKFILE my-notes          \ create a 4-sector file of type "doc"
 my-buffer SAVE-BUFFER my-data   \ save buffer to existing file
 LOAD my-script.f             \ evaluate a Forth source file
 FS-FREE                      \ check remaining space
