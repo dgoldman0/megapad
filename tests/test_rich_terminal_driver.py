@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import struct
 
 import pytest
@@ -35,6 +36,8 @@ from rich_terminal.retained_model import (
 from rich_terminal.retained_wire import (
     OwnerDrop,
     OwnerOpen,
+    ResourceBegin,
+    ResourceChunk,
     RetStatus,
     RetainedMessageType,
     decode_ret_caps,
@@ -42,6 +45,8 @@ from rich_terminal.retained_wire import (
     decode_ret_result,
     encode_owner_drop,
     encode_owner_open,
+    encode_resource_begin,
+    encode_resource_chunk,
     encode_ret_query,
 )
 from rich_terminal.server import (
@@ -96,6 +101,35 @@ def _retained_policy() -> RetainedPolicy:
         image_format=0,
         max_image_width=0,
         max_image_height=0,
+        max_path_points=0,
+        max_glyph_run_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=64,
+        base_max_transaction_bytes=512,
+    )
+
+
+def _image_policy() -> RetainedPolicy:
+    return RetainedPolicy(
+        features=RetainedFeature.CORE | RetainedFeature.RGBA_IMAGE,
+        max_owner_records=2,
+        max_live_owners=1,
+        max_regions=2,
+        max_resources=2,
+        max_objects=2,
+        max_series=0,
+        max_operations_per_transaction=4,
+        max_resource_chunk_bytes=16,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=16,
+        image_format=1,
+        max_image_width=2,
+        max_image_height=2,
         max_path_points=0,
         max_glyph_run_bytes=0,
         max_samples_per_append=0,
@@ -544,6 +578,112 @@ def test_driver_settles_owner_lifecycle_markers_after_ordered_admission():
     system.run_batch_stats(1)
     drop_frame = decoder.feed(_drain_uart_rx(system))[0]
     assert TX_RESULT.unpack(drop_frame.payload) == (2, 0, 0, 2)
+    driver.close()
+
+
+def test_driver_settles_resource_chunk_only_when_covering_credit_is_admitted():
+    system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
+    driver = RichTerminalDriver.attach(
+        system,
+        _host_limits(),
+        _terminal_config(),
+        DriverLimits(4_096, 16),
+        retained_policy=_image_policy(),
+        session_id_factory=lambda: 0x0123456789ABCDEF,
+    )
+    _write_native_uart(system, encode_probe(1))
+    driver.service()
+    system.cpu.halted = True
+    system.run_batch_stats(1)
+    offer = parse_negotiation(_drain_uart_rx(system))
+    assert isinstance(offer, Offer)
+    opened_bytes, encoder = _open_bytes(offer, client_credit=512)
+    _write_native_uart(system, opened_bytes)
+    driver.service()
+    system.run_batch_stats(1)
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    decoder.feed(_drain_uart_rx(system))
+
+    _write_native_uart(
+        system,
+        encoder.encode(RetainedMessageType.RET_QUERY, encode_ret_query()),
+    )
+    driver.service()
+    system.run_batch_stats(1)
+    decoder.feed(_drain_uart_rx(system))
+    owner = OwnerOpen(7, 1, OwnerQuotas(1, 1, 1, 0, 4, 0, 0))
+    _write_native_uart(
+        system,
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner)),
+    )
+    driver.service()
+    system.run_batch_stats(1)
+    decoder.feed(_drain_uart_rx(system))
+
+    pixels = bytes((1, 2, 3, 255))
+    _write_native_uart(
+        system,
+        encoder.encode(
+            RetainedMessageType.RESOURCE_BEGIN,
+            encode_resource_begin(
+                ResourceBegin(
+                    7,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    len(pixels),
+                    hashlib.sha3_256(pixels).digest(),
+                )
+            ),
+        ),
+    )
+    begin_service = driver.service()
+    assert begin_service.outbound_records == 2
+    assert driver.core.outstanding_lifecycle_result is None
+    system.run_batch_stats(1)
+    begin_frames = decoder.feed(_drain_uart_rx(system))
+    assert [frame.message_type for frame in begin_frames] == [
+        RetainedMessageType.RET_RESULT,
+        MessageType.CREDIT,
+    ]
+    assert decode_ret_result(begin_frames[0].payload).status is RetStatus.OK
+
+    # Fill the host's bounded control ingress with unrelated covering credits.
+    # The driver has no retained output at this point, so the next chunk can be
+    # processed while its own CREDIT remains unable to cross host admission.
+    for _ in range(16):
+        _write_native_uart(system, encoder.encode(0x8003))
+        assert driver.service().outbound_records == 1
+
+    _write_native_uart(
+        system,
+        encoder.encode(
+            RetainedMessageType.RESOURCE_CHUNK,
+            encode_resource_chunk(ResourceChunk(7, 1, 1, 0, pixels)),
+        ),
+    )
+    blocked = driver.service()
+    assert blocked.status is DriverStatus.BACKPRESSURED
+    assert blocked.outbound_records == 0
+    assert driver.pending_outbound_events == 1
+    assert driver.core.outstanding_lifecycle_result is not None
+    assert driver.core.resource_upload is not None
+    assert driver.core.resource_upload.accepted_bytes == len(pixels)
+
+    system.run_batch_stats(1)
+    unrelated = decoder.feed(_drain_uart_rx(system))
+    assert [frame.message_type for frame in unrelated] == [MessageType.CREDIT] * 16
+    admitted = driver.service()
+    assert admitted.status is DriverStatus.PROGRESS
+    assert admitted.outbound_records == 1
+    assert driver.pending_outbound_events == 0
+    assert driver.core.outstanding_lifecycle_result is None
+    system.run_batch_stats(1)
+    chunk_credit = decoder.feed(_drain_uart_rx(system))
+    assert [frame.message_type for frame in chunk_credit] == [MessageType.CREDIT]
     driver.close()
 
 

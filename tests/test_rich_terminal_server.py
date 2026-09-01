@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import struct
 
 import pytest
@@ -25,6 +26,8 @@ from rich_terminal.retained_model import (
 from rich_terminal.retained_scene import (
     ExplicitSamples,
     GroupBody,
+    ImageBody,
+    ImageFit,
     ObjectBounds,
     RGBA,
     ReadoutBody,
@@ -44,6 +47,12 @@ from rich_terminal.retained_wire import (
     PresentCommit,
     PresentDisposition,
     PresentRetainedMode,
+    ResourceAbort,
+    ResourceAbortReason,
+    ResourceBegin,
+    ResourceChunk,
+    ResourceCommit,
+    ResourceDrop,
     RegionWireDefinition,
     RetainedItemReference,
     RetStatus,
@@ -65,6 +74,11 @@ from rich_terminal.retained_wire import (
     encode_region_definition,
     encode_region_drop,
     encode_region_replace,
+    encode_resource_abort,
+    encode_resource_begin,
+    encode_resource_chunk,
+    encode_resource_commit,
+    encode_resource_drop,
     encode_ret_query,
     encode_series_append,
     encode_series_definition,
@@ -172,6 +186,35 @@ def _complete_retained_policy() -> RetainedPolicy:
         minimum_presentation_interval_us=0,
         total_sample_slots=16,
         total_utf8_bytes=128,
+        client_to_terminal_max_payload=256,
+        terminal_to_client_max_payload=64,
+        base_max_transaction_bytes=512,
+    )
+
+
+def _image_policy() -> RetainedPolicy:
+    return RetainedPolicy(
+        features=RetainedFeature.CORE | RetainedFeature.RGBA_IMAGE,
+        max_owner_records=4,
+        max_live_owners=2,
+        max_regions=4,
+        max_resources=4,
+        max_objects=4,
+        max_series=0,
+        max_operations_per_transaction=8,
+        max_resource_chunk_bytes=16,
+        max_retained_transaction_bytes=512,
+        total_resource_bytes=64,
+        image_format=1,
+        max_image_width=2,
+        max_image_height=2,
+        max_path_points=0,
+        max_glyph_run_bytes=0,
+        max_samples_per_append=0,
+        max_history_per_series=0,
+        minimum_presentation_interval_us=0,
+        total_sample_slots=0,
+        total_utf8_bytes=0,
         client_to_terminal_max_payload=256,
         terminal_to_client_max_payload=64,
         base_max_transaction_bytes=512,
@@ -316,8 +359,10 @@ def _owner_open(
     generation: int = 1,
     *,
     regions: int = 4,
+    resources: int = 0,
     objects: int = 0,
     series: int = 0,
+    resource_bytes: int = 0,
     utf8_bytes: int = 0,
     sample_slots: int = 0,
 ) -> OwnerOpen:
@@ -326,10 +371,10 @@ def _owner_open(
         generation,
         OwnerQuotas(
             regions,
-            0,
+            resources,
             objects,
             series,
-            0,
+            resource_bytes,
             utf8_bytes,
             sample_slots,
         ),
@@ -864,7 +909,7 @@ def test_owner_open_result_gate_blocks_a_second_lifecycle_request():
         )
     )
 
-    with pytest.raises(TerminalSessionError, match="outstanding RET_RESULT"):
+    with pytest.raises(TerminalSessionError, match="lifecycle completion"):
         core.feed_machine(
             encoder.encode(
                 RetainedMessageType.OWNER_OPEN,
@@ -1710,6 +1755,396 @@ def test_unadvertised_image_rejection_stays_sticky_while_present_drains():
     assert core.retained_state is source
     assert core.owner_state is not None
     assert core.owner_state.records[7].high_water.region == 0
+
+
+def test_resource_upload_chunk_commit_and_drop_publish_exact_bounded_state():
+    core, encoder, decoder = _open_retained_core(retained_policy=_image_policy())
+    owner = _owner_open(resources=2, objects=1, resource_bytes=16)
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+
+    pixels = bytes((12, 34, 56, 255))
+    digest = hashlib.sha3_256(pixels).digest()
+    begun = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_BEGIN,
+            encode_resource_begin(
+                ResourceBegin(7, 1, 1, 1, 1, 1, 0, len(pixels), digest)
+            ),
+        )
+    )
+    begin_frames = [
+        frame
+        for outbound in begun.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    assert [frame.message_type for frame in begin_frames] == [
+        RetainedMessageType.RET_RESULT,
+        MessageType.CREDIT,
+    ]
+    assert decode_ret_result(begin_frames[0].payload).status is RetStatus.OK
+    assert core.resource_upload is not None
+    assert core.resource_upload.accepted_bytes == 0
+    assert core.resource_state is not None
+    assert not core.resource_state.resources
+    assert core.owner_state is not None
+    assert core.owner_state.records[7].high_water.resource == 1
+    _settle_lifecycle(core, begun)
+
+    chunked = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_CHUNK,
+            encode_resource_chunk(ResourceChunk(7, 1, 1, 0, pixels)),
+        )
+    )
+    chunk_frames = [
+        frame
+        for outbound in chunked.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    assert [frame.message_type for frame in chunk_frames] == [MessageType.CREDIT]
+    assert chunked.outbound[0].lifecycle_result is not None
+    assert core.resource_upload is not None
+    assert core.resource_upload.accepted_bytes == len(pixels)
+    _settle_lifecycle(core, chunked)
+
+    committed = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_COMMIT,
+            encode_resource_commit(ResourceCommit(7, 1, 1)),
+        )
+    )
+    commit_frames = [
+        frame
+        for outbound in committed.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    result = decode_ret_result(commit_frames[0].payload)
+    assert result.status is RetStatus.OK
+    assert result.accepted_bytes == len(pixels)
+    assert core.resource_upload is None
+    assert core.resource_state is not None
+    resource = core.resource_state.resources[(7, 1, 1)]
+    assert resource.read(0, len(pixels)) == pixels
+    _settle_lifecycle(core, committed)
+
+    dropped = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_DROP,
+            encode_resource_drop(ResourceDrop(7, 1, 1)),
+        )
+    )
+    drop_frames = [
+        frame
+        for outbound in dropped.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    assert decode_ret_result(drop_frames[0].payload).status is RetStatus.OK
+    assert core.resource_state is not None
+    assert not core.resource_state.resources
+    _settle_lifecycle(core, dropped)
+
+
+def test_image_scene_blocks_drop_and_owner_retirement_preserves_old_view_backing():
+    core, encoder, decoder = _open_retained_core(retained_policy=_image_policy())
+    owner = _owner_open(
+        regions=1,
+        resources=1,
+        objects=1,
+        resource_bytes=4,
+    )
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(owner))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    pixels = bytes((9, 8, 7, 255))
+    begun = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_BEGIN,
+            encode_resource_begin(
+                ResourceBegin(
+                    7,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    len(pixels),
+                    hashlib.sha3_256(pixels).digest(),
+                )
+            ),
+        )
+    )
+    for outbound in begun.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, begun)
+    chunked = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_CHUNK,
+            encode_resource_chunk(ResourceChunk(7, 1, 1, 0, pixels)),
+        )
+    )
+    for outbound in chunked.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, chunked)
+    committed = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_COMMIT,
+            encode_resource_commit(ResourceCommit(7, 1, 1)),
+        )
+    )
+    for outbound in committed.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, committed)
+
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    image = ObjectWireDefinition(
+        7,
+        1,
+        1,
+        1,
+        0,
+        ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        0,
+        True,
+        ImageBody(1, ImageFit.CONTAIN, 255),
+    )
+    hidden = core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=2,
+            base_revision=1,
+            retained_mode=PresentRetainedMode.REPLACE_START,
+            disposition=PresentDisposition.COMMIT,
+            operations=(
+                (
+                    RetainedMessageType.REGION_DEFINE,
+                    encode_region_definition(region),
+                ),
+                (
+                    RetainedMessageType.OBJECT_DEFINE,
+                    encode_object_definition(image),
+                ),
+            ),
+        )
+    )
+    for outbound in hidden.outbound:
+        decoder.feed(outbound.payload)
+    _settle_results(core, hidden)
+    assert core.output_view is not None
+    assert core.output_view.resources == ()
+
+    revealed = core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=3,
+            base_revision=2,
+            retained_mode=PresentRetainedMode.REPLACE_CONTINUE,
+            disposition=PresentDisposition.COMMIT_AND_REVEAL,
+        )
+    )
+    for outbound in revealed.outbound:
+        decoder.feed(outbound.payload)
+    _settle_results(core, revealed)
+    visible_view = core.output_view
+    assert visible_view is not None
+    assert len(visible_view.resources) == 1
+    assert visible_view.resources[0].read(0, len(pixels)) == pixels
+
+    rejected_drop = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_DROP,
+            encode_resource_drop(ResourceDrop(7, 1, 1)),
+        )
+    )
+    drop_frames = [
+        frame
+        for outbound in rejected_drop.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    assert decode_ret_result(drop_frames[0].payload).status is RetStatus.IN_USE
+    assert core.resource_state is not None
+    assert (7, 1, 1) in core.resource_state.resources
+    _settle_lifecycle(core, rejected_drop)
+
+    retired = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_DROP,
+            encode_owner_drop(OwnerDrop(4, 3, 7, 1)),
+        )
+    )
+    assert TX_RESULT.unpack(decoder.feed(retired.outbound[0].payload)[0].payload) == (
+        4,
+        0,
+        0,
+        4,
+    )
+    assert core.resource_state is not None
+    assert not core.resource_state.resources
+    assert core.output_view is not None
+    assert core.output_view.resources == ()
+    assert visible_view.resources[0].read(0, len(pixels)) == pixels
+
+
+def test_resource_wrong_tuple_preserves_upload_but_exact_invalid_commit_aborts_it():
+    core, encoder, decoder = _open_retained_core(retained_policy=_image_policy())
+    opened = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(
+                _owner_open(resources=1, resource_bytes=16)
+            ),
+        )
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    pixels = bytes((1, 2, 3, 4))
+    begun = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_BEGIN,
+            encode_resource_begin(
+                ResourceBegin(
+                    7,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    len(pixels),
+                    hashlib.sha3_256(pixels).digest(),
+                )
+            ),
+        )
+    )
+    for outbound in begun.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, begun)
+
+    wrong = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_CHUNK,
+            encode_resource_chunk(ResourceChunk(8, 1, 1, 0, pixels)),
+        )
+    )
+    wrong_frames = [
+        frame
+        for outbound in wrong.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    assert decode_ret_result(wrong_frames[0].payload).status is RetStatus.STALE_OWNER
+    assert core.resource_upload is not None
+    assert core.resource_upload.accepted_bytes == 0
+    _settle_lifecycle(core, wrong)
+
+    incomplete = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_COMMIT,
+            encode_resource_commit(ResourceCommit(7, 1, 1)),
+        )
+    )
+    incomplete_frames = [
+        frame
+        for outbound in incomplete.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    assert decode_ret_result(incomplete_frames[0].payload).status is RetStatus.INVALID
+    assert core.resource_upload is None
+    assert core.resource_state is not None
+    assert not core.resource_state.resources
+    _settle_lifecycle(core, incomplete)
+
+
+def test_soft_reset_accepts_exact_old_epoch_resource_abort_before_ack():
+    core, encoder, decoder = _open_retained_core(retained_policy=_image_policy())
+    opened = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.OWNER_OPEN,
+            encode_owner_open(_owner_open(resources=1, resource_bytes=16)),
+        )
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    pixels = bytes((1, 2, 3, 4))
+    begun = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_BEGIN,
+            encode_resource_begin(
+                ResourceBegin(
+                    7,
+                    1,
+                    1,
+                    1,
+                    1,
+                    1,
+                    0,
+                    len(pixels),
+                    hashlib.sha3_256(pixels).digest(),
+                )
+            ),
+        )
+    )
+    for outbound in begun.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, begun)
+
+    decoder.feed(core.request_soft_reset().payload)
+    crossed = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_CHUNK,
+            encode_resource_chunk(ResourceChunk(8, 1, 1, 0, pixels)),
+        )
+    )
+    crossed_frames = [
+        frame
+        for outbound in crossed.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    assert decode_ret_result(crossed_frames[0].payload).status is RetStatus.STALE_OWNER
+    assert core.resource_upload is not None
+    _settle_lifecycle(core, crossed)
+
+    # Once the arbitrary crossed request is consumed, only the exact abort of
+    # the surviving upload may pass before the new-epoch acknowledgement.
+    aborted = core.feed_machine(
+        encoder.encode(
+            RetainedMessageType.RESOURCE_ABORT,
+            encode_resource_abort(
+                ResourceAbort(7, 1, 1, ResourceAbortReason.RESET_REBUILD)
+            ),
+        )
+    )
+    abort_frames = [
+        frame
+        for outbound in aborted.outbound
+        for frame in decoder.feed(outbound.payload)
+    ]
+    assert [frame.message_type for frame in abort_frames] == [
+        RetainedMessageType.RET_RESULT
+    ]
+    assert decode_ret_result(abort_frames[0].payload).status is RetStatus.ABORTED
+    assert core.resource_upload is None
+    _settle_lifecycle(core, aborted)
+
+    encoder.set_presentation_epoch(1)
+    acknowledged = core.feed_machine(
+        encoder.encode(
+            MessageType.SOFT_RESET_ACK,
+            SOFT_RESET_ACK.pack(1, 0, 0),
+        )
+    )
+    assert acknowledged.outbound == ()
+    assert core.resource_state is None
+    assert not core.retained_enabled
 
 
 def test_resource_lifecycle_frame_cannot_intervene_inside_present():

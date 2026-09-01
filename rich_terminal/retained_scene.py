@@ -1039,6 +1039,7 @@ class PreparedOwnerRetirement:
     a fixed sequence of non-failing reference assignments.
     """
 
+    owner: OwnerIdentity
     state: SceneModelState
     ledger: PreparedOwnerLedgerInstall
     lease: TransactionLease
@@ -1091,6 +1092,12 @@ class RetainedSceneModel:
     @property
     def clock(self) -> TerminalUpdateAuthority:
         return self._clock
+
+    @property
+    def resource_store(self) -> RetainedResourceStore:
+        """The exact read-only resource authority dependency for this scene."""
+
+        return self._resources
 
     @property
     def transaction_open(self) -> bool:
@@ -1823,6 +1830,7 @@ class RetainedSceneModel:
         except TerminalUpdateError as exc:
             raise SceneModelError(SceneErrorCode.STATE, str(exc)) from exc
         return PreparedOwnerRetirement(
+            owner=owner,
             state=replace(
                 source,
                 revision=revision,

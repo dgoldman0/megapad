@@ -81,6 +81,14 @@ from .retained_scene import (
     SceneModelState,
     SeriesDefinition,
 )
+from .retained_resources import (
+    PreparedResourceInstall,
+    ResourceStoreError,
+    ResourceStoreErrorCode,
+    ResourceStoreState,
+    ResourceUploadView,
+    RetainedResourceStore,
+)
 from .retained_wire import (
     CellMode,
     ControlEvent,
@@ -102,6 +110,11 @@ from .retained_wire import (
     decode_object_replace,
     decode_object_set_value,
     decode_object_set_visibility,
+    decode_resource_abort,
+    decode_resource_begin,
+    decode_resource_chunk,
+    decode_resource_commit,
+    decode_resource_drop,
     decode_ret_query,
     decode_present_begin,
     decode_present_commit,
@@ -296,12 +309,12 @@ class TerminalConfig:
 
 @dataclass(frozen=True, slots=True)
 class LifecycleResultLease:
-    """Exact object-identity gate for one emitted lifecycle result.
+    """Exact object-identity gate for one emitted lifecycle completion.
 
-    The token is deliberately independent of the validated RET_RESULT domain
-    object.  A well-framed rejected request must echo even a semantically
-    invalid zero owner/item scalar, while delivery still needs an exact object
-    marker at the host admission boundary.
+    Most completions are RET_RESULT records.  A successful RESOURCE_CHUNK is
+    completed by its covering CREDIT instead, so the token is deliberately
+    independent of the validated result domain object.  Delivery still needs
+    one exact marker at the host-admission boundary in both cases.
     """
 
     request_type: RetainedMessageType
@@ -521,6 +534,7 @@ class RichTerminalCore:
         )
         self._session_retained_policy: RetainedPolicy | None = None
         self._owner_ledger: OwnerLedger | None = None
+        self._resource_store: RetainedResourceStore | None = None
         self._outstanding_lifecycle_result: LifecycleResultLease | None = None
         self._reset_crossed_lifecycle_consumed = False
         self._retained_query_seen = False
@@ -720,6 +734,22 @@ class RichTerminalCore:
         return self._retained_model.state
 
     @property
+    def resource_state(self) -> ResourceStoreState | None:
+        """Immutable committed resource authority after retained discovery."""
+
+        if not self._retained_enabled or self._resource_store is None:
+            return None
+        return self._resource_store.state
+
+    @property
+    def resource_upload(self) -> ResourceUploadView | None:
+        """The one bounded epoch-local upload, when one is open."""
+
+        if not self._retained_enabled or self._resource_store is None:
+            return None
+        return self._resource_store.upload
+
+    @property
     def output_view(self) -> TerminalOutputView | None:
         """The latest immutable CELL-only or composite terminal output."""
 
@@ -729,7 +759,7 @@ class RichTerminalCore:
 
     @property
     def outstanding_lifecycle_result(self) -> LifecycleResultLease | None:
-        """The exact RET_RESULT whose delivery gates later lifecycle work."""
+        """The exact lifecycle completion gating later lifecycle work."""
 
         return self._outstanding_lifecycle_result
 
@@ -792,7 +822,13 @@ class RichTerminalCore:
             return False
         if self._retained_enabled:
             retained = self._retained_model
-            return retained is not None and not retained.transaction_open
+            resources = self._resource_store
+            return (
+                retained is not None
+                and resources is not None
+                and not retained.transaction_open
+                and resources.upload is None
+            )
         return self._state is TerminalState.ACTIVE and not model.awaiting_snapshot
 
     def validate_resize(self, cols: int, rows: int) -> tuple[int, int]:
@@ -1150,7 +1186,9 @@ class RichTerminalCore:
         if self._reset_requested_epoch is not None:
             raise TerminalSessionError("a soft reset is already pending")
         if self._outstanding_lifecycle_result is not None:
-            raise TerminalSessionError("soft reset waits for RET_RESULT delivery")
+            raise TerminalSessionError(
+                "soft reset waits for lifecycle completion delivery"
+            )
         decoder = self._decoder
         if decoder is None or decoder.buffered_bytes:
             raise TerminalSessionError("soft reset waits for a complete client frame")
@@ -1189,15 +1227,15 @@ class RichTerminalCore:
         self,
         result: LifecycleResultLease,
     ) -> LifecycleResultLease:
-        """Release the lifecycle gate after its exact RET_RESULT is admitted."""
+        """Release the lifecycle gate after its exact completion is admitted."""
 
         outstanding = self._outstanding_lifecycle_result
         if not isinstance(result, LifecycleResultLease):
-            self._fatal("RET_RESULT delivery marker has the wrong type")
+            self._fatal("lifecycle delivery marker has the wrong type")
         if outstanding is None:
-            self._fatal("no RET_RESULT delivery is outstanding")
+            self._fatal("no lifecycle completion delivery is outstanding")
         if result is not outstanding:
-            self._fatal("RET_RESULT delivery marker is stale or foreign")
+            self._fatal("lifecycle delivery marker is stale or foreign")
         self._outstanding_lifecycle_result = None
         return result
 
@@ -1292,6 +1330,7 @@ class RichTerminalCore:
             terminal_to_client_max_payload=record.client_max_payload,
         )
         self._owner_ledger = None
+        self._resource_store = None
         self._retained_model = None
         self._coordinator = None
         self._outstanding_lifecycle_result = None
@@ -1378,6 +1417,22 @@ class RichTerminalCore:
                 self._retained_query_seen = True
                 return self._release_data(frame.complete_bytes), None
             return self._accept_retained_query(frame), None
+
+        if frame.message_type in {
+            RetainedMessageType.RESOURCE_BEGIN,
+            RetainedMessageType.RESOURCE_CHUNK,
+            RetainedMessageType.RESOURCE_COMMIT,
+            RetainedMessageType.RESOURCE_DROP,
+        }:
+            if not self._retained_enabled:
+                self._fatal("resource lifecycle arrived before retained discovery")
+            self._charge_data(frame, include_in_transaction=False)
+            return self._accept_resource_lifecycle(frame), None
+
+        if frame.message_type == RetainedMessageType.RESOURCE_ABORT:
+            if not self._retained_enabled:
+                self._fatal("RESOURCE_ABORT arrived before retained discovery")
+            return self._accept_resource_abort(frame), None
 
         if frame.message_type == RetainedMessageType.PRESENT_BEGIN:
             if not self._retained_enabled:
@@ -1478,6 +1533,8 @@ class RichTerminalCore:
             clock is not None and clock.outstanding_result is not None
         ):
             self._fatal("CLOSE crossed an unsettled emitted result")
+        if self._resource_store is not None and self._resource_store.upload is not None:
+            self._fatal("CLOSE crossed an open resource upload")
 
         # CLOSE is itself the synchronized retirement boundary, so a BEGIN
         # which has not emitted a result is discarded instead of preventing
@@ -1549,6 +1606,7 @@ class RichTerminalCore:
         self._clock = None
         self._session_retained_policy = None
         self._owner_ledger = None
+        self._resource_store = None
         self._retained_model = None
         self._coordinator = None
         self._outstanding_lifecycle_result = None
@@ -1657,6 +1715,7 @@ class RichTerminalCore:
                 presentation_epoch=clock.presentation_epoch,
                 policy=policy,
             )
+            resource_store = RetainedResourceStore(owner_ledger)
             geometry = TerminalGeometry(
                 self._config.cols,
                 self._config.rows,
@@ -1665,6 +1724,7 @@ class RichTerminalCore:
             retained_model = RetainedSceneModel(
                 clock=clock,
                 owners=owner_ledger,
+                resources=resource_store,
                 geometry=geometry,
             )
             coordinator = TerminalOutputCoordinator(
@@ -1695,6 +1755,7 @@ class RichTerminalCore:
         # succeeded.  Publish capability only after the complete ordered
         # CAPS, FORMATS, covering-CREDIT tuple exists.
         self._owner_ledger = owner_ledger
+        self._resource_store = resource_store
         self._retained_model = retained_model
         self._coordinator = coordinator
         self._retained_enabled = True
@@ -1710,6 +1771,7 @@ class RichTerminalCore:
             "OWNER_OPEN",
             allow_crossed_reset=True,
         )
+        self._require_no_resource_upload("OWNER_OPEN")
         if len(frame.payload) != _OWNER_OPEN.size:
             self._fatal(
                 f"OWNER_OPEN payload length is {len(frame.payload)}, "
@@ -1785,6 +1847,284 @@ class RichTerminalCore:
         self._outstanding_lifecycle_result = result_lease
         return (result_record, covering_credit[0])
 
+    def _accept_resource_lifecycle(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        """Complete one ordinary-credit immutable resource request."""
+
+        try:
+            request_type = RetainedMessageType(frame.message_type)
+        except ValueError as exc:
+            self._fatal("resource lifecycle has an unknown request type", cause=exc)
+        decoders = {
+            RetainedMessageType.RESOURCE_BEGIN: decode_resource_begin,
+            RetainedMessageType.RESOURCE_CHUNK: decode_resource_chunk,
+            RetainedMessageType.RESOURCE_COMMIT: decode_resource_commit,
+            RetainedMessageType.RESOURCE_DROP: decode_resource_drop,
+        }
+        decoder = decoders.get(request_type)
+        if decoder is None:
+            self._fatal("ordinary resource lifecycle has a reserve request type")
+        try:
+            request = decoder(frame.payload)
+        except (RetainedWireError, TypeError, ValueError) as exc:
+            self._fatal(f"invalid {request_type.name}: {exc}", cause=exc)
+
+        self._require_owner_lifecycle_ready(
+            request_type.name,
+            allow_crossed_reset=True,
+        )
+        store = self._require_resource_store()
+        if request_type in {
+            RetainedMessageType.RESOURCE_BEGIN,
+            RetainedMessageType.RESOURCE_DROP,
+        } and store.upload is not None:
+            self._fatal(f"{request_type.name} crossed an open resource upload")
+        owner_id = request.owner_id
+        owner_generation = request.owner_generation
+        resource_id = request.resource_id
+        prepared: PreparedResourceInstall | None = None
+        status: RetStatus | None = None
+
+        if owner_id == 0 or owner_generation == 0 or resource_id == 0:
+            status = RetStatus.INVALID
+        else:
+            owner = self._owner_identity(owner_id, owner_generation)
+            try:
+                if request_type is RetainedMessageType.RESOURCE_BEGIN:
+                    prepared = store.prepare_begin(
+                        owner,
+                        resource_id=resource_id,
+                        format=request.format,
+                        width=request.width,
+                        height=request.height,
+                        flags=request.flags,
+                        byte_length=request.byte_length,
+                        digest=request.digest,
+                    )
+                elif request_type is RetainedMessageType.RESOURCE_CHUNK:
+                    prepared = store.prepare_append(
+                        owner,
+                        resource_id,
+                        request.offset,
+                        request.data,
+                    )
+                elif request_type is RetainedMessageType.RESOURCE_COMMIT:
+                    prepared = store.prepare_commit(owner, resource_id)
+                else:
+                    prepared = store.prepare_drop(
+                        owner,
+                        resource_id,
+                        in_use=self._require_retained_model().resource_referenced(
+                            owner,
+                            resource_id,
+                        ),
+                    )
+            except ResourceStoreError as exc:
+                if exc.code is ResourceStoreErrorCode.STATE:
+                    self._fatal(
+                        f"{request_type.name} crossed incompatible resource state",
+                        cause=exc,
+                    )
+                status = self._resource_status(exc)
+                prepared = exc.prepared
+            except (RuntimeError, TypeError, ValueError) as exc:
+                self._fatal(f"cannot prepare {request_type.name}: {exc}", cause=exc)
+            else:
+                status = RetStatus.OK
+
+        if (
+            request_type is RetainedMessageType.RESOURCE_CHUNK
+            and status is RetStatus.OK
+        ):
+            assert prepared is not None
+            return self._complete_resource_chunk(frame, request, prepared)
+        assert status is not None
+        accepted_bytes = (
+            prepared.accepted_bytes
+            if request_type is RetainedMessageType.RESOURCE_COMMIT
+            and status is RetStatus.OK
+            and prepared is not None
+            else 0
+        )
+        return self._complete_resource_result(
+            frame,
+            request_type=request_type,
+            status=status,
+            owner_id=owner_id,
+            owner_generation=owner_generation,
+            resource_id=resource_id,
+            accepted_bytes=accepted_bytes,
+            prepared=prepared,
+            release_ordinary=True,
+        )
+
+    def _accept_resource_abort(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        """Complete one control-reserve upload abort without ordinary CREDIT."""
+
+        try:
+            request = decode_resource_abort(frame.payload)
+        except (RetainedWireError, TypeError, ValueError) as exc:
+            self._fatal(f"invalid RESOURCE_ABORT: {exc}", cause=exc)
+        exact_tuple = (
+            request.owner_id,
+            request.owner_generation,
+            request.resource_id,
+        )
+        self._require_owner_lifecycle_ready(
+            "RESOURCE_ABORT",
+            allow_crossed_reset=True,
+            matching_reset_abort=exact_tuple,
+        )
+        store = self._require_resource_store()
+        prepared: PreparedResourceInstall | None = None
+        if not all(exact_tuple):
+            status = RetStatus.INVALID
+        else:
+            owner = self._owner_identity(request.owner_id, request.owner_generation)
+            try:
+                prepared = store.prepare_abort(
+                    owner,
+                    request.resource_id,
+                    request.reason,
+                )
+            except ResourceStoreError as exc:
+                if exc.code is ResourceStoreErrorCode.STATE:
+                    self._fatal(
+                        "RESOURCE_ABORT crossed incompatible resource state",
+                        cause=exc,
+                    )
+                status = self._resource_status(exc)
+                prepared = exc.prepared
+            except (RuntimeError, TypeError, ValueError) as exc:
+                self._fatal(f"cannot prepare RESOURCE_ABORT: {exc}", cause=exc)
+            else:
+                status = RetStatus.ABORTED
+        return self._complete_resource_result(
+            frame,
+            request_type=RetainedMessageType.RESOURCE_ABORT,
+            status=status,
+            owner_id=request.owner_id,
+            owner_generation=request.owner_generation,
+            resource_id=request.resource_id,
+            accepted_bytes=0,
+            prepared=prepared,
+            release_ordinary=False,
+        )
+
+    def _complete_resource_chunk(
+        self,
+        frame: Frame,
+        request,
+        prepared: PreparedResourceInstall,
+    ) -> tuple[OutboundBytes, ...]:
+        """Install an accepted chunk only after its covering CREDIT exists."""
+
+        store = self._require_resource_store()
+        try:
+            store.validate_prepared(prepared)
+        except (RuntimeError, TypeError) as exc:
+            self._fatal("cannot validate RESOURCE_CHUNK publication", cause=exc)
+        completion = LifecycleResultLease(
+            RetainedMessageType.RESOURCE_CHUNK,
+            request.owner_id,
+            request.owner_generation,
+            request.resource_id,
+        )
+        covering_credit = self._release_data(
+            frame.complete_bytes,
+            lifecycle_result=completion,
+        )
+        if len(covering_credit) != 1:
+            self._fatal("RESOURCE_CHUNK did not produce one covering CREDIT")
+        try:
+            store._install_prevalidated(prepared)
+        except RuntimeError as exc:
+            self._fatal("cannot install RESOURCE_CHUNK publication", cause=exc)
+        self._outstanding_lifecycle_result = completion
+        return covering_credit
+
+    def _complete_resource_result(
+        self,
+        frame: Frame,
+        *,
+        request_type: RetainedMessageType,
+        status: RetStatus,
+        owner_id: int,
+        owner_generation: int,
+        resource_id: int,
+        accepted_bytes: int,
+        prepared: PreparedResourceInstall | None,
+        release_ordinary: bool,
+    ) -> tuple[OutboundBytes, ...]:
+        """Preflight one ordered result tuple, then install its prepared state."""
+
+        store = self._require_resource_store()
+        if prepared is not None:
+            try:
+                store.validate_prepared(prepared)
+            except (RuntimeError, TypeError) as exc:
+                self._fatal(
+                    f"cannot validate {request_type.name} publication",
+                    cause=exc,
+                )
+        completion = LifecycleResultLease(
+            request_type,
+            owner_id,
+            owner_generation,
+            resource_id,
+        )
+        result = RetainedResult(
+            request_type,
+            status,
+            owner_id,
+            owner_generation,
+            resource_id,
+            self._require_clock().revision,
+            accepted_bytes,
+        )
+        result_record = self._encode_control(
+            RetainedMessageType.RET_RESULT,
+            encode_ret_result(result),
+            lifecycle_result=completion,
+        )
+        covering_credit: tuple[OutboundBytes, ...] = ()
+        if release_ordinary:
+            covering_credit = self._release_data(frame.complete_bytes)
+            if len(covering_credit) != 1:
+                self._fatal(
+                    f"{request_type.name} did not produce one covering CREDIT"
+                )
+        if prepared is not None:
+            try:
+                store._install_prevalidated(prepared)
+            except RuntimeError as exc:
+                self._fatal(
+                    f"cannot install {request_type.name} publication",
+                    cause=exc,
+                )
+        self._outstanding_lifecycle_result = completion
+        return (result_record,) + covering_credit
+
+    @staticmethod
+    def _resource_status(error: ResourceStoreError) -> RetStatus:
+        statuses = {
+            ResourceStoreErrorCode.INVALID: RetStatus.INVALID,
+            ResourceStoreErrorCode.STALE_OWNER: RetStatus.STALE_OWNER,
+            ResourceStoreErrorCode.NO_CAPACITY: RetStatus.NO_CAPACITY,
+            ResourceStoreErrorCode.DUPLICATE_ID: RetStatus.DUPLICATE_ID,
+            ResourceStoreErrorCode.IN_USE: RetStatus.IN_USE,
+            ResourceStoreErrorCode.BAD_CONTENT: RetStatus.BAD_CONTENT,
+        }
+        try:
+            return statuses[error.code]
+        except KeyError as exc:
+            raise RuntimeError("resource STATE errors are not result statuses") from exc
+
     def _accept_owner_drop(
         self,
         frame: Frame,
@@ -1795,6 +2135,7 @@ class RichTerminalCore:
             "OWNER_DROP",
             allow_crossed_reset=True,
         )
+        self._require_no_resource_upload("OWNER_DROP")
         if len(frame.payload) != _OWNER_DROP.size:
             self._fatal(
                 f"OWNER_DROP payload length is {len(frame.payload)}, "
@@ -1837,12 +2178,20 @@ class RichTerminalCore:
                 lease,
                 identity,
             )
+            resource_retirement = (
+                self._require_resource_store().prepare_owner_retirement(identity)
+            )
             prepared = self._require_coordinator().prepare_owner_retirement(
                 lease,
                 retirement,
+                resource_retirement,
             )
         except OwnerLedgerError:
             return self._complete_owner_drop_rejection(lease, 2), None
+        except ResourceStoreError as exc:
+            if exc.code is ResourceStoreErrorCode.STALE_OWNER:
+                return self._complete_owner_drop_rejection(lease, 2), None
+            self._fatal(f"cannot validate OWNER_DROP resources: {exc}", cause=exc)
         except (TerminalUpdateError, SceneModelError, RuntimeError, TypeError) as exc:
             self._fatal(f"cannot validate OWNER_DROP publication: {exc}", cause=exc)
 
@@ -1892,20 +2241,35 @@ class RichTerminalCore:
         request_name: str,
         *,
         allow_crossed_reset: bool,
+        matching_reset_abort: tuple[int, int, int] | None = None,
     ) -> tuple[OwnerLedger, TerminalUpdateAuthority]:
         pending_reset = self._reset_requested_epoch is not None
         if pending_reset:
-            if (
-                not allow_crossed_reset
-                or self._state is not TerminalState.RESYNCING
-                or self._reset_crossed_lifecycle_consumed
-            ):
+            if not allow_crossed_reset or self._state is not TerminalState.RESYNCING:
                 self._fatal(f"{request_name} crossed an unavailable soft reset boundary")
-            self._reset_crossed_lifecycle_consumed = True
+            if self._reset_crossed_lifecycle_consumed:
+                upload = self._require_resource_store().upload
+                actual = (
+                    None
+                    if upload is None
+                    else (
+                        upload.owner.owner_id,
+                        upload.owner.owner_generation,
+                        upload.declaration.resource_id,
+                    )
+                )
+                if matching_reset_abort is None or matching_reset_abort != actual:
+                    self._fatal(
+                        f"{request_name} crossed an unavailable soft reset boundary"
+                    )
+            else:
+                self._reset_crossed_lifecycle_consumed = True
         elif self._state is not TerminalState.ACTIVE:
             self._fatal(f"{request_name} is outside ACTIVE")
         if self._outstanding_lifecycle_result is not None:
-            self._fatal(f"{request_name} crossed an outstanding RET_RESULT")
+            self._fatal(
+                f"{request_name} crossed an outstanding lifecycle completion"
+            )
         model = self._require_model()
         clock = self._require_clock()
         if (
@@ -1919,6 +2283,10 @@ class RichTerminalCore:
         if ledger is None:
             self._fatal(f"{request_name} has no retained owner authority")
         return ledger, clock
+
+    def _require_no_resource_upload(self, request_name: str) -> None:
+        if self._require_resource_store().upload is not None:
+            self._fatal(f"{request_name} crossed an open resource upload")
 
     def _owner_identity(
         self,
@@ -1958,7 +2326,8 @@ class RichTerminalCore:
         if self._reset_requested_epoch is not None:
             self._fatal("new PRESENT_BEGIN crossed a pending soft reset")
         if self._outstanding_lifecycle_result is not None:
-            self._fatal("PRESENT_BEGIN crossed an outstanding RET_RESULT")
+            self._fatal("PRESENT_BEGIN crossed an outstanding lifecycle completion")
+        self._require_no_resource_upload("PRESENT_BEGIN")
         if len(frame.payload) != _PRESENT_BEGIN.size:
             self._fatal(
                 f"PRESENT_BEGIN payload length is {len(frame.payload)}, "
@@ -2461,7 +2830,9 @@ class RichTerminalCore:
         if self._reset_requested_epoch is not None:
             self._fatal("new transaction begin crossed a pending soft reset")
         if self._outstanding_lifecycle_result is not None:
-            self._fatal("transaction begin crossed an outstanding RET_RESULT")
+            self._fatal("transaction begin crossed an outstanding lifecycle completion")
+        if self._retained_enabled:
+            self._require_no_resource_upload("transaction begin")
         try:
             begin = decode_transaction_begin(frame.payload)
         except CellModelError as exc:
@@ -2705,7 +3076,9 @@ class RichTerminalCore:
         if clock.outstanding_result is not None:
             self._fatal("SOFT_RESET_ACK crossed an undelivered TX_RESULT")
         if self._outstanding_lifecycle_result is not None:
-            self._fatal("SOFT_RESET_ACK crossed an undelivered RET_RESULT")
+            self._fatal("SOFT_RESET_ACK crossed an undelivered lifecycle completion")
+        if self._resource_store is not None and self._resource_store.upload is not None:
+            self._fatal("SOFT_RESET_ACK crossed an open resource upload")
         released = 0
         if self._wire_transaction_id is not None:
             transaction_id = self._wire_transaction_id
@@ -2746,6 +3119,7 @@ class RichTerminalCore:
         encoder.set_presentation_epoch(requested_epoch)
         self._reset_requested_epoch = None
         self._owner_ledger = None
+        self._resource_store = None
         self._retained_model = None
         self._coordinator = None
         self._outstanding_lifecycle_result = None
@@ -2789,8 +3163,15 @@ class RichTerminalCore:
     def _result_status(error: CellModelError) -> int:
         return 3 if error.code is CellModelErrorCode.STALE_REVISION else 2
 
-    def _release_data(self, count: int) -> tuple[OutboundBytes, ...]:
+    def _release_data(
+        self,
+        count: int,
+        *,
+        lifecycle_result: LifecycleResultLease | None = None,
+    ) -> tuple[OutboundBytes, ...]:
         if count == 0:
+            if lifecycle_result is not None:
+                self._fatal("zero-byte release cannot settle a lifecycle completion")
             return ()
         if count > self._client_data_received - self._client_data_released:
             self._fatal("terminal attempted to release unreceived client bytes")
@@ -2799,7 +3180,13 @@ class RichTerminalCore:
         if grant > UINT64_MAX:
             self._fatal("terminal cumulative receive-credit grant overflowed")
         self._client_data_grant = grant
-        return (self._encode_control(MessageType.CREDIT, _CREDIT.pack(grant)),)
+        return (
+            self._encode_control(
+                MessageType.CREDIT,
+                _CREDIT.pack(grant),
+                lifecycle_result=lifecycle_result,
+            ),
+        )
 
     def _encode_control(
         self,
@@ -2853,6 +3240,11 @@ class RichTerminalCore:
         if self._retained_model is None:
             self._fatal("retained dispatch has no scene model")
         return self._retained_model
+
+    def _require_resource_store(self) -> RetainedResourceStore:
+        if self._resource_store is None:
+            self._fatal("retained dispatch has no resource store")
+        return self._resource_store
 
     def _require_coordinator(self) -> TerminalOutputCoordinator:
         if self._coordinator is None:

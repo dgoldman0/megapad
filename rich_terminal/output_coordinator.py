@@ -21,10 +21,17 @@ from .update_authority import (
     TransactionLease,
 )
 from .retained_scene import (
+    ImageBody,
     PreparedOwnerRetirement,
     PreparedSceneInstall,
     RetainedSceneModel,
     SceneModelState,
+)
+from .retained_resources import (
+    PreparedResourceRetirement,
+    RGBAResource,
+    ResourceStoreState,
+    RetainedResourceStore,
 )
 
 
@@ -42,6 +49,17 @@ class CompositeTerminalView:
     geometry: TerminalGeometry
     cell: TerminalView | None
     retained: SceneModelState | None
+    resources: tuple[RGBAResource, ...] = ()
+
+    def __post_init__(self) -> None:
+        pinned = (
+            self.resources
+            if type(self.resources) is tuple
+            else tuple(self.resources)
+        )
+        if any(not isinstance(resource, RGBAResource) for resource in pinned):
+            raise TypeError("resources must contain only RGBAResource values")
+        object.__setattr__(self, "resources", pinned)
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +72,7 @@ class PreparedOutputInstall:
     retained: PreparedSceneInstall | None
     _coordinator_token: object
     _source_view: CompositeTerminalView
+    _resource_state: ResourceStoreState | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +82,10 @@ class PreparedOwnerRetirementPublication:
     view: CompositeTerminalView
     lease: TransactionLease
     retirement: PreparedOwnerRetirement
+    resource_retirement: PreparedResourceRetirement
     _coordinator_token: object
     _source_view: CompositeTerminalView
+    _resource_state: ResourceStoreState
 
 
 class TerminalOutputCoordinator:
@@ -105,31 +126,47 @@ class TerminalOutputCoordinator:
                 )
 
         retained = None
+        resource_store = None
+        resource_state = None
+        pinned_resources: tuple[RGBAResource, ...] = ()
         if retained_model is not None:
             if retained_model.clock is not clock:
                 raise TerminalUpdateError(
                     "retained model does not use the composite update authority"
                 )
+            resource_store = retained_model.resource_store
+            if not isinstance(resource_store, RetainedResourceStore):
+                raise TerminalUpdateError(
+                    "retained model has no exact resource-store dependency"
+                )
+            resource_state = resource_store.state
             retained = retained_model.state
             self._validate_retained_state(retained, clock, geometry)
             if retained.revision > clock.revision:
                 raise TerminalUpdateError(
                     "retained state revision is ahead of the update authority"
                 )
+            pinned_resources = self._pin_active_resources(
+                retained,
+                resource_state,
+            )
 
         self._clock = clock
         self._cell_model = cell_model
         self._retained_model = retained_model
+        self._resource_store = resource_store
         self._token = object()
         self._selected_geometry = geometry
         self._source_cell = cell
         self._source_retained = retained
+        self._source_resources = pinned_resources
         self._view = CompositeTerminalView(
             presentation_epoch=clock.presentation_epoch,
             revision=clock.revision,
             geometry=geometry,
             cell=cell,
             retained=retained,
+            resources=pinned_resources,
         )
 
     @property
@@ -168,6 +205,24 @@ class TerminalOutputCoordinator:
             raise TypeError("geometry must be TerminalGeometry or None")
 
         target_revision = self._clock.next_revision(lease)
+        resource_state = (
+            None
+            if self._resource_store is None
+            else self._resource_store.state
+        )
+        if retained is None:
+            pinned_resources = self._source_resources
+        else:
+            if resource_state is None:
+                raise RuntimeError("retained publication has no resource store")
+            if retained._resource_state is not resource_state:
+                raise RuntimeError(
+                    "prepared retained scene has stale resource provenance"
+                )
+            pinned_resources = self._pin_active_resources(
+                retained.state,
+                resource_state,
+            )
         prepared = PreparedOutputInstall(
             view=CompositeTerminalView(
                 presentation_epoch=self._clock.presentation_epoch,
@@ -177,12 +232,14 @@ class TerminalOutputCoordinator:
                 retained=(
                     self._source_retained if retained is None else retained.state
                 ),
+                resources=pinned_resources,
             ),
             lease=lease,
             cell=cell,
             retained=retained,
             _coordinator_token=self._token,
             _source_view=self._view,
+            _resource_state=resource_state,
         )
         self.validate_prepared(prepared)
         return prepared
@@ -204,6 +261,13 @@ class TerminalOutputCoordinator:
                 raise RuntimeError("composite has no retained model")
         elif self._retained_model.state is not self._source_retained:
             raise RuntimeError("composite retained source changed outside coordinator")
+
+        resource_store = self._resource_store
+        if resource_store is None:
+            if prepared._resource_state is not None or prepared.view.resources:
+                raise RuntimeError("composite has no retained resource store")
+        elif prepared._resource_state is not resource_store.state:
+            raise RuntimeError("prepared output resource state is stale or foreign")
 
         lease = prepared.lease
         if self._clock.open_transaction is not lease:
@@ -249,6 +313,10 @@ class TerminalOutputCoordinator:
         if prepared.retained is None:
             if view.retained is not self._source_retained:
                 raise RuntimeError("unchanged retained plane was not structurally shared")
+            if view.resources is not self._source_resources:
+                raise RuntimeError(
+                    "unchanged resource tuple was not structurally shared"
+                )
         else:
             retained_model = self._retained_model
             if retained_model is None:
@@ -261,6 +329,20 @@ class TerminalOutputCoordinator:
             self._validate_retained_state(view.retained, self._clock, view.geometry)
             if view.retained.revision != revision:
                 raise RuntimeError("prepared retained revision is not the global revision")
+            resource_state = prepared._resource_state
+            if resource_state is None:
+                raise RuntimeError("retained publication has no resource state")
+            expected_resources = self._pin_active_resources(
+                view.retained,
+                resource_state,
+            )
+            if not self._same_exact_resources(
+                view.resources,
+                expected_resources,
+            ):
+                raise RuntimeError(
+                    "prepared composite has the wrong active resource pins"
+                )
 
         if view.cell is not None and (
             view.cell.cols != view.geometry.cols or view.cell.rows != view.geometry.rows
@@ -287,6 +369,7 @@ class TerminalOutputCoordinator:
             retained_model._install_prevalidated(prepared.retained)
         self._source_cell = prepared.view.cell
         self._source_retained = prepared.view.retained
+        self._source_resources = prepared.view.resources
         self._selected_geometry = prepared.view.geometry
         self._view = prepared.view
         return result
@@ -323,11 +406,19 @@ class TerminalOutputCoordinator:
         self._selected_geometry = geometry
         self._source_cell = None
         self._source_retained = retained
+        resource_store = self._resource_store
+        if resource_store is None:
+            raise TerminalUpdateError("retained resize has no resource store")
+        self._source_resources = self._pin_active_resources(
+            retained,
+            resource_store.state,
+        )
 
     def prepare_owner_retirement(
         self,
         lease: TransactionLease,
         retirement: PreparedOwnerRetirement,
+        resource_retirement: PreparedResourceRetirement,
     ) -> PreparedOwnerRetirementPublication:
         """Prepare OWNER_DROP publication across ledger, scenes, and composite."""
 
@@ -335,10 +426,22 @@ class TerminalOutputCoordinator:
             raise TypeError("lease must be TransactionLease")
         if not isinstance(retirement, PreparedOwnerRetirement):
             raise TypeError("retirement must be PreparedOwnerRetirement")
+        if not isinstance(resource_retirement, PreparedResourceRetirement):
+            raise TypeError(
+                "resource_retirement must be PreparedResourceRetirement"
+            )
         if retirement.lease is not lease:
             raise TerminalUpdateError(
                 "owner retirement and coordinator leases do not match"
             )
+        resource_store = self._resource_store
+        if resource_store is None:
+            raise RuntimeError("owner retirement has no resource store")
+        resource_state = resource_store.state
+        pinned_resources = self._pin_active_resources(
+            retirement.state,
+            resource_retirement.state,
+        )
         target_revision = self._clock.next_revision(lease)
         prepared = PreparedOwnerRetirementPublication(
             view=CompositeTerminalView(
@@ -347,11 +450,14 @@ class TerminalOutputCoordinator:
                 geometry=self._view.geometry,
                 cell=self._view.cell,
                 retained=retirement.state,
+                resources=pinned_resources,
             ),
             lease=lease,
             retirement=retirement,
+            resource_retirement=resource_retirement,
             _coordinator_token=self._token,
             _source_view=self._view,
+            _resource_state=resource_state,
         )
         self.validate_owner_retirement(prepared)
         return prepared
@@ -374,8 +480,20 @@ class TerminalOutputCoordinator:
         retained_model = self._retained_model
         if retained_model is None:
             raise RuntimeError("composite has no retained model")
-        if retained_model.state is not prepared._source_view.retained:
+        if (
+            prepared._source_view.retained is not self._source_retained
+            or retained_model.state is not self._source_retained
+        ):
             raise RuntimeError("composite retained source changed outside coordinator")
+        if prepared._source_view.resources is not self._source_resources:
+            raise RuntimeError("composite resource source changed outside coordinator")
+        resource_store = self._resource_store
+        if resource_store is None:
+            raise RuntimeError("composite has no retained resource store")
+        if prepared._resource_state is not resource_store.state:
+            raise RuntimeError(
+                "prepared owner retirement resource state is stale or foreign"
+            )
 
         lease = prepared.lease
         if self._clock.open_transaction is not lease:
@@ -387,6 +505,13 @@ class TerminalOutputCoordinator:
         if prepared.retirement.lease is not lease:
             raise RuntimeError("prepared retained retirement has the wrong lease")
         retained_model.validate_owner_retirement(prepared.retirement)
+        resource_store.validate_owner_retirement(
+            prepared.resource_retirement
+        )
+        self._validate_retirement_owner(
+            prepared.retirement,
+            prepared.resource_retirement,
+        )
 
         revision = self._clock.next_revision(lease)
         view = prepared.view
@@ -401,6 +526,17 @@ class TerminalOutputCoordinator:
             raise RuntimeError("owner retirement did not share the CELL plane")
         if view.retained is not prepared.retirement.state:
             raise RuntimeError("owner retirement has the wrong retained candidate")
+        expected_resources = self._pin_active_resources(
+            prepared.retirement.state,
+            prepared.resource_retirement.state,
+        )
+        if not self._same_exact_resources(
+            view.resources,
+            expected_resources,
+        ):
+            raise RuntimeError(
+                "owner retirement has the wrong active resource pins"
+            )
         self._validate_retained_state(
             prepared.retirement.state,
             self._clock,
@@ -417,12 +553,77 @@ class TerminalOutputCoordinator:
 
         # No validation, allocation, or policy work may follow this point.
         retained_model = cast(RetainedSceneModel, self._retained_model)
+        resource_store = cast(RetainedResourceStore, self._resource_store)
         result = self._clock.complete_success(prepared.lease)
+        resource_store._install_owner_retirement_prevalidated(
+            prepared.resource_retirement
+        )
         retained_model._install_owner_retirement_prevalidated(
             prepared.retirement
         )
+        self._source_retained = prepared.view.retained
+        self._source_resources = prepared.view.resources
         self._view = prepared.view
         return result
+
+    @staticmethod
+    def _pin_active_resources(
+        retained: SceneModelState,
+        resource_state: ResourceStoreState,
+    ) -> tuple[RGBAResource, ...]:
+        """Resolve each active IMAGE reference to its exact immutable object."""
+
+        pinned: dict[tuple[int, int, int], RGBAResource] = {}
+        for owner_id, owner_scene in retained.active.owners.items():
+            owner = owner_scene.owner
+            if owner_id != owner.owner_id:
+                raise RuntimeError("retained active owner map key is invalid")
+            for definition in owner_scene.objects.values():
+                if definition.owner != owner:
+                    raise RuntimeError(
+                        "retained active object has the wrong exact owner"
+                    )
+                body = definition.body
+                if not isinstance(body, ImageBody):
+                    continue
+                key = (owner.owner_id, owner.owner_generation, body.resource_id)
+                resource = resource_state.resources.get(key)
+                if (
+                    resource is None
+                    or resource.owner != owner
+                    or resource.resource_id != body.resource_id
+                ):
+                    raise RuntimeError(
+                        "active IMAGE lacks its exact-owner committed resource"
+                    )
+                prior = pinned.setdefault(key, resource)
+                if prior is not resource:
+                    raise RuntimeError(
+                        "resource state maps one exact key to different objects"
+                    )
+        return tuple(pinned[key] for key in sorted(pinned))
+
+    @staticmethod
+    def _same_exact_resources(
+        left: tuple[RGBAResource, ...],
+        right: tuple[RGBAResource, ...],
+    ) -> bool:
+        return len(left) == len(right) and all(
+            left_resource is right_resource
+            for left_resource, right_resource in zip(left, right)
+        )
+
+    @staticmethod
+    def _validate_retirement_owner(
+        retirement: PreparedOwnerRetirement,
+        resources: PreparedResourceRetirement,
+    ) -> None:
+        """Require the resource and ledger candidates to retire one owner."""
+
+        if retirement.owner != resources.owner:
+            raise RuntimeError(
+                "scene and resource retirements target different owners"
+            )
 
     @staticmethod
     def _validate_cell_view(
