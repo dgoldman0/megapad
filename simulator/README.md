@@ -649,8 +649,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–5408 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, cached listing, exact-name lookup, and metadata creation/deletion/rename |
-| 5409 onward | Next uncovered frontier | Blank line 5409 precedes the `CAT` heading at line 5410 and definition at line 5414 |
+| 39–5436 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage, partition discovery, singleton compatibility, legacy file abstraction, then MP64FS cache helpers, lifecycle, cached listing, exact-name lookup, metadata creation/deletion/rename, and primary-extent `CAT` publication |
+| 5437 onward | Next uncovered frontier | Blank line 5437 precedes the `FS-LARGEST-FREE` heading at line 5438 and definition at line 5443 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -956,6 +956,34 @@ before `MKFILE`, `RMFILE`, or `RENAME` consumes its name tokens, and an
 old-name miss in `RENAME` leaves the proposed new token to the outer evaluator.
 These defects are recorded, not treated as a safe command domain.
 
+The exact unchanged `CAT` fixture is `kdos.f` lines 5409–5436: 28 LF lines,
+838 bytes, SHA-256
+`e645378a2f4a6a6f5e5e46716a9d12513397bdfa6ec441aba9af51d36ff86f23`,
+and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`. It defines zero-initialized
+`CAT-SLOT` and `CAT`. Loading only installs those dictionary entries and inline
+strings; it performs no parse, filesystem/cache/media access, diagnostic
+update, or UART publication.
+
+Execution checks filesystem availability before parsing, then miss, then
+`DE.USED = 0`; those exits respectively leave the filename token unconsumed,
+print `Not found`, or print `(empty file)`, and none reads file data. A
+nonempty match reads the complete primary `DE.COUNT` extent at `DE.SEC` into
+the unreserved address at `HERE` without advancing `HERE`, even when only a
+short prefix is used. It then publishes exactly `DE.USED` bytes: LF becomes
+CRLF, every other byte including CR, NUL, and ESC is emitted raw, and no final
+newline is added.
+
+The admitted path requires a stable generation, a canonical matched
+non-directory entry, a small positive primary extent, no secondary extent,
+`DE.USED <= DE.COUNT * 512`, and a complete unused mapped span beginning at
+`HERE`. The source neither reserves nor bounds that scratch and does not
+inspect the file type. It ignores
+the secondary extent even though BIOS validation permits one, so a valid file
+whose used bytes extend beyond the primary extent publishes stale unread bytes
+from after the DMA span. A generation-bound read failure aborts before content
+publication, while any earlier partial DMA prefix remains. `CAT-SLOT`, parser
+buffers, storage diagnostics, and the `HERE` scratch are global and unlocked.
+
 The admitted domain is validator-approved geometry, positive run counts,
 in-range sectors and slots, complete cache spans, and structurally valid
 directory entries. The unchanged words do not gate on `FS-OK` or validate
@@ -965,9 +993,9 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue after blank line 5409 with `CAT` at line 5414, then
-toward the persistent evaluator, ordinary checked module-loader surface, and
-deterministic cooperative task scheduler.
+Later slices continue after blank line 5437 with `FS-LARGEST-FREE` at line
+5443, then toward the persistent evaluator, ordinary checked module-loader
+surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

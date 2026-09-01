@@ -1260,7 +1260,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 5408. Exact unchanged lines
+The contiguous source frontier now ends at line 5436. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1441,8 +1441,42 @@ unavailable, `MKFILE`, `RMFILE`, and `RENAME` return before `PARSE-NAME`, so
 their filename tokens remain for the outer evaluator. When `RENAME` cannot
 find its old name, it returns before parsing the proposed new name. These are
 preserved source defects, not admitted safe command forms. Blank line 5409 is
-the next uncovered seam, followed by the `CAT` heading at line 5410 and
-definition at line 5414.
+the leading seam of the adjacent `CAT` fixture.
+
+Exact unchanged lines 5409 through 5436 contain 28 LF lines and 838 bytes,
+with SHA-256
+`e645378a2f4a6a6f5e5e46716a9d12513397bdfa6ec441aba9af51d36ff86f23`
+and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`. They define zero-initialized
+`CAT-SLOT` and the `CAT` colon word. Loading only mutates the dictionary and
+installs inline strings: it performs no parse, filesystem ensure, cache or
+media access, storage-diagnostic update, or UART publication.
+
+`CAT` orders its exits as filesystem availability, parsed exact-name lookup,
+then `DE.USED = 0`. The unavailable path returns before consuming the filename
+token and prints ` No filesystem` plus CRLF. A miss prints ` Not found: `, the
+canonical parsed name, and CRLF. A zero-used match prints ` (empty file)` plus
+CRLF. Miss and empty exits issue no file-data read.
+
+For a nonempty match, `CAT` makes one generation-bound `_DISK-READ` of the
+complete primary `DE.COUNT` sectors at `DE.SEC` into the current unreserved
+`HERE`; it does not reserve the span or advance `HERE`, and it reads allocation
+tail bytes beyond `DE.USED`. Only after the read succeeds does it publish
+exactly `DE.USED` bytes. Each LF byte becomes UART CRLF; CR, NUL, ESC, and every
+other byte are emitted unchanged, and the word adds no implicit final newline.
+A failed read aborts before content UART publication, but a lower-level partial
+transfer can retain its already-written prefix at `HERE` and in diagnostics.
+
+The admitted safe domain is a stable mounted generation, a canonical matched
+non-directory file, one small positive primary extent, no secondary extent,
+`DE.USED <= DE.COUNT * 512`, and a complete unused mapped DMA span from `HERE`.
+`CAT` does not enforce that span, capacity relation, or type. It ignores
+`DE.EXT1-SEC` and `DE.EXT1-CNT`; consequently a BIOS-validator-approved
+two-extent file whose used content crosses the primary boundary causes `CAT`
+to emit stale unread bytes already following the primary DMA span. `CAT-SLOT`,
+`NAMEBUF`, `PATHBUF`, `PN-LEN`, storage diagnostics, and the unreserved `HERE`
+scratch are global and unlocked. Blank line 5437 is the next uncovered seam,
+followed by the `FS-LARGEST-FREE` heading at line 5438 and definition at line
+5443.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

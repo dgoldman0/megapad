@@ -35,18 +35,22 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 5408. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 5436. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
-bitmap, then exact-name lookup and `MKFILE`/`RMFILE`/`RENAME` metadata mutation.
+bitmap, then exact-name lookup, `MKFILE`/`RMFILE`/`RENAME` metadata mutation,
+and bounded primary-extent `CAT` publication.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
+The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
+`e645378a2f4a6a6f5e5e46716a9d12513397bdfa6ec441aba9af51d36ff86f23`
+and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`.
 `FS-LOAD` consumes the separately qualified native
 `MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
 metadata predicate, and generation check. This boundary is not evidence of
-file-backed close/reopen durability, `CAT` or later file commands, malformed
-mutation safety, or stronger filesystem validation.
+file-backed close/reopen durability, `FS-LARGEST-FREE` or later filesystem
+commands, malformed mutation/content safety, or stronger filesystem validation.
 
 ---
 
@@ -663,8 +667,27 @@ from directory extents. `CATALOG` reports only the primary sector count, and
 all numeric fields use signed `.` in the current `BASE`. `FS-ENSURE` trusts an
 already-true `FS-OK`, so detached or replaced media can leave stale cache
 output eligible. This listing qualification and the adjacent admitted lookup
-and mutation slice are pathless; neither establishes close/reopen durability
-or admits `CAT` and the later commands.
+and mutation slices are pathless; none establishes close/reopen durability.
+
+The hosted `CAT` slice is likewise pathless and has no load-time filesystem or
+output effect: loading only zeroes `CAT-SLOT` and installs the word and inline
+strings. At execution it checks for an unavailable filesystem before parsing,
+then a name miss, then zero `DE.USED`. Those branches respectively leave the
+filename token for the outer evaluator, print `Not found`, or print
+`(empty file)`; miss and empty perform no file-data read.
+
+For a nonempty match, `CAT` generation-binds one read of the complete primary
+extent into the unreserved address at `HERE`, without advancing `HERE`, then
+emits exactly `DE.USED` bytes. LF becomes CRLF; every other byte, including CR,
+NUL, and ESC, is emitted raw, and no newline is appended. Safe use requires a
+stable generation, canonical matched non-directory file, one small primary
+extent, no secondary extent, `DE.USED <= DE.COUNT * 512`, and a complete unused
+mapped DMA span at `HERE`. The source neither checks those bounds nor the type.
+It ignores a validator-approved secondary extent, so content beyond primary
+capacity comes from stale unread bytes after the DMA span. A failed read emits
+no file content but can leave a partial scratch prefix. `CAT-SLOT`, parser state,
+diagnostics, and the `HERE` scratch are global and unlocked. Blank line 5437 is
+the next seam; `FS-LARGEST-FREE` begins at line 5438.
 
 ### Directory Navigation
 

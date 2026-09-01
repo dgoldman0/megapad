@@ -857,7 +857,8 @@ registry and sample kernels, the pipeline engine, checked block-device and
 bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
 storage-compatibility, legacy file, and initial MP64FS cache/helper layers,
 the MP64FS load/sync/ensure/format lifecycle, cached directory listing, exact
-name lookup, and metadata creation/deletion/rename through line 5408.
+name lookup, metadata creation/deletion/rename, and primary-extent file
+publication through line 5436.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -866,10 +867,11 @@ lifecycle, diagnostic wrappers, permanent file descriptors, and composed
 head/full/tail sector I/O, MP64FS cache geometry, bitmap mutation/search,
 packed directory readers, raw-binding load, synchronization, conditional
 autoload, metadata formatting, compact type publication, direct-child listing,
-bitmap free-space reporting, exact-name lookup, deterministic timestamps, and
-ordered metadata mutation are executable semantic behavior rather than
-reporting-only shims. The frontier now ends at line 5408; blank line 5409
-precedes the `CAT` heading at line 5410 and definition at line 5414.
+bitmap free-space reporting, exact-name lookup, deterministic timestamps,
+ordered metadata mutation, and byte-exact `CAT` output are executable semantic
+behavior rather than reporting-only shims. The frontier now ends at line 5436;
+blank line 5437 precedes the `FS-LARGEST-FREE` heading at line 5438 and
+definition at line 5443.
 
 ---
 
@@ -1122,8 +1124,14 @@ strings, without binding, I/O, cache mutation, or output. Exact unchanged lines
 zero-initialized scratch variables in 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 Loading that slice performs no clock read, parse, cache or media mutation,
-sync, or output. Blank line 5409 is the next uncovered seam before the `CAT`
-heading at line 5410 and definition at line 5414.
+sync, or output. Exact unchanged lines 5409 through 5436 then add `CAT-SLOT`
+and `CAT` in 28 LF lines and 838 bytes, with SHA-256
+`e645378a2f4a6a6f5e5e46716a9d12513397bdfa6ec441aba9af51d36ff86f23`
+and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`. Load zero-initializes
+`CAT-SLOT` and installs `CAT` and its inline strings without parsing, ensuring
+the filesystem, touching cache or media, updating storage diagnostics, or
+publishing output. Blank line 5437 is the next uncovered seam before the
+`FS-LARGEST-FREE` heading at line 5438 and definition at line 5443.
 
 ---
 
@@ -1755,7 +1763,7 @@ supports 128 entries, 23-character names, and two extents per file.  See
 - **Directory** (the next 12 sectors) — 128 entries × 48 bytes each
 - **Data area** — begins immediately after the derived directory
 
-### Hosted Lifecycle, Listing, and Mutation Checkpoint
+### Hosted Lifecycle, Listing, Mutation, and Content Checkpoint
 
 The native hosted `MP64FS-VALID?` returns literal `1` or `0` after up to three
 raw checked reads and the executable BIOS's narrow geometry/metadata
@@ -1764,7 +1772,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 5408. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 5436. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -1793,6 +1801,15 @@ Load initializes those variables to zero without reading the epoch, parsing a
 name, touching filesystem state or media, syncing, or publishing output.
 Focused execution qualifies lookup and metadata mutation only on pathless
 in-memory media in the safe domain described below.
+
+Exact unchanged lines 5409–5436 add `CAT-SLOT` and `CAT` in 28 LF lines and
+838 bytes, with SHA-256
+`e645378a2f4a6a6f5e5e46716a9d12513397bdfa6ec441aba9af51d36ff86f23`
+and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`. Loading zeroes `CAT-SLOT`
+and installs the colon body and inline strings without parsing, ensuring the
+filesystem, accessing cache or media, updating diagnostics, or publishing
+output. Focused execution qualifies only the bounded primary-extent domain
+described below.
 
 | Word | Stack Effect | Admitted behavior |
 |------|--------------|-------------------|
@@ -1858,7 +1875,7 @@ the field to preserve the stale comment.
 | `MKFILE` | `( nsectors type "name" -- )` | Reserve one positive contiguous primary run, construct an empty entry, timestamp it, then sync. It does not initialize data sectors or validate its type/name/count domain. |
 | `RMFILE` | `( "name" -- )` | Clear both cached extent runs and the complete entry, then sync. It does not wipe payload and is unsafe for a directory's zero primary count. |
 | `RENAME` | `( "oldname" "newname" -- )` | Replace only the 24-byte cached name and sync. It retains `mtime`, rejects the same name as taken, and does not validate an empty replacement. |
-| `CAT` | `( "name" -- )` | Print a file's contents to the terminal (reads sectors into memory, emits bytes). |
+| `CAT` | `( "name" -- )` | Read the complete primary extent into unreserved `HERE`, then emit exactly `DE.USED` bytes with LF converted to CRLF. It does not advance `HERE`, read a secondary extent, type-check, or append a newline. |
 | `FS-FREE` | `( -- )` | Report disk free space: free sectors, bytes, and file count. |
 | `SAVE-BUFFER` | `( buf "name" -- )` | Save a KDOS buffer's data to a named file on disk (file must already exist).  Updates `used_bytes` in the directory. |
 | `OPEN` | `( "name" -- fdesc \| 0 )` | Open a file by name, returning a file descriptor from the FD pool for `FREAD`/`FWRITE` access.  Returns 0 if not found.  `OPEN` is a `DEFER` word — override with `' my-open IS OPEN` (e.g. for a VFS layer). |
@@ -1938,8 +1955,29 @@ If no filesystem is available, these commands return before consuming their
 parsed name tokens, leaving them to the outer evaluator. An old-name miss in
 `RENAME` likewise leaves the proposed new token. Those parser defects, empty
 names, directory deletion, stale parents, and overlapping extents remain
-outside the safe hosted domain. The frontier ends after `RENAME` at line 5408;
-`CAT` and all later commands in this reference remain unqualified.
+outside the safe hosted domain.
+
+`CAT` separately checks filesystem availability before parsing, a lookup miss
+before metadata, and zero `DE.USED` before file I/O. These exits respectively
+leave the filename token unconsumed and print `No filesystem`, print `Not
+found` with the parsed name, or print `(empty file)`; each terminates with CRLF,
+and miss/empty perform no data read. A nonempty match issues a generation-bound
+read of all primary `DE.COUNT` sectors at `DE.SEC` into the unreserved current
+`HERE` without advancing it. It then emits exactly `DE.USED` bytes, converting
+LF to CRLF but passing every other byte, including CR, NUL, and ESC, unchanged.
+It adds no trailing newline. A read failure aborts before content output, while
+a partial lower-level DMA can retain its scratch prefix and diagnostics.
+
+The admitted domain requires a stable mounted generation, a canonical matched
+non-directory file, one small positive primary extent, no secondary extent,
+`DE.USED <= DE.COUNT * 512`, and a complete unused mapped DMA span at `HERE`.
+The word enforces none of the type, capacity, or scratch bounds. It ignores
+the validator-approved secondary
+extent, so a two-extent file crossing the primary boundary instead emits stale
+unread bytes after the DMA span. `CAT-SLOT`, parser buffers, storage diagnostics,
+and the unreserved `HERE` scratch are global and unlocked. The frontier ends
+after `CAT` at line 5436; blank line 5437 precedes the unqualified
+`FS-LARGEST-FREE` family beginning at line 5438.
 
 **Example — filesystem operations:**
 ```forth
