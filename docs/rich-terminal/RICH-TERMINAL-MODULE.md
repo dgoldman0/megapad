@@ -72,17 +72,17 @@ The module owns:
   publication, exact RET_RESULT reconciliation, and covering-CREDIT chunk
   settlement;
 * PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
-  DEFINE/REPLACE/DROP operations, typed GLYPH_RUN DEFINE/REPLACE operations,
-  typed bounded-series DEFINE/APPEND/REPLACE/DROP operations, and typed
-  semantic-control DEFINE/REPLACE/DROP operations; and
+  DEFINE/REPLACE/DROP operations, typed retained-object
+  DEFINE/REPLACE/mutation/DROP operations, typed bounded-series
+  DEFINE/APPEND/REPLACE/DROP operations, and typed semantic-control
+  DEFINE/REPLACE/DROP operations; and
 * close, hard failure, soft cache reset, and fallback.
 
 It does not own consumer focus, host regions, widgets, retained semantic
 objects, owner/item allocation policy, quota derivation, replay planning, or
 the Akashic front/back cell buffers. The core retained writers accept bounded
 wire-neutral intent from a single internal rich-terminal engine; they are not
-an independently discoverable scene or mutation API. Other object kinds
-remain outside the currently implemented writer subset.
+an independently discoverable scene or mutation API.
 
 The module admits in-place RETAINED-1 feature bit 8 `RET_CONTROLS`, supplies
 typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers, and decodes
@@ -166,6 +166,24 @@ PT-SERIES-REPLACE   ( owner generation series timestamp-mode
                       first-timestamp-us samples-a samples-u session
                       -- status )
 PT-SERIES-DROP      ( owner generation series session -- status )
+PT-GROUP-DEFINE     ( owner generation object region parent
+                      left top right bottom z visible session -- status )
+PT-GROUP-REPLACE    ( owner generation object region parent
+                      left top right bottom z visible session -- status )
+PT-POLYLINE-DEFINE  ( owner generation object region parent
+                      left top right bottom z visible stroke-width
+                      red green blue alpha path-flags points-a points-u
+                      session -- status )
+PT-POLYLINE-REPLACE ( owner generation object region parent
+                      left top right bottom z visible stroke-width
+                      red green blue alpha path-flags points-a points-u
+                      session -- status )
+PT-IMAGE-DEFINE     ( owner generation object region parent
+                      left top right bottom z visible resource fit opacity
+                      session -- status )
+PT-IMAGE-REPLACE    ( owner generation object region parent
+                      left top right bottom z visible resource fit opacity
+                      session -- status )
 PT-GLYPH-RUN-DEFINE ( owner generation object region parent
                       left top right bottom z visible
                       fg-red fg-green fg-blue fg-alpha
@@ -176,6 +194,59 @@ PT-GLYPH-RUN-REPLACE ( owner generation object region parent
                        fg-red fg-green fg-blue fg-alpha
                        bg-red bg-green bg-blue bg-alpha attrs
                        text-a text-u session -- status )
+PT-READOUT-DEFINE   ( owner generation object region parent
+                      left top right bottom z visible fg-red fg-green fg-blue
+                      fg-alpha bg-red bg-green bg-blue bg-alpha format
+                      decimal-places initial-value scale unit-a unit-u session
+                      -- status )
+PT-READOUT-REPLACE  ( owner generation object region parent
+                      left top right bottom z visible fg-red fg-green fg-blue
+                      fg-alpha bg-red bg-green bg-blue bg-alpha format
+                      decimal-places initial-value scale unit-a unit-u session
+                      -- status )
+PT-METER-DEFINE     ( owner generation object region parent
+                      left top right bottom z visible fg-red fg-green fg-blue
+                      fg-alpha bg-red bg-green bg-blue bg-alpha orientation
+                      meter-flags minimum maximum initial-value session
+                      -- status )
+PT-METER-REPLACE    ( owner generation object region parent
+                      left top right bottom z visible fg-red fg-green fg-blue
+                      fg-alpha bg-red bg-green bg-blue bg-alpha orientation
+                      meter-flags minimum maximum initial-value session
+                      -- status )
+PT-STATUS-DEFINE    ( owner generation object region parent
+                      left top right bottom z visible inactive-red
+                      inactive-green inactive-blue inactive-alpha active-red
+                      active-green active-blue active-alpha initial-value shape
+                      session -- status )
+PT-STATUS-REPLACE   ( owner generation object region parent
+                      left top right bottom z visible inactive-red
+                      inactive-green inactive-blue inactive-alpha active-red
+                      active-green active-blue active-alpha initial-value shape
+                      session -- status )
+PT-PLOT-DEFINE      ( owner generation object region parent
+                      left top right bottom z visible series minimum maximum
+                      line-red line-green line-blue line-alpha fill-red
+                      fill-green fill-blue fill-alpha plot-flags session
+                      -- status )
+PT-PLOT-REPLACE     ( owner generation object region parent
+                      left top right bottom z visible series minimum maximum
+                      line-red line-green line-blue line-alpha fill-red
+                      fill-green fill-blue fill-alpha plot-flags session
+                      -- status )
+PT-WAVEFORM-DEFINE  ( owner generation object region parent
+                      left top right bottom z visible series minimum maximum
+                      trace-red trace-green trace-blue trace-alpha zero-red
+                      zero-green zero-blue zero-alpha zero-value waveform-flags
+                      session -- status )
+PT-WAVEFORM-REPLACE ( owner generation object region parent
+                      left top right bottom z visible series minimum maximum
+                      trace-red trace-green trace-blue trace-alpha zero-red
+                      zero-green zero-blue zero-alpha zero-value waveform-flags
+                      session -- status )
+PT-OBJECT-SET-VALUE ( owner generation object value session -- status )
+PT-OBJECT-SET-VISIBILITY ( owner generation object visible session -- status )
+PT-OBJECT-DROP      ( owner generation object session -- status )
 PT-CONTROL-DEFINE   ( owner generation control kind state z region parent order
                       left top right bottom label-a label-u shortcut-a
                       shortcut-u content-a content-u session -- status )
@@ -363,7 +434,7 @@ and exact declared bytes. `retained-frame-bytes` is the exact sum of complete
 preflights the complete BEGIN-through-COMMIT byte and sequence budget before it
 emits BEGIN, then checks every operation against the declared count and byte
 sum. There is no public raw retained-operation escape hatch. Typed region,
-GLYPH_RUN, and semantic-control words validate semantic arguments and keep
+object, series, and semantic-control words validate semantic arguments and keep
 their exact message type, common prefix, type body, little-endian assembly, and
 TX scratch private. Empty glyph-run text is canonical `0 0`; a nonempty source
 is borrowed only until the call returns and must satisfy the negotiated
@@ -385,6 +456,30 @@ disjointness, and strictly increasing timestamps within an explicit payload.
 It then encodes every timestamp and value little-endian into private TX scratch.
 The upper engine retains per-series definitions/history and replay authority;
 PT introduces no series table or hard-coded history capacity of its own.
+
+The object writers expose the protocol's renderer-neutral GROUP, POLYLINE,
+IMAGE, GLYPH_RUN, READOUT, METER, STATUS, PLOT, and WAVEFORM records. POLYLINE
+accepts an aligned borrowed span of native coordinate-cell pairs and derives
+the point count; READOUT accepts a borrowed canonical UTF-8 unit span. Both are
+range-checked and caller-bounded; scalar fields and coordinate cells are
+serialized field-by-field, while validated UTF-8 bytes are copied exactly
+before the call returns. Fixed bodies accept typed semantic scalars and
+canonical enum/flag values exposed as public constants. References,
+graph/high-water rules, object history, aggregate quota state, and replay
+remain with the upper engine and terminal; MegaPad allocates no retained scene
+table. Generic value, visibility, and drop writers expose only the three exact
+protocol mutations and share PRESENT's declared operation, byte, sequence, and
+credit accounting. Because SET_VALUE is deliberately stateless, MegaPad cannot
+know the target object's kind, a METER's declared range, or a READOUT's exact
+post-format target quota. It validates the bounded mutation tuple and feature;
+the terminal's transaction model remains authoritative for those
+target-dependent checks.
+
+Object booleans use `PT-OBJECT-HIDDEN` and `PT-OBJECT-VISIBLE`. Public typed
+constants also cover `PT-POLYLINE-CLOSED`, the three `PT-IMAGE-FIT-*` modes,
+the three `PT-READOUT-*` formats, horizontal/vertical and show-value meter
+options, the three `PT-STATUS-*` shapes, the two `PT-PLOT-*` flags, and
+`PT-WAVEFORM-DRAW-ZERO-LINE`; callers do not pass reserved wire fields.
 
 The mode constants are `PT-CELL-NONE`, `PT-CELL-DELTA`,
 `PT-CELL-REPLACE`, `PT-RET-NONE`, `PT-RET-DELTA`,
@@ -506,8 +601,8 @@ Daybook-to-Pad shared-resource handoff and closes the selected software/viewer
 checkpoint. Immutable RGBA resource upload, IMAGE model publication, exact
 shared-session offers, viewer verification, and physical IMAGE composition now
 have focused qualification. Bounded SERIES wire/model/view support and the
-typed MegaPad publication boundary also have focused qualification. Remaining
-object kinds, full semantic replay, retained resize, physical UART delivery,
+complete typed MegaPad object publication boundary also have focused
+qualification. Full semantic replay, retained resize, physical UART delivery,
 and a hardware panel sink remain separate and unqualified.
 
 ## 8. Desk, Pad, and Daybook development checkpoint

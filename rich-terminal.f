@@ -7,7 +7,7 @@
 \  remains the baseline before negotiation and after a synchronized close.
 \
 \  Contracts: APT-1-CELL-1-2026-08-24 plus the core
-\             owner/resource/region/bounded-series/glyph-run/control subset
+\             owner/resource/region/object/series/control transport subset
 \             of APT-1-RETAINED-1-2026-08-24.
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
 
@@ -92,6 +92,33 @@ PROVIDED rich-terminal.f
 \ RETAINED-1 timestamp modes accepted by the typed bounded-series API.
 0 CONSTANT PT-SERIES-TIMESTAMP-EXPLICIT
 1 CONSTANT PT-SERIES-TIMESTAMP-UNIFORM
+
+\ Renderer-neutral object enums and exact canonical flag bits.
+0 CONSTANT PT-OBJECT-HIDDEN
+1 CONSTANT PT-OBJECT-VISIBLE
+
+0x01 CONSTANT PT-POLYLINE-CLOSED
+
+0 CONSTANT PT-IMAGE-FIT-STRETCH
+1 CONSTANT PT-IMAGE-FIT-CONTAIN
+2 CONSTANT PT-IMAGE-FIT-COVER
+
+0 CONSTANT PT-READOUT-INTEGER
+1 CONSTANT PT-READOUT-FIXED
+2 CONSTANT PT-READOUT-PERCENT
+
+0 CONSTANT PT-METER-HORIZONTAL
+1 CONSTANT PT-METER-VERTICAL
+0x01 CONSTANT PT-METER-SHOW-VALUE
+
+0 CONSTANT PT-STATUS-CIRCLE
+1 CONSTANT PT-STATUS-SQUARE
+2 CONSTANT PT-STATUS-DIAMOND
+
+0x01 CONSTANT PT-PLOT-FILL-TO-MINIMUM
+0x02 CONSTANT PT-PLOT-DRAW-POINTS
+
+0x01 CONSTANT PT-WAVEFORM-DRAW-ZERO-LINE
 
 : PT-EVENT-TYPE@      ( event -- u )       @ ;
 : PT-EVENT-REVISION@  ( event -- u )   8 + @ ;
@@ -188,6 +215,10 @@ PROVIDED rich-terminal.f
 1048576  CONSTANT _PT-MAX-PAYLOAD
 4096     CONSTANT _PT-CONTROL-RESERVE
 0x3F     CONSTANT _PT-CAPS
+0x01     CONSTANT _PT-RET-CORE
+0x02     CONSTANT _PT-RET-VECTOR
+0x04     CONSTANT _PT-RET-RGBA-IMAGE
+0x08     CONSTANT _PT-RET-INSTRUMENT
 0x10     CONSTANT _PT-RET-SERIES
 0x100    CONSTANT _PT-RET-CONTROLS
 0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS
@@ -248,6 +279,9 @@ CREATE _PT-OWNER  0 ,
 0x2012 CONSTANT _PT-M-REGION-DROP
 0x2020 CONSTANT _PT-M-OBJECT-DEFINE
 0x2021 CONSTANT _PT-M-OBJECT-REPLACE
+0x2022 CONSTANT _PT-M-OBJECT-SET-VALUE
+0x2023 CONSTANT _PT-M-OBJECT-SET-VISIBILITY
+0x2024 CONSTANT _PT-M-OBJECT-DROP
 0x3000 CONSTANT _PT-M-SERIES-DEFINE
 0x3001 CONSTANT _PT-M-SERIES-APPEND
 0x3002 CONSTANT _PT-M-SERIES-REPLACE
@@ -591,6 +625,22 @@ VARIABLE _PT-U64-A
 : _PT-RET-CONTROL-COLLECTIONS?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
     _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CONTROL-COLLECTIONS AND 0<> ;
+
+: _PT-RET-CORE?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CORE AND 0<> ;
+
+: _PT-RET-VECTOR?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-VECTOR AND 0<> ;
+
+: _PT-RET-RGBA-IMAGE?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-RGBA-IMAGE AND 0<> ;
+
+: _PT-RET-INSTRUMENT?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-INSTRUMENT AND 0<> ;
 
 : _PT-RET-SERIES?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
@@ -4329,6 +4379,730 @@ VARIABLE _PT-GR-PAYLOAD-U
 \        attrs text-a text-u session -- status
 : PT-GLYPH-RUN-REPLACE
     _PT-M-OBJECT-REPLACE _PT-GLYPH-RUN-WRITE ;
+
+\ The remaining OBJECT families share the same semantic common prefix and the
+\ same PRESENT admission/accounting path as GLYPH_RUN.  Only body-specific
+\ fields and negotiated feature gates differ; no local object table shadows
+\ the authoritative retained model.
+VARIABLE _PT-OB-S
+VARIABLE _PT-OB-TYPE
+VARIABLE _PT-OB-KIND
+VARIABLE _PT-OB-OWNER
+VARIABLE _PT-OB-GENERATION
+VARIABLE _PT-OB-ID
+VARIABLE _PT-OB-REGION
+VARIABLE _PT-OB-PARENT
+VARIABLE _PT-OB-LEFT
+VARIABLE _PT-OB-TOP
+VARIABLE _PT-OB-RIGHT
+VARIABLE _PT-OB-BOTTOM
+VARIABLE _PT-OB-Z
+VARIABLE _PT-OB-VISIBLE
+VARIABLE _PT-OB-PAYLOAD-U
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        session message-type object-kind --
+: _PT-OBJECT-COMMON!
+    _PT-OB-KIND ! _PT-OB-TYPE ! _PT-OB-S ! _PT-OB-VISIBLE !
+    _PT-OB-Z ! _PT-OB-BOTTOM ! _PT-OB-RIGHT ! _PT-OB-TOP ! _PT-OB-LEFT !
+    _PT-OB-PARENT ! _PT-OB-REGION ! _PT-OB-ID !
+    _PT-OB-GENERATION ! _PT-OB-OWNER ! ;
+
+: _PT-OBJECT-BOOL?  ( value -- flag )
+    DUP 0= SWAP 1 = OR ;
+
+: _PT-OBJECT-COLOR?  ( red green blue alpha -- flag )
+    _PT-GR-COLOR? ;
+
+: _PT-OBJECT-COMMON-FIELDS?  ( -- flag )
+    _PT-OB-OWNER @ 0= _PT-OB-GENERATION @ 0= OR
+    _PT-OB-ID @ 0= OR _PT-OB-REGION @ 0= OR IF FALSE EXIT THEN
+    _PT-OB-TYPE @ DUP _PT-M-OBJECT-DEFINE =
+    SWAP _PT-M-OBJECT-REPLACE = OR 0= IF FALSE EXIT THEN
+    _PT-OB-KIND @ DUP 1 U< SWAP 9 U> OR IF FALSE EXIT THEN
+    _PT-OB-LEFT @ _PT-U32? 0= _PT-OB-TOP @ _PT-U32? 0= OR
+    _PT-OB-RIGHT @ _PT-U32? 0= OR _PT-OB-BOTTOM @ _PT-U32? 0= OR IF
+        FALSE EXIT
+    THEN
+    _PT-OB-LEFT @ _PT-OB-RIGHT @ U< 0=
+    _PT-OB-TOP @ _PT-OB-BOTTOM @ U< 0= OR IF FALSE EXIT THEN
+    _PT-OB-Z @ _PT-I32? 0= IF FALSE EXIT THEN
+    _PT-OB-VISIBLE @ _PT-OBJECT-BOOL? ;
+
+: _PT-OBJECT-ADMIT  ( payload-u -- status )
+    DUP _PT-OB-PAYLOAD-U !
+    _PT-OBJECT-COMMON-FIELDS? 0= IF DROP PT-S-INVALID EXIT THEN
+    _PT-OB-TYPE @ _PT-PO-TYPE !
+    _PT-PO-U !
+    _PT-OB-S @ _PT-PO-S !
+    _PT-PO-ADMIT ;
+
+: _PT-OBJECT-COMMON-PAYLOAD!  ( -- )
+    _PT-OB-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!
+    _PT-OB-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!
+    _PT-OB-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!
+    _PT-OB-KIND @ _PT-FRAME-PAYLOAD 24 + W!
+    _PT-OB-VISIBLE @ _PT-FRAME-PAYLOAD 26 + W!
+    _PT-OB-Z @ _PT-FRAME-PAYLOAD 28 + L!
+    _PT-OB-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!
+    _PT-OB-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
+    _PT-OB-LEFT @ _PT-FRAME-PAYLOAD 48 + L!
+    _PT-OB-TOP @ _PT-FRAME-PAYLOAD 52 + L!
+    _PT-OB-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!
+    _PT-OB-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L! ;
+
+\ Stack: common-prefix session message-type -- status
+: _PT-GROUP-WRITE
+    1 _PT-OBJECT-COMMON!
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-VECTOR? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    64 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-COMMON-PAYLOAD!
+    _PT-PO-SEND ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        session -- status
+: PT-GROUP-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-GROUP-WRITE ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        session -- status
+: PT-GROUP-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-GROUP-WRITE ;
+
+VARIABLE _PT-PL-S
+VARIABLE _PT-PL-TYPE
+VARIABLE _PT-PL-STROKE
+VARIABLE _PT-PL-RED
+VARIABLE _PT-PL-GREEN
+VARIABLE _PT-PL-BLUE
+VARIABLE _PT-PL-ALPHA
+VARIABLE _PT-PL-FLAGS
+VARIABLE _PT-PL-A
+VARIABLE _PT-PL-U
+VARIABLE _PT-PL-COUNT
+VARIABLE _PT-PL-PAYLOAD-U
+VARIABLE _PT-PL-END
+VARIABLE _PT-PL-MAX-SOURCE-U
+
+: _PT-POLYLINE-SOURCE?  ( -- flag )
+    _PT-PL-A @ 0= _PT-PL-U @ 0= OR IF FALSE EXIT THEN
+    _PT-PL-A @ 1 CELLS 1- AND IF FALSE EXIT THEN
+    _PT-PL-A @ _PT-PL-U @ _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    _PT-PL-END !
+    _PT-PL-A @ _PT-PL-U @ _PT-OB-S @ /PT-SESSION
+        _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-PL-A @ _PT-PL-U @ _PT-OB-S @ _PT.S.TX-A @
+        _PT-OB-S @ _PT.S.TX-U @ _PT-RANGES-OVERLAP? 0= ;
+
+: _PT-POLYLINE-POINTS?  ( -- flag )
+    _PT-OB-S @ _PT.S.RET-FORMATS 20 + L@ DUP 0= IF
+        DROP FALSE EXIT
+    THEN
+    16 _PT-UMUL? 0= IF DROP FALSE EXIT THEN
+    DUP _PT-PL-MAX-SOURCE-U !
+    _PT-PL-U @ U< IF FALSE EXIT THEN
+    _PT-PL-U @ 16 MOD IF FALSE EXIT THEN
+    _PT-PL-U @ 16 / DUP _PT-PL-COUNT !
+    DUP 2 U< SWAP _PT-U32? 0= OR IF FALSE EXIT THEN
+    _PT-PL-COUNT @ 8 _PT-UMUL? 0= IF DROP FALSE EXIT THEN
+    80 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    _PT-PL-PAYLOAD-U !
+    _PT-POLYLINE-SOURCE? 0= IF FALSE EXIT THEN
+    _PT-PL-COUNT @ 0 ?DO
+        _PT-PL-A @ I 2* CELLS + @ _PT-U32? 0= IF
+            FALSE UNLOOP EXIT
+        THEN
+        _PT-PL-A @ I 2* 1+ CELLS + @ _PT-U32? 0= IF
+            FALSE UNLOOP EXIT
+        THEN
+    LOOP
+    TRUE ;
+
+: _PT-POLYLINE-FIELDS?  ( -- flag )
+    _PT-PL-STROKE @ DUP 0= SWAP _PT-U32? 0= OR IF FALSE EXIT THEN
+    _PT-PL-RED @ _PT-PL-GREEN @ _PT-PL-BLUE @ _PT-PL-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-PL-FLAGS @ PT-POLYLINE-CLOSED INVERT AND IF FALSE EXIT THEN
+    _PT-POLYLINE-POINTS? ;
+
+: _PT-POLYLINE-PAYLOAD!  ( -- )
+    _PT-OBJECT-COMMON-PAYLOAD!
+    _PT-PL-COUNT @ _PT-FRAME-PAYLOAD 64 + L!
+    _PT-PL-STROKE @ _PT-FRAME-PAYLOAD 68 + L!
+    _PT-PL-RED @ _PT-FRAME-PAYLOAD 72 + C!
+    _PT-PL-GREEN @ _PT-FRAME-PAYLOAD 73 + C!
+    _PT-PL-BLUE @ _PT-FRAME-PAYLOAD 74 + C!
+    _PT-PL-ALPHA @ _PT-FRAME-PAYLOAD 75 + C!
+    _PT-PL-FLAGS @ _PT-FRAME-PAYLOAD 76 + L!
+    _PT-PL-COUNT @ 0 ?DO
+        _PT-PL-A @ I 2* CELLS + @
+            _PT-FRAME-PAYLOAD 80 + I 8 * + L!
+        _PT-PL-A @ I 2* 1+ CELLS + @
+            _PT-FRAME-PAYLOAD 84 + I 8 * + L!
+    LOOP ;
+
+: _PT-POLYLINE-BODY  ( -- status )
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-VECTOR? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-POLYLINE-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+    _PT-PL-PAYLOAD-U @ _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-POLYLINE-PAYLOAD!
+    _PT-PO-SEND ;
+
+: _PT-POLYLINE-SCRUB  ( -- )
+    0 _PT-PL-A ! 0 _PT-PL-U ! 0 _PT-PL-END !
+    0 _PT-PL-COUNT ! 0 _PT-PL-PAYLOAD-U ! 0 _PT-PL-MAX-SOURCE-U !
+    0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV ! ;
+
+\ Stack: common-prefix stroke-width red green blue alpha path-flags
+\        points-a points-u session message-type -- status
+: _PT-POLYLINE-WRITE
+    _PT-PL-TYPE ! _PT-PL-S ! _PT-PL-U ! _PT-PL-A ! _PT-PL-FLAGS !
+    _PT-PL-ALPHA ! _PT-PL-BLUE ! _PT-PL-GREEN ! _PT-PL-RED !
+    _PT-PL-STROKE !
+    _PT-PL-S @ _PT-PL-TYPE @ 2 _PT-OBJECT-COMMON!
+    ['] _PT-POLYLINE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
+    _PT-POLYLINE-SCRUB ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        stroke-width red green blue alpha path-flags points-a points-u session
+\        -- status
+: PT-POLYLINE-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-POLYLINE-WRITE ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        stroke-width red green blue alpha path-flags points-a points-u session
+\        -- status
+: PT-POLYLINE-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-POLYLINE-WRITE ;
+
+VARIABLE _PT-IM-S
+VARIABLE _PT-IM-TYPE
+VARIABLE _PT-IM-RESOURCE
+VARIABLE _PT-IM-FIT
+VARIABLE _PT-IM-OPACITY
+
+\ Stack: common-prefix resource fit opacity session message-type -- status
+: _PT-IMAGE-WRITE
+    _PT-IM-TYPE ! _PT-IM-S ! _PT-IM-OPACITY ! _PT-IM-FIT !
+    _PT-IM-RESOURCE !
+    _PT-IM-S @ _PT-IM-TYPE @ 3 _PT-OBJECT-COMMON!
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-RGBA-IMAGE? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-OB-S @ _PT.S.RET-FORMATS 8 + L@ PT-RESOURCE-RGBA8 <> IF
+        PT-S-UNSUPPORTED EXIT
+    THEN
+    _PT-IM-RESOURCE @ 0= IF PT-S-INVALID EXIT THEN
+    _PT-IM-FIT @ DUP PT-IMAGE-FIT-STRETCH U<
+    SWAP PT-IMAGE-FIT-COVER U> OR IF PT-S-INVALID EXIT THEN
+    _PT-IM-OPACITY @ _PT-U8? 0= IF PT-S-INVALID EXIT THEN
+    80 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-COMMON-PAYLOAD!
+    _PT-IM-RESOURCE @ _PT-FRAME-PAYLOAD 64 + _PT-U64!
+    _PT-IM-FIT @ _PT-FRAME-PAYLOAD 72 + L!
+    _PT-IM-OPACITY @ _PT-FRAME-PAYLOAD 76 + C!
+    _PT-PO-SEND ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        resource fit opacity session -- status
+: PT-IMAGE-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-IMAGE-WRITE ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        resource fit opacity session -- status
+: PT-IMAGE-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-IMAGE-WRITE ;
+
+VARIABLE _PT-RO-S
+VARIABLE _PT-RO-TYPE
+VARIABLE _PT-RO-FG-RED
+VARIABLE _PT-RO-FG-GREEN
+VARIABLE _PT-RO-FG-BLUE
+VARIABLE _PT-RO-FG-ALPHA
+VARIABLE _PT-RO-BG-RED
+VARIABLE _PT-RO-BG-GREEN
+VARIABLE _PT-RO-BG-BLUE
+VARIABLE _PT-RO-BG-ALPHA
+VARIABLE _PT-RO-FORMAT
+VARIABLE _PT-RO-DECIMALS
+VARIABLE _PT-RO-VALUE
+VARIABLE _PT-RO-SCALE
+VARIABLE _PT-RO-UNIT-A
+VARIABLE _PT-RO-UNIT-U
+VARIABLE _PT-RO-PAYLOAD-U
+VARIABLE _PT-RO-MIN-FORMATTED-U
+
+: _PT-READOUT-UNIT-SOURCE?  ( -- flag )
+    _PT-RO-UNIT-U @ 0= IF _PT-RO-UNIT-A @ 0= EXIT THEN
+    _PT-RO-UNIT-A @ _PT-RO-UNIT-U @ _PT-RANGE-VALID? 0= IF
+        FALSE EXIT
+    THEN
+    _PT-RO-UNIT-A @ _PT-RO-UNIT-U @ _PT-OB-S @ /PT-SESSION
+        _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-RO-UNIT-A @ _PT-RO-UNIT-U @ _PT-OB-S @ _PT.S.TX-A @
+        _PT-OB-S @ _PT.S.TX-U @ _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-RO-UNIT-A @ _PT-RO-UNIT-U @ _PT-UTF8? 0= IF FALSE EXIT THEN
+    _PT-RO-UNIT-U @ 0 ?DO
+        _PT-RO-UNIT-A @ I + C@ DUP 0= OVER 10 = OR SWAP 13 = OR IF
+            FALSE UNLOOP EXIT
+        THEN
+    LOOP
+    TRUE ;
+
+\ This is a lower-bound admission check only.  Exact signed-rational rounding
+\ and target-local UTF-8 quota validation remain terminal transaction state;
+\ a stateless transport must not grow a shadow object table merely to predict
+\ later OBJECT_SET_VALUE formatting.
+: _PT-READOUT-MIN-FORMATTED?  ( -- flag )
+    _PT-RO-UNIT-U @ 1 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    _PT-RO-FORMAT @ PT-READOUT-INTEGER <> IF
+        _PT-RO-DECIMALS @ IF
+            1 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+            _PT-RO-DECIMALS @ _PT-UADD? 0= IF DROP FALSE EXIT THEN
+        THEN
+        _PT-RO-FORMAT @ PT-READOUT-PERCENT = IF
+            1 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+        THEN
+    THEN
+    DUP _PT-RO-MIN-FORMATTED-U !
+    _PT-OB-S @ _PT.S.RET-FORMATS 24 + L@ U> 0= ;
+
+: _PT-READOUT-FIELDS?  ( -- flag )
+    _PT-RO-FG-RED @ _PT-RO-FG-GREEN @
+    _PT-RO-FG-BLUE @ _PT-RO-FG-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-RO-BG-RED @ _PT-RO-BG-GREEN @
+    _PT-RO-BG-BLUE @ _PT-RO-BG-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-RO-FORMAT @ DUP PT-READOUT-INTEGER U<
+    SWAP PT-READOUT-PERCENT U> OR IF FALSE EXIT THEN
+    _PT-RO-DECIMALS @ _PT-U32? 0= IF FALSE EXIT THEN
+    _PT-RO-FORMAT @ PT-READOUT-INTEGER = IF
+        _PT-RO-DECIMALS @ IF FALSE EXIT THEN
+        _PT-RO-SCALE @ 1 <> IF FALSE EXIT THEN
+    ELSE
+        _PT-RO-SCALE @ 0> 0= IF FALSE EXIT THEN
+    THEN
+    _PT-RO-UNIT-U @ _PT-U32? 0= IF FALSE EXIT THEN
+    _PT-READOUT-MIN-FORMATTED? 0= IF FALSE EXIT THEN
+    _PT-RO-UNIT-U @ 104 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    _PT-RO-PAYLOAD-U !
+    _PT-READOUT-UNIT-SOURCE? ;
+
+: _PT-READOUT-PAYLOAD!  ( -- )
+    _PT-OBJECT-COMMON-PAYLOAD!
+    _PT-RO-FG-RED @ _PT-FRAME-PAYLOAD 64 + C!
+    _PT-RO-FG-GREEN @ _PT-FRAME-PAYLOAD 65 + C!
+    _PT-RO-FG-BLUE @ _PT-FRAME-PAYLOAD 66 + C!
+    _PT-RO-FG-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!
+    _PT-RO-BG-RED @ _PT-FRAME-PAYLOAD 68 + C!
+    _PT-RO-BG-GREEN @ _PT-FRAME-PAYLOAD 69 + C!
+    _PT-RO-BG-BLUE @ _PT-FRAME-PAYLOAD 70 + C!
+    _PT-RO-BG-ALPHA @ _PT-FRAME-PAYLOAD 71 + C!
+    _PT-RO-FORMAT @ _PT-FRAME-PAYLOAD 72 + L!
+    _PT-RO-DECIMALS @ _PT-FRAME-PAYLOAD 76 + L!
+    _PT-RO-VALUE @ _PT-FRAME-PAYLOAD 80 + _PT-U64!
+    _PT-RO-SCALE @ _PT-FRAME-PAYLOAD 88 + _PT-U64!
+    _PT-RO-UNIT-U @ _PT-FRAME-PAYLOAD 96 + L!
+    _PT-RO-UNIT-U @ IF
+        _PT-RO-UNIT-A @ _PT-RO-UNIT-U @
+            _PT-FRAME-PAYLOAD 104 + SWAP MOVE
+    THEN ;
+
+: _PT-READOUT-BODY  ( -- status )
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-INSTRUMENT? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-OB-S @ _PT.S.RET-FORMATS 24 + L@ 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-READOUT-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+    _PT-RO-PAYLOAD-U @ _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-READOUT-PAYLOAD!
+    _PT-PO-SEND ;
+
+: _PT-READOUT-SCRUB  ( -- )
+    0 _PT-RO-UNIT-A ! 0 _PT-RO-UNIT-U !
+    0 _PT-RO-PAYLOAD-U ! 0 _PT-RO-MIN-FORMATTED-U !
+    0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV !
+    0 _PT-U8-A ! 0 _PT-U8-END ! 0 _PT-U8-B ! ;
+
+\ Stack: common-prefix fg-r fg-g fg-b fg-a bg-r bg-g bg-b bg-a format
+\        decimal-places initial-value scale unit-a unit-u session
+\        message-type -- status
+: _PT-READOUT-WRITE
+    _PT-RO-TYPE ! _PT-RO-S ! _PT-RO-UNIT-U ! _PT-RO-UNIT-A !
+    _PT-RO-SCALE ! _PT-RO-VALUE ! _PT-RO-DECIMALS ! _PT-RO-FORMAT !
+    _PT-RO-BG-ALPHA ! _PT-RO-BG-BLUE !
+    _PT-RO-BG-GREEN ! _PT-RO-BG-RED !
+    _PT-RO-FG-ALPHA ! _PT-RO-FG-BLUE !
+    _PT-RO-FG-GREEN ! _PT-RO-FG-RED !
+    _PT-RO-S @ _PT-RO-TYPE @ 5 _PT-OBJECT-COMMON!
+    ['] _PT-READOUT-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
+    _PT-READOUT-SCRUB ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+\        format decimal-places initial-value scale unit-a unit-u session
+\        -- status
+: PT-READOUT-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-READOUT-WRITE ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+\        format decimal-places initial-value scale unit-a unit-u session
+\        -- status
+: PT-READOUT-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-READOUT-WRITE ;
+
+VARIABLE _PT-MT-S
+VARIABLE _PT-MT-TYPE
+VARIABLE _PT-MT-FG-RED
+VARIABLE _PT-MT-FG-GREEN
+VARIABLE _PT-MT-FG-BLUE
+VARIABLE _PT-MT-FG-ALPHA
+VARIABLE _PT-MT-BG-RED
+VARIABLE _PT-MT-BG-GREEN
+VARIABLE _PT-MT-BG-BLUE
+VARIABLE _PT-MT-BG-ALPHA
+VARIABLE _PT-MT-ORIENTATION
+VARIABLE _PT-MT-FLAGS
+VARIABLE _PT-MT-MINIMUM
+VARIABLE _PT-MT-MAXIMUM
+VARIABLE _PT-MT-VALUE
+
+: _PT-METER-FIELDS?  ( -- flag )
+    _PT-MT-FG-RED @ _PT-MT-FG-GREEN @
+    _PT-MT-FG-BLUE @ _PT-MT-FG-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-MT-BG-RED @ _PT-MT-BG-GREEN @
+    _PT-MT-BG-BLUE @ _PT-MT-BG-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-MT-ORIENTATION @ DUP PT-METER-HORIZONTAL =
+    SWAP PT-METER-VERTICAL = OR 0= IF FALSE EXIT THEN
+    _PT-MT-FLAGS @ PT-METER-SHOW-VALUE INVERT AND IF FALSE EXIT THEN
+    _PT-MT-MINIMUM @ _PT-MT-MAXIMUM @ < 0= IF FALSE EXIT THEN
+    _PT-MT-VALUE @ _PT-MT-MINIMUM @ < IF FALSE EXIT THEN
+    _PT-MT-VALUE @ _PT-MT-MAXIMUM @ > 0= ;
+
+\ Stack: common-prefix fg-r fg-g fg-b fg-a bg-r bg-g bg-b bg-a orientation
+\        meter-flags minimum maximum initial-value session message-type
+\        -- status
+: _PT-METER-WRITE
+    _PT-MT-TYPE ! _PT-MT-S ! _PT-MT-VALUE ! _PT-MT-MAXIMUM !
+    _PT-MT-MINIMUM ! _PT-MT-FLAGS ! _PT-MT-ORIENTATION !
+    _PT-MT-BG-ALPHA ! _PT-MT-BG-BLUE !
+    _PT-MT-BG-GREEN ! _PT-MT-BG-RED !
+    _PT-MT-FG-ALPHA ! _PT-MT-FG-BLUE !
+    _PT-MT-FG-GREEN ! _PT-MT-FG-RED !
+    _PT-MT-S @ _PT-MT-TYPE @ 6 _PT-OBJECT-COMMON!
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-INSTRUMENT? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-METER-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+    112 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-COMMON-PAYLOAD!
+    _PT-MT-FG-RED @ _PT-FRAME-PAYLOAD 64 + C!
+    _PT-MT-FG-GREEN @ _PT-FRAME-PAYLOAD 65 + C!
+    _PT-MT-FG-BLUE @ _PT-FRAME-PAYLOAD 66 + C!
+    _PT-MT-FG-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!
+    _PT-MT-BG-RED @ _PT-FRAME-PAYLOAD 68 + C!
+    _PT-MT-BG-GREEN @ _PT-FRAME-PAYLOAD 69 + C!
+    _PT-MT-BG-BLUE @ _PT-FRAME-PAYLOAD 70 + C!
+    _PT-MT-BG-ALPHA @ _PT-FRAME-PAYLOAD 71 + C!
+    _PT-MT-ORIENTATION @ _PT-FRAME-PAYLOAD 72 + L!
+    _PT-MT-FLAGS @ _PT-FRAME-PAYLOAD 76 + L!
+    _PT-MT-MINIMUM @ _PT-FRAME-PAYLOAD 80 + _PT-U64!
+    _PT-MT-MAXIMUM @ _PT-FRAME-PAYLOAD 88 + _PT-U64!
+    _PT-MT-VALUE @ _PT-FRAME-PAYLOAD 96 + _PT-U64!
+    _PT-PO-SEND ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+\        orientation meter-flags minimum maximum initial-value session -- status
+: PT-METER-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-METER-WRITE ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
+\        orientation meter-flags minimum maximum initial-value session -- status
+: PT-METER-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-METER-WRITE ;
+
+VARIABLE _PT-STO-S
+VARIABLE _PT-STO-TYPE
+VARIABLE _PT-STO-INACTIVE-RED
+VARIABLE _PT-STO-INACTIVE-GREEN
+VARIABLE _PT-STO-INACTIVE-BLUE
+VARIABLE _PT-STO-INACTIVE-ALPHA
+VARIABLE _PT-STO-ACTIVE-RED
+VARIABLE _PT-STO-ACTIVE-GREEN
+VARIABLE _PT-STO-ACTIVE-BLUE
+VARIABLE _PT-STO-ACTIVE-ALPHA
+VARIABLE _PT-STO-VALUE
+VARIABLE _PT-STO-SHAPE
+
+: _PT-STATUS-FIELDS?  ( -- flag )
+    _PT-STO-INACTIVE-RED @ _PT-STO-INACTIVE-GREEN @
+    _PT-STO-INACTIVE-BLUE @ _PT-STO-INACTIVE-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-STO-ACTIVE-RED @ _PT-STO-ACTIVE-GREEN @
+    _PT-STO-ACTIVE-BLUE @ _PT-STO-ACTIVE-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-STO-SHAPE @ DUP PT-STATUS-CIRCLE U<
+    SWAP PT-STATUS-DIAMOND U> OR 0= ;
+
+\ Stack: common-prefix inactive-r inactive-g inactive-b inactive-a
+\        active-r active-g active-b active-a initial-value shape
+\        session message-type -- status
+: _PT-STATUS-WRITE
+    _PT-STO-TYPE ! _PT-STO-S ! _PT-STO-SHAPE ! _PT-STO-VALUE !
+    _PT-STO-ACTIVE-ALPHA ! _PT-STO-ACTIVE-BLUE !
+    _PT-STO-ACTIVE-GREEN ! _PT-STO-ACTIVE-RED !
+    _PT-STO-INACTIVE-ALPHA ! _PT-STO-INACTIVE-BLUE !
+    _PT-STO-INACTIVE-GREEN ! _PT-STO-INACTIVE-RED !
+    _PT-STO-S @ _PT-STO-TYPE @ 7 _PT-OBJECT-COMMON!
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-INSTRUMENT? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-STATUS-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+    96 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-COMMON-PAYLOAD!
+    _PT-STO-INACTIVE-RED @ _PT-FRAME-PAYLOAD 64 + C!
+    _PT-STO-INACTIVE-GREEN @ _PT-FRAME-PAYLOAD 65 + C!
+    _PT-STO-INACTIVE-BLUE @ _PT-FRAME-PAYLOAD 66 + C!
+    _PT-STO-INACTIVE-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!
+    _PT-STO-ACTIVE-RED @ _PT-FRAME-PAYLOAD 68 + C!
+    _PT-STO-ACTIVE-GREEN @ _PT-FRAME-PAYLOAD 69 + C!
+    _PT-STO-ACTIVE-BLUE @ _PT-FRAME-PAYLOAD 70 + C!
+    _PT-STO-ACTIVE-ALPHA @ _PT-FRAME-PAYLOAD 71 + C!
+    _PT-STO-VALUE @ _PT-FRAME-PAYLOAD 72 + _PT-U64!
+    _PT-STO-SHAPE @ _PT-FRAME-PAYLOAD 80 + L!
+    _PT-PO-SEND ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        inactive-red inactive-green inactive-blue inactive-alpha
+\        active-red active-green active-blue active-alpha initial-value shape
+\        session -- status
+: PT-STATUS-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-STATUS-WRITE ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        inactive-red inactive-green inactive-blue inactive-alpha
+\        active-red active-green active-blue active-alpha initial-value shape
+\        session -- status
+: PT-STATUS-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-STATUS-WRITE ;
+
+VARIABLE _PT-PLO-S
+VARIABLE _PT-PLO-TYPE
+VARIABLE _PT-PLO-SERIES
+VARIABLE _PT-PLO-MINIMUM
+VARIABLE _PT-PLO-MAXIMUM
+VARIABLE _PT-PLO-LINE-RED
+VARIABLE _PT-PLO-LINE-GREEN
+VARIABLE _PT-PLO-LINE-BLUE
+VARIABLE _PT-PLO-LINE-ALPHA
+VARIABLE _PT-PLO-FILL-RED
+VARIABLE _PT-PLO-FILL-GREEN
+VARIABLE _PT-PLO-FILL-BLUE
+VARIABLE _PT-PLO-FILL-ALPHA
+VARIABLE _PT-PLO-FLAGS
+
+: _PT-PLOT-FIELDS?  ( -- flag )
+    _PT-PLO-SERIES @ 0= IF FALSE EXIT THEN
+    _PT-PLO-MINIMUM @ _PT-PLO-MAXIMUM @ < 0= IF FALSE EXIT THEN
+    _PT-PLO-LINE-RED @ _PT-PLO-LINE-GREEN @
+    _PT-PLO-LINE-BLUE @ _PT-PLO-LINE-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-PLO-FILL-RED @ _PT-PLO-FILL-GREEN @
+    _PT-PLO-FILL-BLUE @ _PT-PLO-FILL-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-PLO-FLAGS @
+    PT-PLOT-FILL-TO-MINIMUM PT-PLOT-DRAW-POINTS OR INVERT AND 0= ;
+
+\ Stack: common-prefix series minimum maximum line-r line-g line-b line-a
+\        fill-r fill-g fill-b fill-a plot-flags session message-type -- status
+: _PT-PLOT-WRITE
+    _PT-PLO-TYPE ! _PT-PLO-S ! _PT-PLO-FLAGS !
+    _PT-PLO-FILL-ALPHA ! _PT-PLO-FILL-BLUE !
+    _PT-PLO-FILL-GREEN ! _PT-PLO-FILL-RED !
+    _PT-PLO-LINE-ALPHA ! _PT-PLO-LINE-BLUE !
+    _PT-PLO-LINE-GREEN ! _PT-PLO-LINE-RED !
+    _PT-PLO-MAXIMUM ! _PT-PLO-MINIMUM ! _PT-PLO-SERIES !
+    _PT-PLO-S @ _PT-PLO-TYPE @ 8 _PT-OBJECT-COMMON!
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-SERIES? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-PLOT-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+    104 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-COMMON-PAYLOAD!
+    _PT-PLO-SERIES @ _PT-FRAME-PAYLOAD 64 + _PT-U64!
+    _PT-PLO-MINIMUM @ _PT-FRAME-PAYLOAD 72 + _PT-U64!
+    _PT-PLO-MAXIMUM @ _PT-FRAME-PAYLOAD 80 + _PT-U64!
+    _PT-PLO-LINE-RED @ _PT-FRAME-PAYLOAD 88 + C!
+    _PT-PLO-LINE-GREEN @ _PT-FRAME-PAYLOAD 89 + C!
+    _PT-PLO-LINE-BLUE @ _PT-FRAME-PAYLOAD 90 + C!
+    _PT-PLO-LINE-ALPHA @ _PT-FRAME-PAYLOAD 91 + C!
+    _PT-PLO-FILL-RED @ _PT-FRAME-PAYLOAD 92 + C!
+    _PT-PLO-FILL-GREEN @ _PT-FRAME-PAYLOAD 93 + C!
+    _PT-PLO-FILL-BLUE @ _PT-FRAME-PAYLOAD 94 + C!
+    _PT-PLO-FILL-ALPHA @ _PT-FRAME-PAYLOAD 95 + C!
+    _PT-PLO-FLAGS @ _PT-FRAME-PAYLOAD 96 + L!
+    _PT-PO-SEND ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        series minimum maximum line-red line-green line-blue line-alpha
+\        fill-red fill-green fill-blue fill-alpha plot-flags session -- status
+: PT-PLOT-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-PLOT-WRITE ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        series minimum maximum line-red line-green line-blue line-alpha
+\        fill-red fill-green fill-blue fill-alpha plot-flags session -- status
+: PT-PLOT-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-PLOT-WRITE ;
+
+VARIABLE _PT-WF-S
+VARIABLE _PT-WF-TYPE
+VARIABLE _PT-WF-SERIES
+VARIABLE _PT-WF-MINIMUM
+VARIABLE _PT-WF-MAXIMUM
+VARIABLE _PT-WF-TRACE-RED
+VARIABLE _PT-WF-TRACE-GREEN
+VARIABLE _PT-WF-TRACE-BLUE
+VARIABLE _PT-WF-TRACE-ALPHA
+VARIABLE _PT-WF-ZERO-RED
+VARIABLE _PT-WF-ZERO-GREEN
+VARIABLE _PT-WF-ZERO-BLUE
+VARIABLE _PT-WF-ZERO-ALPHA
+VARIABLE _PT-WF-ZERO-VALUE
+VARIABLE _PT-WF-FLAGS
+
+: _PT-WAVEFORM-FIELDS?  ( -- flag )
+    _PT-WF-SERIES @ 0= IF FALSE EXIT THEN
+    _PT-WF-MINIMUM @ _PT-WF-MAXIMUM @ < 0= IF FALSE EXIT THEN
+    _PT-WF-ZERO-VALUE @ _PT-WF-MINIMUM @ < IF FALSE EXIT THEN
+    _PT-WF-ZERO-VALUE @ _PT-WF-MAXIMUM @ > IF FALSE EXIT THEN
+    _PT-WF-TRACE-RED @ _PT-WF-TRACE-GREEN @
+    _PT-WF-TRACE-BLUE @ _PT-WF-TRACE-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-WF-ZERO-RED @ _PT-WF-ZERO-GREEN @
+    _PT-WF-ZERO-BLUE @ _PT-WF-ZERO-ALPHA @
+        _PT-OBJECT-COLOR? 0= IF FALSE EXIT THEN
+    _PT-WF-FLAGS @ PT-WAVEFORM-DRAW-ZERO-LINE INVERT AND 0= ;
+
+\ Stack: common-prefix series minimum maximum trace-r trace-g trace-b trace-a
+\        zero-r zero-g zero-b zero-a zero-value waveform-flags
+\        session message-type -- status
+: _PT-WAVEFORM-WRITE
+    _PT-WF-TYPE ! _PT-WF-S ! _PT-WF-FLAGS ! _PT-WF-ZERO-VALUE !
+    _PT-WF-ZERO-ALPHA ! _PT-WF-ZERO-BLUE !
+    _PT-WF-ZERO-GREEN ! _PT-WF-ZERO-RED !
+    _PT-WF-TRACE-ALPHA ! _PT-WF-TRACE-BLUE !
+    _PT-WF-TRACE-GREEN ! _PT-WF-TRACE-RED !
+    _PT-WF-MAXIMUM ! _PT-WF-MINIMUM ! _PT-WF-SERIES !
+    _PT-WF-S @ _PT-WF-TYPE @ 9 _PT-OBJECT-COMMON!
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-SERIES? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-WAVEFORM-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+    112 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-COMMON-PAYLOAD!
+    _PT-WF-SERIES @ _PT-FRAME-PAYLOAD 64 + _PT-U64!
+    _PT-WF-MINIMUM @ _PT-FRAME-PAYLOAD 72 + _PT-U64!
+    _PT-WF-MAXIMUM @ _PT-FRAME-PAYLOAD 80 + _PT-U64!
+    _PT-WF-TRACE-RED @ _PT-FRAME-PAYLOAD 88 + C!
+    _PT-WF-TRACE-GREEN @ _PT-FRAME-PAYLOAD 89 + C!
+    _PT-WF-TRACE-BLUE @ _PT-FRAME-PAYLOAD 90 + C!
+    _PT-WF-TRACE-ALPHA @ _PT-FRAME-PAYLOAD 91 + C!
+    _PT-WF-ZERO-RED @ _PT-FRAME-PAYLOAD 92 + C!
+    _PT-WF-ZERO-GREEN @ _PT-FRAME-PAYLOAD 93 + C!
+    _PT-WF-ZERO-BLUE @ _PT-FRAME-PAYLOAD 94 + C!
+    _PT-WF-ZERO-ALPHA @ _PT-FRAME-PAYLOAD 95 + C!
+    _PT-WF-ZERO-VALUE @ _PT-FRAME-PAYLOAD 96 + _PT-U64!
+    _PT-WF-FLAGS @ _PT-FRAME-PAYLOAD 104 + L!
+    _PT-PO-SEND ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        series minimum maximum trace-red trace-green trace-blue trace-alpha
+\        zero-red zero-green zero-blue zero-alpha zero-value waveform-flags
+\        session -- status
+: PT-WAVEFORM-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-WAVEFORM-WRITE ;
+
+\ Stack: owner generation object region parent left top right bottom z visible
+\        series minimum maximum trace-red trace-green trace-blue trace-alpha
+\        zero-red zero-green zero-blue zero-alpha zero-value waveform-flags
+\        session -- status
+: PT-WAVEFORM-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-WAVEFORM-WRITE ;
+
+VARIABLE _PT-OU-S
+VARIABLE _PT-OU-TYPE
+VARIABLE _PT-OU-OWNER
+VARIABLE _PT-OU-GENERATION
+VARIABLE _PT-OU-ID
+VARIABLE _PT-OU-VALUE
+
+: _PT-OBJECT-UPDATE-TYPE?  ( -- flag )
+    _PT-OU-TYPE @ DUP _PT-M-OBJECT-SET-VALUE = IF DROP TRUE EXIT THEN
+    DUP _PT-M-OBJECT-SET-VISIBILITY = IF DROP TRUE EXIT THEN
+    _PT-M-OBJECT-DROP = ;
+
+: _PT-OBJECT-UPDATE-ADMIT  ( payload-u -- status )
+    _PT-OU-S @ _PT-VALID-S? 0= IF DROP PT-S-INVALID EXIT THEN
+    _PT-OU-S @ _PT-OP-LOST? IF DROP PT-S-SESSION-LOST EXIT THEN
+    _PT-OU-S @ _PT-RET-CORE? 0= IF DROP PT-S-UNSUPPORTED EXIT THEN
+    _PT-OBJECT-UPDATE-TYPE? 0= IF DROP PT-S-INVALID EXIT THEN
+    _PT-OU-TYPE @ _PT-M-OBJECT-SET-VALUE = IF
+        _PT-OU-S @ _PT-RET-INSTRUMENT? 0= IF
+            DROP PT-S-UNSUPPORTED EXIT
+        THEN
+    THEN
+    _PT-OU-OWNER @ 0= _PT-OU-GENERATION @ 0= OR
+    _PT-OU-ID @ 0= OR IF DROP PT-S-INVALID EXIT THEN
+    _PT-OU-TYPE @ _PT-PO-TYPE !
+    _PT-PO-U !
+    _PT-OU-S @ _PT-PO-S !
+    _PT-PO-ADMIT ;
+
+: _PT-OBJECT-UPDATE-PREFIX!  ( -- )
+    _PT-OU-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!
+    _PT-OU-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!
+    _PT-OU-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64! ;
+
+: PT-OBJECT-SET-VALUE  ( owner generation object value session -- status )
+    _PT-OU-S ! _PT-OU-VALUE ! _PT-OU-ID !
+    _PT-OU-GENERATION ! _PT-OU-OWNER !
+    _PT-M-OBJECT-SET-VALUE _PT-OU-TYPE !
+    32 _PT-OBJECT-UPDATE-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-UPDATE-PREFIX!
+    _PT-OU-VALUE @ _PT-FRAME-PAYLOAD 24 + _PT-U64!
+    _PT-PO-SEND ;
+
+\ Stack: owner generation object visible session -- status
+: PT-OBJECT-SET-VISIBILITY
+    _PT-OU-S ! _PT-OU-VALUE ! _PT-OU-ID !
+    _PT-OU-GENERATION ! _PT-OU-OWNER !
+    _PT-M-OBJECT-SET-VISIBILITY _PT-OU-TYPE !
+    _PT-OU-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OU-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OU-VALUE @ _PT-OBJECT-BOOL? 0= IF PT-S-INVALID EXIT THEN
+    32 _PT-OBJECT-UPDATE-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-UPDATE-PREFIX!
+    _PT-OU-VALUE @ _PT-FRAME-PAYLOAD 24 + C!
+    _PT-PO-SEND ;
+
+: PT-OBJECT-DROP  ( owner generation object session -- status )
+    _PT-OU-S ! _PT-OU-ID ! _PT-OU-GENERATION ! _PT-OU-OWNER !
+    _PT-M-OBJECT-DROP _PT-OU-TYPE !
+    0 _PT-OU-VALUE !
+    24 _PT-OBJECT-UPDATE-ADMIT ?DUP IF EXIT THEN
+    _PT-OBJECT-UPDATE-PREFIX!
+    _PT-PO-SEND ;
 
 \ Semantic controls are a separate retained identity namespace, but consume
 \ the owner's shared object and UTF-8 quotas at the terminal.  PT validates

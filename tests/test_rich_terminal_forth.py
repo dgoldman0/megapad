@@ -1248,6 +1248,515 @@ class TestRichTerminalForth(_KDOSTestBase):
             struct.pack(f"<{len(expected_facts)}q", *expected_facts),
         )
 
+    def test_typed_object_writers_emit_exact_bytes_and_accounting(self) -> None:
+        """Pack every universal typed OBJECT writer and generic mutation."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PT-OBJ-RX 8192 ALLOT",
+                "CREATE PT-OBJ-TX 8192 ALLOT",
+                "CREATE PT-OBJ-EVENT PT-EVENT-SIZE ALLOT",
+                "CREATE PT-OBJ-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PT-OBJ-SESSION PT-OBJ-SESSION-STORAGE 7 + -8 AND ;",
+                "CREATE PT-OBJ-POINTS-STORAGE 32 7 + ALLOT",
+                ": PT-OBJ-POINTS PT-OBJ-POINTS-STORAGE 7 + -8 AND ;",
+                "CREATE PT-OBJ-MAX-POINTS-STORAGE 48 7 + ALLOT",
+                ": PT-OBJ-MAX-POINTS PT-OBJ-MAX-POINTS-STORAGE 7 + -8 AND ;",
+                "CREATE PT-OBJ-UNIT 3 ALLOT",
+                "CREATE PT-OBJ-BAD-UNIT 1 ALLOT",
+                "CREATE PT-OBJ-MARK-BUFFER 8 ALLOT",
+                "CREATE PT-OBJ-STATUSES 34 8 * ALLOT",
+                "CREATE PT-OBJ-FACTS 9 8 * ALLOT",
+                "VARIABLE PT-OBJ-STATUS-I",
+                "VARIABLE PT-OBJ-FACT-I",
+                ": PT-OBJ-STATUS!  ( status -- )",
+                "  PT-OBJ-STATUSES PT-OBJ-STATUS-I @ 8 * + !",
+                "  PT-OBJ-STATUS-I @ 1+ PT-OBJ-STATUS-I ! ;",
+                ": PT-OBJ-FACT!  ( value -- )",
+                "  PT-OBJ-FACTS PT-OBJ-FACT-I @ 8 * + !",
+                "  PT-OBJ-FACT-I @ 1+ PT-OBJ-FACT-I ! ;",
+                ": PT-OBJ-MARK  ( u -- )",
+                "  PT-OBJ-MARK-BUFFER _PT-U64!",
+                "  PT-OBJ-MARK-BUFFER 8 TYPE TX-FLUSH ;",
+                ": PT-OBJ-OWNER  ( -- owner generation )",
+                "  0x0102030405060708 0x1112131415161718 ;",
+                ": PT-OBJ-COMMON-V  ( object visible -- common-prefix )",
+                "  >R >R PT-OBJ-OWNER R>",
+                "  0x6162636465666768 0",
+                "  0x01020304 0x11121314 0xA1A2A3A4 0xB1B2B3B4 -7 R> ;",
+                ": PT-OBJ-COMMON  ( object -- common-prefix )",
+                "  PT-OBJECT-VISIBLE PT-OBJ-COMMON-V ;",
+                ": PT-OBJ-GROUP  ( object -- common-prefix session )",
+                "  PT-OBJ-COMMON PT-OBJ-SESSION ;",
+                ": PT-OBJ-POLYLINE  ( object -- polyline-args )",
+                "  PT-OBJ-COMMON 0x01000000 1 2 3 255",
+                "  PT-POLYLINE-CLOSED PT-OBJ-POINTS 32 PT-OBJ-SESSION ;",
+                ": PT-OBJ-IMAGE  ( object -- image-args )",
+                "  PT-OBJ-COMMON 0x696A6B6C6D6E6F70",
+                "  PT-IMAGE-FIT-COVER 200 PT-OBJ-SESSION ;",
+                ": PT-OBJ-READOUT  ( object -- readout-args )",
+                "  PT-OBJ-COMMON 1 2 3 4 5 6 7 8",
+                "  PT-READOUT-FIXED 2 -123 100",
+                "  PT-OBJ-UNIT 3 PT-OBJ-SESSION ;",
+                ": PT-OBJ-METER  ( object -- meter-args )",
+                "  PT-OBJ-COMMON 10 11 12 13 14 15 16 17",
+                "  PT-METER-VERTICAL PT-METER-SHOW-VALUE",
+                "  -100 100 -25 PT-OBJ-SESSION ;",
+                ": PT-OBJ-STATUS  ( object -- status-args )",
+                "  PT-OBJ-COMMON 20 21 22 23 24 25 26 27",
+                "  -1 PT-STATUS-DIAMOND PT-OBJ-SESSION ;",
+                ": PT-OBJ-PLOT  ( object -- plot-args )",
+                "  PT-OBJ-COMMON 0x7172737475767778 -10 20",
+                "  30 31 32 33 34 35 36 37",
+                "  PT-PLOT-FILL-TO-MINIMUM PT-PLOT-DRAW-POINTS OR",
+                "  PT-OBJ-SESSION ;",
+                ": PT-OBJ-WAVEFORM  ( object -- waveform-args )",
+                "  PT-OBJ-COMMON 0x7172737475767778 -1000 1000",
+                "  40 41 42 43 44 45 46 47 0",
+                "  PT-WAVEFORM-DRAW-ZERO-LINE PT-OBJ-SESSION ;",
+                ": PT-OBJ-FEATURES!  ( features -- )",
+                "  PT-OBJ-SESSION _PT.S.RET-CAPS 8 + _PT-U64! ;",
+                ": PT-OBJ-IMAGE-FORMAT!  ( format -- )",
+                "  PT-OBJ-SESSION _PT.S.RET-FORMATS 8 + L! ;",
+                ": PT-OBJ-GLYPH-MAX!  ( bytes -- )",
+                "  PT-OBJ-SESSION _PT.S.RET-FORMATS 24 + L! ;",
+                ": PT-OBJ-DATA!",
+                "  0 PT-OBJ-POINTS !",
+                "  0x11111111 PT-OBJ-POINTS 8 + !",
+                "  0x88888888 PT-OBJ-POINTS 16 + !",
+                "  0xFFFFFFFF PT-OBJ-POINTS 24 + !",
+                "  0 PT-OBJ-MAX-POINTS !",
+                "  1 PT-OBJ-MAX-POINTS 8 + !",
+                "  2 PT-OBJ-MAX-POINTS 16 + !",
+                "  3 PT-OBJ-MAX-POINTS 24 + !",
+                "  4 PT-OBJ-MAX-POINTS 32 + !",
+                "  5 PT-OBJ-MAX-POINTS 40 + !",
+                "  0xC2 PT-OBJ-UNIT C!",
+                "  0xB5 PT-OBJ-UNIT 1+ C!",
+                "  0x73 PT-OBJ-UNIT 2 + C!",
+                "  0xC2 PT-OBJ-BAD-UNIT C! ;",
+                ": PT-OBJ-PRIME",
+                "  PT-OBJ-STATUSES 34 8 * 0 FILL",
+                "  PT-OBJ-FACTS 9 8 * 0 FILL",
+                "  PT-OBJ-STATUS-I OFF PT-OBJ-FACT-I OFF",
+                "  PT-OBJ-DATA!",
+                "  PT-OBJ-RX 8192 PT-OBJ-TX 8192",
+                "    PT-OBJ-EVENT PT-EVENT-SIZE PT-OBJ-SESSION",
+                "    PT-INIT PT-OBJ-STATUS!",
+                "  PT-ST-ACTIVE PT-OBJ-SESSION _PT.S.STATE !",
+                "  128 PT-OBJ-SESSION _PT.S.PEER-MAX-PAY !",
+                "  4096 PT-OBJ-SESSION _PT.S.PEER-MAX-TX !",
+                "  8192 PT-OBJ-SESSION _PT.S.PEER-GRANT !",
+                "  8192 PT-OBJ-SESSION _PT.S.PEER-INITIAL !",
+                "  0 PT-OBJ-SESSION _PT.S.PEER-SENT !",
+                "  0 PT-OBJ-SESSION _PT.S.TX-SEQ !",
+                "  0x090A0B0C0D0E0F10 PT-OBJ-SESSION _PT.S.SESSION-ID !",
+                "  9 PT-OBJ-SESSION _PT.S.EPOCH !",
+                "  -1 PT-OBJ-SESSION _PT.S.RET-ENABLED? !",
+                "  _PT-RD-AVAILABLE PT-OBJ-SESSION _PT.S.RET-STATE !",
+                "  0x1F PT-OBJ-FEATURES!",
+                "  32 PT-OBJ-SESSION _PT.S.RET-CAPS 32 + L!",
+                "  4 PT-OBJ-SESSION _PT.S.RET-CAPS 36 + L!",
+                "  19 PT-OBJ-SESSION _PT.S.RET-CAPS 40 + L!",
+                "  4096 PT-OBJ-SESSION _PT.S.RET-CAPS 48 + _PT-U64!",
+                "  PT-RESOURCE-RGBA8 PT-OBJ-IMAGE-FORMAT!",
+                "  2 PT-OBJ-SESSION _PT.S.RET-FORMATS 20 + L!",
+                "  16 PT-OBJ-GLYPH-MAX!",
+                "  2 PT-OBJ-SESSION _PT.S.RET-FORMATS 28 + L!",
+                "  8 PT-OBJ-SESSION _PT.S.RET-FORMATS 32 + L!",
+                "  64 PT-OBJ-SESSION _PT.S.RET-FORMATS 40 + _PT-U64!",
+                "  64 PT-OBJ-SESSION _PT.S.RET-FORMATS 48 + _PT-U64!",
+                "  -1 PT-OBJ-SESSION _PT.S.TX-OPEN? !",
+                "  _PT-TX-PRESENT PT-OBJ-SESSION _PT.S.TX-KIND !",
+                "  PT-CELL-NONE PT-OBJ-SESSION _PT.S.TX-CELL-MODE !",
+                "  PT-RET-DELTA PT-OBJ-SESSION _PT.S.TX-RET-MODE !",
+                "  19 PT-OBJ-SESSION _PT.S.TX-RET-OPS !",
+                "  2390 PT-OBJ-SESSION _PT.S.TX-RET-BYTES ! ;",
+                ": PT-OBJ-INVALIDS",
+                "  0x1D PT-OBJ-FEATURES!",
+                "  0x2122232425262728 PT-OBJ-GROUP",
+                "    PT-GROUP-DEFINE PT-OBJ-STATUS!",
+                "  0x1B PT-OBJ-FEATURES!",
+                "  0x3132333435363738 PT-OBJ-IMAGE",
+                "    PT-IMAGE-DEFINE PT-OBJ-STATUS!",
+                "  0x1F PT-OBJ-FEATURES!",
+                "  0 PT-OBJ-IMAGE-FORMAT!",
+                "  0x3132333435363738 PT-OBJ-IMAGE",
+                "    PT-IMAGE-DEFINE PT-OBJ-STATUS!",
+                "  PT-RESOURCE-RGBA8 PT-OBJ-IMAGE-FORMAT!",
+                "  0x17 PT-OBJ-FEATURES!",
+                "  PT-OBJ-OWNER 0x393A3B3C3D3E3F40 -456 PT-OBJ-SESSION",
+                "    PT-OBJECT-SET-VALUE PT-OBJ-STATUS!",
+                "  0x0F PT-OBJ-FEATURES!",
+                "  0x5152535455565758 PT-OBJ-PLOT",
+                "    PT-PLOT-DEFINE PT-OBJ-STATUS!",
+                "  0x1F PT-OBJ-FEATURES!",
+                "  0x2122232425262728 2 PT-OBJ-COMMON-V PT-OBJ-SESSION",
+                "    PT-GROUP-DEFINE PT-OBJ-STATUS!",
+                "  0x292A2B2C2D2E2F30 PT-OBJ-COMMON",
+                "    0x01000000 1 2 3 255 PT-POLYLINE-CLOSED",
+                "    PT-OBJ-MAX-POINTS 48 PT-OBJ-SESSION",
+                "    PT-POLYLINE-DEFINE PT-OBJ-STATUS!",
+                "  0x292A2B2C2D2E2F30 PT-OBJ-COMMON",
+                "    0x01000000 1 2 3 255 PT-POLYLINE-CLOSED",
+                "    PT-OBJ-POINTS 1+ 32 PT-OBJ-SESSION",
+                "    PT-POLYLINE-DEFINE PT-OBJ-STATUS!",
+                "  6 PT-OBJ-GLYPH-MAX!",
+                "  0x393A3B3C3D3E3F40 PT-OBJ-READOUT",
+                "    PT-READOUT-DEFINE PT-OBJ-STATUS!",
+                "  16 PT-OBJ-GLYPH-MAX!",
+                "  0x393A3B3C3D3E3F40 PT-OBJ-COMMON 1 2 3 4 5 6 7 8",
+                "    PT-READOUT-FIXED 2 -123 100",
+                "    PT-OBJ-BAD-UNIT 1 PT-OBJ-SESSION",
+                "    PT-READOUT-DEFINE PT-OBJ-STATUS!",
+                "  0x4142434445464748 PT-OBJ-COMMON",
+                "    10 11 12 13 14 15 16 17",
+                "    PT-METER-VERTICAL PT-METER-SHOW-VALUE",
+                "    10 10 10 PT-OBJ-SESSION",
+                "    PT-METER-DEFINE PT-OBJ-STATUS!",
+                "  PT-OBJ-OWNER 0x3132333435363738 2 PT-OBJ-SESSION",
+                "    PT-OBJECT-SET-VISIBILITY PT-OBJ-STATUS! ;",
+                ": PT-OBJ-VALIDS",
+                "  0x2122232425262728 PT-OBJ-GROUP",
+                "    PT-GROUP-DEFINE PT-OBJ-STATUS!",
+                "  0x2122232425262728 PT-OBJ-GROUP",
+                "    PT-GROUP-REPLACE PT-OBJ-STATUS!",
+                "  0x292A2B2C2D2E2F30 PT-OBJ-POLYLINE",
+                "    PT-POLYLINE-DEFINE PT-OBJ-STATUS!",
+                "  0x292A2B2C2D2E2F30 PT-OBJ-POLYLINE",
+                "    PT-POLYLINE-REPLACE PT-OBJ-STATUS!",
+                "  0x3132333435363738 PT-OBJ-IMAGE",
+                "    PT-IMAGE-DEFINE PT-OBJ-STATUS!",
+                "  0x3132333435363738 PT-OBJ-IMAGE",
+                "    PT-IMAGE-REPLACE PT-OBJ-STATUS!",
+                "  0x393A3B3C3D3E3F40 PT-OBJ-READOUT",
+                "    PT-READOUT-DEFINE PT-OBJ-STATUS!",
+                "  0x393A3B3C3D3E3F40 PT-OBJ-READOUT",
+                "    PT-READOUT-REPLACE PT-OBJ-STATUS!",
+                "  0x4142434445464748 PT-OBJ-METER",
+                "    PT-METER-DEFINE PT-OBJ-STATUS!",
+                "  0x4142434445464748 PT-OBJ-METER",
+                "    PT-METER-REPLACE PT-OBJ-STATUS!",
+                "  0x494A4B4C4D4E4F50 PT-OBJ-STATUS",
+                "    PT-STATUS-DEFINE PT-OBJ-STATUS!",
+                "  0x494A4B4C4D4E4F50 PT-OBJ-STATUS",
+                "    PT-STATUS-REPLACE PT-OBJ-STATUS!",
+                "  0x5152535455565758 PT-OBJ-PLOT",
+                "    PT-PLOT-DEFINE PT-OBJ-STATUS!",
+                "  0x5152535455565758 PT-OBJ-PLOT",
+                "    PT-PLOT-REPLACE PT-OBJ-STATUS!",
+                "  0x595A5B5C5D5E5F60 PT-OBJ-WAVEFORM",
+                "    PT-WAVEFORM-DEFINE PT-OBJ-STATUS!",
+                "  0x595A5B5C5D5E5F60 PT-OBJ-WAVEFORM",
+                "    PT-WAVEFORM-REPLACE PT-OBJ-STATUS!",
+                "  PT-OBJ-OWNER 0x393A3B3C3D3E3F40 -456 PT-OBJ-SESSION",
+                "    PT-OBJECT-SET-VALUE PT-OBJ-STATUS!",
+                "  PT-OBJ-OWNER 0x3132333435363738 PT-OBJECT-HIDDEN",
+                "    PT-OBJ-SESSION PT-OBJECT-SET-VISIBILITY PT-OBJ-STATUS!",
+                "  PT-OBJ-OWNER 0x2122232425262728 PT-OBJ-SESSION",
+                "    PT-OBJECT-DROP PT-OBJ-STATUS! ;",
+                ": PT-OBJ-RUN",
+                "  PT-OBJ-PRIME",
+                "  0x313030304745424F PT-OBJ-MARK",
+                "  PT-OBJ-INVALIDS",
+                "  PT-OBJ-SESSION _PT.S.TX-RET-OPS-DONE @ PT-OBJ-FACT!",
+                "  PT-OBJ-SESSION _PT.S.TX-RET-BYTES-DONE @ PT-OBJ-FACT!",
+                "  PT-OBJ-SESSION _PT.S.TX-SEQ @ PT-OBJ-FACT!",
+                "  PT-OBJ-SESSION _PT.S.PEER-SENT @ PT-OBJ-FACT!",
+                "  PT-OBJ-VALIDS",
+                "  PT-OBJ-OWNER 0x494A4B4C4D4E4F50 PT-OBJ-SESSION",
+                "    PT-OBJECT-DROP PT-OBJ-STATUS!",
+                "  PT-OBJ-SESSION _PT.S.TX-RET-OPS-DONE @ PT-OBJ-FACT!",
+                "  PT-OBJ-SESSION _PT.S.TX-RET-BYTES-DONE @ PT-OBJ-FACT!",
+                "  PT-OBJ-SESSION _PT.S.TX-SEQ @ PT-OBJ-FACT!",
+                "  PT-OBJ-SESSION _PT.S.PEER-SENT @ PT-OBJ-FACT!",
+                "  DEPTH PT-OBJ-STATUS!",
+                "  PT-OBJ-STATUS-I @ PT-OBJ-FACT!",
+                "  0x32303030444E454F PT-OBJ-MARK",
+                "  0x333030305354534F PT-OBJ-MARK",
+                "  PT-OBJ-STATUSES PT-OBJ-STATUS-I @ 8 * TYPE",
+                "  0x343030304554534F PT-OBJ-MARK",
+                "  0x353030305443464F PT-OBJ-MARK",
+                "  PT-OBJ-FACTS PT-OBJ-FACT-I @ 8 * TYPE",
+                "  0x363030304543464F PT-OBJ-MARK ;",
+                "PT-OBJ-RUN BYE",
+            ]
+        )
+        program = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data:
+                if position >= len(program):
+                    break
+                chunk = _next_line_chunk(program, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+                continue
+            executed = system.run_batch(
+                min(RUN_BATCH_STEPS, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += max(executed, 1)
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(program), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "typed object writer byte oracle exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "dictionary overflow",
+            "Stack underflow",
+            "Stack overflow",
+            "Return stack overflow",
+            "nested definition",
+            "branch out of range",
+            "control-flow",
+            "*** BUS FAULT",
+            "*** PRIVILEGE FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+
+        owner = 0x0102030405060708
+        generation = 0x1112131415161718
+        region = 0x6162636465666768
+        group = 0x2122232425262728
+        polyline = 0x292A2B2C2D2E2F30
+        image = 0x3132333435363738
+        readout = 0x393A3B3C3D3E3F40
+        meter = 0x4142434445464748
+        status = 0x494A4B4C4D4E4F50
+        plot = 0x5152535455565758
+        waveform = 0x595A5B5C5D5E5F60
+        resource = 0x696A6B6C6D6E6F70
+        series = 0x7172737475767778
+
+        def common(object_id: int, kind: int) -> bytes:
+            return struct.pack(
+                "<QQQHHiQQIIII",
+                owner,
+                generation,
+                object_id,
+                kind,
+                1,
+                -7,
+                region,
+                0,
+                0x01020304,
+                0x11121314,
+                0xA1A2A3A4,
+                0xB1B2B3B4,
+            )
+
+        unit = "\N{MICRO SIGN}s".encode("utf-8")
+        point_bytes = struct.pack(
+            "<IIII",
+            0,
+            0x11111111,
+            0x88888888,
+            0xFFFFFFFF,
+        )
+        definitions = (
+            (group, 1, b""),
+            (
+                polyline,
+                2,
+                struct.pack("<II4BI", 2, 0x01000000, 1, 2, 3, 255, 1)
+                + point_bytes,
+            ),
+            (image, 3, struct.pack("<QIB3x", resource, 2, 200)),
+            (
+                readout,
+                5,
+                struct.pack(
+                    "<8BIIqqII",
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    1,
+                    2,
+                    -123,
+                    100,
+                    len(unit),
+                    0,
+                )
+                + unit,
+            ),
+            (
+                meter,
+                6,
+                struct.pack(
+                    "<8BIIqqqQ",
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    1,
+                    1,
+                    -100,
+                    100,
+                    -25,
+                    0,
+                ),
+            ),
+            (
+                status,
+                7,
+                struct.pack(
+                    "<8BqIIQ",
+                    20,
+                    21,
+                    22,
+                    23,
+                    24,
+                    25,
+                    26,
+                    27,
+                    -1,
+                    2,
+                    0,
+                    0,
+                ),
+            ),
+            (
+                plot,
+                8,
+                struct.pack(
+                    "<Qqq8BII",
+                    series,
+                    -10,
+                    20,
+                    30,
+                    31,
+                    32,
+                    33,
+                    34,
+                    35,
+                    36,
+                    37,
+                    3,
+                    0,
+                ),
+            ),
+            (
+                waveform,
+                9,
+                struct.pack(
+                    "<Qqq8BqII",
+                    series,
+                    -1000,
+                    1000,
+                    40,
+                    41,
+                    42,
+                    43,
+                    44,
+                    45,
+                    46,
+                    47,
+                    0,
+                    1,
+                    0,
+                ),
+            ),
+        )
+        operations: list[tuple[RetainedMessageType, bytes]] = []
+        for object_id, kind, body in definitions:
+            payload = common(object_id, kind) + body
+            operations.extend(
+                (
+                    (RetainedMessageType.OBJECT_DEFINE, payload),
+                    (RetainedMessageType.OBJECT_REPLACE, payload),
+                )
+            )
+        operations.extend(
+            (
+                (
+                    RetainedMessageType.OBJECT_SET_VALUE,
+                    struct.pack("<QQQq", owner, generation, readout, -456),
+                ),
+                (
+                    RetainedMessageType.OBJECT_SET_VISIBILITY,
+                    struct.pack("<QQQB7x", owner, generation, image, 0),
+                ),
+                (
+                    RetainedMessageType.OBJECT_DROP,
+                    struct.pack("<QQQ", owner, generation, group),
+                ),
+            )
+        )
+        self.assertEqual(len(operations), 19)
+        expected = b"".join(
+            encode_frame(
+                Frame(
+                    message_type,
+                    0x090A0B0C0D0E0F10,
+                    sequence,
+                    9,
+                    payload,
+                ),
+                max_payload=128,
+            )
+            for sequence, (message_type, payload) in enumerate(operations)
+        )
+        self.assertEqual(len(expected), 2390)
+
+        begin_marker = b"OBEG0001"
+        end_marker = b"OEND0002"
+        status_marker = b"OSTS0003"
+        status_end_marker = b"OSTE0004"
+        facts_marker = b"OFCT0005"
+        facts_end_marker = b"OFCE0006"
+        begin = raw.index(begin_marker) + len(begin_marker)
+        end_at = raw.index(end_marker, begin)
+        end = end_at + len(end_marker)
+        self.assertEqual(raw[begin:end_at], expected)
+
+        expected_statuses = (
+            (0,) + (4,) * 5 + (3,) * 7 + (0,) * 19 + (3, 0)
+        )
+        status_begin = raw.index(status_marker, end) + len(status_marker)
+        status_end = raw.index(status_end_marker, status_begin)
+        self.assertEqual(
+            raw[status_begin:status_end],
+            struct.pack(f"<{len(expected_statuses)}q", *expected_statuses),
+        )
+
+        expected_facts = (0, 0, 0, 0, 19, 2390, 19, 2390, 34)
+        facts_begin = raw.index(facts_marker, status_end) + len(facts_marker)
+        facts_end = raw.index(facts_end_marker, facts_begin)
+        self.assertEqual(
+            raw[facts_begin:facts_end],
+            struct.pack(f"<{len(expected_facts)}q", *expected_facts),
+        )
+
     def test_real_core_snapshot_key_resize_and_synchronized_close(self) -> None:
         memory, ext_memory, cpu_state = self._snapshot_data()
         system = make_system(

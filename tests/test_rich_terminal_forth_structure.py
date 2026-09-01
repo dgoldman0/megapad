@@ -1268,6 +1268,573 @@ def test_series_drop_and_shared_present_accounting_are_exact() -> None:
     assert queued < ops < byte_count
 
 
+def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+
+    def preceding_stack_signature(word: str) -> str:
+        lines = source[: source.index(f": {word}")].splitlines()
+        comment: list[str] = []
+        while lines and lines[-1].startswith("\\"):
+            comment.append(lines.pop())
+        comment.reverse()
+        assert comment and comment[0].startswith("\\ Stack:")
+        parts = [comment[0].removeprefix("\\ Stack:").strip()]
+        parts.extend(line.removeprefix("\\").strip() for line in comment[1:])
+        return " ".join(" ".join(parts).split())
+
+    for declaration in (
+        "0x2020 CONSTANT _PT-M-OBJECT-DEFINE",
+        "0x2021 CONSTANT _PT-M-OBJECT-REPLACE",
+        "0x2022 CONSTANT _PT-M-OBJECT-SET-VALUE",
+        "0x2023 CONSTANT _PT-M-OBJECT-SET-VISIBILITY",
+        "0x2024 CONSTANT _PT-M-OBJECT-DROP",
+        "0x01     CONSTANT _PT-RET-CORE",
+        "0x02     CONSTANT _PT-RET-VECTOR",
+        "0x04     CONSTANT _PT-RET-RGBA-IMAGE",
+        "0x08     CONSTANT _PT-RET-INSTRUMENT",
+        "0x10     CONSTANT _PT-RET-SERIES",
+        "0 CONSTANT PT-OBJECT-HIDDEN",
+        "1 CONSTANT PT-OBJECT-VISIBLE",
+        "0x01 CONSTANT PT-POLYLINE-CLOSED",
+        "0 CONSTANT PT-IMAGE-FIT-STRETCH",
+        "1 CONSTANT PT-IMAGE-FIT-CONTAIN",
+        "2 CONSTANT PT-IMAGE-FIT-COVER",
+        "0 CONSTANT PT-READOUT-INTEGER",
+        "1 CONSTANT PT-READOUT-FIXED",
+        "2 CONSTANT PT-READOUT-PERCENT",
+        "0 CONSTANT PT-METER-HORIZONTAL",
+        "1 CONSTANT PT-METER-VERTICAL",
+        "0x01 CONSTANT PT-METER-SHOW-VALUE",
+        "0 CONSTANT PT-STATUS-CIRCLE",
+        "1 CONSTANT PT-STATUS-SQUARE",
+        "2 CONSTANT PT-STATUS-DIAMOND",
+        "0x01 CONSTANT PT-PLOT-FILL-TO-MINIMUM",
+        "0x02 CONSTANT PT-PLOT-DRAW-POINTS",
+        "0x01 CONSTANT PT-WAVEFORM-DRAW-ZERO-LINE",
+    ):
+        assert declaration in source
+    for helper, feature in (
+        ("_PT-RET-CORE?", "_PT-RET-CORE"),
+        ("_PT-RET-VECTOR?", "_PT-RET-VECTOR"),
+        ("_PT-RET-RGBA-IMAGE?", "_PT-RET-RGBA-IMAGE"),
+        ("_PT-RET-INSTRUMENT?", "_PT-RET-INSTRUMENT"),
+        ("_PT-RET-SERIES?", "_PT-RET-SERIES"),
+    ):
+        definition = _definition(source, helper)
+        assert "PT-RETAINED-AVAILABLE? 0=" in definition
+        assert f"_PT.S.RET-CAPS 8 + _PT-U64@ {feature} AND 0<>" in definition
+
+    common = "owner generation object region parent left top right bottom z visible"
+    signatures = {
+        "GROUP": f"{common} session -- status",
+        "POLYLINE": (
+            f"{common} stroke-width red green blue alpha path-flags "
+            "points-a points-u session -- status"
+        ),
+        "IMAGE": f"{common} resource fit opacity session -- status",
+        "READOUT": (
+            f"{common} fg-red fg-green fg-blue fg-alpha bg-red bg-green "
+            "bg-blue bg-alpha format decimal-places initial-value scale "
+            "unit-a unit-u session -- status"
+        ),
+        "METER": (
+            f"{common} fg-red fg-green fg-blue fg-alpha bg-red bg-green "
+            "bg-blue bg-alpha orientation meter-flags minimum maximum "
+            "initial-value session -- status"
+        ),
+        "STATUS": (
+            f"{common} inactive-red inactive-green inactive-blue "
+            "inactive-alpha active-red active-green active-blue active-alpha "
+            "initial-value shape session -- status"
+        ),
+        "PLOT": (
+            f"{common} series minimum maximum line-red line-green line-blue "
+            "line-alpha fill-red fill-green fill-blue fill-alpha plot-flags "
+            "session -- status"
+        ),
+        "WAVEFORM": (
+            f"{common} series minimum maximum trace-red trace-green trace-blue "
+            "trace-alpha zero-red zero-green zero-blue zero-alpha zero-value "
+            "waveform-flags session -- status"
+        ),
+    }
+    helpers = {
+        "GROUP": "_PT-GROUP-WRITE",
+        "POLYLINE": "_PT-POLYLINE-WRITE",
+        "IMAGE": "_PT-IMAGE-WRITE",
+        "READOUT": "_PT-READOUT-WRITE",
+        "METER": "_PT-METER-WRITE",
+        "STATUS": "_PT-STATUS-WRITE",
+        "PLOT": "_PT-PLOT-WRITE",
+        "WAVEFORM": "_PT-WAVEFORM-WRITE",
+    }
+    for family, signature in signatures.items():
+        for operation, message in (
+            ("DEFINE", "_PT-M-OBJECT-DEFINE"),
+            ("REPLACE", "_PT-M-OBJECT-REPLACE"),
+        ):
+            definition = _definition(source, f"PT-{family}-{operation}")
+            assert preceding_stack_signature(f"PT-{family}-{operation}") == signature
+            assert f"{message} {helpers[family]}" in definition
+
+    assert (
+        "( owner generation object value session -- status )"
+        in _definition(source, "PT-OBJECT-SET-VALUE")
+    )
+    assert preceding_stack_signature("PT-OBJECT-SET-VISIBILITY") == (
+        "owner generation object visible session -- status"
+    )
+    assert (
+        "( owner generation object session -- status )"
+        in _definition(source, "PT-OBJECT-DROP")
+    )
+
+    # There is no public kind-plus-bytes escape hatch and no guest-side scene
+    # cache or object-count policy.  The only copied span is READOUT's checked
+    # semantic UTF-8 unit, never a prepacked object body.
+    assert re.search(r"^:\s+PT-OBJECT-(?:DEFINE|REPLACE)\b", source, re.MULTILINE) is None
+    objects = source[
+        source.index("\\ The remaining OBJECT families share") :
+        source.index("\\ Semantic controls are a separate retained identity")
+    ]
+    assert "_PT-PRESENT-FIXED-OP" not in objects
+    assert "CREATE " not in objects
+    assert "ALLOT" not in objects
+    assert " CONSTANT " not in objects
+    assert objects.count(" MOVE") == 1
+    assert "_PT-FRAME-PAYLOAD 104 + SWAP MOVE" in objects
+    lowered = objects.lower()
+    for consumer in ("pad", "desk", "daybook", "uidl", "applet"):
+        assert consumer not in lowered
+
+
+def test_object_common_prefix_group_and_polyline_are_exact_and_bounded() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    frame_begin = _definition(source, "_PT-FRAME-BEGIN")
+    fields = _definition(source, "_PT-OBJECT-COMMON-FIELDS?")
+    admit = _definition(source, "_PT-OBJECT-ADMIT")
+    prefix = _definition(source, "_PT-OBJECT-COMMON-PAYLOAD!")
+    group = _definition(source, "_PT-GROUP-WRITE")
+    point_source = _definition(source, "_PT-POLYLINE-SOURCE?")
+    points = _definition(source, "_PT-POLYLINE-POINTS?")
+    poly_fields = _definition(source, "_PT-POLYLINE-FIELDS?")
+    payload = _definition(source, "_PT-POLYLINE-PAYLOAD!")
+    body = _definition(source, "_PT-POLYLINE-BODY")
+    write = _definition(source, "_PT-POLYLINE-WRITE")
+    scrub = _definition(source, "_PT-POLYLINE-SCRUB")
+
+    assert "_PT-OB-OWNER @ 0=" in fields
+    assert "_PT-OB-GENERATION @ 0= OR" in fields
+    assert "_PT-OB-ID @ 0= OR" in fields
+    assert "_PT-OB-REGION @ 0= OR" in fields
+    assert "_PT-M-OBJECT-DEFINE =" in fields
+    assert "_PT-M-OBJECT-REPLACE = OR" in fields
+    assert "_PT-OB-KIND @ DUP 1 U< SWAP 9 U> OR" in fields
+    for coordinate in ("LEFT", "TOP", "RIGHT", "BOTTOM"):
+        assert f"_PT-OB-{coordinate} @ _PT-U32?" in fields
+    assert "_PT-OB-LEFT @ _PT-OB-RIGHT @ U< 0=" in fields
+    assert "_PT-OB-TOP @ _PT-OB-BOTTOM @ U< 0=" in fields
+    assert "_PT-OB-Z @ _PT-I32? 0=" in fields
+    assert "_PT-OB-VISIBLE @ _PT-OBJECT-BOOL?" in fields
+
+    assert "_PT-OBJECT-COMMON-FIELDS? 0=" in admit
+    assert "_PT-OB-TYPE @ _PT-PO-TYPE !" in admit
+    assert "_PT-PO-U !" in admit
+    assert "_PT-OB-S @ _PT-PO-S !" in admit
+    assert "_PT-PO-ADMIT" in admit
+    for store in (
+        "_PT-OB-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-OB-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-OB-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+        "_PT-OB-KIND @ _PT-FRAME-PAYLOAD 24 + W!",
+        "_PT-OB-VISIBLE @ _PT-FRAME-PAYLOAD 26 + W!",
+        "_PT-OB-Z @ _PT-FRAME-PAYLOAD 28 + L!",
+        "_PT-OB-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
+        "_PT-OB-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
+        "_PT-OB-LEFT @ _PT-FRAME-PAYLOAD 48 + L!",
+        "_PT-OB-TOP @ _PT-FRAME-PAYLOAD 52 + L!",
+        "_PT-OB-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!",
+        "_PT-OB-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!",
+    ):
+        assert store in prefix
+    assert "_PT-F-TOTAL @ 0 FILL" in frame_begin
+
+    assert "1 _PT-OBJECT-COMMON!" in group
+    assert "_PT-RET-VECTOR? 0=" in group
+    assert "64 _PT-OBJECT-ADMIT" in group
+    assert group.index("_PT-OBJECT-ADMIT") < group.index(
+        "_PT-OBJECT-COMMON-PAYLOAD!"
+    ) < group.index("_PT-PO-SEND")
+
+    # POLYLINE accepts native two-cell points but publishes canonical <II>
+    # records.  Source-byte and wire-byte arithmetic deliberately differ.
+    assert "_PT-PL-A @ 0= _PT-PL-U @ 0= OR" in point_source
+    assert "_PT-PL-A @ 1 CELLS 1- AND" in point_source
+    assert "_PT-PL-A @ _PT-PL-U @ _PT-UADD?" in point_source
+    assert point_source.count("_PT-RANGES-OVERLAP?") == 2
+    assert "/PT-SESSION" in point_source
+    assert "_PT.S.TX-A @" in point_source
+    assert "_PT.S.RET-FORMATS 20 + L@" in points
+    assert "16 _PT-UMUL?" in points
+    assert "_PT-PL-MAX-SOURCE-U !" in points
+    assert "_PT-PL-U @ U<" in points
+    assert "_PT-PL-U @ 16 MOD" in points
+    assert "_PT-PL-U @ 16 / DUP _PT-PL-COUNT !" in points
+    assert "DUP 2 U< SWAP _PT-U32? 0= OR" in points
+    assert "_PT-PL-COUNT @ 8 _PT-UMUL?" in points
+    assert "80 _PT-UADD?" in points
+    assert "_PT-POLYLINE-SOURCE? 0=" in points
+    assert points.count("_PT-U32? 0=") >= 3
+    assert "_PT-PL-STROKE @ DUP 0= SWAP _PT-U32? 0= OR" in poly_fields
+    assert "_PT-OBJECT-COLOR? 0=" in poly_fields
+    assert "PT-POLYLINE-CLOSED INVERT AND" in poly_fields
+
+    assert "_PT-OBJECT-COMMON-PAYLOAD!" in payload
+    for store in (
+        "_PT-PL-COUNT @ _PT-FRAME-PAYLOAD 64 + L!",
+        "_PT-PL-STROKE @ _PT-FRAME-PAYLOAD 68 + L!",
+        "_PT-PL-RED @ _PT-FRAME-PAYLOAD 72 + C!",
+        "_PT-PL-GREEN @ _PT-FRAME-PAYLOAD 73 + C!",
+        "_PT-PL-BLUE @ _PT-FRAME-PAYLOAD 74 + C!",
+        "_PT-PL-ALPHA @ _PT-FRAME-PAYLOAD 75 + C!",
+        "_PT-PL-FLAGS @ _PT-FRAME-PAYLOAD 76 + L!",
+        "_PT-FRAME-PAYLOAD 80 + I 8 * + L!",
+        "_PT-FRAME-PAYLOAD 84 + I 8 * + L!",
+    ):
+        assert store in payload
+    assert "MOVE" not in payload
+    assert "_PT-RET-VECTOR? 0=" in body
+    assert body.index("_PT-POLYLINE-FIELDS?") < body.index(
+        "_PT-OBJECT-ADMIT"
+    ) < body.index("_PT-POLYLINE-PAYLOAD!") < body.index("_PT-PO-SEND")
+    assert "2 _PT-OBJECT-COMMON!" in write
+    assert "CATCH" in write
+    assert "_PT-POLYLINE-SCRUB" in write
+    for pointer in ("_PT-PL-A", "_PT-PL-U", "_PT-PL-END"):
+        assert f"0 {pointer} !" in scrub
+
+
+def test_image_and_readout_have_typed_bodies_and_checked_sources() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    frame_begin = _definition(source, "_PT-FRAME-BEGIN")
+    image = _definition(source, "_PT-IMAGE-WRITE")
+    unit = _definition(source, "_PT-READOUT-UNIT-SOURCE?")
+    minimum = _definition(source, "_PT-READOUT-MIN-FORMATTED?")
+    fields = _definition(source, "_PT-READOUT-FIELDS?")
+    payload = _definition(source, "_PT-READOUT-PAYLOAD!")
+    body = _definition(source, "_PT-READOUT-BODY")
+    write = _definition(source, "_PT-READOUT-WRITE")
+    scrub = _definition(source, "_PT-READOUT-SCRUB")
+
+    assert "3 _PT-OBJECT-COMMON!" in image
+    assert "_PT-RET-RGBA-IMAGE? 0=" in image
+    assert "_PT.S.RET-FORMATS 8 + L@ PT-RESOURCE-RGBA8 <>" in image
+    assert "_PT-IM-RESOURCE @ 0=" in image
+    assert "PT-IMAGE-FIT-STRETCH U<" in image
+    assert "PT-IMAGE-FIT-COVER U>" in image
+    assert "_PT-IM-OPACITY @ _PT-U8? 0=" in image
+    assert "80 _PT-OBJECT-ADMIT" in image
+    for store in (
+        "_PT-IM-RESOURCE @ _PT-FRAME-PAYLOAD 64 + _PT-U64!",
+        "_PT-IM-FIT @ _PT-FRAME-PAYLOAD 72 + L!",
+        "_PT-IM-OPACITY @ _PT-FRAME-PAYLOAD 76 + C!",
+    ):
+        assert store in image
+    assert image.index("_PT-OBJECT-ADMIT") < image.index(
+        "_PT-OBJECT-COMMON-PAYLOAD!"
+    ) < image.index("_PT-PO-SEND")
+    assert "_PT-F-TOTAL @ 0 FILL" in frame_begin
+
+    # Empty unit text is exactly 0/0.  Nonempty text is bounded, disjoint,
+    # scalar UTF-8 without the forbidden GLYPH_RUN controls, and is scrubbed
+    # after the guarded call.
+    assert "_PT-RO-UNIT-U @ 0= IF _PT-RO-UNIT-A @ 0= EXIT THEN" in unit
+    assert "_PT-RANGE-VALID?" in unit
+    assert unit.count("_PT-RANGES-OVERLAP?") == 2
+    assert "/PT-SESSION" in unit
+    assert "_PT.S.TX-A @" in unit
+    assert "_PT-UTF8? 0=" in unit
+    for control in ("DUP 0=", "OVER 10 =", "SWAP 13 ="):
+        assert control in unit
+
+    # Guest admission computes only a checked lower bound.  Exact rational
+    # formatting and target quota remain terminal state; percent never risks
+    # rejecting an i64 merely because an intermediate 100*value would wrap.
+    assert "_PT-RO-UNIT-U @ 1 _PT-UADD?" in minimum
+    assert "_PT-RO-DECIMALS @ _PT-UADD?" in minimum
+    assert "PT-READOUT-PERCENT = IF" in minimum
+    assert "_PT.S.RET-FORMATS 24 + L@ U> 0=" in minimum
+    assert "_PT-UMUL?" not in minimum
+    assert "_PT-RO-VALUE" not in minimum
+    assert "_PT-RO-SCALE" not in minimum
+
+    assert fields.count("_PT-OBJECT-COLOR? 0=") == 2
+    assert "PT-READOUT-INTEGER U<" in fields
+    assert "PT-READOUT-PERCENT U>" in fields
+    assert "_PT-RO-DECIMALS @ _PT-U32? 0=" in fields
+    integer = fields.index("PT-READOUT-INTEGER = IF")
+    noninteger = fields.index("ELSE", integer)
+    assert "_PT-RO-DECIMALS @ IF FALSE EXIT THEN" in fields[integer:noninteger]
+    assert "_PT-RO-SCALE @ 1 <>" in fields[integer:noninteger]
+    assert "_PT-RO-SCALE @ 0> 0=" in fields[noninteger:]
+    assert "_PT-RO-UNIT-U @ _PT-U32? 0=" in fields
+    assert "_PT-READOUT-MIN-FORMATTED? 0=" in fields
+    assert "_PT-RO-UNIT-U @ 104 _PT-UADD?" in fields
+
+    for store in (
+        "_PT-RO-FG-RED @ _PT-FRAME-PAYLOAD 64 + C!",
+        "_PT-RO-FG-GREEN @ _PT-FRAME-PAYLOAD 65 + C!",
+        "_PT-RO-FG-BLUE @ _PT-FRAME-PAYLOAD 66 + C!",
+        "_PT-RO-FG-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!",
+        "_PT-RO-BG-RED @ _PT-FRAME-PAYLOAD 68 + C!",
+        "_PT-RO-BG-GREEN @ _PT-FRAME-PAYLOAD 69 + C!",
+        "_PT-RO-BG-BLUE @ _PT-FRAME-PAYLOAD 70 + C!",
+        "_PT-RO-BG-ALPHA @ _PT-FRAME-PAYLOAD 71 + C!",
+        "_PT-RO-FORMAT @ _PT-FRAME-PAYLOAD 72 + L!",
+        "_PT-RO-DECIMALS @ _PT-FRAME-PAYLOAD 76 + L!",
+        "_PT-RO-VALUE @ _PT-FRAME-PAYLOAD 80 + _PT-U64!",
+        "_PT-RO-SCALE @ _PT-FRAME-PAYLOAD 88 + _PT-U64!",
+        "_PT-RO-UNIT-U @ _PT-FRAME-PAYLOAD 96 + L!",
+        "_PT-FRAME-PAYLOAD 104 + SWAP MOVE",
+    ):
+        assert store in payload
+    assert "_PT-FRAME-PAYLOAD 100 +" not in payload
+    assert "_PT-RET-INSTRUMENT? 0=" in body
+    assert "_PT.S.RET-FORMATS 24 + L@ 0=" in body
+    assert body.index("_PT-OBJECT-ADMIT") < body.index(
+        "_PT-READOUT-PAYLOAD!"
+    ) < body.index("_PT-PO-SEND")
+    assert "5 _PT-OBJECT-COMMON!" in write
+    assert "CATCH" in write
+    assert "_PT-READOUT-SCRUB" in write
+    for pointer in ("_PT-RO-UNIT-A", "_PT-RO-UNIT-U"):
+        assert f"0 {pointer} !" in scrub
+    for scratch in ("_PT-U8-A", "_PT-U8-END", "_PT-U8-B"):
+        assert f"0 {scratch} !" in scrub
+
+
+def test_meter_and_status_validate_semantics_and_reserved_zero_bodies() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    frame_begin = _definition(source, "_PT-FRAME-BEGIN")
+    meter_fields = _definition(source, "_PT-METER-FIELDS?")
+    meter = _definition(source, "_PT-METER-WRITE")
+    status_fields = _definition(source, "_PT-STATUS-FIELDS?")
+    status = _definition(source, "_PT-STATUS-WRITE")
+
+    assert meter_fields.count("_PT-OBJECT-COLOR? 0=") == 2
+    assert "PT-METER-HORIZONTAL =" in meter_fields
+    assert "PT-METER-VERTICAL = OR" in meter_fields
+    assert "PT-METER-SHOW-VALUE INVERT AND" in meter_fields
+    assert "_PT-MT-MINIMUM @ _PT-MT-MAXIMUM @ < 0=" in meter_fields
+    assert "_PT-MT-VALUE @ _PT-MT-MINIMUM @ <" in meter_fields
+    assert "_PT-MT-VALUE @ _PT-MT-MAXIMUM @ > 0=" in meter_fields
+    assert "6 _PT-OBJECT-COMMON!" in meter
+    assert "_PT-RET-INSTRUMENT? 0=" in meter
+    assert "112 _PT-OBJECT-ADMIT" in meter
+    for store in (
+        "_PT-MT-FG-RED @ _PT-FRAME-PAYLOAD 64 + C!",
+        "_PT-MT-FG-GREEN @ _PT-FRAME-PAYLOAD 65 + C!",
+        "_PT-MT-FG-BLUE @ _PT-FRAME-PAYLOAD 66 + C!",
+        "_PT-MT-FG-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!",
+        "_PT-MT-BG-RED @ _PT-FRAME-PAYLOAD 68 + C!",
+        "_PT-MT-BG-GREEN @ _PT-FRAME-PAYLOAD 69 + C!",
+        "_PT-MT-BG-BLUE @ _PT-FRAME-PAYLOAD 70 + C!",
+        "_PT-MT-BG-ALPHA @ _PT-FRAME-PAYLOAD 71 + C!",
+        "_PT-MT-ORIENTATION @ _PT-FRAME-PAYLOAD 72 + L!",
+        "_PT-MT-FLAGS @ _PT-FRAME-PAYLOAD 76 + L!",
+        "_PT-MT-MINIMUM @ _PT-FRAME-PAYLOAD 80 + _PT-U64!",
+        "_PT-MT-MAXIMUM @ _PT-FRAME-PAYLOAD 88 + _PT-U64!",
+        "_PT-MT-VALUE @ _PT-FRAME-PAYLOAD 96 + _PT-U64!",
+    ):
+        assert store in meter
+    assert "_PT-FRAME-PAYLOAD 104 +" not in meter
+    assert meter.index("_PT-OBJECT-ADMIT") < meter.index(
+        "_PT-OBJECT-COMMON-PAYLOAD!"
+    ) < meter.index("_PT-PO-SEND")
+
+    assert status_fields.count("_PT-OBJECT-COLOR? 0=") == 2
+    assert "PT-STATUS-CIRCLE U<" in status_fields
+    assert "PT-STATUS-DIAMOND U>" in status_fields
+    assert "7 _PT-OBJECT-COMMON!" in status
+    assert "_PT-RET-INSTRUMENT? 0=" in status
+    assert "96 _PT-OBJECT-ADMIT" in status
+    for store in (
+        "_PT-STO-INACTIVE-RED @ _PT-FRAME-PAYLOAD 64 + C!",
+        "_PT-STO-INACTIVE-GREEN @ _PT-FRAME-PAYLOAD 65 + C!",
+        "_PT-STO-INACTIVE-BLUE @ _PT-FRAME-PAYLOAD 66 + C!",
+        "_PT-STO-INACTIVE-ALPHA @ _PT-FRAME-PAYLOAD 67 + C!",
+        "_PT-STO-ACTIVE-RED @ _PT-FRAME-PAYLOAD 68 + C!",
+        "_PT-STO-ACTIVE-GREEN @ _PT-FRAME-PAYLOAD 69 + C!",
+        "_PT-STO-ACTIVE-BLUE @ _PT-FRAME-PAYLOAD 70 + C!",
+        "_PT-STO-ACTIVE-ALPHA @ _PT-FRAME-PAYLOAD 71 + C!",
+        "_PT-STO-VALUE @ _PT-FRAME-PAYLOAD 72 + _PT-U64!",
+        "_PT-STO-SHAPE @ _PT-FRAME-PAYLOAD 80 + L!",
+    ):
+        assert store in status
+    assert "_PT-FRAME-PAYLOAD 84 +" not in status
+    assert "_PT-FRAME-PAYLOAD 88 +" not in status
+    assert status.index("_PT-OBJECT-ADMIT") < status.index(
+        "_PT-OBJECT-COMMON-PAYLOAD!"
+    ) < status.index("_PT-PO-SEND")
+    assert "_PT-F-TOTAL @ 0 FILL" in frame_begin
+
+
+def test_plot_and_waveform_encode_series_references_without_local_history() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    plot_fields = _definition(source, "_PT-PLOT-FIELDS?")
+    plot = _definition(source, "_PT-PLOT-WRITE")
+    wave_fields = _definition(source, "_PT-WAVEFORM-FIELDS?")
+    wave = _definition(source, "_PT-WAVEFORM-WRITE")
+
+    assert "_PT-PLO-SERIES @ 0=" in plot_fields
+    assert "_PT-PLO-MINIMUM @ _PT-PLO-MAXIMUM @ < 0=" in plot_fields
+    assert plot_fields.count("_PT-OBJECT-COLOR? 0=") == 2
+    assert "PT-PLOT-FILL-TO-MINIMUM PT-PLOT-DRAW-POINTS OR INVERT AND" in (
+        plot_fields
+    )
+    assert "8 _PT-OBJECT-COMMON!" in plot
+    assert "_PT-RET-SERIES? 0=" in plot
+    assert "104 _PT-OBJECT-ADMIT" in plot
+    for store in (
+        "_PT-PLO-SERIES @ _PT-FRAME-PAYLOAD 64 + _PT-U64!",
+        "_PT-PLO-MINIMUM @ _PT-FRAME-PAYLOAD 72 + _PT-U64!",
+        "_PT-PLO-MAXIMUM @ _PT-FRAME-PAYLOAD 80 + _PT-U64!",
+        "_PT-PLO-LINE-RED @ _PT-FRAME-PAYLOAD 88 + C!",
+        "_PT-PLO-LINE-GREEN @ _PT-FRAME-PAYLOAD 89 + C!",
+        "_PT-PLO-LINE-BLUE @ _PT-FRAME-PAYLOAD 90 + C!",
+        "_PT-PLO-LINE-ALPHA @ _PT-FRAME-PAYLOAD 91 + C!",
+        "_PT-PLO-FILL-RED @ _PT-FRAME-PAYLOAD 92 + C!",
+        "_PT-PLO-FILL-GREEN @ _PT-FRAME-PAYLOAD 93 + C!",
+        "_PT-PLO-FILL-BLUE @ _PT-FRAME-PAYLOAD 94 + C!",
+        "_PT-PLO-FILL-ALPHA @ _PT-FRAME-PAYLOAD 95 + C!",
+        "_PT-PLO-FLAGS @ _PT-FRAME-PAYLOAD 96 + L!",
+    ):
+        assert store in plot
+    assert "_PT-FRAME-PAYLOAD 100 +" not in plot
+    assert plot.index("_PT-OBJECT-ADMIT") < plot.index(
+        "_PT-OBJECT-COMMON-PAYLOAD!"
+    ) < plot.index("_PT-PO-SEND")
+
+    assert "_PT-WF-SERIES @ 0=" in wave_fields
+    assert "_PT-WF-MINIMUM @ _PT-WF-MAXIMUM @ < 0=" in wave_fields
+    assert "_PT-WF-ZERO-VALUE @ _PT-WF-MINIMUM @ <" in wave_fields
+    assert "_PT-WF-ZERO-VALUE @ _PT-WF-MAXIMUM @ >" in wave_fields
+    assert wave_fields.count("_PT-OBJECT-COLOR? 0=") == 2
+    assert "PT-WAVEFORM-DRAW-ZERO-LINE INVERT AND" in wave_fields
+    assert "9 _PT-OBJECT-COMMON!" in wave
+    assert "_PT-RET-SERIES? 0=" in wave
+    assert "112 _PT-OBJECT-ADMIT" in wave
+    for store in (
+        "_PT-WF-SERIES @ _PT-FRAME-PAYLOAD 64 + _PT-U64!",
+        "_PT-WF-MINIMUM @ _PT-FRAME-PAYLOAD 72 + _PT-U64!",
+        "_PT-WF-MAXIMUM @ _PT-FRAME-PAYLOAD 80 + _PT-U64!",
+        "_PT-WF-TRACE-RED @ _PT-FRAME-PAYLOAD 88 + C!",
+        "_PT-WF-TRACE-GREEN @ _PT-FRAME-PAYLOAD 89 + C!",
+        "_PT-WF-TRACE-BLUE @ _PT-FRAME-PAYLOAD 90 + C!",
+        "_PT-WF-TRACE-ALPHA @ _PT-FRAME-PAYLOAD 91 + C!",
+        "_PT-WF-ZERO-RED @ _PT-FRAME-PAYLOAD 92 + C!",
+        "_PT-WF-ZERO-GREEN @ _PT-FRAME-PAYLOAD 93 + C!",
+        "_PT-WF-ZERO-BLUE @ _PT-FRAME-PAYLOAD 94 + C!",
+        "_PT-WF-ZERO-ALPHA @ _PT-FRAME-PAYLOAD 95 + C!",
+        "_PT-WF-ZERO-VALUE @ _PT-FRAME-PAYLOAD 96 + _PT-U64!",
+        "_PT-WF-FLAGS @ _PT-FRAME-PAYLOAD 104 + L!",
+    ):
+        assert store in wave
+    assert "_PT-FRAME-PAYLOAD 108 +" not in wave
+    assert wave.index("_PT-OBJECT-ADMIT") < wave.index(
+        "_PT-OBJECT-COMMON-PAYLOAD!"
+    ) < wave.index("_PT-PO-SEND")
+    assert "CREATE" not in plot + wave
+    assert "ALLOT" not in plot + wave
+
+
+def test_object_mutations_use_exact_prefixes_and_shared_present_accounting() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    admit = _definition(source, "_PT-OBJECT-UPDATE-ADMIT")
+    prefix = _definition(source, "_PT-OBJECT-UPDATE-PREFIX!")
+    value = _definition(source, "PT-OBJECT-SET-VALUE")
+    visibility = _definition(source, "PT-OBJECT-SET-VISIBILITY")
+    drop = _definition(source, "PT-OBJECT-DROP")
+    object_admit = _definition(source, "_PT-OBJECT-ADMIT")
+    present_admit = _definition(source, "_PT-PO-ADMIT")
+    present_send = _definition(source, "_PT-PO-SEND")
+    update_type = _definition(source, "_PT-OBJECT-UPDATE-TYPE?")
+
+    for message in (
+        "_PT-M-OBJECT-SET-VALUE",
+        "_PT-M-OBJECT-SET-VISIBILITY",
+        "_PT-M-OBJECT-DROP",
+    ):
+        assert message in update_type
+    assert "_PT-VALID-S? 0=" in admit
+    assert "_PT-OP-LOST?" in admit
+    assert "_PT-RET-CORE? 0=" in admit
+    assert "_PT-RET-INSTRUMENT? 0=" in admit
+    assert "_PT-OU-OWNER @ 0=" in admit
+    assert "_PT-OU-GENERATION @ 0= OR" in admit
+    assert "_PT-OU-ID @ 0= OR" in admit
+    assert "_PT-OU-TYPE @ _PT-PO-TYPE !" in admit
+    assert "_PT-PO-U !" in admit
+    assert "_PT-OU-S @ _PT-PO-S !" in admit
+    assert "_PT-PO-ADMIT" in admit
+    valid = admit.index("_PT-VALID-S? 0=")
+    lost = admit.index("_PT-OP-LOST?", valid)
+    core = admit.index("_PT-RET-CORE? 0=", lost)
+    typed = admit.index("_PT-OBJECT-UPDATE-TYPE? 0=", core)
+    instrument = admit.index("_PT-RET-INSTRUMENT? 0=", typed)
+    assert valid < lost < core < typed < instrument
+    for store in (
+        "_PT-OU-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
+        "_PT-OU-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
+        "_PT-OU-ID @ _PT-FRAME-PAYLOAD 16 + _PT-U64!",
+    ):
+        assert store in prefix
+
+    assert "_PT-M-OBJECT-SET-VALUE _PT-OU-TYPE !" in value
+    assert "32 _PT-OBJECT-UPDATE-ADMIT" in value
+    assert "_PT-OU-VALUE @ _PT-FRAME-PAYLOAD 24 + _PT-U64!" in value
+    assert "_PT-METER-FIELDS?" not in value
+    assert "_PT-READOUT-FIELDS?" not in value
+    assert value.index("_PT-OBJECT-UPDATE-ADMIT") < value.index(
+        "_PT-OBJECT-UPDATE-PREFIX!"
+    ) < value.index("_PT-PO-SEND")
+
+    assert "_PT-M-OBJECT-SET-VISIBILITY _PT-OU-TYPE !" in visibility
+    assert "_PT-OU-VALUE @ _PT-OBJECT-BOOL? 0=" in visibility
+    assert "32 _PT-OBJECT-UPDATE-ADMIT" in visibility
+    assert "_PT-OU-VALUE @ _PT-FRAME-PAYLOAD 24 + C!" in visibility
+    valid = visibility.index("_PT-VALID-S? 0=")
+    lost = visibility.index("_PT-OP-LOST?", valid)
+    boolean = visibility.index("_PT-OBJECT-BOOL? 0=", lost)
+    admitted = visibility.index("_PT-OBJECT-UPDATE-ADMIT", boolean)
+    assert valid < lost < boolean < admitted
+    assert admitted < visibility.index(
+        "_PT-OBJECT-UPDATE-PREFIX!"
+    ) < visibility.index("_PT-PO-SEND")
+
+    assert "_PT-M-OBJECT-DROP _PT-OU-TYPE !" in drop
+    assert "24 _PT-OBJECT-UPDATE-ADMIT" in drop
+    assert drop.index("_PT-OBJECT-UPDATE-ADMIT") < drop.index(
+        "_PT-OBJECT-UPDATE-PREFIX!"
+    ) < drop.index("_PT-PO-SEND")
+
+    # Both definition and mutation paths use the one PRESENT operation and
+    # complete-frame byte ledger.  Counters advance only after queue success.
+    assert "_PT-PO-ADMIT" in object_admit
+    for gate in (
+        "_PT.S.TX-OPEN? @ 0=",
+        "_PT.S.TX-KIND @ _PT-TX-PRESENT <>",
+        "_PT.S.TX-RET-MODE @ PT-RET-NONE =",
+        "_PT.S.TX-RET-OPS-DONE @ 1 _PT-UADD?",
+        "_PT-PO-U @ 40 _PT-UADD?",
+        "_PT.S.TX-RET-BYTES-DONE @ SWAP _PT-UADD?",
+    ):
+        assert gate in present_admit
+    queued = present_send.index("TRUE _PT-PO-S @ _PT-FRAME-QUEUE")
+    assert queued < present_send.index("_PT.S.TX-RET-OPS-DONE !")
+    assert queued < present_send.index("_PT.S.TX-RET-BYTES-DONE !")
+
+
 def test_soft_reset_aborts_the_old_epoch_upload_before_reset_ack() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     apply_reset = _definition(source, "_PT-APPLY-PENDING-RESET")
