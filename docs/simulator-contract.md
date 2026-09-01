@@ -385,6 +385,14 @@ bits without an admitted service; missing or malformed SysInfo never enables a
 host fallback implicitly. Runtime construction likewise requires the admitted
 one-core topology qwords to report exactly one full core.
 
+That topology has no synthetic secondary worker. `CORE-STATUS` accepts only
+core ID zero and replaces it with zero, meaning the core-0 secondary-worker
+dispatch slot is idle; it is not a claim that the CPU itself is stopped.
+Out-of-topology IDs fail without consuming their operand. `WAKE-CORE` always
+fails without consuming either XT or core ID, because no valid secondary
+target exists. It never resolves or executes the XT and creates no host thread,
+worker slot, mailbox, IPI, asynchronous completion, or hidden no-op success.
+
 The currently admitted UART surface is pseudo-BIOS byte I/O, not the physical
 UART window. Output bytes become observable synchronously, making the native
 TX flush before `KEY` an observational no-op. Input is the deterministic FIFO

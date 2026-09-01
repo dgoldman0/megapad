@@ -26,6 +26,10 @@ The implemented slices provide:
   BIOS topology words share the same service and report the actual sparse
   memory geometry, now advertising the admitted `0x7` crypto profile: CRC,
   checked SHA3/SHAKE streaming, and raw Keccak-f[1600];
+- an explicit one-core worker capability boundary: `CORE-STATUS 0` reports an
+  idle secondary-worker slot, other IDs are rejected, and `WAKE-CORE` rejects
+  every request without consuming or executing its XT because no secondary
+  core exists;
 - fail-closed construction for injected address spaces: their SysInfo
   capability qword must be readable and may advertise only admitted services;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access, low-byte `C!`,

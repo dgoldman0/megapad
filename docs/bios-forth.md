@@ -828,6 +828,13 @@ device.
 | `WAKE-CORE` | `( xt core -- )` | Convenience wrapper: pre-writes the XT into the shared worker table, then sends the IPI.  This ensures `CORE-STATUS` sees the pending work immediately. |
 | `CORE-STATUS` | `( core -- n )` | Read the worker XT slot for a core.  Returns 0 if the core is idle, or the pending XT if it’s busy/dispatched. |
 
+The hosted simulator advertises exactly one full core and does not manufacture
+a secondary worker. In that profile `CORE-STATUS 0` returns zero for the
+core-0 worker slot, while any other ID fails without consuming it.
+`WAKE-CORE` always fails without consuming or executing its operands because
+there is no valid secondary target. This is an explicit capability boundary,
+not a silent dispatch no-op, mailbox model, IPI model, or concurrency claim.
+
 The bank contains 16 locks and records global physical-core identity, not a
 task identity. Same-core acquisition is depthless: repeated `SPIN@` calls all
 return 0, but one `SPIN!` releases the lock. The BIOS words do not validate

@@ -941,6 +941,28 @@ def _spin_release(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.spinlocks.release(lock_id, core_id)
 
 
+def _wake_core_unavailable(context: ExecutionContext) -> None:
+    core_id = context.data.peek()
+    xt = context.data.peek(1)
+    raise ExecutionError(
+        "WAKE-CORE is unavailable in the one-core hosted profile: no "
+        f"secondary core exists for core ID 0x{core_id:016x}; execution "
+        f"token 0x{xt:016x} and core ID were not consumed"
+    )
+
+
+def _core_status(context: ExecutionContext) -> None:
+    core_id = context.data.peek()
+    if core_id != 0:
+        raise ExecutionError(
+            "CORE-STATUS accepts only core ID 0 in the one-core hosted "
+            f"profile, got 0x{core_id:016x}; the operand was not consumed"
+        )
+    # This reports the secondary-worker dispatch slot, not whether the
+    # primary CPU is currently executing.  Core zero has no such work queued.
+    context.data.replace_top(0)
+
+
 def _disk_transfer_checked(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
@@ -1718,6 +1740,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (b"SPIN@", lambda context: _spin_fetch(runtime, context)),
         (b"SPIN!", lambda context: _spin_release(runtime, context)),
+        (b"WAKE-CORE", _wake_core_unavailable),
+        (b"CORE-STATUS", _core_status),
         (b"DISK@", lambda context: context.data.push(runtime.storage.status)),
         (
             b"DISK-SECTORS",
