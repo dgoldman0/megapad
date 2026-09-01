@@ -445,12 +445,12 @@ diskutil.py:
 **v0.9d — Dictionary Search, Stack Safety & Diagnostics** (done)
 
 Dictionary search (§7.8):
-- `WORDS-LIKE` ( "pattern" -- ): case-insensitive substring search across dictionary
+- `WORDS-LIKE` ( "pattern" -- ): ASCII-case-insensitive raw-header substring search, newest-first and including shadowed duplicates
 - `APROPOS` ( "pattern" -- ): alias for WORDS-LIKE
 - `.RECENT` ( n -- ): show last n defined words
 - `ENTRY>NAME` ( entry -- addr len ): extract name from dictionary entry
 - `ENTRY>LINK` ( entry -- next ): follow dictionary link to previous entry
-- `ICONTAINS?` ( pa pl sa sl -- flag ): case-insensitive substring match
+- `ICONTAINS?` ( pa pl sa sl -- flag ): substring match with ASCII `a`–`z` folding only
 
 Stack safety & diagnostics (§1):
 - `NEEDS` ( n -- ): warn if stack has fewer than n items

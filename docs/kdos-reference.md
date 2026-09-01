@@ -862,7 +862,8 @@ publication, cache-only free-space reporting, primary-extent Buffer save/load,
 the fixed FD pool with cached open/metadata-flush/final-close lifecycle, the
 checked source compiler, nested two-extent filesystem `LOAD`, application
 loader and ANSI helpers, whole-file encryption, parent-byte directory
-navigation/mutation, and the Documentation Browser through line 6427.
+navigation/mutation, the Documentation Browser, and Dictionary Search through
+line 6510.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -877,8 +878,8 @@ fragmentation reporting, ordered Buffer/file transfers, descriptor allocation,
 cached open snapshots, used-metadata flush, ordered close/release, source
 evaluation/loading, encryption, navigation/mutation, paging, listing, and
 descriptor-backed documentation display are executable semantic behavior
-rather than reporting-only shims. The frontier now ends at line 6427;
-Dictionary Search begins at line 6428.
+rather than reporting-only shims. The frontier now ends at line 6510;
+Scheduler & Tasks begins at line 6511.
 
 ---
 
@@ -1165,10 +1166,10 @@ to `(FCLOSE-NOFS)`, binds deferred `OPEN` to `(OPEN)`, and finally rebinds
 only load effects; it does no filesystem or media I/O and emits nothing.
 Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
-navigation, and the Documentation Browser through line 6427. Their provenance
-and edge contracts are recorded in the corresponding sections below and in
-`docs/simulator-contract.md`; the next uncovered seam is Dictionary Search at
-line 6428.
+navigation, the Documentation Browser, and Dictionary Search through line
+6510. Their provenance and edge contracts are recorded in the corresponding
+sections below and in `docs/simulator-contract.md`; the next uncovered seam is
+Scheduler & Tasks at line 6511.
 
 ---
 
@@ -1809,7 +1810,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 6427. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 6510. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2182,8 +2183,8 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through the Documentation Browser at line 6427; the next uncovered
-seam is Dictionary Search at line 6428.
+continues through Dictionary Search at line 6510; the next uncovered seam is
+Scheduler & Tasks at line 6511.
 
 **Example — filesystem operations:**
 ```forth
@@ -2370,12 +2371,39 @@ inspecting recent definitions.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `WORDS-LIKE` | `( "pattern" -- )` | Search the entire dictionary for words whose names contain *pattern* (case-insensitive substring match).  Prints all matches with a count. |
+| `WORDS-LIKE` | `( "pattern" -- )` | Walk every raw header newest-first and print ASCII-case-insensitive substring matches, including shadowed duplicates. |
 | `APROPOS` | `( "pattern" -- )` | Alias for `WORDS-LIKE`. |
-| `.RECENT` | `( n -- )` | Show the last *n* words added to the dictionary, starting from `LATEST`. |
-| `ICONTAINS?` | `( pa pl sa sl -- flag )` | Low-level: case-insensitive substring search.  True if the pattern (addr *pa*, len *pl*) appears anywhere in the string (addr *sa*, len *sl*). |
-| `ENTRY>NAME` | `( entry -- addr len )` | Extract the name from a dictionary entry (skip 8-byte link + 1-byte flags/len). |
-| `ENTRY>LINK` | `( entry -- next )` | Follow the link field to the previous dictionary entry. |
+| `.RECENT` | `( n -- )` | Show at most signed-positive *n* raw headers from `LATEST`. |
+| `ICONTAINS?` | `( pa pl sa sl -- flag )` | Low-level nested-loop substring search; folds only ASCII `a`–`z`. |
+| `ENTRY>NAME` | `( entry -- addr len )` | Return spelling at `entry+9` and low-seven-bit length from flags/length at `+8`. |
+| `ENTRY>LINK` | `( entry -- next )` | Fetch the unchecked raw link cell at `entry+0`. |
+
+The exact unchanged source is lines 6428–6510: 83 LF records and 2,682
+bytes, SHA-256
+`c1c7be64fd2d1c86465edec8f0fd6922c2742c6b77be9267dc7638f7eeb3ce5a`,
+Git blob `8335b7ef5566340e7fa1115de27fec9c75f6ae97`. It publishes six
+colon definitions and eight zeroed scratch variables. The hosted semantic
+headers grow by 398 bytes; differing native code-body sizes are irrelevant to
+the link/flags/name fields this source reads. Loading performs no search,
+transient `WORD`, UART, filesystem, platform-service, or task action.
+
+`ICONTAINS?` correctly uses `I` for the inner pattern offset and `J` for the
+outer candidate offset. Mismatch `LEAVE` exits only the inner loop, while
+success removes the live outer frame with `UNLOOP` before `EXIT`. Its four
+arguments and the search walker's count/header/pattern state live in global
+scratch, so calls are not reentrant. Its signed length comparison is only safe
+for ordinary nonnegative spans; arbitrary full-cell lengths can enter wrapping
+ordinary-`DO` behavior.
+
+`WORDS-LIKE` leaves its counted pattern in transient bytes at `HERE` and leaves
+`WL-PA` pointing there after return. It follows raw links to zero with no cycle
+bound and does not deduplicate shadowed names or hide internal definitions.
+Malformed lengths can read/print beyond a header, an invalid link can fault
+after partial output, and a cycle does not terminate. `.RECENT` uses the same
+unchecked headers but its signed-positive count bounds traversal, even through
+a cycle. Raw header changes affect these tools while the hosted semantic
+lookup index remains metadata-backed; agreement after corruption is not a
+compatibility claim.
 
 **Example:**
 ```forth

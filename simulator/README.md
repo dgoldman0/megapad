@@ -145,7 +145,10 @@ The implemented slices provide:
   parser, directory cache, RTC timestamp, sync, and flush paths;
 - the unchanged KDOS Documentation Browser through ordinary `FREAD`, file
   descriptors, directory scans, ANSI pagination, deterministic `KEY`, and
-  final `FCLOSE`/sync rather than a hosted documentation shortcut.
+  final `FCLOSE`/sync rather than a hosted documentation shortcut;
+- unchanged KDOS Dictionary Search over the guest-visible linked headers,
+  transient `WORD` pattern, nested-loop substring matcher, native-compatible
+  `TYPE`/`SPACE`, and raw `LATEST` traversal.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 task stack arenas and cooperative scheduling remain pending. The IDL seam
@@ -737,14 +740,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 6427.
+ends at line 6510.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–6427 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file filesystem encryption, parent-byte subdirectory navigation/mutation, and the paged Documentation Browser |
-| 6428 onward | Next uncovered frontier | Dictionary Search begins at line 6428, followed by the scheduler and remaining ordinary KDOS source |
+| 39–6510 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file filesystem encryption, parent-byte subdirectory navigation/mutation, the paged Documentation Browser, and raw linked-header Dictionary Search |
+| 6511 onward | Next uncovered frontier | Scheduler & Tasks begins at line 6511, followed by the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1425,9 +1428,35 @@ returns a stray zero despite the declared clean stack; a no-filesystem
 The browser's buffers, counter, FD pool, parser, cache, and UART streams are
 global and non-reentrant.
 
-Later slices continue with Dictionary Search at line 6428, then advance the
-remaining ordinary KDOS source toward its deterministic cooperative task
-scheduler.
+The following exact fixture is unchanged lines 6428–6510: 83 LF records,
+2,682 bytes, SHA-256
+`c1c7be64fd2d1c86465edec8f0fd6922c2742c6b77be9267dc7638f7eeb3ce5a`,
+and Git blob `8335b7ef5566340e7fa1115de27fec9c75f6ae97`. It publishes six
+colon definitions and eight zero-initialized scratch variables, advancing the
+hosted dictionary by 398 bytes without executing a search, parsing a pattern,
+or touching UART, filesystem, platform-service, task, or transient `WORD`
+state.
+
+`ENTRY>LINK` and `ENTRY>NAME` directly consume the guest-visible header layout:
+link at `+0`, flags/length at `+8`, and spelling at `+9`, with the immediate bit
+masked from the low-seven-bit length. `ICONTAINS?` performs the unchanged
+nested `I`/`J` loops and folds only ASCII `a`–`z`. `WORDS-LIKE` stores its
+count, current header, and transient counted pattern globally, walks every raw
+header newest-first, and reports shadowed duplicates as separate matches;
+`APROPOS` is an exact alias. `.RECENT` walks at most its signed-positive count.
+
+The safe domain is one stable, mapped, acyclic linked dictionary with canonical
+ASCII headers, ordinary nonnegative lengths and mapped spans, enough live
+dictionary-tail room for `WORD`, a reasonable bounded traversal budget, and
+synchronous non-reentrant use. The raw helpers validate nothing. A malformed
+length can print beyond a header, an invalid link can fault after partial UART
+output, and a cycle makes unbounded `WORDS-LIKE` nonterminating; `.RECENT` is
+still bounded by its count. Global `IC-*`/`WL-*` scratch and the transient
+pattern bytes remain changed after return or failure, with `WL-PA` left pointing
+at `HERE`. Raw header mutation is observed by these walkers even though hosted
+ordinary lookup retains its semantic metadata authority.
+
+Later slices continue with Scheduler & Tasks at line 6511.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

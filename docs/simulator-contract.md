@@ -256,7 +256,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 6427.
+KDOS source frontier now ends at line 6510.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1353,7 +1353,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 6427. Exact unchanged lines
+The contiguous source frontier now ends at line 6510. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2071,7 +2071,60 @@ leak the allocated FD. Encrypted input is emitted as ciphertext for logical
 is verified. Content and names are trusted terminal data. Zero or malformed
 ordinary-`DO` chunk bounds, non-NUL names, invalid slots, concurrency,
 durability, and multi-extent browsing remain outside the qualified domain.
-The next uncovered seam is Dictionary Search at line 6428.
+
+Exact unchanged lines 6428 through 6510 contain 83 LF records and 2,682
+bytes, with SHA-256
+`c1c7be64fd2d1c86465edec8f0fd6922c2742c6b77be9267dc7638f7eeb3ce5a`
+and Git blob `8335b7ef5566340e7fa1115de27fec9c75f6ae97`. The exact ledger is
+`ENTRY>LINK`, `ENTRY>NAME`, four `IC-*` variables, `ICONTAINS?`, four `WL-*`
+variables, `WORDS-LIKE`, `APROPOS`, and `.RECENT`: six colon definitions and
+eight zero-initialized cells. Under hosted header geometry they advance HERE
+by 398 bytes. Loading executes none of them and performs no UART, filesystem,
+storage, MMIO, task, transient `WORD`, or parser action beyond ordinary source
+consumption and dictionary publication.
+
+This slice consumes the real pseudo-BIOS `TYPE` and `SPACE` words. `TYPE`
+removes length then address before reading, performs no read for zero length,
+routes bytes low-to-high with uint64 address wrapping, and retains an emitted
+prefix on a later read fault. `SPACE` emits one byte `0x20`. Neither word adds
+a retained terminal, renderer, raw UART MMIO, capacity, or timing claim.
+
+`ENTRY>LINK` reads the little-endian link at header offset zero.
+`ENTRY>NAME` masks the immediate bit from the flags/length byte at offset eight
+and returns the original spelling at offset nine. This agrees with the
+executable BIOS's no-padding header layout; hosted semantic code slots can have
+different sizes because the slice never derives a code address or next header
+from a name. Raw guest header mutation affects these readers and walkers even
+though hosted dictionary lookup retains semantic metadata, so corrupted-state
+agreement between raw search and `FIND` is not claimed.
+
+`ICONTAINS?` stores all four arguments in global scratch, treats an empty
+pattern as matching, rejects a pattern longer than its subject, and otherwise
+uses correctly nested `I`/`J` loops. Inner mismatch `LEAVE` removes only the
+inner loop; success executes `UNLOOP` for the still-live outer frame before
+`EXIT`. Case folding applies only to ASCII `a`–`z`; high bytes remain exact.
+Its length guard uses signed `<`, so arbitrary full-cell lengths can bypass the
+intended bounds and enter wrapping ordinary-`DO` behavior.
+
+`WORDS-LIKE` parses a transient counted pattern at current HERE, records its
+address/length and traversal state globally, follows raw links from LATEST to
+zero, and prints every matching header newest-first. Shadowed duplicates,
+internal words, and the search word itself are not deduplicated or hidden.
+`APROPOS` invokes the same path. The counted bytes do not advance HERE and
+`WL-PA` remains pointed at that transient region after return. `.RECENT` also
+uses raw headers but stops after its signed-positive count or link zero.
+
+The qualified domain requires a stable mapped acyclic dictionary chain,
+canonical ASCII headers, ordinary nonnegative lengths and complete
+nonwrapping pattern/name spans, enough live dictionary-tail space for the
+transient counted word, an active physical input line for the parsing words,
+a reasonable finite step budget, and synchronous non-reentrant execution.
+The raw readers validate nothing. A link cycle makes WORDS-LIKE unbounded;
+malformed name lengths can read or print beyond a header; an invalid link can
+fault after partial output; and failure retains global `IC-*`/`WL-*` state,
+transient pattern bytes, and any UART prefix. `.RECENT` remains count-bounded
+even if a link cycles. The next uncovered seam is Scheduler & Tasks at line
+6511.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
