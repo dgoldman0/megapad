@@ -599,6 +599,34 @@ def _push_zero(context: ExecutionContext) -> None:
     context.data.push(0)
 
 
+def _mpu_base_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.set_mpu_base(context.data.pop())
+
+
+def _mpu_limit_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.set_mpu_limit(context.data.pop())
+
+
+def _mpu_base_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.mpu_base)
+
+
+def _mpu_limit_fetch(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    context.data.push(runtime.mpu_limit)
+
+
 def _sysinfo_fetch(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
@@ -2115,6 +2143,25 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (b"COREID", _push_zero),
         (b"TASK-ID", _push_zero),
+        (b"ENTER-USER", lambda _context: None),
+        (b"SYS-EXIT", lambda _context: None),
+        (b"PRIV@", _push_zero),
+        (
+            b"MPU-BASE!",
+            lambda context: _mpu_base_store(runtime, context),
+        ),
+        (
+            b"MPU-LIMIT!",
+            lambda context: _mpu_limit_store(runtime, context),
+        ),
+        (
+            b"MPU-BASE@",
+            lambda context: _mpu_base_fetch(runtime, context),
+        ),
+        (
+            b"MPU-LIMIT@",
+            lambda context: _mpu_limit_fetch(runtime, context),
+        ),
         (
             b"BACKGROUND",
             lambda context: _task_start_unavailable(

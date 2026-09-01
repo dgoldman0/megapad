@@ -180,6 +180,13 @@ accelerated primitive words.  Whole KDOS, filesystem, rich-terminal, UIDL,
 Desk, or applet modules are not replaced with host implementations during a
 compatibility journey.
 
+The retired user-mode ABI is preserved exactly as compatibility state rather
+than revived as a simulator security boundary. `ENTER-USER` and `SYS-EXIT` are
+stack-neutral no-ops, `PRIV@` always returns supervisor level 0, and
+`MPU-BASE!`/`MPU-LIMIT!` retain runtime-local cells readable through the
+corresponding fetchers. The MPU values do not restrict hosted memory because
+the native checks are gated by the user privilege level that MegaPad removed.
+
 `REQUIRE`, `PROVIDED`, evaluator nesting and diagnostics, compilation
 transactions, rollback, dictionary-zone transitions, and allocation lifetimes
 are required semantics.  JIT controls may be semantic no-ops only when their

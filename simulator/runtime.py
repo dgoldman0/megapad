@@ -615,6 +615,12 @@ class MegaForthRuntime:
         self._dictionary_base = 0
         self._dictionary_limit = 0
         self._dictionary_fault_xt = 0
+        # Hardware user mode was removed from MegaPad, but its public BIOS
+        # compatibility surface still exposes inert MPU registers.  Preserve
+        # their guest-visible state without using it to restrict semantic
+        # memory access; PRIV@ therefore remains permanently supervisor (0).
+        self._mpu_base = 0
+        self._mpu_limit = 0
         self._provided: set[bytes] = set()
         self._active_input_states: list[_EvaluationState] = []
         self._bios_evaluator: _BiosEvaluatorState | None = None
@@ -675,6 +681,24 @@ class MegaForthRuntime:
         return self._dictionary_fault_xt
 
     @property
+    def privilege_level(self) -> int:
+        """Return the retired hardware privilege level, always supervisor."""
+
+        return 0
+
+    @property
+    def mpu_base(self) -> int:
+        """Return the inert guest-visible MPU lower-bound register."""
+
+        return self._mpu_base
+
+    @property
+    def mpu_limit(self) -> int:
+        """Return the inert guest-visible MPU exclusive-limit register."""
+
+        return self._mpu_limit
+
+    @property
     def dictionary_index_state(self) -> DictionaryIndexState:
         """Return stable diagnostics for the caller-backed BIOS index."""
 
@@ -713,6 +737,16 @@ class MegaForthRuntime:
             self._bootstrap_numeric_base = value
         else:
             self.memory.write64(self._numeric_base_address, value)
+
+    def set_mpu_base(self, base: int) -> None:
+        """Store one wrapped cell in the non-enforcing MPU base register."""
+
+        self._mpu_base = u64(base)
+
+    def set_mpu_limit(self, limit: int) -> None:
+        """Store one wrapped cell in the non-enforcing MPU limit register."""
+
+        self._mpu_limit = u64(limit)
 
     def bind_numeric_base_address(self, address: int) -> None:
         """Bind numeric parsing and printers to the semantic BIOS BASE cell."""

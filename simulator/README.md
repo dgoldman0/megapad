@@ -125,7 +125,11 @@ The implemented slices provide:
   cleanup;
 - the one-core semantic BIOS evaluator: raw guest `EVALUATE` through 255 bytes,
   checked statuses and diagnostics, persistent cross-call compiler/control
-  state, explicit finish/reset/unwind, and one inherited public step budget; and
+  state, explicit finish/reset/unwind, and one inherited public step budget;
+- the retired user-mode compatibility ABI: stack-neutral `ENTER-USER` and
+  `SYS-EXIT`, constant-supervisor `PRIV@`, and runtime-local, guest-visible
+  `MPU-BASE`/`MPU-LIMIT` registers which retain values but do not enforce
+  access restrictions; and
 - the unchanged KDOS checked whole-source compiler and MP64FS `LOAD`, including
   nested relative paths, concatenated primary/secondary extents, guest
   `THROW` cleanup, and the literal pre-registry transaction hooks.
@@ -160,6 +164,14 @@ Bank-0 relocation still refuses to move below the semantic dictionary's
 initial start even though native raw `ALLOT` has no equivalent lower-bound
 check. That pre-existing divergence is outside the userland transition and is
 not presented as native equivalence.
+
+The application compatibility words follow the checked-in BIOS after removal
+of hardware user mode. `ENTER-USER` and `SYS-EXIT` are true no-ops and `PRIV@`
+always reports supervisor level 0. `MPU-BASE!`, `MPU-LIMIT!`, and their fetchers
+retain wrapped cells independently in each runtime so unchanged software can
+observe its setup and teardown, but those registers do not gate semantic
+memory access. They are compatibility state, not a sandbox or protection
+boundary.
 
 ## Run it
 
