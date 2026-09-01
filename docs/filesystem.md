@@ -36,7 +36,7 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 6296. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 6427. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
@@ -45,8 +45,9 @@ bounded primary-extent `CAT` publication, cache-only total/largest-free and
 global occupancy reporting, primary-extent `SAVE-BUFFER`/`LOAD-BUFFER`, the
 fixed FD pool with cached `OPEN`, used-metadata `FFLUSH`, and final `FCLOSE`,
 then the checked source compiler, nested two-extent filesystem `LOAD`,
-application loader, ANSI byte helpers, whole-file encryption, and parent-byte
-subdirectory navigation/mutation.
+application loader, ANSI byte helpers, whole-file encryption, parent-byte
+subdirectory navigation/mutation, and the paged Documentation Browser through
+ordinary descriptors and `FREAD`/`FCLOSE`.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -79,11 +80,18 @@ and Git blob `b964ca87a1af44e54b22abd25116edd2a7e2a853`. Its ledger is the raw
 publishes those words without a filesystem, cache, media, RTC, diagnostic,
 lock, or output effect.
 
+The exact 6297–6427 Documentation Browser fixture contains 131 LF records and
+3,945 bytes, with SHA-256
+`442e5e39598d71a589bf19d6345c5bb042d678ba9f51607a878ae5030fbdcee6`
+and Git blob `242fc879957ba14f3a00b3284e8af921a4fa365c`. It publishes 13
+definitions, including a raw 512-byte buffer and one zeroed counter, without
+filesystem/media access, FD allocation, input, output, or synchronization.
+
 `FS-LOAD` consumes the separately qualified native
 `MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
 metadata predicate, and generation check. This boundary is not evidence of
-file-backed close/reopen durability, the Documentation Browser or later KDOS
-source, general multi-extent content I/O, malformed mutation/content safety,
+file-backed close/reopen durability, later KDOS source, general multi-extent
+content I/O, malformed mutation/content safety,
 allocator improvement, compaction, repair, or stronger filesystem validation.
 
 ---
@@ -918,18 +926,29 @@ untouched. No operation validates pool membership, alignment, allocation, or
 directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
 flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
 and deferred targets are global and unlocked. The contiguous hosted frontier
-continues through navigation at line 6296; its next seam is the Documentation
-Browser heading at line 6297.
+continues through the Documentation Browser at line 6427; its next seam is
+Dictionary Search at line 6428.
 
 ### Documentation Access
 
 | Word | Description |
 |------|-------------|
-| `TOPICS` | List all doc-type files |
-| `LESSONS` | List all tutorial-type files |
-| `DOC name` | Page through a documentation file |
-| `TUTORIAL name` | Walk through a tutorial file |
-| `DESCRIBE word` | Search docs for info about a word |
+| `TOPICS` | Globally list every occupied type-4 cached name, ignoring CWD/parent |
+| `LESSONS` | Globally list every occupied type-6 cached name, ignoring CWD/parent |
+| `DOC name` | Use ordinary current-directory `OPEN` and page the selected payload |
+| `TUTORIAL name` | Identical to `DOC`; no tutorial-type check is performed |
+| `DESCRIBE word` | Globally select the lowest-slot, case-sensitive type-4 filename match |
+
+These are compatibility descriptions, not stronger safety guarantees.
+`DOC`/`TUTORIAL` do not validate type, encryption, CRC, or directory status;
+`DESCRIBE` does not search the Forth dictionary or file contents. The browser
+emits arbitrary payload control bytes, maps LF to CRLF, pauses after every
+twentieth LF, and starts `SHOW-FILE` at the descriptor's incoming cursor.
+Legacy `FREAD` ignores secondary extents, so browsing a valid split file can
+publish adjacent sectors. Successful high-level display closes through
+`FFLUSH`/`FS-SYNC` and therefore writes and flushes media. Open failure leaves
+a zero on the data stack in `DOC`, `TUTORIAL`, and DESCRIBE's final open path;
+read/input/sync failure can leak the allocated descriptor.
 
 ### Low-Level Access
 

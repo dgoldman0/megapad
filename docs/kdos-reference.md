@@ -861,8 +861,8 @@ name lookup, metadata creation/deletion/rename, primary-extent file
 publication, cache-only free-space reporting, primary-extent Buffer save/load,
 the fixed FD pool with cached open/metadata-flush/final-close lifecycle, the
 checked source compiler, nested two-extent filesystem `LOAD`, application
-loader and ANSI helpers, whole-file encryption, and parent-byte directory
-navigation/mutation through line 6296.
+loader and ANSI helpers, whole-file encryption, parent-byte directory
+navigation/mutation, and the Documentation Browser through line 6427.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -875,9 +875,10 @@ bitmap free-space reporting, exact-name lookup, deterministic timestamps,
 ordered metadata mutation, byte-exact `CAT` output, global cached
 fragmentation reporting, ordered Buffer/file transfers, descriptor allocation,
 cached open snapshots, used-metadata flush, ordered close/release, source
-evaluation/loading, encryption, and navigation/mutation are executable
-semantic behavior rather than reporting-only shims. The frontier now ends at
-line 6296; the Documentation Browser begins at line 6297.
+evaluation/loading, encryption, navigation/mutation, paging, listing, and
+descriptor-backed documentation display are executable semantic behavior
+rather than reporting-only shims. The frontier now ends at line 6427;
+Dictionary Search begins at line 6428.
 
 ---
 
@@ -1163,10 +1164,11 @@ to `(FCLOSE-NOFS)`, binds deferred `OPEN` to `(OPEN)`, and finally rebinds
 `FCLOSE` to `(FCLOSE)`. Those dictionary/allocation/vector mutations are its
 only load effects; it does no filesystem or media I/O and emits nothing.
 Subsequent exact fixtures qualify the checked compiler and filesystem loader,
-application loader and ANSI helpers, filesystem encryption, and subdirectory
-navigation through line 6296. Their provenance and edge contracts are recorded
-in the corresponding sections below and in `docs/simulator-contract.md`; the
-next uncovered seam is the Documentation Browser at line 6297.
+application loader and ANSI helpers, filesystem encryption, subdirectory
+navigation, and the Documentation Browser through line 6427. Their provenance
+and edge contracts are recorded in the corresponding sections below and in
+`docs/simulator-contract.md`; the next uncovered seam is Dictionary Search at
+line 6428.
 
 ---
 
@@ -1807,7 +1809,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 6296. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 6427. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2180,8 +2182,8 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through subdirectory navigation at line 6296; the next uncovered seam
-is the Documentation Browser heading at line 6297.
+continues through the Documentation Browser at line 6427; the next uncovered
+seam is Dictionary Search at line 6428.
 
 **Example — filesystem operations:**
 ```forth
@@ -2303,18 +2305,52 @@ unlocked.
 
 ## §7.7 Documentation Browser
 
-A built-in paging reader for documentation and tutorial files stored on
-disk.  Files with type=4 (doc) and type=6 (tutorial) are browsable.
+A built-in paging reader for content stored in MP64FS. Type 4 and 6 classify
+documentation and tutorial entries for the global listing words; the two named
+display wrappers themselves do not enforce those types.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `TOPICS` | `( -- )` | List all documentation files on disk (type=doc). |
-| `LESSONS` | `( -- )` | List all tutorial files on disk (type=tutorial). |
-| `DOC` | `( "name" -- )` | Open and page through a documentation file, pausing every 20 lines with a "--- more ---" prompt.  Automatically closes the FD when done. |
-| `TUTORIAL` | `( "name" -- )` | Open and walk through a tutorial file (same pagination as DOC).  Automatically closes the FD when done. |
-| `DESCRIBE` | `( "word" -- )` | Search for a documentation file matching the given word name.  If found, displays it (closes FD after).  If not, suggests using `TOPICS`. |
-| `SHOW-FILE` | `( fdesc -- )` | Low-level: page through an open file descriptor with pagination.  Caller is responsible for `FCLOSE`. |
-| `OPEN-BY-SLOT` | `( slot -- fdesc \| 0 )` | Open a file by its directory slot index.  Uses the FD pool; caller should `FCLOSE` when done. |
+| `TOPICS` | `( -- )` | Globally list occupied type-4 names, ignoring CWD and parent. |
+| `LESSONS` | `( -- )` | Globally list occupied type-6 names, ignoring CWD and parent. |
+| `DOC` | `( "name" -- )` | Use ordinary current-directory `OPEN`, page from the descriptor cursor, then close on normal success. |
+| `TUTORIAL` | `( "name" -- )` | Behaviorally identical to `DOC`; no tutorial-type check is made. |
+| `DESCRIBE` | `( "word" -- )` | Globally find the lowest-slot, case-sensitive type-4 filename match and display it. |
+| `SHOW-FILE` | `( fdesc -- )` | Reset pagination and display from the incoming cursor to logical EOF without closing. |
+| `OPEN-BY-SLOT` | `( slot -- fdesc \| 0 )` | Snapshot the supplied occupied slot into the lowest free FD without ensuring or validating the slot. |
+
+The exact unchanged source is lines 6297–6427: 131 LF records and 3,945
+bytes, SHA-256
+`442e5e39598d71a589bf19d6345c5bb042d678ba9f51607a878ae5030fbdcee6`,
+Git blob `242fc879957ba14f3a00b3284e8af921a4fa365c`. Its 13 definitions
+reserve raw `DOC-BUF`, zero `DOC-LINES`, and publish constants and colon bodies
+without load-time filesystem, FD, UART, input, or synchronization effects.
+
+`.DOC-CHUNK` publishes arbitrary bytes, replacing LF with CRLF and retaining a
+global line count across chunks. Every twentieth LF emits the DIM/reset prompt,
+consumes one `KEY`, emits CRLF, and resets the counter—even if that LF is the
+final byte. `SHOW-FILE` resets the count and uses 512-byte `FREAD` calls from
+the current cursor. Its “entire file” comment therefore excludes a skipped
+prefix. Legacy `FREAD` ignores secondary extents and can publish adjacent
+primary-sector bytes for a valid split file.
+
+The high-level wrappers are not read-only at the media interface: successful
+display ends in `FCLOSE`, which calls `FFLUSH`/`FS-SYNC`, rewrites bitmap and
+directory sectors, and flushes. Neither DOC nor TUTORIAL checks type,
+encryption, CRC, or directory status. Encrypted logical bytes are displayed as
+ciphertext without the appended tag, and NUL/ESC/control bytes reach the UART
+unchanged. DESCRIBE does not inspect dictionary words or file contents; it
+compares the parsed/truncated token against complete zero-padded directory
+names.
+
+On open failure, DOC, TUTORIAL, and DESCRIBE's final open path leave a zero on
+the data stack despite their documented clean effect. A no-filesystem
+DOC/TUTORIAL failure occurs before parsing, so the would-be operand remains for
+the outer evaluator. Read, input, or close/sync failure can leave partial
+output and leak the allocated FD. The safe domain therefore requires canonical
+NUL-terminated metadata, positive mapped chunk spans, one-primary-extent
+unencrypted content, a writable stable mount for close, enough queued prompt
+input, and synchronous non-reentrant execution.
 
 **Example:**
 ```forth

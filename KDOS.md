@@ -212,7 +212,8 @@ secret boundary, or security proof.
   allocation-neutral duplicates, cycle-breaking pre-registration, and
   frame-scoped rollback
 - **Python diskutil.py**: MP64FS image formatter, file injector/reader/lister/deleter
-- **Documentation browser**: TOPICS, LESSONS, DOC, TUTORIAL, DESCRIBE (word lookup)
+- **Documentation browser**: TOPICS, LESSONS, DOC, TUTORIAL, and DESCRIBE
+  (global exact documentation-filename lookup, not dictionary/content search)
 - **Doc file display**: .DOC-CHUNK with 20-line pagination and "--- more ---" prompt
 - **OPEN-BY-SLOT**: Open file by directory slot index for DESCRIBE lookup
 - **SCR-DOCS**: Screen 7 — documentation browser listing topics and tutorials
@@ -400,10 +401,10 @@ New Forth words (§7.7, ~120 lines):
 - `FTYPE-DOC` / `FTYPE-TUT` / `FTYPE-BUNDLE`: file type constants (4, 6, 7)
 - `DOC` ( "topic" -- ): open and display documentation file with pagination
 - `TUTORIAL` ( "name" -- ): open and display tutorial file
-- `DESCRIBE` ( "word" -- ): search directory for matching doc, display or suggest TOPICS
+- `DESCRIBE` ( "word" -- ): globally select the first case-sensitive matching doc filename, display or suggest TOPICS
 - `TOPICS` / `LESSONS`: list all doc/tutorial files from FS directory
 - `OPEN-BY-SLOT` ( slot -- fdesc | 0 ): open file by directory slot index (uses FD pool; caller should FCLOSE)
-- `SHOW-FILE` ( fdesc -- ): read and display entire file via FREAD (caller should FCLOSE)
+- `SHOW-FILE` ( fdesc -- ): display from the descriptor's current cursor through logical EOF via FREAD (caller should FCLOSE)
 - `.DOC-CHUNK` ( addr len -- ): paginated display (20-line pages, KEY to continue)
 - SCR-DOCS: screen 7 — documentation browser listing topics and tutorials
 

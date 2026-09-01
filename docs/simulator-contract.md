@@ -256,7 +256,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 6296.
+KDOS source frontier now ends at line 6427.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1353,7 +1353,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 6296. Exact unchanged lines
+The contiguous source frontier now ends at line 6427. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -1997,8 +1997,81 @@ policy flags, mutate cache before nontransactional sync, and can leave
 cache/media prefixes on an exception. `RMDIR` does not account for saved CWD
 snapshots in the loader/REQUIRE machinery, and its nonempty rejection drops
 only one of two target slot copies, returning with the slot leaked on the data
-stack. The next
-uncovered seam is the Documentation Browser at line 6297.
+stack.
+
+Exact unchanged lines 6297 through 6427 contain 131 LF records and 3,945
+bytes, with SHA-256
+`442e5e39598d71a589bf19d6345c5bb042d678ba9f51607a878ae5030fbdcee6`
+and Git blob `242fc879957ba14f3a00b3284e8af921a4fa365c`. Their exact
+source-order ledger is `FTYPE-DOC`, `FTYPE-TUT`, `DOC-BUF`, `DOC-LINES`,
+`PAGE-LINES`, `.DOC-CHUNK`, `SHOW-FILE`, `TOPICS`, `LESSONS`, `DOC`,
+`TUTORIAL`, `OPEN-BY-SLOT`, and `DESCRIBE`. Loading reserves the raw 512-byte
+`DOC-BUF`, zero-initializes `DOC-LINES`, and publishes the other definitions.
+It performs no parse, filesystem/media operation, FD allocation, input read,
+UART write, synchronization, or lock action. The source does not explicitly
+initialize the raw CREATE/ALLOT buffer.
+
+The ordinary qualified browser domain is a stable validator-approved mounted
+cache and matching media generation; canonical occupied entries with
+NUL-terminated names; unencrypted one-primary-extent payloads satisfying
+`cursor <= used <= primary capacity`; writable media for the final close;
+positive mapped nonwrapping chunk spans; enough explicitly injected input for
+each pagination prompt reached through source evaluation; and synchronous,
+non-reentrant execution. The descriptor pool, directory/cache state,
+`DOC-BUF`, `DOC-LINES`, parser scratch, UART streams, and storage service are
+shared and unlocked.
+
+`.DOC-CHUNK` emits bytes in address order. LF is replaced by UART CRLF and
+increments the retained global line count; CR, NUL, ESC, and every other byte
+are emitted unchanged, so a CRLF input becomes CR-CR-LF. At each twentieth LF
+it emits the ordinary DIM/reset prompt, consumes and discards exactly one
+`KEY`, emits CRLF, and resets the counter. The pause also occurs when the
+twentieth LF is the chunk's final byte. Counts carry across calls. A blocking
+prompt can be resumed through the hosted `KEY`/IDL boundary when the browser
+word was entered by resumable compiled dispatch; the ordinary evaluator path
+must prequeue its input as specified above.
+
+`SHOW-FILE` resets the line count, issues consecutive `FREAD` calls of at most
+512 bytes from the descriptor's incoming cursor, displays each positive
+result, and stops on zero. It consumes the descriptor argument without closing
+it and leaves the descriptor cursor at logical EOF. Consequently its source
+comment's “entire file” means only the suffix from the current cursor. The
+already-admitted legacy `FREAD` ignores secondary extents and has no primary
+capacity clamp, so a valid two-extent logical file can publish neighboring
+primary-sector bytes rather than its second extent.
+
+`TOPICS` and `LESSONS` ensure the filesystem and scan all 128 cached slots,
+ignoring CWD and parent, listing every occupied type-4 or type-6 name and an
+ambient-base count. `DOC` and `TUTORIAL` are behaviorally identical wrappers
+around ordinary current-directory `OPEN`: they do not resolve a path or check
+type, encryption, CRC, or directory status. `DESCRIBE` does not inspect the
+Forth dictionary or documentation content. It parses into the 23-byte name
+domain, scans type-4 entries globally and case-sensitively, compares the full
+24-byte zero-padded field, and passes the lowest-slot match to
+`OPEN-BY-SLOT`. Thus a global listing or DESCRIBE match can name content which
+the current-directory DOC/TUTORIAL path cannot open.
+
+`OPEN-BY-SLOT` checks only whether the addressed dirent's first name byte is
+nonzero, then allocates the lowest free descriptor and snapshots the supplied
+slot. It does not ensure the filesystem or validate slot range, generation,
+type, flags, descriptor identity, or parent. Successful DOC, TUTORIAL, and
+DESCRIBE display then call ordinary `FCLOSE`; that invokes `FFLUSH` and
+`FS-SYNC`, so nominally read-only browsing rewrites the bitmap and complete
+directory and flushes the media. A stale descriptor can overwrite a newer
+cached used value.
+
+These routines intentionally retain the source's failure behavior. DOC,
+TUTORIAL, and DESCRIBE's final open path each execute `DUP 0= IF EXIT THEN` and
+therefore return one zero on open failure despite their declared clean stack.
+When DOC/TUTORIAL fail their OPEN filesystem gate, parsing never occurred and
+the operand also remains for the outer evaluator. Read, input, or close/sync
+failure can retain partial output and global counter/cursor/cache effects and
+leak the allocated FD. Encrypted input is emitted as ciphertext for logical
+`used` bytes without displaying the appended tag; neither encryption nor CRC
+is verified. Content and names are trusted terminal data. Zero or malformed
+ordinary-`DO` chunk bounds, non-NUL names, invalid slots, concurrency,
+durability, and multi-extent browsing remain outside the qualified domain.
+The next uncovered seam is Dictionary Search at line 6428.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

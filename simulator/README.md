@@ -142,7 +142,10 @@ The implemented slices provide:
   Bank-0 DMA allocator, AES-GCM words, guarded storage transfers, directory
   cache, sync, and flush ordering;
 - unchanged parent-byte `PWD`, `CD`, `MKDIR`, and `RMDIR` through the ordinary
-  parser, directory cache, RTC timestamp, sync, and flush paths.
+  parser, directory cache, RTC timestamp, sync, and flush paths;
+- the unchanged KDOS Documentation Browser through ordinary `FREAD`, file
+  descriptors, directory scans, ANSI pagination, deterministic `KEY`, and
+  final `FCLOSE`/sync rather than a hosted documentation shortcut.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 task stack arenas and cooperative scheduling remain pending. The IDL seam
@@ -734,14 +737,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 6296.
+ends at line 6427.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–6296 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file filesystem encryption, and parent-byte subdirectory navigation/mutation |
-| 6297 onward | Next uncovered frontier | The Documentation Browser begins at line 6297, followed by the remaining ordinary KDOS source |
+| 39–6427 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file filesystem encryption, parent-byte subdirectory navigation/mutation, and the paged Documentation Browser |
+| 6428 onward | Next uncovered frontier | Dictionary Search begins at line 6428, followed by the scheduler and remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1387,9 +1390,44 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue with the Documentation Browser at line 6297, then advance
-the remaining ordinary KDOS source toward its module registry and deterministic
-cooperative task scheduler.
+The next exact fixture is unchanged lines 6297–6427: 131 LF records, 3,945
+bytes, SHA-256
+`442e5e39598d71a589bf19d6345c5bb042d678ba9f51607a878ae5030fbdcee6`,
+and Git blob `242fc879957ba14f3a00b3284e8af921a4fa365c`. Its 13-definition
+ledger contains the two file-type constants, raw 512-byte `DOC-BUF`, zeroed
+`DOC-LINES`, `PAGE-LINES`, and the eight browser colon words. Loading publishes
+that state without parsing, filesystem/media access, FD allocation, input,
+UART output, or synchronization.
+
+In the qualified domain, `.DOC-CHUNK` emits every byte except LF unchanged,
+maps LF to CRLF, and consumes one queued key after each twentieth LF—even when
+that LF is the final byte. The count carries across chunks until a prompt and
+`SHOW-FILE` resets it, reads in 512-byte calls from the descriptor's current
+cursor through logical EOF, and consumes but does not close the descriptor.
+`TOPICS` and `LESSONS` globally list cached type-4/type-6 names. `DOC` and
+`TUTORIAL` are identical current-directory `OPEN` wrappers, while `DESCRIBE`
+globally selects the lowest-slot type-4 entry whose complete zero-padded name
+matches the parsed token case-sensitively. Successful wrappers close through
+ordinary `FCLOSE`, so even read-only browsing rewrites bitmap/directory state
+and flushes media.
+
+This source is deliberately not strengthened. `DOC` and `TUTORIAL` do not
+check type, encryption, or CRC and therefore publish any selected logical
+payload, including ciphertext and raw NUL/ESC/control bytes. Listings ignore
+CWD while named opening does not, and `SHOW-FILE` begins at an incoming cursor
+rather than necessarily at byte zero. Legacy `FREAD` ignores secondary extents
+and can expose neighboring sectors. `OPEN-BY-SLOT` trusts its slot and mounted
+state; interruption or I/O/sync failure can leak an FD after partial output or
+media effects. Open failure in `DOC`, `TUTORIAL`, and the final `DESCRIBE` path
+returns a stray zero despite the declared clean stack; a no-filesystem
+`DOC`/`TUTORIAL` failure also leaves the operand unparsed. Zero or malformed
+`.DOC-CHUNK` spans and non-NUL directory names remain outside the safe domain.
+The browser's buffers, counter, FD pool, parser, cache, and UART streams are
+global and non-reentrant.
+
+Later slices continue with Dictionary Search at line 6428, then advance the
+remaining ordinary KDOS source toward its deterministic cooperative task
+scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work
