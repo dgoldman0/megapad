@@ -21,8 +21,11 @@ from rich_terminal.pygame_view import (
     CompositeDrawResult,
     ControlHitTarget,
     ControlIdentity,
+    HitMapEntry,
+    RegionOcclusion,
     composite_draw_plane,
     composite_draw_plane_result,
+    hit_test_hit_map,
 )
 from rich_terminal.retained_model import ResourceFormat
 from rich_terminal.retained_view import (
@@ -486,10 +489,10 @@ class _RetainedDisplayState:
         self._pending_resource_token: tuple[int, DisplayScope] | None = None
         self._pending_resources_ready = False
         self._pending_hit_token: tuple[int, DisplayScope] | None = None
-        self._pending_hit_targets: tuple[ControlHitTarget, ...] = ()
+        self._pending_hit_entries: tuple[HitMapEntry, ...] = ()
         self._pending_hit_map_rendered = False
         self._hit_map_token: tuple[int, DisplayScope] | None = None
-        self._hit_targets: tuple[ControlHitTarget, ...] = ()
+        self._hit_entries: tuple[HitMapEntry, ...] = ()
 
     @property
     def frame_plane(self) -> RetainedDrawPlane | None:
@@ -505,27 +508,43 @@ class _RetainedDisplayState:
 
     @property
     def hit_targets(self) -> tuple[ControlHitTarget, ...]:
-        """Only the immutable map promoted by accepted sink presentation."""
+        """Control-only view of the sink-acknowledged immutable map."""
 
-        return self._hit_targets
+        return tuple(
+            entry
+            for entry in self._hit_entries
+            if isinstance(entry, ControlHitTarget)
+        )
+
+    @property
+    def hit_entries(self) -> tuple[HitMapEntry, ...]:
+        """Exact immutable map promoted only by accepted sink presentation."""
+
+        return self._hit_entries
 
     @staticmethod
     def _offer_token(offer: TerminalDisplayOffer) -> tuple[int, DisplayScope]:
         return offer.offer_id, offer.scope
 
     @staticmethod
-    def _validated_hits(hit_targets) -> tuple[ControlHitTarget, ...]:
-        targets = tuple(hit_targets)
-        if any(not isinstance(target, ControlHitTarget) for target in targets):
-            raise TypeError("hit_targets must contain only ControlHitTarget values")
-        return targets
+    def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
+        entries = tuple(hit_entries)
+        if any(
+            not isinstance(entry, (ControlHitTarget, RegionOcclusion))
+            for entry in entries
+        ):
+            raise TypeError(
+                "hit_entries must contain only ControlHitTarget or "
+                "RegionOcclusion values"
+            )
+        return entries
 
     def _clear_hit_maps(self) -> None:
         self._pending_hit_token = None
-        self._pending_hit_targets = ()
+        self._pending_hit_entries = ()
         self._pending_hit_map_rendered = False
         self._hit_map_token = None
-        self._hit_targets = ()
+        self._hit_entries = ()
 
     def _clear_pending_resources(self) -> None:
         self._pending_resource_token = None
@@ -556,12 +575,12 @@ class _RetainedDisplayState:
         # Delivery of a newer candidate invalidates the older frame as local
         # input authority before the candidate crosses its sink boundary.
         self._hit_map_token = None
-        self._hit_targets = ()
+        self._hit_entries = ()
         token = self._offer_token(offer)
         self._pending_resource_token = token
         self._pending_resources_ready = not bool(offer.retained.resources)
         self._pending_hit_token = token
-        self._pending_hit_targets = ()
+        self._pending_hit_entries = ()
         self._pending_hit_map_rendered = False
 
     @property
@@ -600,7 +619,7 @@ class _RetainedDisplayState:
     def stage_frame_hit_map(
         self,
         offer: TerminalDisplayOffer,
-        hit_targets,
+        hit_entries,
     ) -> None:
         """Bind off-screen geometry to the exact pending offer, never authority."""
 
@@ -613,7 +632,7 @@ class _RetainedDisplayState:
             raise RuntimeError("hit map does not belong to the pending offer")
         if token != self._pending_hit_token:
             raise RuntimeError("pending hit-map token is inconsistent")
-        self._pending_hit_targets = self._validated_hits(hit_targets)
+        self._pending_hit_entries = self._validated_hit_entries(hit_entries)
         self._pending_hit_map_rendered = True
 
     def hit_test(
@@ -627,10 +646,7 @@ class _RetainedDisplayState:
 
         if display_token is None or display_token != self._hit_map_token:
             return None
-        for target in reversed(self._hit_targets):
-            if target.rect.contains(x, y):
-                return target
-        return None
+        return hit_test_hit_map(self._hit_entries, x, y)
 
     def finish_presentation(self, response) -> int | None:
         offer = self.pending_offer
@@ -655,12 +671,12 @@ class _RetainedDisplayState:
         self.since_offer = offer.offer_id
         self.retained_plane = offer.retained
         self._hit_map_token = token
-        self._hit_targets = self._pending_hit_targets
+        self._hit_entries = self._pending_hit_entries
         self.pending_offer = None
         self.pending_generation = None
         self._clear_pending_resources()
         self._pending_hit_token = None
-        self._pending_hit_targets = ()
+        self._pending_hit_entries = ()
         self._pending_hit_map_rendered = False
         return revision
 
@@ -1292,7 +1308,7 @@ def compose_terminal_frame_result(
         show_cursor=False,
         _cache=glyph_cache,
     )
-    hit_targets: tuple[ControlHitTarget, ...] = ()
+    hit_entries: tuple[HitMapEntry, ...] = ()
     if retained_plane is not None:
         compositor_kwargs = {
             "control_font": control_font,
@@ -1310,7 +1326,7 @@ def compose_terminal_frame_result(
             cell_height,
             **compositor_kwargs,
         )
-        hit_targets = retained_result.hit_targets
+        hit_entries = retained_result.hit_entries
     _paint_terminal_cursor(
         pygame_module,
         surface,
@@ -1319,7 +1335,7 @@ def compose_terminal_frame_result(
         cell_height,
         show_cursor=show_cursor,
     )
-    return CompositeDrawResult(surface, hit_targets)
+    return CompositeDrawResult(surface, hit_entries)
 
 
 def capture_final_terminal_raster(pygame_module, surface) -> FinalRaster:
@@ -1692,7 +1708,7 @@ def main() -> int:
                 else display_state.pending_generation
             )
             frame_plane = display_state.frame_plane
-            rendered_hit_targets: tuple[ControlHitTarget, ...] | None = None
+            rendered_hit_entries: tuple[HitMapEntry, ...] | None = None
             if frame_offer is not None:
                 if not resource_cache.pending_ready(
                     frame_offer,
@@ -1740,7 +1756,7 @@ def main() -> int:
                 resource_surfaces = resource_cache.acknowledged_surfaces
 
             def draw_frame() -> None:
-                nonlocal rendered_hit_targets
+                nonlocal rendered_hit_entries
                 screen.fill((0, 0, 0))
                 frame_result = compose_terminal_frame_result(
                     pygame,
@@ -1756,7 +1772,7 @@ def main() -> int:
                     pressed=semantic_pointer.pressed,
                     resource_surfaces=resource_surfaces,
                 )
-                rendered_hit_targets = frame_result.hit_targets
+                rendered_hit_entries = frame_result.hit_entries
                 screen.blit(frame_result.surface, (0, 0))
                 y = terminal.rows * cell_h
                 pygame.draw.rect(
@@ -1787,7 +1803,7 @@ def main() -> int:
                 if frame_offer is not None:
                     display_state.stage_frame_hit_map(
                         frame_offer,
-                        rendered_hit_targets,
+                        rendered_hit_entries,
                     )
             presentation = draw_flip_and_present(
                 pygame,

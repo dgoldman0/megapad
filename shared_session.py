@@ -557,10 +557,14 @@ _REGION_WIRE_FIELDS = (
     "owner_id",
     "owner_generation",
     "region_id",
-    "cell_x",
-    "cell_y",
-    "cell_cols",
-    "cell_rows",
+    "logical_x",
+    "logical_y",
+    "logical_cols",
+    "logical_rows",
+    "clip_x",
+    "clip_y",
+    "clip_cols",
+    "clip_rows",
     "z_order",
     "clipped",
     "draws",
@@ -577,7 +581,12 @@ def _semantic_content_to_wire(content: SemanticTextContent) -> str:
 def _bounds_to_wire(bounds: ObjectBounds) -> list[int]:
     if not isinstance(bounds, ObjectBounds):
         raise TypeError("bounds must be ObjectBounds")
-    return [bounds.left, bounds.top, bounds.right, bounds.bottom]
+    return [
+        bounds.cell_x,
+        bounds.cell_y,
+        bounds.cell_cols,
+        bounds.cell_rows,
+    ]
 
 
 def _bounds_path_to_wire(bounds_path: tuple[ObjectBounds, ...]) -> list[list[int]]:
@@ -966,12 +975,7 @@ def _retained_draw_to_wire(
             "state": int(draw.state),
             "order": draw.order,
             "z_order": draw.z_order,
-            "bounds": [
-                draw.bounds.left,
-                draw.bounds.top,
-                draw.bounds.right,
-                draw.bounds.bottom,
-            ],
+            "bounds": _bounds_to_wire(draw.bounds),
             "menus": [_menu_to_wire(menu) for menu in draw.menus],
         }
     if isinstance(draw, (TextAreaDraw, TextGridDraw)):
@@ -994,12 +998,7 @@ def _retained_draw_to_wire(
             "state": int(draw.state),
             "order": draw.order,
             "z_order": draw.z_order,
-            "bounds": [
-                draw.bounds.left,
-                draw.bounds.top,
-                draw.bounds.right,
-                draw.bounds.bottom,
-            ],
+            "bounds": _bounds_to_wire(draw.bounds),
             "content_stx1_base64": _semantic_content_to_wire(draw.content),
         }
     if isinstance(draw, TabSetDraw):
@@ -1009,12 +1008,7 @@ def _retained_draw_to_wire(
             "state": int(draw.state),
             "order": draw.order,
             "z_order": draw.z_order,
-            "bounds": [
-                draw.bounds.left,
-                draw.bounds.top,
-                draw.bounds.right,
-                draw.bounds.bottom,
-            ],
+            "bounds": _bounds_to_wire(draw.bounds),
             "tabs": [_tab_to_wire(tab) for tab in draw.tabs],
         }
     raise TypeError("retained draw is outside the shared-viewer vocabulary")
@@ -1037,10 +1031,14 @@ def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
                 "owner_id": region.owner_id,
                 "owner_generation": region.owner_generation,
                 "region_id": region.region_id,
-                "cell_x": region.cell_x,
-                "cell_y": region.cell_y,
-                "cell_cols": region.cell_cols,
-                "cell_rows": region.cell_rows,
+                "logical_x": region.logical_x,
+                "logical_y": region.logical_y,
+                "logical_cols": region.logical_cols,
+                "logical_rows": region.logical_rows,
+                "clip_x": region.clip_x,
+                "clip_y": region.clip_y,
+                "clip_cols": region.clip_cols,
+                "clip_rows": region.clip_rows,
                 "z_order": region.z_order,
                 "clipped": region.clipped,
                 "draws": [_retained_draw_to_wire(draw) for draw in region.draws],
@@ -1682,22 +1680,52 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
                     minimum=1,
                     maximum=UINT64_MAX,
                 ),
-                cell_x=_wire_integer(
-                    region["cell_x"], f"{prefix} cell_x", minimum=0, maximum=UINT32_MAX
+                logical_x=_wire_integer(
+                    region["logical_x"],
+                    f"{prefix} logical_x",
+                    minimum=INT32_MIN,
+                    maximum=INT32_MAX,
                 ),
-                cell_y=_wire_integer(
-                    region["cell_y"], f"{prefix} cell_y", minimum=0, maximum=UINT32_MAX
+                logical_y=_wire_integer(
+                    region["logical_y"],
+                    f"{prefix} logical_y",
+                    minimum=INT32_MIN,
+                    maximum=INT32_MAX,
                 ),
-                cell_cols=_wire_integer(
-                    region["cell_cols"],
-                    f"{prefix} cell_cols",
+                logical_cols=_wire_integer(
+                    region["logical_cols"],
+                    f"{prefix} logical_cols",
                     minimum=1,
                     maximum=UINT32_MAX,
                 ),
-                cell_rows=_wire_integer(
-                    region["cell_rows"],
-                    f"{prefix} cell_rows",
+                logical_rows=_wire_integer(
+                    region["logical_rows"],
+                    f"{prefix} logical_rows",
                     minimum=1,
+                    maximum=UINT32_MAX,
+                ),
+                clip_x=_wire_integer(
+                    region["clip_x"],
+                    f"{prefix} clip_x",
+                    minimum=0,
+                    maximum=UINT32_MAX,
+                ),
+                clip_y=_wire_integer(
+                    region["clip_y"],
+                    f"{prefix} clip_y",
+                    minimum=0,
+                    maximum=UINT32_MAX,
+                ),
+                clip_cols=_wire_integer(
+                    region["clip_cols"],
+                    f"{prefix} clip_cols",
+                    minimum=0,
+                    maximum=UINT32_MAX,
+                ),
+                clip_rows=_wire_integer(
+                    region["clip_rows"],
+                    f"{prefix} clip_rows",
+                    minimum=0,
                     maximum=UINT32_MAX,
                 ),
                 z_order=_wire_integer(

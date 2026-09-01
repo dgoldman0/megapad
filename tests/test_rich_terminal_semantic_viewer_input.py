@@ -13,6 +13,7 @@ from rich_terminal.pygame_view import (
     ControlHitTarget,
     ControlIdentity,
     PixelRect,
+    RegionOcclusion,
 )
 from rich_terminal.retained_scene import ControlKind
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
@@ -97,6 +98,10 @@ def _target(control_id=3, *, rect=(10, 10, 60, 32), kind=ControlKind.MENU_ITEM):
     )
 
 
+def _occlusion(*, region_id=9, rect=(10, 10, 30, 32)):
+    return RegionOcclusion(8, 3, region_id, PixelRect(*rect))
+
+
 def _promote(state, keyboard, offer, targets, *, response_status="presented"):
     state.stage(offer, keyboard.generation)
     state.stage_frame_hit_map(offer, targets)
@@ -148,6 +153,48 @@ def test_pending_hit_map_is_not_authority_until_accepted_sink_present():
     assert state.hit_targets == (target,)
     assert state.hit_map_token == (offer.offer_id, offer.scope)
     assert pointer.move((20, 20), (100, 80)) == target
+
+
+def test_unified_barrier_map_promotes_only_on_ack_and_clears_on_stale_offer():
+    client = _RecordingClient()
+    keyboard = _GuestKeyboardForwarder(
+        _Pygame(),
+        client,
+        generation=4,
+        display_required=True,
+    )
+    state = _RetainedDisplayState()
+    pointer = _SemanticPointerInteractor(state, keyboard)
+    first = _offer(1)
+    lower = _target(rect=(10, 10, 60, 32))
+    barrier = _occlusion(rect=(10, 10, 30, 32))
+    entries = (lower, barrier)
+
+    state.stage(first, 4)
+    state.stage_frame_hit_map(first, entries)
+    keyboard.acknowledge_display_offer(first.offer_id, first.scope)
+    assert state.hit_entries == ()
+    assert pointer.move((20, 20), (100, 80)) is None
+
+    assert state.finish_presentation(
+        {"status": "presented", "presented": True, "revision": 1}
+    ) == 1
+    assert state.hit_entries == entries
+    assert state.hit_targets == (lower,)
+    assert pointer.move((20, 20), (100, 80)) is None
+    assert pointer.move((40, 20), (100, 80)) == lower
+
+    second = _offer(2)
+    state.stage(second, 4)
+    assert state.hit_entries == ()
+    assert state.hit_targets == ()
+    assert pointer.move((40, 20), (100, 80)) is None
+    state.stage_frame_hit_map(second, entries)
+    assert state.finish_presentation(
+        {"status": "stale_display", "presented": False}
+    ) is None
+    assert state.hit_entries == ()
+    assert state.hit_map_token is None
 
 
 def test_accepted_present_requires_a_rendered_map_for_the_exact_offer():
@@ -379,6 +426,8 @@ def test_companion_composition_returns_hits_from_the_exact_paint_pass(monkeypatc
     surface = object()
     plane = RetainedDrawPlane(True, True, ())
     target = _target()
+    barrier = _occlusion()
+    hit_entries = (barrier, target)
     control_font = object()
 
     class Terminal:
@@ -396,7 +445,7 @@ def test_companion_composition_returns_hits_from_the_exact_paint_pass(monkeypatc
 
     def composite(*args, **kwargs):
         events.append(("semantic", args[1], args[2], kwargs))
-        return CompositeDrawResult(surface, (target,))
+        return CompositeDrawResult(surface, hit_entries)
 
     monkeypatch.setattr(session_viewer, "composite_draw_plane_result", composite)
     result = compose_terminal_frame_result(
@@ -412,6 +461,7 @@ def test_companion_composition_returns_hits_from_the_exact_paint_pass(monkeypatc
     )
 
     assert result.surface is surface
+    assert result.hit_entries == hit_entries
     assert result.hit_targets == (target,)
     assert events[0] == ("cell", False)
     assert events[1][0:3] == ("semantic", surface, plane)

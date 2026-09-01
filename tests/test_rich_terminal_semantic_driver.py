@@ -164,7 +164,7 @@ def _control_scene(
                 1,
                 0,
                 0,
-                ObjectBounds(0, 0, 0xFFFFFFFF, 0x18000000),
+                ObjectBounds(0, 0, 2, 1),
                 "",
                 "",
             ),
@@ -196,7 +196,9 @@ def _control_scene(
                 "Ctrl+O",
             ),
         }
-    region = RegionDefinition(owner, 1, 0, 0, 2, 2, 0, True, True, 0)
+    region = RegionDefinition(
+        owner, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, True, True, 0
+    )
     owner_scene = OwnerScene(
         owner=owner,
         regions=MappingProxyType({1: region}),

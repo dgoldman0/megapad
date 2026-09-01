@@ -1,6 +1,6 @@
 # APT-1 RETAINED-1 ownership and lifetime ledger
 
-Contract ID: `APT-1-RETAINED-1-2026-08-24`
+Contract ID: `APT-1-RETAINED-1-2026-09-01`
 
 This document is normative for ownership, authority, allocation, and retirement
 under `APT-1-RETAINED-1.md`. The base `APT-1-OWNERSHIP.md` remains normative for

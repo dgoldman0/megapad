@@ -252,7 +252,12 @@ def _object_bounds_path(name: str, value) -> tuple[ObjectBounds, ...]:
     if any(not isinstance(item, ObjectBounds) for item in bounds):
         raise TypeError(f"{name} must contain only ObjectBounds values")
     return tuple(
-        ObjectBounds(item.left, item.top, item.right, item.bottom)
+        ObjectBounds(
+            item.cell_x,
+            item.cell_y,
+            item.cell_cols,
+            item.cell_rows,
+        )
         for item in bounds
     )
 
@@ -287,10 +292,10 @@ class PolylineDraw:
             self,
             "bounds",
             ObjectBounds(
-                self.bounds.left,
-                self.bounds.top,
-                self.bounds.right,
-                self.bounds.bottom,
+                self.bounds.cell_x,
+                self.bounds.cell_y,
+                self.bounds.cell_cols,
+                self.bounds.cell_rows,
             ),
         )
         points = tuple(self.points)
@@ -906,7 +911,7 @@ class MenuDraw:
 
 @dataclass(frozen=True, slots=True)
 class MenuBarDraw:
-    """One visible semantic menu root anchored in UNORM32 region geometry."""
+    """One visible semantic menu root anchored in CELL_RECT32 geometry."""
 
     control_id: int
     state: ControlState
@@ -987,7 +992,12 @@ def _root_draw_fields(
     )
     if not isinstance(bounds, ObjectBounds):
         raise TypeError("bounds must be ObjectBounds")
-    bounds = ObjectBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
+    bounds = ObjectBounds(
+        bounds.cell_x,
+        bounds.cell_y,
+        bounds.cell_cols,
+        bounds.cell_rows,
+    )
     if order:
         raise ValueError(f"{kind.name} draw order must be zero")
     if kind in (ControlKind.TEXT_AREA, ControlKind.TEXT_GRID):
@@ -1176,10 +1186,14 @@ class RetainedRegionDraw:
     owner_id: int
     owner_generation: int
     region_id: int
-    cell_x: int
-    cell_y: int
-    cell_cols: int
-    cell_rows: int
+    logical_x: int
+    logical_y: int
+    logical_cols: int
+    logical_rows: int
+    clip_x: int
+    clip_y: int
+    clip_cols: int
+    clip_rows: int
     z_order: int
     clipped: bool
     draws: tuple[RetainedDraw, ...]
@@ -1191,16 +1205,25 @@ class RetainedRegionDraw:
                 name,
                 _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
             )
-        for name, minimum in (
-            ("cell_x", 0),
-            ("cell_y", 0),
-            ("cell_cols", 1),
-            ("cell_rows", 1),
+        for name, minimum, maximum in (
+            ("logical_x", INT32_MIN, INT32_MAX),
+            ("logical_y", INT32_MIN, INT32_MAX),
+            ("logical_cols", 1, UINT32_MAX),
+            ("logical_rows", 1, UINT32_MAX),
+            ("clip_x", 0, UINT32_MAX),
+            ("clip_y", 0, UINT32_MAX),
+            ("clip_cols", 0, UINT32_MAX),
+            ("clip_rows", 0, UINT32_MAX),
         ):
             object.__setattr__(
                 self,
                 name,
-                _integer(name, getattr(self, name), minimum=minimum, maximum=UINT32_MAX),
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=minimum,
+                    maximum=maximum,
+                ),
             )
         object.__setattr__(
             self,
@@ -1208,6 +1231,11 @@ class RetainedRegionDraw:
             _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
         )
         object.__setattr__(self, "clipped", _boolean("clipped", self.clipped))
+        clip = (self.clip_x, self.clip_y, self.clip_cols, self.clip_rows)
+        if not self.clipped and any(clip):
+            raise ValueError("an unclipped draw region must carry a zero clip")
+        if self.clipped and (self.clip_cols == 0 or self.clip_rows == 0) and any(clip):
+            raise ValueError("an empty draw-region clip must be all zero")
         draws = tuple(self.draws)
         if any(
             not isinstance(
@@ -1388,7 +1416,12 @@ def _object_parent_bounds(
         reverse_path.append(parent.bounds)
         current = parent
     return tuple(
-        ObjectBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
+        ObjectBounds(
+            bounds.cell_x,
+            bounds.cell_y,
+            bounds.cell_cols,
+            bounds.cell_rows,
+        )
         for bounds in reversed(reverse_path)
     )
 
@@ -1464,7 +1497,12 @@ def _validate_control_value(
     if bounds is not None:
         if not isinstance(bounds, ObjectBounds):
             raise TypeError("control bounds must be ObjectBounds or None")
-        bounds = ObjectBounds(bounds.left, bounds.top, bounds.right, bounds.bottom)
+        bounds = ObjectBounds(
+            bounds.cell_x,
+            bounds.cell_y,
+            bounds.cell_cols,
+            bounds.cell_rows,
+        )
     content = definition.content
     validate_control_shape(
         kind=kind,
@@ -2141,10 +2179,14 @@ def project_composite_draw_plane(
                     owner_id=owner.owner_id,
                     owner_generation=owner.owner_generation,
                     region_id=region.region_id,
-                    cell_x=region.cell_x,
-                    cell_y=region.cell_y,
-                    cell_cols=region.cell_cols,
-                    cell_rows=region.cell_rows,
+                    logical_x=region.logical_x,
+                    logical_y=region.logical_y,
+                    logical_cols=region.logical_cols,
+                    logical_rows=region.logical_rows,
+                    clip_x=region.clip_x,
+                    clip_y=region.clip_y,
+                    clip_cols=region.clip_cols,
+                    clip_rows=region.clip_rows,
                     z_order=region.z_order,
                     clipped=region.clipped,
                     draws=tuple(draws),

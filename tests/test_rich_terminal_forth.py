@@ -335,7 +335,7 @@ class TestRichTerminalForth(_KDOSTestBase):
         )
         self.assertEqual(len(content), 72)
         control = struct.pack(
-            "<QQQHHiQQIIIIIIII",
+            "<QQQHHiQQIiiIIIII",
             0x0102030405060708,
             0x1112131415161718,
             0x2122232425262728,
@@ -1551,7 +1551,7 @@ class TestRichTerminalForth(_KDOSTestBase):
 
         def common(object_id: int, kind: int) -> bytes:
             return struct.pack(
-                "<QQQHHiQQIIII",
+                "<QQQHHiQQiiII",
                 owner,
                 generation,
                 object_id,
@@ -2179,7 +2179,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 ": PT-RICH-REPLACE-START",
                 "  2 2 0 0 1 88 PT-CELL-NONE PT-RET-REPLACE-START",
                 "    PT-RICH-SESSION PT-PRESENT-BEGIN PT-RICH-STATUS+",
-                "  1 1 1 0 0 2 2 0 1 PT-RICH-SESSION",
+                "  1 1 1 0 0 2 2 0 0 0 0 0 1 PT-RICH-SESSION",
                 "    PT-REGION-DEFINE PT-RICH-STATUS+",
                 "  PT-COMMIT PT-RICH-SESSION PT-PRESENT-COMMIT",
                 "    PT-RICH-STATUS+ ;",

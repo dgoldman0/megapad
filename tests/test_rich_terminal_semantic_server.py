@@ -280,7 +280,7 @@ def _control(
         parent_control_id=parent,
         order=order,
         bounds=(
-            ObjectBounds(0, 0, 0xFFFFFFFF, 0x18000000)
+            ObjectBounds(0, 0, 2, 1)
             if kind is ControlKind.MENU_BAR
             else None
         ),
@@ -318,7 +318,7 @@ def _visible_control_core():
             order=1,
         ),
     )
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
     _commit(
         core,
         encoder,
@@ -439,12 +439,12 @@ def test_present_ingress_carries_and_replaces_generic_text_area_content() -> Non
         region_id=1,
         parent_control_id=0,
         order=0,
-        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(0, 0, 2, 2),
         label="",
         shortcut="",
         content=initial_content,
     )
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
     _commit(
         core,
         encoder,
@@ -509,7 +509,7 @@ def test_present_ingress_restarts_live_hidden_replacement_before_reveal() -> Non
     active = initial.active
     visible_enabled = ControlState.VISIBLE | ControlState.ENABLED
 
-    older_region = RegionWireDefinition(7, 1, 2, 0, 0, 2, 2, 0, 0x3)
+    older_region = RegionWireDefinition(7, 1, 2, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
     older_bar = replace(
         _control(5, ControlKind.MENU_BAR, visible_enabled),
         region_id=2,
@@ -532,7 +532,7 @@ def test_present_ingress_restarts_live_hidden_replacement_before_reveal() -> Non
     assert state.active is active
     assert set(older_hidden.owners[7].controls) == {5}
 
-    newest_region = RegionWireDefinition(7, 1, 3, 0, 0, 2, 2, 0, 0x3)
+    newest_region = RegionWireDefinition(7, 1, 3, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
     newest_bar = replace(
         _control(6, ControlKind.MENU_BAR, visible_enabled),
         region_id=3,

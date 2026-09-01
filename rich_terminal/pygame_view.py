@@ -42,6 +42,63 @@ ATTR_REVERSE = 0x20
 ATTR_STRIKE = 0x40
 
 
+@dataclass(frozen=True, slots=True)
+class _WideRect:
+    """Python-integer logical geometry; never passed directly into pygame."""
+
+    left: int
+    top: int
+    width: int
+    height: int
+
+    @property
+    def right(self) -> int:
+        return self.left + self.width
+
+    @property
+    def bottom(self) -> int:
+        return self.top + self.height
+
+    @property
+    def centerx(self) -> int:
+        return self.left + self.width // 2
+
+    @property
+    def centery(self) -> int:
+        return self.top + self.height // 2
+
+    @property
+    def size(self) -> tuple[int, int]:
+        return self.width, self.height
+
+    def move(self, x: int, y: int) -> _WideRect:
+        return _WideRect(self.left + x, self.top + y, self.width, self.height)
+
+
+def _wide_intersection(rect, clip) -> _WideRect:
+    left = max(rect.left, clip.left)
+    top = max(rect.top, clip.top)
+    right = min(rect.right, clip.right)
+    bottom = min(rect.bottom, clip.bottom)
+    if left >= right or top >= bottom:
+        return _WideRect(0, 0, 0, 0)
+    return _WideRect(left, top, right - left, bottom - top)
+
+
+def _bounded_pygame_rect(pygame_module, rect, clip):
+    """Intersect in Python integers before constructing one SDL-backed Rect."""
+
+    visible = _wide_intersection(rect, clip)
+    if visible.width <= 0 or visible.height <= 0:
+        return pygame_module.Rect(0, 0, 0, 0)
+    return pygame_module.Rect(
+        visible.left,
+        visible.top,
+        visible.width,
+        visible.height,
+    )
+
+
 # The control palette is deliberately renderer-owned.  These values describe
 # one restrained dark surface system rather than protocol state or application
 # annotations; callers can continue to use the independent CELL palette.
@@ -172,28 +229,94 @@ class ControlHitTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class RegionOcclusion:
+    """Visible region coverage that blocks controls painted below the region."""
+
+    owner_id: int
+    owner_generation: int
+    region_id: int
+    rect: PixelRect
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "region_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                ),
+            )
+        if not isinstance(self.rect, PixelRect):
+            raise TypeError("rect must be PixelRect")
+
+
+HitMapEntry = ControlHitTarget | RegionOcclusion
+
+
+def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
+    entries = tuple(hit_entries)
+    if any(
+        not isinstance(entry, (ControlHitTarget, RegionOcclusion))
+        for entry in entries
+    ):
+        raise TypeError(
+            "hit_entries must contain only ControlHitTarget or "
+            "RegionOcclusion values"
+        )
+    return entries
+
+
+def hit_test_hit_map(
+    hit_entries: tuple[HitMapEntry, ...],
+    x: int,
+    y: int,
+) -> ControlHitTarget | None:
+    """Resolve one painter-ordered immutable map without region click-through."""
+
+    for entry in reversed(hit_entries):
+        if not entry.rect.contains(x, y):
+            continue
+        if isinstance(entry, ControlHitTarget):
+            return entry
+        return None
+    return None
+
+
+@dataclass(frozen=True, slots=True)
 class CompositeDrawResult:
     """One completed paint pass and its immutable semantic hit map.
 
-    ``hit_targets`` is stored in back-to-front painter order.  ``hit_test``
-    searches it in reverse, so overlapping later-painted controls win without
-    leaking pygame.Rect or mutable renderer state into the retained model.
+    ``hit_entries`` is stored in back-to-front painter order.  A region's
+    occlusion precedes its own controls, so reverse testing lets those controls
+    win and then stops before any lower region.  ``hit_targets`` remains a
+    filtered inspection view; barriers are never represented as fake controls.
     """
 
     surface: object
-    hit_targets: tuple[ControlHitTarget, ...]
+    hit_entries: tuple[HitMapEntry, ...]
 
     def __post_init__(self) -> None:
-        targets = tuple(self.hit_targets)
-        if any(not isinstance(target, ControlHitTarget) for target in targets):
-            raise TypeError("hit_targets must contain only ControlHitTarget values")
-        object.__setattr__(self, "hit_targets", targets)
+        object.__setattr__(
+            self,
+            "hit_entries",
+            _validated_hit_entries(self.hit_entries),
+        )
+
+    @property
+    def hit_targets(self) -> tuple[ControlHitTarget, ...]:
+        """Control-only compatibility/inspection view of the exact hit map."""
+
+        return tuple(
+            entry
+            for entry in self.hit_entries
+            if isinstance(entry, ControlHitTarget)
+        )
 
     def hit_test(self, x: int, y: int) -> ControlHitTarget | None:
-        for target in reversed(self.hit_targets):
-            if target.rect.contains(x, y):
-                return target
-        return None
+        return hit_test_hit_map(self.hit_entries, x, y)
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,24 +365,55 @@ def _rgb(color):
     return color.red, color.green, color.blue
 
 
-def _bounds_rect(pygame_module, region_rect, bounds):
-    left = unorm_low_edge(bounds.left, region_rect.width)
-    top = unorm_low_edge(bounds.top, region_rect.height)
-    right = unorm_high_edge(bounds.right, region_rect.width)
-    bottom = unorm_high_edge(bounds.bottom, region_rect.height)
-    return pygame_module.Rect(
-        region_rect.left + left,
-        region_rect.top + top,
-        right - left,
-        bottom - top,
+def _bounds_rect(pygame_module, parent_rect, bounds, cell_width, cell_height):
+    """Resolve CELL_RECT32 without rewriting it to the current viewport."""
+
+    return _WideRect(
+        parent_rect.left + bounds.cell_x * cell_width,
+        parent_rect.top + bounds.cell_y * cell_height,
+        bounds.cell_cols * cell_width,
+        bounds.cell_rows * cell_height,
     )
 
 
-def _object_rect(pygame_module, region_rect, draw):
+def _object_rect(pygame_module, region, region_rect, draw):
+    cell_width = region_rect.width // region.logical_cols
+    cell_height = region_rect.height // region.logical_rows
     parent = region_rect
     for bounds in draw.parent_bounds:
-        parent = _bounds_rect(pygame_module, parent, bounds)
-    return _bounds_rect(pygame_module, parent, draw.bounds)
+        parent = _bounds_rect(
+            pygame_module,
+            parent,
+            bounds,
+            cell_width,
+            cell_height,
+        )
+    return _bounds_rect(
+        pygame_module,
+        parent,
+        draw.bounds,
+        cell_width,
+        cell_height,
+    )
+
+
+def _region_viewport(pygame_module, surface, region, region_rect):
+    """Resolve the independent physical clip in selected-surface cells."""
+
+    viewport = surface.get_rect().clip(surface.get_clip())
+    if not region.clipped:
+        return viewport
+    if region.clip_cols == 0:
+        return pygame_module.Rect(0, 0, 0, 0)
+    cell_width = region_rect.width // region.logical_cols
+    cell_height = region_rect.height // region.logical_rows
+    physical_clip = _WideRect(
+        region.clip_x * cell_width,
+        region.clip_y * cell_height,
+        region.clip_cols * cell_width,
+        region.clip_rows * cell_height,
+    )
+    return _bounded_pygame_rect(pygame_module, physical_clip, viewport)
 
 
 def _font_height(font, fallback: int) -> int:
@@ -306,11 +460,9 @@ def _text_width(font, text: str) -> int:
             else:
                 if value >= 0:
                     return int(value)
-    glyph = font.render(text, True, _TEXT[:3])
-    width = getattr(glyph, "get_width", None)
-    if not callable(width):
-        raise TypeError("control font must measure or render text surfaces")
-    return _integer("rendered text width", width(), minimum=0)
+    raise TypeError(
+        "control font must expose non-rendering size() text measurement"
+    )
 
 
 def _menu_metrics(font, cell_width: int, cell_height: int) -> _MenuMetrics:
@@ -350,52 +502,133 @@ def _rounded_rect(
         return
     radius = min(max(0, radius), rect.width // 2, rect.height // 2)
     rgba = tuple(color)
-    if len(rgba) == 4 and rgba[3] != 0xFF:
-        if rgba[3] == 0:
-            return
-        layer = pygame_module.Surface(rect.size, flags=pygame_module.SRCALPHA)
-        pygame_module.draw.rect(
-            layer,
-            rgba,
-            layer.get_rect(),
-            width=width,
-            border_radius=radius,
-        )
-        surface.blit(layer, rect)
+    if len(rgba) == 4 and rgba[3] == 0:
         return
-    pygame_module.draw.rect(
-        surface,
-        rgba[:3],
-        rect,
-        width=width,
-        border_radius=radius,
+    viewport = surface.get_rect().clip(surface.get_clip())
+    visible = _bounded_pygame_rect(pygame_module, rect, viewport)
+    if visible.width <= 0 or visible.height <= 0:
+        return
+    layer = pygame_module.Surface(visible.size, flags=pygame_module.SRCALPHA)
+    # Only true edges within one corner/border influence radius of the visible
+    # pixels.  Replace farther edges outside that influence band before the
+    # geometry enters pygame's signed native Rect storage.
+    maximum_margin = 2 * max(viewport.width, viewport.height, 1) + 2
+    margin = min(max(radius, width) + 2, maximum_margin)
+    safe_left = max(rect.left, visible.left - margin)
+    safe_top = max(rect.top, visible.top - margin)
+    safe_right = min(rect.right, visible.right + margin)
+    safe_bottom = min(rect.bottom, visible.bottom + margin)
+    shifted = pygame_module.Rect(
+        safe_left - visible.left,
+        safe_top - visible.top,
+        safe_right - safe_left,
+        safe_bottom - safe_top,
     )
+    pygame_module.draw.rect(
+        layer,
+        rgba if len(rgba) == 4 else (*rgba[:3], 0xFF),
+        shifted,
+        width=width,
+        border_radius=min(radius, maximum_margin),
+    )
+    surface.blit(layer, visible)
+
+
+def _clip_line_segment(start, end, clip, padding: int):
+    """Cohen-Sutherland clip in Python integers before calling pygame."""
+
+    left = clip.left - padding
+    top = clip.top - padding
+    right = clip.right - 1 + padding
+    bottom = clip.bottom - 1 + padding
+    x0, y0 = start
+    x1, y1 = end
+
+    def code(x, y):
+        result = 0
+        if x < left:
+            result |= 1
+        elif x > right:
+            result |= 2
+        if y < top:
+            result |= 4
+        elif y > bottom:
+            result |= 8
+        return result
+
+    for _ in range(16):
+        code0 = code(x0, y0)
+        code1 = code(x1, y1)
+        if not (code0 | code1):
+            return (x0, y0), (x1, y1)
+        if code0 & code1:
+            return None
+        outside = code0 or code1
+        if outside & 8:
+            if y1 == y0:
+                return None
+            x = x0 + (x1 - x0) * (bottom - y0) // (y1 - y0)
+            y = bottom
+        elif outside & 4:
+            if y1 == y0:
+                return None
+            x = x0 + (x1 - x0) * (top - y0) // (y1 - y0)
+            y = top
+        elif outside & 2:
+            if x1 == x0:
+                return None
+            y = y0 + (y1 - y0) * (right - x0) // (x1 - x0)
+            x = right
+        else:
+            if x1 == x0:
+                return None
+            y = y0 + (y1 - y0) * (left - x0) // (x1 - x0)
+            x = left
+        if outside == code0:
+            if (x, y) == (x0, y0):
+                return None
+            x0, y0 = x, y
+        else:
+            if (x, y) == (x1, y1):
+                return None
+            x1, y1 = x, y
+    return None
 
 
 def _alpha_line(pygame_module, surface, color, start, end, *, width: int = 1) -> None:
     rgba = tuple(color)
+    if len(rgba) == 4 and rgba[3] == 0:
+        return
+    visible = surface.get_rect().clip(surface.get_clip())
+    if visible.width <= 0 or visible.height <= 0:
+        return
+    native_width = min(max(1, width), 2 * max(visible.width, visible.height) + 1)
+    clipped = _clip_line_segment(start, end, visible, native_width)
+    if clipped is None:
+        return
+    safe_start, safe_end = clipped
     if len(rgba) != 4 or rgba[3] == 0xFF:
-        pygame_module.draw.line(surface, rgba[:3], start, end, width)
+        pygame_module.draw.line(
+            surface,
+            rgba[:3],
+            safe_start,
+            safe_end,
+            native_width,
+        )
         return
-    if rgba[3] == 0:
-        return
-    left = min(start[0], end[0])
-    top = min(start[1], end[1])
-    right = max(start[0], end[0]) + width
-    bottom = max(start[1], end[1]) + width
-    bounds = pygame_module.Rect(left, top, right - left, bottom - top)
-    layer = pygame_module.Surface(bounds.size, flags=pygame_module.SRCALPHA)
+    layer = pygame_module.Surface(visible.size, flags=pygame_module.SRCALPHA)
     pygame_module.draw.line(
         layer,
         rgba,
-        (start[0] - left, start[1] - top),
-        (end[0] - left, end[1] - top),
-        width,
+        (safe_start[0] - visible.left, safe_start[1] - visible.top),
+        (safe_end[0] - visible.left, safe_end[1] - visible.top),
+        native_width,
     )
-    surface.blit(layer, bounds)
+    surface.blit(layer, visible)
 
 
 def _paint_text(
+    pygame_module,
     surface,
     font,
     text: str,
@@ -407,16 +640,33 @@ def _paint_text(
 ) -> None:
     if not text:
         return
-    glyph = font.render(text, True, tuple(color)[:3])
-    glyph_rect = glyph.get_rect()
-    glyph_rect.centery = center_y
+    viewport = surface.get_rect().clip(surface.get_clip())
+    if viewport.width <= 0 or viewport.height <= 0:
+        return
+    tab_advance = max(1, _text_width(font, " ") * 4)
+    text_width = sum(_scalar_advance(font, character, tab_advance) for character in text)
     if right is not None:
-        glyph_rect.right = right
+        logical_left = right - text_width
+        logical_right = right
     elif left is not None:
-        glyph_rect.left = left
+        logical_left = left
+        logical_right = left + text_width
     else:
         raise ValueError("control text needs a left or right edge")
-    surface.blit(glyph, glyph_rect)
+    font_height = _font_height(font, viewport.height)
+    _paint_bounded_scalar_text(
+        pygame_module,
+        surface,
+        font,
+        text,
+        color,
+        viewport,
+        left=logical_left,
+        right=logical_right,
+        top=center_y - font_height // 2,
+        bottom=center_y - font_height // 2 + font_height,
+        tab_advance=tab_advance,
+    )
 
 
 def _partition_edge(origin: int, extent: int, index: int, count: int) -> int:
@@ -434,11 +684,22 @@ def _semantic_root_rects(
 ):
     """Return stable root geometry and its physical clip without reflowing it."""
 
-    anchor = _bounds_rect(pygame_module, region_rect, bounds)
-    viewport = surface.get_rect().clip(surface.get_clip())
-    if region.clipped:
-        viewport = viewport.clip(region_rect)
-    return anchor, anchor.clip(viewport)
+    cell_width = region_rect.width // region.logical_cols
+    cell_height = region_rect.height // region.logical_rows
+    anchor = _bounds_rect(
+        pygame_module,
+        region_rect,
+        bounds,
+        cell_width,
+        cell_height,
+    )
+    viewport = _region_viewport(
+        pygame_module,
+        surface,
+        region,
+        region_rect,
+    )
+    return anchor, _bounded_pygame_rect(pygame_module, anchor, viewport)
 
 
 def _scalar_advance(font, character: str, tab_advance: int) -> int:
@@ -532,6 +793,25 @@ def _paint_bounded_scalar_text(
             cursor += advance
     finally:
         surface.set_clip(prior_clip)
+
+
+def _blit_bounded_surface(pygame_module, destination, source, left: int, top: int, clip):
+    """Crop one source before any destination coordinate enters pygame."""
+
+    source_width, source_height = source.get_size()
+    paint_left = max(left, clip.left)
+    paint_top = max(top, clip.top)
+    paint_right = min(left + source_width, clip.right)
+    paint_bottom = min(top + source_height, clip.bottom)
+    if paint_left >= paint_right or paint_top >= paint_bottom:
+        return
+    source_rect = pygame_module.Rect(
+        paint_left - left,
+        paint_top - top,
+        paint_right - paint_left,
+        paint_bottom - paint_top,
+    )
+    destination.blit(source, (paint_left, paint_top), source_rect)
 
 
 def _clipped_python_rect(
@@ -638,7 +918,22 @@ def _draw_checkmark(
         (left + size // 3, top + size - 1),
         (left + size, top),
     )
-    pygame_module.draw.lines(surface, tuple(color)[:3], False, points, thickness)
+    _alpha_line(
+        pygame_module,
+        surface,
+        (*tuple(color)[:3], 0xFF),
+        points[0],
+        points[1],
+        width=thickness,
+    )
+    _alpha_line(
+        pygame_module,
+        surface,
+        (*tuple(color)[:3], 0xFF),
+        points[1],
+        points[2],
+        width=thickness,
+    )
 
 
 def _popup_dimensions(font, menu: MenuDraw, metrics: _MenuMetrics) -> tuple[int, int]:
@@ -677,7 +972,7 @@ def _popup_rect(pygame_module, anchor, title_rect, viewport, width: int, height:
         left = min(max(left, viewport.left), viewport.right - width)
     else:
         left = viewport.left
-    return pygame_module.Rect(left, top, width, height)
+    return _WideRect(left, top, width, height)
 
 
 def _paint_popup(
@@ -705,7 +1000,7 @@ def _paint_popup(
         height,
         metrics,
     )
-    visible_popup = popup.clip(viewport)
+    visible_popup = _bounded_pygame_rect(pygame_module, popup, viewport)
     if visible_popup.width <= 0 or visible_popup.height <= 0:
         return []
 
@@ -738,7 +1033,7 @@ def _paint_popup(
     row_top = popup.top + metrics.popup_padding
     for entry in menu.entries:
         if isinstance(entry, MenuSeparatorDraw):
-            separator = pygame_module.Rect(
+            separator = _WideRect(
                 popup.left + metrics.popup_padding + metrics.check_column,
                 row_top,
                 max(
@@ -760,13 +1055,17 @@ def _paint_popup(
             row_top += metrics.separator_height
             continue
 
-        row = pygame_module.Rect(
+        row = _WideRect(
             popup.left + metrics.popup_padding,
             row_top,
             popup.width - 2 * metrics.popup_padding,
             metrics.row_height,
         )
-        visible_row = row.clip(visible_popup)
+        visible_row = _bounded_pygame_rect(
+            pygame_module,
+            row,
+            visible_popup,
+        )
         identity = _identity(region, entry.control_id)
         effectively_enabled = menu_enabled and bool(
             entry.state & ControlState.ENABLED
@@ -801,6 +1100,7 @@ def _paint_popup(
                     _ACCENT if effectively_enabled else _DISABLED_TEXT,
                 )
             _paint_text(
+                pygame_module,
                 surface,
                 font,
                 entry.label,
@@ -814,6 +1114,7 @@ def _paint_popup(
                 center_y=row.centery,
             )
             _paint_text(
+                pygame_module,
                 surface,
                 font,
                 entry.shortcut,
@@ -848,11 +1149,20 @@ def _paint_menu_bar(
     hovered: ControlIdentity | None,
     pressed: ControlIdentity | None,
 ) -> list[ControlHitTarget]:
-    anchor = _bounds_rect(pygame_module, region_rect, draw.bounds)
-    viewport = surface.get_rect().clip(surface.get_clip())
-    if region.clipped:
-        viewport = viewport.clip(region_rect)
-    visible_anchor = anchor.clip(viewport)
+    anchor = _bounds_rect(
+        pygame_module,
+        region_rect,
+        draw.bounds,
+        cell_width,
+        cell_height,
+    )
+    viewport = _region_viewport(
+        pygame_module,
+        surface,
+        region,
+        region_rect,
+    )
+    visible_anchor = _bounded_pygame_rect(pygame_module, anchor, viewport)
     if visible_anchor.width <= 0 or visible_anchor.height <= 0:
         return []
 
@@ -893,13 +1203,17 @@ def _paint_menu_bar(
         surface.set_clip(visible_anchor)
         for menu in draw.menus:
             title_width = _text_width(font, menu.label) + 2 * metrics.horizontal_padding
-            title = pygame_module.Rect(
+            title = _WideRect(
                 title_left,
                 title_top,
                 title_width,
                 title_height,
             )
-            visible_title = title.clip(visible_anchor)
+            visible_title = _bounded_pygame_rect(
+                pygame_module,
+                title,
+                visible_anchor,
+            )
             identity = _identity(region, menu.control_id)
             effectively_enabled = root_enabled and bool(
                 menu.state & ControlState.ENABLED
@@ -942,6 +1256,7 @@ def _paint_menu_bar(
                 try:
                     surface.set_clip(visible_title)
                     _paint_text(
+                        pygame_module,
                         surface,
                         font,
                         menu.label,
@@ -1033,7 +1348,7 @@ def _paint_text_area(
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(visible_anchor)
-        surface.fill(_COLLECTION_SURFACE, anchor)
+        surface.fill(_COLLECTION_SURFACE, visible_anchor)
         for item in visible_items:
             surface.set_clip(visible_anchor)
             relative_row = item.row - row_start
@@ -1049,13 +1364,17 @@ def _paint_text_area(
                 relative_row + 1,
                 content.viewport_rows,
             )
-            row_rect = pygame_module.Rect(
+            row_rect = _WideRect(
                 anchor.left,
                 row_top,
                 anchor.width,
                 row_bottom - row_top,
             )
-            visible_row = row_rect.clip(visible_anchor)
+            visible_row = _bounded_pygame_rect(
+                pygame_module,
+                row_rect,
+                visible_anchor,
+            )
             if visible_row.width <= 0 or visible_row.height <= 0:
                 continue
 
@@ -1091,13 +1410,15 @@ def _paint_text_area(
                             selected_end - column_start,
                             content.viewport_columns,
                         )
-                        selected_rect = pygame_module.Rect(
+                        selected_rect = _clipped_python_rect(
+                            pygame_module,
                             selection_left,
                             row_top,
-                            selection_right - selection_left,
-                            row_bottom - row_top,
-                        ).clip(visible_anchor)
-                        if selected_rect.width > 0 and selected_rect.height > 0:
+                            selection_right,
+                            row_bottom,
+                            visible_anchor,
+                        )
+                        if selected_rect is not None:
                             surface.fill(_TEXT_SELECTION, selected_rect)
 
             first_scalar = max(column_start, 0)
@@ -1119,30 +1440,46 @@ def _paint_text_area(
                     relative_column + 1,
                     content.viewport_columns,
                 )
-                slot = pygame_module.Rect(
+                slot = _WideRect(
                     slot_left,
                     row_top,
                     slot_right - slot_left,
                     row_bottom - row_top,
                 )
-                slot_clip = slot.clip(visible_anchor)
+                slot_clip = _bounded_pygame_rect(
+                    pygame_module,
+                    slot,
+                    visible_anchor,
+                )
                 if slot_clip.width <= 0 or slot_clip.height <= 0:
                     continue
-                surface.set_clip(slot_clip)
-                glyph = font.render(character, True, text_color)
-                glyph_rect = glyph.get_rect()
-                glyph_rect.left = slot.left
-                glyph_rect.centery = slot.centery
-                surface.blit(glyph, glyph_rect)
+                _paint_bounded_scalar_text(
+                    pygame_module,
+                    surface,
+                    font,
+                    character,
+                    text_color,
+                    slot_clip,
+                    left=slot.left,
+                    right=slot.right,
+                    top=slot.top,
+                    bottom=slot.bottom,
+                    tab_advance=max(1, slot.width),
+                )
 
         surface.set_clip(visible_anchor)
-        pygame_module.draw.rect(
+        _paint_clipped_border(
+            pygame_module,
             surface,
             _ACCENT[:3]
             if draw.state & ControlState.SELECTED
             else _COLLECTION_BORDER,
-            anchor,
+            left=anchor.left,
+            top=anchor.top,
+            right=anchor.right,
+            bottom=anchor.bottom,
             width=1,
+            clip=visible_anchor,
         )
         if (
             primary_item is not None
@@ -1170,13 +1507,15 @@ def _paint_text_area(
             )
             if caret_x >= anchor.right:
                 caret_x = anchor.right - 1
-            caret = pygame_module.Rect(
+            caret = _clipped_python_rect(
+                pygame_module,
                 caret_x,
                 row_top + (1 if row_bottom - row_top > 2 else 0),
-                1,
-                max(1, row_bottom - row_top - 2),
-            ).clip(visible_anchor)
-            if caret.width > 0 and caret.height > 0:
+                caret_x + 1,
+                row_bottom - (1 if row_bottom - row_top > 2 else 0),
+                visible_anchor,
+            )
+            if caret is not None:
                 surface.fill(_ACCENT[:3] if enabled else _DISABLED_TEXT, caret)
     finally:
         surface.set_clip(prior_clip)
@@ -1213,7 +1552,7 @@ def _paint_text_grid(
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(visible_anchor)
-        surface.fill(_COLLECTION_SURFACE, anchor)
+        surface.fill(_COLLECTION_SURFACE, visible_anchor)
         for item in content.items:
             item_bottom = item.row + item.row_span
             item_right = item.column + item.column_span
@@ -1332,13 +1671,18 @@ def _paint_text_grid(
             )
 
         surface.set_clip(visible_anchor)
-        pygame_module.draw.rect(
+        _paint_clipped_border(
+            pygame_module,
             surface,
             _ACCENT[:3]
             if draw.state & ControlState.SELECTED
             else _COLLECTION_BORDER,
-            anchor,
+            left=anchor.left,
+            top=anchor.top,
+            right=anchor.right,
+            bottom=anchor.bottom,
             width=1,
+            clip=visible_anchor,
         )
     finally:
         surface.set_clip(prior_clip)
@@ -1403,17 +1747,22 @@ def _paint_tabset(
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(visible_anchor)
-        surface.fill(_COLLECTION_SURFACE, anchor)
-        pygame_module.draw.rect(
+        surface.fill(_COLLECTION_SURFACE, visible_anchor)
+        _paint_clipped_border(
+            pygame_module,
             surface,
             _COLLECTION_BORDER,
-            anchor,
+            left=anchor.left,
+            top=anchor.top,
+            right=anchor.right,
+            bottom=anchor.bottom,
             width=1,
+            clip=visible_anchor,
         )
         natural_left = anchor.left
         for index, tab in enumerate(draw.tabs):
             if natural_layout:
-                tab_rect = pygame_module.Rect(
+                tab_rect = _WideRect(
                     natural_left,
                     anchor.top,
                     widths[index],
@@ -1433,13 +1782,17 @@ def _paint_tabset(
                     index + 1,
                     len(draw.tabs),
                 )
-                tab_rect = pygame_module.Rect(
+                tab_rect = _WideRect(
                     tab_left,
                     anchor.top,
                     tab_right - tab_left,
                     anchor.height,
                 )
-            visible_tab = tab_rect.clip(visible_anchor)
+            visible_tab = _bounded_pygame_rect(
+                pygame_module,
+                tab_rect,
+                visible_anchor,
+            )
             if visible_tab.width <= 0 or visible_tab.height <= 0:
                 continue
 
@@ -1532,22 +1885,13 @@ def _paint_tabset(
 
 def _draw_decoration(pygame_module, surface, slot, color, alpha, y):
     """Draw one clipped source-over decoration without discarding alpha."""
-    if alpha == 0xFF:
-        pygame_module.draw.line(
-            surface,
-            color,
-            (slot.left, y),
-            (slot.right - 1, y),
-        )
-        return
-    layer = pygame_module.Surface(slot.size, flags=pygame_module.SRCALPHA)
-    pygame_module.draw.line(
-        layer,
+    _alpha_line(
+        pygame_module,
+        surface,
         (*color, alpha),
-        (0, y - slot.top),
-        (slot.width - 1, y - slot.top),
+        (slot.left, y),
+        (slot.right - 1, y),
     )
-    surface.blit(layer, slot)
 
 
 def _polyline_point(rect, point) -> tuple[int, int]:
@@ -1564,28 +1908,33 @@ def _polyline_point(rect, point) -> tuple[int, int]:
 def _alpha_circle(pygame_module, surface, color, center, radius: int) -> None:
     rgba = tuple(color)
     radius = max(1, radius)
-    if len(rgba) != 4 or rgba[3] == 0xFF:
-        pygame_module.draw.circle(surface, rgba[:3], center, radius)
+    if len(rgba) == 4 and rgba[3] == 0:
         return
-    if rgba[3] == 0:
+    visible = surface.get_rect().clip(surface.get_clip())
+    if visible.width <= 0 or visible.height <= 0:
         return
-    diameter = 2 * radius + 1
-    bounds = pygame_module.Rect(
-        center[0] - radius,
-        center[1] - radius,
-        diameter,
-        diameter,
-    )
-    layer = pygame_module.Surface(bounds.size, flags=pygame_module.SRCALPHA)
-    pygame_module.draw.circle(layer, rgba, (radius, radius), radius)
-    surface.blit(layer, bounds)
+    layer = pygame_module.Surface(visible.size, flags=pygame_module.SRCALPHA)
+    paint = rgba if len(rgba) == 4 else (*rgba[:3], 0xFF)
+    radius_squared = radius * radius
+    for local_y in range(visible.height):
+        dy = visible.top + local_y - center[1]
+        remaining = radius_squared - dy * dy
+        if remaining < 0:
+            continue
+        for local_x in range(visible.width):
+            dx = visible.left + local_x - center[0]
+            if dx * dx <= remaining:
+                layer.set_at((local_x, local_y), paint)
+    surface.blit(layer, visible)
 
 
 def _paint_polyline(pygame_module, surface, region, region_rect, draw) -> None:
-    object_rect = _object_rect(pygame_module, region_rect, draw)
-    clip = object_rect.clip(surface.get_rect())
-    if region.clipped:
-        clip = clip.clip(region_rect)
+    object_rect = _object_rect(pygame_module, region, region_rect, draw)
+    clip = _bounded_pygame_rect(
+        pygame_module,
+        object_rect,
+        _region_viewport(pygame_module, surface, region, region_rect),
+    )
     prior_clip = surface.get_clip()
     clip = clip.clip(prior_clip)
     if clip.width <= 0 or clip.height <= 0 or draw.color.alpha == 0:
@@ -1625,10 +1974,12 @@ def _paint_polyline(pygame_module, surface, region, region_rect, draw) -> None:
 
 
 def _object_clip(pygame_module, surface, region, region_rect, draw):
-    object_rect = _object_rect(pygame_module, region_rect, draw)
-    clip = object_rect.clip(surface.get_rect()).clip(surface.get_clip())
-    if region.clipped:
-        clip = clip.clip(region_rect)
+    object_rect = _object_rect(pygame_module, region, region_rect, draw)
+    clip = _bounded_pygame_rect(
+        pygame_module,
+        object_rect,
+        _region_viewport(pygame_module, surface, region, region_rect),
+    )
     return object_rect, clip
 
 
@@ -1710,14 +2061,14 @@ def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> Non
             filled = extent
         if filled:
             if draw.vertical:
-                fill_rect = pygame_module.Rect(
+                fill_rect = _WideRect(
                     object_rect.left,
                     object_rect.bottom - filled,
                     object_rect.width,
                     filled,
                 )
             else:
-                fill_rect = pygame_module.Rect(
+                fill_rect = _WideRect(
                     object_rect.left,
                     object_rect.top,
                     filled,
@@ -1778,35 +2129,35 @@ def _paint_status(pygame_module, surface, region, region_rect, draw) -> None:
     side = min(object_rect.width, object_rect.height)
     if side <= 0:
         return
-    shape_rect = pygame_module.Rect(
-        (object_rect.width - side) // 2,
-        (object_rect.height - side) // 2,
+    shape = _WideRect(
+        object_rect.left + (object_rect.width - side) // 2,
+        object_rect.top + (object_rect.height - side) // 2,
         side,
         side,
     )
-    layer = pygame_module.Surface(object_rect.size, flags=pygame_module.SRCALPHA)
+    visible = _bounded_pygame_rect(pygame_module, shape, clip)
+    if visible.width <= 0 or visible.height <= 0:
+        return
+    layer = pygame_module.Surface(visible.size, flags=pygame_module.SRCALPHA)
     rgba = (*_rgb(color), color.alpha)
-    if draw.shape == 0:
-        pygame_module.draw.ellipse(layer, rgba, shape_rect)
-    elif draw.shape == 1:
-        pygame_module.draw.rect(layer, rgba, shape_rect)
-    else:
-        pygame_module.draw.polygon(
-            layer,
-            rgba,
-            (
-                (shape_rect.centerx, shape_rect.top),
-                (shape_rect.right - 1, shape_rect.centery),
-                (shape_rect.centerx, shape_rect.bottom - 1),
-                (shape_rect.left, shape_rect.centery),
-            ),
-        )
-    prior_clip = surface.get_clip()
-    try:
-        surface.set_clip(clip)
-        surface.blit(layer, object_rect)
-    finally:
-        surface.set_clip(prior_clip)
+    center_x2 = shape.left * 2 + shape.width
+    center_y2 = shape.top * 2 + shape.height
+    radius2 = side
+    for local_y in range(visible.height):
+        pixel_y2 = (visible.top + local_y) * 2 + 1
+        dy = abs(pixel_y2 - center_y2)
+        for local_x in range(visible.width):
+            pixel_x2 = (visible.left + local_x) * 2 + 1
+            dx = abs(pixel_x2 - center_x2)
+            if draw.shape == 0:
+                painted = dx * dx + dy * dy <= radius2 * radius2
+            elif draw.shape == 1:
+                painted = True
+            else:
+                painted = dx + dy <= radius2
+            if painted:
+                layer.set_at((local_x, local_y), rgba)
+    surface.blit(layer, visible)
 
 
 def _series_value_y(rect, value: int, minimum: int, maximum: int) -> int:
@@ -1838,20 +2189,58 @@ def _alpha_polygon(pygame_module, surface, color, points) -> None:
     rgba = tuple(color)
     if not points or (len(rgba) == 4 and rgba[3] == 0):
         return
-    if len(rgba) != 4 or rgba[3] == 0xFF:
-        pygame_module.draw.polygon(surface, rgba[:3], points)
+    visible = surface.get_rect().clip(surface.get_clip())
+    if visible.width <= 0 or visible.height <= 0:
         return
-    left = min(point[0] for point in points)
-    top = min(point[1] for point in points)
-    right = max(point[0] for point in points) + 1
-    bottom = max(point[1] for point in points) + 1
-    layer = pygame_module.Surface((right - left, bottom - top), flags=pygame_module.SRCALPHA)
+
+    polygon = list(points)
+
+    def intersect(start, end, axis, edge):
+        delta = end[axis] - start[axis]
+        if delta == 0:
+            return start
+        other = 1 - axis
+        other_value = start[other] + (
+            (end[other] - start[other]) * (edge - start[axis]) // delta
+        )
+        return (edge, other_value) if axis == 0 else (other_value, edge)
+
+    for axis, edge, keep_greater in (
+        (0, visible.left, True),
+        (0, visible.right - 1, False),
+        (1, visible.top, True),
+        (1, visible.bottom - 1, False),
+    ):
+        if not polygon:
+            return
+        output = []
+        prior = polygon[-1]
+        prior_inside = prior[axis] >= edge if keep_greater else prior[axis] <= edge
+        for current in polygon:
+            current_inside = (
+                current[axis] >= edge if keep_greater else current[axis] <= edge
+            )
+            if current_inside != prior_inside:
+                output.append(intersect(prior, current, axis, edge))
+            if current_inside:
+                output.append(current)
+            prior, prior_inside = current, current_inside
+        polygon = output
+    if len(polygon) < 3:
+        return
+    if len(rgba) != 4 or rgba[3] == 0xFF:
+        pygame_module.draw.polygon(surface, rgba[:3], polygon)
+        return
+    layer = pygame_module.Surface(visible.size, flags=pygame_module.SRCALPHA)
     pygame_module.draw.polygon(
         layer,
         rgba,
-        tuple((point[0] - left, point[1] - top) for point in points),
+        tuple(
+            (point[0] - visible.left, point[1] - visible.top)
+            for point in polygon
+        ),
     )
-    surface.blit(layer, (left, top))
+    surface.blit(layer, visible)
 
 
 def _paint_plot(pygame_module, surface, region, region_rect, draw, samples) -> None:
@@ -1933,10 +2322,12 @@ def _paint_waveform(
 
 
 def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
-    object_rect = _object_rect(pygame_module, region_rect, draw)
-    clip = object_rect.clip(surface.get_rect())
-    if region.clipped:
-        clip = clip.clip(region_rect)
+    object_rect = _object_rect(pygame_module, region, region_rect, draw)
+    clip = _bounded_pygame_rect(
+        pygame_module,
+        object_rect,
+        _region_viewport(pygame_module, surface, region, region_rect),
+    )
     prior_clip = surface.get_clip()
     clip = clip.clip(prior_clip)
     if clip.width <= 0 or clip.height <= 0:
@@ -1947,14 +2338,15 @@ def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
     try:
         surface.set_clip(clip)
         if background.alpha == 0xFF:
-            surface.fill(_rgb(background), object_rect)
+            surface.fill(_rgb(background), clip)
         elif background.alpha:
-            layer = pygame_module.Surface(
-                object_rect.size,
-                flags=pygame_module.SRCALPHA,
+            _rounded_rect(
+                pygame_module,
+                surface,
+                object_rect,
+                (*_rgb(background), background.alpha),
+                radius=0,
             )
-            layer.fill((*_rgb(background), background.alpha))
-            surface.blit(layer, object_rect)
         count = len(draw.text)
         if not count or foreground.alpha == 0:
             return
@@ -1975,13 +2367,17 @@ def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
             for index, codepoint in enumerate(draw.text):
                 left = object_rect.left + (index * object_rect.width) // count
                 right = object_rect.left + ((index + 1) * object_rect.width) // count
-                slot = pygame_module.Rect(
+                slot = _WideRect(
                     left,
                     object_rect.top,
                     right - left,
                     object_rect.height,
                 )
-                slot_clip = slot.clip(clip)
+                slot_clip = _bounded_pygame_rect(
+                    pygame_module,
+                    slot,
+                    clip,
+                )
                 if slot_clip.width <= 0 or slot_clip.height <= 0:
                     continue
                 surface.set_clip(slot_clip)
@@ -1995,10 +2391,23 @@ def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
                 # A glyph run uses the same cell origin as the mandatory CELL
                 # renderer.  Every glyph and decoration is clipped to its own
                 # equal slot, so font overhang cannot alter an adjacent cell.
-                origin = (slot.left, slot.top)
-                surface.blit(glyph, origin)
+                _blit_bounded_surface(
+                    pygame_module,
+                    surface,
+                    glyph,
+                    slot.left,
+                    slot.top,
+                    slot_clip,
+                )
                 if draw.attributes & ATTR_BOLD:
-                    surface.blit(glyph, (origin[0] + 1, origin[1]))
+                    _blit_bounded_surface(
+                        pygame_module,
+                        surface,
+                        glyph,
+                        slot.left + 1,
+                        slot.top,
+                        slot_clip,
+                    )
                 if draw.attributes & ATTR_UNDERLINE:
                     _draw_decoration(
                         pygame_module,
@@ -2076,13 +2485,9 @@ def _preflight_image_surfaces(
             raise ValueError(
                 "IMAGE resource surface dimensions do not match its manifest"
             )
-        if (
-            not callable(getattr(source, "copy", None))
-            or not callable(getattr(source, "set_alpha", None))
-            or not callable(getattr(source, "subsurface", None))
-        ):
+        if not callable(getattr(source, "get_at", None)):
             raise TypeError(
-                "IMAGE resource surface lacks immutable crop/opacity operations"
+                "IMAGE resource surface lacks immutable bounded-sampling operations"
             )
         resolved[resource_key] = source
 
@@ -2098,10 +2503,6 @@ def _preflight_image_surfaces(
             if resource_key not in resolved:
                 raise ValueError("visible IMAGE has no exact resource manifest")
 
-    if resolved:
-        transform = getattr(pygame_module, "transform", None)
-        if transform is None or not callable(getattr(transform, "scale", None)):
-            raise TypeError("pygame module has no IMAGE scaling operation")
     return resolved
 
 
@@ -2207,23 +2608,40 @@ def _paint_image(
     if geometry is None:
         return
     source_crop, target_size, target_position = geometry
-    image = source
-    if source_crop is not None:
-        image = source.subsurface(pygame_module.Rect(*source_crop))
-    if tuple(image.get_size()) != target_size:
-        image = pygame_module.transform.scale(image, target_size)
-    if draw.opacity != 0xFF:
-        # Even a freshly scaled surface is copied here so opacity application
-        # has one simple ownership rule and can never alter a viewer cache.
-        image = image.copy()
-        image.set_alpha(draw.opacity)
+    target = _WideRect(*target_position, *target_size)
+    visible = _bounded_pygame_rect(pygame_module, target, clip)
+    if visible.width <= 0 or visible.height <= 0:
+        return
+    source_width, source_height = source.get_size()
+    if source_crop is None:
+        source_x = source_y = 0
+        sampled_width, sampled_height = source_width, source_height
+    else:
+        source_x, source_y, sampled_width, sampled_height = source_crop
 
-    prior_clip = surface.get_clip()
-    try:
-        surface.set_clip(clip)
-        surface.blit(image, target_position)
-    finally:
-        surface.set_clip(prior_clip)
+    # Sample only physically visible pixels.  A legal offscreen CELL_RECT32
+    # may have a multi-billion-cell extent; scaling an intermediate to that
+    # logical size would turn clipping into an allocation attack.
+    image = pygame_module.Surface(visible.size, flags=pygame_module.SRCALPHA)
+    for target_y in range(visible.height):
+        logical_y = visible.top + target_y - target.top
+        sample_y = source_y + min(
+            sampled_height - 1,
+            (logical_y * sampled_height) // target.height,
+        )
+        for target_x in range(visible.width):
+            logical_x = visible.left + target_x - target.left
+            sample_x = source_x + min(
+                sampled_width - 1,
+                (logical_x * sampled_width) // target.width,
+            )
+            pixel = tuple(source.get_at((sample_x, sample_y)))
+            if len(pixel) == 3:
+                pixel = (*pixel, 0xFF)
+            if draw.opacity != 0xFF:
+                pixel = (*pixel[:3], (pixel[3] * draw.opacity) // 0xFF)
+            image.set_at((target_x, target_y), pixel)
+    surface.blit(image, visible)
 
 
 def composite_draw_plane_result(
@@ -2258,16 +2676,33 @@ def composite_draw_plane_result(
         resource_surfaces,
     )
     series_by_key = {history.key: history.samples for history in plane.series}
-    targets: list[ControlHitTarget] = []
+    hit_entries: list[HitMapEntry] = []
     for region in plane.regions:
-        region_rect = pygame_module.Rect(
-            region.cell_x * cell_w,
-            region.cell_y * cell_h,
-            region.cell_cols * cell_w,
-            region.cell_rows * cell_h,
+        region_rect = _WideRect(
+            region.logical_x * cell_w,
+            region.logical_y * cell_h,
+            region.logical_cols * cell_w,
+            region.logical_rows * cell_h,
         )
-        if not surface.get_rect().contains(region_rect):
-            raise ValueError("retained region exceeds the CELL surface")
+        region_coverage = _bounded_pygame_rect(
+            pygame_module,
+            region_rect,
+            _region_viewport(pygame_module, surface, region, region_rect),
+        )
+        if region_coverage.width > 0 and region_coverage.height > 0:
+            hit_entries.append(
+                RegionOcclusion(
+                    region.owner_id,
+                    region.owner_generation,
+                    region.region_id,
+                    PixelRect(
+                        region_coverage.left,
+                        region_coverage.top,
+                        region_coverage.right,
+                        region_coverage.bottom,
+                    ),
+                )
+            )
         for draw in region.draws:
             if isinstance(draw, GlyphRunDraw):
                 _paint_glyph_run(
@@ -2350,7 +2785,7 @@ def composite_draw_plane_result(
                     ],
                 )
             elif isinstance(draw, MenuBarDraw):
-                targets.extend(
+                hit_entries.extend(
                     _paint_menu_bar(
                         pygame_module,
                         surface,
@@ -2384,7 +2819,7 @@ def composite_draw_plane_result(
                     cell_w,
                 )
             elif isinstance(draw, TabSetDraw):
-                targets.extend(
+                hit_entries.extend(
                     _paint_tabset(
                         pygame_module,
                         surface,
@@ -2400,7 +2835,7 @@ def composite_draw_plane_result(
                 )
             else:  # Legitimate newer kinds remain fail-closed until implemented.
                 raise TypeError("unsupported retained draw value")
-    return CompositeDrawResult(surface, tuple(targets))
+    return CompositeDrawResult(surface, tuple(hit_entries))
 
 
 def composite_draw_plane(
@@ -2435,10 +2870,13 @@ __all__ = [
     "CompositeDrawResult",
     "ControlHitTarget",
     "ControlIdentity",
+    "HitMapEntry",
     "ImageSurfaceKey",
     "PixelRect",
+    "RegionOcclusion",
     "composite_draw_plane",
     "composite_draw_plane_result",
+    "hit_test_hit_map",
     "unorm_high_edge",
     "unorm_low_edge",
 ]

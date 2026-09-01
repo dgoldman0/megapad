@@ -483,17 +483,25 @@ acknowledgement. The SDL reference sink does no needless pixel readback because
 it has no damage consumer. Full/partial refresh choice, waveform, ghosting,
 controller completion, and settling remain sink-local policy.
 
-A region's pixel rectangle is exactly its cell rectangle multiplied by the
-selected cell width and height. For a parentless object's normalized edge, the
-low edge rounds down and the high edge rounds up against that region's pixel
-extent, then clips to the region when clipping is enabled. The terminal font is
-authoritative. Each GLYPH_RUN fills its background and assigns one equal slot
-to each scalar, clips glyph overhang and decorations to that slot, and applies
-their alpha by source-over composition. Bold, dim, italic, underline, reverse,
-and strike are exact; blink is rejected because this draw value has no
-presentation-phase cadence. The ordinary TUI projection resolves existing
-clips, lines, boxes, selection, and caret writes into these runs so substantive
-UI pixels are rasterized here rather than supplied only by CELL.
+A region's logical pixel rectangle is its signed cell origin and positive cell
+extent multiplied by the selected cell width and height. Objects use the same
+cell scale with an origin relative to the region logical origin or parent
+object origin; they are not normalized, clamped, or cropped. The renderer
+resolves this full logical geometry in wide host integers, then intersects it
+with the independent physical region clip and surface before constructing an
+SDL-backed rectangle, issuing a draw call, allocating an alpha layer, or
+hit-testing. Thus a small visible fragment of a legal multi-billion-cell or
+offscreen object remains a small bounded operation.
+
+POLYLINE points and stroke width remain normalized within that full logical
+object. The terminal font is authoritative. Each GLYPH_RUN fills its bounded
+visible background and assigns one equal slot to each scalar, clips glyph
+overhang and decorations to that slot, and applies their alpha by source-over
+composition. Bold, dim, italic, underline, reverse, and strike are exact;
+blink is rejected because this draw value has no presentation-phase cadence.
+The ordinary TUI projection resolves existing clips, lines, boxes, selection,
+and caret writes into these runs so substantive UI pixels are rasterized here
+rather than supplied only by CELL.
 
 Cursor blink and other renderer-only overlays do not create cell revisions.
 Unchanged rows may be shared by identity across revisions. A renderer cannot

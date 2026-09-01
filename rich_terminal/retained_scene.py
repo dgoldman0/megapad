@@ -230,30 +230,52 @@ class Point:
 
 @dataclass(frozen=True, slots=True)
 class ObjectBounds:
-    left: int
-    top: int
-    right: int
-    bottom: int
+    """One CELL_RECT32 relative rectangle, never a normalized crop."""
+
+    cell_x: int
+    cell_y: int
+    cell_cols: int
+    cell_rows: int
 
     def __post_init__(self) -> None:
-        for name in ("left", "top", "right", "bottom"):
+        for name, minimum, maximum in (
+            ("cell_x", INT32_MIN, INT32_MAX),
+            ("cell_y", INT32_MIN, INT32_MAX),
+            ("cell_cols", 1, UINT32_MAX),
+            ("cell_rows", 1, UINT32_MAX),
+        ):
             object.__setattr__(
                 self,
                 name,
-                _integer(name, getattr(self, name), minimum=0, maximum=UINT32_MAX),
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=minimum,
+                    maximum=maximum,
+                ),
             )
-        if self.left >= self.right or self.top >= self.bottom:
-            raise ValueError("object bounds must have positive width and height")
+
+    @property
+    def cell_right(self) -> int:
+        return self.cell_x + self.cell_cols
+
+    @property
+    def cell_bottom(self) -> int:
+        return self.cell_y + self.cell_rows
 
 
 @dataclass(frozen=True, slots=True)
 class RegionDefinition:
     owner: OwnerIdentity
     region_id: int
-    cell_x: int
-    cell_y: int
-    cell_cols: int
-    cell_rows: int
+    logical_x: int
+    logical_y: int
+    logical_cols: int
+    logical_rows: int
+    clip_x: int
+    clip_y: int
+    clip_cols: int
+    clip_rows: int
     z_order: int
     visible: bool
     clipped: bool
@@ -264,10 +286,14 @@ class RegionDefinition:
             raise TypeError("owner must be OwnerIdentity")
         for name, minimum, maximum in (
             ("region_id", 1, UINT64_MAX),
-            ("cell_x", 0, UINT32_MAX),
-            ("cell_y", 0, UINT32_MAX),
-            ("cell_cols", 1, UINT32_MAX),
-            ("cell_rows", 1, UINT32_MAX),
+            ("logical_x", INT32_MIN, INT32_MAX),
+            ("logical_y", INT32_MIN, INT32_MAX),
+            ("logical_cols", 1, UINT32_MAX),
+            ("logical_rows", 1, UINT32_MAX),
+            ("clip_x", 0, UINT32_MAX),
+            ("clip_y", 0, UINT32_MAX),
+            ("clip_cols", 0, UINT32_MAX),
+            ("clip_rows", 0, UINT32_MAX),
             ("z_order", INT32_MIN, INT32_MAX),
             ("geometry_generation", 0, UINT64_MAX),
         ):
@@ -278,22 +304,43 @@ class RegionDefinition:
             )
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         object.__setattr__(self, "clipped", _boolean("clipped", self.clipped))
+        clip = (self.clip_x, self.clip_y, self.clip_cols, self.clip_rows)
+        if not self.clipped and any(clip):
+            raise ValueError("an unclipped region must carry the zero clip rectangle")
+        if self.clipped and (self.clip_cols == 0 or self.clip_rows == 0) and any(clip):
+            raise ValueError("an empty region clip must use the canonical all-zero rectangle")
+
+    @property
+    def logical_right(self) -> int:
+        return self.logical_x + self.logical_cols
+
+    @property
+    def logical_bottom(self) -> int:
+        return self.logical_y + self.logical_rows
 
     def validate_geometry(self, geometry: TerminalGeometry) -> None:
         if self.geometry_generation != geometry.generation:
             raise SceneModelError(SceneErrorCode.BOUNDS, "region geometry stamp is stale")
+        if not self.clipped or self.clip_cols == 0:
+            return
+        clip_right = self.clip_x + self.clip_cols
+        clip_bottom = self.clip_y + self.clip_rows
+        if clip_right > geometry.cols or clip_bottom > geometry.rows:
+            raise SceneModelError(SceneErrorCode.BOUNDS, "region clip exceeds the CELL surface")
+        intersection_left = max(0, self.logical_x)
+        intersection_top = max(0, self.logical_y)
+        intersection_right = min(geometry.cols, self.logical_right)
+        intersection_bottom = min(geometry.rows, self.logical_bottom)
         if (
-            self.cell_x > geometry.cols - self.cell_cols
-            if self.cell_cols <= geometry.cols
-            else True
+            self.clip_x < intersection_left
+            or self.clip_y < intersection_top
+            or clip_right > intersection_right
+            or clip_bottom > intersection_bottom
         ):
-            raise SceneModelError(SceneErrorCode.BOUNDS, "region exceeds cell columns")
-        if (
-            self.cell_y > geometry.rows - self.cell_rows
-            if self.cell_rows <= geometry.rows
-            else True
-        ):
-            raise SceneModelError(SceneErrorCode.BOUNDS, "region exceeds cell rows")
+            raise SceneModelError(
+                SceneErrorCode.BOUNDS,
+                "region clip is outside the logical-rect/surface intersection",
+            )
 
 
 @dataclass(frozen=True, slots=True)

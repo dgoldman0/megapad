@@ -591,7 +591,7 @@ class RichTerminalCore:
     @staticmethod
     def _formats_from_policy(policy: RetainedPolicy) -> RetainedFormats:
         return RetainedFormats(
-            coordinate_format=1,
+            bounds_format=2,
             color_format=1,
             image_format=policy.image_format,
             max_image_width=policy.max_image_width,
@@ -2589,10 +2589,14 @@ class RichTerminalCore:
                 region = RegionDefinition(
                     owner=owner,
                     region_id=operation.region_id,
-                    cell_x=operation.cell_x,
-                    cell_y=operation.cell_y,
-                    cell_cols=operation.cell_cols,
-                    cell_rows=operation.cell_rows,
+                    logical_x=operation.logical_x,
+                    logical_y=operation.logical_y,
+                    logical_cols=operation.logical_cols,
+                    logical_rows=operation.logical_rows,
+                    clip_x=operation.clip_x,
+                    clip_y=operation.clip_y,
+                    clip_cols=operation.clip_cols,
+                    clip_rows=operation.clip_rows,
                     z_order=operation.z_order,
                     visible=operation.visible,
                     clipped=operation.clipped,

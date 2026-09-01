@@ -25,11 +25,14 @@ from rich_terminal.retained_view import (
 
 
 def _run(object_id, z_order, foreground, background, text, *, attributes=0):
-    return GlyphRunDraw(object_id, z_order, ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX), RGBA(*foreground), RGBA(*background), attributes, text)
+    return GlyphRunDraw(object_id, z_order, ObjectBounds(0, 0, 2, 1), RGBA(*foreground), RGBA(*background), attributes, text)
 
 
 def _region(*draws, clipped=True):
-    return RetainedRegionDraw(1, 1, 1, 0, 0, 2, 1, 0, clipped, draws)
+    clip = (0, 0, 2, 1) if clipped else (0, 0, 0, 0)
+    return RetainedRegionDraw(
+        1, 1, 1, 0, 0, 2, 1, *clip, 0, clipped, draws
+    )
 
 
 def _plane(region):
@@ -181,14 +184,16 @@ def test_polyline_uses_iterative_group_geometry_without_crossing_parent_bounds()
     line = PolylineDraw(
         object_id=1,
         z_order=0,
-        bounds=ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        bounds=ObjectBounds(0, 0, 1, 1),
         points=(Point(UINT32_MAX, 0), Point(UINT32_MAX, UINT32_MAX)),
         stroke_width=1,
         color=RGBA(20, 210, 70, 255),
         closed=False,
-        parent_bounds=(ObjectBounds(0, 0, UINT32_MAX // 2, UINT32_MAX),),
+        parent_bounds=(ObjectBounds(0, 0, 1, 1),),
     )
-    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (line,))
+    region = RetainedRegionDraw(
+        1, 1, 1, 0, 0, 2, 1, 0, 0, 2, 1, 0, True, (line,)
+    )
 
     composite_draw_plane(pygame, surface, _plane(region), font, 10, 10)
 
@@ -206,7 +211,7 @@ def test_closed_polyline_adds_only_the_canonical_final_segment():
         line = PolylineDraw(
             1,
             0,
-            ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+            ObjectBounds(0, 0, 1, 1),
             (
                 Point(0, 0),
                 Point(UINT32_MAX, 0),
@@ -216,7 +221,9 @@ def test_closed_polyline_adds_only_the_canonical_final_segment():
             RGBA(220, 30, 40, 255),
             closed,
         )
-        region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (line,))
+        region = RetainedRegionDraw(
+            1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, True, (line,)
+        )
         composite_draw_plane(pygame, surface, _plane(region), font, 9, 9)
         return surface
 
@@ -236,13 +243,15 @@ def test_translucent_polyline_obeys_the_caller_clip_and_source_over_blending():
     line = PolylineDraw(
         1,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         (Point(0, 0), Point(UINT32_MAX, 0)),
         1,
         RGBA(200, 100, 0, 128),
         False,
     )
-    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (line,))
+    region = RetainedRegionDraw(
+        1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, True, (line,)
+    )
 
     composite_draw_plane(pygame, surface, _plane(region), font, 10, 5)
 
@@ -259,12 +268,14 @@ def test_readout_right_aligns_canonical_text_and_preserves_color_alpha():
     readout = ReadoutDraw(
         1,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         RGBA(200, 100, 0, 128),
         RGBA(20, 40, 60, 255),
         "12",
     )
-    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (readout,))
+    region = RetainedRegionDraw(
+        1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, True, (readout,)
+    )
 
     composite_draw_plane(pygame, surface, _plane(region), font, 10, 5)
 
@@ -283,7 +294,7 @@ def test_meter_maps_horizontal_and_vertical_ranges_with_exact_integer_edges():
     horizontal = MeterDraw(
         1,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         RGBA(20, 210, 70, 255),
         RGBA(10, 20, 30, 255),
         False,
@@ -293,7 +304,7 @@ def test_meter_maps_horizontal_and_vertical_ranges_with_exact_integer_edges():
         25,
     )
     horizontal_region = RetainedRegionDraw(
-        1, 1, 1, 0, 0, 1, 1, 0, True, (horizontal,)
+        1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, True, (horizontal,)
     )
     composite_draw_plane(
         pygame, horizontal_surface, _plane(horizontal_region), font, 8, 4
@@ -303,7 +314,7 @@ def test_meter_maps_horizontal_and_vertical_ranges_with_exact_integer_edges():
     vertical = MeterDraw(
         2,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         RGBA(220, 30, 40, 255),
         RGBA(10, 20, 30, 255),
         True,
@@ -313,7 +324,7 @@ def test_meter_maps_horizontal_and_vertical_ranges_with_exact_integer_edges():
         0,
     )
     vertical_region = RetainedRegionDraw(
-        1, 1, 1, 0, 0, 1, 1, 0, True, (vertical,)
+        1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, True, (vertical,)
     )
     composite_draw_plane(
         pygame, vertical_surface, _plane(vertical_region), font, 4, 8
@@ -344,13 +355,15 @@ def test_status_rasterizes_canonical_shape_and_active_state(
     status = StatusDraw(
         1,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         RGBA(90, 90, 90, 255),
         RGBA(20, 210, 70, 255),
         value,
         shape,
     )
-    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (status,))
+    region = RetainedRegionDraw(
+        1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, True, (status,)
+    )
 
     composite_draw_plane(pygame, surface, _plane(region), font, 7, 7)
 
@@ -360,7 +373,9 @@ def test_status_rasterizes_canonical_shape_and_active_state(
 
 def _series_plane(draw, samples):
     history = SeriesHistoryDraw(1, 1, draw.series_id, tuple(samples))
-    region = RetainedRegionDraw(1, 1, 1, 0, 0, 1, 1, 0, True, (draw,))
+    region = RetainedRegionDraw(
+        1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, True, (draw,)
+    )
     return RetainedDrawPlane(True, True, (region,), (history,))
 
 
@@ -372,7 +387,7 @@ def test_plot_maps_timestamps_and_clips_values_to_exact_object_edges():
     plot = PlotDraw(
         1,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         7,
         -10,
         10,
@@ -400,7 +415,7 @@ def test_plot_fill_uses_source_over_and_a_single_sample_is_centered():
     filled = PlotDraw(
         1,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         7,
         0,
         10,
@@ -423,7 +438,7 @@ def test_plot_fill_uses_source_over_and_a_single_sample_is_centered():
     single = PlotDraw(
         2,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         8,
         0,
         10,
@@ -455,7 +470,7 @@ def test_waveform_draws_zero_line_even_when_committed_history_is_empty():
     waveform = WaveformDraw(
         1,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 1, 1),
         7,
         -10,
         10,
@@ -491,7 +506,7 @@ def _image_draw(resource_id, fit, *, opacity=255, bounds=None, z_order=0):
         object_id=resource_id,
         z_order=z_order,
         bounds=(
-            ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX)
+            ObjectBounds(0, 0, 1, 1)
             if bounds is None
             else bounds
         ),
@@ -506,6 +521,10 @@ def _image_plane(draws, manifests, *, cell_cols=1, cell_rows=1):
         1,
         1,
         1,
+        0,
+        0,
+        cell_cols,
+        cell_rows,
         0,
         0,
         cell_cols,
@@ -539,22 +558,22 @@ def test_image_dependencies_are_preflighted_before_any_destination_mutation():
     second = _image_manifest(2, 1, 1)
     first_surface = pygame.Surface((1, 1), flags=pygame.SRCALPHA)
     first_surface.fill((220, 30, 40, 255))
-    midpoint = UINT32_MAX // 2
     plane = _image_plane(
         (
             _image_draw(
                 1,
                 ImageFit.STRETCH,
-                bounds=ObjectBounds(0, 0, midpoint, UINT32_MAX),
+                bounds=ObjectBounds(0, 0, 1, 1),
             ),
             _image_draw(
                 2,
                 ImageFit.STRETCH,
-                bounds=ObjectBounds(midpoint, 0, UINT32_MAX, UINT32_MAX),
+                bounds=ObjectBounds(1, 0, 1, 1),
                 z_order=1,
             ),
         ),
         (first, second),
+        cell_cols=2,
     )
 
     with pytest.raises(ValueError, match="no exact resource surface"):

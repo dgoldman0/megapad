@@ -481,10 +481,10 @@ def test_typed_glyph_run_writers_own_exact_object_wire_assembly() -> None:
         "_PT-GR-Z @ _PT-FRAME-PAYLOAD 28 + L!",
         "_PT-GR-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
         "_PT-GR-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
-        "_PT-GR-LEFT @ _PT-FRAME-PAYLOAD 48 + L!",
-        "_PT-GR-TOP @ _PT-FRAME-PAYLOAD 52 + L!",
-        "_PT-GR-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!",
-        "_PT-GR-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!",
+        "_PT-GR-X @ _PT-FRAME-PAYLOAD 48 + L!",
+        "_PT-GR-Y @ _PT-FRAME-PAYLOAD 52 + L!",
+        "_PT-GR-COLS @ _PT-FRAME-PAYLOAD 56 + L!",
+        "_PT-GR-ROWS @ _PT-FRAME-PAYLOAD 60 + L!",
         "_PT-GR-FG-RED @ _PT-FRAME-PAYLOAD 64 + C!",
         "_PT-GR-FG-GREEN @ _PT-FRAME-PAYLOAD 65 + C!",
         "_PT-GR-FG-BLUE @ _PT-FRAME-PAYLOAD 66 + C!",
@@ -502,6 +502,8 @@ def test_typed_glyph_run_writers_own_exact_object_wire_assembly() -> None:
         assert store in payload
 
     assert "_PT-GR-TEXT-U @ 80 _PT-UADD?" in fields
+    assert "_PT-GR-X @ _PT-GR-COLS @ _PT-I32-EXTENT?" in fields
+    assert "_PT-GR-Y @ _PT-GR-ROWS @ _PT-I32-EXTENT?" in fields
     assert "_PT.S.RET-FORMATS 24 + L@ U>" in fields
     assert "_PT.S.RET-FORMATS 24 + L@ 0= IF FALSE EXIT THEN" in fields
     assert "_PT.S.RET-CAPS 8 + _PT-U64@ 0x08 AND" not in fields
@@ -547,6 +549,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     source_span = _definition(source, "_PT-CT-SOURCE?")
     text = _definition(source, "_PT-CT-TEXT?")
     spans = _definition(source, "_PT-CT-SPANS-DISJOINT?")
+    root_bounds = _definition(source, "_PT-CT-ROOT-BOUNDS?")
     payload = _definition(source, "_PT-CT-PAYLOAD!")
     scrub = _definition(source, "_PT-CT-SCRUB")
 
@@ -571,10 +574,10 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
         "_PT-CT-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
         "_PT-CT-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
         "_PT-CT-ORDER @ _PT-FRAME-PAYLOAD 48 + L!",
-        "_PT-CT-LEFT @ _PT-FRAME-PAYLOAD 52 + L!",
-        "_PT-CT-TOP @ _PT-FRAME-PAYLOAD 56 + L!",
-        "_PT-CT-RIGHT @ _PT-FRAME-PAYLOAD 60 + L!",
-        "_PT-CT-BOTTOM @ _PT-FRAME-PAYLOAD 64 + L!",
+        "_PT-CT-X @ _PT-FRAME-PAYLOAD 52 + L!",
+        "_PT-CT-Y @ _PT-FRAME-PAYLOAD 56 + L!",
+        "_PT-CT-COLS @ _PT-FRAME-PAYLOAD 60 + L!",
+        "_PT-CT-ROWS @ _PT-FRAME-PAYLOAD 64 + L!",
         "_PT-CT-LABEL-U @ _PT-FRAME-PAYLOAD 68 + L!",
         "_PT-CT-SHORTCUT-U @ _PT-FRAME-PAYLOAD 72 + L!",
         "_PT-CT-CONTENT-U @ _PT-FRAME-PAYLOAD 76 + L!",
@@ -589,6 +592,9 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     assert "_PT-CT-LABEL-U @ 80 _PT-UADD?" in fields
     assert "_PT-CT-SHORTCUT-U @ _PT-UADD?" in fields
     assert "_PT-CT-CONTENT-U @ _PT-UADD?" in fields
+    assert "_PT-CT-BOUNDS-ABSENT? 0= IF" in fields
+    assert "_PT-CT-X @ _PT-CT-COLS @ _PT-I32-EXTENT?" in root_bounds
+    assert "_PT-CT-Y @ _PT-CT-ROWS @ _PT-I32-EXTENT?" in root_bounds
     assert "_PT.S.PEER-MAX-PAY @ U>" in fields
     assert "_PT-CT-STATE @ 0x1F INVERT AND" in fields
     assert "PT-CONTROL-OPEN PT-CONTROL-SELECTED OR AND" in fields
@@ -1324,7 +1330,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
         assert "PT-RETAINED-AVAILABLE? 0=" in definition
         assert f"_PT.S.RET-CAPS 8 + _PT-U64@ {feature} AND 0<>" in definition
 
-    common = "owner generation object region parent left top right bottom z visible"
+    common = "owner generation object region parent x y cols rows z visible"
     signatures = {
         "GROUP": f"{common} session -- status",
         "POLYLINE": (
@@ -1430,10 +1436,8 @@ def test_object_common_prefix_group_and_polyline_are_exact_and_bounded() -> None
     assert "_PT-M-OBJECT-DEFINE =" in fields
     assert "_PT-M-OBJECT-REPLACE = OR" in fields
     assert "_PT-OB-KIND @ DUP 1 U< SWAP 9 U> OR" in fields
-    for coordinate in ("LEFT", "TOP", "RIGHT", "BOTTOM"):
-        assert f"_PT-OB-{coordinate} @ _PT-U32?" in fields
-    assert "_PT-OB-LEFT @ _PT-OB-RIGHT @ U< 0=" in fields
-    assert "_PT-OB-TOP @ _PT-OB-BOTTOM @ U< 0=" in fields
+    assert "_PT-OB-X @ _PT-OB-COLS @ _PT-I32-EXTENT? 0=" in fields
+    assert "_PT-OB-Y @ _PT-OB-ROWS @ _PT-I32-EXTENT? 0=" in fields
     assert "_PT-OB-Z @ _PT-I32? 0=" in fields
     assert "_PT-OB-VISIBLE @ _PT-OBJECT-BOOL?" in fields
 
@@ -1451,10 +1455,10 @@ def test_object_common_prefix_group_and_polyline_are_exact_and_bounded() -> None
         "_PT-OB-Z @ _PT-FRAME-PAYLOAD 28 + L!",
         "_PT-OB-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!",
         "_PT-OB-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
-        "_PT-OB-LEFT @ _PT-FRAME-PAYLOAD 48 + L!",
-        "_PT-OB-TOP @ _PT-FRAME-PAYLOAD 52 + L!",
-        "_PT-OB-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!",
-        "_PT-OB-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!",
+        "_PT-OB-X @ _PT-FRAME-PAYLOAD 48 + L!",
+        "_PT-OB-Y @ _PT-FRAME-PAYLOAD 52 + L!",
+        "_PT-OB-COLS @ _PT-FRAME-PAYLOAD 56 + L!",
+        "_PT-OB-ROWS @ _PT-FRAME-PAYLOAD 60 + L!",
     ):
         assert store in prefix
     assert "_PT-F-TOTAL @ 0 FILL" in frame_begin

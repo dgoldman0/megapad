@@ -142,7 +142,9 @@ def _domain(
 
 
 def _region(owner: OwnerIdentity, *, generation: int = 0) -> RegionDefinition:
-    return RegionDefinition(owner, 1, 0, 0, 20, 10, 0, True, True, generation)
+    return RegionDefinition(
+        owner, 1, 0, 0, 20, 10, 0, 0, 20, 10, 0, True, True, generation
+    )
 
 
 def _object(owner: OwnerIdentity, object_id: int, body, *, parent: int = 0):
@@ -151,7 +153,7 @@ def _object(owner: OwnerIdentity, object_id: int, body, *, parent: int = 0):
         object_id=object_id,
         region_id=1,
         parent_object_id=parent,
-        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(0, 0, 20, 10),
         z_order=object_id,
         visible=True,
         body=body,

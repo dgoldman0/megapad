@@ -19,7 +19,7 @@ from typing import Any
 from canonical_state import canonical_state, deduplicate_records, owner_key, resource_key
 
 
-CONTRACT_ID = "APT-1-RETAINED-1-2026-08-24"
+CONTRACT_ID = "APT-1-RETAINED-1-2026-09-01"
 OWNER_ID = 0x534F554E444C4142
 OWNER_GENERATION = 7
 INITIAL_C2T_GRANT = 65_536
@@ -94,7 +94,7 @@ def _soft_reset_replay_path() -> list[dict[str, Any]]:
         ("t", "RET_RESULT", 88, 27, 1),
         ("t", "CREDIT", 48, 28, 1),
         ("c", "PRESENT_BEGIN", 104, 89, 1),
-        ("c", "REGION_DEFINE", 88, 90, 1),
+        ("c", "REGION_DEFINE", 104, 90, 1),
         ("c", "PRESENT_COMMIT", 56, 91, 1),
         ("t", "TX_RESULT", 60, 29, 1),
         ("t", "CREDIT", 48, 30, 1),
@@ -127,7 +127,7 @@ FRAME_PATHS = {
     "soundlab_initial_replace": _path(
         "cttccccccccccttcccccccttcccctt",
         "OWNER_OPEN,RET_RESULT,CREDIT,PRESENT_BEGIN,REGION_DEFINE,SERIES_DEFINE,SERIES_REPLACE,SERIES_DEFINE,SERIES_REPLACE,OBJECT_DEFINE,OBJECT_DEFINE,OBJECT_DEFINE,PRESENT_COMMIT,TX_RESULT,CREDIT,PRESENT_BEGIN,OBJECT_DEFINE,OBJECT_DEFINE,OBJECT_DEFINE,OBJECT_DEFINE,OBJECT_DEFINE,PRESENT_COMMIT,TX_RESULT,CREDIT,TX_BEGIN,CELL_SPAN,CURSOR,TX_COMMIT,TX_RESULT,CREDIT",
-        [104,88,48,104,88,80,104,80,112,104,144,128,56,60,48,104,146,152,136,144,152,56,60,48,72,60,56,48,60,48],
+        [104,88,48,104,104,80,104,80,112,104,144,128,56,60,48,104,146,152,136,144,152,56,60,48,72,60,56,48,60,48],
         [30,5,6,31,32,33,34,35,36,37,38,39,40,7,8,41,42,43,44,45,46,47,9,10,48,49,50,51,11,12],
         [0] * 30,
     ),
@@ -151,13 +151,13 @@ FRAME_PATHS = {
     "legacy_cell_and_replace_continue": _path(
         "cttccccttccccttccccctt",
         "OWNER_OPEN,RET_RESULT,CREDIT,TX_BEGIN,CELL_SPAN,CURSOR,TX_COMMIT,TX_RESULT,CREDIT,PRESENT_BEGIN,REGION_DEFINE,SERIES_DEFINE,PRESENT_COMMIT,TX_RESULT,CREDIT,PRESENT_BEGIN,SERIES_REPLACE,OBJECT_DEFINE,OBJECT_DEFINE,PRESENT_COMMIT,TX_RESULT,CREDIT",
-        [104,88,48,72,60,56,48,60,48,104,88,80,56,60,48,104,96,146,144,56,60,48],
+        [104,88,48,72,60,56,48,60,48,104,104,80,56,60,48,104,96,146,144,56,60,48],
         [150,150,151,151,152,153,154,152,153,155,156,157,158,154,155,159,160,161,162,163,156,157], [0] * 22,
     ),
     "resize_layout_sync": _path(
         "cccccttcccttcctt",
         "PRESENT_BEGIN,CELL_SPAN,CELL_SPAN,CURSOR,PRESENT_COMMIT,TX_RESULT,CREDIT,PRESENT_BEGIN,REGION_REPLACE,PRESENT_COMMIT,TX_RESULT,CREDIT,PRESENT_BEGIN,PRESENT_COMMIT,TX_RESULT,CREDIT",
-        [104,76,76,56,56,60,48,104,88,56,60,48,104,56,60,48],
+        [104,76,76,56,56,60,48,104,104,56,60,48,104,56,60,48],
         [30,31,32,33,34,30,31,35,36,37,32,33,38,39,34,35], [0] * 16,
     ),
     "reset_crossed_present_commit": _path(
@@ -210,14 +210,14 @@ FRAME_PATHS = {
 
 
 OBJECT_BASE = {
-    1: {"object_id":1,"object_type":1,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,0,4294967295,805306367],"body_sha3_256":"a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a","visible":True},
-    2: {"object_id":2,"object_type":2,"flags":1,"z_index":0,"region_id":1,"parent_id":1,"bounds":[0,0,4294967295,4294967295],"body_sha3_256":"0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35","visible":True},
-    3: {"object_id":3,"object_type":4,"flags":1,"z_index":1,"region_id":1,"parent_id":1,"bounds":[0,0,4294967295,4294967295],"body_sha3_256":"b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd","text_utf8_hex":"536f756e644c6162","utf8_bytes":8,"visible":True},
-    4: {"object_id":4,"object_type":5,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,0,4294967295,805306367],"body_sha3_256":"a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8","format":1,"decimal_places":2,"value":-1200,"scale":100,"unit_utf8_hex":"6442","formatted_utf8_hex":"2d31322e30306442","utf8_bytes":8,"visible":True},
-    5: {"object_id":5,"object_type":6,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,805306368,4294967295,1207959551],"body_sha3_256":"b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615","value":-1200,"visible":True},
-    6: {"object_id":6,"object_type":7,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,1207959552,536870911,1610612735],"body_sha3_256":"f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240","value":0,"visible":True},
-    7: {"object_id":7,"object_type":8,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,805306368,4294967295,4294967295],"body_sha3_256":"e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d","series_id":1,"visible":True},
-    8: {"object_id":8,"object_type":9,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,2952790016,4294967295,4294967295],"body_sha3_256":"0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2","series_id":2,"visible":True},
+    1: {"object_id":1,"object_type":1,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,0,80,5],"body_sha3_256":"a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a","visible":True},
+    2: {"object_id":2,"object_type":2,"flags":1,"z_index":0,"region_id":1,"parent_id":1,"bounds":[0,0,80,5],"body_sha3_256":"0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35","visible":True},
+    3: {"object_id":3,"object_type":4,"flags":1,"z_index":1,"region_id":1,"parent_id":1,"bounds":[0,0,80,5],"body_sha3_256":"b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd","text_utf8_hex":"536f756e644c6162","utf8_bytes":8,"visible":True},
+    4: {"object_id":4,"object_type":5,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,0,80,5],"body_sha3_256":"a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8","format":1,"decimal_places":2,"value":-1200,"scale":100,"unit_utf8_hex":"6442","formatted_utf8_hex":"2d31322e30306442","utf8_bytes":8,"visible":True},
+    5: {"object_id":5,"object_type":6,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,5,80,4],"body_sha3_256":"b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615","value":-1200,"visible":True},
+    6: {"object_id":6,"object_type":7,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,9,16,4],"body_sha3_256":"f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240","value":0,"visible":True},
+    7: {"object_id":7,"object_type":8,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,5,80,20],"body_sha3_256":"e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d","series_id":1,"visible":True},
+    8: {"object_id":8,"object_type":9,"flags":1,"z_index":0,"region_id":1,"parent_id":0,"bounds":[0,17,80,8],"body_sha3_256":"0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2","series_id":2,"visible":True},
 }
 
 
@@ -338,10 +338,14 @@ def region(
         "generation": generation,
         "region_id": region_id,
         "geometry_generation": geometry_generation,
-        "left": 0,
-        "top": 0,
-        "cols": cols,
-        "rows": rows,
+        "logical_x": 0,
+        "logical_y": 0,
+        "logical_cols": cols,
+        "logical_rows": rows,
+        "clip_x": 0,
+        "clip_y": 0,
+        "clip_cols": cols,
+        "clip_rows": rows,
         "z_index": 0,
         "flags": 3,
     }
@@ -427,7 +431,7 @@ def image_scene(*, cols: int = 1, rows: int = 1) -> dict[str, dict[str, Any]]:
     image = {"owner_id":OWNER_ID,"generation":OWNER_GENERATION,**copy.deepcopy(OBJECT_BASE.get(1, {}))}
     image.update({
         "object_id":1,"object_type":3,"flags":1,"z_index":0,"region_id":1,"parent_id":0,
-        "bounds":[0,0,4294967295,4294967295],
+        "bounds":[0,0,1,1],
         "body_sha3_256":"1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
         "resource_id":1,"visible":True,
     })

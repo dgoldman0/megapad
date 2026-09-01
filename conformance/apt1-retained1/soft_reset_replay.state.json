@@ -1,5 +1,5 @@
 {
-  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "contract_id": "APT-1-RETAINED-1-2026-09-01",
   "transcript": "soft_reset_replay.hex",
   "initial_state": {
     "session_state": "ACTIVE",
@@ -71,7 +71,7 @@
       },
       "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
     },
-    "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+    "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
     "active": {
       "regions": [
         {
@@ -79,10 +79,14 @@
           "generation": 7,
           "region_id": 1,
           "geometry_generation": 0,
-          "left": 0,
-          "top": 0,
-          "cols": 80,
-          "rows": 25,
+          "logical_x": 0,
+          "logical_y": 0,
+          "logical_cols": 80,
+          "logical_rows": 25,
+          "clip_x": 0,
+          "clip_y": 0,
+          "clip_cols": 80,
+          "clip_rows": 25,
           "z_index": 0,
           "flags": 3
         }
@@ -100,8 +104,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            805306367
+            80,
+            5
           ],
           "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
           "visible": true
@@ -118,8 +122,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            4294967295
+            80,
+            5
           ],
           "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
           "visible": true
@@ -136,8 +140,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            4294967295
+            80,
+            5
           ],
           "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
           "text_utf8_hex": "536f756e644c6162",
@@ -156,8 +160,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            805306367
+            80,
+            5
           ],
           "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
           "format": 1,
@@ -180,9 +184,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            805306368,
-            4294967295,
-            1207959551
+            5,
+            80,
+            4
           ],
           "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
           "value": -1200,
@@ -199,9 +203,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            1207959552,
-            536870911,
-            1610612735
+            9,
+            16,
+            4
           ],
           "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
           "value": 0,
@@ -218,9 +222,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            805306368,
-            4294967295,
-            4294967295
+            5,
+            80,
+            20
           ],
           "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
           "series_id": 1,
@@ -237,9 +241,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            2952790016,
-            4294967295,
-            4294967295
+            17,
+            80,
+            8
           ],
           "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
           "series_id": 2,
@@ -407,7 +411,7 @@
         },
         "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -415,10 +419,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -436,8 +444,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -454,8 +462,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -472,8 +480,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -492,8 +500,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -516,9 +524,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -535,9 +543,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -554,9 +562,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -573,9 +581,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -6105,7 +6113,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38138,
+          "sent_complete_bytes": 38154,
           "released_complete_bytes": 37946,
           "last_advertised_grant": 103482,
           "advertised_released_bytes": 37946,
@@ -6230,7 +6238,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 192
+        "held_complete_bytes": 208
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -6248,11 +6256,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38194,
-          "released_complete_bytes": 38194,
+          "sent_complete_bytes": 38210,
+          "released_complete_bytes": 38210,
           "last_advertised_grant": 103482,
           "advertised_released_bytes": 37946,
-          "pending_release_bytes": 248
+          "pending_release_bytes": 264
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -6313,7 +6321,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "d2bdbc763824cc62ebc2863c9eb2542985946e841fe5e6117e078457c58febe4",
+      "hidden_digest_sha3_256": "9f0f57554353d2105170bbdd975674a3ce296af0cde7ba5f6d334ad0d0cfe1bb",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -6323,10 +6331,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -6421,11 +6433,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38194,
-          "released_complete_bytes": 38194,
+          "sent_complete_bytes": 38210,
+          "released_complete_bytes": 38210,
           "last_advertised_grant": 103482,
           "advertised_released_bytes": 37946,
-          "pending_release_bytes": 248
+          "pending_release_bytes": 264
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -6486,7 +6498,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "d2bdbc763824cc62ebc2863c9eb2542985946e841fe5e6117e078457c58febe4",
+      "hidden_digest_sha3_256": "9f0f57554353d2105170bbdd975674a3ce296af0cde7ba5f6d334ad0d0cfe1bb",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -6496,10 +6508,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -6592,10 +6608,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38194,
-          "released_complete_bytes": 38194,
-          "last_advertised_grant": 103730,
-          "advertised_released_bytes": 38194,
+          "sent_complete_bytes": 38210,
+          "released_complete_bytes": 38210,
+          "last_advertised_grant": 103746,
+          "advertised_released_bytes": 38210,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6657,7 +6673,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "d2bdbc763824cc62ebc2863c9eb2542985946e841fe5e6117e078457c58febe4",
+      "hidden_digest_sha3_256": "9f0f57554353d2105170bbdd975674a3ce296af0cde7ba5f6d334ad0d0cfe1bb",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -6667,10 +6683,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -6757,10 +6777,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38298,
-          "released_complete_bytes": 38194,
-          "last_advertised_grant": 103730,
-          "advertised_released_bytes": 38194,
+          "sent_complete_bytes": 38314,
+          "released_complete_bytes": 38210,
+          "last_advertised_grant": 103746,
+          "advertised_released_bytes": 38210,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6822,7 +6842,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "d2bdbc763824cc62ebc2863c9eb2542985946e841fe5e6117e078457c58febe4",
+      "hidden_digest_sha3_256": "9f0f57554353d2105170bbdd975674a3ce296af0cde7ba5f6d334ad0d0cfe1bb",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -6832,10 +6852,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -6930,10 +6954,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38418,
-          "released_complete_bytes": 38194,
-          "last_advertised_grant": 103730,
-          "advertised_released_bytes": 38194,
+          "sent_complete_bytes": 38434,
+          "released_complete_bytes": 38210,
+          "last_advertised_grant": 103746,
+          "advertised_released_bytes": 38210,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6995,7 +7019,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "d2bdbc763824cc62ebc2863c9eb2542985946e841fe5e6117e078457c58febe4",
+      "hidden_digest_sha3_256": "9f0f57554353d2105170bbdd975674a3ce296af0cde7ba5f6d334ad0d0cfe1bb",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -7005,10 +7029,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -7103,10 +7131,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38474,
-          "released_complete_bytes": 38474,
-          "last_advertised_grant": 103730,
-          "advertised_released_bytes": 38194,
+          "sent_complete_bytes": 38490,
+          "released_complete_bytes": 38490,
+          "last_advertised_grant": 103746,
+          "advertised_released_bytes": 38210,
           "pending_release_bytes": 280
         },
         "terminal_to_client": {
@@ -7161,7 +7189,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "b06a18b518aef5f030a5112fb66b53147dfd80be124d7d0acbf5425e246e1ade",
+      "active_digest_sha3_256": "bd5903c1e263779688438bd82e6471fdce129004eb218d1f2367ff020ed9109b",
       "active": {
         "regions": [
           {
@@ -7169,10 +7197,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -7190,8 +7222,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -7289,10 +7321,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38474,
-          "released_complete_bytes": 38474,
-          "last_advertised_grant": 103730,
-          "advertised_released_bytes": 38194,
+          "sent_complete_bytes": 38490,
+          "released_complete_bytes": 38490,
+          "last_advertised_grant": 103746,
+          "advertised_released_bytes": 38210,
           "pending_release_bytes": 280
         },
         "terminal_to_client": {
@@ -7347,7 +7379,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "b06a18b518aef5f030a5112fb66b53147dfd80be124d7d0acbf5425e246e1ade",
+      "active_digest_sha3_256": "bd5903c1e263779688438bd82e6471fdce129004eb218d1f2367ff020ed9109b",
       "active": {
         "regions": [
           {
@@ -7355,10 +7387,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -7376,8 +7412,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -7473,10 +7509,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38474,
-          "released_complete_bytes": 38474,
-          "last_advertised_grant": 104010,
-          "advertised_released_bytes": 38474,
+          "sent_complete_bytes": 38490,
+          "released_complete_bytes": 38490,
+          "last_advertised_grant": 104026,
+          "advertised_released_bytes": 38490,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -7531,7 +7567,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "b06a18b518aef5f030a5112fb66b53147dfd80be124d7d0acbf5425e246e1ade",
+      "active_digest_sha3_256": "bd5903c1e263779688438bd82e6471fdce129004eb218d1f2367ff020ed9109b",
       "active": {
         "regions": [
           {
@@ -7539,10 +7575,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -7560,8 +7600,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,

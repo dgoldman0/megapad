@@ -152,10 +152,12 @@ PT-RESOURCE-ABORT   ( owner generation resource reason session -- status )
 PT-PRESENT-BEGIN    ( cols rows cell-spans cells retained-ops
                       retained-frame-bytes cell-mode retained-mode session
                       -- status )
-PT-REGION-DEFINE    ( owner generation region x y cols rows z flags session
-                      -- status )
-PT-REGION-REPLACE   ( owner generation region x y cols rows z flags session
-                      -- status )
+PT-REGION-DEFINE    ( owner generation region logical-x logical-y
+                      logical-cols logical-rows clip-x clip-y clip-cols
+                      clip-rows z flags session -- status )
+PT-REGION-REPLACE   ( owner generation region logical-x logical-y
+                      logical-cols logical-rows clip-x clip-y clip-cols
+                      clip-rows z flags session -- status )
 PT-REGION-DROP      ( owner generation region session -- status )
 PT-SERIES-DEFINE    ( owner generation series capacity timestamp-mode
                       interval-us session -- status )
@@ -167,80 +169,80 @@ PT-SERIES-REPLACE   ( owner generation series timestamp-mode
                       -- status )
 PT-SERIES-DROP      ( owner generation series session -- status )
 PT-GROUP-DEFINE     ( owner generation object region parent
-                      left top right bottom z visible session -- status )
+                      x y cols rows z visible session -- status )
 PT-GROUP-REPLACE    ( owner generation object region parent
-                      left top right bottom z visible session -- status )
+                      x y cols rows z visible session -- status )
 PT-POLYLINE-DEFINE  ( owner generation object region parent
-                      left top right bottom z visible stroke-width
+                      x y cols rows z visible stroke-width
                       red green blue alpha path-flags points-a points-u
                       session -- status )
 PT-POLYLINE-REPLACE ( owner generation object region parent
-                      left top right bottom z visible stroke-width
+                      x y cols rows z visible stroke-width
                       red green blue alpha path-flags points-a points-u
                       session -- status )
 PT-IMAGE-DEFINE     ( owner generation object region parent
-                      left top right bottom z visible resource fit opacity
+                      x y cols rows z visible resource fit opacity
                       session -- status )
 PT-IMAGE-REPLACE    ( owner generation object region parent
-                      left top right bottom z visible resource fit opacity
+                      x y cols rows z visible resource fit opacity
                       session -- status )
 PT-GLYPH-RUN-DEFINE ( owner generation object region parent
-                      left top right bottom z visible
+                      x y cols rows z visible
                       fg-red fg-green fg-blue fg-alpha
                       bg-red bg-green bg-blue bg-alpha attrs
                       text-a text-u session -- status )
 PT-GLYPH-RUN-REPLACE ( owner generation object region parent
-                       left top right bottom z visible
+                       x y cols rows z visible
                        fg-red fg-green fg-blue fg-alpha
                        bg-red bg-green bg-blue bg-alpha attrs
                        text-a text-u session -- status )
 PT-READOUT-DEFINE   ( owner generation object region parent
-                      left top right bottom z visible fg-red fg-green fg-blue
+                      x y cols rows z visible fg-red fg-green fg-blue
                       fg-alpha bg-red bg-green bg-blue bg-alpha format
                       decimal-places initial-value scale unit-a unit-u session
                       -- status )
 PT-READOUT-REPLACE  ( owner generation object region parent
-                      left top right bottom z visible fg-red fg-green fg-blue
+                      x y cols rows z visible fg-red fg-green fg-blue
                       fg-alpha bg-red bg-green bg-blue bg-alpha format
                       decimal-places initial-value scale unit-a unit-u session
                       -- status )
 PT-METER-DEFINE     ( owner generation object region parent
-                      left top right bottom z visible fg-red fg-green fg-blue
+                      x y cols rows z visible fg-red fg-green fg-blue
                       fg-alpha bg-red bg-green bg-blue bg-alpha orientation
                       meter-flags minimum maximum initial-value session
                       -- status )
 PT-METER-REPLACE    ( owner generation object region parent
-                      left top right bottom z visible fg-red fg-green fg-blue
+                      x y cols rows z visible fg-red fg-green fg-blue
                       fg-alpha bg-red bg-green bg-blue bg-alpha orientation
                       meter-flags minimum maximum initial-value session
                       -- status )
 PT-STATUS-DEFINE    ( owner generation object region parent
-                      left top right bottom z visible inactive-red
+                      x y cols rows z visible inactive-red
                       inactive-green inactive-blue inactive-alpha active-red
                       active-green active-blue active-alpha initial-value shape
                       session -- status )
 PT-STATUS-REPLACE   ( owner generation object region parent
-                      left top right bottom z visible inactive-red
+                      x y cols rows z visible inactive-red
                       inactive-green inactive-blue inactive-alpha active-red
                       active-green active-blue active-alpha initial-value shape
                       session -- status )
 PT-PLOT-DEFINE      ( owner generation object region parent
-                      left top right bottom z visible series minimum maximum
+                      x y cols rows z visible series minimum maximum
                       line-red line-green line-blue line-alpha fill-red
                       fill-green fill-blue fill-alpha plot-flags session
                       -- status )
 PT-PLOT-REPLACE     ( owner generation object region parent
-                      left top right bottom z visible series minimum maximum
+                      x y cols rows z visible series minimum maximum
                       line-red line-green line-blue line-alpha fill-red
                       fill-green fill-blue fill-alpha plot-flags session
                       -- status )
 PT-WAVEFORM-DEFINE  ( owner generation object region parent
-                      left top right bottom z visible series minimum maximum
+                      x y cols rows z visible series minimum maximum
                       trace-red trace-green trace-blue trace-alpha zero-red
                       zero-green zero-blue zero-alpha zero-value waveform-flags
                       session -- status )
 PT-WAVEFORM-REPLACE ( owner generation object region parent
-                      left top right bottom z visible series minimum maximum
+                      x y cols rows z visible series minimum maximum
                       trace-red trace-green trace-blue trace-alpha zero-red
                       zero-green zero-blue zero-alpha zero-value waveform-flags
                       session -- status )
@@ -248,10 +250,10 @@ PT-OBJECT-SET-VALUE ( owner generation object value session -- status )
 PT-OBJECT-SET-VISIBILITY ( owner generation object visible session -- status )
 PT-OBJECT-DROP      ( owner generation object session -- status )
 PT-CONTROL-DEFINE   ( owner generation control kind state z region parent order
-                      left top right bottom label-a label-u shortcut-a
+                      x y cols rows label-a label-u shortcut-a
                       shortcut-u content-a content-u session -- status )
 PT-CONTROL-REPLACE  ( owner generation control kind state z region parent order
-                      left top right bottom label-a label-u shortcut-a
+                      x y cols rows label-a label-u shortcut-a
                       shortcut-u content-a content-u session -- status )
 PT-CONTROL-DROP     ( owner generation control session -- status )
 PT-PRESENT-COMMIT   ( disposition session -- status )
@@ -273,6 +275,18 @@ PT-CONTROL-EVENT-MODIFIERS@  ( event -- modifiers )
 PT-LEGACY-POLL      ( session -- byte has-byte )
 PT-CLOSE            ( reason session -- status )
 ```
+
+The region writer carries an independent logical CELL_RECT32 and physical
+surface clip. Logical origins are signed i32, logical extents are positive
+u32, and their exact endpoints may extend beyond i32. When the clipping flag
+is clear the four clip arguments are canonically zero. When it is set, all-zero
+means fully clipped; otherwise the positive clip is within the selected
+surface and its intersection with the logical rectangle. Object and optional
+root-control `x y cols rows` use the same signed-origin/positive-extent cell
+contract, relative to the region logical origin or parent-object origin.
+Descendant controls pass the canonical all-zero absent tuple. PT does not
+normalize, clamp, or crop these values. POLYLINE's inner point coordinates and
+stroke width remain UNORM32 within the resolved object.
 
 `PT-STORAGE-DISJOINT?` accepts only a nonempty, nonwrapping candidate span and
 a valid initialized session. It returns true only when the candidate is

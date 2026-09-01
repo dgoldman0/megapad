@@ -1,5 +1,5 @@
 {
-  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "contract_id": "APT-1-RETAINED-1-2026-09-01",
   "transcript": "resize_layout_sync.hex",
   "initial_state": {
     "session_state": "ACTIVE",
@@ -77,7 +77,7 @@
       },
       "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
     },
-    "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+    "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
     "active": {
       "regions": [
         {
@@ -85,10 +85,14 @@
           "generation": 7,
           "region_id": 1,
           "geometry_generation": 0,
-          "left": 0,
-          "top": 0,
-          "cols": 2,
-          "rows": 1,
+          "logical_x": 0,
+          "logical_y": 0,
+          "logical_cols": 2,
+          "logical_rows": 1,
+          "clip_x": 0,
+          "clip_y": 0,
+          "clip_cols": 2,
+          "clip_rows": 1,
           "z_index": 0,
           "flags": 3
         }
@@ -106,8 +110,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            805306367
+            80,
+            5
           ],
           "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
           "visible": true
@@ -124,8 +128,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            4294967295
+            80,
+            5
           ],
           "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
           "visible": true
@@ -142,8 +146,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            4294967295
+            80,
+            5
           ],
           "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
           "text_utf8_hex": "536f756e644c6162",
@@ -162,8 +166,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            805306367
+            80,
+            5
           ],
           "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
           "format": 1,
@@ -186,9 +190,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            805306368,
-            4294967295,
-            1207959551
+            5,
+            80,
+            4
           ],
           "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
           "value": -1200,
@@ -205,9 +209,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            1207959552,
-            536870911,
-            1610612735
+            9,
+            16,
+            4
           ],
           "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
           "value": 0,
@@ -224,9 +228,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            805306368,
-            4294967295,
-            4294967295
+            5,
+            80,
+            20
           ],
           "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
           "series_id": 1,
@@ -243,9 +247,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            2952790016,
-            4294967295,
-            4294967295
+            17,
+            80,
+            8
           ],
           "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
           "series_id": 2,
@@ -419,7 +423,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -427,10 +431,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -448,8 +456,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -466,8 +474,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -484,8 +492,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -504,8 +512,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -528,9 +536,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -547,9 +555,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -566,9 +574,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -585,9 +593,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -768,7 +776,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -776,10 +784,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -797,8 +809,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -815,8 +827,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -833,8 +845,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -853,8 +865,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -877,9 +889,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -896,9 +908,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -915,9 +927,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -934,9 +946,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -1117,7 +1129,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -1125,10 +1137,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -1146,8 +1162,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -1164,8 +1180,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -1182,8 +1198,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -1202,8 +1218,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -1226,9 +1242,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -1245,9 +1261,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -1264,9 +1280,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -1283,9 +1299,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -1466,7 +1482,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -1474,10 +1490,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -1495,8 +1515,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -1513,8 +1533,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -1531,8 +1551,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -1551,8 +1571,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -1575,9 +1595,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -1594,9 +1614,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -1613,9 +1633,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -1632,9 +1652,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -1839,7 +1859,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -1847,10 +1867,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -1868,8 +1892,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -1886,8 +1910,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -1904,8 +1928,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -1924,8 +1948,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -1948,9 +1972,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -1967,9 +1991,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -1986,9 +2010,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -2005,9 +2029,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -2212,7 +2236,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -2220,10 +2244,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2241,8 +2269,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -2259,8 +2287,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -2277,8 +2305,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -2297,8 +2325,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -2321,9 +2349,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -2340,9 +2368,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -2359,9 +2387,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -2378,9 +2406,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -2583,7 +2611,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -2591,10 +2619,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2612,8 +2644,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -2630,8 +2662,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -2648,8 +2680,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -2668,8 +2700,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -2692,9 +2724,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -2711,9 +2743,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -2730,9 +2762,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -2749,9 +2781,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -2948,7 +2980,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -2956,10 +2988,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2977,8 +3013,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -2995,8 +3031,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -3013,8 +3049,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -3033,8 +3069,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -3057,9 +3093,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -3076,9 +3112,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -3095,9 +3131,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -3114,9 +3150,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -3233,7 +3269,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 10024,
+          "sent_complete_bytes": 10040,
           "released_complete_bytes": 9832,
           "last_advertised_grant": 75368,
           "advertised_released_bytes": 9832,
@@ -3321,7 +3357,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -3329,10 +3365,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -3350,8 +3390,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -3368,8 +3408,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -3386,8 +3426,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -3406,8 +3446,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -3430,9 +3470,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -3449,9 +3489,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -3468,9 +3508,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -3487,9 +3527,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -3588,7 +3628,7 @@
         "cell_mode": 0,
         "retained_mode": 4,
         "phase": "body",
-        "held_complete_bytes": 192
+        "held_complete_bytes": 208
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -3606,11 +3646,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 10080,
-          "released_complete_bytes": 10080,
+          "sent_complete_bytes": 10096,
+          "released_complete_bytes": 10096,
           "last_advertised_grant": 75368,
           "advertised_released_bytes": 9832,
-          "pending_release_bytes": 248
+          "pending_release_bytes": 264
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -3694,7 +3734,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -3702,10 +3742,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -3723,8 +3767,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -3741,8 +3785,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -3759,8 +3803,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -3779,8 +3823,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -3803,9 +3847,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -3822,9 +3866,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -3841,9 +3885,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -3860,9 +3904,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -3923,7 +3967,7 @@
           "sample_slots": 7
         }
       ],
-      "hidden_digest_sha3_256": "d22ab3077b7793d6b4b665498d890f376ec67c1ffc01b47d4c8def269ba0f442",
+      "hidden_digest_sha3_256": "c24a334dcd23f4f5ec89e81969ab79b691f0f638dd9ac6f00b9ef5d5630df93e",
       "hidden": {
         "mode": "layout",
         "scene": {
@@ -3933,10 +3977,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 1,
-              "left": 0,
-              "top": 0,
-              "cols": 3,
-              "rows": 2,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 3,
+              "logical_rows": 2,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 3,
+              "clip_rows": 2,
               "z_index": 0,
               "flags": 3
             }
@@ -3954,8 +4002,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -3972,8 +4020,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -3990,8 +4038,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -4010,8 +4058,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
               "format": 1,
@@ -4034,9 +4082,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                805306368,
-                4294967295,
-                1207959551
+                5,
+                80,
+                4
               ],
               "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
               "value": -1200,
@@ -4053,9 +4101,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                1207959552,
-                536870911,
-                1610612735
+                9,
+                16,
+                4
               ],
               "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
               "value": 0,
@@ -4072,9 +4120,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                805306368,
-                4294967295,
-                4294967295
+                5,
+                80,
+                20
               ],
               "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
               "series_id": 1,
@@ -4091,9 +4139,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                2952790016,
-                4294967295,
-                4294967295
+                17,
+                80,
+                8
               ],
               "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
               "series_id": 2,
@@ -4208,11 +4256,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 10080,
-          "released_complete_bytes": 10080,
+          "sent_complete_bytes": 10096,
+          "released_complete_bytes": 10096,
           "last_advertised_grant": 75368,
           "advertised_released_bytes": 9832,
-          "pending_release_bytes": 248
+          "pending_release_bytes": 264
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -4296,7 +4344,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -4304,10 +4352,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -4325,8 +4377,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -4343,8 +4395,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -4361,8 +4413,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -4381,8 +4433,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -4405,9 +4457,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -4424,9 +4476,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -4443,9 +4495,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -4462,9 +4514,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -4525,7 +4577,7 @@
           "sample_slots": 7
         }
       ],
-      "hidden_digest_sha3_256": "d22ab3077b7793d6b4b665498d890f376ec67c1ffc01b47d4c8def269ba0f442",
+      "hidden_digest_sha3_256": "c24a334dcd23f4f5ec89e81969ab79b691f0f638dd9ac6f00b9ef5d5630df93e",
       "hidden": {
         "mode": "layout",
         "scene": {
@@ -4535,10 +4587,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 1,
-              "left": 0,
-              "top": 0,
-              "cols": 3,
-              "rows": 2,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 3,
+              "logical_rows": 2,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 3,
+              "clip_rows": 2,
               "z_index": 0,
               "flags": 3
             }
@@ -4556,8 +4612,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -4574,8 +4630,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -4592,8 +4648,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -4612,8 +4668,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
               "format": 1,
@@ -4636,9 +4692,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                805306368,
-                4294967295,
-                1207959551
+                5,
+                80,
+                4
               ],
               "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
               "value": -1200,
@@ -4655,9 +4711,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                1207959552,
-                536870911,
-                1610612735
+                9,
+                16,
+                4
               ],
               "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
               "value": 0,
@@ -4674,9 +4730,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                805306368,
-                4294967295,
-                4294967295
+                5,
+                80,
+                20
               ],
               "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
               "series_id": 1,
@@ -4693,9 +4749,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                2952790016,
-                4294967295,
-                4294967295
+                17,
+                80,
+                8
               ],
               "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
               "series_id": 2,
@@ -4808,10 +4864,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 10080,
-          "released_complete_bytes": 10080,
-          "last_advertised_grant": 75616,
-          "advertised_released_bytes": 10080,
+          "sent_complete_bytes": 10096,
+          "released_complete_bytes": 10096,
+          "last_advertised_grant": 75632,
+          "advertised_released_bytes": 10096,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -4896,7 +4952,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -4904,10 +4960,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -4925,8 +4985,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -4943,8 +5003,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -4961,8 +5021,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -4981,8 +5041,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -5005,9 +5065,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -5024,9 +5084,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -5043,9 +5103,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -5062,9 +5122,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -5125,7 +5185,7 @@
           "sample_slots": 7
         }
       ],
-      "hidden_digest_sha3_256": "d22ab3077b7793d6b4b665498d890f376ec67c1ffc01b47d4c8def269ba0f442",
+      "hidden_digest_sha3_256": "c24a334dcd23f4f5ec89e81969ab79b691f0f638dd9ac6f00b9ef5d5630df93e",
       "hidden": {
         "mode": "layout",
         "scene": {
@@ -5135,10 +5195,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 1,
-              "left": 0,
-              "top": 0,
-              "cols": 3,
-              "rows": 2,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 3,
+              "logical_rows": 2,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 3,
+              "clip_rows": 2,
               "z_index": 0,
               "flags": 3
             }
@@ -5156,8 +5220,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -5174,8 +5238,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -5192,8 +5256,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -5212,8 +5276,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
               "format": 1,
@@ -5236,9 +5300,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                805306368,
-                4294967295,
-                1207959551
+                5,
+                80,
+                4
               ],
               "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
               "value": -1200,
@@ -5255,9 +5319,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                1207959552,
-                536870911,
-                1610612735
+                9,
+                16,
+                4
               ],
               "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
               "value": 0,
@@ -5274,9 +5338,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                805306368,
-                4294967295,
-                4294967295
+                5,
+                80,
+                20
               ],
               "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
               "series_id": 1,
@@ -5293,9 +5357,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                2952790016,
-                4294967295,
-                4294967295
+                17,
+                80,
+                8
               ],
               "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
               "series_id": 2,
@@ -5402,10 +5466,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 10184,
-          "released_complete_bytes": 10080,
-          "last_advertised_grant": 75616,
-          "advertised_released_bytes": 10080,
+          "sent_complete_bytes": 10200,
+          "released_complete_bytes": 10096,
+          "last_advertised_grant": 75632,
+          "advertised_released_bytes": 10096,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -5490,7 +5554,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "91a11a9bad73a2ef301ae48bb3c24bf3de1e62414331e921584b5d84f91b882e",
+      "active_digest_sha3_256": "51f4dba4458d1585505adef316999037eb74651800b85768d115fb6a57354693",
       "active": {
         "regions": [
           {
@@ -5498,10 +5562,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -5519,8 +5587,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -5537,8 +5605,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -5555,8 +5623,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -5575,8 +5643,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -5599,9 +5667,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -5618,9 +5686,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -5637,9 +5705,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -5656,9 +5724,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -5719,7 +5787,7 @@
           "sample_slots": 7
         }
       ],
-      "hidden_digest_sha3_256": "d22ab3077b7793d6b4b665498d890f376ec67c1ffc01b47d4c8def269ba0f442",
+      "hidden_digest_sha3_256": "c24a334dcd23f4f5ec89e81969ab79b691f0f638dd9ac6f00b9ef5d5630df93e",
       "hidden": {
         "mode": "layout",
         "scene": {
@@ -5729,10 +5797,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 1,
-              "left": 0,
-              "top": 0,
-              "cols": 3,
-              "rows": 2,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 3,
+              "logical_rows": 2,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 3,
+              "clip_rows": 2,
               "z_index": 0,
               "flags": 3
             }
@@ -5750,8 +5822,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -5768,8 +5840,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -5786,8 +5858,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -5806,8 +5878,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
               "format": 1,
@@ -5830,9 +5902,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                805306368,
-                4294967295,
-                1207959551
+                5,
+                80,
+                4
               ],
               "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
               "value": -1200,
@@ -5849,9 +5921,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                1207959552,
-                536870911,
-                1610612735
+                9,
+                16,
+                4
               ],
               "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
               "value": 0,
@@ -5868,9 +5940,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                805306368,
-                4294967295,
-                4294967295
+                5,
+                80,
+                20
               ],
               "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
               "series_id": 1,
@@ -5887,9 +5959,9 @@
               "parent_id": 0,
               "bounds": [
                 0,
-                2952790016,
-                4294967295,
-                4294967295
+                17,
+                80,
+                8
               ],
               "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
               "series_id": 2,
@@ -6004,10 +6076,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 10240,
-          "released_complete_bytes": 10240,
-          "last_advertised_grant": 75616,
-          "advertised_released_bytes": 10080,
+          "sent_complete_bytes": 10256,
+          "released_complete_bytes": 10256,
+          "last_advertised_grant": 75632,
+          "advertised_released_bytes": 10096,
           "pending_release_bytes": 160
         },
         "terminal_to_client": {
@@ -6092,7 +6164,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "33c1fe1a784a7918503b31ff32c53fd9e20354d27c70508bab4352d928ab43b1",
+      "active_digest_sha3_256": "91c3e318dc60ec418525c0a2115bad907eaa1835f2af2f8c7714777483cd9838",
       "active": {
         "regions": [
           {
@@ -6100,10 +6172,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 1,
-            "left": 0,
-            "top": 0,
-            "cols": 3,
-            "rows": 2,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 3,
+            "logical_rows": 2,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 3,
+            "clip_rows": 2,
             "z_index": 0,
             "flags": 3
           }
@@ -6121,8 +6197,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -6139,8 +6215,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -6157,8 +6233,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -6177,8 +6253,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -6201,9 +6277,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -6220,9 +6296,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -6239,9 +6315,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -6258,9 +6334,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -6377,10 +6453,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 10240,
-          "released_complete_bytes": 10240,
-          "last_advertised_grant": 75616,
-          "advertised_released_bytes": 10080,
+          "sent_complete_bytes": 10256,
+          "released_complete_bytes": 10256,
+          "last_advertised_grant": 75632,
+          "advertised_released_bytes": 10096,
           "pending_release_bytes": 160
         },
         "terminal_to_client": {
@@ -6465,7 +6541,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "33c1fe1a784a7918503b31ff32c53fd9e20354d27c70508bab4352d928ab43b1",
+      "active_digest_sha3_256": "91c3e318dc60ec418525c0a2115bad907eaa1835f2af2f8c7714777483cd9838",
       "active": {
         "regions": [
           {
@@ -6473,10 +6549,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 1,
-            "left": 0,
-            "top": 0,
-            "cols": 3,
-            "rows": 2,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 3,
+            "logical_rows": 2,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 3,
+            "clip_rows": 2,
             "z_index": 0,
             "flags": 3
           }
@@ -6494,8 +6574,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -6512,8 +6592,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -6530,8 +6610,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -6550,8 +6630,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -6574,9 +6654,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -6593,9 +6673,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -6612,9 +6692,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -6631,9 +6711,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -6748,10 +6828,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 10240,
-          "released_complete_bytes": 10240,
-          "last_advertised_grant": 75776,
-          "advertised_released_bytes": 10240,
+          "sent_complete_bytes": 10256,
+          "released_complete_bytes": 10256,
+          "last_advertised_grant": 75792,
+          "advertised_released_bytes": 10256,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6836,7 +6916,7 @@
         },
         "digest_sha3_256": "f28d6ba83cebc7a230aa463487a214dd46d82fbb8f4e7e295e9832a1a803cf31"
       },
-      "active_digest_sha3_256": "33c1fe1a784a7918503b31ff32c53fd9e20354d27c70508bab4352d928ab43b1",
+      "active_digest_sha3_256": "91c3e318dc60ec418525c0a2115bad907eaa1835f2af2f8c7714777483cd9838",
       "active": {
         "regions": [
           {
@@ -6844,10 +6924,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 1,
-            "left": 0,
-            "top": 0,
-            "cols": 3,
-            "rows": 2,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 3,
+            "logical_rows": 2,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 3,
+            "clip_rows": 2,
             "z_index": 0,
             "flags": 3
           }
@@ -6865,8 +6949,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -6883,8 +6967,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -6901,8 +6985,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -6921,8 +7005,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -6945,9 +7029,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -6964,9 +7048,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -6983,9 +7067,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -7002,9 +7086,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,

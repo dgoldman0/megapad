@@ -164,7 +164,7 @@ def test_menu_bar_definition_has_the_exact_eighty_byte_prefix() -> None:
 
     payload = encode_control_definition(definition)
     expected = struct.pack(
-        "<QQQHHiQQIIIIIIII",
+        "<QQQHHiQQIiiIIIII",
         definition.owner_id,
         definition.owner_generation,
         definition.control_id,
@@ -305,7 +305,7 @@ def test_control_decoder_rejects_reserved_lengths_bounds_and_text() -> None:
             )
         )
     )
-    bar[60:64] = (1).to_bytes(4, "little")
+    bar[60:64] = bytes(4)
     with pytest.raises(RetainedWireError) as bounds:
         decode_control_definition(bar)
     assert bounds.value.code is RetainedWireErrorCode.CONSISTENCY

@@ -1,5 +1,5 @@
 {
-  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "contract_id": "APT-1-RETAINED-1-2026-09-01",
   "transcript": "resource_lifecycle.hex",
   "initial_state": {
     "session_state": "ACTIVE",
@@ -71,7 +71,7 @@
       },
       "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
     },
-    "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+    "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
     "active": {
       "regions": [
         {
@@ -79,10 +79,14 @@
           "generation": 7,
           "region_id": 1,
           "geometry_generation": 0,
-          "left": 0,
-          "top": 0,
-          "cols": 1,
-          "rows": 1,
+          "logical_x": 0,
+          "logical_y": 0,
+          "logical_cols": 1,
+          "logical_rows": 1,
+          "clip_x": 0,
+          "clip_y": 0,
+          "clip_cols": 1,
+          "clip_rows": 1,
           "z_index": 0,
           "flags": 3
         },
@@ -91,10 +95,14 @@
           "generation": 1,
           "region_id": 1,
           "geometry_generation": 0,
-          "left": 0,
-          "top": 0,
-          "cols": 1,
-          "rows": 1,
+          "logical_x": 0,
+          "logical_y": 0,
+          "logical_cols": 1,
+          "logical_rows": 1,
+          "clip_x": 0,
+          "clip_y": 0,
+          "clip_cols": 1,
+          "clip_rows": 1,
           "z_index": 0,
           "flags": 3
         }
@@ -112,8 +120,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            4294967295
+            1,
+            1
           ],
           "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
           "visible": true,
@@ -130,9 +138,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            805306368,
-            4294967295,
-            4294967295
+            5,
+            80,
+            20
           ],
           "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
           "series_id": 1,
@@ -317,7 +325,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -325,10 +333,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -337,10 +349,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -358,8 +374,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -376,9 +392,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -568,7 +584,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -576,10 +592,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -588,10 +608,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -609,8 +633,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -627,9 +651,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -823,7 +847,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -831,10 +855,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -843,10 +871,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -864,8 +896,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -882,9 +914,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -1068,7 +1100,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -1076,10 +1108,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -1088,10 +1124,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -1109,8 +1149,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -1127,9 +1167,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -1330,7 +1370,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -1338,10 +1378,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -1350,10 +1394,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -1371,8 +1419,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -1389,9 +1437,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -1596,7 +1644,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -1604,10 +1652,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -1616,10 +1668,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -1637,8 +1693,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -1655,9 +1711,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -1852,7 +1908,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -1860,10 +1916,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -1872,10 +1932,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -1893,8 +1957,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -1911,9 +1975,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -2114,7 +2178,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -2122,10 +2186,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -2134,10 +2202,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2155,8 +2227,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -2173,9 +2245,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -2380,7 +2452,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -2388,10 +2460,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -2400,10 +2476,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2421,8 +2501,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -2439,9 +2519,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -2636,7 +2716,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -2644,10 +2724,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -2656,10 +2740,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2677,8 +2765,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -2695,9 +2783,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -2898,7 +2986,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -2906,10 +2994,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -2918,10 +3010,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2939,8 +3035,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -2957,9 +3053,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -3164,7 +3260,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -3172,10 +3268,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -3184,10 +3284,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -3205,8 +3309,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -3223,9 +3327,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -3415,7 +3519,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -3423,10 +3527,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -3435,10 +3543,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -3456,8 +3568,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -3474,9 +3586,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -3670,7 +3782,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -3678,10 +3790,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -3690,10 +3806,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -3711,8 +3831,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -3729,9 +3849,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -3923,7 +4043,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "7669fd113d4970c20fe3f570aa42895c68378111bd6c5c5f5d4003c7822d345b",
+      "active_digest_sha3_256": "1c6f136aa4979f4bc2e370dd6de1d31e92f53ab3d39e0c878f5185a027ba43a0",
       "active": {
         "regions": [
           {
@@ -3931,10 +4051,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -3943,10 +4067,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -3964,8 +4092,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              1,
+              1
             ],
             "body_sha3_256": "1d0f6461f308a06f7ecf9bdf591bd5593373fc8d422b2b7a31aef8e4b01a2f13",
             "visible": true,
@@ -3982,9 +4110,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -4176,7 +4304,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "361d9c9b5ecbfd6c0837b448d8f271b24cb6fa65a7c37f08315b00e86d243280",
+      "active_digest_sha3_256": "6ee2d24dcbd049c82314921ac00360cbd1889a1247700893123f7fed12b63110",
       "active": {
         "regions": [
           {
@@ -4184,10 +4312,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -4196,10 +4328,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -4216,9 +4352,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -4410,7 +4546,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "361d9c9b5ecbfd6c0837b448d8f271b24cb6fa65a7c37f08315b00e86d243280",
+      "active_digest_sha3_256": "6ee2d24dcbd049c82314921ac00360cbd1889a1247700893123f7fed12b63110",
       "active": {
         "regions": [
           {
@@ -4418,10 +4554,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -4430,10 +4570,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -4450,9 +4594,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -4642,7 +4786,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "361d9c9b5ecbfd6c0837b448d8f271b24cb6fa65a7c37f08315b00e86d243280",
+      "active_digest_sha3_256": "6ee2d24dcbd049c82314921ac00360cbd1889a1247700893123f7fed12b63110",
       "active": {
         "regions": [
           {
@@ -4650,10 +4794,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -4662,10 +4810,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -4682,9 +4834,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -4868,7 +5020,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "361d9c9b5ecbfd6c0837b448d8f271b24cb6fa65a7c37f08315b00e86d243280",
+      "active_digest_sha3_256": "6ee2d24dcbd049c82314921ac00360cbd1889a1247700893123f7fed12b63110",
       "active": {
         "regions": [
           {
@@ -4876,10 +5028,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -4888,10 +5044,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -4908,9 +5068,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -5078,7 +5238,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "361d9c9b5ecbfd6c0837b448d8f271b24cb6fa65a7c37f08315b00e86d243280",
+      "active_digest_sha3_256": "6ee2d24dcbd049c82314921ac00360cbd1889a1247700893123f7fed12b63110",
       "active": {
         "regions": [
           {
@@ -5086,10 +5246,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -5098,10 +5262,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -5118,9 +5286,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -5292,7 +5460,7 @@
         },
         "digest_sha3_256": "c37718ae7e6b60979bb79f4ee6da0fe87479f6f5588015e816d172444d97367c"
       },
-      "active_digest_sha3_256": "361d9c9b5ecbfd6c0837b448d8f271b24cb6fa65a7c37f08315b00e86d243280",
+      "active_digest_sha3_256": "6ee2d24dcbd049c82314921ac00360cbd1889a1247700893123f7fed12b63110",
       "active": {
         "regions": [
           {
@@ -5300,10 +5468,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           },
@@ -5312,10 +5484,14 @@
             "generation": 1,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 1,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 1,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 1,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -5332,9 +5508,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,

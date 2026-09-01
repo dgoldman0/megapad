@@ -1,5 +1,5 @@
 {
-  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "contract_id": "APT-1-RETAINED-1-2026-09-01",
   "transcript": "reset_crossed_present_commit.hex",
   "initial_state": {
     "session_state": "ACTIVE",
@@ -77,7 +77,7 @@
       },
       "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
     },
-    "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+    "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
     "active": {
       "regions": [
         {
@@ -85,10 +85,14 @@
           "generation": 7,
           "region_id": 1,
           "geometry_generation": 0,
-          "left": 0,
-          "top": 0,
-          "cols": 2,
-          "rows": 1,
+          "logical_x": 0,
+          "logical_y": 0,
+          "logical_cols": 2,
+          "logical_rows": 1,
+          "clip_x": 0,
+          "clip_y": 0,
+          "clip_cols": 2,
+          "clip_rows": 1,
           "z_index": 0,
           "flags": 3
         }
@@ -106,8 +110,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            805306367
+            80,
+            5
           ],
           "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
           "format": 1,
@@ -130,9 +134,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            805306368,
-            4294967295,
-            4294967295
+            5,
+            80,
+            20
           ],
           "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
           "series_id": 1,
@@ -284,7 +288,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
       "active": {
         "regions": [
           {
@@ -292,10 +296,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -313,8 +321,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
             "format": 1,
@@ -337,9 +345,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -498,7 +506,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
       "active": {
         "regions": [
           {
@@ -506,10 +514,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -527,8 +539,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
             "format": 1,
@@ -551,9 +563,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -712,7 +724,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
       "active": {
         "regions": [
           {
@@ -720,10 +732,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -741,8 +757,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
             "format": 1,
@@ -765,9 +781,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -929,7 +945,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
       "active": {
         "regions": [
           {
@@ -937,10 +953,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -958,8 +978,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
             "format": 1,
@@ -982,9 +1002,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -1146,7 +1166,7 @@
         },
         "digest_sha3_256": "7ac2de2f2e31c7405e90c79fc7f6e1f58718d796a736e6c53a622bc6e08de26c"
       },
-      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
       "active": {
         "regions": [
           {
@@ -1154,10 +1174,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -1175,8 +1199,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
             "format": 1,
@@ -1199,9 +1223,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,

@@ -1,5 +1,5 @@
 {
-  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "contract_id": "APT-1-RETAINED-1-2026-09-01",
   "transcript": "legacy_cell_and_replace_continue.hex",
   "initial_state": {
     "session_state": "ACTIVE",
@@ -1256,7 +1256,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 6996,
+          "sent_complete_bytes": 7012,
           "released_complete_bytes": 6804,
           "last_advertised_grant": 72340,
           "advertised_released_bytes": 6804,
@@ -1359,7 +1359,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 192
+        "held_complete_bytes": 208
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -1377,7 +1377,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7076,
+          "sent_complete_bytes": 7092,
           "released_complete_bytes": 6804,
           "last_advertised_grant": 72340,
           "advertised_released_bytes": 6804,
@@ -1480,7 +1480,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 272
+        "held_complete_bytes": 288
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -1498,11 +1498,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7132,
-          "released_complete_bytes": 7132,
+          "sent_complete_bytes": 7148,
+          "released_complete_bytes": 7148,
           "last_advertised_grant": 72340,
           "advertised_released_bytes": 6804,
-          "pending_release_bytes": 328
+          "pending_release_bytes": 344
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -1563,7 +1563,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "f2906ac4668872ef3242cdf9a6bc00d388cce3f121814315e5f2bf5756d6e952",
+      "hidden_digest_sha3_256": "23ccefc8c9f1d2e8a2d30f23f2005b4be522cc1ab2ce2f194aa253f6f12f0669",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -1573,10 +1573,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 2,
-              "rows": 1,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 2,
+              "logical_rows": 1,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 2,
+              "clip_rows": 1,
               "z_index": 0,
               "flags": 3
             }
@@ -1659,11 +1663,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7132,
-          "released_complete_bytes": 7132,
+          "sent_complete_bytes": 7148,
+          "released_complete_bytes": 7148,
           "last_advertised_grant": 72340,
           "advertised_released_bytes": 6804,
-          "pending_release_bytes": 328
+          "pending_release_bytes": 344
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -1724,7 +1728,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "f2906ac4668872ef3242cdf9a6bc00d388cce3f121814315e5f2bf5756d6e952",
+      "hidden_digest_sha3_256": "23ccefc8c9f1d2e8a2d30f23f2005b4be522cc1ab2ce2f194aa253f6f12f0669",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -1734,10 +1738,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 2,
-              "rows": 1,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 2,
+              "logical_rows": 1,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 2,
+              "clip_rows": 1,
               "z_index": 0,
               "flags": 3
             }
@@ -1818,10 +1826,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7132,
-          "released_complete_bytes": 7132,
-          "last_advertised_grant": 72668,
-          "advertised_released_bytes": 7132,
+          "sent_complete_bytes": 7148,
+          "released_complete_bytes": 7148,
+          "last_advertised_grant": 72684,
+          "advertised_released_bytes": 7148,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -1883,7 +1891,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "f2906ac4668872ef3242cdf9a6bc00d388cce3f121814315e5f2bf5756d6e952",
+      "hidden_digest_sha3_256": "23ccefc8c9f1d2e8a2d30f23f2005b4be522cc1ab2ce2f194aa253f6f12f0669",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -1893,10 +1901,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 2,
-              "rows": 1,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 2,
+              "logical_rows": 1,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 2,
+              "clip_rows": 1,
               "z_index": 0,
               "flags": 3
             }
@@ -1971,10 +1983,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7236,
-          "released_complete_bytes": 7132,
-          "last_advertised_grant": 72668,
-          "advertised_released_bytes": 7132,
+          "sent_complete_bytes": 7252,
+          "released_complete_bytes": 7148,
+          "last_advertised_grant": 72684,
+          "advertised_released_bytes": 7148,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -2036,7 +2048,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "f2906ac4668872ef3242cdf9a6bc00d388cce3f121814315e5f2bf5756d6e952",
+      "hidden_digest_sha3_256": "23ccefc8c9f1d2e8a2d30f23f2005b4be522cc1ab2ce2f194aa253f6f12f0669",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -2046,10 +2058,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 2,
-              "rows": 1,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 2,
+              "logical_rows": 1,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 2,
+              "clip_rows": 1,
               "z_index": 0,
               "flags": 3
             }
@@ -2132,10 +2148,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7332,
-          "released_complete_bytes": 7132,
-          "last_advertised_grant": 72668,
-          "advertised_released_bytes": 7132,
+          "sent_complete_bytes": 7348,
+          "released_complete_bytes": 7148,
+          "last_advertised_grant": 72684,
+          "advertised_released_bytes": 7148,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -2197,7 +2213,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "f2906ac4668872ef3242cdf9a6bc00d388cce3f121814315e5f2bf5756d6e952",
+      "hidden_digest_sha3_256": "23ccefc8c9f1d2e8a2d30f23f2005b4be522cc1ab2ce2f194aa253f6f12f0669",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -2207,10 +2223,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 2,
-              "rows": 1,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 2,
+              "logical_rows": 1,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 2,
+              "clip_rows": 1,
               "z_index": 0,
               "flags": 3
             }
@@ -2293,10 +2313,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7478,
-          "released_complete_bytes": 7132,
-          "last_advertised_grant": 72668,
-          "advertised_released_bytes": 7132,
+          "sent_complete_bytes": 7494,
+          "released_complete_bytes": 7148,
+          "last_advertised_grant": 72684,
+          "advertised_released_bytes": 7148,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -2358,7 +2378,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "f2906ac4668872ef3242cdf9a6bc00d388cce3f121814315e5f2bf5756d6e952",
+      "hidden_digest_sha3_256": "23ccefc8c9f1d2e8a2d30f23f2005b4be522cc1ab2ce2f194aa253f6f12f0669",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -2368,10 +2388,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 2,
-              "rows": 1,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 2,
+              "logical_rows": 1,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 2,
+              "clip_rows": 1,
               "z_index": 0,
               "flags": 3
             }
@@ -2454,10 +2478,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7622,
-          "released_complete_bytes": 7132,
-          "last_advertised_grant": 72668,
-          "advertised_released_bytes": 7132,
+          "sent_complete_bytes": 7638,
+          "released_complete_bytes": 7148,
+          "last_advertised_grant": 72684,
+          "advertised_released_bytes": 7148,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -2519,7 +2543,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "f2906ac4668872ef3242cdf9a6bc00d388cce3f121814315e5f2bf5756d6e952",
+      "hidden_digest_sha3_256": "23ccefc8c9f1d2e8a2d30f23f2005b4be522cc1ab2ce2f194aa253f6f12f0669",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -2529,10 +2553,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 2,
-              "rows": 1,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 2,
+              "logical_rows": 1,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 2,
+              "clip_rows": 1,
               "z_index": 0,
               "flags": 3
             }
@@ -2615,10 +2643,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7678,
-          "released_complete_bytes": 7678,
-          "last_advertised_grant": 72668,
-          "advertised_released_bytes": 7132,
+          "sent_complete_bytes": 7694,
+          "released_complete_bytes": 7694,
+          "last_advertised_grant": 72684,
+          "advertised_released_bytes": 7148,
           "pending_release_bytes": 546
         },
         "terminal_to_client": {
@@ -2673,7 +2701,7 @@
         },
         "digest_sha3_256": "c587be60204244200d689afee9e66bda09f7dd86624f28716cd4a146c654ad35"
       },
-      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
       "active": {
         "regions": [
           {
@@ -2681,10 +2709,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2702,8 +2734,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
             "format": 1,
@@ -2726,9 +2758,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -2823,10 +2855,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7678,
-          "released_complete_bytes": 7678,
-          "last_advertised_grant": 72668,
-          "advertised_released_bytes": 7132,
+          "sent_complete_bytes": 7694,
+          "released_complete_bytes": 7694,
+          "last_advertised_grant": 72684,
+          "advertised_released_bytes": 7148,
           "pending_release_bytes": 546
         },
         "terminal_to_client": {
@@ -2881,7 +2913,7 @@
         },
         "digest_sha3_256": "c587be60204244200d689afee9e66bda09f7dd86624f28716cd4a146c654ad35"
       },
-      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
       "active": {
         "regions": [
           {
@@ -2889,10 +2921,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -2910,8 +2946,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
             "format": 1,
@@ -2934,9 +2970,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -3029,10 +3065,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 7678,
-          "released_complete_bytes": 7678,
-          "last_advertised_grant": 73214,
-          "advertised_released_bytes": 7678,
+          "sent_complete_bytes": 7694,
+          "released_complete_bytes": 7694,
+          "last_advertised_grant": 73230,
+          "advertised_released_bytes": 7694,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -3087,7 +3123,7 @@
         },
         "digest_sha3_256": "c587be60204244200d689afee9e66bda09f7dd86624f28716cd4a146c654ad35"
       },
-      "active_digest_sha3_256": "d33c01a081eda9833e58e3231d64e69997b61cccaa258fcedfa0395e14cfd34f",
+      "active_digest_sha3_256": "5e9b9eff46be7776a698617317554af11dd23fbf4b561682d1a9bff2d0ad0ab8",
       "active": {
         "regions": [
           {
@@ -3095,10 +3131,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 2,
-            "rows": 1,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 2,
+            "logical_rows": 1,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 2,
+            "clip_rows": 1,
             "z_index": 0,
             "flags": 3
           }
@@ -3116,8 +3156,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "7c2dd7cc4be24f77922089da133b7d169e26e3ca94e7df768c3f445f15afe02d",
             "format": 1,
@@ -3140,9 +3180,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,

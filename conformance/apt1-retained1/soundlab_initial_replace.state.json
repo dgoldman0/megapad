@@ -1,5 +1,5 @@
 {
-  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "contract_id": "APT-1-RETAINED-1-2026-09-01",
   "transcript": "soundlab_initial_replace.hex",
   "initial_state": {
     "session_state": "ACTIVE",
@@ -589,7 +589,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 17820,
+          "sent_complete_bytes": 17836,
           "released_complete_bytes": 17628,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
@@ -692,7 +692,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 192
+        "held_complete_bytes": 208
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -710,7 +710,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 17900,
+          "sent_complete_bytes": 17916,
           "released_complete_bytes": 17628,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
@@ -813,7 +813,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 272
+        "held_complete_bytes": 288
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -831,7 +831,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18004,
+          "sent_complete_bytes": 18020,
           "released_complete_bytes": 17628,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
@@ -934,7 +934,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 376
+        "held_complete_bytes": 392
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -952,7 +952,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18084,
+          "sent_complete_bytes": 18100,
           "released_complete_bytes": 17628,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
@@ -1055,7 +1055,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 456
+        "held_complete_bytes": 472
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -1073,7 +1073,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18196,
+          "sent_complete_bytes": 18212,
           "released_complete_bytes": 17628,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
@@ -1176,7 +1176,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 568
+        "held_complete_bytes": 584
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -1194,7 +1194,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18300,
+          "sent_complete_bytes": 18316,
           "released_complete_bytes": 17628,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
@@ -1297,7 +1297,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 672
+        "held_complete_bytes": 688
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -1315,7 +1315,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18444,
+          "sent_complete_bytes": 18460,
           "released_complete_bytes": 17628,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
@@ -1418,7 +1418,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 816
+        "held_complete_bytes": 832
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -1436,7 +1436,7 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18572,
+          "sent_complete_bytes": 18588,
           "released_complete_bytes": 17628,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
@@ -1539,7 +1539,7 @@
         "cell_mode": 0,
         "retained_mode": 2,
         "phase": "body",
-        "held_complete_bytes": 944
+        "held_complete_bytes": 960
       },
       "open_lifecycle_request": null,
       "pending_reset": null,
@@ -1557,11 +1557,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18628,
-          "released_complete_bytes": 18628,
+          "sent_complete_bytes": 18644,
+          "released_complete_bytes": 18644,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
-          "pending_release_bytes": 1000
+          "pending_release_bytes": 1016
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -1622,7 +1622,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -1632,10 +1632,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -1653,8 +1657,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -1671,8 +1675,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -1689,8 +1693,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -1806,11 +1810,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18628,
-          "released_complete_bytes": 18628,
+          "sent_complete_bytes": 18644,
+          "released_complete_bytes": 18644,
           "last_advertised_grant": 83164,
           "advertised_released_bytes": 17628,
-          "pending_release_bytes": 1000
+          "pending_release_bytes": 1016
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -1871,7 +1875,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -1881,10 +1885,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -1902,8 +1910,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -1920,8 +1928,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -1938,8 +1946,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -2053,10 +2061,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18628,
-          "released_complete_bytes": 18628,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 18644,
+          "released_complete_bytes": 18644,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -2118,7 +2126,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -2128,10 +2136,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -2149,8 +2161,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -2167,8 +2179,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -2185,8 +2197,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -2294,10 +2306,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18732,
-          "released_complete_bytes": 18628,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 18748,
+          "released_complete_bytes": 18644,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -2359,7 +2371,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -2369,10 +2381,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -2390,8 +2406,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -2408,8 +2424,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -2426,8 +2442,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -2543,10 +2559,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 18878,
-          "released_complete_bytes": 18628,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 18894,
+          "released_complete_bytes": 18644,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -2608,7 +2624,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -2618,10 +2634,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -2639,8 +2659,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -2657,8 +2677,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -2675,8 +2695,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -2792,10 +2812,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19030,
-          "released_complete_bytes": 18628,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 19046,
+          "released_complete_bytes": 18644,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -2857,7 +2877,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -2867,10 +2887,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -2888,8 +2912,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -2906,8 +2930,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -2924,8 +2948,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -3041,10 +3065,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19166,
-          "released_complete_bytes": 18628,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 19182,
+          "released_complete_bytes": 18644,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -3106,7 +3130,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -3116,10 +3140,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -3137,8 +3165,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -3155,8 +3183,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -3173,8 +3201,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -3290,10 +3318,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19310,
-          "released_complete_bytes": 18628,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 19326,
+          "released_complete_bytes": 18644,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -3355,7 +3383,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -3365,10 +3393,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -3386,8 +3418,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -3404,8 +3436,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -3422,8 +3454,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -3539,10 +3571,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19462,
-          "released_complete_bytes": 18628,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 19478,
+          "released_complete_bytes": 18644,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -3604,7 +3636,7 @@
         "series": []
       },
       "active_usage": [],
-      "hidden_digest_sha3_256": "de0132254d4cafb2075efc33736327dd81e1e95c623694144332310d74129dcd",
+      "hidden_digest_sha3_256": "6e5e6f8a74b7d1b1b74120bb9f76c2533854280a80fca7dddef16e6f400d33f2",
       "hidden": {
         "mode": "replacement",
         "scene": {
@@ -3614,10 +3646,14 @@
               "generation": 7,
               "region_id": 1,
               "geometry_generation": 0,
-              "left": 0,
-              "top": 0,
-              "cols": 80,
-              "rows": 25,
+              "logical_x": 0,
+              "logical_y": 0,
+              "logical_cols": 80,
+              "logical_rows": 25,
+              "clip_x": 0,
+              "clip_y": 0,
+              "clip_cols": 80,
+              "clip_rows": 25,
               "z_index": 0,
               "flags": 3
             }
@@ -3635,8 +3671,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                805306367
+                80,
+                5
               ],
               "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
               "visible": true
@@ -3653,8 +3689,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
               "visible": true
@@ -3671,8 +3707,8 @@
               "bounds": [
                 0,
                 0,
-                4294967295,
-                4294967295
+                80,
+                5
               ],
               "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
               "text_utf8_hex": "536f756e644c6162",
@@ -3788,10 +3824,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19518,
-          "released_complete_bytes": 19518,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 19534,
+          "released_complete_bytes": 19534,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 890
         },
         "terminal_to_client": {
@@ -3846,7 +3882,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -3854,10 +3890,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -3875,8 +3915,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -3893,8 +3933,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -3911,8 +3951,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -3931,8 +3971,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -3955,9 +3995,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -3974,9 +4014,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -3993,9 +4033,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -4012,9 +4052,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -4131,10 +4171,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19518,
-          "released_complete_bytes": 19518,
-          "last_advertised_grant": 84164,
-          "advertised_released_bytes": 18628,
+          "sent_complete_bytes": 19534,
+          "released_complete_bytes": 19534,
+          "last_advertised_grant": 84180,
+          "advertised_released_bytes": 18644,
           "pending_release_bytes": 890
         },
         "terminal_to_client": {
@@ -4189,7 +4229,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -4197,10 +4237,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -4218,8 +4262,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -4236,8 +4280,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -4254,8 +4298,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -4274,8 +4318,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -4298,9 +4342,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -4317,9 +4361,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -4336,9 +4380,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -4355,9 +4399,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -4472,10 +4516,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19518,
-          "released_complete_bytes": 19518,
-          "last_advertised_grant": 85054,
-          "advertised_released_bytes": 19518,
+          "sent_complete_bytes": 19534,
+          "released_complete_bytes": 19534,
+          "last_advertised_grant": 85070,
+          "advertised_released_bytes": 19534,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -4530,7 +4574,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -4538,10 +4582,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -4559,8 +4607,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -4577,8 +4625,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -4595,8 +4643,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -4615,8 +4663,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -4639,9 +4687,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -4658,9 +4706,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -4677,9 +4725,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -4696,9 +4744,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -4807,10 +4855,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19590,
-          "released_complete_bytes": 19518,
-          "last_advertised_grant": 85054,
-          "advertised_released_bytes": 19518,
+          "sent_complete_bytes": 19606,
+          "released_complete_bytes": 19534,
+          "last_advertised_grant": 85070,
+          "advertised_released_bytes": 19534,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -4865,7 +4913,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -4873,10 +4921,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -4894,8 +4946,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -4912,8 +4964,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -4930,8 +4982,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -4950,8 +5002,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -4974,9 +5026,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -4993,9 +5045,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -5012,9 +5064,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -5031,9 +5083,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -5150,10 +5202,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19650,
-          "released_complete_bytes": 19518,
-          "last_advertised_grant": 85054,
-          "advertised_released_bytes": 19518,
+          "sent_complete_bytes": 19666,
+          "released_complete_bytes": 19534,
+          "last_advertised_grant": 85070,
+          "advertised_released_bytes": 19534,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -5208,7 +5260,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -5216,10 +5268,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -5237,8 +5293,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -5255,8 +5311,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -5273,8 +5329,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -5293,8 +5349,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -5317,9 +5373,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -5336,9 +5392,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -5355,9 +5411,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -5374,9 +5430,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -5493,10 +5549,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19706,
-          "released_complete_bytes": 19518,
-          "last_advertised_grant": 85054,
-          "advertised_released_bytes": 19518,
+          "sent_complete_bytes": 19722,
+          "released_complete_bytes": 19534,
+          "last_advertised_grant": 85070,
+          "advertised_released_bytes": 19534,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -5551,7 +5607,7 @@
         },
         "digest_sha3_256": "07dab8c10f26fc033e2b6a653cfe9abaacb01e85be54640961f4620e8d6b134d"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -5559,10 +5615,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -5580,8 +5640,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -5598,8 +5658,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -5616,8 +5676,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -5636,8 +5696,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -5660,9 +5720,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -5679,9 +5739,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -5698,9 +5758,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -5717,9 +5777,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -5836,10 +5896,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19754,
-          "released_complete_bytes": 19754,
-          "last_advertised_grant": 85054,
-          "advertised_released_bytes": 19518,
+          "sent_complete_bytes": 19770,
+          "released_complete_bytes": 19770,
+          "last_advertised_grant": 85070,
+          "advertised_released_bytes": 19534,
           "pending_release_bytes": 236
         },
         "terminal_to_client": {
@@ -5894,7 +5954,7 @@
         },
         "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -5902,10 +5962,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -5923,8 +5987,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -5941,8 +6005,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -5959,8 +6023,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -5979,8 +6043,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -6003,9 +6067,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -6022,9 +6086,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -6041,9 +6105,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -6060,9 +6124,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -6179,10 +6243,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19754,
-          "released_complete_bytes": 19754,
-          "last_advertised_grant": 85054,
-          "advertised_released_bytes": 19518,
+          "sent_complete_bytes": 19770,
+          "released_complete_bytes": 19770,
+          "last_advertised_grant": 85070,
+          "advertised_released_bytes": 19534,
           "pending_release_bytes": 236
         },
         "terminal_to_client": {
@@ -6237,7 +6301,7 @@
         },
         "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -6245,10 +6309,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -6266,8 +6334,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -6284,8 +6352,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -6302,8 +6370,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -6322,8 +6390,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -6346,9 +6414,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -6365,9 +6433,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -6384,9 +6452,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -6403,9 +6471,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,
@@ -6520,10 +6588,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 19754,
-          "released_complete_bytes": 19754,
-          "last_advertised_grant": 85290,
-          "advertised_released_bytes": 19754,
+          "sent_complete_bytes": 19770,
+          "released_complete_bytes": 19770,
+          "last_advertised_grant": 85306,
+          "advertised_released_bytes": 19770,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6578,7 +6646,7 @@
         },
         "digest_sha3_256": "7d2527079ead61aaa992a981c1c4ac0abc88e9c58cd7d09f62fa60e3e50919dc"
       },
-      "active_digest_sha3_256": "9a31d4530c1e9be2fbfee3fdf2d44c175392036360399c8919708868e9784273",
+      "active_digest_sha3_256": "a334828704b931b78ab73de488a130ede36b8155bf687900fa35f1e5ff3ab0fb",
       "active": {
         "regions": [
           {
@@ -6586,10 +6654,14 @@
             "generation": 7,
             "region_id": 1,
             "geometry_generation": 0,
-            "left": 0,
-            "top": 0,
-            "cols": 80,
-            "rows": 25,
+            "logical_x": 0,
+            "logical_y": 0,
+            "logical_cols": 80,
+            "logical_rows": 25,
+            "clip_x": 0,
+            "clip_y": 0,
+            "clip_cols": 80,
+            "clip_rows": 25,
             "z_index": 0,
             "flags": 3
           }
@@ -6607,8 +6679,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
             "visible": true
@@ -6625,8 +6697,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
             "visible": true
@@ -6643,8 +6715,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              4294967295
+              80,
+              5
             ],
             "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
             "text_utf8_hex": "536f756e644c6162",
@@ -6663,8 +6735,8 @@
             "bounds": [
               0,
               0,
-              4294967295,
-              805306367
+              80,
+              5
             ],
             "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
             "format": 1,
@@ -6687,9 +6759,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              1207959551
+              5,
+              80,
+              4
             ],
             "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
             "value": -1200,
@@ -6706,9 +6778,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              1207959552,
-              536870911,
-              1610612735
+              9,
+              16,
+              4
             ],
             "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
             "value": 0,
@@ -6725,9 +6797,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              805306368,
-              4294967295,
-              4294967295
+              5,
+              80,
+              20
             ],
             "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
             "series_id": 1,
@@ -6744,9 +6816,9 @@
             "parent_id": 0,
             "bounds": [
               0,
-              2952790016,
-              4294967295,
-              4294967295
+              17,
+              80,
+              8
             ],
             "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
             "series_id": 2,

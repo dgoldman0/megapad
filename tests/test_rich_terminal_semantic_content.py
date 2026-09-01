@@ -33,7 +33,7 @@ from rich_terminal.semantic_content import (
 )
 
 
-BOUNDS = ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF)
+BOUNDS = ObjectBounds(0, 0, 80, 25)
 
 
 def _line(item_key: int, row: int, text: str) -> SemanticTextItem:

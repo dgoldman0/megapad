@@ -467,7 +467,7 @@ def test_driver_admits_retained_discovery_pair_then_covering_credit_in_order():
         MessageType.CREDIT,
     ]
     assert decode_ret_caps(frames[0].payload).max_regions == 8
-    assert decode_ret_formats(frames[1].payload).coordinate_format == 1
+    assert decode_ret_formats(frames[1].payload).bounds_format == 2
     assert CREDIT.unpack(frames[2].payload) == (1_024 + 312 + 48,)
 
     assert driver.request_resize(2, 2) is DriverStatus.PROGRESS

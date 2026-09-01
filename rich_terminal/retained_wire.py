@@ -69,9 +69,9 @@ _RESOURCE_ITEM = struct.Struct("<QQQ")
 _RESOURCE_ABORT = struct.Struct("<QQQH6s")
 _PRESENT_BEGIN = struct.Struct("<QQQQIIIIIIII")
 _PRESENT_COMMIT = struct.Struct("<QII")
-_REGION_DEFINITION = struct.Struct("<QQQIIIIiI")
+_REGION_DEFINITION = struct.Struct("<QQQiiIIIIIIiI")
 _OWNER_ITEM = struct.Struct("<QQQ")
-_OBJECT_PREFIX = struct.Struct("<QQQHHiQQIIII")
+_OBJECT_PREFIX = struct.Struct("<QQQHHiQQiiII")
 _POLYLINE_BODY = struct.Struct("<II4BI")
 _POINT = struct.Struct("<II")
 # ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
@@ -88,7 +88,7 @@ _SERIES_DEFINITION = struct.Struct("<QQQIIQ")
 _SERIES_SAMPLES = struct.Struct("<QQQIIQ")
 _EXPLICIT_SAMPLE = struct.Struct("<Qq")
 _UNIFORM_SAMPLE = struct.Struct("<q")
-_CONTROL_PREFIX = struct.Struct("<QQQHHiQQIIIIIIII")
+_CONTROL_PREFIX = struct.Struct("<QQQHHiQQIiiIIIII")
 _CONTROL_EVENT = struct.Struct("<QQQHHIQ")
 
 
@@ -390,7 +390,7 @@ class RetainedCaps:
 
 @dataclass(frozen=True, slots=True)
 class RetainedFormats:
-    coordinate_format: int
+    bounds_format: int
     color_format: int
     image_format: int
     max_image_width: int
@@ -405,7 +405,7 @@ class RetainedFormats:
 
     def __post_init__(self) -> None:
         for name in (
-            "coordinate_format",
+            "bounds_format",
             "color_format",
             "image_format",
             "max_image_width",
@@ -427,8 +427,8 @@ class RetainedFormats:
                 name,
                 _integer(name, getattr(self, name), minimum=0, maximum=UINT64_MAX),
             )
-        if self.coordinate_format != 1 or self.color_format != 1:
-            raise ValueError("RETAINED-1 requires UNORM32 coordinates and RGBA8 colors")
+        if self.bounds_format != 2 or self.color_format != 1:
+            raise ValueError("RETAINED-1 requires CELL_RECT32 bounds and RGBA8 colors")
         if self.image_format not in (0, 1):
             raise ValueError("image_format must be zero or raw RGBA8")
 
@@ -818,10 +818,14 @@ class RegionWireDefinition:
     owner_id: int
     owner_generation: int
     region_id: int
-    cell_x: int
-    cell_y: int
-    cell_cols: int
-    cell_rows: int
+    logical_x: int
+    logical_y: int
+    logical_cols: int
+    logical_rows: int
+    clip_x: int
+    clip_y: int
+    clip_cols: int
+    clip_rows: int
     z_order: int
     flags: int
 
@@ -830,10 +834,14 @@ class RegionWireDefinition:
             ("owner_id", 1, UINT64_MAX),
             ("owner_generation", 1, UINT64_MAX),
             ("region_id", 1, UINT64_MAX),
-            ("cell_x", 0, UINT32_MAX),
-            ("cell_y", 0, UINT32_MAX),
-            ("cell_cols", 1, UINT32_MAX),
-            ("cell_rows", 1, UINT32_MAX),
+            ("logical_x", -(1 << 31), (1 << 31) - 1),
+            ("logical_y", -(1 << 31), (1 << 31) - 1),
+            ("logical_cols", 1, UINT32_MAX),
+            ("logical_rows", 1, UINT32_MAX),
+            ("clip_x", 0, UINT32_MAX),
+            ("clip_y", 0, UINT32_MAX),
+            ("clip_cols", 0, UINT32_MAX),
+            ("clip_rows", 0, UINT32_MAX),
             ("z_order", -(1 << 31), (1 << 31) - 1),
             ("flags", 0, 0x3),
         ):
@@ -847,6 +855,11 @@ class RegionWireDefinition:
                     maximum=maximum,
                 ),
             )
+        clip = (self.clip_x, self.clip_y, self.clip_cols, self.clip_rows)
+        if not self.clipped and any(clip):
+            raise ValueError("an unclipped REGION must carry the zero clip rectangle")
+        if self.clipped and (self.clip_cols == 0 or self.clip_rows == 0) and any(clip):
+            raise ValueError("an empty REGION clip must use the all-zero rectangle")
 
     @property
     def visible(self) -> bool:
@@ -1222,7 +1235,7 @@ def encode_ret_formats(formats: RetainedFormats) -> bytes:
     if not isinstance(formats, RetainedFormats):
         raise TypeError("formats must be RetainedFormats")
     return _RET_FORMATS.pack(
-        formats.coordinate_format, formats.color_format, formats.image_format,
+        formats.bounds_format, formats.color_format, formats.image_format,
         formats.max_image_width, formats.max_image_height, formats.max_path_points,
         formats.max_glyph_run_bytes, formats.max_samples_per_append,
         formats.max_history_per_series, formats.minimum_presentation_interval_us,
@@ -1471,10 +1484,14 @@ def encode_region_definition(definition: RegionWireDefinition) -> bytes:
         definition.owner_id,
         definition.owner_generation,
         definition.region_id,
-        definition.cell_x,
-        definition.cell_y,
-        definition.cell_cols,
-        definition.cell_rows,
+        definition.logical_x,
+        definition.logical_y,
+        definition.logical_cols,
+        definition.logical_rows,
+        definition.clip_x,
+        definition.clip_y,
+        definition.clip_cols,
+        definition.clip_rows,
         definition.z_order,
         definition.flags,
     )
@@ -1678,10 +1695,10 @@ def encode_object_definition(definition: ObjectWireDefinition) -> bytes:
         definition.z_order,
         definition.region_id,
         definition.parent_object_id,
-        definition.bounds.left,
-        definition.bounds.top,
-        definition.bounds.right,
-        definition.bounds.bottom,
+        definition.bounds.cell_x,
+        definition.bounds.cell_y,
+        definition.bounds.cell_cols,
+        definition.bounds.cell_rows,
     ) + _encode_object_body(definition.body)
 
 
@@ -1993,10 +2010,10 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
         bounds = (0, 0, 0, 0)
     else:
         bounds = (
-            definition.bounds.left,
-            definition.bounds.top,
-            definition.bounds.right,
-            definition.bounds.bottom,
+            definition.bounds.cell_x,
+            definition.bounds.cell_y,
+            definition.bounds.cell_cols,
+            definition.bounds.cell_rows,
         )
     return _CONTROL_PREFIX.pack(
         definition.owner_id,

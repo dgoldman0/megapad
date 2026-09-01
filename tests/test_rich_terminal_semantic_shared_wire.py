@@ -41,7 +41,7 @@ from shared_session import retained_draw_plane_from_wire, retained_draw_plane_to
 
 VISIBLE = ControlState.VISIBLE
 ENABLED = ControlState.ENABLED
-FULL_BOUNDS = ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF)
+FULL_BOUNDS = ObjectBounds(0, 0, 80, 25)
 
 
 def _glyph(*, object_id: int = 11, z_order: int = 4) -> GlyphRunDraw:
@@ -60,14 +60,14 @@ def _polyline(*, object_id: int = 12, z_order: int = 5) -> PolylineDraw:
     return PolylineDraw(
         object_id=object_id,
         z_order=z_order,
-        bounds=ObjectBounds(0x10000000, 0, 0xEFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(5, 0, 70, 25),
         points=(Point(0, 0), Point(0x7FFFFFFF, 0xFFFFFFFF), Point(0xFFFFFFFF, 0)),
         stroke_width=0x08000000,
         color=RGBA(20, 210, 70, 192),
         closed=True,
         parent_bounds=(
-            ObjectBounds(0, 0x10000000, 0xFFFFFFFF, 0xEFFFFFFF),
-            ObjectBounds(0x20000000, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+            ObjectBounds(0, 2, 80, 21),
+            ObjectBounds(10, 0, 70, 25),
         ),
     )
 
@@ -78,7 +78,7 @@ def _menu_bar(*, z_order: int = 4) -> MenuBarDraw:
         state=VISIBLE | ENABLED,
         order=0,
         z_order=z_order,
-        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0x0FFFFFFF),
+        bounds=ObjectBounds(0, 0, 80, 2),
         menus=(
             MenuDraw(
                 control_id=21,
@@ -207,7 +207,7 @@ def _collection_plane() -> RetainedDrawPlane:
         state=VISIBLE | ENABLED,
         order=0,
         z_order=1,
-        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0x0FFFFFFF),
+        bounds=ObjectBounds(0, 0, 80, 2),
         tabs=(
             TabDraw(
                 31,
@@ -248,6 +248,10 @@ def _collection_plane() -> RetainedDrawPlane:
                 80,
                 25,
                 0,
+                0,
+                0,
+                0,
+                0,
                 False,
                 (tabset, area, grid),
             ),
@@ -264,10 +268,14 @@ def _plane() -> RetainedDrawPlane:
                 owner_id=1,
                 owner_generation=2,
                 region_id=3,
-                cell_x=0,
-                cell_y=0,
-                cell_cols=80,
-                cell_rows=25,
+                logical_x=0,
+                logical_y=0,
+                logical_cols=80,
+                logical_rows=25,
+                clip_x=0,
+                clip_y=0,
+                clip_cols=0,
+                clip_rows=0,
                 z_order=0,
                 clipped=False,
                 # At equal z, the renderer-neutral painter contract places
@@ -306,20 +314,24 @@ def test_object_draws_round_trip_with_exact_group_paths_and_vector_geometry():
         background=RGBA(17, 20, 28, 255),
         attributes=0,
         text="Desk",
-        parent_bounds=(ObjectBounds(0, 0, 0xDFFFFFFF, 0xFFFFFFFF),),
+        parent_bounds=(ObjectBounds(0, 0, 70, 25),),
     )
     line = _polyline()
     plane = RetainedDrawPlane(
         True,
         True,
-        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, (glyph, line)),),
+        (
+            RetainedRegionDraw(
+                1, 2, 3, 0, 0, 80, 25, 0, 0, 0, 0, 0, False, (glyph, line)
+            ),
+        ),
     )
 
     wire = retained_draw_plane_to_wire(plane)
 
     assert retained_draw_plane_from_wire(wire) == plane
     glyph_wire, line_wire = wire["regions"][0]["draws"]
-    assert glyph_wire["parent_bounds"] == [[0, 0, 0xDFFFFFFF, 0xFFFFFFFF]]
+    assert glyph_wire["parent_bounds"] == [[0, 0, 70, 25]]
     assert set(line_wire) == {
         "kind",
         "object_id",
@@ -369,7 +381,11 @@ def test_polyline_wire_rejects_noncanonical_geometry(mutate, error, match):
     plane = RetainedDrawPlane(
         True,
         True,
-        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, (_polyline(),)),),
+        (
+            RetainedRegionDraw(
+                1, 2, 3, 0, 0, 80, 25, 0, 0, 0, 0, 0, False, (_polyline(),)
+            ),
+        ),
     )
     wire = deepcopy(retained_draw_plane_to_wire(plane))
     mutate(wire["regions"][0]["draws"][0])
@@ -379,7 +395,7 @@ def test_polyline_wire_rejects_noncanonical_geometry(mutate, error, match):
 
 
 def _instrument_plane() -> RetainedDrawPlane:
-    parent_bounds = (ObjectBounds(0, 0, 0xEFFFFFFF, 0xFFFFFFFF),)
+    parent_bounds = (ObjectBounds(0, 0, 75, 25),)
     draws = (
         ReadoutDraw(
             20,
@@ -417,7 +433,11 @@ def _instrument_plane() -> RetainedDrawPlane:
     return RetainedDrawPlane(
         True,
         True,
-        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, draws),),
+        (
+            RetainedRegionDraw(
+                1, 2, 3, 0, 0, 80, 25, 0, 0, 0, 0, 0, False, draws
+            ),
+        ),
     )
 
 
@@ -492,7 +512,24 @@ def _series_plane() -> RetainedDrawPlane:
     return RetainedDrawPlane(
         True,
         True,
-        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, (plot, waveform)),),
+        (
+            RetainedRegionDraw(
+                1,
+                2,
+                3,
+                0,
+                0,
+                80,
+                25,
+                0,
+                0,
+                0,
+                0,
+                0,
+                False,
+                (plot, waveform),
+            ),
+        ),
         (history,),
     )
 
@@ -760,7 +797,11 @@ def test_collection_encoder_rejects_a_mislabeled_content_family() -> None:
     plane = RetainedDrawPlane(
         True,
         True,
-        (RetainedRegionDraw(1, 2, 3, 0, 0, 80, 25, 0, False, (area,)),),
+        (
+            RetainedRegionDraw(
+                1, 2, 3, 0, 0, 80, 25, 0, 0, 0, 0, 0, False, (area,)
+            ),
+        ),
     )
 
     with pytest.raises(ValueError, match="TEXT_AREA"):

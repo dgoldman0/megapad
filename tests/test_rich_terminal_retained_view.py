@@ -119,10 +119,14 @@ def _region(
     return RegionDefinition(
         owner=owner,
         region_id=region_id,
-        cell_x=0,
-        cell_y=0,
-        cell_cols=GEOMETRY.cols,
-        cell_rows=GEOMETRY.rows,
+        logical_x=0,
+        logical_y=0,
+        logical_cols=GEOMETRY.cols,
+        logical_rows=GEOMETRY.rows,
+        clip_x=0,
+        clip_y=0,
+        clip_cols=GEOMETRY.cols,
+        clip_rows=GEOMETRY.rows,
         z_order=z_order,
         visible=visible,
         clipped=True,
@@ -145,7 +149,7 @@ def _object(
         object_id=object_id,
         region_id=region_id,
         parent_object_id=parent,
-        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(0, 0, GEOMETRY.cols, GEOMETRY.rows),
         z_order=z_order,
         visible=visible,
         body=body,
@@ -314,7 +318,7 @@ def test_projection_fails_closed_on_a_missing_series_and_projects_groups():
 
     group = replace(
         _object(owner, 2, 1, GroupBody()),
-        bounds=ObjectBounds(0x10000000, 0x20000000, 0xEFFFFFFF, 0xDFFFFFFF),
+        bounds=ObjectBounds(1, 1, 6, 3),
     )
     nested = _object(
         owner,
@@ -338,11 +342,11 @@ def test_projection_copies_polyline_geometry_and_nested_group_path():
     region = _region(owner, 1)
     outer = replace(
         _object(owner, 2, 1, GroupBody()),
-        bounds=ObjectBounds(0, 0, 0xCFFFFFFF, 0xEFFFFFFF),
+        bounds=ObjectBounds(0, 0, 6, 3),
     )
     inner = replace(
         _object(owner, 3, 1, GroupBody(), parent=2),
-        bounds=ObjectBounds(0x10000000, 0x20000000, 0xFFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(1, 1, 5, 2),
     )
     body = PolylineBody(
         (Point(0, 0), Point(0x7FFFFFFF, 0xFFFFFFFF), Point(0xFFFFFFFF, 0)),
@@ -352,7 +356,7 @@ def test_projection_copies_polyline_geometry_and_nested_group_path():
     )
     line = replace(
         _object(owner, 4, 1, body, z_order=7, parent=3),
-        bounds=ObjectBounds(0x20000000, 0, 0xDFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(2, 0, 3, 2),
     )
 
     _, plane = project_composite_draw_plane(
@@ -377,7 +381,7 @@ def test_projection_copies_images_and_deduplicates_sorted_resource_manifests():
     region = _region(owner, 1)
     group = replace(
         _object(owner, 1, 1, GroupBody()),
-        bounds=ObjectBounds(0x10000000, 0, 0xEFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(1, 0, 7, 4),
     )
     later = _object(
         owner,
@@ -548,7 +552,7 @@ def test_projection_formats_and_copies_instruments_without_renderer_hints():
     region = _region(owner, 1)
     group = replace(
         _object(owner, 1, 1, GroupBody()),
-        bounds=ObjectBounds(0x10000000, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(1, 0, 7, 4),
     )
     readout = _object(
         owner,

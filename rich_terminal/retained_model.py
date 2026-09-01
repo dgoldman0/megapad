@@ -284,7 +284,7 @@ class RetainedPolicy:
                 raise ValueError("resource bytes cannot admit one maximum image")
 
         inbound = self.client_to_terminal_max_payload
-        operation_payloads = [48]
+        operation_payloads = [64]
         if vector:
             vector_payload = _checked_add(
                 "maximum vector payload",

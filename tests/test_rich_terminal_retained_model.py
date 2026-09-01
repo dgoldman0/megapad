@@ -128,7 +128,7 @@ def test_policy_rejects_feature_dependency_and_absent_family_capacity():
             max_series=0,
             max_operations_per_transaction=1,
             max_resource_chunk_bytes=0,
-            max_retained_transaction_bytes=248,
+            max_retained_transaction_bytes=264,
             total_resource_bytes=0,
             image_format=0,
             max_image_width=0,
@@ -142,7 +142,7 @@ def test_policy_rejects_feature_dependency_and_absent_family_capacity():
             total_utf8_bytes=0,
             client_to_terminal_max_payload=64,
             terminal_to_client_max_payload=64,
-            base_max_transaction_bytes=248,
+            base_max_transaction_bytes=264,
         )
 
     with pytest.raises(TypeError, match="must not be bool"):

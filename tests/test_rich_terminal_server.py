@@ -639,7 +639,7 @@ def test_retained_query_emits_exact_adjacent_replies_before_covering_credit():
     formats = decode_ret_formats(frames[1].payload)
     assert caps.features == policy.features
     assert caps.max_regions == policy.max_regions
-    assert formats.coordinate_format == 1
+    assert formats.bounds_format == 2
     assert formats.total_sample_slots == 0
     assert CREDIT.unpack(frames[2].payload) == (1_024 + 312 + 48,)
     assert core.retained_enabled
@@ -1138,7 +1138,7 @@ def test_present_region_hidden_replace_commits_then_reveals_atomically():
     for outbound in opened.outbound:
         decoder.feed(outbound.payload)
     _settle_lifecycle(core, opened)
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
 
     started = core.feed_machine(
         _present_frames(
@@ -1204,7 +1204,7 @@ def test_present_declared_byte_mismatch_rejects_without_scene_or_id_publication(
     _settle_lifecycle(core, opened)
     scene_source = core.retained_state
     owner_source = core.owner_state
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
 
     rejected = core.feed_machine(
         _present_frames(
@@ -1242,12 +1242,12 @@ def test_present_abort_discards_only_transaction_staging_and_returns_credit():
     _settle_lifecycle(core, opened)
     scene_source = core.retained_state
     owner_source = core.owner_state
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
     begin = PresentBegin(
         2,
         1,
         0,
-        248,
+        264,
         2,
         2,
         0,
@@ -1319,7 +1319,7 @@ def test_owner_drop_retires_committed_scene_and_authority_as_one_revision():
     for outbound in opened.outbound:
         decoder.feed(outbound.payload)
     _settle_lifecycle(core, opened)
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
     started = core.feed_machine(
         _present_frames(
             encoder,
@@ -1494,9 +1494,9 @@ def test_retained_vocabulary_dispatches_through_atomic_composite_views():
     for outbound in opened.outbound:
         decoder.feed(outbound.payload)
     _settle_lifecycle(core, opened)
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
     series = SeriesWireDefinition(7, 1, 1, 4, TimestampMode.EXPLICIT, 0)
-    bounds = ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF)
+    bounds = ObjectBounds(0, 0, 2, 2)
     group = ObjectWireDefinition(
         owner_id=7,
         owner_generation=1,
@@ -1577,7 +1577,9 @@ def test_retained_vocabulary_dispatches_through_atomic_composite_views():
     )
     revealed_scene = revealed.views[0].retained.active
 
-    replacement_region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, -4, 0x2)
+    replacement_region = RegionWireDefinition(
+        7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, -4, 0x2
+    )
     commit(
         4,
         PresentRetainedMode.DELTA,
@@ -1717,7 +1719,7 @@ def test_unadvertised_image_rejection_stays_sticky_while_present_drains():
         1,
         1,
         0,
-        ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        ObjectBounds(0, 0, 2, 2),
         0,
         True,
         GroupBody(),
@@ -1725,7 +1727,7 @@ def test_unadvertised_image_rejection_stays_sticky_while_present_drains():
     image_payload = bytearray(encode_object_definition(group))
     struct.pack_into("<H", image_payload, 24, 3)
     source = core.retained_state
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
 
     rejected = core.feed_machine(
         _present_frames(
@@ -1904,14 +1906,14 @@ def test_image_scene_blocks_drop_and_owner_retirement_preserves_old_view_backing
         decoder.feed(outbound.payload)
     _settle_lifecycle(core, committed)
 
-    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0x3)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
     image = ObjectWireDefinition(
         7,
         1,
         1,
         1,
         0,
-        ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        ObjectBounds(0, 0, 2, 2),
         0,
         True,
         ImageBody(1, ImageFit.CONTAIN, 255),

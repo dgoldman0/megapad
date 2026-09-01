@@ -16,7 +16,7 @@ from typing import Any, Sequence
 from canonical_state import canonical_state, deduplicate_records, owner_key, resource_key
 
 
-CONTRACT_ID = "APT-1-RETAINED-1-2026-08-24"
+CONTRACT_ID = "APT-1-RETAINED-1-2026-09-01"
 MAGIC = b"\xa5PT1"
 HEADER_BYTES = 40
 RETAINED_TAG = 0x31544552
@@ -84,8 +84,8 @@ RET_RESULT = struct.Struct("<HHIQQQQQ")
 OWNER_OPEN = struct.Struct("<QQIIIIQQQQ")
 PRESENT_BEGIN = struct.Struct("<QQQQIIIIIIII")
 PRESENT_COMMIT = struct.Struct("<QII")
-REGION = struct.Struct("<QQQIIIIiI")
-OBJECT_PREFIX = struct.Struct("<QQQHHiQQIIII")
+REGION = struct.Struct("<QQQiiIIIIIIiI")
+OBJECT_PREFIX = struct.Struct("<QQQHHiQQiiII")
 GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
 GLYPH_RUN_ATTRIBUTE_MASK = 0x006F
 READOUT_BODY = struct.Struct("<8BIIqqII")
@@ -330,15 +330,32 @@ def _apply_retained(
     geometry_generation: int,
 ) -> None:
     if message in {"REGION_DEFINE","REGION_REPLACE"}:
-        owner,generation,item,left,top,cols,rows,z_index,flags = REGION.unpack(payload)
+        (
+            owner,
+            generation,
+            item,
+            logical_x,
+            logical_y,
+            logical_cols,
+            logical_rows,
+            clip_x,
+            clip_y,
+            clip_cols,
+            clip_rows,
+            z_index,
+            flags,
+        ) = REGION.unpack(payload)
         key = _scene_item_key(owner,generation,item)
         if message == "REGION_DEFINE" and key in scene["regions"]:
             _fail("duplicate REGION_DEFINE")
         if message == "REGION_REPLACE" and key not in scene["regions"]:
             _fail("absent REGION_REPLACE")
         scene["regions"][key] = {
-            "owner_id":owner,"generation":generation,"region_id":item,"left":left,
-            "top":top,"cols":cols,"rows":rows,"z_index":z_index,"flags":flags,
+            "owner_id":owner,"generation":generation,"region_id":item,
+            "logical_x":logical_x,"logical_y":logical_y,
+            "logical_cols":logical_cols,"logical_rows":logical_rows,
+            "clip_x":clip_x,"clip_y":clip_y,"clip_cols":clip_cols,
+            "clip_rows":clip_rows,"z_index":z_index,"flags":flags,
             "geometry_generation":geometry_generation,
         }
     elif message in {"OBJECT_DEFINE","OBJECT_REPLACE"}:

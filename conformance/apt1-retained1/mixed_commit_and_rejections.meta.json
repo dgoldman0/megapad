@@ -1,5 +1,5 @@
 {
-  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "contract_id": "APT-1-RETAINED-1-2026-09-01",
   "transcript": "mixed_commit_and_rejections.hex",
   "directions": [
     "client_to_terminal",
@@ -113,10 +113,14 @@
           "generation": 7,
           "region_id": 1,
           "geometry_generation": 0,
-          "left": 0,
-          "top": 0,
-          "cols": 80,
-          "rows": 25,
+          "logical_x": 0,
+          "logical_y": 0,
+          "logical_cols": 80,
+          "logical_rows": 25,
+          "clip_x": 0,
+          "clip_y": 0,
+          "clip_cols": 80,
+          "clip_rows": 25,
           "z_index": 0,
           "flags": 3
         }
@@ -134,8 +138,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            805306367
+            80,
+            5
           ],
           "body_sha3_256": "a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a",
           "visible": true
@@ -152,8 +156,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            4294967295
+            80,
+            5
           ],
           "body_sha3_256": "0ba6e68a1ee0bef43c7d1c0f9b06f59e2044608d60d73303fc6bbfe8c9b32a35",
           "visible": true
@@ -170,8 +174,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            4294967295
+            80,
+            5
           ],
           "body_sha3_256": "b70c62fa76c6dc2d59747ee2c4451d0cc0cf3f7502bcaba972985e65728024cd",
           "text_utf8_hex": "536f756e644c6162",
@@ -190,8 +194,8 @@
           "bounds": [
             0,
             0,
-            4294967295,
-            805306367
+            80,
+            5
           ],
           "body_sha3_256": "a2ace35825af19dc3f83e8336f65d1acf1c2030275d1649bdca9910c6a69c4f8",
           "format": 1,
@@ -214,9 +218,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            805306368,
-            4294967295,
-            1207959551
+            5,
+            80,
+            4
           ],
           "body_sha3_256": "b64f0eb5274270a48132412211eaa091e08041e3aaf3b733d5a8a097b7264615",
           "value": -300,
@@ -233,9 +237,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            1207959552,
-            536870911,
-            1610612735
+            9,
+            16,
+            4
           ],
           "body_sha3_256": "f9e427a8264b162980676c80f72340d2d6f95cbc765e8de00e0dba5df340f240",
           "value": 1,
@@ -252,9 +256,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            805306368,
-            4294967295,
-            4294967295
+            5,
+            80,
+            20
           ],
           "body_sha3_256": "e1598914753be7911a334b9079f10e09b45b3e9913673f37a7f4aa73740bc18d",
           "series_id": 1,
@@ -271,9 +275,9 @@
           "parent_id": 0,
           "bounds": [
             0,
-            2952790016,
-            4294967295,
-            4294967295
+            17,
+            80,
+            8
           ],
           "body_sha3_256": "0e3a490a14e884002ebca36e7b4d7d0672c010be9137584bbdf8840f74496bb2",
           "series_id": 2,

@@ -46,9 +46,10 @@ box.
 
 ## CONTROL envelope
 
-The existing 80-byte prefix remains `<QQQHHiQQIIIIIIII>`. Its last three u32
-fields are now `label_bytes`, `shortcut_bytes`, and `content_bytes`. The exact
-payload is:
+The exact 80-byte prefix is `<QQQHHiQQIiiIIIII>`. Its optional root bounds use
+the common signed-cell-origin/unsigned-positive-extent contract, with all-zero
+as canonical absence. Its last three u32 fields are `label_bytes`,
+`shortcut_bytes`, and `content_bytes`. The exact payload is:
 
 ```
 80-byte CONTROL prefix

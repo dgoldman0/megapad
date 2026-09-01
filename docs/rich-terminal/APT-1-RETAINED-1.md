@@ -1,6 +1,6 @@
 # APT-1 RETAINED-1 wire profile
 
-Contract ID: `APT-1-RETAINED-1-2026-08-24`
+Contract ID: `APT-1-RETAINED-1-2026-09-01`
 
 Status: normative Phase 3 contract. This profile is additive to
 `APT-1-CELL-1-2026-08-24`; every rule in APT-1 CELL-1 remains in force unless
@@ -68,11 +68,18 @@ transport, and cumulative byte credit. Unless a field says otherwise:
 - a message is not partially applied. It is accepted in full, rejected in
   full, or causes the base contract's fatal structural failure.
 
-`UNORM32` is an unsigned 32-bit coordinate. It represents the closed interval
-`[0, 1]` by `value / 4294967295`. Object coordinates are relative to the
-containing region or group, not terminal pixels or cells. Colors are four
-consecutive bytes in red, green, blue, alpha order. Alpha is straight, not
-premultiplied.
+`CELL_RECT32` is a signed i32 cell origin followed by positive u32 column and
+row extents. Its exclusive mathematical endpoints are computed exactly in a
+wider integer domain; they are not required to fit i32. An object's origin is
+relative to its region's logical origin or its parent object's origin, and its
+extent remains in cells. This geometry is neither normalized nor clamped to a
+containing rectangle.
+
+`UNORM32` is an unsigned 32-bit normalized scalar. It represents the closed
+interval `[0, 1]` by `value / 4294967295`. POLYLINE points and stroke width use
+UNORM32 within the object's already resolved CELL_RECT32; common object and
+control bounds do not. Colors are four consecutive bytes in red, green, blue,
+alpha order. Alpha is straight, not premultiplied.
 
 ## 3. Message registry
 
@@ -93,8 +100,8 @@ use the APT-1 control reserve under Section 17.
 | `2000` | `PRESENT_BEGIN` | C -> T | ordinary | 64 bytes |
 | `2001` | `PRESENT_COMMIT` | C -> T | ordinary | 16 bytes |
 | `2002` | `OWNER_OPEN` | C -> T | ordinary | 64 bytes |
-| `2010` | `REGION_DEFINE` | C -> T | ordinary, in transaction | 48 bytes |
-| `2011` | `REGION_REPLACE` | C -> T | ordinary, in transaction | 48 bytes |
+| `2010` | `REGION_DEFINE` | C -> T | ordinary, in transaction | 64 bytes |
+| `2011` | `REGION_REPLACE` | C -> T | ordinary, in transaction | 64 bytes |
 | `2012` | `REGION_DROP` | C -> T | ordinary, in transaction | 24 bytes |
 | `2020` | `OBJECT_DEFINE` | C -> T | ordinary, in transaction | 64-byte prefix + body |
 | `2021` | `OBJECT_REPLACE` | C -> T | ordinary, in transaction | 64-byte prefix + body |
@@ -248,7 +255,7 @@ available at mutation time.
 The retained transaction maximum must admit BEGIN plus COMMIT plus at least one
 maximum-sized operation from every advertised family that publishes an item
 maximum. The general checked floor is
-`200 + maximum_retained_operation_payload`. Exact family floors are 248 for
+`200 + maximum_retained_operation_payload`. Exact family floors are 264 for
 CORE with no objects, `280 + max_glyph_run_bytes` when glyph runs are enabled,
 `280 + 8 * max_path_points` for VECTOR,
 `max(304 + max_glyph_run_bytes, 312)` for INSTRUMENT, 280 for RGBA_IMAGE, and
@@ -277,7 +284,7 @@ now-forbidden legacy snapshot path.
 
 | Offset | Field | Type |
 |---:|---|---|
-| 0 | `coordinate_format` = 1 (`UNORM32`) | u32 |
+| 0 | `bounds_format` = 2 (`CELL_RECT32`) | u32 |
 | 4 | `color_format` = 1 (`RGBA8`) | u32 |
 | 8 | `image_format` | u32 |
 | 12 | `max_image_width` | u32 |
@@ -820,29 +827,62 @@ absent ID is RET_INVALID; IDs are not reused.
 
 ## 9. Regions
 
-Regions bind retained coordinates to the selected cell geometry. DEFINE and
-REPLACE have exact layout `<QQQIIIIiI>`:
+Regions bind retained logical coordinates and physical clipping to the
+selected cell geometry. DEFINE and REPLACE have exact layout
+`<QQQiiIIIIIIiI>`:
 
 ```text
 u64 owner_id
 u64 owner_generation
 u64 region_id
-u32 cell_x
-u32 cell_y
-u32 cell_cols
-u32 cell_rows
+i32 logical_x
+i32 logical_y
+u32 logical_cols
+u32 logical_rows
+u32 clip_x
+u32 clip_y
+u32 clip_cols
+u32 clip_rows
 i32 z_order
 u32 flags
 ```
 
-`cell_cols` and `cell_rows` are positive; the checked rectangle is within the
-PRESENT_BEGIN geometry. Flags bit 0 is initial visibility and bit 1 enables
-clipping at the region rectangle; other bits are zero. Region IDs are nonzero
-and strictly increasing on DEFINE. REPLACE requires an existing exact-owner
-region and is its complete definition. `REGION_DROP <QQQ>` names owner,
-generation, and ID. Commit validates that no surviving object or control refers
-to a dropped region. Overlapping regions render by signed region z-order, then
-owner ID, then region ID in ascending back-to-front order.
+`logical_cols` and `logical_rows` are positive. The logical rectangle may be
+partially or wholly outside the selected surface; exact origin-plus-extent
+addition is performed in a wider integer domain and does not impose an i32
+endpoint ceiling. Flags bit 0 is initial visibility and bit 1 enables the
+independent physical clip; other bits are zero. When bit 1 is clear, all four
+clip fields are canonically zero. When bit 1 is set, the all-zero clip is the
+sole fully-clipped encoding. Otherwise both clip extents are positive, the clip
+lies within the selected surface, and it lies within the intersection of that
+surface and the logical rectangle. A noncanonical empty or out-of-intersection
+clip rejects the transaction.
+
+Renderers first resolve every object's full logical cell rectangle, then
+intersect paint and hit-test geometry with the region's physical clip (when
+enabled) and the selected surface. They do not rewrite, clamp, or crop retained
+model geometry. Native raster rectangles, draw calls, and temporary surfaces
+must be constructed only from the bounded visible intersection; a legal large
+or offscreen logical rectangle is not permission to allocate a logical-size
+offscreen buffer.
+
+Region IDs are nonzero and strictly increasing on DEFINE. REPLACE requires an
+existing exact-owner region and is its complete definition. `REGION_DROP
+<QQQ>` names owner, generation, and ID. Commit validates that no surviving
+object or control refers to a dropped region. Overlapping regions render by
+signed region z-order, then owner ID, then region ID in ascending back-to-front
+order.
+
+The selected renderer's immutable hit map follows that same painter order.
+Each visible region contributes an occlusion barrier for its logical rectangle
+intersected with its physical clip and the selected surface, followed by that
+region's independently activatable control targets. Reverse hit-testing first
+selects a control in the top region or stops at its barrier, so an empty region
+or one containing only non-control draws cannot click through to a lower
+region. Non-control draws remain pointer-transparent relative to controls in
+the same region: the current generic OBJECT vocabulary carries neither object
+input policy nor per-pixel opacity semantics, and changing that rule requires
+an explicit renderer-neutral semantic extension rather than pixel inference.
 
 Regions are stamped with PRESENT_BEGIN `geometry_generation`. A resize makes
 the active retained plane hidden and layout-rebuild-required. A layout reveal
@@ -853,7 +893,7 @@ is invalid until every surviving region is stamped with the new generation.
 `RET_CONTROLS` defines the independent CONTROL identity namespace and its menu
 kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds in that same
 namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
-80-byte prefix `<QQQHHiQQIIIIIIII>`, followed immediately by `label_bytes`
+80-byte prefix `<QQQHHiQQIiiIIIII>`, followed immediately by `label_bytes`
 bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
 
 | Offset | Field | Type |
@@ -867,10 +907,10 @@ bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
 | 32 | `region_id` | u64 |
 | 40 | `parent_control_id` | u64 |
 | 48 | `order` | u32 |
-| 52 | `left` | optional UNORM32 |
-| 56 | `top` | optional UNORM32 |
-| 60 | `right` | optional UNORM32 |
-| 64 | `bottom` | optional UNORM32 |
+| 52 | `cell_x` | optional i32 |
+| 56 | `cell_y` | optional i32 |
+| 60 | `cell_cols` | optional u32 |
+| 64 | `cell_rows` | optional u32 |
 | 68 | `label_bytes` | u32 |
 | 72 | `shortcut_bytes` | u32 |
 | 76 | `content_bytes` | u32 |
@@ -899,7 +939,8 @@ Control kinds are:
 Menu controls, `TABSET`, and `TAB` require `content_bytes = 0`. `TEXT_AREA`
 and `TEXT_GRID` require one canonical STX1 text collection. Its exact header,
 item, graph, state, replacement, and quota rules are specified in
-`SEMANTIC-CONTENT-1.md`. Existing menu records remain byte-for-byte unchanged.
+`SEMANTIC-CONTENT-1.md`. Menu and collection roots use the same CELL_RECT32
+geometry contract.
 
 State bits are:
 
@@ -912,11 +953,13 @@ State bits are:
 | 4 | `CHECKED` | this menu item carries checked state |
 
 Bits 5 through 15 are zero. The all-zero bound tuple means bounds are absent;
-otherwise `left < right` and `top < bottom` and the bounds are relative to the
-named region. Bounds constrain the renderer-neutral root placement/available
-rectangle but do not prescribe fonts, menu metrics, popup direction, pixels,
-or hit boxes. The selected renderer owns exact descendant menu geometry,
-clipping, rasterization, and hit testing.
+otherwise the cell origins are signed i32 and both extents are positive u32.
+Their exact endpoints use the same wider-integer rule as every CELL_RECT32, and
+the bounds are relative to the named region's logical origin. Bounds constrain
+the renderer-neutral root placement/available rectangle but do not prescribe
+fonts, menu metrics, popup direction, pixels, or hit boxes. The selected
+renderer owns exact descendant menu geometry, bounded clipping,
+rasterization, and hit testing.
 
 The final menu control graph is canonical:
 
@@ -1015,7 +1058,7 @@ UIDL/widget action path.
 ## 10. Generic objects
 
 OBJECT_DEFINE and OBJECT_REPLACE start with exact common prefix
-`<QQQHHiQQIIII>` (64 bytes), followed by the exact type body in Section 11:
+`<QQQHHiQQiiII>` (64 bytes), followed by the exact type body in Section 11:
 
 | Offset | Field | Type |
 |---:|---|---|
@@ -1027,17 +1070,19 @@ OBJECT_DEFINE and OBJECT_REPLACE start with exact common prefix
 | 28 | `z_order` | i32 |
 | 32 | `region_id` | u64 |
 | 40 | `parent_object_id` | u64 |
-| 48 | `left` | UNORM32 |
-| 52 | `top` | UNORM32 |
-| 56 | `right` | UNORM32 |
-| 60 | `bottom` | UNORM32 |
+| 48 | `cell_x` | i32 |
+| 52 | `cell_y` | i32 |
+| 56 | `cell_cols` | u32 |
+| 60 | `cell_rows` | u32 |
 
-Object flag bit 0 is initial visibility; all other bits are zero. `left < right`
-and `top < bottom`. With parent zero, coordinates are region-relative. A
-nonzero parent must be a GROUP of the same owner and region; coordinates are
-relative to that group's bounds. The final parent graph must be acyclic. Group
-visibility cascades; object and region z-order compare signed, with object ID
-as the deterministic final tie-breaker.
+Object flag bit 0 is initial visibility; all other bits are zero. Both extents
+are positive and exact exclusive endpoints are computed in a wider integer
+domain without an i32 endpoint cap. With parent zero, the cell origin is
+relative to the region's logical origin. A nonzero parent must be a GROUP of
+the same owner and region; the cell origin is relative to that parent object's
+origin. Parentage does not normalize or crop the child rectangle. The final
+parent graph must be acyclic. Group visibility cascades; object and region
+z-order compare signed, with object ID as the deterministic final tie-breaker.
 
 DEFINE requires a nonzero ID strictly greater than the owner's prior object
 high-water mark. REPLACE requires an existing exact-owner object and the same

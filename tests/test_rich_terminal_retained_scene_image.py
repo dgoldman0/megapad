@@ -136,7 +136,9 @@ def _region(
     owner: OwnerIdentity,
     region_id: int = 1,
 ) -> RegionDefinition:
-    return RegionDefinition(owner, region_id, 0, 0, 8, 4, 0, True, True, 0)
+    return RegionDefinition(
+        owner, region_id, 0, 0, 8, 4, 0, 0, 8, 4, 0, True, True, 0
+    )
 
 
 def _image(
@@ -151,7 +153,7 @@ def _image(
         object_id=object_id,
         region_id=region_id,
         parent_object_id=0,
-        bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+        bounds=ObjectBounds(0, 0, 8, 4),
         z_order=0,
         visible=True,
         body=ImageBody(resource_id, ImageFit.CONTAIN, 192),

@@ -8,7 +8,7 @@
 \
 \  Contracts: APT-1-CELL-1-2026-08-24 plus the core
 \             owner/resource/region/object/series/control transport subset
-\             of APT-1-RETAINED-1-2026-08-24.
+\             of APT-1-RETAINED-1-2026-09-01.
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
 
 PROVIDED rich-terminal.f
@@ -672,6 +672,14 @@ VARIABLE _PT-RV
 : _PT-I32?  ( n -- flag )
     DUP -2147483648 < IF DROP FALSE EXIT THEN
     2147483647 > 0= ;
+
+\ A CELL_RECT32 origin is signed while its extent is positive unsigned.  Their
+\ exact mathematical endpoint fits the native 64-bit cell; it is deliberately
+\ not forced back into i32, which would create an unrelated size ceiling.
+: _PT-I32-EXTENT?  ( origin extent -- flag )
+    OVER _PT-I32? 0= IF 2DROP FALSE EXIT THEN
+    DUP _PT-U32? 0= OVER 0= OR IF 2DROP FALSE EXIT THEN
+    2DROP TRUE ;
 
 : _PT-UADD?  ( a b -- sum flag )
     OVER + DUP ROT _PT-U>= ;
@@ -2075,7 +2083,7 @@ VARIABLE _PT-RV-TOTAL
     _PT-RV-P @ 20 + L@ _PT-RV-P @ 16 + L@ U> IF FALSE EXIT THEN
     _PT-RV-P @ 24 + L@ 0= _PT-RV-P @ 40 + L@ 0= OR IF FALSE EXIT THEN
     _PT-RV-P @ 48 + _PT-U64@ DUP _PT-RV-RETMAX ! 0= IF FALSE EXIT THEN
-    _PT-RV-RETMAX @ 248 U< IF FALSE EXIT THEN
+    _PT-RV-RETMAX @ 264 U< IF FALSE EXIT THEN
     _PT-RV-RETMAX @ _PT-RV-S @ _PT.S.PEER-MAX-TX @ U> IF FALSE EXIT THEN
     _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 64 U<
     _PT-RV-S @ _PT.S.CLIENT-MAX-PAY @ 64 U< OR IF FALSE EXIT THEN
@@ -2131,7 +2139,7 @@ VARIABLE _PT-RF-PIXELS
     DUP _PT.S.RET-CAPS _PT-RF-CAPS !
     DROP _PT-RX-P @ _PT-RF-FORMATS !
     _PT-RX-LEN @ 64 <> IF FALSE EXIT THEN
-    _PT-RF-FORMATS @ L@ 1 <>
+    _PT-RF-FORMATS @ L@ 2 <>
     _PT-RF-FORMATS @ 4 + L@ 1 <> OR IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 8 + L@ 1 U> IF FALSE EXIT THEN
     _PT-RF-FORMATS @ 56 + _PT-U64@ IF FALSE EXIT THEN
@@ -3864,6 +3872,70 @@ VARIABLE _PT-PO-S
 VARIABLE _PT-PO-NEXT-OPS
 VARIABLE _PT-PO-NEXT-BYTES
 
+VARIABLE _PT-PR-A
+VARIABLE _PT-PR-X
+VARIABLE _PT-PR-Y
+VARIABLE _PT-PR-XEND
+VARIABLE _PT-PR-YEND
+VARIABLE _PT-PR-CLIP-X
+VARIABLE _PT-PR-CLIP-Y
+VARIABLE _PT-PR-CLIP-COLS
+VARIABLE _PT-PR-CLIP-ROWS
+VARIABLE _PT-PR-CLIP-XEND
+VARIABLE _PT-PR-CLIP-YEND
+
+: _PT-PO-REGION-DEFINITION?  ( -- flag )
+    _PT-PO-U @ 64 <> IF FALSE EXIT THEN
+    _PT-PO-A @ DUP _PT-PR-A !
+    DUP _PT-U64@ 0=
+    OVER 8 + _PT-U64@ 0= OR
+    SWAP 16 + _PT-U64@ 0= OR IF FALSE EXIT THEN
+
+    _PT-PR-A @ 24 + _PT-I32@ DUP _PT-PR-X !
+    _PT-PR-A @ 32 + L@ 2DUP _PT-I32-EXTENT? 0= IF
+        2DROP FALSE EXIT
+    THEN
+    + _PT-PR-XEND !
+    _PT-PR-A @ 28 + _PT-I32@ DUP _PT-PR-Y !
+    _PT-PR-A @ 36 + L@ 2DUP _PT-I32-EXTENT? 0= IF
+        2DROP FALSE EXIT
+    THEN
+    + _PT-PR-YEND !
+
+    _PT-PR-A @ 40 + L@ _PT-PR-CLIP-X !
+    _PT-PR-A @ 44 + L@ _PT-PR-CLIP-Y !
+    _PT-PR-A @ 48 + L@ _PT-PR-CLIP-COLS !
+    _PT-PR-A @ 52 + L@ _PT-PR-CLIP-ROWS !
+    _PT-PR-A @ 60 + L@ DUP 3 INVERT AND IF DROP FALSE EXIT THEN
+    2 AND 0= IF
+        _PT-PR-CLIP-X @ _PT-PR-CLIP-Y @ OR
+        _PT-PR-CLIP-COLS @ OR _PT-PR-CLIP-ROWS @ OR 0= EXIT
+    THEN
+
+    \ The all-zero rectangle is the sole empty encoding.  A nonempty clip is
+    \ in physical surface cells and must be contained by both the selected
+    \ surface and the visible intersection of the independent logical rect.
+    _PT-PR-CLIP-X @ _PT-PR-CLIP-Y @ OR
+    _PT-PR-CLIP-COLS @ OR _PT-PR-CLIP-ROWS @ OR 0= IF TRUE EXIT THEN
+    _PT-PR-CLIP-COLS @ 0= _PT-PR-CLIP-ROWS @ 0= OR IF FALSE EXIT THEN
+    _PT-PR-CLIP-X @ _PT-PR-CLIP-COLS @ _PT-UADD? 0= IF
+        DROP FALSE EXIT
+    THEN DUP _PT-PR-CLIP-XEND !
+    _PT-PO-S @ _PT.S.COLS @ U> IF FALSE EXIT THEN
+    _PT-PR-CLIP-Y @ _PT-PR-CLIP-ROWS @ _PT-UADD? 0= IF
+        DROP FALSE EXIT
+    THEN DUP _PT-PR-CLIP-YEND !
+    _PT-PO-S @ _PT.S.ROWS @ U> IF FALSE EXIT THEN
+    _PT-PR-XEND @ 0<= _PT-PR-YEND @ 0<= OR IF FALSE EXIT THEN
+    _PT-PR-X @ 0> IF
+        _PT-PR-CLIP-X @ _PT-PR-X @ U< IF FALSE EXIT THEN
+    THEN
+    _PT-PR-Y @ 0> IF
+        _PT-PR-CLIP-Y @ _PT-PR-Y @ U< IF FALSE EXIT THEN
+    THEN
+    _PT-PR-CLIP-XEND @ _PT-PR-XEND @ U>
+    _PT-PR-CLIP-YEND @ _PT-PR-YEND @ U> OR 0= ;
+
 : _PT-PO-SOURCE?  ( -- flag )
     _PT-PO-A @ _PT-PO-U @ _PT-RANGE-VALID? 0= IF FALSE EXIT THEN
     _PT-PO-A @ _PT-PO-U @ _PT-PO-S @ /PT-SESSION
@@ -3874,18 +3946,7 @@ VARIABLE _PT-PO-NEXT-BYTES
 : _PT-PO-REGION?  ( -- flag )
     _PT-PO-TYPE @ DUP _PT-M-REGION-DEFINE =
     SWAP _PT-M-REGION-REPLACE = OR IF
-        _PT-PO-U @ 48 <> IF FALSE EXIT THEN
-        _PT-PO-A @ _PT-U64@ 0=
-        _PT-PO-A @ 8 + _PT-U64@ 0= OR
-        _PT-PO-A @ 16 + _PT-U64@ 0= OR IF FALSE EXIT THEN
-        _PT-PO-A @ 24 + L@ _PT-PO-A @ 32 + L@ _PT-UADD?
-        0= IF DROP FALSE EXIT THEN
-        _PT-PO-S @ _PT.S.COLS @ U> IF FALSE EXIT THEN
-        _PT-PO-A @ 28 + L@ _PT-PO-A @ 36 + L@ _PT-UADD?
-        0= IF DROP FALSE EXIT THEN
-        _PT-PO-S @ _PT.S.ROWS @ U> IF FALSE EXIT THEN
-        _PT-PO-A @ 32 + L@ 0= _PT-PO-A @ 36 + L@ 0= OR IF FALSE EXIT THEN
-        _PT-PO-A @ 44 + L@ 3 INVERT AND 0= EXIT
+        _PT-PO-REGION-DEFINITION? EXIT
     THEN
     _PT-PO-TYPE @ _PT-M-REGION-DROP <> IF FALSE EXIT THEN
     _PT-PO-U @ 24 <> IF FALSE EXIT THEN
@@ -3934,47 +3995,63 @@ VARIABLE _PT-PO-NEXT-BYTES
     _PT-PO-A @ _PT-PO-U @ _PT-FRAME-PAYLOAD SWAP MOVE
     _PT-PO-SEND ;
 
-CREATE _PT-REGION-PAYLOAD 48 ALLOT
+CREATE _PT-REGION-PAYLOAD 64 ALLOT
 VARIABLE _PT-RG-TYPE
 VARIABLE _PT-RG-S
 VARIABLE _PT-RG-OWNER
 VARIABLE _PT-RG-GENERATION
 VARIABLE _PT-RG-ID
-VARIABLE _PT-RG-X
-VARIABLE _PT-RG-Y
-VARIABLE _PT-RG-COLS
-VARIABLE _PT-RG-ROWS
+VARIABLE _PT-RG-LOGICAL-X
+VARIABLE _PT-RG-LOGICAL-Y
+VARIABLE _PT-RG-LOGICAL-COLS
+VARIABLE _PT-RG-LOGICAL-ROWS
+VARIABLE _PT-RG-CLIP-X
+VARIABLE _PT-RG-CLIP-Y
+VARIABLE _PT-RG-CLIP-COLS
+VARIABLE _PT-RG-CLIP-ROWS
 VARIABLE _PT-RG-Z
 VARIABLE _PT-RG-FLAGS
 
-\ Stack: owner generation region x y cols rows z flags session type -- status
+\ Stack: owner generation region logical-x logical-y logical-cols logical-rows
+\        clip-x clip-y clip-cols clip-rows z flags session type -- status
 : _PT-REGION-WRITE
-    _PT-RG-TYPE ! _PT-RG-S ! _PT-RG-FLAGS ! _PT-RG-Z ! _PT-RG-ROWS !
-    _PT-RG-COLS ! _PT-RG-Y ! _PT-RG-X ! _PT-RG-ID !
+    _PT-RG-TYPE ! _PT-RG-S ! _PT-RG-FLAGS ! _PT-RG-Z !
+    _PT-RG-CLIP-ROWS ! _PT-RG-CLIP-COLS !
+    _PT-RG-CLIP-Y ! _PT-RG-CLIP-X !
+    _PT-RG-LOGICAL-ROWS ! _PT-RG-LOGICAL-COLS !
+    _PT-RG-LOGICAL-Y ! _PT-RG-LOGICAL-X ! _PT-RG-ID !
     _PT-RG-GENERATION ! _PT-RG-OWNER !
-    _PT-RG-X @ _PT-U32? 0= _PT-RG-Y @ _PT-U32? 0= OR
-    _PT-RG-COLS @ _PT-U32? 0= OR _PT-RG-ROWS @ _PT-U32? 0= OR
+    _PT-RG-LOGICAL-X @ _PT-RG-LOGICAL-COLS @ _PT-I32-EXTENT? 0=
+    _PT-RG-LOGICAL-Y @ _PT-RG-LOGICAL-ROWS @ _PT-I32-EXTENT? 0= OR
+    _PT-RG-CLIP-X @ _PT-U32? 0= OR _PT-RG-CLIP-Y @ _PT-U32? 0= OR
+    _PT-RG-CLIP-COLS @ _PT-U32? 0= OR _PT-RG-CLIP-ROWS @ _PT-U32? 0= OR
     _PT-RG-Z @ _PT-I32? 0= OR _PT-RG-FLAGS @ _PT-U32? 0= OR IF
         PT-S-INVALID EXIT
     THEN
-    _PT-REGION-PAYLOAD 48 0 FILL
+    _PT-REGION-PAYLOAD 64 0 FILL
     _PT-RG-OWNER @ _PT-REGION-PAYLOAD _PT-U64!
     _PT-RG-GENERATION @ _PT-REGION-PAYLOAD 8 + _PT-U64!
     _PT-RG-ID @ _PT-REGION-PAYLOAD 16 + _PT-U64!
-    _PT-RG-X @ _PT-REGION-PAYLOAD 24 + L!
-    _PT-RG-Y @ _PT-REGION-PAYLOAD 28 + L!
-    _PT-RG-COLS @ _PT-REGION-PAYLOAD 32 + L!
-    _PT-RG-ROWS @ _PT-REGION-PAYLOAD 36 + L!
-    _PT-RG-Z @ _PT-REGION-PAYLOAD 40 + L!
-    _PT-RG-FLAGS @ _PT-REGION-PAYLOAD 44 + L!
-    _PT-RG-TYPE @ _PT-REGION-PAYLOAD 48 _PT-RG-S @
+    _PT-RG-LOGICAL-X @ _PT-REGION-PAYLOAD 24 + L!
+    _PT-RG-LOGICAL-Y @ _PT-REGION-PAYLOAD 28 + L!
+    _PT-RG-LOGICAL-COLS @ _PT-REGION-PAYLOAD 32 + L!
+    _PT-RG-LOGICAL-ROWS @ _PT-REGION-PAYLOAD 36 + L!
+    _PT-RG-CLIP-X @ _PT-REGION-PAYLOAD 40 + L!
+    _PT-RG-CLIP-Y @ _PT-REGION-PAYLOAD 44 + L!
+    _PT-RG-CLIP-COLS @ _PT-REGION-PAYLOAD 48 + L!
+    _PT-RG-CLIP-ROWS @ _PT-REGION-PAYLOAD 52 + L!
+    _PT-RG-Z @ _PT-REGION-PAYLOAD 56 + L!
+    _PT-RG-FLAGS @ _PT-REGION-PAYLOAD 60 + L!
+    _PT-RG-TYPE @ _PT-REGION-PAYLOAD 64 _PT-RG-S @
         _PT-PRESENT-FIXED-OP ;
 
-\ Stack: owner generation region x y cols rows z flags session -- status
+\ Stack: owner generation region logical-x logical-y logical-cols logical-rows
+\        clip-x clip-y clip-cols clip-rows z flags session -- status
 : PT-REGION-DEFINE
     _PT-M-REGION-DEFINE _PT-REGION-WRITE ;
 
-\ Stack: owner generation region x y cols rows z flags session -- status
+\ Stack: owner generation region logical-x logical-y logical-cols logical-rows
+\        clip-x clip-y clip-cols clip-rows z flags session -- status
 : PT-REGION-REPLACE
     _PT-M-REGION-REPLACE _PT-REGION-WRITE ;
 
@@ -4222,10 +4299,10 @@ VARIABLE _PT-GR-GENERATION
 VARIABLE _PT-GR-OBJECT
 VARIABLE _PT-GR-REGION
 VARIABLE _PT-GR-PARENT
-VARIABLE _PT-GR-LEFT
-VARIABLE _PT-GR-TOP
-VARIABLE _PT-GR-RIGHT
-VARIABLE _PT-GR-BOTTOM
+VARIABLE _PT-GR-X
+VARIABLE _PT-GR-Y
+VARIABLE _PT-GR-COLS
+VARIABLE _PT-GR-ROWS
 VARIABLE _PT-GR-Z
 VARIABLE _PT-GR-VISIBLE
 VARIABLE _PT-GR-FG-RED
@@ -4269,12 +4346,8 @@ VARIABLE _PT-GR-PAYLOAD-U
     _PT-GR-S @ _PT-VALID-S? 0= IF FALSE EXIT THEN
     _PT-GR-OWNER @ 0= _PT-GR-GENERATION @ 0= OR
     _PT-GR-OBJECT @ 0= OR _PT-GR-REGION @ 0= OR IF FALSE EXIT THEN
-    _PT-GR-LEFT @ _PT-U32? 0= _PT-GR-TOP @ _PT-U32? 0= OR
-    _PT-GR-RIGHT @ _PT-U32? 0= OR _PT-GR-BOTTOM @ _PT-U32? 0= OR IF
-        FALSE EXIT
-    THEN
-    _PT-GR-LEFT @ _PT-GR-RIGHT @ U< 0=
-    _PT-GR-TOP @ _PT-GR-BOTTOM @ U< 0= OR IF FALSE EXIT THEN
+    _PT-GR-X @ _PT-GR-COLS @ _PT-I32-EXTENT? 0=
+    _PT-GR-Y @ _PT-GR-ROWS @ _PT-I32-EXTENT? 0= OR IF FALSE EXIT THEN
     _PT-GR-Z @ _PT-I32? 0= IF FALSE EXIT THEN
     _PT-GR-VISIBLE @ DUP 0<> SWAP 1 <> AND IF FALSE EXIT THEN
     _PT-GR-FG-RED @ _PT-GR-FG-GREEN @
@@ -4305,10 +4378,10 @@ VARIABLE _PT-GR-PAYLOAD-U
     _PT-GR-Z @ _PT-FRAME-PAYLOAD 28 + L!
     _PT-GR-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!
     _PT-GR-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
-    _PT-GR-LEFT @ _PT-FRAME-PAYLOAD 48 + L!
-    _PT-GR-TOP @ _PT-FRAME-PAYLOAD 52 + L!
-    _PT-GR-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!
-    _PT-GR-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L!
+    _PT-GR-X @ _PT-FRAME-PAYLOAD 48 + L!
+    _PT-GR-Y @ _PT-FRAME-PAYLOAD 52 + L!
+    _PT-GR-COLS @ _PT-FRAME-PAYLOAD 56 + L!
+    _PT-GR-ROWS @ _PT-FRAME-PAYLOAD 60 + L!
     _PT-GR-FG-RED @ _PT-FRAME-PAYLOAD 64 + C!
     _PT-GR-FG-GREEN @ _PT-FRAME-PAYLOAD 65 + C!
     _PT-GR-FG-BLUE @ _PT-FRAME-PAYLOAD 66 + C!
@@ -4341,7 +4414,7 @@ VARIABLE _PT-GR-PAYLOAD-U
     0 _PT-GR-S ! 0 _PT-GR-TYPE !
     0 _PT-GR-OWNER ! 0 _PT-GR-GENERATION !
     0 _PT-GR-OBJECT ! 0 _PT-GR-REGION ! 0 _PT-GR-PARENT !
-    0 _PT-GR-LEFT ! 0 _PT-GR-TOP ! 0 _PT-GR-RIGHT ! 0 _PT-GR-BOTTOM !
+    0 _PT-GR-X ! 0 _PT-GR-Y ! 0 _PT-GR-COLS ! 0 _PT-GR-ROWS !
     0 _PT-GR-Z ! 0 _PT-GR-VISIBLE !
     0 _PT-GR-FG-RED ! 0 _PT-GR-FG-GREEN !
     0 _PT-GR-FG-BLUE ! 0 _PT-GR-FG-ALPHA !
@@ -4352,7 +4425,7 @@ VARIABLE _PT-GR-PAYLOAD-U
     0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV !
     0 _PT-U8-A ! 0 _PT-U8-END ! 0 _PT-U8-B ! ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
 \        attrs text-a text-u session type -- status
 : _PT-GLYPH-RUN-WRITE
@@ -4362,19 +4435,19 @@ VARIABLE _PT-GR-PAYLOAD-U
     _PT-GR-BG-GREEN ! _PT-GR-BG-RED !
     _PT-GR-FG-ALPHA ! _PT-GR-FG-BLUE !
     _PT-GR-FG-GREEN ! _PT-GR-FG-RED !
-    _PT-GR-VISIBLE ! _PT-GR-Z ! _PT-GR-BOTTOM ! _PT-GR-RIGHT !
-    _PT-GR-TOP ! _PT-GR-LEFT ! _PT-GR-PARENT ! _PT-GR-REGION !
+    _PT-GR-VISIBLE ! _PT-GR-Z ! _PT-GR-ROWS ! _PT-GR-COLS !
+    _PT-GR-Y ! _PT-GR-X ! _PT-GR-PARENT ! _PT-GR-REGION !
     _PT-GR-OBJECT ! _PT-GR-GENERATION ! _PT-GR-OWNER !
     ['] _PT-GR-DEFINE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
     _PT-GR-SCRUB ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
 \        attrs text-a text-u session -- status
 : PT-GLYPH-RUN-DEFINE
     _PT-M-OBJECT-DEFINE _PT-GLYPH-RUN-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
 \        attrs text-a text-u session -- status
 : PT-GLYPH-RUN-REPLACE
@@ -4392,19 +4465,19 @@ VARIABLE _PT-OB-GENERATION
 VARIABLE _PT-OB-ID
 VARIABLE _PT-OB-REGION
 VARIABLE _PT-OB-PARENT
-VARIABLE _PT-OB-LEFT
-VARIABLE _PT-OB-TOP
-VARIABLE _PT-OB-RIGHT
-VARIABLE _PT-OB-BOTTOM
+VARIABLE _PT-OB-X
+VARIABLE _PT-OB-Y
+VARIABLE _PT-OB-COLS
+VARIABLE _PT-OB-ROWS
 VARIABLE _PT-OB-Z
 VARIABLE _PT-OB-VISIBLE
 VARIABLE _PT-OB-PAYLOAD-U
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        session message-type object-kind --
 : _PT-OBJECT-COMMON!
     _PT-OB-KIND ! _PT-OB-TYPE ! _PT-OB-S ! _PT-OB-VISIBLE !
-    _PT-OB-Z ! _PT-OB-BOTTOM ! _PT-OB-RIGHT ! _PT-OB-TOP ! _PT-OB-LEFT !
+    _PT-OB-Z ! _PT-OB-ROWS ! _PT-OB-COLS ! _PT-OB-Y ! _PT-OB-X !
     _PT-OB-PARENT ! _PT-OB-REGION ! _PT-OB-ID !
     _PT-OB-GENERATION ! _PT-OB-OWNER ! ;
 
@@ -4420,12 +4493,8 @@ VARIABLE _PT-OB-PAYLOAD-U
     _PT-OB-TYPE @ DUP _PT-M-OBJECT-DEFINE =
     SWAP _PT-M-OBJECT-REPLACE = OR 0= IF FALSE EXIT THEN
     _PT-OB-KIND @ DUP 1 U< SWAP 9 U> OR IF FALSE EXIT THEN
-    _PT-OB-LEFT @ _PT-U32? 0= _PT-OB-TOP @ _PT-U32? 0= OR
-    _PT-OB-RIGHT @ _PT-U32? 0= OR _PT-OB-BOTTOM @ _PT-U32? 0= OR IF
-        FALSE EXIT
-    THEN
-    _PT-OB-LEFT @ _PT-OB-RIGHT @ U< 0=
-    _PT-OB-TOP @ _PT-OB-BOTTOM @ U< 0= OR IF FALSE EXIT THEN
+    _PT-OB-X @ _PT-OB-COLS @ _PT-I32-EXTENT? 0=
+    _PT-OB-Y @ _PT-OB-ROWS @ _PT-I32-EXTENT? 0= OR IF FALSE EXIT THEN
     _PT-OB-Z @ _PT-I32? 0= IF FALSE EXIT THEN
     _PT-OB-VISIBLE @ _PT-OBJECT-BOOL? ;
 
@@ -4446,10 +4515,10 @@ VARIABLE _PT-OB-PAYLOAD-U
     _PT-OB-Z @ _PT-FRAME-PAYLOAD 28 + L!
     _PT-OB-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!
     _PT-OB-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
-    _PT-OB-LEFT @ _PT-FRAME-PAYLOAD 48 + L!
-    _PT-OB-TOP @ _PT-FRAME-PAYLOAD 52 + L!
-    _PT-OB-RIGHT @ _PT-FRAME-PAYLOAD 56 + L!
-    _PT-OB-BOTTOM @ _PT-FRAME-PAYLOAD 60 + L! ;
+    _PT-OB-X @ _PT-FRAME-PAYLOAD 48 + L!
+    _PT-OB-Y @ _PT-FRAME-PAYLOAD 52 + L!
+    _PT-OB-COLS @ _PT-FRAME-PAYLOAD 56 + L!
+    _PT-OB-ROWS @ _PT-FRAME-PAYLOAD 60 + L! ;
 
 \ Stack: common-prefix session message-type -- status
 : _PT-GROUP-WRITE
@@ -4461,12 +4530,12 @@ VARIABLE _PT-OB-PAYLOAD-U
     _PT-OBJECT-COMMON-PAYLOAD!
     _PT-PO-SEND ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        session -- status
 : PT-GROUP-DEFINE
     _PT-M-OBJECT-DEFINE _PT-GROUP-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        session -- status
 : PT-GROUP-REPLACE
     _PT-M-OBJECT-REPLACE _PT-GROUP-WRITE ;
@@ -4567,13 +4636,13 @@ VARIABLE _PT-PL-MAX-SOURCE-U
     ['] _PT-POLYLINE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
     _PT-POLYLINE-SCRUB ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        stroke-width red green blue alpha path-flags points-a points-u session
 \        -- status
 : PT-POLYLINE-DEFINE
     _PT-M-OBJECT-DEFINE _PT-POLYLINE-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        stroke-width red green blue alpha path-flags points-a points-u session
 \        -- status
 : PT-POLYLINE-REPLACE
@@ -4607,12 +4676,12 @@ VARIABLE _PT-IM-OPACITY
     _PT-IM-OPACITY @ _PT-FRAME-PAYLOAD 76 + C!
     _PT-PO-SEND ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        resource fit opacity session -- status
 : PT-IMAGE-DEFINE
     _PT-M-OBJECT-DEFINE _PT-IMAGE-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        resource fit opacity session -- status
 : PT-IMAGE-REPLACE
     _PT-M-OBJECT-REPLACE _PT-IMAGE-WRITE ;
@@ -4743,14 +4812,14 @@ VARIABLE _PT-RO-MIN-FORMATTED-U
     ['] _PT-READOUT-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
     _PT-READOUT-SCRUB ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
 \        format decimal-places initial-value scale unit-a unit-u session
 \        -- status
 : PT-READOUT-DEFINE
     _PT-M-OBJECT-DEFINE _PT-READOUT-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
 \        format decimal-places initial-value scale unit-a unit-u session
 \        -- status
@@ -4819,13 +4888,13 @@ VARIABLE _PT-MT-VALUE
     _PT-MT-VALUE @ _PT-FRAME-PAYLOAD 96 + _PT-U64!
     _PT-PO-SEND ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
 \        orientation meter-flags minimum maximum initial-value session -- status
 : PT-METER-DEFINE
     _PT-M-OBJECT-DEFINE _PT-METER-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        fg-red fg-green fg-blue fg-alpha bg-red bg-green bg-blue bg-alpha
 \        orientation meter-flags minimum maximum initial-value session -- status
 : PT-METER-REPLACE
@@ -4882,14 +4951,14 @@ VARIABLE _PT-STO-SHAPE
     _PT-STO-SHAPE @ _PT-FRAME-PAYLOAD 80 + L!
     _PT-PO-SEND ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        inactive-red inactive-green inactive-blue inactive-alpha
 \        active-red active-green active-blue active-alpha initial-value shape
 \        session -- status
 : PT-STATUS-DEFINE
     _PT-M-OBJECT-DEFINE _PT-STATUS-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        inactive-red inactive-green inactive-blue inactive-alpha
 \        active-red active-green active-blue active-alpha initial-value shape
 \        session -- status
@@ -4953,13 +5022,13 @@ VARIABLE _PT-PLO-FLAGS
     _PT-PLO-FLAGS @ _PT-FRAME-PAYLOAD 96 + L!
     _PT-PO-SEND ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        series minimum maximum line-red line-green line-blue line-alpha
 \        fill-red fill-green fill-blue fill-alpha plot-flags session -- status
 : PT-PLOT-DEFINE
     _PT-M-OBJECT-DEFINE _PT-PLOT-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        series minimum maximum line-red line-green line-blue line-alpha
 \        fill-red fill-green fill-blue fill-alpha plot-flags session -- status
 : PT-PLOT-REPLACE
@@ -5026,14 +5095,14 @@ VARIABLE _PT-WF-FLAGS
     _PT-WF-FLAGS @ _PT-FRAME-PAYLOAD 104 + L!
     _PT-PO-SEND ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        series minimum maximum trace-red trace-green trace-blue trace-alpha
 \        zero-red zero-green zero-blue zero-alpha zero-value waveform-flags
 \        session -- status
 : PT-WAVEFORM-DEFINE
     _PT-M-OBJECT-DEFINE _PT-WAVEFORM-WRITE ;
 
-\ Stack: owner generation object region parent left top right bottom z visible
+\ Stack: owner generation object region parent x y cols rows z visible
 \        series minimum maximum trace-red trace-green trace-blue trace-alpha
 \        zero-red zero-green zero-blue zero-alpha zero-value waveform-flags
 \        session -- status
@@ -5121,10 +5190,10 @@ VARIABLE _PT-CT-Z
 VARIABLE _PT-CT-REGION
 VARIABLE _PT-CT-PARENT
 VARIABLE _PT-CT-ORDER
-VARIABLE _PT-CT-LEFT
-VARIABLE _PT-CT-TOP
-VARIABLE _PT-CT-RIGHT
-VARIABLE _PT-CT-BOTTOM
+VARIABLE _PT-CT-X
+VARIABLE _PT-CT-Y
+VARIABLE _PT-CT-COLS
+VARIABLE _PT-CT-ROWS
 VARIABLE _PT-CT-LABEL-A
 VARIABLE _PT-CT-LABEL-U
 VARIABLE _PT-CT-SHORTCUT-A
@@ -5175,13 +5244,15 @@ VARIABLE _PT-CT-TU
     TRUE ;
 
 : _PT-CT-ROOT-BOUNDS?  ( -- flag )
-    _PT-CT-LEFT @ _PT-CT-RIGHT @ U<
-    _PT-CT-TOP @ _PT-CT-BOTTOM @ U< AND ;
+    _PT-CT-X @ _PT-CT-COLS @ _PT-I32-EXTENT?
+    _PT-CT-Y @ _PT-CT-ROWS @ _PT-I32-EXTENT? AND ;
+
+: _PT-CT-BOUNDS-ABSENT?  ( -- flag )
+    _PT-CT-X @ _PT-CT-Y @ OR _PT-CT-COLS @ OR _PT-CT-ROWS @ OR 0= ;
 
 : _PT-CT-DESCENDANT?  ( -- flag )
     _PT-CT-PARENT @ 0<> _PT-CT-Z @ 0= AND
-    _PT-CT-LEFT @ _PT-CT-TOP @ OR
-    _PT-CT-RIGHT @ OR _PT-CT-BOTTOM @ OR 0= AND ;
+    _PT-CT-BOUNDS-ABSENT? AND ;
 
 : _PT-CT-COLLECTION-KIND?  ( kind -- flag )
     PT-CONTROL-TEXT-AREA PT-CONTROL-TAB 1+ WITHIN ;
@@ -5241,11 +5312,10 @@ VARIABLE _PT-CT-TU
     _PT-CT-ID @ 0= OR _PT-CT-REGION @ 0= OR IF FALSE EXIT THEN
     _PT-CT-KIND @ _PT-U16? 0= _PT-CT-STATE @ _PT-U16? 0= OR
     _PT-CT-Z @ _PT-I32? 0= OR IF FALSE EXIT THEN
-    _PT-CT-ORDER @ _PT-U32? 0=
-    _PT-CT-LEFT @ _PT-U32? 0= OR
-    _PT-CT-TOP @ _PT-U32? 0= OR
-    _PT-CT-RIGHT @ _PT-U32? 0= OR
-    _PT-CT-BOTTOM @ _PT-U32? 0= OR IF FALSE EXIT THEN
+    _PT-CT-ORDER @ _PT-U32? 0= IF FALSE EXIT THEN
+    _PT-CT-BOUNDS-ABSENT? 0= IF
+        _PT-CT-ROOT-BOUNDS? 0= IF FALSE EXIT THEN
+    THEN
     _PT-CT-LABEL-U @ _PT-U32? 0=
     _PT-CT-SHORTCUT-U @ _PT-U32? 0= OR
     _PT-CT-CONTENT-U @ _PT-U32? 0= OR IF FALSE EXIT THEN
@@ -5279,10 +5349,10 @@ VARIABLE _PT-CT-TU
     _PT-CT-REGION @ _PT-FRAME-PAYLOAD 32 + _PT-U64!
     _PT-CT-PARENT @ _PT-FRAME-PAYLOAD 40 + _PT-U64!
     _PT-CT-ORDER @ _PT-FRAME-PAYLOAD 48 + L!
-    _PT-CT-LEFT @ _PT-FRAME-PAYLOAD 52 + L!
-    _PT-CT-TOP @ _PT-FRAME-PAYLOAD 56 + L!
-    _PT-CT-RIGHT @ _PT-FRAME-PAYLOAD 60 + L!
-    _PT-CT-BOTTOM @ _PT-FRAME-PAYLOAD 64 + L!
+    _PT-CT-X @ _PT-FRAME-PAYLOAD 52 + L!
+    _PT-CT-Y @ _PT-FRAME-PAYLOAD 56 + L!
+    _PT-CT-COLS @ _PT-FRAME-PAYLOAD 60 + L!
+    _PT-CT-ROWS @ _PT-FRAME-PAYLOAD 64 + L!
     _PT-CT-LABEL-U @ _PT-FRAME-PAYLOAD 68 + L!
     _PT-CT-SHORTCUT-U @ _PT-FRAME-PAYLOAD 72 + L!
     _PT-CT-CONTENT-U @ _PT-FRAME-PAYLOAD 76 + L!
@@ -5324,7 +5394,7 @@ VARIABLE _PT-CT-TU
     0 _PT-CT-OWNER ! 0 _PT-CT-GENERATION ! 0 _PT-CT-ID !
     0 _PT-CT-KIND ! 0 _PT-CT-STATE ! 0 _PT-CT-Z !
     0 _PT-CT-REGION ! 0 _PT-CT-PARENT ! 0 _PT-CT-ORDER !
-    0 _PT-CT-LEFT ! 0 _PT-CT-TOP ! 0 _PT-CT-RIGHT ! 0 _PT-CT-BOTTOM !
+    0 _PT-CT-X ! 0 _PT-CT-Y ! 0 _PT-CT-COLS ! 0 _PT-CT-ROWS !
     0 _PT-CT-LABEL-A ! 0 _PT-CT-LABEL-U !
     0 _PT-CT-SHORTCUT-A ! 0 _PT-CT-SHORTCUT-U !
     0 _PT-CT-CONTENT-A ! 0 _PT-CT-CONTENT-U !
@@ -5333,14 +5403,14 @@ VARIABLE _PT-CT-TU
     0 _PT-U8-A ! 0 _PT-U8-END ! 0 _PT-U8-B ! ;
 
 \ Stack: owner generation control kind state z region parent order
-\        left top right bottom label-a label-u shortcut-a shortcut-u
+\        x y cols rows label-a label-u shortcut-a shortcut-u
 \        content-a content-u session type -- status
 : _PT-CONTROL-WRITE
     _PT-CT-TYPE ! _PT-CT-S !
     _PT-CT-CONTENT-U ! _PT-CT-CONTENT-A !
     _PT-CT-SHORTCUT-U ! _PT-CT-SHORTCUT-A !
     _PT-CT-LABEL-U ! _PT-CT-LABEL-A !
-    _PT-CT-BOTTOM ! _PT-CT-RIGHT ! _PT-CT-TOP ! _PT-CT-LEFT !
+    _PT-CT-ROWS ! _PT-CT-COLS ! _PT-CT-Y ! _PT-CT-X !
     _PT-CT-ORDER ! _PT-CT-PARENT ! _PT-CT-REGION ! _PT-CT-Z !
     _PT-CT-STATE ! _PT-CT-KIND ! _PT-CT-ID !
     _PT-CT-GENERATION ! _PT-CT-OWNER !
@@ -5348,13 +5418,13 @@ VARIABLE _PT-CT-TU
     _PT-CT-SCRUB ;
 
 \ Stack: owner generation control kind state z region parent order
-\        left top right bottom label-a label-u shortcut-a shortcut-u
+\        x y cols rows label-a label-u shortcut-a shortcut-u
 \        content-a content-u session -- status
 : PT-CONTROL-DEFINE
     _PT-M-CONTROL-DEFINE _PT-CONTROL-WRITE ;
 
 \ Stack: owner generation control kind state z region parent order
-\        left top right bottom label-a label-u shortcut-a shortcut-u
+\        x y cols rows label-a label-u shortcut-a shortcut-u
 \        content-a content-u session -- status
 : PT-CONTROL-REPLACE
     _PT-M-CONTROL-REPLACE _PT-CONTROL-WRITE ;

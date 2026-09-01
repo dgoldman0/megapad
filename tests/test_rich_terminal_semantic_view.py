@@ -54,7 +54,7 @@ from rich_terminal.update_authority import TerminalGeometry
 SESSION_ID = 0x1020304050607080
 PRESENTATION_EPOCH = 3
 GEOMETRY = TerminalGeometry(24, 12, 7)
-FULL_BOUNDS = ObjectBounds(0, 0, UINT32_MAX, 0x18000000)
+FULL_BOUNDS = ObjectBounds(0, 0, 24, 2)
 WHITE = RGBA(255, 255, 255, 255)
 BLUE = RGBA(10, 40, 120, 255)
 
@@ -77,6 +77,10 @@ def _region(
     return RegionDefinition(
         owner,
         region_id,
+        0,
+        0,
+        GEOMETRY.cols,
+        GEOMETRY.rows,
         0,
         0,
         GEOMETRY.cols,
@@ -631,7 +635,9 @@ def test_semantic_draw_dtos_reject_duplicate_ids_within_a_menu_tree():
 
 
 def test_semantic_draw_plane_rejects_duplicate_ids_across_owner_regions():
-    first = RetainedRegionDraw(7, 2, 1, 0, 0, 1, 1, 0, False, (_menu_bar_draw(1),))
+    first = RetainedRegionDraw(
+        7, 2, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, False, (_menu_bar_draw(1),)
+    )
     area = TextAreaDraw(
         1,
         ControlState.VISIBLE | ControlState.ENABLED,
@@ -640,7 +646,9 @@ def test_semantic_draw_plane_rejects_duplicate_ids_across_owner_regions():
         FULL_BOUNDS,
         _text_area_content(),
     )
-    second = RetainedRegionDraw(7, 2, 2, 1, 0, 1, 1, 1, False, (area,))
+    second = RetainedRegionDraw(
+        7, 2, 2, 1, 0, 1, 1, 0, 0, 0, 0, 1, False, (area,)
+    )
 
     with pytest.raises(ValueError, match="owner semantic control IDs are duplicated"):
         RetainedDrawPlane(True, True, (first, second))

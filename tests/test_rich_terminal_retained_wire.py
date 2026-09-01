@@ -627,10 +627,14 @@ def test_region_definition_codec_enforces_exact_scalar_and_flag_contract():
         UINT64_MAX,
         UINT64_MAX,
         UINT64_MAX,
-        UINT32_MAX - 1,
-        UINT32_MAX - 1,
+        (1 << 31) - 1,
+        (1 << 31) - 1,
         1,
         1,
+        0,
+        0,
+        0,
+        0,
         -(1 << 31),
         0x3,
     )
@@ -671,7 +675,7 @@ def test_glyph_run_object_define_empty_text_has_exact_eighty_byte_payload():
 
     payload = encode_object_definition(definition)
     expected = struct.pack(
-        "<QQQHHiQQIIII4B4BHHI",
+        "<QQQHHiQQiiII4B4BHHI",
         definition.owner_id,
         definition.owner_generation,
         definition.object_id,
@@ -680,10 +684,10 @@ def test_glyph_run_object_define_empty_text_has_exact_eighty_byte_payload():
         definition.z_order,
         definition.region_id,
         definition.parent_object_id,
-        definition.bounds.left,
-        definition.bounds.top,
-        definition.bounds.right,
-        definition.bounds.bottom,
+        definition.bounds.cell_x,
+        definition.bounds.cell_y,
+        definition.bounds.cell_cols,
+        definition.bounds.cell_rows,
         0x41,
         0x42,
         0x43,
@@ -853,7 +857,7 @@ def test_image_object_oracles_and_exact_body_round_trip_without_scene_state():
         ImageBody(9, ImageFit.COVER, 127),
     )
     expected = struct.pack(
-        "<QQQHHiQQIIIIQIB3x",
+        "<QQQHHiQQiiIIQIB3x",
         1,
         2,
         3,

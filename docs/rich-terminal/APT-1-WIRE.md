@@ -215,7 +215,7 @@ reset exchange. Model revisions and transaction IDs are scoped to that epoch
 and do not provide authorization. An enabled additive rich-terminal
 profile may define additional transaction families only by sharing this one
 transaction-ID and model-revision domain; it may not create a parallel commit
-clock. `APT-1-RETAINED-1-2026-08-24` uses that extension rule.
+clock. `APT-1-RETAINED-1-2026-09-01` uses that extension rule.
 
 ## 7. Credit and bounded admission
 
@@ -661,7 +661,7 @@ Message ranges are reserved as follows:
 
 Reservation does not define a payload or grant a capability. Those families
 remain outside the CELL-1 implementation gate. The optional additive contract
-`APT-1-RETAINED-1-2026-08-24` defines selected IDs in `000a`–`000c`,
+`APT-1-RETAINED-1-2026-09-01` defines selected IDs in `000a`–`000c`,
 `0205`, `1000`–`1003`, `2000`–`2024`, `3000`–`3003`, `4000`–`4002`, and
 `8000`–`8002` only after its deterministic discovery succeeds. Feature bit 8
 `RET_CONTROLS` gates `CONTROL_DEFINE`, `CONTROL_REPLACE`, `CONTROL_DROP`, and
@@ -675,13 +675,14 @@ evidence that the retained semantic-control family crossed the rich path.
 
 The retained control mutations use `CONTROL_DEFINE` (`4000`),
 `CONTROL_REPLACE` (`4001`), and `CONTROL_DROP` (`4002`). DEFINE and REPLACE
-begin with the exact 80-byte prefix `<QQQHHiQQIIIIIIII>` carrying owner ID,
+begin with the exact 80-byte prefix `<QQQHHiQQIiiIIIII>` carrying owner ID,
 owner generation, independent control ID, kind, state, z-order, region ID,
-parent control ID, sibling order, optional UNORM32 bounds, label byte count,
-shortcut byte count, and semantic-content byte count; label bytes, shortcut
-bytes, and then the optional content body follow without padding. REPLACE
-resends that complete record with the kind-specific immutable and mutable field
-rules. DROP is exact `<QQQ>`. RETAINED-1 Section 9.1 and
+parent control ID, sibling order, optional CELL_RECT32 origin/extents, label
+byte count, shortcut byte count, and semantic-content byte count; label bytes,
+shortcut bytes, and then the optional content body follow without padding. The
+all-zero rectangle is canonical absence. REPLACE resends that complete record
+with the kind-specific immutable and mutable field rules. DROP is exact
+`<QQQ>`. RETAINED-1 Section 9.1 and
 `SEMANTIC-CONTENT-1.md` define the canonical menu, text, grid, and tab graph,
 content, replacement, and state rules.
 Controls have an independent ID high-water but share each owner's existing

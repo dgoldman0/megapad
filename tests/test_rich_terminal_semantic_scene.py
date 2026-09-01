@@ -47,7 +47,7 @@ from rich_terminal.update_authority import (
 SESSION_ID = 0x1020304050607080
 EPOCH = 3
 GEOMETRY = TerminalGeometry(24, 12, 0)
-FULL_BOUNDS = ObjectBounds(0, 0, UINT32_MAX, 0x18000000)
+FULL_BOUNDS = ObjectBounds(0, 0, 24, 2)
 
 
 def _policy(
@@ -131,7 +131,9 @@ def _install(clock, scene, disposition: CommitDisposition):
 
 
 def _region(owner):
-    return RegionDefinition(owner, 1, 0, 0, 24, 12, 3, True, True, 0)
+    return RegionDefinition(
+        owner, 1, 0, 0, 24, 12, 0, 0, 24, 12, 3, True, True, 0
+    )
 
 
 def _control(
@@ -437,7 +439,7 @@ def test_controls_and_graphical_objects_share_the_declared_object_quota():
             object_id=1,
             region_id=1,
             parent_object_id=0,
-            bounds=ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+            bounds=ObjectBounds(0, 0, 24, 12),
             z_order=0,
             visible=True,
             body=GlyphRunBody(

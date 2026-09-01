@@ -1,5 +1,5 @@
 {
-  "contract_id": "APT-1-RETAINED-1-2026-08-24",
+  "contract_id": "APT-1-RETAINED-1-2026-09-01",
   "base_contract_id": "APT-1-CELL-1-2026-08-24",
   "byte_order": "little-endian",
   "header": {
@@ -80,7 +80,7 @@
     "max_resource_chunk_bytes": 4096,
     "max_retained_transaction_bytes": 32768,
     "total_resource_bytes": 1048576,
-    "coordinate_format": 1,
+    "bounds_format": 2,
     "color_format": 1,
     "image_format": 1,
     "max_image_width": 256,
@@ -131,9 +131,9 @@
       "invariant": "full SoundLab scene commits hidden through REPLACE_START and REPLACE_CONTINUE, reveals at revision 3, then accepts an unchanged legacy CELL transaction at revision 4",
       "expected_credit_watermarks": [
         83164,
-        84164,
-        85054,
-        85290
+        84180,
+        85070,
+        85306
       ],
       "expected_global_revision": 4
     },
@@ -193,8 +193,8 @@
       "expected_credit_watermarks": [
         72104,
         72340,
-        72668,
-        73214
+        72684,
+        73230
       ],
       "expected_global_revision": 4
     },
@@ -208,8 +208,8 @@
       "invariant": "canonical full-width PRESENT CELL_REPLACE precedes hidden LAYOUT_START and zero-operation LAYOUT_CONTINUE reveal",
       "expected_credit_watermarks": [
         75368,
-        75616,
-        75776
+        75632,
+        75792
       ],
       "expected_global_revision": 7
     },
@@ -263,8 +263,8 @@
         103342,
         103418,
         103482,
-        103730,
-        104010
+        103746,
+        104026
       ],
       "expected_global_revision": 3
     },

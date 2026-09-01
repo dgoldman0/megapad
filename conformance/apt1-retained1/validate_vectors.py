@@ -23,7 +23,7 @@ from oracle_vectors import check_oracles
 from semantic_reducer import reduce_transcript
 
 
-CONTRACT_ID = "APT-1-RETAINED-1-2026-08-24"
+CONTRACT_ID = "APT-1-RETAINED-1-2026-09-01"
 BASE_CONTRACT_ID = "APT-1-CELL-1-2026-08-24"
 MAGIC = b"\xa5PT1"
 HEADER_BYTES = 40
@@ -171,7 +171,7 @@ CAPS_VALUES = {
 }
 
 FORMAT_VALUES = {
-    "coordinate_format": 1,
+    "bounds_format": 2,
     "color_format": 1,
     "image_format": 1,
     "max_image_width": 256,
@@ -206,8 +206,8 @@ RET_RESULT = struct.Struct("<HHIQQQQQ")
 OWNER_OPEN = struct.Struct("<QQIIIIQQQQ")
 PRESENT_BEGIN = struct.Struct("<QQQQIIIIIIII")
 PRESENT_COMMIT = struct.Struct("<QII")
-REGION = struct.Struct("<QQQIIIIiI")
-OBJECT_PREFIX = struct.Struct("<QQQHHiQQIIII")
+REGION = struct.Struct("<QQQiiIIIIIIiI")
+OBJECT_PREFIX = struct.Struct("<QQQHHiQQiiII")
 POLYLINE_BODY = struct.Struct("<II4BI")
 POINT = struct.Struct("<II")
 GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
@@ -329,7 +329,7 @@ def caps_payload() -> bytes:
 
 def formats_payload() -> bytes:
     return RET_FORMATS.pack(
-        FORMAT_VALUES["coordinate_format"],
+        FORMAT_VALUES["bounds_format"],
         FORMAT_VALUES["color_format"],
         FORMAT_VALUES["image_format"],
         FORMAT_VALUES["max_image_width"],
@@ -403,6 +403,10 @@ def region_payload(message: str, *, cols: int, rows: int) -> tuple[str, bytes]:
         cols,
         rows,
         0,
+        0,
+        cols,
+        rows,
+        0,
         0x3,
     )
 
@@ -412,10 +416,10 @@ def object_payload(
     object_type: int,
     body: bytes,
     *,
-    left: int,
-    top: int,
-    right: int,
-    bottom: int,
+    x: int,
+    y: int,
+    cols: int,
+    rows: int,
 ) -> bytes:
     return OBJECT_PREFIX.pack(
         OWNER_ID,
@@ -426,10 +430,10 @@ def object_payload(
         0,
         REGION_ID,
         0,
-        left,
-        top,
-        right,
-        bottom,
+        x,
+        y,
+        cols,
+        rows,
     ) + body
 
 
@@ -455,10 +459,10 @@ def readout_payload(initial_value: int = -1_200) -> bytes:
         READOUT_ID,
         OBJECT_TYPES["READOUT"],
         body,
-        left=0,
-        top=0,
-        right=0xFFFFFFFF,
-        bottom=0x2FFFFFFF,
+        x=0,
+        y=0,
+        cols=80,
+        rows=5,
     )
 
 
@@ -467,10 +471,10 @@ def group_payload() -> bytes:
         GROUP_ID,
         OBJECT_TYPES["GROUP"],
         b"",
-        left=0,
-        top=0,
-        right=0xFFFFFFFF,
-        bottom=0x2FFFFFFF,
+        x=0,
+        y=0,
+        cols=80,
+        rows=5,
     )
 
 
@@ -500,8 +504,8 @@ def polyline_payload() -> bytes:
         GROUP_ID,
         0,
         0,
-        0xFFFFFFFF,
-        0xFFFFFFFF,
+        80,
+        5,
     )
     return payload + body
 
@@ -531,8 +535,8 @@ def glyph_run_payload(text: bytes = b"SoundLab") -> bytes:
         GROUP_ID,
         0,
         0,
-        0xFFFFFFFF,
-        0xFFFFFFFF,
+        80,
+        5,
     )
     return payload + body
 
@@ -558,10 +562,10 @@ def meter_payload(initial_value: int = -1_200) -> bytes:
         METER_ID,
         OBJECT_TYPES["METER"],
         body,
-        left=0,
-        top=0x30000000,
-        right=0xFFFFFFFF,
-        bottom=0x47FFFFFF,
+        x=0,
+        y=5,
+        cols=80,
+        rows=4,
     )
 
 
@@ -584,10 +588,10 @@ def status_payload(initial_value: int = 0) -> bytes:
         STATUS_ID,
         OBJECT_TYPES["STATUS"],
         body,
-        left=0,
-        top=0x48000000,
-        right=0x1FFFFFFF,
-        bottom=0x5FFFFFFF,
+        x=0,
+        y=9,
+        cols=16,
+        rows=4,
     )
 
 
@@ -611,10 +615,10 @@ def plot_payload(series_id: int = SERIES_ID) -> bytes:
         PLOT_ID,
         OBJECT_TYPES["PLOT"],
         body,
-        left=0,
-        top=0x30000000,
-        right=0xFFFFFFFF,
-        bottom=0xFFFFFFFF,
+        x=0,
+        y=5,
+        cols=80,
+        rows=20,
     )
 
 
@@ -639,10 +643,10 @@ def waveform_payload() -> bytes:
         WAVEFORM_ID,
         OBJECT_TYPES["WAVEFORM"],
         body,
-        left=0,
-        top=0xB0000000,
-        right=0xFFFFFFFF,
-        bottom=0xFFFFFFFF,
+        x=0,
+        y=17,
+        cols=80,
+        rows=8,
     )
 
 
@@ -651,10 +655,10 @@ def image_payload() -> bytes:
         IMAGE_ID,
         OBJECT_TYPES["IMAGE"],
         IMAGE_BODY.pack(RESOURCE_ID, 1, 255),
-        left=0,
-        top=0,
-        right=0xFFFFFFFF,
-        bottom=0xFFFFFFFF,
+        x=0,
+        y=0,
+        cols=1,
+        rows=1,
     )
 
 
@@ -2794,7 +2798,7 @@ def validate_discovery(supported: Scenario, unsupported: Scenario) -> None:
         "RET_FORMATS fields",
         formats,
         (
-            FORMAT_VALUES["coordinate_format"],
+            FORMAT_VALUES["bounds_format"],
             FORMAT_VALUES["color_format"],
             FORMAT_VALUES["image_format"],
             FORMAT_VALUES["max_image_width"],
@@ -2924,7 +2928,21 @@ def validate_object_bodies(initial: Scenario) -> None:
     check_equal(
         "initial REGION_DEFINE fields",
         REGION.unpack(find_frames(initial, "REGION_DEFINE")[0].payload),
-        (OWNER_ID, OWNER_GENERATION, REGION_ID, 0, 0, 80, 25, 0, 3),
+        (
+            OWNER_ID,
+            OWNER_GENERATION,
+            REGION_ID,
+            0,
+            0,
+            80,
+            25,
+            0,
+            0,
+            80,
+            25,
+            0,
+            3,
+        ),
     )
     owner_values = OWNER_OPEN.unpack(find_frames(initial, "OWNER_OPEN")[0].payload)
     check_equal("SoundLab owner object/series quotas", owner_values[4:6], (12, 2))
@@ -2969,14 +2987,30 @@ def validate_object_bodies(initial: Scenario) -> None:
         (PLOT_ID, OBJECT_TYPES["PLOT"]),
         (WAVEFORM_ID, OBJECT_TYPES["WAVEFORM"]),
     )
-    for frame, (object_id, object_type) in zip(definitions, expected_ids_types, strict=True):
+    expected_bounds = (
+        (0, 0, 80, 5),
+        (0, 0, 80, 5),
+        (0, 0, 80, 5),
+        (0, 0, 80, 5),
+        (0, 5, 80, 4),
+        (0, 9, 16, 4),
+        (0, 5, 80, 20),
+        (0, 17, 80, 8),
+    )
+    for frame, (object_id, object_type), bounds in zip(
+        definitions,
+        expected_ids_types,
+        expected_bounds,
+        strict=True,
+    ):
         prefix = OBJECT_PREFIX.unpack_from(frame.payload)
         check_equal(f"object {object_id} authority", prefix[:3], (OWNER_ID, OWNER_GENERATION, object_id))
         check_equal(f"object {object_id} type", prefix[3], object_type)
         check_equal(f"object {object_id} visibility flags", prefix[4], 1)
         check_equal(f"object {object_id} region", prefix[6], REGION_ID)
-        if not prefix[8] < prefix[10] or not prefix[9] < prefix[11]:
-            fail(f"object {object_id} has noncanonical UNORM bounds")
+        check_equal(f"object {object_id} CELL_RECT32 bounds", prefix[8:12], bounds)
+        if prefix[10] == 0 or prefix[11] == 0:
+            fail(f"object {object_id} has a zero CELL_RECT32 extent")
 
     group_body = definitions[0].payload[OBJECT_PREFIX.size :]
     check_equal("GROUP exact empty body", group_body, b"")
@@ -3256,7 +3290,8 @@ def validate_resize(scenario: Scenario) -> None:
     check_equal("resize reveal disposition", PRESENT_COMMIT.unpack(layout_continue[-1].payload)[1], 1)
     region = REGION.unpack(find_frames(scenario, "REGION_REPLACE")[0].payload)
     check_equal("resize exact owner/region identity", region[:3], (OWNER_ID, OWNER_GENERATION, REGION_ID))
-    check_equal("resize region extent", region[3:7], (0, 0, 3, 2))
+    check_equal("resize region logical rect", region[3:7], (0, 0, 3, 2))
+    check_equal("resize region physical clip", region[7:11], (0, 0, 3, 2))
     check_equal(
         "resize transaction results",
         [TX_RESULT.unpack(frame.payload) for frame in find_frames(scenario, "TX_RESULT")],
@@ -3490,7 +3525,7 @@ def validate_struct_sizes() -> None:
         "OWNER_OPEN": (OWNER_OPEN.size, 64),
         "PRESENT_BEGIN": (PRESENT_BEGIN.size, 64),
         "PRESENT_COMMIT": (PRESENT_COMMIT.size, 16),
-        "REGION": (REGION.size, 48),
+        "REGION": (REGION.size, 64),
         "OBJECT_PREFIX": (OBJECT_PREFIX.size, 64),
         "POLYLINE_BODY": (POLYLINE_BODY.size, 16),
         "POINT": (POINT.size, 8),

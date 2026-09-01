@@ -60,7 +60,7 @@ their current ownership and behavior.
 ## Optional retained identity rule
 
 Retained families are not implemented by CELL-1. When the optional
-`APT-1-RETAINED-1-2026-08-24` discovery succeeds, their identity boundary is
+`APT-1-RETAINED-1-2026-09-01` discovery succeeds, their identity boundary is
 exactly `(session_id, presentation_epoch, owner_id, owner_generation,
 item_namespace, item_id)`. No component pointer, region address, opaque
 application key, or native Akashic instance address may appear on the wire.

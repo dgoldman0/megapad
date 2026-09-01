@@ -178,7 +178,7 @@ def _publish_image(
     hidden_lease = clock.reserve(TransactionFamily.PRESENT, 2, 1)
     retained.begin(hidden_lease, RetainedMode.REPLACE_START, GEOMETRY)
     retained.define_region(
-        RegionDefinition(owner, 1, 0, 0, 2, 2, 0, True, True, 0)
+        RegionDefinition(owner, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, True, True, 0)
     )
     retained.define_object(
         ObjectDefinition(
@@ -186,7 +186,7 @@ def _publish_image(
             object_id=1,
             region_id=1,
             parent_object_id=0,
-            bounds=ObjectBounds(0, 0, 0xFFFFFFFF, 0xFFFFFFFF),
+            bounds=ObjectBounds(0, 0, 2, 2),
             z_order=0,
             visible=True,
             body=ImageBody(1, ImageFit.CONTAIN, 255),
@@ -267,7 +267,7 @@ def test_retained_only_and_mixed_commits_share_or_swap_planes_as_one_view():
     retained_lease = clock.reserve(TransactionFamily.PRESENT, 2, 1)
     retained.begin(retained_lease, RetainedMode.REPLACE_START, GEOMETRY)
     retained.define_region(
-        RegionDefinition(owner, 1, 0, 0, 2, 2, 0, True, True, 0)
+        RegionDefinition(owner, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, True, True, 0)
     )
     retained_prepared = retained.prepare_commit(CommitDisposition.COMMIT)
     retained_composite = coordinator.prepare_commit(
@@ -500,7 +500,7 @@ def test_stale_retained_ledger_fails_before_clock_or_composite_publication():
     lease = clock.reserve(TransactionFamily.PRESENT, 2, 1)
     retained.begin(lease, RetainedMode.REPLACE_START, GEOMETRY)
     retained.define_region(
-        RegionDefinition(owner, 1, 0, 0, 2, 2, 0, True, True, 0)
+        RegionDefinition(owner, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, True, True, 0)
     )
     retained_prepared = retained.prepare_commit(CommitDisposition.COMMIT)
     prepared = coordinator.prepare_commit(lease, retained=retained_prepared)

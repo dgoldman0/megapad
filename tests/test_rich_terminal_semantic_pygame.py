@@ -10,6 +10,7 @@ from rich_terminal.apt1 import UINT32_MAX
 from rich_terminal.pygame_view import (
     ControlIdentity,
     PixelRect,
+    RegionOcclusion,
     composite_draw_plane,
     composite_draw_plane_result,
 )
@@ -82,8 +83,30 @@ class _GlyphFont:
         return glyph
 
 
-def _region(*draws, cols=30, rows=20, clipped=True):
-    return RetainedRegionDraw(11, 7, 1, 0, 0, cols, rows, 0, clipped, draws)
+def _region(
+    *draws,
+    cols=30,
+    rows=20,
+    clipped=True,
+    clip=None,
+    region_id=1,
+    z_order=0,
+):
+    if clip is None:
+        clip = (0, 0, cols, rows) if clipped else (0, 0, 0, 0)
+    return RetainedRegionDraw(
+        11,
+        7,
+        region_id,
+        0,
+        0,
+        cols,
+        rows,
+        *clip,
+        z_order,
+        clipped,
+        draws,
+    )
 
 
 def _plane(*regions):
@@ -96,7 +119,7 @@ def _item(control_id, order, label, shortcut="", *, state=VISIBLE | ENABLED):
 
 def _menu_bar(*, z_order=0, root_id=1, menu_id=2, bounds=None):
     if bounds is None:
-        bounds = ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX // 5)
+        bounds = ObjectBounds(0, 0, 30, 4)
     file_menu = MenuDraw(
         menu_id,
         VISIBLE | ENABLED | ControlState.OPEN | ControlState.SELECTED,
@@ -232,13 +255,102 @@ def test_hit_geometry_is_deterministic_and_reverse_painter_order_wins():
     assert first.hit_test(*point).identity.control_id == 21
 
 
+@pytest.mark.parametrize(
+    "upper_draws",
+    (
+        (),
+        (
+            GlyphRunDraw(
+                90,
+                0,
+                ObjectBounds(0, 0, 1, 1),
+                RGBA(230, 240, 250, 255),
+                RGBA(10, 20, 30, 255),
+                0,
+                "X",
+            ),
+        ),
+    ),
+    ids=("empty", "non-control"),
+)
+def test_higher_region_coverage_blocks_lower_control_click_through(upper_draws):
+    pygame = pytest.importorskip("pygame")
+    lower = _region(_menu_bar(), region_id=1, z_order=0)
+    upper = _region(*upper_draws, region_id=2, z_order=1)
+
+    _, result = _render(pygame, _plane(lower, upper))
+
+    lower_file = _target(result, 2)
+    point = (
+        (lower_file.rect.left + lower_file.rect.right) // 2,
+        (lower_file.rect.top + lower_file.rect.bottom) // 2,
+    )
+    assert isinstance(result.hit_entries[-1], RegionOcclusion)
+    assert result.hit_entries[-1].region_id == 2
+    assert result.hit_test(*point) is None
+
+
+def test_clipped_higher_region_barrier_blocks_only_inside_its_physical_clip():
+    pygame = pytest.importorskip("pygame")
+    lower = _region(_menu_bar(), region_id=1, z_order=0)
+    upper = _region(
+        region_id=2,
+        z_order=1,
+        clip=(0, 0, 1, 4),
+    )
+
+    _, result = _render(pygame, _plane(lower, upper))
+
+    lower_file = _target(result, 2)
+    barrier = next(
+        entry
+        for entry in result.hit_entries
+        if isinstance(entry, RegionOcclusion) and entry.region_id == 2
+    )
+    y = (lower_file.rect.top + lower_file.rect.bottom) // 2
+    assert lower_file.rect.left < barrier.rect.right < lower_file.rect.right
+    assert barrier.rect.top <= y < barrier.rect.bottom
+    assert result.hit_test(barrier.rect.right - 1, y) is None
+    assert result.hit_test(barrier.rect.right, y).identity.control_id == 2
+
+
+def test_higher_region_control_wins_before_its_own_occlusion_barrier():
+    pygame = pytest.importorskip("pygame")
+    lower = _region(
+        _menu_bar(root_id=1, menu_id=2),
+        region_id=1,
+        z_order=0,
+    )
+    upper = _region(
+        _menu_bar(root_id=20, menu_id=21),
+        region_id=2,
+        z_order=1,
+    )
+
+    _, result = _render(pygame, _plane(lower, upper))
+
+    lower_file = _target(result, 2)
+    point = (
+        (lower_file.rect.left + lower_file.rect.right) // 2,
+        (lower_file.rect.top + lower_file.rect.bottom) // 2,
+    )
+    upper_barrier_index = next(
+        index
+        for index, entry in enumerate(result.hit_entries)
+        if isinstance(entry, RegionOcclusion) and entry.region_id == 2
+    )
+    upper_target_index = result.hit_entries.index(_target(result, 21))
+    assert upper_barrier_index < upper_target_index
+    assert result.hit_test(*point).identity.control_id == 21
+
+
 def test_popup_flips_above_and_clips_to_the_renderer_viewport():
     pygame = pytest.importorskip("pygame")
     bounds = ObjectBounds(
         0,
-        (UINT32_MAX * 3) // 4,
-        UINT32_MAX,
-        UINT32_MAX,
+        6,
+        12,
+        3,
     )
     long_menu = MenuDraw(
         2,
@@ -284,7 +396,7 @@ def test_legacy_glyph_composition_keeps_surface_return_and_empty_hit_map():
     glyph = GlyphRunDraw(
         1,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 2, 1),
         RGBA(230, 240, 250, 255),
         RGBA(10, 20, 30, 255),
         0,
@@ -360,7 +472,7 @@ def test_text_area_paints_exact_viewport_selection_and_persistent_caret():
         VISIBLE | ENABLED,
         0,
         0,
-        ObjectBounds(0, 0, (UINT32_MAX * 3) // 4, UINT32_MAX),
+        ObjectBounds(0, 0, 6, 4),
         content,
     )
     plane = _plane(_region(area, cols=8, rows=4))
@@ -433,7 +545,7 @@ def test_text_area_clip_does_not_reflow_or_relocate_an_offscreen_endpoint():
         VISIBLE | ENABLED,
         0,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 4, 1),
         content,
     )
     surface = pygame.Surface((40, 10))
@@ -519,7 +631,7 @@ def test_text_grid_maps_spans_and_states_without_inventing_item_hits():
         VISIBLE | ENABLED,
         0,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 12, 8),
         content,
     )
 
@@ -545,7 +657,7 @@ def test_tabset_owns_layout_and_emits_only_enabled_tab_targets():
         VISIBLE | ENABLED,
         0,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 12, 4),
         (
             TabDraw(51, VISIBLE | ENABLED | ControlState.SELECTED, 0, "Pad", ""),
             TabDraw(52, VISIBLE | ENABLED, 1, "Daybook", "D"),
@@ -581,7 +693,7 @@ def test_tabset_owns_layout_and_emits_only_enabled_tab_targets():
 
 def test_later_tabset_wins_hit_testing_in_painter_order():
     pygame = pytest.importorskip("pygame")
-    bounds = ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX)
+    bounds = ObjectBounds(0, 0, 12, 4)
     lower = TabSetDraw(
         70,
         VISIBLE | ENABLED,
@@ -657,7 +769,7 @@ def test_grid_rasterizes_only_visible_scalars_without_a_logical_cell_matrix():
         VISIBLE | ENABLED,
         0,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 4, 1),
         content,
     )
     font = CountingFont(pygame)
@@ -711,7 +823,7 @@ def test_grid_clips_extreme_u32_spans_before_constructing_pygame_rects():
         VISIBLE | ENABLED,
         0,
         0,
-        ObjectBounds(0, 0, UINT32_MAX, UINT32_MAX),
+        ObjectBounds(0, 0, 4, 1),
         content,
     )
     surface = pygame.Surface((40, 10))
