@@ -104,8 +104,9 @@ two's-complement values.  False is zero and true is
 `0xffffffffffffffff`.  Memory is byte addressed and little endian, including
 unaligned loads and stores.
 
-The admitted scalar vocabulary includes full-cell `XOR`, the ordinary `C!`
-byte store, and `OFF`. `C!` preflights exactly one addressed byte and stores
+The admitted scalar vocabulary includes full-cell `XOR`, wrapping `CELL+`
+(one eight-byte address step), the ordinary `C!` byte store, and `OFF`. `C!`
+preflights exactly one addressed byte and stores
 the low eight bits of its value, including for unaligned ordinary or admitted
 MMIO addresses; it does not widen into a cell transfer. `OFF` pops its address
 and performs the same exact unaligned eight-byte write as `!`, with a zero

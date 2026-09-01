@@ -578,6 +578,10 @@ def _cells(context: ExecutionContext) -> None:
     context.data.push(context.data.pop() << 3)
 
 
+def _cell_plus(context: ExecutionContext) -> None:
+    context.data.push(context.data.pop() + CELL_BYTES)
+
+
 def _depth(context: ExecutionContext) -> None:
     context.data.push(context.data.depth())
 
@@ -1685,6 +1689,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b",", lambda context: _comma(runtime, context)),
         (b"C,", lambda context: _c_comma(runtime, context)),
         (b"CELLS", _cells),
+        (b"CELL+", _cell_plus),
         (b"DEPTH", _depth),
         (b"BL", lambda context: context.data.push(32)),
         (b"WORD", lambda context: _word(runtime, context)),

@@ -169,6 +169,28 @@ def test_true_false_cr_and_talign_are_real_bios_words() -> None:
     assert runtime.dictionary.here == (original_here + 63) & ~63
 
 
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    (
+        (0, 8),
+        (0x1020_3040_5060_7080, 0x1020_3040_5060_7088),
+        (MASK64, 7),
+    ),
+)
+def test_cell_plus_advances_one_wrapping_machine_cell(
+    address: int,
+    expected: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(0xCAFE)
+    context.data.push(address)
+
+    runtime.execute("CELL+", context=context)
+
+    assert context.data.snapshot() == (0xCAFE, expected)
+
+
 def test_bank0_dictionary_reports_the_optional_user_interval_as_disabled() -> None:
     runtime = MegaForthRuntime()
 
