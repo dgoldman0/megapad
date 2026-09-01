@@ -1180,8 +1180,8 @@ block I/O, raw and bounded volume constructors, reference accounting, and
 relative volume I/O. Source load performs no media operation and explicitly
 initializes only `STORAGE-COOKIE`.
 
-The contiguous source frontier now ends at line 4669. Exact unchanged lines
-4100 through 4669 contain 570 lines and 18,979 bytes (SHA-256
+Exact unchanged lines 4100 through 4669 contain 570 lines and 18,979 bytes
+(SHA-256
 `bf46ad3acc9deaf380ac4229fe9196219fc0111df8d8f5a6650ffa95fb766112`).
 They publish 110 definitions through the locked public `MBR-SCAN`, `GPT-SCAN`,
 and `PART-SCAN` entry points: raw fallback, transactional MBR discovery, dual-
@@ -1197,8 +1197,52 @@ failure, mode-4 absence and contention, old-reference release, and a media
 generation swap during later array reads. The caller must provide pairwise-
 disjoint writable block descriptor, output, and workspace extents; the source
 does not prove those spans or make a scan a same-medium content snapshot.
-Line 4670 begins the next uncovered singleton storage binding and compatibility
-wrapper section.
+
+The contiguous source frontier now ends at line 4803. Exact unchanged lines
+4670 through 4803 contain 134 lines and 4,127 bytes (SHA-256
+`7ba6cb19989623363d2e78ac45ae81b1b7e4bb2ad51864005bfbb35b1f768199`).
+They publish 24 definitions through `DISK-INFO`: singleton raw storage
+binding, a borrowed selected-volume pointer, cache-validity gating, retained
+compatibility diagnostics, checked and aborting I/O wrappers, and the legacy
+Buffer sector helpers. Loading allocates singleton bodies without explicitly
+clearing their extents; virgin hosted memory supplies the descriptor-contract
+zeros in the qualified cold runtime. It creates zero-initialized diagnostic
+variables, points `FS-VOLUME` at still-invalid `SYSTEM-RAW-VOLUME`, and
+explicitly clears `FS-OK`, without opening media, transferring sectors,
+flushing, or printing.
+
+`STORAGE-OPEN` is a destructive management operation: it attempts
+`VOL-CLOSE`, attempts `BD-CLOSE`, discards both results, and only then calls
+`BD-OPEN`. An extra live volume can therefore leave the block object valid,
+clear the singleton raw volume, and make the new open fail `BD-E-BUSY`; there
+is no rollback. The word also does not clear `FS-OK`. Direct callers must
+invalidate caches first.
+`FS-VOLUME!` validates and borrows its argument without acquiring a reference;
+rejected selections preserve the old pointer and cache marker. An invalid
+selection with a nonzero `FS-OK` makes `STORAGE-ENSURE` clear the marker and
+return `VOL-E-STALE` without reopening; structurally valid stale selections
+fail closed on every later call until explicit replacement or reselection.
+
+Read/write compatibility wrappers retain raw status, actual completed count,
+and structured ior. A zero-ior short completion becomes raw status 14 plus
+`BD-E-INTERNAL`. Stale read, write, and selected-volume flush results clear
+`FS-OK`, whereas `_RAW-DISK-FLUSH?` does not. Both flush paths update status and
+ior but deliberately leave the last transfer's completed count. The state is
+runtime-global and unlocked, so concurrent calls need not expose a coherent
+three-cell snapshot. An abort preserves it without rolling back partial DMA or
+media effects.
+
+`B.SAVE` and `B.LOAD` are qualified only when the Buffer has a complete
+sector-rounded payload. Unchanged source submits `ceil(B.BYTES/512)*512` bytes
+from `B.DATA`, while ordinary constructors reserve only the logical payload;
+otherwise the operation exposes or overwrites up to 511 adjacent bytes. A
+zero-byte Buffer submits an invalid zero-sector request and aborts through the
+checked wrapper. `B.SAVE` performs no flush and proves no durability. Hosted
+acceptance uses an exact-sector Buffer and does not add hidden padding. After
+blank line 4804, line 4805 begins the next uncovered legacy file abstraction.
+`DISK-INFO` samples only ambient attachment presence; it neither opens nor
+validates the selected binding and does not report capabilities, staleness,
+`FS-OK`, or durability.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

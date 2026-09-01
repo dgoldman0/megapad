@@ -639,8 +639,8 @@ remains a raw aligned restore within its caller-owned stack span.
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–4669 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage objects, then raw/MBR/GPT partition discovery |
-| 4670 onward | Next uncovered frontier | Singleton raw storage binding and compatibility wrappers begin before the file abstraction |
+| 39–4803 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, hybrid exchange, HBW/XMEM allocation, dictionary indexing, userland partitioning, Arena, semantic `IDLE`, integer/FP Buffer operations, kernels and pipelines, checked storage objects, raw/MBR/GPT discovery, then singleton storage compatibility |
+| 4804 onward | Next uncovered frontier | A blank seam precedes the legacy file abstraction at line 4805 |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -814,9 +814,32 @@ byte routing. Fetches retain their input address on a late fault; stores have
 already consumed both inputs and retain any written low-byte prefix. Partition
 callers must supply mutually disjoint live block, output-volume, and writable
 workspace extents; unchanged source does not preflight or prove that geometry.
-Later slices continue at line 4670 through the singleton storage binding and
-files toward the persistent evaluator, ordinary checked module-loader surface,
-and deterministic cooperative task scheduler.
+The adjacent storage-compatibility fixture is exact unchanged `kdos.f` lines
+4670–4803: 134 lines, 4,127 bytes, and SHA-256
+`7ba6cb19989623363d2e78ac45ae81b1b7e4bb2ad51864005bfbb35b1f768199`.
+It publishes 24 definitions through `DISK-INFO` without opening or touching
+media at load time. Focused acceptance covers singleton replacement and
+explicit stale rebind, borrowed custom-volume selection, global transfer
+diagnostics, selected and raw checked wrappers, abort preservation,
+exact-sector Buffer save/load, and attachment reporting.
+
+The unchanged compatibility source retains important caller obligations.
+`STORAGE-OPEN` attempts and discards both close results before opening, so a
+busy block can leave the raw singleton cleared without rollback; it also does
+not clear `FS-OK`. `FS-VOLUME!` borrows rather than owns its selected
+descriptor. Management plus diagnostics are unlocked global state, and the
+three diagnostic cells are not a coherent snapshot under concurrent calls.
+Both flush wrappers leave the previous completed count, while raw flush alone
+does not clear `FS-OK` for a stale result. `B.SAVE` does not flush, and
+`B.SAVE`/`B.LOAD` submit a sector-rounded span even though ordinary Buffer
+allocation reserves only logical bytes. Hosted acceptance therefore uses an
+exact-sector payload instead of masking the possible 511-byte overrun with
+simulator padding. `DISK-INFO` reports only ambient attachment presence, not a
+usable or current selected binding.
+
+Later slices continue after blank line 4804 with the legacy file abstraction
+at line 4805, then toward the persistent evaluator, ordinary checked
+module-loader surface, and deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

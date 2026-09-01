@@ -152,6 +152,44 @@ unsigned.  A request is valid exactly when `count > 0`, `count <= length`, and
 is valid, zero-length requests are invalid, and arithmetic wraparound cannot
 turn an out-of-range request into an accepted one.
 
+## Singleton compatibility binding
+
+`SYSTEM-BD` and `SYSTEM-RAW-VOLUME` are KDOS-global, runtime-local raw recovery
+singletons. `FS-VOLUME` points either to that raw volume or to a
+caller-selected validated volume. This is a compatibility binding for ordinary
+KDOS file paths; it does not replace independently owned volumes used by
+Akashic VFS instances.
+
+`STORAGE-OPEN` attempts `VOL-CLOSE`, then `BD-CLOSE`, discards both close
+results, and only then attempts `BD-OPEN`. Replacement is destructive and is
+not rolled back if a later step fails. In particular, an extra live volume can
+make the block close busy after the raw singleton has already been cleared;
+the subsequent open then returns `BD-E-BUSY` while that extra volume and block
+remain live. The word publishes a new raw volume on success but does not clear
+`FS-OK`; a direct management caller must invalidate filesystem cache state
+before rebinding. `FS-VOLUME!` instead validates a current volume, publishes
+its pointer, and clears `FS-OK`. It borrows the descriptor without incrementing
+the parent reference count, so its owner must keep it live until selection
+changes.
+
+`STORAGE-ENSURE` lazily opens the singleton only when the selection is invalid
+and `FS-OK` is already zero. If the selection is invalid while `FS-OK` is
+nonzero, it clears the marker and returns `VOL-E-STALE` without opening; a
+later call may then open. A structurally valid but generation-stale selection
+continues to return stale until an explicit management operation replaces it.
+
+`DISK-IO-STATUS`, `DISK-IO-COMPLETED`, and `DISK-IO-IOR` are shared retained
+diagnostics for the compatibility wrappers. Reads and writes update all three;
+a zero-ior short completion is normalized to raw status 14 and
+`BD-E-INTERNAL`, retaining the actual completed count. Flushes update status
+and ior but preserve the preceding completed count. Stale read, write, and
+selected-volume flush results clear `FS-OK`; `_RAW-DISK-FLUSH?` does not. These
+cells, singleton management, selection lifetime, and diagnostic consumption
+are unlocked global state. Concurrent calls can expose a noncoherent mixture
+of the three diagnostics, so their caller must serialize them. The detailed
+compatibility surface and Buffer-sector caveats are recorded in the
+[KDOS reference](kdos-reference.md#7-storage--persistence).
+
 ## Generation safety and completion
 
 A descriptor's media generation is part of its authority.  Every operation

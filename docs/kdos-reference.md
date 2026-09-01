@@ -854,14 +854,15 @@ The contiguous hosted frontier now includes the complete unchanged userland
 and Arena sections plus Buffer's general `IDLE`, registry, constructors,
 inspection, Arena integration, integer/FP16/BF16 operations, the kernel
 registry and sample kernels, the pipeline engine, checked block-device and
-bounded-volume objects, and raw/MBR/GPT partition discovery through line 4669.
+bounded-volume objects, raw/MBR/GPT partition discovery, and the singleton
+storage-compatibility layer through line 4803.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
-guarded I/O, partition validation, and transactional publication are executable
-semantic behavior rather than reporting-only shims. The next uncovered source
-at line 4670 begins the singleton raw storage binding and compatibility
-wrappers.
+guarded I/O, partition validation, transactional publication, selected-volume
+lifecycle, and diagnostic wrappers are executable semantic behavior rather
+than reporting-only shims. After blank line 4804, the next uncovered source at
+line 4805 begins the legacy file abstraction.
 
 ---
 
@@ -1081,7 +1082,16 @@ through `PART-SCAN` in 570 lines and 18,979 bytes, with SHA-256
 `bf46ad3acc9deaf380ac4229fe9196219fc0111df8d8f5a6650ffa95fb766112`.
 They implement raw fallback, MBR and dual-copy GPT validation, checked mode-4
 CRC chaining, staged volume publication, and serialized public scanners. Line
-4670 begins the next uncovered singleton storage binding.
+4670 through 4803 then add all 24 singleton binding, compatibility I/O, Buffer
+sector-I/O helper, and status-display definitions through `DISK-INFO` in 134 lines
+and 4,127 bytes, with SHA-256
+`7ba6cb19989623363d2e78ac45ae81b1b7e4bb2ad51864005bfbb35b1f768199`.
+Load allocates the singleton bodies without explicitly clearing their extents;
+virgin hosted memory supplies the zeros required by their first-construction
+contract. It also creates zero-initialized diagnostic variables, points
+`FS-VOLUME` at the still-invalid `SYSTEM-RAW-VOLUME`, and explicitly clears
+`FS-OK`, all without touching storage. After blank line 4804, line 4805 begins
+the next uncovered legacy file abstraction.
 
 ---
 
@@ -1498,6 +1508,39 @@ currently qualified hosted frontier includes these public words unchanged:
 | `VOL-READ` / `VOL-WRITE` | `( dma lba count vol -- completed ior )` | Validate a relative request and translate it through the parent block device. |
 | `VOL-FLUSH` | `( vol -- ior )` | Flush through the validated parent. |
 
+The admitted compatibility layer binds ordinary KDOS storage users to one
+selected volume:
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `STORAGE-OPEN` | `( -- ior )` | Destructively replace `SYSTEM-BD` and `SYSTEM-RAW-VOLUME` with a raw view of the current attachment. |
+| `FS-VOLUME!` | `( vol -- ior )` | Select a valid, current caller-owned volume without acquiring a reference; success clears `FS-OK`. |
+| `STORAGE-ENSURE` | `( -- ior )` | Validate the selected volume, opening the singleton only for an invalid selection whose cache marker is already clear. |
+| `_RAW-DISK-READ?` / `_RAW-DISK-WRITE?` | `( dma lba count -- flag )` | Checked raw-controller compatibility I/O with global result diagnostics. |
+| `_RAW-DISK-FLUSH?` | `( -- flag )` | Checked raw-controller flush with global result diagnostics. |
+| `_DISK-READ?` / `_DISK-WRITE?` | `( dma lba count -- flag )` | Checked selected-volume I/O with global result diagnostics. |
+| `_DISK-FLUSH?` | `( -- flag )` | Checked selected-volume flush with global status and ior diagnostics. |
+| `_DISK-READ` / `_DISK-WRITE` | `( dma lba count -- )` | Abort on a false checked result while retaining diagnostics. |
+| `_DISK-FLUSH` | `( -- )` | Abort on a false checked flush while retaining diagnostics. |
+
+`STORAGE-OPEN` attempts `VOL-CLOSE` and then `BD-CLOSE`, discards both results,
+and only then attempts `BD-OPEN`; it is destructive and nontransactional. For
+example, an extra live volume reference leaves that volume and the block
+descriptor valid, clears the singleton raw volume, and makes the subsequent
+open return `BD-E-BUSY`. Nothing restores the old raw binding. `STORAGE-OPEN`
+also does not clear `FS-OK`: direct callers must invalidate filesystem cache
+state before rebinding. The ordinary later `FS-LOAD` and `FORMAT` paths do that
+themselves. `FS-VOLUME!` borrows rather than owns its selection, so the caller
+must keep that volume alive. A rejected selection leaves the previous pointer
+and cache marker unchanged.
+
+`STORAGE-ENSURE` deliberately fails closed when invalid storage is paired with
+a nonzero `FS-OK`: it clears the marker, returns `VOL-E-STALE`, and does not
+auto-open until a later call. A structurally valid but stale selected volume
+returns stale on every call until explicit replacement or reselection. These
+singleton management operations, the selected-volume lifetime, and their
+global diagnostics are not internally serialized.
+
 The range predicate is unsigned and subtraction-based: count must be nonzero,
 `count <= length`, and `lba <= length - count`. Bad descriptor precedes stale,
 which precedes range for ordinary checks. A valid descriptor's saved read-only
@@ -1515,14 +1558,31 @@ preflight the descriptor span itself. See the normative
 [block/volume contract](block-volume-contract.md) for layouts, structured ior
 fields, and lifetime rules.
 
-The hosted fixture ends at `VOL-FLUSH`; `B.SECTORS`, `B.SAVE`, and `B.LOAD`
-remain later source. Independently of hosted admission, their current source
-rounds the logical Buffer byte count up to whole sectors and passes `B.DATA`
-directly as DMA storage. Unless the Buffer payload already includes the full
-rounded sector tail, `B.SAVE` reads and `B.LOAD` writes up to 511 bytes beyond
-that payload. A zero-byte Buffer also produces a zero-sector request, which the
-checked layer rejects. This discrepancy is recorded here rather than hidden by
-a simulator-only buffer reservation.
+`DISK-IO-STATUS`, `DISK-IO-COMPLETED`, and `DISK-IO-IOR` retain the last
+compatibility result. Read and write wrappers publish all three values;
+nonzero ior takes precedence, while a zero-ior short completion is converted
+to raw status 14 plus `BD-E-INTERNAL` without losing the actual completed
+count. Flush wrappers replace status and ior but intentionally preserve the
+previous completed count. Stale read, write, and selected-volume flush results
+clear `FS-OK`; `_RAW-DISK-FLUSH?` does not. Aborting wrappers do not roll back
+partial DMA or media effects, and diagnostics remain readable after the abort.
+Concurrent calls can expose a mix of fields from different operations rather
+than a coherent diagnostic snapshot.
+
+`B.SECTORS` is admitted as the pure sector-rounding helper. `B.SAVE` and
+`B.LOAD` are admitted only when the Buffer has complete rounded backing: they
+pass `B.DATA` directly as DMA storage, while ordinary Buffer constructors
+reserve logical bytes rather than the complete sector tail. A
+non-sector-multiple save reads and load writes up to 511 adjacent bytes. A
+zero-byte Buffer produces a zero-sector request and aborts through the checked
+wrapper. Use an exact sector payload or separately prove that caller-owned
+backing includes the rounded tail. `B.SAVE` does not flush and is not a
+durability boundary. These discrepancies are retained and documented rather
+than hidden by a simulator-only buffer reservation.
+
+`DISK-INFO` samples ambient `DISK?` presence only. It neither opens nor
+validates the selected binding and says nothing about capabilities, staleness,
+`FS-OK`, or durability.
 
 ---
 
