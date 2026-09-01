@@ -36,7 +36,7 @@ every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
 The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 6510. It qualifies the initial MP64FS cache, derived geometry,
+`kdos.f` line 6724. It qualifies the initial MP64FS cache, derived geometry,
 bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
@@ -48,7 +48,8 @@ then the checked source compiler, nested two-extent filesystem `LOAD`,
 application loader, ANSI byte helpers, whole-file encryption, parent-byte
 subdirectory navigation/mutation, and the paged Documentation Browser through
 ordinary descriptors and `FREAD`/`FCLOSE`, followed by raw linked-header
-Dictionary Search.
+Dictionary Search and the task registry/synchronous run-to-completion
+executor.
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
 The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
@@ -927,8 +928,8 @@ untouched. No operation validates pool membership, alignment, allocation, or
 directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
 flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
 and deferred targets are global and unlocked. The contiguous hosted frontier
-continues through Dictionary Search at line 6510; its next seam is Scheduler &
-Tasks at line 6511.
+continues through the task registry/synchronous executor at line 6724; its
+next seam is Timer Preemption Setup at line 6725.
 
 ### Documentation Access
 

@@ -256,7 +256,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 6510.
+KDOS source frontier now ends at line 6724.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -267,10 +267,14 @@ contracts have an implementation and differential evidence.
 
 ## 5. Scheduling and time
 
-The target simulator uses a deterministic cooperative scheduler, not
-uncontrolled host threads. Given the same runnable set, yield sequence, clock,
-entropy, and ingress schedule, public task ordering and state repeat. The
-current one-core profile has not implemented that task scheduler yet.
+The target design calls for a deterministic cooperative scheduler rather than
+uncontrolled host threads: given the same runnable set, yield sequence, clock,
+entropy, and ingress schedule, public task ordering and state must repeat. The
+current one-core profile does not implement that target scheduler. It admits
+the unchanged KDOS registry and table-ordered synchronous executor: selected
+task XTs run inline to return on the caller's context. That behavior is
+deterministic, but it is neither host threading nor cooperative task
+scheduling.
 
 It does implement the narrower architectural `IDL` boundary needed by
 unchanged source. `run_until_blocked` detaches a compiled-word dispatch after
@@ -313,10 +317,14 @@ advance a clock. Interpreted source and nested host dispatch cannot yet detach
 their Python continuations, so a caller using those paths must prequeue enough
 input to avoid blocking.
 
-Task descriptors, per-task stacks, `PAUSE`, `TASK-YIELD`, `SCHEDULE`, exception
-ownership, and checkpoint behavior remain visible source semantics.  A future
-multicore profile must preserve publication order, generations, locks, and
-barriers, but it still does not qualify physical races or arbitration.
+Task descriptors, registry state, synchronous `SCHEDULE`, and the provisional
+checkpoint are now qualified source semantics. `TASK-STACKS` and the saved
+DSP/RSP fields are inert guest storage: execution never installs them. Active
+per-task data/return stacks, suspension and resumption, priority scheduling,
+task-local exception ownership, genuine `PAUSE`/`TASK-YIELD`, and preemption
+remain unimplemented. A future multicore profile must preserve publication
+order, generations, locks, and barriers, but it still does not qualify
+physical races or arbitration.
 
 Two eventual full-clock modes are permitted:
 
@@ -1353,7 +1361,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 6510. Exact unchanged lines
+The contiguous source frontier now ends at line 6724. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2123,8 +2131,45 @@ The raw readers validate nothing. A link cycle makes WORDS-LIKE unbounded;
 malformed name lengths can read or print beyond a header; an invalid link can
 fault after partial output; and failure retains global `IC-*`/`WL-*` state,
 transient pattern bytes, and any UART prefix. `.RECENT` remains count-bounded
-even if a link cycles. The next uncovered seam is Scheduler & Tasks at line
-6511.
+even if a link cycles.
+
+Exact unchanged lines 6511 through 6724 contain 214 LF records and 6,935
+bytes, with SHA-256
+`cc28cfab7033390f4efc885cc043feafecc136e913aa34cc6338f7ad1b6a1f4c`
+and Git blob `ccdee7bbf513495f25eb77ad4c0f13f63b07532c`. Their source-order ledger
+contains five constants, nine variables, 24 colon definitions, and one
+deferred `CORE-CHECKPOINT`, for 39 publications. Loading zeroes
+`TASK-COUNT`, `CURRENT-TASK`, `SCHED-RUNNING`, `PREEMPT-FLAG`, and
+`SPAWN-COUNT`, initializes `TIME-SLICE` to 50,000, and installs
+`_CORE-CHECKPOINT-BOOT`. It executes no task and touches no timer, UART, IDL,
+filesystem, or task stack. The variables reserve 2,175 bytes and the deferred
+word reserves one additional cell. `TASK-TABLE` occupies the intended 64
+bytes; `VARIABLE TASK-STACKS 2047 ALLOT` occupies 2,055 bytes, despite the
+source comment claiming 2,048.
+
+The admitted behavior is a fixed table and synchronous run-to-completion
+executor. `TASK` and `SPAWN` append ordinary 48-byte descriptors. DSP is a
+computed placeholder that is never installed, RSP is zero with no return-stack
+arena, and the stored name address remains zero. A selected XT executes on the
+caller's active data stack, return stack, loop frames, task identity, and
+exception context. Priority is stored and printed but never consulted;
+`FIND-READY` scans from table slot zero on every call. `SCHEDULE` runs that
+first READY task to return, then repeats. `SCHED-YIELD`/`YIELD` only mark
+`CURRENT-TASK` DONE and return to the next instruction in the same XT. The boot
+checkpoint merely clears a manually set global `PREEMPT-FLAG` and calls that
+non-suspending `YIELD`. No behavior in this prefix creates a private context,
+suspends a task, switches stacks, polls a timer, or preempts execution.
+
+DONE slots are never reclaimed and `TASK-COUNT` only increases. Once eight
+slots are registered, another `TASK` still appends an orphan descriptor and
+publishes its constant; another `SPAWN` appends an orphan and increments
+`SPAWN-COUNT`. Both compute a nominal DSP beyond the declared arena. `TASK`
+mutates the registry before parsing and publishing its constant, so a late
+source or dictionary fault retains that prefix. A task failure can retain a
+RUNNING descriptor, `SCHED-RUNNING = 1`, and stale `CURRENT-TASK`; success also
+does not clear `CURRENT-TASK`. Public counts, table cells, and descriptor
+addresses are not validated. The next clean seam is Timer Preemption Setup at
+line 6725; its first unavailable pseudo-BIOS service is `TIMER!` at line 6738.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

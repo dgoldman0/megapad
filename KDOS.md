@@ -83,13 +83,13 @@ myfile FREWIND                \ Reset cursor to 0
 HERE 128 myfile FREAD .       \ Read back, print bytes read
 FILES                         \ List registered files
 
-\ Scheduler & tasks
+\ Task registry and synchronous execution
 : my-work 99 . ;              \ Define task body
-' my-work 10 TASK my-task     \ Create task, priority 10
+' my-work 10 TASK my-task     \ Store task descriptor (priority is metadata)
 TASKS                         \ List all tasks
-SCHEDULE                      \ Run all READY tasks
+SCHEDULE                      \ Run READY entries serially in table order
 my-task T.INFO                \ Show task status (DONE)
-' my-work BG                  \ One-shot: spawn + schedule
+' my-work BG                  \ Spawn and execute before returning
 
 \ Interactive TUI
 SCREENS                       \ Enter full-screen TUI
@@ -185,9 +185,12 @@ secret boundary, or security proof.
 - **3 demo pipelines**: fill-sum, add-stats, threshold (with demo buffers)
 - **Storage & persistence**: Buffer save/load to disk, file abstraction layer
 - **File abstraction**: Sector-backed files with cursor I/O (up to 8 registered)
-- **Scheduler & tasks**: Cooperative multitasking with task registry (up to 8 tasks)
+- **Scheduler & tasks**: Fixed eight-entry registry with synchronous
+  table-ordered execution; no resumable cooperative task contexts
 - **Task lifecycle**: TASK, SPAWN, KILL, RESTART, BG, YIELD, SCHEDULE
-- **Timer preemption**: PREEMPT-ON/PREEMPT-OFF for timer-based preemption
+- **Timer controls**: PREEMPT-ON/PREEMPT-OFF configure a software gate and
+  timer registers, but the current source does not connect timer status to a
+  suspending task switch
 - **Interactive screens**: Full-screen ANSI TUI with 9 screens and keyboard navigation
 - **ANSI terminal**: ESC, CSI, AT-XY, PAGE, SGR colors, BOLD, DIM, REVERSE
 - **Screen system**: SCREENS entry point, RENDER-SCREEN, HANDLE-KEY event loop
@@ -278,14 +281,14 @@ complete; Akashic refactoring is a separate task in a user-selected worktree.
 - FWRITE / FREAD / FSEEK / FREWIND / FSIZE — cursor-based I/O
 - F.INFO, FILES — file introspection
 
-**Phase 3: Scheduler & Preemption** (✅ complete — v0.5)
+**Phase 3: Task Registry & Timer Controls** (source present; scheduler incomplete)
 - 6 BIOS timer/interrupt words: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
 - IVT slot 7 (IVEC_TIMER) wired with IRQ delivery in emulator/system.py
 - Task descriptor: 6-cell (48 bytes) — status, priority, xt, dsp, rsp, name
-- Task registry: up to 8 tasks, cooperative scheduling via SCHEDULE
+- Task registry: up to 8 table entries; `SCHEDULE` executes READY XTs inline
 - TASK, SPAWN, KILL, RESTART, BG — task lifecycle management
-- YIELD for cooperative release, FIND-READY for round-robin scan
-- Timer-based preemption: PREEMPT-ON / PREEMPT-OFF
+- `YIELD` marks DONE but continues the same XT; `FIND-READY` scans lowest slot
+- PREEMPT-ON / PREEMPT-OFF do not by themselves implement timer preemption
 - Introspection: T.INFO, TASKS, TASK-COUNT-READY
 
 **Phase 4: Interactive Screens** (✅ complete — v0.6)
@@ -1129,46 +1132,60 @@ only `COMPARE_LO` from `TIMER!`, unlike emulator/native and the documented
 
 **Additions needed**:
 
-### 5.4 Scheduler (IMPLEMENTED)
+### 5.4 Task Registry and Synchronous Executor
 
-The scheduler provides cooperative multitasking with a task registry
-and round-robin dispatching.
+Unchanged `kdos.f` §8 publishes task-shaped descriptors and scheduling names,
+but its executable behavior is a fixed registry plus synchronous
+run-to-completion dispatch. It does not save or install task contexts, suspend
+at `YIELD`, order by priority, or preempt an XT.
 
 **Task descriptor** (6 cells = 48 bytes, kdos.f §8):
 ```forth
 task-descriptor:
   +0   status      ( 0=FREE  1=READY  2=RUNNING  3=BLOCKED  4=DONE )
-  +8   priority    ( 0-255, lower = higher priority )
+  +8   priority    ( stored/displayed only; not consulted )
   +16  xt          ( execution token of task body )
-  +24  dsp_save    ( saved data stack pointer — reserved )
-  +32  rsp_save    ( saved return stack pointer — reserved )
-  +40  name_addr   ( address of name string )
+  +24  dsp_save    ( computed nominal midpoint; never installed )
+  +32  rsp_save    ( initialized to zero; no return-stack arena )
+  +40  name_addr   ( initialized to zero; never populated )
 ```
 
-**Task registry**: `TASK-TABLE` — up to 8 tasks. `TASK-COUNT` tracks count.
+**Task registry**: `TASK-TABLE` holds up to eight descriptor pointers and
+`TASK-COUNT` is monotonic. `TASK-STACKS` occupies 2,055 bytes because an
+eight-byte `VARIABLE` body is followed by `2047 ALLOT`; the source comment's
+2,048-byte claim is incorrect. No execution word uses that arena. All XTs run
+on the caller's live data/return stacks, loop frames, and exception context.
 
 **Task lifecycle words**:
 | Word | Stack | Description |
 |---|---|---|
-| `TASK` | `( xt priority "name" -- )` | Create named task |
-| `SPAWN` | `( xt -- )` | Anonymous task, priority 128 |
+| `TASK` | `( xt priority "name" -- )` | Append a descriptor, register it if capacity remains, and define a constant |
+| `SPAWN` | `( xt -- )` | Append an anonymous descriptor with stored priority 128 |
 | `KILL` | `( tdesc -- )` | Mark task DONE |
 | `RESTART` | `( tdesc -- )` | Mark task READY again |
-| `BG` | `( xt -- )` | SPAWN + SCHEDULE |
-| `YIELD` | `( -- )` | Cooperatively mark current task DONE |
+| `BG` | `( xt -- )` | Execute `SPAWN SCHEDULE` before returning |
+| `YIELD` | `( -- )` | Mark the current descriptor DONE, then continue the same XT |
 
 **Scheduling words**:
 | Word | Stack | Description |
 |---|---|---|
-| `SCHEDULE` | `( -- )` | Run all READY tasks until none remain |
-| `FIND-READY` | `( -- tdesc\|0 )` | Find first READY task |
-| `RUN-TASK` | `( tdesc -- )` | Execute task, mark DONE on return |
+| `SCHEDULE` | `( -- )` | Repeatedly execute the first READY table entry to return |
+| `FIND-READY` | `( -- tdesc\|0 )` | Scan from slot zero; stored priority is ignored |
+| `RUN-TASK` | `( tdesc -- )` | Set RUNNING, execute inline, and mark DONE after normal return |
 
-**Timer preemption**:
-| Word | Stack | Description |
-|---|---|---|
-| `PREEMPT-ON` | `( -- )` | Enable timer-based preemption flag |
-| `PREEMPT-OFF` | `( -- )` | Disable timer preemption |
+DONE slots are never reclaimed. After eight registrations, `TASK` and `SPAWN`
+still append orphan 48-byte descriptors with an out-of-arena nominal DSP;
+`TASK` also publishes its constant and `SPAWN` still advances `SPAWN-COUNT`.
+Late constant parsing/publication or an exception from a task retains earlier
+registry and scheduler-state mutations. `CURRENT-TASK` remains stale even
+after ordinary completion.
+
+**Timer-control discrepancy:** `PREEMPT-ON` writes timer control value 5,
+which enables auto-reload but not IRQ generation. This source block never
+reads timer status or otherwise sets `PREEMPT-FLAG`. A manually set flag only
+reaches the non-suspending `YIELD`; `PREEMPT-OFF` writes control value 1, so it
+leaves the counter enabled and clears only the software gate. The words do not
+currently implement timer preemption.
 
 **BIOS timer/interrupt words** (bios.asm):
 | Word | Stack | Description |
@@ -1220,6 +1237,10 @@ provide visual hierarchy within each screen.
    Scheduler: cooperative     (or "preempt ON" in green)
    Tasks rdy: 0
 ```
+
+The literal `cooperative` / `preempt ON` labels report the source's selected
+software mode. They overstate the execution semantics described in §5.4 and
+are not evidence of task suspension or timer-driven switching.
 
 ### Screen 2 — Buffers
 

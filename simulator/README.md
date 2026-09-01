@@ -148,12 +148,17 @@ The implemented slices provide:
   final `FCLOSE`/sync rather than a hosted documentation shortcut;
 - unchanged KDOS Dictionary Search over the guest-visible linked headers,
   transient `WORD` pattern, nested-loop substring matcher, native-compatible
-  `TYPE`/`SPACE`, and raw `LATEST` traversal.
+  `TYPE`/`SPACE`, and raw `LATEST` traversal;
+- the unchanged KDOS task registry and synchronous run-to-completion executor,
+  including its descriptor/state bookkeeping and provisional deferred
+  checkpoint binding.
 
 This is deliberately not yet a complete MegaForth environment. Additional
-task stack arenas and cooperative scheduling remain pending. The IDL seam
-blocks and resumes one compiled-word dispatch; it is not `PAUSE`, task
-round-robin, interrupt-vector delivery, DMA timing, or a device scheduler.
+private task contexts and genuine cooperative scheduling remain pending. The
+loaded KDOS words execute task XTs inline on the caller's stacks; the IDL seam
+blocks and resumes one compiled-word dispatch and cannot turn that registry
+into `PAUSE`, task round-robin, interrupt-vector delivery, DMA timing, or a
+device scheduler.
 Public `SOURCE`, `>IN`, and `STATE`, interpret-time `[IF]`, `MS@` and the
 remaining RTC/calendar service, raw UART MMIO, TX-ring capacity and timing,
 terminal geometry, raw storage-controller access, and an ordinary complete
@@ -321,8 +326,10 @@ never slot zero. Each start wrapper reaches that reset before its captured
 BIOS entry reports scheduling unavailable. `TASK-STOP` orders its reset after
 the captured entry, so that reset is deliberately unreachable until
 task cancellation exists.
-Resumable cooperative task contexts, `PAUSE`, and scheduling have not been
-implemented, so this slice makes no task-execution or cadence claim.
+At this early prefix boundary the scheduler source has not loaded, so the
+slice makes no task-execution or cadence claim. The later §8 frontier adds its
+synchronous registry/executor, but resumable cooperative task contexts and
+`PAUSE` remain unimplemented.
 
 Byte-exact logical lines 720 through 855 then load the complete KDOS CRC
 convenience and CRC-diagnostic family. The nine BIOS words retain their
@@ -740,14 +747,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 6510.
+ends at line 6724.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–6510 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file filesystem encryption, parent-byte subdirectory navigation/mutation, the paged Documentation Browser, and raw linked-header Dictionary Search |
-| 6511 onward | Next uncovered frontier | Scheduler & Tasks begins at line 6511, followed by the remaining ordinary KDOS source |
+| 39–6724 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, and the task registry/synchronous executor |
+| 6725 onward | Next uncovered frontier | Timer Preemption begins at line 6725, followed by multicore dispatch and the remaining ordinary KDOS source |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1456,7 +1463,45 @@ pattern bytes remain changed after return or failure, with `WL-PA` left pointing
 at `HERE`. Raw header mutation is observed by these walkers even though hosted
 ordinary lookup retains its semantic metadata authority.
 
-Later slices continue with Scheduler & Tasks at line 6511.
+The following exact fixture is unchanged lines 6511–6724: 214 LF records,
+6,935 bytes, SHA-256
+`cc28cfab7033390f4efc885cc043feafecc136e913aa34cc6338f7ad1b6a1f4c`,
+and Git blob `ccdee7bbf513495f25eb77ad4c0f13f63b07532c`. It publishes five task-state
+constants, nine variables, 24 colon definitions, and deferred
+`CORE-CHECKPOINT`: 39 definitions. Load initializes the scalar state, sets
+`TIME-SLICE` to 50,000, and binds the checkpoint to its boot action. It runs no
+task and performs no timer, UART, IDL, filesystem, or stack-switch operation.
+Raw variable storage is 2,175 bytes plus the deferred action cell. In
+particular, `TASK-TABLE` is 64 bytes, while `VARIABLE TASK-STACKS 2047 ALLOT`
+reserves 2,055 bytes rather than the source comment's 2,048.
+
+This prefix is qualified as a task registry and synchronous
+run-to-completion executor, not as cooperative multitasking. `TASK` and
+`SPAWN` append 48-byte descriptors and record a nominal data-stack midpoint,
+but neither `RUN-TASK` nor any other word installs `T.DSP`; `T.RSP` and
+`T.NAME` remain zero. Every XT executes inline on the caller's data stack,
+return stack, loop frames, task identity, and exception state. `FIND-READY`
+always selects the lowest READY table slot and never consults priority.
+`YIELD` only marks the current descriptor DONE and returns to the task body,
+so code after it continues. `SCHEDULE` therefore executes each selected XT to
+return, not until a resumable yield, and leaves `CURRENT-TASK` stale.
+
+The unchanged bounds and failure behavior remain visible. DONE slots are not
+reclaimed and `TASK-COUNT` is monotonic. A ninth `TASK` still appends an orphan
+descriptor and publishes its constant; a ninth `SPAWN` appends an orphan and
+increments `SPAWN-COUNT`. Their nominal stack pointer is beyond the declared
+arena. Even admitted descriptors point only 128 bytes above the lower edge of
+their nominal downward-growing slot, and no return-stack arena exists. Late
+name publication or task execution failure retains prior registry, status,
+`CURRENT-TASK`, and `SCHED-RUNNING` mutations. Descriptor arguments and public
+count/table state are unchecked. `T.FREE`, `T.BLOCKED`, saved stack fields,
+names, and priority ordering are otherwise inert in this block.
+
+The provisional checkpoint consumes only a manually set `PREEMPT-FLAG` and
+then calls the same non-suspending `YIELD`; it neither samples a timer nor
+switches tasks. The next slice begins with Timer Preemption at line 6725 and
+requires real retained timer-control state before the unchanged words can be
+loaded honestly.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

@@ -1,9 +1,11 @@
 # KDOS Word Reference
 
 KDOS — the Kernel Dashboard Operating System — is a Forth-based OS that runs
-on top of the Megapad-64 BIOS.  Its Bank 0 core provides buffers, compute
-kernels, pipelines, a cooperative scheduler, a named filesystem, multicore
-dispatch, and an interactive 9-screen TUI dashboard.  The loadable
+on top of the Megapad-64 BIOS. Its Bank 0 core provides buffers, compute
+kernels, pipelines, a task registry with a synchronous executor, a named
+filesystem, multicore dispatch, and an interactive 9-screen TUI dashboard. The
+source calls that executor a cooperative scheduler, but §8 records why its
+current stack and yield machinery does not implement that claim. The loadable
 `networking.f` module adds Ethernet through TLS, sockets, and the UDP-backed
 data-port transport from the XMEM userland dictionary.
 
@@ -862,8 +864,8 @@ publication, cache-only free-space reporting, primary-extent Buffer save/load,
 the fixed FD pool with cached open/metadata-flush/final-close lifecycle, the
 checked source compiler, nested two-extent filesystem `LOAD`, application
 loader and ANSI helpers, whole-file encryption, parent-byte directory
-navigation/mutation, the Documentation Browser, and Dictionary Search through
-line 6510.
+navigation/mutation, the Documentation Browser, Dictionary Search, and the
+task registry/synchronous executor through line 6724.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -878,8 +880,10 @@ fragmentation reporting, ordered Buffer/file transfers, descriptor allocation,
 cached open snapshots, used-metadata flush, ordered close/release, source
 evaluation/loading, encryption, navigation/mutation, paging, listing, and
 descriptor-backed documentation display are executable semantic behavior
-rather than reporting-only shims. The frontier now ends at line 6510;
-Scheduler & Tasks begins at line 6511.
+rather than reporting-only shims. Task descriptor/state bookkeeping and
+table-ordered run-to-return execution are also executable, without implying
+private task contexts or cooperative switching. The frontier now ends at line
+6724; Timer Preemption Setup begins at line 6725.
 
 ---
 
@@ -1166,10 +1170,11 @@ to `(FCLOSE-NOFS)`, binds deferred `OPEN` to `(OPEN)`, and finally rebinds
 only load effects; it does no filesystem or media I/O and emits nothing.
 Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
-navigation, the Documentation Browser, and Dictionary Search through line
-6510. Their provenance and edge contracts are recorded in the corresponding
-sections below and in `docs/simulator-contract.md`; the next uncovered seam is
-Scheduler & Tasks at line 6511.
+navigation, the Documentation Browser, Dictionary Search, and the task
+registry/synchronous executor through line 6724. Their provenance and edge
+contracts are recorded in the corresponding sections below and in
+`docs/simulator-contract.md`; the next uncovered seam is Timer Preemption
+Setup at line 6725.
 
 ---
 
@@ -1810,7 +1815,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 6510. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 6724. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2183,8 +2188,8 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through Dictionary Search at line 6510; the next uncovered seam is
-Scheduler & Tasks at line 6511.
+continues through the task registry/synchronous executor at line 6724; the
+next uncovered seam is Timer Preemption Setup at line 6725.
 
 **Example — filesystem operations:**
 ```forth
@@ -2417,19 +2422,29 @@ APROPOS task        \ find all task-related words
 
 ## §8 Scheduler & Tasks
 
-KDOS includes a **cooperative multitasking scheduler** with optional
-timer-assisted preemption.  Up to **8 tasks** can be registered, each
-with a **256-byte private data stack**.
+The hosted frontier qualifies unchanged `kdos.f` lines 6511–6724 as a fixed
+eight-entry task registry and synchronous run-to-completion executor. Despite
+the source comments and names, this prefix does not provide resumable
+cooperative tasks, active private stacks, priority scheduling, or preemption.
+
+The exact slice has 214 LF records and 6,935 bytes, SHA-256
+`cc28cfab7033390f4efc885cc043feafecc136e913aa34cc6338f7ad1b6a1f4c`,
+and Git blob `ccdee7bbf513495f25eb77ad4c0f13f63b07532c`. Its 39 publications are five
+constants, nine variables, 24 colon definitions, and deferred
+`CORE-CHECKPOINT`. Load sets the task count, current task, scheduler flag,
+preemption flag, and spawn count to zero, initializes `TIME-SLICE` to 50,000,
+and binds the checkpoint to `_CORE-CHECKPOINT-BOOT`. It executes no task and
+touches no timer or other device.
 
 ### Task States
 
 | State | Value | Meaning |
 |-------|-------|---------|
-| `T.FREE` | 0 | Slot is available (no task). |
-| `T.READY` | 1 | Task is runnable, waiting for CPU time. |
-| `T.RUNNING` | 2 | Task is currently executing. |
-| `T.BLOCKED` | 3 | Task is waiting for an external event. |
-| `T.DONE` | 4 | Task has finished; can be cleaned up or restarted. |
+| `T.FREE` | 0 | Defined, but this prefix never assigns it. |
+| `T.READY` | 1 | Assigned by construction and `RESTART`. |
+| `T.RUNNING` | 2 | Assigned immediately before synchronous `EXECUTE`. |
+| `T.BLOCKED` | 3 | Defined, but this prefix never assigns it. |
+| `T.DONE` | 4 | Assigned after normal return, by `KILL`, or by non-suspending `YIELD`. |
 
 ### Task Descriptor Layout
 
@@ -2437,38 +2452,44 @@ with a **256-byte private data stack**.
 Offset   Field       Meaning
 ───────  ──────────  ─────────────────────────────────────
 +0       status      T.FREE .. T.DONE
-+8       priority    0 = highest, 255 = lowest
++8       priority    Stored/displayed metadata; never consulted
 +16      xt          Execution token (the task body)
-+24      dsp_save    Saved data stack pointer
-+32      rsp_save    Saved return stack pointer
-+40      name_addr   Pointer to name string (or 0)
++24      dsp_save    Computed nominal midpoint; never installed or read
++32      rsp_save    Always initialized to 0; no return-stack arena exists
++40      name_addr   Always initialized to 0 and never populated
 ```
+
+`TASK-TABLE` reserves the intended 64 bytes. The spelling `VARIABLE
+TASK-STACKS 2047 ALLOT` reserves 2,055 bytes, not the 2,048 stated in its
+source comment. A descriptor's nominal DSP is `TASK-STACKS + index*256 + 128`,
+which gives only 128 bytes below that point for a downward-growing stack even
+if it were installed. It is not installed: all task XTs share the caller's
+data stack, return stack, loop frames, task identity, and exception context.
 
 ### Words
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `TASK` | `( xt priority "name" -- )` | Create a named task.  Allocates a 256-byte private stack area, initializes the descriptor as READY, and registers it in `TASK-TABLE`.  Defines a CONSTANT. |
-| `TASKS` | `( -- )` | List all tasks showing state, priority, xt, and name. |
-| `SCHEDULE` | `( -- )` | Run the scheduler: repeatedly find READY tasks and execute them round-robin until no READY tasks remain. |
-| `SPAWN` | `( xt -- )` | Create an anonymous READY task with default priority 128. |
-| `BG` | `( xt -- )` | Spawn a task and immediately run the scheduler ("background" a task). |
+| `TASK` | `( xt priority "name" -- )` | Append a 48-byte READY descriptor, register it only while `TASK-COUNT < 8`, then define a constant for it. |
+| `TASKS` | `( -- )` | Print each registered slot's numeric status, priority, and XT; no name is printed. |
+| `SCHEDULE` | `( -- )` | Repeatedly select the first READY table slot and execute its XT synchronously to return. |
+| `SPAWN` | `( xt -- )` | Append an anonymous READY descriptor with stored priority 128. |
+| `BG` | `( xt -- )` | Execute `SPAWN SCHEDULE` before returning; it is not background execution. |
 | `KILL` | `( tdesc -- )` | Force a task to DONE state (cancel it). |
 | `RESTART` | `( tdesc -- )` | Reset a DONE task back to READY so it can run again. |
-| `SCHED-YIELD` | `( -- )` | Mark the current core-0 KDOS task DONE. Scheduler-only primitive. |
-| `YIELD` | `( -- )` | Compatibility wrapper for `SCHED-YIELD`; a no-op on dispatched secondary full cores. |
-| `WORKER-CHECKPOINT` | `( -- )` | Check and clear the calling worker core's preemption flag without touching scheduler state. |
-| `CORE-CHECKPOINT` | `( -- )` | Check and clear the calling core's preemption flag. On core 0 this also performs `YIELD`; secondary one-shot workers continue without touching `CURRENT-TASK`. |
-| `YIELD?` | `( -- )` | Compatibility alias for `CORE-CHECKPOINT`. |
-| `FIND-READY` | `( -- tdesc \| 0 )` | Find the first READY task in the table (0 if none). |
-| `RUN-TASK` | `( tdesc -- )` | Low-level: set task to RUNNING, execute its XT, mark DONE on return. |
+| `SCHED-YIELD` | `( -- )` | On core 0, mark `CURRENT-TASK` DONE and return to the next instruction in the same task body. |
+| `YIELD` | `( -- )` | Call `SCHED-YIELD`; it does not suspend or transfer control. |
+| `CORE-CHECKPOINT` | `( -- )` | Deferred boot action: clear a manually set global `PREEMPT-FLAG`, then call the same non-suspending `YIELD`. |
+| `YIELD?` | `( -- )` | Invoke deferred `CORE-CHECKPOINT`. |
+| `FIND-READY` | `( -- tdesc \| 0 )` | Scan from slot zero and return the first READY descriptor, ignoring priority. |
+| `RUN-TASK` | `( tdesc -- )` | Set RUNNING, execute inline on the caller's context, then mark the current descriptor DONE after normal return. |
 | `TASK-COUNT-READY` | `( -- n )` | Count tasks currently in READY state. |
-| `PREEMPT-ON` | `( -- )` | Enable timer-based preemption.  Configures the hardware timer with `TIME-SLICE` cycles (default 50,000) and enables auto-reload.  Yield points (`YIELD?`) will check the preemption flag. |
-| `PREEMPT-OFF` | `( -- )` | Disable timer preemption. |
 
-**Variables:** `TASK-COUNT`, `TASK-TABLE`, `CURRENT-TASK`, `SCHED-RUNNING`, `PREEMPT-FLAG`, `TIME-SLICE` (default 50000), `PREEMPT-ENABLED`, `TASK-STACKS` (2048 bytes).
+**Variables:** `TASK-COUNT`, `TASK-TABLE`, `CURRENT-TASK`, `SCHED-RUNNING`,
+`PREEMPT-FLAG`, `TIME-SLICE` (default 50000), `TASK-STACKS`, `TDESC-TEMP`,
+and `SPAWN-COUNT`.
 
-**Example — running background tasks:**
+**Example — synchronous task execution:**
 ```forth
 : blink  ( -- )  ." Blink! " CR ;
 : count  ( -- )  10 0 DO I . LOOP CR ;
@@ -2477,22 +2498,33 @@ Offset   Field       Meaning
 ' count 50 TASK my-count     \ priority 50 (higher)
 
 SCHEDULE              \ run both tasks
-\ Output: numbers print first (higher priority),
-\         then "Blink!" prints
+\ Output: "Blink!" prints first because it occupies the first table slot;
+\         stored priority never reorders the descriptors.
 
-\ Or spawn and run in one shot:
-' blink BG            \ runs immediately
+\ Spawn and execute before BG returns:
+' blink BG
 ```
 
-### How Preemption Works
+DONE slots are never reclaimed and `TASK-COUNT` is monotonic. A ninth `TASK`
+still appends an orphan descriptor and publishes its constant; a ninth
+`SPAWN` appends an orphan and advances `SPAWN-COUNT`. Both compute an
+out-of-arena nominal DSP. `TASK` registers before its final constant name is
+parsed and published, so a late parse or dictionary fault leaves registry
+mutation. Descriptor addresses and public count/table state are unchecked. A
+task exception can leave its status RUNNING, `SCHED-RUNNING = 1`, and
+`CURRENT-TASK` stale; normal completion also does not clear `CURRENT-TASK`.
 
-KDOS uses a "soft preemption" model. The hardware timer fires periodically
-and sets a per-core preemption flag. Long-running code should call
-`CORE-CHECKPOINT` (or the compatibility name `YIELD?`) at regular intervals.
-On core 0, a set flag yields the current KDOS task back to the scheduler. A
-secondary full core has no suspended KDOS task scheduler, so it clears its
-own flag and continues its one-shot dispatch without reading or modifying
-core 0's `CURRENT-TASK`.
+### Timer-preemption suffix (not yet hosted-qualified)
+
+The next source block starts at line 6725; its first missing pseudo-BIOS word
+is `TIMER!` at line 6738. Even with real timer registers, that block alone is
+not preemption: `PREEMPT-ON` writes control value 5 (enable plus auto-reload,
+with IRQ disabled), and no word reads timer status or sets `PREEMPT-FLAG`.
+Only external or manual flagging reaches the checkpoint, whose `YIELD` does
+not suspend. `PREEMPT-OFF` writes control value 1, leaving the hardware counter
+enabled while clearing only the software gate. These are recorded source
+semantics, not behavior supplied or corrected behind the source by the hosted
+runtime.
 
 ---
 
@@ -3048,11 +3080,11 @@ MODULE? exact-id         \ query exact, case-sensitive identity
 MODULES                  \ list exact identities and count
 ```
 
-**Multitasking:**
+**Task registry / synchronous execution:**
 ```forth
-' work BG                \ spawn + run
+' work BG                \ spawn and run before returning
 TASKS                    \ list tasks
-SCHEDULE                 \ run all READY tasks
+SCHEDULE                 \ run READY table entries synchronously
 ```
 
 **Multicore:**
