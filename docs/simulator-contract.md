@@ -307,7 +307,7 @@ evaluator contract. The admitted surface does not publish or qualify public
 `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
 or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
 source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 8568.
+KDOS source frontier now ends at line 8943.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1466,7 +1466,7 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 8568. Exact unchanged lines
+The contiguous source frontier now ends at line 8943. Exact unchanged lines
 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
@@ -2606,9 +2606,94 @@ The tail adds these source-literal discrepancies:
   is also not idempotent: it appends registrations until the 16-row table is
   full and appends duplicate Home and Buffer subscreens.
 
-The contiguous frontier now ends at line 8568. Line 8569 is the separator for
-§10 Data Ports. Nothing in the qualified frontier advances the rich-terminal
-vertical.
+Exact unchanged lines 8569 through 8943 add §10's transport-independent
+Data Port structures and bindings, the empty §11 benchmark placeholder,
+§12's text Dashboard/status words, and §13's Help system. The 375 LF
+records occupy 15,702 bytes, have SHA-256
+`0fff19ac85b6b0ff1261e587a1a0d7462035ac2f453229f58236af37e465a713`,
+and have Git blob `7f5cd3054b3936f5e0561cbd53395da0af50d309`. They publish
+27 definitions in source order: one constant, five variables, and 21 colon
+definitions. The hosted dictionary grows by exactly 4,264 bytes: 459 fixed
+header/semantic-slot bytes, 211 name bytes, and 3,594 body bytes.
+`FRAME-BUF`, `PORT-TABLE`, `ROUTE-BUF`, `HW-FOUND`, and `HW-CSTR` have body
+spans of 1,507, 2,048, 8, 8, and 23 bytes respectively; every other new word
+has a zero-byte hosted body. The many compiled `."` publishers are semantic
+operations rather than guest body-literal pools.
+
+Load explicitly clears the complete 2,048-byte `PORT-TABLE`. `VARIABLE`
+clears the leading cell of the other variables, while the 1,499-byte
+`FRAME-BUF` and 15-byte `HW-CSTR` `ALLOT` tails retain their prior bytes.
+The earlier `PORT-COUNT`, `PORT-RX`, and `PORT-DROP` cells are not reset.
+There is no frame receive, descriptor binding, heap setup, UART or key
+publication, filesystem or storage operation, NIC access, RTC change, or
+lock change during load. Evaluation advances only the ordinary timer counter;
+its compare, control, status, and interrupt state remain unchanged.
+
+Focused acceptance covers ordinary bind/rebind/unbind transitions at IDs zero
+and 255, the source's zero-binding counter drift, and address-only boundary
+arithmetic without dereferencing invalid slots. It pins little-endian frame
+header access, `FRAME-DATA`, exact `.FRAME`, `PORTS`, and `PORT-STATS` UART
+bytes, both rule publishers, and the ordinary `STATUS` line. Specific Help
+lookup covers found and missing words and the broken related-word result. The
+complete 7,431-byte `HELP` publication has SHA-256
+`c1d44c8970fa800f943db3e9b081cdaaf642af429c6cf4f9df27bcc63a2f1d07`.
+This evidence does not execute the heap-reporting `.MEM`, `MEM-REPORT`, or
+full `DASHBOARD` paths and does not qualify the later networking transport or
+Pipeline Bundle implementation.
+
+The following source-literal discrepancies remain visible:
+
+- `FRAME-BUF` is described as 1,500 bytes, but the eight-byte `VARIABLE` cell
+  plus `1499 ALLOT` gives it a 1,507-byte body. Only its leading cell is
+  initialized at load. `FRAME-SRC`, `FRAME-TYPE`, `FRAME-SEQ`, `FRAME-LEN`,
+  `FRAME-DATA`, and `.FRAME` trust the current bytes completely: they carry no
+  received-frame validity or freshness marker and perform no local payload
+  length or type validation.
+- `PORT-SLOT` accepts every cell. ID `-1` computes eight bytes before the
+  table, and ID 256 computes the following `ROUTE-BUF` header address;
+  `PORT@`, `PORT!`, and `UNPORT` then dereference those unchecked addresses.
+  `PORT!` also accepts any nonzero cell as a descriptor, with no ownership,
+  liveness, or Buffer-layout proof. A later transport call can therefore
+  dereference an arbitrary or destroyed descriptor.
+- `PORT!` increments `PORT-COUNT` when a zero value is stored into an empty
+  slot. Repeating that operation increases the count while the slot remains
+  unbound; replacing a nonzero value with zero silently unbinds without a
+  decrement, and `UNPORT` cannot repair it. The shared table/count update has
+  no core restriction or synchronization. Re-evaluating this slice clears a
+  replacement table but preserves the earlier count and statistics, so the
+  section is not hot-reload-idempotent.
+- The deferred networking layer is not qualified here. Its outbound DTYPE
+  mapping conflates Buffer-layout and wire-type enums, receive routing ignores
+  `FRAME-TYPE`, and outbound header construction truncates an ID to one byte
+  even though the core binding path first uses the unchecked full cell as a
+  table index.
+- `.MEM` labels `SP@ HERE -` as `Free`, but that is a raw address gap which
+  includes heap and reserved space and can wrap into signed-looking output.
+  `.MEM` and `MEM-REPORT` call `.HEAP`; before normal startup that supposedly
+  observational path can run lazy `HEAP-SETUP`, align `HERE`, initialize heap
+  headers, and fix `HEAP-BASE`. Their execution must remain isolated from a
+  runtime used to extend the contiguous source load.
+- `HW-CSTR` has a 23-byte body, while the maximum `PN-LEN = 23` query needs
+  24 bytes for its count plus payload. `HELP-WORD` therefore writes the final
+  query byte into the low byte of its own following header link. Longer input
+  is truncated to 23 bytes, so longer dictionary names cannot be queried
+  exactly.
+- In the related-word loop, the live stack is `( count entry name-addr
+  name-len )`; `2 PICK` selects `entry`, not `count`. A real header address is
+  never below ten, so every lookup reports zero related words. If that branch
+  were reached, `TYPE` would leave only `( count entry )` and the following
+  `ROT` would underflow.
+- `.HELP-ALL` advertises `POLL`, `INGEST`, and later Bundle words even though
+  those definitions are absent at this frontier. The surrounding §10 source
+  comments also promise `RECV-FRAME`, `ROUTE-FRAME`, `PORT-SEND`, and the
+  deferred networking layer. None of those names, including
+  `PORT-SEND-SLICE`, is executable here; the qualified Help text does not
+  qualify any transport operation.
+
+The contiguous frontier now ends at line 8943. Line 8944 is the separator for
+§15 Pipeline Bundles. Nothing in this slice loads `rich-terminal.f`, creates
+a rich projection, composites a frame, reaches a physical viewer, or otherwise
+advances the rich-terminal vertical.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed

@@ -775,14 +775,14 @@ The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
 interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
 literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 8568.
+ends at line 8943.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–8568 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, and complete §9 ANSI screen registry, widget SDL, screen definitions, dispatch, registration, handlers, and event loop |
-| 8569 onward | Next uncovered frontier | §10 begins the Data Ports structures and binding layer |
+| 39–8943 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, and §13 Help |
+| 8944 onward | Next uncovered frontier | §15 begins the Pipeline Bundle state and declarative binding layer |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -1798,8 +1798,72 @@ parameter bytes queued; empty-list n/p navigation manufactures selection
 zero; and the event loop busy-polls without yielding. Reloading the slice
 duplicates registrations until capacity.
 
-The contiguous frontier now ends at line 8568. Line 8569 begins §10 Data
-Ports.
+Exact unchanged lines 8569–8943 add §10's transport-independent Data Port
+structures and bindings, the empty §11 placeholder, §12's text
+Dashboard/status definitions, and §13 Help: 375 LF records, 15,702 bytes,
+SHA-256
+`0fff19ac85b6b0ff1261e587a1a0d7462035ac2f453229f58236af37e465a713`,
+and Git blob `7f5cd3054b3936f5e0561cbd53395da0af50d309`. The slice publishes
+27 definitions (one constant, five variables, and 21 colons) and grows the
+hosted dictionary by exactly 4,264 bytes. Of that growth, 459 bytes are fixed
+headers/semantic slots, 211 are names, and 3,594 are bodies. The body spans
+are 1,507 bytes for `FRAME-BUF`, 2,048 for `PORT-TABLE`, 8 each for
+`ROUTE-BUF` and `HW-FOUND`, and 23 for `HW-CSTR`; all other new words have
+zero-byte hosted bodies.
+
+Load clears all 256 cells of `PORT-TABLE` and the leading cell of each other
+variable. The `FRAME-BUF` and `HW-CSTR` `ALLOT` tails remain untouched, and
+the earlier port count/RX/drop statistics retain their values. Load performs
+no binding, receive, heap setup, UART/key publication, storage/filesystem or
+NIC operation, RTC change, or lock change. Only the ordinary timer counter
+advances; its programmed state is unchanged.
+
+Focused acceptance covers normal and defective zero-valued port transitions,
+unchecked slot arithmetic without dereferencing an invalid address,
+little-endian frame accessors, and exact `.FRAME`, `PORTS`, `PORT-STATS`,
+rule, and `STATUS` bytes. It covers found and missing Help lookup, including
+the zero-related-word defect, and pins the complete 7,431-byte `HELP` output
+at SHA-256
+`c1d44c8970fa800f943db3e9b081cdaaf642af429c6cf4f9df27bcc63a2f1d07`.
+It does not execute `.MEM`, `MEM-REPORT`, or full `DASHBOARD`, and it does not
+qualify the later UDP transport or Pipeline Bundle implementation.
+
+The unchanged source retains these discrepancies:
+
+- `FRAME-BUF` occupies 1,507 bytes rather than its stated 1,500 because its
+  eight-byte `VARIABLE` cell precedes `1499 ALLOT`; only that first cell is
+  initialized. The frame accessors and `.FRAME` trust raw current bytes and
+  carry no local validity, freshness, type, or payload-length proof.
+- Port IDs are unchecked: `-1` addresses before `PORT-TABLE`, while 256
+  reaches the following header. Bind/fetch/unbind dereference those results,
+  and `PORT!` accepts any nonzero cell without proving a live Buffer
+  descriptor. There is no core restriction or synchronization.
+- Storing zero into an empty slot increments `PORT-COUNT` while leaving it
+  unbound; repeating it grows the count indefinitely, and replacing a live
+  binding with zero does not decrement. Re-evaluation clears a replacement
+  table while preserving the earlier count and statistics.
+- The unqualified networking layer later conflates Buffer-layout and wire
+  DTYPE enums, ignores `FRAME-TYPE` while routing, and truncates outbound IDs
+  to a byte after the core path has already used the unchecked full cell.
+- `.MEM` calls the raw `SP@ HERE -` gap `Free`; it includes reserved/heap
+  space and can wrap into signed-looking output. `.MEM` and `MEM-REPORT` call
+  `.HEAP`, so execution before startup can lazily align `HERE`, initialize the
+  heap, and fix `HEAP-BASE` rather than merely observe state.
+- `HW-CSTR` has 23 bytes, but a maximum 23-byte query needs 24 including its
+  count. `HELP-WORD` overwrites one byte of its following header link. Longer
+  input is truncated, so longer dictionary names cannot be queried exactly.
+- The related-word loop uses `2 PICK` on `( count entry name-addr name-len )`
+  and tests the entry address instead of the count. It always reports zero;
+  if the branch were reachable, `TYPE` would leave too little stack for its
+  following `ROT`.
+- Full Help advertises absent `POLL`, `INGEST`, and later Bundle words. The
+  surrounding §10 comments also promise `RECV-FRAME`, `ROUTE-FRAME`, and
+  `PORT-SEND`; `PORT-SEND-SLICE` is likewise absent. Help/comment publication
+  is qualified, not any of those operations.
+
+The contiguous frontier now ends at line 8943. Line 8944 begins §15
+Pipeline Bundles. This slice does not load `rich-terminal.f` or advance any
+rich projection, compositor, physical-viewer, or revision-bound-input seam.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

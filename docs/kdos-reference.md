@@ -870,9 +870,10 @@ navigation/mutation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
 the one-core queue/affinity/flag/message/lock state machines, and the
 cluster-control/MPU source boundary, absent-network forward bridge,
-§9.1–§9.4 ANSI screen registry/control layer, and the complete §9 widget SDL,
-screen definitions, dispatch, registration, handlers, and event loop through
-line 8568.
+§9.1–§9.4 ANSI screen registry/control layer, the complete §9 widget SDL,
+screen definitions, dispatch, registration, handlers, and event loop, and the
+§10 Data Port structures and bindings, §11 placeholder, §12 Dashboard, and
+§13 Help source through line 8943.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -890,7 +891,8 @@ descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
 private task contexts or cooperative switching. The frontier now ends at line
-8568; line 8569 begins §10's Data Ports structures and binding layer.
+8943, immediately before §15 Pipeline Bundles; the source has no §14 block at
+this boundary.
 
 ---
 
@@ -1179,9 +1181,10 @@ Subsequent exact fixtures qualify the checked compiler and filesystem loader,
 application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
-§8.2–§8.7, §8.8–§8.9, and complete §9 through line 8568. Their provenance and
-edge contracts are recorded in the corresponding sections below and in
-`docs/simulator-contract.md`; §10 begins at line 8569.
+§8.2–§8.7, §8.8–§8.9, complete §9, and §10–§13 through line 8943. Their
+provenance and edge contracts are recorded in the corresponding sections
+below and in `docs/simulator-contract.md`; §15 begins at the following source
+boundary.
 
 ---
 
@@ -1823,7 +1826,7 @@ KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
 The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 8568. The foundation through line 5134 allocates `FS-SUPER`,
+`kdos.f` line 8943. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2197,7 +2200,8 @@ identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
 continues through complete §9 screen registry, widget, dispatch, registration,
-handler, and event-loop source at line 8568; §10 begins at line 8569.
+handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
+Dashboard, and §13 Help through line 8943; §15 is next.
 
 **Example — filesystem operations:**
 ```forth
@@ -3022,9 +3026,10 @@ The following tail discrepancies are source-literal:
   `IDLE`. Re-evaluating this source is non-idempotent and appends duplicate
   screen/subscreen registrations until the fixed tables fill.
 
-The contiguous hosted frontier ends at line 8568. Line 8569 starts §10 Data
-Ports. This completes the existing ANSI TUI source but does not accept a
-rich-terminal module, projection, compositor, or viewer.
+This §9 block ends at line 8568. The contiguous hosted frontier now continues
+through §10–§13 and ends at line 8943, immediately before §15. The admitted
+source completes the existing ANSI TUI but does not accept a rich-terminal
+module, projection, compositor, or viewer.
 
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
@@ -3114,6 +3119,101 @@ KDOS core defines the frame structures, buffer bindings, accessors, and
 statistics.  `networking.f` supplies the UDP transport and routes each
 received payload into a bound buffer based on the source ID.
 
+### Hosted unchanged-source frontier through §13
+
+Exact unchanged `kdos.f` lines 8569–8943 contain 375 LF records and 15,702
+bytes, with SHA-256
+`0fff19ac85b6b0ff1261e587a1a0d7462035ac2f453229f58236af37e465a713`
+and Git blob `7f5cd3054b3936f5e0561cbd53395da0af50d309`. The checked fixture also
+includes the §15 separator at line 8944: 376 LF records and 15,774 bytes,
+with SHA-256
+`90af3e5c11bd7501b0a69f58163ce8be01f68ee543365cf2d388e97707ac9ce5`
+and Git blob `01ff09721f5601602c66c1ab42af76fc7dad0b87`.
+
+The slice publishes 27 definitions in source order: `/FRAME-HDR`,
+`FRAME-BUF`, `PORT-TABLE`, `ROUTE-BUF`, `PORT-SLOT`, `PORT!`, `PORT@`,
+`UNPORT`, `FRAME-SRC`, `FRAME-TYPE`, `FRAME-SEQ`, `FRAME-LEN`, `FRAME-DATA`,
+`.FRAME`, `PORTS`, `PORT-STATS`, `HRULE`, `THIN-RULE`, `.MEM`, `MEM-REPORT`,
+`DASHBOARD`, `STATUS`, `HW-FOUND`, `HW-CSTR`, `HELP-WORD`, `.HELP-ALL`, and
+`HELP`. These are one constant, five variables, and 21 colon words. The five
+variable bodies occupy 3,594 bytes: 1,507 for `FRAME-BUF`, 2,048 for
+`PORT-TABLE`, eight each for `ROUTE-BUF` and `HW-FOUND`, and 23 for
+`HW-CSTR`. With 211 name bytes and 27 hosted header/semantic slots of 17
+bytes each, exact hosted dictionary growth is 4,264 bytes.
+
+The explicit `PORT-TABLE 256 CELLS 0 FILL` is the slice's only top-level
+execution. It clears the complete new table. Ordinary `VARIABLE` creation
+zeroes the first cell of each other variable, while the additional
+`FRAME-BUF` and `HW-CSTR` `ALLOT` bytes retain their prior memory contents.
+The earlier `PORT-COUNT`, `PORT-RX`, and `PORT-DROP` cells are not
+reinitialized by this slice. Loading performs no key read, UART publication,
+filesystem/media operation, NIC operation, RTC mutation, lock operation, or
+timer-control mutation.
+
+Focused qualification covers binding, rebinding, and unbinding ordinary
+nonzero descriptors at the ends of the declared 0–255 ID domain; the complete
+256-slot `PORTS` scan; little-endian frame accessors and exact `.FRAME`,
+`PORTS`, and `PORT-STATS` bytes; the 60-dash and 40-dot rules; and the
+counter-, disk-, and `HERE`-based `STATUS` line. On the ordinary first load,
+the inherited port counters and all table slots are zero; qualification also
+proves that seeded nonzero counters survive while the new table is cleared.
+Word-specific Help finds an existing ordinary word, misses an absent word,
+and exposes the current zero-related-result behavior. Full Help publishes
+7,431 bytes with SHA-256
+`c1d44c8970fa800f943db3e9b081cdaaf642af429c6cf4f9df27bcc63a2f1d07`.
+`HELP-WORD` reaches public `FIND` as an executable semantic BIOS capability:
+its counted-name lookup, execution token, and normal/immediate flag are not a
+Help-specific host shortcut.
+
+The following limits and discrepancies are unchanged source behavior:
+
+- `FRAME-BUF VARIABLE 1499 ALLOT` owns 1,507 bytes, not the commented 1,500.
+  Only its first cell is cleared at load. The accessors neither establish that
+  a frame was received nor validate `FRAME-LEN`, payload capacity, or a
+  coherent header snapshot.
+- `PORT-SLOT`, `PORT!`, `PORT@`, and `UNPORT` perform no ID bounds check.
+  ID 256 resolves exactly to the following `ROUTE-BUF` header and all-ones
+  resolves one cell before the table; invalid stores can corrupt dictionary
+  state. `PORT!` also accepts an arbitrary nonzero cell as a descriptor.
+- Binding zero to an empty slot increments `PORT-COUNT` but leaves the slot
+  indistinguishable from unbound. Repeating that operation increments again,
+  replacing a nonzero binding with zero does not decrement, and `UNPORT`
+  cannot reduce the drift. Re-evaluation likewise creates and clears a new
+  table while retaining the earlier counters, so source reload is not
+  state-idempotent.
+- The table, counters, and frame buffer are shared and unlocked. Listings and
+  accessors are sequential reads rather than coherent concurrent snapshots.
+- `POLL`, `INGEST`, `RECV-FRAME`, `ROUTE-FRAME`, `PORT-SEND`, and
+  `PORT-SEND-SLICE` remain absent because `networking.f` is not loaded at this
+  frontier; the earlier absent-NIC `NET-RX?` remains false. The frame-routing,
+  payload-validation, and send contracts therefore remain networking-module
+  claims, not behavior qualified by this core slice.
+- Focused Dashboard evidence covers `HRULE`, `THIN-RULE`, and `STATUS`, not a
+  claim that `.MEM`, `MEM-REPORT`, or `DASHBOARD` is a pure query. Those words
+  call broad subsystem reporters, and `.HEAP` may initialize a cold heap.
+  `.MEM` also labels the raw `SP@ HERE -` address gap as `Free`, even though it
+  includes reserved/heap space and can wrap into signed-looking output.
+- `HW-CSTR VARIABLE 15 ALLOT` owns 23 bytes. A maximum 23-byte parsed name
+  needs one count byte plus 23 payload bytes, so `HELP-WORD` writes one byte
+  into the following `HELP-WORD` header. Qualification proves the boundary
+  structurally rather than executing the corrupting case. Longer input is
+  truncated to 23 bytes and therefore cannot query a longer dictionary name
+  exactly.
+- The related-word loop uses `2 PICK` on `( count entry name-addr name-len )`,
+  testing the dictionary entry address against 10 instead of the match count.
+  Normal positive entry addresses suppress every match. If an anomalously low
+  entry reached the other branch, `TYPE` would leave only two cells for its
+  subsequent `ROT`, causing data-stack underflow.
+- `.HELP-ALL` advertises the absent `POLL`, `INGEST`, and §15 bundle words such
+  as `BDL-BEGIN` and `BUNDLE-LOAD`. The surrounding §10 comments promise the
+  other networking words listed above, but none is defined here. §11 itself
+  is only a placeholder, and the source numbering proceeds from §13 directly
+  to §15 without a §14 block here.
+
+The contiguous hosted frontier ends at line 8943, immediately before §15.
+This qualification adds no rich-terminal module, projection, compositor,
+physical viewer, or other rich-terminal work.
+
 ### Frame Protocol
 
 Every incoming frame has a 6-byte header:
@@ -3141,12 +3241,12 @@ changing the last routed buffer.
 | `PORT!` | `( buf id -- )` | Bind a buffer descriptor to source ID *id*.  Incoming frames from that source will be routed to this buffer. |
 | `PORT@` | `( id -- buf \| 0 )` | Get the buffer bound to a source ID (0 if unbound). |
 | `UNPORT` | `( id -- )` | Unbind a source ID. |
-| `POLL` | `( -- id \| -1 )` | Receive and route one frame.  Returns the source ID, or −1 if no frame was available. |
-| `INGEST` | `( n -- received )` | Receive and route up to *n* frames.  Returns the actual count received. |
-| `RECV-FRAME` | `( -- flag )` | Receive and route one data-port frame; true only when a bound source was routed. |
-| `ROUTE-FRAME` | `( -- id \| -1 )` | Low-level: receive a frame and route its payload to the bound buffer. |
-| `PORT-SEND` | `( buf id -- )` | Send one buffer as a data-port UDP frame; reject data over 1466 bytes rather than sending a prefix. |
-| `PORT-SEND-SLICE` | `( buf off len id -- )` | Send one complete in-bounds slice up to 1466 bytes; reject invalid or oversized slices. |
+| `POLL` | `( -- id \| -1 )` | `networking.f`: receive and route one frame. Returns the source ID, or −1 if no frame was available. |
+| `INGEST` | `( n -- received )` | `networking.f`: receive and route up to *n* frames. Returns the actual count received. |
+| `RECV-FRAME` | `( -- flag )` | `networking.f`: receive and route one data-port frame; true only when a bound source was routed. |
+| `ROUTE-FRAME` | `( -- id \| -1 )` | `networking.f`: receive a frame and route its payload to the bound buffer. |
+| `PORT-SEND` | `( buf id -- )` | `networking.f`: send one buffer as a data-port UDP frame; reject data over 1466 bytes rather than sending a prefix. |
+| `PORT-SEND-SLICE` | `( buf off len id -- )` | `networking.f`: send one complete in-bounds slice up to 1466 bytes; reject invalid or oversized slices. |
 | `.FRAME` | `( -- )` | Print the last received frame's header (source, type, seq, length). |
 | `PORTS` | `( -- )` | List all bound ports with stats. |
 | `PORT-STATS` | `( -- )` | One-line summary: port count, received frames, dropped frames. |
@@ -3156,7 +3256,7 @@ changing the last routed buffer.
 | `FRAME-LEN` | `( -- len )` | Payload length of the last received frame. |
 | `FRAME-DATA` | `( -- addr )` | Address of the payload in the frame buffer. |
 
-**Example — ingesting sensor data from the network:**
+**Example — ingesting sensor data after loading `networking.f`:**
 ```forth
 0 1 256 BUFFER sensor    \ create a 256-byte buffer for sensor data
 sensor 1 PORT!           \ bind buffer to source ID 1
@@ -3186,7 +3286,8 @@ are general-purpose:
 |------|-------------|-------------|
 | `DASHBOARD` | `( -- )` | Print a comprehensive text-mode system overview: memory, disk, buffers, kernels, pipelines, tasks, files, ports.  Like Screen 1 but in the REPL. |
 | `STATUS` | `( -- )` | Quick one-line status showing all subsystem counts (buffers, kernels, pipes, tasks, files, ports). |
-| `.MEM` | `( -- )` | Print current memory usage (value of HERE). |
+| `.MEM` | `( -- )` | Print dictionary/stack, heap, HBW, XMEM, Buffer-count, and stack-depth reporting. |
+| `MEM-REPORT` | `( -- )` | Print heap/HBW/XMEM status, dictionary-to-stack gap, and heap-integrity result. |
 | `HRULE` | `( -- )` | Print 60 dashes. |
 | `THIN-RULE` | `( -- )` | Print 40 dots. |
 
