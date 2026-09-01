@@ -119,19 +119,22 @@ The implemented slices provide:
   cell geometry, retained continuation slots, `SP@`/`SP!` and `RP@`/`RP!`;
 - the unchanged source-defined KDOS Bank-0 heap, including lazy setup,
   first-fit allocation, sorted free/coalescing, resize, statistics, structural
-  verification, and its dictionary/stack/heap proximity guard; and
+  verification, and its dictionary/stack/heap proximity guard;
 - an exact-record bootstrap loader that supplies a shadowable `REQUIRE` before
   KDOS exists, with nested budgets, cycle detection, and registry-only failure
-  cleanup.
+  cleanup; and
+- the one-core semantic BIOS evaluator: raw guest `EVALUATE` through 255 bytes,
+  checked statuses and diagnostics, persistent cross-call compiler/control
+  state, explicit finish/reset/unwind, and one inherited public step budget.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 task stack arenas and cooperative scheduling remain pending. The IDL seam
 blocks and resumes one compiled-word dispatch; it is not `PAUSE`, task
 round-robin, interrupt-vector delivery, DMA timing, or a device scheduler.
-Persistent compiler state across evaluator calls, public `STATE`, the BIOS
-evaluator surfaces, `MS@` and the remaining RTC/calendar service, complete
-UART/MMIO service, raw storage-controller access, and an ordinary complete
-KDOS load also remain. The simulator does not
+Public `SOURCE`, `>IN`, and `STATE`, interpret-time `[IF]`, `MS@` and the
+remaining RTC/calendar service, complete UART/MMIO service, raw
+storage-controller access, and an ordinary complete KDOS load still remain.
+The simulator does not
 execute ROMs, MP64
 binaries, or MF64 native dictionaries, and it makes no machine-timing,
 snapshot, RTL, or hardware claim. Those remain the architectural emulator's
@@ -147,7 +150,8 @@ callback takes the BIOS diagnostic-and-ABORT fallback. Unbacked contexts from
 dictionary operations use the canonical foreground stack margin. Direct
 `runtime.dictionary` mutation remains a low-level host/test seam outside the
 guest ABI. The external interval and its source-defined switching words are
-now admitted; the later transactional evaluator remains pending. Hosted
+now admitted, as is the persistent semantic BIOS evaluator. The later
+KDOS-owned checked wrapper and loader transaction remain pending. Hosted
 Bank-0 relocation still refuses to move below the semantic dictionary's
 initial start even though native raw `ALLOT` has no equivalent lower-bound
 check. That pre-existing divergence is outside the userland transition and is
@@ -639,11 +643,50 @@ observed `RP@` marks that execution context non-reusable. The registration is
 kept for the complete dispatch because unchanged KDOS pops a saved handler
 cell immediately before restoring the `HANDLER` variable. This conservative,
 fail-closed boundary covers that one-operation cleanup window and prevents a
-stale guest handler from reviving abandoned continuations. Transactional
-context recovery belongs to the pending evaluator/rollback slice. Ordinary
-source `THROW` never escapes the outer public host boundary, including when it
-crosses a nested host primitive's `execute`/`evaluate` call. Guest `RP!`
-remains a raw aligned restore within its caller-owned stack span.
+stale guest handler from reviving abandoned continuations. A host escape now
+clears hidden evaluator frames and unfinished compiler state; KDOS dictionary
+transaction ownership and exact loader cleanup remain pending. Ordinary source
+`THROW` never escapes the outer public host boundary, including when it crosses
+a nested host primitive's `execute`/`evaluate` call. Guest `RP!` remains a raw
+aligned restore within its caller-owned stack span.
+
+### Semantic BIOS evaluator prerequisite
+
+The hosted BIOS now exposes `EVALUATE`, the early `EVALUATE-CHECKED`,
+`EVALUATE-FINISH`, `EVALUATOR-RESET`, `EVALUATOR-UNWIND`, `EVAL-STATUS`,
+`EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH`, `EVAL-THROW`, and `EVAL-TOKEN`.
+Guest `EVALUATE` consumes one physical input's supplied bytes rather than
+normalizing carriage returns and accepts at most 255 bytes. Direct LF-containing
+input remains outside this prerequisite; the pending KDOS walker owns physical
+line splitting. A 256-byte request is rejected before reading its address. The
+ordinary one-core compiler and its control-flow stack persist across
+successful calls, so a colon definition and its conditionals may span several
+evaluator inputs.
+
+The early checked entry returns status 0 for success, 1 for an undefined
+token, 2 for an overlength input, and 3 for evaluator-depth exhaustion.
+`EVALUATE-FINISH` returns status 4 when the persistent compiler or cross-line
+control state is unfinished. `EVALUATOR-RESET` clears that compiler
+bookkeeping without erasing the retained status/diagnostics. The five `EVAL-*`
+cells are distinct, zero-initialized guest-memory cells, and `EVAL-TOKEN`
+returns a stable `( addr len )` view backed by protected 256-byte guest storage.
+Nested failure is sticky: an inner failure stops the remaining inner input and
+the enclosing source tail, while preserving the first diagnostic.
+
+A guest `THROW` caught outside `EVALUATE` deliberately leaves its logical input
+frame recorded until `EVALUATOR-UNWIND` receives a valid prior-depth
+checkpoint. Negative or above-current checkpoints do nothing; a valid target
+drops every abandoned logical frame and republishes the resulting depth. A
+host-side abort, budget exhaustion, or implementation escape instead performs
+fail-closed cleanup of hidden evaluator depth and unfinished compiler state.
+Nested evaluation consumes the active outer public step budget and cannot
+acquire a fresh allowance.
+
+This prerequisite remains runtime-global and nonconcurrent and makes no claim
+for public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
+or interpret-time `[IF]`. It also does not admit KDOS's later status-5
+`EVALUATE-CHECKED` shadow, `SOURCE-EVALUATE-CHECKED`, or `LOAD`. The contiguous
+KDOS frontier therefore remains line 5610.
 
 ### KDOS source frontier
 
@@ -1132,9 +1175,9 @@ bytes of a free slot, but executable BIOS validation also uses only
 `name[0]`; stale tail bytes are accepted. Invalid ordinary-`DO` bounds can
 traverse the 64-bit cell space, so acceptance does not execute them.
 
-Later slices continue with the `LOAD` heading at line 5611, then toward the
-persistent evaluator, ordinary checked module-loader surface, and deterministic
-cooperative task scheduler.
+Later slices continue with the `LOAD` heading at line 5611 and its KDOS-owned
+checked wrapper, then toward the ordinary module-loader surface and
+deterministic cooperative task scheduler.
 
 This branch stops after the semantic BIOS and ordinary KDOS source load are
 credible. It does not load or implement `rich-terminal.f`; that later work

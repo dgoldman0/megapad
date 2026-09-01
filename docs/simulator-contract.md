@@ -186,6 +186,54 @@ are required semantics.  JIT controls may be semantic no-ops only when their
 documented effect is purely optimization.  Capability and status words must
 report the simulator's actual support.
 
+### Semantic BIOS evaluator prerequisite
+
+The admitted hosted BIOS vocabulary includes `EVALUATE`, the early
+`EVALUATE-CHECKED`, `EVALUATE-FINISH`, `EVALUATOR-RESET`,
+`EVALUATOR-UNWIND`, `EVAL-STATUS`, `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH`,
+`EVAL-THROW`, and `EVAL-TOKEN`. `EVALUATE ( addr len -- )` interprets one
+physical input's raw bytes, including carriage returns, with a maximum length
+of 255. LF-delimited multi-line input belongs to the pending KDOS walker. An
+overlength request rejects before reading the guest address. The one-core
+compiler, open-definition state, and compile-time control stack persist across
+normal evaluator calls, permitting definitions and conditionals to span
+inputs.
+
+The early BIOS `EVALUATE-CHECKED ( addr len -- status )` returns 0 for success,
+1 for the first undefined token, 2 for overlength input, and 3 for evaluator
+nesting exhaustion. It preserves ordinary source data-stack effects.
+`EVALUATE-FINISH ( -- status )` returns 4 if an open definition or cross-input
+conditional remains, otherwise 0. `EVALUATOR-RESET` clears persistent compiler
+bookkeeping after recovery but deliberately retains the last status and
+diagnostics.
+
+`EVAL-STATUS`, `EVAL-LINE`, `EVAL-COLUMN`, `EVAL-DEPTH`, and `EVAL-THROW`
+return five distinct, zero-initialized guest-memory cell addresses.
+`EVAL-TOKEN` returns a stable `( addr len )` view whose protected 256-byte
+guest buffer begins zeroed and is not reclaimed by numeric dictionary rollback.
+Undefined-token diagnostics retain the caller's line context, zero-based byte
+column, and exact raw token. A nested evaluator failure is sticky through its
+enclosing inputs: neither the failed inner tail nor the outer tail executes,
+and the first diagnostic remains authoritative.
+
+If a guest `THROW` crosses `EVALUATE` into a guest `CATCH`, its logical
+evaluator frame remains present until KDOS explicitly accounts for the
+abandoned depth. `EVALUATOR-UNWIND ( depth -- )` ignores negative and
+above-current checkpoints and drops every abandoned logical frame only for a
+valid prior depth. By contrast, an exception that escapes the public host
+boundary, including a host abort, active-step-budget exhaustion, or
+implementation error, clears hidden evaluator frames and unfinished compiler
+state before the context can be reused. Nested guest evaluation remains
+charged to the active outer public step budget; it does not reset or enlarge
+that budget.
+
+This state is runtime-global for the one admitted core and is not a concurrent
+evaluator contract. The prerequisite does not publish or qualify public
+`SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
+interpret-time `[IF]`, the KDOS status-5 checked shadow,
+`SOURCE-EVALUATE-CHECKED`, or filesystem `LOAD`. Consequently it does not
+advance the contiguous KDOS source frontier beyond line 5610.
+
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
 streaming, and bit 2 is raw Keccak-f[1600]. Bit 3 remains clear because the
@@ -1070,9 +1118,10 @@ is stranded at hosted HERE, and any other bracketed raw opcode fails closed.
 Execution blocks after that operation and resumes only through the exact
 one-shot wake contract above; treating IDL as a no-op or ordinary cooperative
 task yield is outside the contract. Public memory-backed `STATE`, general raw
-native-code emission, executing a `]` compiled while already in compile state,
-and compiler state persistent across separate evaluator calls remain pending;
-that unsupported `]` form fails during source compilation.
+native-code emission, and executing a `]` compiled while already in compile
+state remain pending; that unsupported `]` form fails during source
+compilation. Persistent one-core compiler state across evaluator calls is now
+part of the semantic BIOS prerequisite above.
 
 Exact unchanged lines 2797 through 2985 execute the Buffer registry,
 descriptor accessors, ordinary,
@@ -1843,10 +1892,10 @@ branch has an explicit pre-rich-terminal stop line:
 3. sparse byte memory, dictionary/runtime backing, staged compiler/evaluator
    semantics, exceptions, and numeric dictionary rollback;
 4. advance one unchanged `kdos.f` frontier alongside the one-core semantic
-   BIOS surfaces it actually reaches, while filling the remaining persistent
-   compiler/evaluator seams instead of replacing source definitions;
-5. complete the ordinary `kdos.f` load, then qualify KDOS-owned evaluator and
-   module-loading surfaces; and
+   BIOS surfaces it actually reaches, while filling the remaining KDOS-owned
+   evaluator and loader seams instead of replacing source definitions;
+5. qualify KDOS-owned checked-evaluator and module-loading surfaces as the
+   frontier reaches them, then complete the ordinary `kdos.f` load; and
 6. stop before loading or implementing `rich-terminal.f`.
 
 KDOS qualification maintains one monotonically advancing source frontier.

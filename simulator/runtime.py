@@ -79,6 +79,11 @@ from simulator.source import (
 from simulator.stacks import DataStack, ReturnEntry, ReturnStack
 
 
+_BIOS_EVALUATE_MAX_BYTES = 255
+_BIOS_EVALUATE_MAX_DEPTH = 16
+_BIOS_EVAL_TOKEN_CAPACITY = 256
+
+
 @dataclass(slots=True)
 class ExecutionContext:
     """Per-task semantic stacks for one hosted execution context."""
@@ -333,13 +338,51 @@ class _Compiler:
 
 
 @dataclass(slots=True)
+class _CompilerState:
+    """One mutable compiler slot shared only where source semantics require."""
+
+    compiler: _Compiler | None = None
+
+
+@dataclass(slots=True)
 class _EvaluationState:
     context: ExecutionContext
     cursor: SourceCursor
     meter: _StepMeter
-    compiler: _Compiler | None = None
+    _compiler_state: _CompilerState = field(default_factory=_CompilerState)
     token_count: int = 0
     definitions: list[Word] = field(default_factory=list)
+    bios_evaluator: bool = False
+
+    @property
+    def compiler(self) -> _Compiler | None:
+        return self._compiler_state.compiler
+
+    @compiler.setter
+    def compiler(self, value: _Compiler | None) -> None:
+        self._compiler_state.compiler = value
+
+
+@dataclass(frozen=True, slots=True)
+class _BiosEvaluationFrame:
+    """One input context retained until normal return or explicit unwind."""
+
+    context: ExecutionContext
+
+
+@dataclass(slots=True)
+class _BiosEvaluatorState:
+    """Runtime-owned state behind the mutable semantic BIOS evaluator ABI."""
+
+    status_address: int
+    line_address: int
+    column_address: int
+    depth_address: int
+    throw_address: int
+    token_address: int
+    token_length: int = 0
+    compiler_state: _CompilerState = field(default_factory=_CompilerState)
+    frames: list[_BiosEvaluationFrame] = field(default_factory=list)
 
 
 class _StepMeter:
@@ -421,6 +464,14 @@ class _GuestControlTransfer(BaseException):
         self.root_id = u64(root_id)
         self.context = context
         super().__init__(f"guest control transferred to dispatch {self.root_id}")
+
+
+class _UndefinedWord(SourceError):
+    """Narrow source failure translated by the guest checked evaluator."""
+
+    def __init__(self, token: bytes, location: SourceLocation) -> None:
+        self.token = token
+        super().__init__(f"unknown word {token!r}", location)
 
 
 class MegaForthRuntime:
@@ -566,6 +617,7 @@ class MegaForthRuntime:
         self._dictionary_fault_xt = 0
         self._provided: set[bytes] = set()
         self._active_input_states: list[_EvaluationState] = []
+        self._bios_evaluator: _BiosEvaluatorState | None = None
         self._active_dispatches: list[_DispatchFrame] = []
         self._next_dispatch_root_id = 1
         self._uart_output = bytearray()
@@ -669,6 +721,262 @@ class MegaForthRuntime:
             raise RuntimeError("numeric BASE is already bound")
         self.memory.write64(address, self._bootstrap_numeric_base)
         self._numeric_base_address = address
+
+    def bind_bios_evaluator(
+        self,
+        *,
+        status_address: int,
+        line_address: int,
+        column_address: int,
+        depth_address: int,
+        throw_address: int,
+        token_address: int,
+    ) -> None:
+        """Bind the runtime-owned evaluator to its protected BIOS storage."""
+
+        if self._bios_evaluator is not None:
+            raise RuntimeError("semantic BIOS evaluator is already bound")
+        cell_addresses = (
+            status_address,
+            line_address,
+            column_address,
+            depth_address,
+            throw_address,
+        )
+        if any(
+            not isinstance(address, int) or not 0 <= address <= MASK64
+            for address in (*cell_addresses, token_address)
+        ):
+            raise ValueError("evaluator storage addresses must be uint64 values")
+        if len(set(cell_addresses)) != len(cell_addresses):
+            raise ValueError("evaluator diagnostic cells must not alias")
+        if token_address > MASK64 - (_BIOS_EVAL_TOKEN_CAPACITY - 1):
+            raise ValueError("evaluator token buffer wraps uint64")
+
+        for address in cell_addresses:
+            self.memory.write64(address, 0)
+        self.memory.fill(token_address, _BIOS_EVAL_TOKEN_CAPACITY, 0)
+        self._bios_evaluator = _BiosEvaluatorState(
+            status_address=status_address,
+            line_address=line_address,
+            column_address=column_address,
+            depth_address=depth_address,
+            throw_address=throw_address,
+            token_address=token_address,
+        )
+
+    def bios_evaluate(self, context: ExecutionContext) -> None:
+        """Execute the legacy guest ``EVALUATE ( addr len -- )`` ABI."""
+
+        if not isinstance(context, ExecutionContext):
+            raise TypeError("context must be an ExecutionContext")
+        evaluator = self._require_bios_evaluator()
+        try:
+            self._bios_evaluate(evaluator, context)
+        except (_GuestControlTransfer, _DictionaryFaultRequest):
+            # Both paths have abandoned the Python input cursor while guest
+            # control is still entitled to reconstruct logical EVALUATE depth.
+            raise
+        except BaseException:
+            self._fail_closed_bios_evaluator(evaluator)
+            raise
+
+    def bios_evaluate_checked(self, context: ExecutionContext) -> None:
+        """Run the early BIOS checked wrapper and append its sticky status."""
+
+        self.bios_evaluate(context)
+        evaluator = self._require_bios_evaluator()
+        context.data.push(self.memory.read64(evaluator.status_address))
+
+    def bios_evaluate_finish(self, context: ExecutionContext) -> None:
+        """Report whether the persistent guest compiler is completely idle."""
+
+        if not isinstance(context, ExecutionContext):
+            raise TypeError("context must be an ExecutionContext")
+        evaluator = self._require_bios_evaluator()
+        self._clear_bios_evaluator_diagnostics(evaluator)
+        status = 4 if evaluator.compiler_state.compiler is not None else 0
+        if status:
+            self.memory.write64(evaluator.status_address, status)
+        context.data.push(status)
+
+    def bios_evaluator_reset(self) -> None:
+        """Discard only persistent guest compiler bookkeeping."""
+
+        evaluator = self._require_bios_evaluator()
+        evaluator.compiler_state.compiler = None
+
+    def bios_evaluator_unwind(self, context: ExecutionContext) -> None:
+        """Discard abandoned logical input frames down to one checkpoint."""
+
+        if not isinstance(context, ExecutionContext):
+            raise TypeError("context must be an ExecutionContext")
+        evaluator = self._require_bios_evaluator()
+        target_cell = context.data.pop()
+        if s64(target_cell) < 0:
+            return
+        depth = self._validated_bios_evaluator_depth(evaluator)
+        if target_cell > depth:
+            return
+        del evaluator.frames[target_cell:]
+        self.memory.write64(evaluator.depth_address, target_cell)
+
+    def bios_eval_status(self, context: ExecutionContext) -> None:
+        """Push the mutable ``EVAL-STATUS`` diagnostic cell address."""
+
+        context.data.push(self._require_bios_evaluator().status_address)
+
+    def bios_eval_line(self, context: ExecutionContext) -> None:
+        """Push the caller-owned one-based ``EVAL-LINE`` cell address."""
+
+        context.data.push(self._require_bios_evaluator().line_address)
+
+    def bios_eval_column(self, context: ExecutionContext) -> None:
+        """Push the zero-based ``EVAL-COLUMN`` diagnostic cell address."""
+
+        context.data.push(self._require_bios_evaluator().column_address)
+
+    def bios_eval_depth(self, context: ExecutionContext) -> None:
+        """Push the mutable logical ``EVAL-DEPTH`` cell address."""
+
+        context.data.push(self._require_bios_evaluator().depth_address)
+
+    def bios_eval_throw(self, context: ExecutionContext) -> None:
+        """Push the KDOS-owned ``EVAL-THROW`` diagnostic cell address."""
+
+        context.data.push(self._require_bios_evaluator().throw_address)
+
+    def bios_eval_token(self, context: ExecutionContext) -> None:
+        """Return the stable first-failure token buffer and current length."""
+
+        evaluator = self._require_bios_evaluator()
+        context.data.push(evaluator.token_address)
+        context.data.push(evaluator.token_length)
+
+    def _bios_evaluate(
+        self,
+        evaluator: _BiosEvaluatorState,
+        context: ExecutionContext,
+    ) -> None:
+        depth = self._validated_bios_evaluator_depth(evaluator)
+        if depth == 0:
+            self._clear_bios_evaluator_diagnostics(evaluator)
+
+        if depth and self.memory.read64(evaluator.status_address) != 0:
+            context.data.pop()
+            context.data.pop()
+            return
+
+        if depth >= _BIOS_EVALUATE_MAX_DEPTH:
+            context.data.pop()
+            context.data.pop()
+            self.memory.write64(evaluator.status_address, 3)
+            self.memory.write64(evaluator.column_address, 0)
+            evaluator.token_length = 0
+            self.write_uart_bytes(b"EVALUATE depth limit exceeded\n")
+            return
+
+        length = context.data.pop()
+        address = context.data.pop()
+        if length > _BIOS_EVALUATE_MAX_BYTES:
+            self.memory.write64(evaluator.status_address, 2)
+            self.memory.write64(evaluator.column_address, 0)
+            evaluator.token_length = 0
+            self.write_uart_bytes(b"EVALUATE input exceeds 255 bytes\n")
+            return
+
+        source = self.memory.read_bytes(address, length)
+        cursor = SourceCursor(source, source_name="<EVALUATE>")
+        frame = _BiosEvaluationFrame(context)
+        evaluator.frames.append(frame)
+        self.memory.write64(evaluator.depth_address, len(evaluator.frames))
+        meter, _starting_steps = self._meter_for_public_call(None)
+        state = _EvaluationState(
+            context,
+            cursor,
+            meter,
+            _compiler_state=evaluator.compiler_state,
+            bios_evaluator=True,
+        )
+        try:
+            self._evaluate_line(state)
+        except _UndefinedWord as error:
+            self._capture_bios_undefined(evaluator, error)
+            self._pop_bios_evaluator_frame(evaluator, frame)
+        except (_GuestControlTransfer, _DictionaryFaultRequest):
+            # The Python cursor is gone, but the native input frame would
+            # remain abandoned until KDOS calls EVALUATOR-UNWIND.
+            raise
+        else:
+            self._pop_bios_evaluator_frame(evaluator, frame)
+
+    def _capture_bios_undefined(
+        self,
+        evaluator: _BiosEvaluatorState,
+        error: _UndefinedWord,
+    ) -> None:
+        token = error.token
+        if len(token) > _BIOS_EVALUATE_MAX_BYTES:
+            raise AssertionError("evaluator token exceeds its admitted input")
+        self.memory.write64(evaluator.status_address, 1)
+        self.memory.write64(evaluator.column_address, error.location.column)
+        self.memory.write_bytes(evaluator.token_address, token)
+        evaluator.token_length = len(token)
+        self.write_uart_bytes(token + b" ? (not found)\n")
+
+    def _clear_bios_evaluator_diagnostics(
+        self,
+        evaluator: _BiosEvaluatorState,
+    ) -> None:
+        self.memory.write64(evaluator.status_address, 0)
+        self.memory.write64(evaluator.column_address, 0)
+        self.memory.write64(evaluator.throw_address, 0)
+        evaluator.token_length = 0
+
+    def _validated_bios_evaluator_depth(
+        self,
+        evaluator: _BiosEvaluatorState,
+    ) -> int:
+        depth = self.memory.read64(evaluator.depth_address)
+        if depth != len(evaluator.frames):
+            self._fail_closed_bios_evaluator(evaluator)
+            raise ExecutionError(
+                "guest EVAL-DEPTH no longer matches hosted input frames"
+            )
+        return depth
+
+    def _pop_bios_evaluator_frame(
+        self,
+        evaluator: _BiosEvaluatorState,
+        frame: _BiosEvaluationFrame,
+    ) -> None:
+        if not evaluator.frames or evaluator.frames[-1] is not frame:
+            self._fail_closed_bios_evaluator(evaluator)
+            raise ExecutionError("hosted EVALUATE frame stack is corrupted")
+        evaluator.frames.pop()
+        self.memory.write64(evaluator.depth_address, len(evaluator.frames))
+
+    def _fail_closed_bios_evaluator(
+        self,
+        evaluator: _BiosEvaluatorState,
+    ) -> None:
+        evaluator.frames.clear()
+        evaluator.compiler_state.compiler = None
+        self.memory.write64(evaluator.depth_address, 0)
+
+    def _fail_closed_active_bios_evaluator(self) -> None:
+        evaluator = self._bios_evaluator
+        if evaluator is not None and (
+            evaluator.frames
+            or evaluator.compiler_state.compiler is not None
+        ):
+            self._fail_closed_bios_evaluator(evaluator)
+
+    def _require_bios_evaluator(self) -> _BiosEvaluatorState:
+        evaluator = self._bios_evaluator
+        if evaluator is None:
+            raise ExecutionError("semantic BIOS evaluator is not installed")
+        return evaluator
 
     def guest_identity(self, context: ExecutionContext) -> GuestIdentity:
         """Return the checked BIOS caller identity for the initial profile."""
@@ -818,6 +1126,18 @@ class MegaForthRuntime:
     def _has_active_dispatch(self, context: ExecutionContext) -> bool:
         return any(
             frame.context is context for frame in self._active_dispatches
+        )
+
+    def _has_active_guest_transfer_target(
+        self,
+        transfer: _GuestControlTransfer,
+    ) -> bool:
+        """Whether an internal transfer can still reach its exact guest root."""
+
+        return any(
+            frame.context is transfer.context
+            and frame.root_id == transfer.root_id
+            for frame in self._active_dispatches
         )
 
     def _has_active_evaluation(self, context: ExecutionContext) -> bool:
@@ -1098,6 +1418,7 @@ class MegaForthRuntime:
         callback: PrimitiveCallback,
         *,
         immediate: bool = False,
+        initial_body: bytes = b"",
     ) -> Word:
         if not callable(callback):
             raise TypeError("primitive callback must be callable")
@@ -1105,6 +1426,7 @@ class MegaForthRuntime:
             name,
             PrimitiveDefinition(callback),
             immediate=immediate,
+            initial_body=initial_body,
         )
 
     def define_constant(self, name: bytes | str, value: int) -> Word:
@@ -1227,6 +1549,35 @@ class MegaForthRuntime:
         buffer.  It intentionally does not reset at token boundaries.
         """
 
+        try:
+            return self._evaluate_source(
+                source,
+                source_name=source_name,
+                context=context,
+                step_budget=step_budget,
+            )
+        except _GuestControlTransfer as transfer:
+            if not self._has_active_guest_transfer_target(transfer):
+                self._fail_closed_active_bios_evaluator()
+            raise
+        except _DictionaryFaultRequest as request:
+            if not self._has_active_dispatch(request.context):
+                self._fail_closed_active_bios_evaluator()
+            raise
+        except BaseException:
+            self._fail_closed_active_bios_evaluator()
+            raise
+
+    def _evaluate_source(
+        self,
+        source: bytes | bytearray | memoryview,
+        *,
+        source_name: str,
+        context: ExecutionContext | None,
+        step_budget: int | None,
+    ) -> EvaluationResult:
+        """Implement :meth:`evaluate` below its outer host-escape guard."""
+
         active_context = self.main_context if context is None else context
         if not isinstance(active_context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
@@ -1317,6 +1668,7 @@ class MegaForthRuntime:
                 active_context._mark_host_control_fault(transfer)
             raise
         except ForthAbort as exc:
+            self._fail_closed_active_bios_evaluator()
             if active_context.returns.has_pointer_captures_after(
                 capture_checkpoint
             ):
@@ -1326,6 +1678,7 @@ class MegaForthRuntime:
                 active_context.returns.clear()
             raise
         except BaseException as exc:
+            self._fail_closed_active_bios_evaluator()
             if active_context.returns.has_pointer_captures_after(
                 capture_checkpoint
             ):
@@ -1374,6 +1727,28 @@ class MegaForthRuntime:
         step_budget: int | None = None,
     ) -> RunResult:
         """Run one compiled word until completion or its next IDL boundary."""
+
+        try:
+            return self._run_until_blocked(
+                name_or_xt,
+                context=context,
+                step_budget=step_budget,
+            )
+        except BaseException:
+            # This entry point rejects nested dispatch before execution, so
+            # every exception escaping it is an outer host escape rather than
+            # a guest transfer still travelling toward an older CATCH root.
+            self._fail_closed_active_bios_evaluator()
+            raise
+
+    def _run_until_blocked(
+        self,
+        name_or_xt: bytes | str | int,
+        *,
+        context: ExecutionContext | None,
+        step_budget: int | None,
+    ) -> RunResult:
+        """Implement :meth:`run_until_blocked` under its host guard."""
 
         active_context = self.main_context if context is None else context
         if not isinstance(active_context, ExecutionContext):
@@ -1517,6 +1892,10 @@ class MegaForthRuntime:
                     return
                 state.token_count += 1
                 self._evaluate_token(token, state)
+                if state.bios_evaluator:
+                    evaluator = self._require_bios_evaluator()
+                    if self.memory.read64(evaluator.status_address) != 0:
+                        return
         finally:
             active = self._active_input_states.pop()
             if active is not state:
@@ -1527,7 +1906,15 @@ class MegaForthRuntime:
             state.cursor.skip_backslash_comment()
             return
 
-        word = self.dictionary.find(token)
+        try:
+            word = self.dictionary.find(token)
+        except ValueError:
+            if not state.bios_evaluator:
+                raise
+            # Dictionary header names are ASCII and at most 127 bytes, while
+            # the BIOS parser admits any non-space token up to the 255-byte
+            # input bound.  Such a token is an ordinary guest lookup miss.
+            word = None
         if word is not None and isinstance(word.implementation, DirectiveDefinition):
             if (
                 state.compiler is not None
@@ -1567,10 +1954,10 @@ class MegaForthRuntime:
                 state.context.data.push(number)
             return
 
-        raise SourceError(
-            f"unknown word {token!r}",
-            self._token_location(state),
-        )
+        location = self._token_location(state)
+        if state.bios_evaluator:
+            raise _UndefinedWord(token, location)
+        raise SourceError(f"unknown word {token!r}", location)
 
     def _apply_directive(
         self,
@@ -1839,6 +2226,7 @@ class MegaForthRuntime:
             preserve_capture_evidence = True
             raise
         except ForthAbort as exc:
+            self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
             if exc.bind_origin(context):
@@ -1850,6 +2238,7 @@ class MegaForthRuntime:
                 context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:
+            self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
             context.returns.restore(return_snapshot)
@@ -1937,6 +2326,7 @@ class MegaForthRuntime:
             preserve_capture_evidence = True
             raise
         except ForthAbort as exc:
+            self._fail_closed_active_bios_evaluator()
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -1952,6 +2342,7 @@ class MegaForthRuntime:
                 context.returns.restore(suspended.return_snapshot)
             raise
         except BaseException as exc:
+            self._fail_closed_active_bios_evaluator()
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -2011,6 +2402,7 @@ class MegaForthRuntime:
                 context.returns.restore(return_snapshot)
             raise
         except ForthAbort as exc:
+            self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
             if exc.bind_origin(context):
@@ -2020,6 +2412,7 @@ class MegaForthRuntime:
                 context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:
+            self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
             context.returns.restore(return_snapshot)

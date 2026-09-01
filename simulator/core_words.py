@@ -42,6 +42,9 @@ from simulator.runtime import (
 from simulator.sha3 import SHA3_CONTROL, SHA3_STATUS
 
 
+_EVAL_TOKEN_BYTES = 256
+
+
 def _dup(context: ExecutionContext) -> None:
     context.data.push(context.data.peek())
 
@@ -2138,6 +2141,23 @@ def install_core(runtime: MegaForthRuntime) -> None:
         ),
         (b"TASK-STOP", _task_stop_unavailable),
         (b"'", lambda context: _tick(runtime, context)),
+        (b"EVALUATE", lambda context: runtime.bios_evaluate(context)),
+        (
+            b"EVALUATE-CHECKED",
+            lambda context: runtime.bios_evaluate_checked(context),
+        ),
+        (
+            b"EVALUATE-FINISH",
+            lambda context: runtime.bios_evaluate_finish(context),
+        ),
+        (
+            b"EVALUATOR-RESET",
+            lambda _context: runtime.bios_evaluator_reset(),
+        ),
+        (
+            b"EVALUATOR-UNWIND",
+            lambda context: runtime.bios_evaluator_unwind(context),
+        ),
         (b">BODY", lambda context: _to_body(runtime, context)),
         (b"COMPARE", lambda context: _compare(runtime, context)),
         (b"JIT-ON", _semantic_noop),
@@ -2160,6 +2180,46 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
     for name, callback in primitives:
         runtime.define_primitive(name, callback)
+
+    zero_cell = bytes(CELL_BYTES)
+    eval_status = runtime.define_primitive(
+        b"EVAL-STATUS",
+        lambda context: runtime.bios_eval_status(context),
+        initial_body=zero_cell,
+    )
+    eval_line = runtime.define_primitive(
+        b"EVAL-LINE",
+        lambda context: runtime.bios_eval_line(context),
+        initial_body=zero_cell,
+    )
+    eval_column = runtime.define_primitive(
+        b"EVAL-COLUMN",
+        lambda context: runtime.bios_eval_column(context),
+        initial_body=zero_cell,
+    )
+    eval_depth = runtime.define_primitive(
+        b"EVAL-DEPTH",
+        lambda context: runtime.bios_eval_depth(context),
+        initial_body=zero_cell,
+    )
+    eval_throw = runtime.define_primitive(
+        b"EVAL-THROW",
+        lambda context: runtime.bios_eval_throw(context),
+        initial_body=zero_cell,
+    )
+    eval_token = runtime.define_primitive(
+        b"EVAL-TOKEN",
+        lambda context: runtime.bios_eval_token(context),
+        initial_body=bytes(_EVAL_TOKEN_BYTES),
+    )
+    runtime.bind_bios_evaluator(
+        status_address=eval_status.body_address,
+        line_address=eval_line.body_address,
+        column_address=eval_column.body_address,
+        depth_address=eval_depth.body_address,
+        throw_address=eval_throw.body_address,
+        token_address=eval_token.body_address,
+    )
 
     base_word = runtime.define_created(
         b"BASE",
