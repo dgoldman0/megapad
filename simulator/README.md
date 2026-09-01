@@ -1756,19 +1756,21 @@ ordinary screen definitions: 501 LF records, 18,051 bytes, SHA-256
 `a47d29e51c6754e24852bea08261b3119389e8a1849b9e39322bf1e9013cce7d`,
 Git blob `01a3e0eff93567b66441e071003b3e7a25809d3d`, 86 definitions, and
 4,297 bytes of hosted dictionary growth. The 17 string-bearing definitions
-compile 102 `S\"` literals into 1,939 bytes of guest-addressable body storage.
+compile 102 `S"` literals into 1,939 bytes of guest-addressable body storage.
 Load initializes four statistics variables and runs `INSTALL-TUI`, binding
 vector slots 0–12 and 14; raw `WV-NONE` slot 13 remains unwritten. It performs
 no UART, key, filesystem, storage, or NIC operation.
 
-Focused acceptance executes public vector-dispatched widgets, bounded line
-editing, list and detail behavior, document enumeration, scalar renderers, and
-safe composed screens. It retains the unchanged ANSI byte publisher as the
-selected backend; that does not qualify rich output. Source defects remain
-observable: `WV@`/`WV!` trust their index and XT; `TUI-DETAIL` suppresses valid
-selections but executes an out-of-range numeric selection; parameterized CSI
-bytes leak from `TUI-INPUT` and can corrupt its stack state; `.STOR-ROW` leaves
-its slot; document and tutorial list indices are reset independently;
+Focused byte oracles cover selected public widgets, scalar rows, document
+enumeration, absent-storage `SCR-STORAGE`, one-core `SCR-CORES`, and
+`SCR-HOME-NET`; the zero-buffer statistics helper is qualified separately.
+The selected backend remains the unchanged ANSI byte publisher, so this does
+not qualify rich output. Source defects remain observable: `WV@`/`WV!` trust
+their index and XT; negative/high-cell `TUI-LIST` counts can traverse almost
+the whole cell domain; `TUI-DETAIL` suppresses valid selections but executes
+an out-of-range numeric selection; parameterized CSI bytes leak from
+`TUI-INPUT` and can corrupt its stack state; `.STOR-ROW` leaves its slot;
+document and tutorial list indices are reset independently;
 selected Storage inherits the `FIND-NTH-ACTIVE` stack fault; zero-count
 `.HOME-MEM-BUFS` wraps; the Memory view assumes a 65,536-byte dictionary; and
 zero-count `.BSTATS-BODY` retains stale counters. The full normative details

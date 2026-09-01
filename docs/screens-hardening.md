@@ -1,7 +1,7 @@
 # KDOS Screen System — Hardening Plan
 
-Status: **partially implemented** (§1–§7 have landed mechanisms, with the
-remaining source-literal defects called out below; §8 is deferred)
+Status: **partially implemented** (§1–§7 have landed mechanisms; §8 input
+repair and the qualified SDL defects below remain open)
 
 Covers: KDOS v1.1 screen registry, tab bar, key dispatch, WVEC widgets
 
@@ -166,6 +166,26 @@ repaired there.
 
 ---
 
+## 9. Widget SDL and Screen-definition Correctness
+
+The unchanged §9.5–§9.6 source has additional correctness defects distinct
+from optional UI features:
+
+| Issue | Detail |
+|-------|--------|
+| **Unchecked widget vector** | `WV@`/`WV!` trust both index and XT, and `INSTALL-TUI` leaves raw slot 13 uninitialized. |
+| **Unsafe list count** | `TUI-LIST` special-cases exact zero but accepts negative/high-cell counts; `0 DO` can traverse essentially the whole cell domain. |
+| **Reversed detail bound** | `TUI-DETAIL` suppresses valid selections, then executes an out-of-range numeric selection as an XT. |
+| **Row/index leaks** | `.STOR-ROW` returns its `slot`. Documentation and tutorial lists restart visible numbering independently, while `.DOCS-BODY` publishes only the final tutorial count as `SCR-MAX`. |
+| **Inherited Storage fault** | A selected Storage row reaches the matched-path extra `DROP` in `FIND-NTH-ACTIVE`. |
+| **Zero-count loops/state** | `.HOME-MEM-BUFS` uses non-zero-trip `0 DO`; zero-buffer `.BSTATS-BODY` returns before clearing stale counters. |
+| **Fixed memory ceiling** | `SCR-HOME-MEMORY` computes free space from a hard-coded 65,536-byte dictionary ceiling. |
+
+These are source bugs, not simulator substitutions. The hosted acceptance
+keeps them observable while tests avoid the unbounded and invalid-XT paths.
+
+---
+
 ## Priority Order
 
 | # | Item | Severity | Effort | Status |
@@ -178,5 +198,6 @@ repaired there.
 | 6 | Key namespace docs (§6) | Low | Tiny | **Done** |
 | 7 | SCR-SEL reset (§7) | Low | Small | **Done** |
 | 8 | Fix W.INPUT parameterized CSI leak (§8) | High | Small | Open |
-| 9 | Spinlock for multicore (§4 long-term) | Low | Medium | Deferred |
-| 10 | W.INPUT enhancements (§8) | Low | Large | Deferred |
+| 9 | Fix SDL correctness defects (§9) | High | Mixed | Open |
+| 10 | Spinlock for multicore (§4 long-term) | Low | Medium | Deferred |
+| 11 | W.INPUT enhancements (§8) | Low | Large | Deferred |

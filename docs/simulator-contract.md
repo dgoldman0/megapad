@@ -2494,19 +2494,19 @@ bytes, with SHA-256
 and Git blob `01a3e0eff93567b66441e071003b3e7a25809d3d`. They publish 86
 definitions: 16 constants, one 120-byte `WVEC` created body, 65 colon words,
 and four variables. The 17 string-bearing colon definitions contain 102
-compiled `S\"` literals in 1,939 body bytes. Total hosted dictionary growth is
-4,297 bytes: 2,206 bytes of headers and semantic slots, 1,939 bytes of literal
-pools, and 152 bytes of vector/variable bodies.
+compiled `S"` literals in 1,939 body bytes. Total hosted dictionary growth is
+4,297 bytes: 2,206 bytes of headers, names, and semantic slots, 1,939 bytes of
+literal pools, and 152 bytes of vector/variable bodies.
 
 Load executes `INSTALL-TUI`: slots 0 through 12 and 14 receive the ordinary
 ANSI TUI XTs, while the declared `WV-NONE` slot 13 retains its prior raw
 `ALLOT` byte pattern. The four statistics variables are zero-initialized.
 There is no key read, filesystem or storage I/O, direct NIC access, or UART
-publication during load. Public `W.*` dispatch, scalar row renderers, list
-selection, bounded line editing, document enumeration, and safe Home,
-Storage, Cores, and Buffer Statistics compositions execute through the
-unchanged vector vocabulary. Their current selected renderer still publishes
-ANSI bytes to UART; this is renderer-neutral source dispatch evidence, not a
+publication during load. Focused byte oracles cover selected public widgets,
+scalar rows, document enumeration, absent-storage `SCR-STORAGE`, one-core
+`SCR-CORES`, and `SCR-HOME-NET`; the zero-buffer statistics helper is
+qualified separately. Their current selected renderer still publishes ANSI
+bytes to UART. This is renderer-neutral source dispatch evidence, not a
 rich-frame, compositor, or physical-viewer checkpoint.
 
 The following additional source-literal discrepancies are accepted and left
@@ -2515,6 +2515,9 @@ visible:
 - `WV@` and `WV!` neither check the 0-through-14 index nor validate the XT.
   Slot 13 is not installed, so dispatching it without an explicit binding can
   execute retained raw allocation bytes as an XT.
+- `TUI-LIST` special-cases exact zero but accepts negative or high-cell
+  counts; its `SWAP 0 DO` can then traverse essentially the whole cell domain.
+  Callers must supply a nonnegative, bounded count.
 - `TUI-DETAIL` tests `count >= selection` in its exit branch. It therefore
   suppresses every valid selection (and the `selection = count` boundary),
   while a larger selection prints the separator and executes the numeric

@@ -932,9 +932,9 @@ untouched. No operation validates pool membership, alignment, allocation, or
 directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
 flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
 and deferred targets are global and unlocked. The contiguous hosted frontier
-continues through the §9.5–§9.6 widget-vector SDL and ordinary screen
-definitions at line 8339; §9's screen registration/event-loop tail begins at
-line 8340.
+continues through §9.1–§9.6 registry/control, widget-vector SDL, and ordinary
+screen definitions at line 8339; the screen-label, dispatch, registration, and
+event-loop tail begins at line 8340.
 
 ### Documentation Access
 

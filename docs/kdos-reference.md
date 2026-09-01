@@ -2196,9 +2196,9 @@ operation validates pool membership, alignment, allocation state, or directory
 identity. Lowest-first address reuse therefore permits stale-handle ABA: an old
 fdesc can flush or close a new occupant. The pool, `OP-SLOT`, parser/cache
 state, and deferred vectors are global and unlocked. The contiguous frontier
-continues through the §9.5–§9.6 widget-vector SDL and ordinary screen
-definitions at line 8339; the screen registration/event-loop tail begins at
-line 8340.
+continues through §9.1–§9.6 registry/control, widget-vector SDL, and ordinary
+screen definitions at line 8339; the screen-label, dispatch, registration, and
+event-loop tail begins at line 8340.
 
 **Example — filesystem operations:**
 ```forth
@@ -2938,20 +2938,20 @@ SHA-256
 `a47d29e51c6754e24852bea08261b3119389e8a1849b9e39322bf1e9013cce7d`
 and Git blob `01a3e0eff93567b66441e071003b3e7a25809d3d`. They publish 86
 definitions: 16 constants, one 120-byte `WVEC` table, 65 colon words, and four
-variables. Seventeen colon definitions contain 102 compiled `S\"` operations
+variables. Seventeen colon definitions contain 102 compiled `S"` operations
 and 1,939 bytes of guest-addressable literal storage. Together with 152 bytes
-of vector and variable bodies and 2,206 bytes of headers/semantic slots, the
-slice grows the hosted dictionary by exactly 4,297 bytes.
+of vector and variable bodies and 2,206 bytes of headers, names, and semantic
+slots, the slice grows the hosted dictionary by exactly 4,297 bytes.
 
 The only load-time execution is `INSTALL-TUI`. It binds vector slots 0–12 and
-14 to the ANSI implementations, deliberately leaving raw `WV-NONE` slot 13
-untouched, and the four statistics variables begin at zero. Loading reads no
+14 to the ANSI implementations, leaving raw `WV-NONE` slot 13 untouched, and
+the four statistics variables begin at zero. Loading reads no
 key, emits no UART bytes, and performs no filesystem, storage, or direct NIC
-operation. Focused execution preserves the public `W.*` dispatch boundary and
-the literal ANSI output of the selected renderer. Ordinary safe Home, Storage,
-Cores, and Buffer Statistics compositions run through that same boundary, but
-byte-oriented TUI output is not acceptance of a rich-terminal module,
-projection, compositor, or physical viewer.
+operation. Focused byte oracles cover selected public widgets, scalar rows,
+document enumeration, absent-storage `SCR-STORAGE`, one-core `SCR-CORES`, and
+`SCR-HOME-NET`; the zero-buffer statistics helper is qualified separately.
+The selected renderer's byte-oriented TUI output is not acceptance of a
+rich-terminal module, projection, compositor, or physical viewer.
 
 The following discrepancies are source-literal and are not repaired by the
 simulator:
@@ -2959,6 +2959,9 @@ simulator:
 - `WV@`/`WV!` accept any index or XT. `INSTALL-TUI` does not initialize slot
   13, so dispatch through it before an explicit binding uses retained raw
   allocation bytes.
+- `TUI-LIST` special-cases exact zero but accepts negative or high-cell
+  counts; its `SWAP 0 DO` can then traverse essentially the whole cell domain.
+  Callers must supply a nonnegative, bounded count.
 - `TUI-DETAIL` exits when `count >= selection`, suppressing every valid
   selection and the `selection = count` boundary. A selection larger than the
   count instead prints a separator, executes the numeric selection as an XT,
