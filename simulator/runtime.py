@@ -49,8 +49,11 @@ from simulator.ir import (
     RestoreDataStackPointer,
     RestoreReturnStackPointer,
     RPeek,
+    RPeekPair,
     RPop,
+    RPopPair,
     RPush,
+    RPushPair,
     Return,
     Unloop,
     UartReadAttempt,
@@ -247,6 +250,9 @@ class DirectiveKind(Enum):
     TO_R = auto()
     R_FROM = auto()
     R_FETCH = auto()
+    TWO_TO_R = auto()
+    TWO_R_FROM = auto()
+    TWO_R_FETCH = auto()
     DO = auto()
     QUESTION_DO = auto()
     LOOP = auto()
@@ -2192,6 +2198,12 @@ class MegaForthRuntime:
             compiler.operations.append(RPop())
         elif kind is DirectiveKind.R_FETCH:
             compiler.operations.append(RPeek())
+        elif kind is DirectiveKind.TWO_TO_R:
+            compiler.operations.append(RPushPair())
+        elif kind is DirectiveKind.TWO_R_FROM:
+            compiler.operations.append(RPopPair())
+        elif kind is DirectiveKind.TWO_R_FETCH:
+            compiler.operations.append(RPeekPair())
         elif kind is DirectiveKind.DO:
             compiler.operations.append(Do())
             compiler.controls.append(_DoFrame(len(compiler.operations)))
@@ -2749,6 +2761,25 @@ class MegaForthRuntime:
                 ip += 1
             elif isinstance(operation, RPeek):
                 context.data.push(context.returns.peek())
+                ip += 1
+            elif isinstance(operation, RPushPair):
+                # Preflight both stacks before consuming either source cell.
+                context.returns.require_push_capacity(2)
+                first, second = context.data.pop_pair("2>R")
+                context.returns.push_pair(first, second)
+                ip += 1
+            elif isinstance(operation, RPopPair):
+                # Shape and destination checks make the cross-stack transfer
+                # fail without partially consuming the ordered pair.
+                first, second = context.returns.peek_pair("2R>")
+                context.data.require_push_capacity(2)
+                context.returns.pop_pair("2R>")
+                context.data.push_pair(first, second)
+                ip += 1
+            elif isinstance(operation, RPeekPair):
+                first, second = context.returns.peek_pair("2R@")
+                context.data.require_push_capacity(2)
+                context.data.push_pair(first, second)
                 ip += 1
             elif isinstance(operation, Do):
                 index = context.data.pop()

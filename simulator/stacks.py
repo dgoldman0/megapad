@@ -242,6 +242,15 @@ class DataStack:
         self._memory.write64(target, value)
         self._pointer = target
 
+    def push_pair(self, first: int, second: int) -> None:
+        """Push ``first`` deeper and ``second`` on top, atomically checked."""
+
+        first_value = u64(first)
+        second_value = u64(second)
+        self.require_push_capacity(2)
+        self.push(first_value)
+        self.push(second_value)
+
     def pop(self) -> int:
         self._require(1, "pop")
         if self._memory is None:
@@ -251,6 +260,15 @@ class DataStack:
         value = self._memory.read64(self._pointer)
         self._pointer += CELL_BYTES
         return value
+
+    def pop_pair(self, operation: str = "pop pair") -> tuple[int, int]:
+        """Pop and return one ``( first second )`` pair without reordering."""
+
+        self._require(2, operation)
+        second = self.peek()
+        first = self.peek(1)
+        self._discard_entries(2)
+        return first, second
 
     def peek(self, offset: int = 0) -> int:
         """Return the cell *offset* entries below the top without removing it."""
@@ -325,6 +343,18 @@ class DataStack:
         self._validate_pointer(target)
         self._pointer = target
 
+    def require_push_capacity(self, count: int) -> None:
+        """Fail before mutation unless *count* more cells fit this stack."""
+
+        if not isinstance(count, int) or count < 0:
+            raise TypeError("data stack push count must be a nonnegative integer")
+        if self._memory is None:
+            return
+        assert self._pointer is not None
+        assert self._floor is not None
+        if self._pointer - count * CELL_BYTES < self._floor:
+            raise StackOverflow("data", floor=self._floor)
+
     def _require(self, required: int, operation: str) -> None:
         available = self.depth()
         if available < required:
@@ -341,6 +371,14 @@ class DataStack:
         if self._pointer <= self._floor:
             raise StackOverflow("data", floor=self._floor)
         return self._pointer - CELL_BYTES
+
+    def _discard_entries(self, count: int) -> None:
+        if self._memory is None:
+            assert self._cells is not None
+            del self._cells[-count:]
+        else:
+            assert self._pointer is not None
+            self._pointer += count * CELL_BYTES
 
     def _validate_pointer(self, pointer: object) -> None:
         self._require_backing("set its pointer")
@@ -455,6 +493,15 @@ class ReturnStack:
         self._continuations.pop(target, None)
         self._pointer = target
 
+    def push_pair(self, first: int, second: int) -> None:
+        """Push ``first`` deeper and ``second`` on top, atomically checked."""
+
+        first_value = u64(first)
+        second_value = u64(second)
+        self.require_push_capacity(2)
+        self.push(first_value)
+        self.push(second_value)
+
     def pop(self) -> int:
         """Implement user ``R>``, rejecting an exposed continuation."""
 
@@ -471,6 +518,25 @@ class ReturnStack:
         if isinstance(entry, Continuation):
             raise self._shape_error("R@", "user cell", entry)
         return entry
+
+    def pop_pair(self, operation: str = "2R>") -> tuple[int, int]:
+        """Remove and return one ordered user-cell pair without searching."""
+
+        pair = self.peek_pair(operation)
+        self._discard_entries(2)
+        return pair
+
+    def peek_pair(self, operation: str = "2R@") -> tuple[int, int]:
+        """Return the two top user cells as ``( deeper, top )``."""
+
+        self._require(2, operation)
+        second = self._peek_entry(0, operation)
+        first = self._peek_entry(1, operation)
+        if isinstance(second, Continuation):
+            raise self._shape_error(operation, "top user cell", second)
+        if isinstance(first, Continuation):
+            raise self._shape_error(operation, "deeper user cell", first)
+        return first, second
 
     def push_continuation(
         self,
@@ -655,6 +721,18 @@ class ReturnStack:
         pointer = self.pointer
         self._pointer_capture_generation += 1
         return pointer
+
+    def require_push_capacity(self, count: int) -> None:
+        """Fail before mutation unless *count* more cells fit this stack."""
+
+        if not isinstance(count, int) or count < 0:
+            raise TypeError("return stack push count must be a nonnegative integer")
+        if self._memory is None:
+            return
+        assert self._pointer is not None
+        assert self._floor is not None
+        if self._pointer - count * CELL_BYTES < self._floor:
+            raise StackOverflow("return", floor=self._floor)
 
     def pointer_capture_checkpoint(self) -> int:
         """Capture ``RP@`` registrations around one host dispatch boundary."""

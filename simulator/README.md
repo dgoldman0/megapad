@@ -16,7 +16,8 @@ The implemented slices provide:
   stable numeric execution tokens, compile-time binding, and ordinary
   source-parsing `CONSTANT` definitions;
 - an explicit dispatcher with colon continuations, loop state, and user
-  `>R`/`R@`/`R>` values on one ordered return stack;
+  `>R`/`R@`/`R>` plus ordered `2>R`/`2R@`/`2R>` pairs on one return stack,
+  including whole-pair preflight and continuation barriers;
 - a focused core vocabulary sufficient to execute the first unchanged Akashic
   utility source, with an optional caller-owned semantic step budget;
 - a sparse 64-bit address space with distinct Bank 0, external, VRAM, HBW, and

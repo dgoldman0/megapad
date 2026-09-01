@@ -144,12 +144,22 @@ lifetime.  Checked spans reject overflow and cannot become valid by wrapping
 through address zero.
 
 The data stack and the logical return stack retain ordinary MegaForth
-semantics.  Colon continuations, user values moved by `>R`, and `DO` loop state
-share one ordered return stack.  `DO` places its limit and index so `R@` sees
-the loop counter unless source has deliberately placed a balanced value above
-it.  `I`, `J`, `R@`, `R>`, `UNLOOP`, exceptions, and task switching must not be
-implemented using independent stacks that merely appear equivalent in simple
-programs.
+semantics. Colon continuations, user values moved by `>R` or `2>R`, and `DO`
+loop state share one ordered return stack. A saved `( x1 x2 )` pair has `x1`
+deeper and `x2` topmost; `2R@` copies and `2R>` restores that exact order.
+`DO` places its `( limit index )` cells in the same order, so the pair words can
+observe or consume a raw loop frame just as the inline native code can. They do
+not search through a colon continuation. Hosted pair transfers preflight the
+complete source shape and bounded destination capacity, then either transfer
+both cells or fail without partial mutation.
+
+`R@` sees the loop counter unless source has deliberately placed a balanced
+value above it. A value or pair parked above a loop frame must be removed before
+`I`, `J`, `LOOP`, `+LOOP`, `UNLOOP`, or `LEAVE`, because those words use fixed
+return-stack positions. A helper definition likewise cannot retrieve values
+below its own continuation. `I`, `J`, `R@`, `R>`, `2R@`, `2R>`, `UNLOOP`,
+exceptions, and task switching must not be implemented using independent
+stacks that merely appear equivalent in simple programs.
 
 Hosted `ROLL` preserves the native mutation order: it consumes `u` before
 accessing the selected depth. If the bounded hosted stack then detects

@@ -68,8 +68,10 @@ ROT           \ stack: 10 10 20
 ## Return Stack (6 words)
 
 The return stack is normally used by the compiler for loop counters and
-subroutine returns, but you can temporarily stash values there.  **Always
-balance your `>R` / `R>` pairs within a single definition.**
+subroutine returns, but you can temporarily stash values there. **Always
+balance `>R`/`R>` and `2>R`/`2R>` within a single definition.** These six words
+are immediate compile-inline words intended for compiled definitions, not
+ordinary interpretation.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -79,6 +81,19 @@ balance your `>R` / `R>` pairs within a single definition.**
 | `2>R` | `( a b -- ) R:( -- a b )` | Move a pair to the return stack (a pushed first). |
 | `2R>` | `( -- a b ) R:( a b -- )` | Move a pair back from the return stack. |
 | `2R@` | `( -- a b ) R:( a b -- a b )` | Copy a pair from the return stack (non-destructive). |
+
+The return stack is one ordered structure. While a saved value or pair is
+above a `DO` frame, fixed-position words such as `I`, `J`, `LOOP`, `+LOOP`,
+`UNLOOP`, and `LEAVE` see that saved data where they expect loop state. Restore
+it first. A called helper also has its own continuation above the caller's
+saved data, so the helper must not try to retrieve the caller's value or pair.
+
+> **Open compile-state guard discrepancy.** The current executable BIOS marks
+> all six words immediate and their handlers emit inline MP64 instructions,
+> but those handlers do not check compilation state. Interpreting one can
+> therefore append raw instruction bytes at `HERE`. Hosted execution rejects
+> this use as compile-only; this documents a missing native guard rather than
+> treating dictionary corruption as a supported Forth behavior.
 
 **Example — saving a value across a computation:**
 ```forth

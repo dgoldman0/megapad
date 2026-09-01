@@ -12,6 +12,9 @@ from simulator.ir import (
     InstallDoes,
     Loop,
     QuestionDo,
+    RPeekPair,
+    RPopPair,
+    RPushPair,
     RestoreDataStackPointer,
     RestoreReturnStackPointer,
 )
@@ -23,9 +26,17 @@ from simulator.runtime import (
     CreatedDefinition,
     DirectiveKind,
     DoesBodyRef,
+    ExecutionContext,
     MegaForthRuntime,
 )
-from simulator.stacks import ReturnStackShapeError, StackPointerError
+from simulator.stacks import (
+    DataStack,
+    ReturnStack,
+    ReturnStackShapeError,
+    StackOverflow,
+    StackPointerError,
+    StackUnderflow,
+)
 
 
 def test_runtime_owns_a_default_address_space_or_uses_the_injected_one() -> None:
@@ -627,6 +638,117 @@ def test_counted_loops_use_one_ordered_return_stack_for_i_j_and_user_cells() -> 
     runtime.execute("RS", context=user_cells)
     assert user_cells.data.snapshot() == (0, 0, 1, 1, 2, 2)
     assert user_cells.returns.snapshot() == ()
+
+
+def test_compiled_return_stack_pair_words_use_explicit_ordered_ir() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        b": PAIR 11 22 2>R 2R@ 2R> ; "
+        b": LOOP-PAIR 3 0 DO "
+        b"I 10 + I 20 + 2>R 2R@ 2DROP 2R> I LOOP ;"
+    )
+
+    pair = runtime.find("PAIR")
+    assert pair is not None
+    assert isinstance(pair.implementation, ColonDefinition)
+    pair_operations = pair.implementation.operations
+    assert sum(isinstance(operation, RPushPair) for operation in pair_operations) == 1
+    assert sum(isinstance(operation, RPeekPair) for operation in pair_operations) == 1
+    assert sum(isinstance(operation, RPopPair) for operation in pair_operations) == 1
+
+    direct = runtime.new_context()
+    runtime.execute("PAIR", context=direct)
+    assert direct.data.snapshot() == (11, 22, 11, 22)
+    assert direct.returns.snapshot() == ()
+
+    loop = runtime.new_context()
+    runtime.execute("LOOP-PAIR", context=loop)
+    assert loop.data.snapshot() == (10, 20, 0, 11, 21, 1, 12, 22, 2)
+    assert loop.returns.snapshot() == ()
+
+
+@pytest.mark.parametrize("token", (b"2>R", b"2R>", b"2R@"))
+def test_return_stack_pair_words_are_hosted_compile_only_directives(
+    token: bytes,
+) -> None:
+    runtime = MegaForthRuntime()
+
+    with pytest.raises(SourceError, match="compile-only"):
+        runtime.evaluate(token)
+
+
+def test_return_stack_pair_transfer_failures_do_not_partially_consume() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        b": NEED-PAIR 2>R ; "
+        b": TAKE-PAIR 2R> ; "
+        b": FACTORED 11 22 2>R TAKE-PAIR ;"
+    )
+
+    short = runtime.new_context()
+    short.data.push(0xAA)
+    with pytest.raises(StackUnderflow) as caught:
+        runtime.execute("NEED-PAIR", context=short)
+    assert caught.value.operation == "2>R"
+    assert caught.value.required == 2
+    assert caught.value.available == 1
+    assert short.data.snapshot() == (0xAA,)
+    assert short.returns.snapshot() == ()
+
+    factored = runtime.new_context()
+    with pytest.raises(ReturnStackShapeError, match="2R>.*continuation"):
+        runtime.execute("FACTORED", context=factored)
+    assert factored.data.snapshot() == ()
+    assert factored.returns.snapshot() == ()
+
+
+def test_return_stack_pair_dispatch_preflights_bounded_destinations() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        b": PUSH-PAIR 2>R ; "
+        b": POP-PAIR 11 22 2>R 1 2 2R> ; "
+        b": PEEK-PAIR 11 22 2>R 1 2R@ ;"
+    )
+
+    return_memory = SparseAddressSpace(bank0_size=0x200)
+    push_context = ExecutionContext(
+        data=DataStack([0x11, 0x22]),
+        returns=ReturnStack(
+            memory=return_memory,
+            floor=0x100,
+            empty_pointer=0x110,
+        ),
+    )
+    with pytest.raises(StackOverflow):
+        runtime.execute("PUSH-PAIR", context=push_context)
+    assert push_context.data.snapshot() == (0x11, 0x22)
+    assert push_context.returns.snapshot() == ()
+
+    pop_memory = SparseAddressSpace(bank0_size=0x200)
+    pop_context = ExecutionContext(
+        data=DataStack(
+            memory=pop_memory,
+            floor=0x100,
+            empty_pointer=0x110,
+        ),
+    )
+    with pytest.raises(StackOverflow):
+        runtime.execute("POP-PAIR", context=pop_context)
+    assert pop_context.data.snapshot() == (1, 2)
+    assert pop_context.returns.snapshot() == ()
+
+    peek_memory = SparseAddressSpace(bank0_size=0x200)
+    peek_context = ExecutionContext(
+        data=DataStack(
+            memory=peek_memory,
+            floor=0x100,
+            empty_pointer=0x110,
+        ),
+    )
+    with pytest.raises(StackOverflow):
+        runtime.execute("PEEK-PAIR", context=peek_context)
+    assert peek_context.data.snapshot() == (1,)
+    assert peek_context.returns.snapshot() == ()
 
 
 def test_unloop_removes_exact_frame_before_early_exit() -> None:

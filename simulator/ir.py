@@ -93,6 +93,21 @@ class RPeek:
 
 
 @dataclass(frozen=True, slots=True)
+class RPushPair:
+    """Move one ordered data-stack pair onto the return stack."""
+
+
+@dataclass(frozen=True, slots=True)
+class RPopPair:
+    """Move one ordered return-stack pair onto the data stack."""
+
+
+@dataclass(frozen=True, slots=True)
+class RPeekPair:
+    """Copy one ordered return-stack pair onto the data stack."""
+
+
+@dataclass(frozen=True, slots=True)
 class Do:
     pass
 
@@ -177,6 +192,9 @@ Operation: TypeAlias = (
     | RPush
     | RPop
     | RPeek
+    | RPushPair
+    | RPopPair
+    | RPeekPair
     | Do
     | QuestionDo
     | Loop
@@ -205,8 +223,11 @@ __all__ = [
     "RestoreReturnStackPointer",
     "Return",
     "RPeek",
+    "RPeekPair",
     "RPop",
+    "RPopPair",
     "RPush",
+    "RPushPair",
     "Unloop",
     "UartReadAttempt",
     "WriteOutput",

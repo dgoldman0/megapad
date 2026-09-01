@@ -49,6 +49,76 @@ def test_data_stack_underflow_reports_operation_shape(operation, required: int) 
     assert caught.value.available == 0
 
 
+def test_stack_pair_methods_preserve_order_and_preflight_whole_pairs() -> None:
+    data = DataStack([0xAA])
+
+    data.push_pair(-1, 1 << 64)
+    assert data.snapshot() == (0xAA, MASK64, 0)
+    assert data.pop_pair("2>R") == (MASK64, 0)
+    assert data.snapshot() == (0xAA,)
+
+    with pytest.raises(StackUnderflow) as caught:
+        data.pop_pair("2>R")
+    assert caught.value.operation == "2>R"
+    assert caught.value.required == 2
+    assert caught.value.available == 1
+    assert data.snapshot() == (0xAA,)
+
+    memory = SparseAddressSpace(bank0_size=0x200)
+    bounded = DataStack(
+        [0xBB],
+        memory=memory,
+        floor=0xE8,
+        empty_pointer=0xF8,
+    )
+    with pytest.raises(StackOverflow):
+        bounded.push_pair(1, 2)
+    assert bounded.snapshot() == (0xBB,)
+
+
+def test_return_stack_pair_methods_accept_raw_do_cells_and_reject_continuations() -> None:
+    stack = ReturnStack()
+    stack.enter_do(limit=9, index=3)
+
+    assert stack.peek_pair("2R@") == (9, 3)
+    assert stack.snapshot() == (9, 3)
+    assert stack.pop_pair("2R>") == (9, 3)
+    assert stack.snapshot() == ()
+
+    stack.push(0x11)
+    top_continuation = stack.push_continuation(xt=0x100, ip=0x200)
+    before = stack.snapshot()
+    with pytest.raises(ReturnStackShapeError, match="2R>.*top user cell"):
+        stack.pop_pair("2R>")
+    assert stack.snapshot() == before
+    assert stack.pop_continuation() == top_continuation
+    assert stack.pop() == 0x11
+
+    deeper_continuation = stack.push_continuation(xt=0x300, ip=0x400)
+    stack.push(0x22)
+    before = stack.snapshot()
+    with pytest.raises(ReturnStackShapeError, match="2R@.*deeper user cell"):
+        stack.peek_pair("2R@")
+    assert stack.snapshot() == before
+    assert stack.pop() == 0x22
+    assert stack.pop_continuation() == deeper_continuation
+
+
+def test_backed_return_stack_pair_capacity_failure_is_atomic() -> None:
+    memory = SparseAddressSpace(bank0_size=0x200)
+    stack = ReturnStack(
+        memory=memory,
+        floor=0xE8,
+        empty_pointer=0xF8,
+    )
+    stack.push(0xCC)
+
+    with pytest.raises(StackOverflow):
+        stack.push_pair(1, 2)
+
+    assert stack.snapshot() == (0xCC,)
+
+
 def test_user_return_cell_temporarily_sits_above_loop_index() -> None:
     stack = ReturnStack()
     stack.enter_do(limit=9, index=3)
