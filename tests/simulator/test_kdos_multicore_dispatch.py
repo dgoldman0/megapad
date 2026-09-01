@@ -309,4 +309,3 @@ def test_equal_bound_plain_do_reaches_phantom_core_one(word: str) -> None:
         runtime.execute(word, context=context, step_budget=500)
 
     assert runtime.drain_uart_output() == b""
-
