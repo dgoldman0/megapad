@@ -3148,6 +3148,19 @@ compile-both-branches lookup, and cleanup after an unfinished source. The
 admitted exactly-one-full-core profile executes only the false
 multicore-banner branch; this is not multicore startup evidence.
 
+One bounded regular-load selector applies the CLI blank/pure-comment filter to
+the pinned 9,894-line, 341,355-byte file and submits the resulting 6,693 lines
+(215,356 payload bytes, or 222,049 CLI UART bytes with terminators; maximum
+line length 99) through the captured core checked evaluator. It uses canonical
+128 MiB XMEM, 3 MiB HBW, 4 MiB VRAM, and valid 15-sector MP64FS media. The
+post-load history consists of 319 pseudo-BIOS words plus 1,452 KDOS
+publications; its authoritative 65,536-slot index contains 1,764 unique
+bindings and seven shadows. That checkpoint pins six buffers, 23 kernels,
+three pipelines, nine screens, intact heap/HBW state, mounted media, zero
+modules, balanced stacks, and released locks. The same runtime then executes a
+checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
+listing.
+
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load copies the exact lowercase,
 unterminated ten bytes `autoexec.f` into `NAMEBUF`, zeroes the remaining 14
@@ -3171,9 +3184,11 @@ or performance.
 
 This qualification completes the monotonically contiguous unchanged-source
 frontier from executable line 39 through EOF line 9894. It is focused semantic
-evidence, not the resource-deferred monolithic cold-load run. Nothing in this
-advance loads or implements `rich-terminal.f` or moves the rich-terminal
-vertical.
+evidence. A separate moderate selector now also submits the complete pinned
+file through the persistent checked pseudo-BIOS evaluator on one fresh
+canonical runtime; it is not native/exact-full-core cold-load or timing
+evidence. Nothing in this advance loads or implements `rich-terminal.f` or
+moves the rich-terminal vertical.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
@@ -3385,9 +3400,10 @@ branch has an explicit pre-rich-terminal stop line:
 Steps 1 through 5 are now satisfied by contiguous unchanged-source
 qualification from executable `kdos.f` line 39 through EOF line 9894. The
 branch is at the step-6 stop: no rich-terminal source, projection, compositor,
-viewer, or input lifecycle is part of the completed KDOS slice. A monolithic
-cold source-load run remains deferred under the rich-terminal resource gate;
-that deferred integration run does not create a source-coverage gap.
+viewer, or input lifecycle is part of the completed KDOS slice. The ordinary
+semantic file now also loads through the CLI-like checked line path. Native or
+exact-full-core cold loading, Akashic integration, and Desktop execution remain
+deferred under the rich-terminal resource gate.
 
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
@@ -3404,7 +3420,8 @@ later implementation phase.  They resume only after synchronizing this backend
 with the then-current rich-terminal vertical, so evolving panels and terminal
 core semantics are not copied prematurely into the simulator branch.
 
-Only seconds-scale structural and focused unit tests run before the real rich
-vertical exists.  Cold source load, Desktop smoke, sustained cadence,
-persistence, full renderer, and physical-viewer qualification remain deferred
-to vertical acceptance under the project's resource rules.
+Only seconds-scale structural, focused unit, and the bounded moderate semantic
+KDOS load run before the real rich vertical exists. Native/exact-full-core cold
+load, Desktop smoke, sustained cadence, persistence, full renderer, and
+physical-viewer qualification remain deferred to vertical acceptance under
+the project's resource rules.

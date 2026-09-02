@@ -3397,9 +3397,14 @@ The literal startup path has important limits:
 Both are hosted semantic no-ops: startup qualification proves token
 reachability, not a hosted JIT-state transition, native-code generation, or
 speedup. The contiguous unchanged-source frontier now runs from executable
-line 39 through
-EOF line 9894 on one composed simulator runtime. This focused evidence is not
-the resource-deferred monolithic cold-load run and adds no `rich-terminal.f`,
+line 39 through EOF line 9894 on one composed simulator runtime. A bounded
+moderate selector also feeds the exact file's 6,693 nonblank,
+non-pure-comment physical lines through the persistent checked pseudo-BIOS
+evaluator with canonical XMEM, HBW, VRAM, and valid MP64FS media. It publishes
+1,452 KDOS words, finishes with an authoritative 1,764-binding dictionary
+index, and executes post-boot definition, allocation, CRC, ring, and
+module-listing checks. This is semantic regular-load evidence, not
+native/exact-full-core timing evidence, and adds no `rich-terminal.f`,
 projection, compositor, viewer, or rich-input work.
 
 ---

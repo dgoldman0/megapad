@@ -198,9 +198,11 @@ device scheduler.
 Public `SOURCE`, `>IN`, and `STATE`, conditional-compilation `[IF]`, `MS@` and
 the remaining RTC/calendar service, raw UART MMIO, TX-ring capacity and timing,
 terminal geometry, and raw storage-controller access still remain. Exact
-unchanged KDOS coverage is now contiguous from executable line 39 through EOF;
-the resource-gated monolithic cold source-load run is deliberately deferred.
-The simulator does not
+unchanged KDOS coverage is now contiguous from executable line 39 through EOF.
+A moderate CLI-like semantic load also feeds the complete file through the
+persistent checked pseudo-BIOS evaluator on one fresh runtime. The deferred
+boundary is the native/exact-full-core cold load and Akashic/Desktop
+integration, not ordinary KDOS source composition. The simulator does not
 execute ROMs, MP64
 binaries, or MF64 native dictionaries, and it makes no machine-timing,
 snapshot, RTL, or hardware claim. Those remain the architectural emulator's
@@ -800,8 +802,9 @@ frontier, not the number of isolated fixtures. A later island is admitted only
 when it validates a cross-cutting capability needed by the frontier. That
 convergence is now complete for exact unchanged `kdos.f`: every executable
 source line from 39 through EOF is covered in order on one composed runtime.
-This is not a monolithic cold-load or timing claim; the resource gate defers
-that broader run until the rich-terminal vertical exists.
+In addition, the complete pinned file is now qualified once through the
+line-by-line checked evaluator in CLI submission order. This remains semantic
+compatibility evidence rather than native cold-load or timing evidence.
 
 The bootstrap loader was scaffolding, not KDOS module-loader evidence. The
 ordinary unchanged `REQUIRE` path is now qualified separately through §20 and
@@ -2204,11 +2207,28 @@ is nontransactional, so filesystem/module throws can retain earlier effects and
 skip hosted `JIT-OFF` plus the final newline. `JIT-ON` at line 39 and `JIT-OFF`
 at line 9893 are hosted semantic no-ops, not native-code or speed evidence.
 
+The moderate regular-load selector reads the exact 9,894-line, 341,355-byte
+file once and applies the CLI filter, yielding 6,693 submitted physical lines,
+215,356 payload bytes (222,049 CLI UART bytes with line terminators), and a
+maximum line length of 99. It sends those lines sequentially through the
+captured core `EVALUATE-CHECKED` XT and finishes through the captured
+`EVALUATE-FINISH` XT, so KDOS's later evaluator shadow cannot weaken the
+harness. The fresh one-core platform has canonical 128 MiB XMEM, 3 MiB HBW,
+4 MiB VRAM, and a valid 15-sector MP64FS image.
+
+That load retains 319 pseudo-BIOS words and publishes 1,452 KDOS words. The
+65,536-slot authoritative index records 1,764 unique bindings across the 1,771
+live history entries, including seven shadows. It reaches six buffers, 23
+kernels, three pipelines, nine screens, an intact heap, all HBW still free,
+mounted MP64FS, zero modules, balanced stacks, and no held lock. A post-boot
+checked definition returns 42; focused follow-through also proves ordinary
+allocation/free, CRC32, ring FIFO, and module listing on that same runtime.
+
 The contiguous unchanged KDOS core now reaches EOF. This branch stops here,
 before loading or implementing `rich-terminal.f`; later terminal work must
-resynchronize with the then-current rich-terminal vertical. The monolithic
-cold-load and broader integration runs remain deferred by that vertical's
-resource gate.
+resynchronize with the then-current rich-terminal vertical. Native/full-core
+cold load, Akashic integration, Desktop smoke, and broader renderer or
+persistence runs remain deferred by that vertical's resource gate.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.
