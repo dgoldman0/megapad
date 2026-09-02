@@ -303,11 +303,15 @@ Rollback removes already completed definitions in the transaction; reset
 discards the hidden unfinished compiler while retaining diagnostics.
 
 This state is runtime-global for the one admitted core and is not a concurrent
-evaluator contract. The admitted surface does not publish or qualify public
-`SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input,
-or interpret-time `[IF]`. Filesystem `LOAD` deliberately has a narrower raw
-source domain and different failure behavior, specified below. The contiguous
-KDOS source frontier now ends at line 9853.
+evaluator contract. Ordinary interpret-mode `IF`/`ELSE`/`THEN` uses the native
+anonymous temporary-compilation lifetime: it persists across physical
+`EVALUATE` inputs, executes only at the outer `THEN`, clears its temporary
+bytes, restores `HERE`, and publishes no dictionary word. This is distinct
+from conditional-compilation `[IF]`, which remains unqualified. The admitted
+surface also does not publish or qualify public `SOURCE`, `>IN`, or `STATE`, or
+direct LF-containing guest `EVALUATE` input. Filesystem `LOAD` deliberately has
+a narrower raw source domain and different failure behavior, specified below.
+The contiguous KDOS source frontier now reaches EOF at line 9894.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -1466,8 +1470,8 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now ends at line 9853. Exact unchanged lines
-4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
+The contiguous source frontier now reaches EOF at line 9894. Exact unchanged
+lines 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
 `b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
 display registry, one-sector scratch window, permanent four-cell dictionary
@@ -2688,8 +2692,8 @@ The following source-literal discrepancies remain visible:
   following qualified §15 slice, but the surrounding §10 source also promises
   `RECV-FRAME`, `ROUTE-FRAME`, `PORT-SEND`, and the deferred networking layer.
   None of those transport names, including `PORT-SEND-SLICE`, is executable
-  at the current line-9853 frontier; qualified Help text does not qualify a
-  transport operation.
+  through the current EOF line-9894 frontier; qualified Help text does not
+  qualify a transport operation.
 
 Exact unchanged lines 8944 through 9121 add §15 Pipeline Bundles in 178 LF
 records and 5,801 bytes, with SHA-256
@@ -3102,10 +3106,74 @@ The safe domain is one core with canonical uncorrupted registry/loader state,
 immutable mapped 1–246-byte IDs, a genuine exact-uppercase first-token
 declaration on bounded LF records, direct root filenames, available
 Bank-0 node storage, production-compatible nonthrowing allocator bindings,
-and no reentry or pre-held shared lock. The contiguous frontier now ends at
-line 9853; line 9854 is the separator and §14 Startup begins at line 9855.
-Nothing in this advance implements `rich-terminal.f` or moves the
-rich-terminal vertical.
+and no reentry or pre-held shared lock. §20 ends at line 9853; the following
+§14 qualification completes the contiguous frontier through EOF line 9894.
+
+### Unchanged KDOS §14 startup and EOF contract
+
+Exact unchanged lines 9854 through 9894, including the section separator,
+contain 41 LF records and 1,410 bytes, with SHA-256
+`468983d02d94ed94b7accc8b98f5f60ef1b28c4e397a167d0be95ad785d5f4ae`
+and Git blob `5a95a4dafdeec003d706381d8ea9b5ec93d0ccd0`. The executable section from
+line 9855 through EOF contains 40 LF records and 1,338 bytes, with SHA-256
+`ea02b8f22cd7ffc9631b5e4663c4b4a923615fc3cbb906e510461b3061005e43`
+and Git blob `a7345a62b57144fa7135938aae4cf94e1679c0f6`. The complete unchanged
+`kdos.f` is 9,894 LF records and 341,355 bytes, with SHA-256
+`99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
+and Git blob `fd017b16dbd3ef4746d0e3467e980c015cf5a664` at revision
+`ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
+
+The section prints the exact one-core banner, conditionally calls `FS-LOAD`,
+forces lazy Bank-0 heap initialization with a 16-byte `DMA-ALLOCATE`/`DMA-FREE`
+round trip, publishes `_AUTOEXEC-NAME` and `_AUTOEXEC-RUN`, invokes the latter,
+executes hosted `JIT-OFF`, and prints the final newline. For pre-section
+`HERE = H`, let `A = align64(H)`. The canonical fresh-heap path fixes
+`HEAP-BASE = A + 32768`, coalesces the temporary allocation back into the one
+free block, and reaches `HERE = A + 71` before any data-dependent autoexec
+dictionary effects: 27 name bytes, 10 created-body bytes, and 34 fixed hosted
+header/code-slot bytes. All four accepted fixtures end there. Neither anonymous
+interpret-`IF` body is published or charged to that ledger.
+
+Four focused startup tests cover no disk, attached invalid media, a valid
+15-sector MP64FS without `autoexec.f`, and a valid mounted `autoexec.f` loaded
+through the unchanged module machinery. They pin exact UART bytes, heap
+geometry, the two-definition header chain, filesystem status and completion,
+media immutability, zero-padded `NAMEBUF`, loader-frame/CWD restoration,
+module registration, duplicate suppression, and released locks. Six separate
+semantic-BIOS tests pin ordinary anonymous interpret `IF`: true/false and
+nested branches, calls into ordinary colon definitions, compiled string
+literals, continuation across checked `EVALUATE` calls, survival of a
+pre-checkpoint definition across that boundary, finish/reset state,
+compile-both-branches lookup, and cleanup after an unfinished source. The
+admitted exactly-one-full-core profile executes only the false
+multicore-banner branch; this is not multicore startup evidence.
+
+The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
+not clear a stale true `FS-OK`. A successful load copies the exact lowercase,
+unterminated ten bytes `autoexec.f` into `NAMEBUF`, zeroes the remaining 14
+bytes, and searches the ambient `CWD`; `_MOD-LOAD-BODY` performs its own second
+lookup. Neither lookup adds a file-type, flags, CRC, encryption, or root-CWD
+gate, and the `Running` line is printed before module-body validation. The tiny
+accepted autoexec proves this startup-to-module seam only. It does not qualify
+the repository's standard `autoexec.f`, `networking.f`, or `tools.f` journey.
+
+Source comments at lines 9877–9878 claim that line-by-line evaluation means a
+multiline `IF` cannot gate execution. That contradicts both the immediately
+preceding multiline startup branch and BIOS's persisted temporary-`IF`
+implementation; the unchanged source is recorded rather than silently fixed.
+The heap trigger also drops the allocation status before freeing the returned
+address, so ordinary OOM silently continues with `DMA-FREE 0`, while a
+`HEAP-SETUP` throw escapes. Startup is not transactional: filesystem or module
+throws can retain completed definitions, registry/output/object/media effects,
+and skip `JIT-OFF` plus the final newline. Hosted `JIT-ON` at line 39 and
+`JIT-OFF` at line 9893 are semantic no-ops, not evidence of native-code state
+or performance.
+
+This qualification completes the monotonically contiguous unchanged-source
+frontier from executable line 39 through EOF line 9894. It is focused semantic
+evidence, not the resource-deferred monolithic cold-load run. Nothing in this
+advance loads or implements `rich-terminal.f` or moves the rich-terminal
+vertical.
 
 The admitted TRNG window at `+0x800..+0x81F` is per runtime and deterministic.
 Each 64-byte pool is derived reproducibly from an explicit host-injected seed
@@ -3313,6 +3381,13 @@ branch has an explicit pre-rich-terminal stop line:
 5. qualify KDOS-owned checked-evaluator and module-loading surfaces as the
    frontier reaches them, then complete the ordinary `kdos.f` load; and
 6. stop before loading or implementing `rich-terminal.f`.
+
+Steps 1 through 5 are now satisfied by contiguous unchanged-source
+qualification from executable `kdos.f` line 39 through EOF line 9894. The
+branch is at the step-6 stop: no rich-terminal source, projection, compositor,
+viewer, or input lifecycle is part of the completed KDOS slice. A monolithic
+cold source-load run remains deferred under the rich-terminal resource gate;
+that deferred integration run does not create a source-coverage gap.
 
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real

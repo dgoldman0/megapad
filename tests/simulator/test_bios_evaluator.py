@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from shared.cells import MASK64, u64
+from shared.cells import CELL_BYTES, MASK64, u64
 from simulator.errors import ForthAbort, StepBudgetExceeded
 from simulator.runtime import MegaForthRuntime
 from tests.simulator.test_kdos_exceptions import _load_exceptions
@@ -160,6 +160,85 @@ def test_guest_compiler_and_control_stack_persist_across_evaluate_calls() -> Non
     context.data.push(8)
     runtime.execute("CROSS-LINE")
     assert context.data.snapshot() == (9,)
+
+
+def test_interpret_if_persists_across_checked_evaluate_calls_and_finishes() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+    here = runtime.dictionary.here
+    latest = runtime.dictionary.latest
+    words = runtime.dictionary.words
+
+    assert _evaluate_checked(runtime, b"1 IF") == (1, 0)
+    assert context.data.pop() == 0
+    runtime.execute("EVALUATE-FINISH")
+    assert context.data.snapshot() == (1, 4)
+    assert context.data.pop() == 4
+
+    assert _evaluate_checked(runtime, b"41 ELSE") == (1, 0)
+    assert context.data.pop() == 0
+    assert _evaluate_checked(runtime, b"99 THEN 7") == (41, 7, 0)
+    assert context.data.pop() == 0
+    runtime.execute("EVALUATE-FINISH")
+
+    assert context.data.snapshot() == (41, 7, 0)
+    assert runtime.dictionary.here == here
+    assert runtime.dictionary.latest == latest
+    assert runtime.dictionary.words == words
+    assert runtime.find(b"<interpret-if>") is None
+
+
+def test_cross_input_interpret_if_retains_definition_before_checkpoint() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+
+    assert _evaluate_checked(runtime, b": BEFORE 77 ; 1 IF") == (1, 0)
+    assert context.data.pop() == 0
+    before = runtime.find("BEFORE")
+    assert before is not None
+    here = runtime.dictionary.here
+    latest = runtime.dictionary.latest
+    words = runtime.dictionary.words
+    index = runtime.dictionary_index.state
+    runtime.memory.fill(here, 2 * CELL_BYTES, 0xA5)
+
+    source = b"BEFORE THEN"
+    source_address = here + 4 * CELL_BYTES
+    runtime.memory.write_bytes(source_address, source)
+    context.data.push(source_address)
+    context.data.push(len(source))
+    runtime.execute("EVALUATE-CHECKED")
+
+    assert context.data.snapshot() == (77, 0)
+    assert runtime.find("BEFORE") is before
+    assert runtime.dictionary.here == here
+    assert runtime.dictionary.latest == latest
+    assert runtime.dictionary.words == words
+    assert runtime.dictionary_index.state == index
+    assert runtime.find(b"<interpret-if>") is None
+    assert runtime.memory.read_bytes(here, CELL_BYTES) == bytes(CELL_BYTES)
+    assert runtime.memory.read_bytes(here + CELL_BYTES, CELL_BYTES) == (
+        b"\xA5" * CELL_BYTES
+    )
+
+
+def test_interpret_if_evaluator_reset_discards_code_but_retains_flag() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+    here = runtime.dictionary.here
+    latest = runtime.dictionary.latest
+    words = runtime.dictionary.words
+
+    assert _evaluate_checked(runtime, b"0 IF 88") == (0, 0)
+    assert context.data.pop() == 0
+    runtime.execute("EVALUATOR-RESET")
+    runtime.execute("EVALUATE-FINISH")
+
+    assert context.data.snapshot() == (0, 0)
+    assert runtime.dictionary.here == here
+    assert runtime.dictionary.latest == latest
+    assert runtime.dictionary.words == words
+    assert runtime.find(b"<interpret-if>") is None
 
 
 def test_evaluate_finish_reports_unfinished_and_reset_retains_diagnostics() -> None:

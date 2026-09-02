@@ -147,7 +147,8 @@ The implemented slices provide:
   cleanup;
 - the one-core semantic BIOS evaluator: raw guest `EVALUATE` through 255 bytes,
   checked statuses and diagnostics, persistent cross-call compiler/control
-  state, explicit finish/reset/unwind, and one inherited public step budget;
+  state, ordinary anonymous interpret-mode `IF`/`ELSE`/`THEN`, explicit
+  finish/reset/unwind, and one inherited public step budget;
 - the retired user-mode compatibility ABI: stack-neutral `ENTER-USER` and
   `SYS-EXIT`, constant-supervisor `PRIV@`, and runtime-local, guest-visible
   `MPU-BASE`/`MPU-LIMIT` registers which retain values but do not enforce
@@ -183,10 +184,10 @@ The implemented slices provide:
 - unchanged KDOS cluster-control and MPU failure behavior, complete §9 ANSI
   screens, §10 Data Port bindings, Dashboard and Help publication, and §15
   Pipeline Bundle tracking/declarative words plus §18 Ring Buffer primitives
-  and §19 Hash Table primitives, followed by the §20 Module System through line
-  9853, without claiming networking transport, real bundle-file integration,
-  concurrent collection execution, scheduling, rendering, or rich-terminal
-  output.
+  and §19 Hash Table primitives, followed by the §20 Module System and final
+  §14 Startup through EOF line 9894, without claiming networking transport,
+  real bundle-file integration, concurrent collection execution, scheduling,
+  rendering, or rich-terminal output.
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -194,10 +195,11 @@ loaded KDOS words execute task XTs inline on the caller's stacks; the IDL seam
 blocks and resumes one compiled-word dispatch and cannot turn that registry
 into `PAUSE`, task round-robin, interrupt-vector delivery, DMA timing, or a
 device scheduler.
-Public `SOURCE`, `>IN`, and `STATE`, interpret-time `[IF]`, `MS@` and the
-remaining RTC/calendar service, raw UART MMIO, TX-ring capacity and timing,
-terminal geometry, raw storage-controller access, and an ordinary complete
-KDOS load still remain.
+Public `SOURCE`, `>IN`, and `STATE`, conditional-compilation `[IF]`, `MS@` and
+the remaining RTC/calendar service, raw UART MMIO, TX-ring capacity and timing,
+terminal geometry, and raw storage-controller access still remain. Exact
+unchanged KDOS coverage is now contiguous from executable line 39 through EOF;
+the resource-gated monolithic cold source-load run is deliberately deferred.
 The simulator does not
 execute ROMs, MP64
 binaries, or MF64 native dictionaries, and it makes no machine-timing,
@@ -779,25 +781,27 @@ of input. Caller-owned dictionary rollback followed by `EVALUATOR-RESET`
 removes completed and unfinished work while retaining the failure diagnostic.
 
 The evaluator remains runtime-global and nonconcurrent and makes no claim for
-public `SOURCE`, `>IN`, or `STATE`, direct LF-containing `EVALUATE` input, or
-interpret-time `[IF]`. The filesystem loader's narrower raw-source domain and
-literal failure behavior are recorded below. The contiguous KDOS frontier now
-ends at line 9853.
+public `SOURCE`, `>IN`, or `STATE`, direct LF-containing guest `EVALUATE`
+input, or conditional-compilation `[IF]`. Ordinary interpret-mode
+`IF`/`ELSE`/`THEN` is distinct: it persists one anonymous temporary compilation
+across physical inputs, executes at the outer `THEN`, clears its bytes, restores
+`HERE`, and publishes no word. The filesystem loader's narrower raw-source
+domain and literal failure behavior are recorded below. The contiguous KDOS
+frontier now reaches EOF at line 9894.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–9853 | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, §19 Hash Table Primitives, and §20 Module System |
-| 9854 onward | Next uncovered frontier | Line 9854 is the separator; §14 Startup begins at line 9855 |
+| 39–9894 (EOF) | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, §19 Hash Table Primitives, §20 Module System, and final §14 Startup |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
-when it validates a cross-cutting capability needed by the frontier. As the
-semantic BIOS vocabulary becomes complete, first-failure source loading should
-cross more definitions per slice, the frontier increments should grow, and
-qualified islands should be absorbed until ordinary complete `kdos.f` is one
-continuous load.
+when it validates a cross-cutting capability needed by the frontier. That
+convergence is now complete for exact unchanged `kdos.f`: every executable
+source line from 39 through EOF is covered in order on one composed runtime.
+This is not a monolithic cold-load or timing claim; the resource gate defers
+that broader run until the rich-terminal vertical exists.
 
 The bootstrap loader was scaffolding, not KDOS module-loader evidence. The
 ordinary unchanged `REQUIRE` path is now qualified separately through §20 and
@@ -1869,8 +1873,8 @@ The unchanged source retains these discrepancies:
 - Full Help advertises `POLL`, `INGEST`, and Bundle words before they exist at
   the line-8943 boundary. The Bundle words arrive in the following §15 slice;
   the transport words, including the promised `RECV-FRAME`, `ROUTE-FRAME`,
-  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent at line 9853. Help/comment
-  publication is qualified, not any transport operation.
+  `PORT-SEND`, and `PORT-SEND-SLICE`, remain absent through EOF line 9894.
+  Help/comment publication is qualified, not any transport operation.
 
 Exact unchanged lines 8944–9121 add §15 Pipeline Bundles: 178 LF records,
 5,801 bytes, SHA-256
@@ -2155,14 +2159,56 @@ Unchanged source retains these limits:
 The useful admitted domain is one core, canonical registry/loader state,
 immutable mapped ID spans of 1–246 bytes, an exact uppercase first-token
 declaration on bounded LF source, available Bank-0 node storage, and no
-reentry or pre-held shared lock. The contiguous frontier now ends at line
-9853. Line 9854 is the separator and §14 Startup begins at line 9855. This
-advance does not implement `rich-terminal.f` or move the rich-terminal
-vertical.
+reentry or pre-held shared lock. §20 ends at line 9853; the following final
+slice completes the contiguous frontier through EOF.
 
-This branch stops after the semantic BIOS and ordinary KDOS source load are
-credible. It does not load or implement `rich-terminal.f`; that later work
-must resynchronize with the then-current rich-terminal vertical.
+### KDOS §14 Startup and EOF
+
+Exact unchanged lines 9854–9894, including the section separator, contain 41
+LF records and 1,410 bytes, with SHA-256
+`468983d02d94ed94b7accc8b98f5f60ef1b28c4e397a167d0be95ad785d5f4ae`
+and Git blob `5a95a4dafdeec003d706381d8ea9b5ec93d0ccd0`. The executable lines
+9855–9894 contain 40 LF records and 1,338 bytes, with SHA-256
+`ea02b8f22cd7ffc9631b5e4663c4b4a923615fc3cbb906e510461b3061005e43`
+and Git blob `a7345a62b57144fa7135938aae4cf94e1679c0f6`. The complete 9,894-line,
+341,355-byte `kdos.f` has SHA-256
+`99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
+and Git blob `fd017b16dbd3ef4746d0e3467e980c015cf5a664`.
+
+Startup prints the one-core banner, uses ordinary temporary interpret
+`IF`/`THEN` for the multicore banner, conditionally calls `FS-LOAD`, forces the
+Bank-0 heap through a 16-byte `DMA-ALLOCATE`/`DMA-FREE`, defines the exact
+lowercase ten-byte `_AUTOEXEC-NAME` plus `_AUTOEXEC-RUN`, invokes it, executes
+hosted `JIT-OFF`, and prints a final newline. If pre-slice `HERE = H` and
+`A = align64(H)`, the fresh-heap path fixes `HEAP-BASE = A + 32768` and ends
+with exactly 71 permanent hosted startup bytes at `HERE = A + 71` before any
+data-dependent autoexec dictionary effects. All four accepted fixtures end
+there. Anonymous interpret-`IF` code is cleared and rolled back rather than
+published.
+
+Four focused cases pin exact no-disk output/state, invalid attached media, a
+valid 15-sector filesystem without autoexec, and a tiny mounted autoexec
+through the ordinary module loader including duplicate suppression. The
+filesystem path uses ambient `CWD`, performs two name lookups on the successful
+autoexec path, and adds no file-type, flags, CRC, encryption, or root-directory
+gate. The `Running` line precedes body validation. This tiny module proves the
+startup seam; it does not qualify the standard repository `autoexec.f` or its
+`networking.f`/`tools.f` journey.
+
+Literal discrepancies remain visible. Lines 9877–9878 say multiline
+`IF`/`THEN` cannot gate line-by-line evaluation, contradicting the immediately
+preceding startup branch and BIOS's cross-input temporary compiler. The heap
+trigger drops its allocation status; OOM can silently continue through
+`DMA-FREE 0`. No-disk startup leaves any stale true `FS-OK` untouched. Startup
+is nontransactional, so filesystem/module throws can retain earlier effects and
+skip hosted `JIT-OFF` plus the final newline. `JIT-ON` at line 39 and `JIT-OFF`
+at line 9893 are hosted semantic no-ops, not native-code or speed evidence.
+
+The contiguous unchanged KDOS core now reaches EOF. This branch stops here,
+before loading or implementing `rich-terminal.f`; later terminal work must
+resynchronize with the then-current rich-terminal vertical. The monolithic
+cold-load and broader integration runs remain deferred by that vertical's
+resource gate.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

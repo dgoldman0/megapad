@@ -876,8 +876,8 @@ cluster-control/MPU source boundary, absent-network forward bridge,
 screen definitions, dispatch, registration, handlers, and event loop, and the
 §10 Data Port structures and bindings, §11 placeholder, §12 Dashboard,
 §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19 Hash Table
-Primitives, followed by the complete §20 Module System source through line
-9853.
+Primitives, followed by the complete §20 Module System and final §14 Startup
+source through EOF line 9894.
 Their checked bounds, Bank-0/XMEM HERE transitions, cross-zone definitions,
 allocator dispatch, descriptor lifecycle, snapshots, scoped stack, IDL
 block/wake boundary, Buffer publication order, tile effects, storage identity,
@@ -894,9 +894,9 @@ evaluation/loading, encryption, navigation/mutation, paging, listing, and
 descriptor-backed documentation display are executable semantic behavior
 rather than reporting-only shims. Task descriptor/state bookkeeping and
 table-ordered run-to-return execution are also executable, without implying
-private task contexts or cooperative switching. The frontier now ends at line
-9853; line 9854 is the next section sentinel and line 9855 begins §14 Startup.
-There are no §16 or §17 blocks at their earlier section-numbering boundaries.
+private task contexts or cooperative switching. The frontier now reaches EOF
+at line 9894. There are no §16 or §17 blocks at their earlier
+section-numbering boundaries.
 
 ---
 
@@ -1186,10 +1186,9 @@ application loader and ANSI helpers, filesystem encryption, subdirectory
 navigation, the Documentation Browser, Dictionary Search, the task
 registry/synchronous executor, Timer Preemption Setup, Multicore Dispatch,
 §8.2–§8.7, §8.8–§8.9, complete §9, §10–§13, §15, §18, and §19 through line
-9383, followed by §20 through line 9853. Their provenance and edge contracts
-are recorded in the corresponding sections below and in
-`docs/simulator-contract.md`; §14 Startup begins at line 9855 after the
-line-9854 sentinel.
+9383, followed by §20 through line 9853 and final §14 Startup through EOF
+line 9894. Their provenance and edge contracts are recorded in the
+corresponding sections below and in `docs/simulator-contract.md`.
 
 ---
 
@@ -1830,8 +1829,8 @@ predicate. Ordinary admitted `FS-LOAD` now exercises it before publishing
 KDOS caches. It still does not select a KDOS volume or make its reads a
 coherent same-image content snapshot.
 
-The hosted simulator continuously executes the unchanged source through
-`kdos.f` line 9853. The foundation through line 5134 allocates `FS-SUPER`,
+The hosted simulator's contiguous unchanged-source coverage reaches `kdos.f`
+EOF at line 9894. The foundation through line 5134 allocates `FS-SUPER`,
 `FS-BMAP`, and `FS-DIR`; installs provisional `FS-TOTAL = 2048`,
 `FS-BMAP-N = 1`, and root `CWD = 255`; and publishes the geometry, bitmap,
 first-fit, and packed-entry helpers. It performs no storage I/O or validation
@@ -2208,7 +2207,7 @@ continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
 Dashboard, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19
 Hash Table Primitives through line 9383, followed by §20 Module System through
-line 9853; §14 Startup begins at line 9855 after the line-9854 sentinel.
+line 9853 and final §14 Startup through EOF line 9894.
 
 **Example — filesystem operations:**
 ```forth
@@ -3034,11 +3033,11 @@ The following tail discrepancies are source-literal:
   screen/subscreen registrations until the fixed tables fill.
 
 This §9 block ends at line 8568. The contiguous hosted frontier now continues
-through §10–§13, §15, §18, §19, and §20 and ends at line 9853, before the
-line-9854 sentinel and §14 Startup at line 9855. The admitted source completes
-the existing ANSI TUI, Pipeline Bundle tracking layer, source-defined Ring
-Buffer and Hash Table primitives, and Module System but does not accept a
-rich-terminal module, projection, compositor, or viewer.
+through §10–§13, §15, §18, §19, §20, and final §14 Startup to EOF line
+9894. The admitted source completes the existing ANSI TUI, Pipeline Bundle
+tracking layer, source-defined Ring Buffer and Hash Table primitives, Module
+System, and startup, but does not accept a rich-terminal module, projection,
+compositor, or viewer.
 
 > **Threading rule:** All screen state (`NSCREENS`, `SCREEN-ID`, `SCR-SEL`,
 > the `SCR-*` arrays) lives in shared dictionary memory and is **not
@@ -3220,10 +3219,9 @@ The following limits and discrepancies are unchanged source behavior:
   to §15 without a §14 block here.
 
 The historical §10–§13 fixture ends at line 8943. The contiguous hosted
-frontier now continues through §15, §18, §19, and §20 and ends at line 9853,
-before the line-9854 sentinel and §14 Startup at line 9855. This qualification
-adds no rich-terminal module, projection, compositor, physical viewer, or
-other rich-terminal work.
+frontier now continues through §15, §18, §19, §20, and final §14 Startup to
+EOF line 9894. This qualification adds no rich-terminal module, projection,
+compositor, physical viewer, or other rich-terminal work.
 
 ### Frame Protocol
 
@@ -3323,30 +3321,86 @@ Stack & diagnostics.
 
 ## §14 Startup
 
-This executable block begins at `kdos.f` line 9855 and is the next unqualified
-frontier after the currently admitted line 9853. The behavior below describes
-the source/design; it is not yet hosted startup acceptance evidence.
+Exact unchanged `kdos.f` lines 9854 through 9894, including the section
+separator, contain 41 LF records and 1,410 bytes, with SHA-256
+`468983d02d94ed94b7accc8b98f5f60ef1b28c4e397a167d0be95ad785d5f4ae`
+and Git blob `5a95a4dafdeec003d706381d8ea9b5ec93d0ccd0`. The executable body from
+line 9855 through EOF contains 40 LF records and 1,338 bytes, with SHA-256
+`ea02b8f22cd7ffc9631b5e4663c4b4a923615fc3cbb906e510461b3061005e43`
+and Git blob `a7345a62b57144fa7135938aae4cf94e1679c0f6`. The complete unchanged
+9,894-line, 341,355-byte source has SHA-256
+`99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
+and Git blob `fd017b16dbd3ef4746d0e3467e980c015cf5a664` at revision
+`ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
 
-The startup section runs automatically when the KDOS core loads.  It:
+The startup section runs automatically after the KDOS core definitions. It:
 
-1. Uses **JIT compilation** (`JIT-ON`) while `kdos.f` compiles into Bank 0
-2. Prints the banner and usage hints
-3. If a disk is attached (`DISK?`), loads the filesystem (`FS-LOAD`) so
-   `DIR`, `CAT`, `LOAD`, and related words work immediately
-4. Initializes the Bank 0 heap before any userland transition
-5. Runs `autoexec.f` if present on disk
-6. Disables JIT (`JIT-OFF`) so interactive use is non-JIT by default
+1. prints the exact banner and one-core usage hints;
+2. conditionally publishes multicore hints through ordinary interpret-mode
+   `IF`/`THEN` (false in the admitted one-full-core profile);
+3. calls `FS-LOAD` only when `DISK?` reports attached media;
+4. forces the Bank-0 heap to initialize by allocating and freeing 16 bytes;
+5. publishes `_AUTOEXEC-NAME` and `_AUTOEXEC-RUN`, then runs `autoexec.f` when
+   found; and
+6. executes hosted `JIT-OFF` and emits the final newline on normal return.
 
-The standard autoexec enables JIT for its own load, enters the capacity-derived
-and BIOS-bounded XMEM userland dictionary, loads `networking.f` with KDOS
-`REQUIRE`, configures DHCP
-or the static fallback, loads `tools.f`, and disables JIT.  The module loader
-batches validated MP64FS extents into a separate, temporary transfer
-allocation, so the network stack does not enlarge the Bank 0 core dictionary
-or alias the BIOS boot buffer.  That allocation resides in XMEM when available
-and is reclaimed after evaluation.
+The section publishes exactly two permanent definitions. `_AUTOEXEC-NAME` is a
+`CREATE` body containing the lowercase, unterminated ten bytes `autoexec.f`;
+`_AUTOEXEC-RUN` is one colon definition with no hosted body bytes. The two names
+total 27 bytes, their created body is 10 bytes, and two 17-byte hosted
+header/code slots produce 71 permanent bytes. For pre-section `HERE = H`, let
+`A = align64(H)`: canonical fresh-heap startup fixes `HEAP-BASE = A + 32768`,
+coalesces the temporary 16-byte allocation back into the single free block,
+and reaches `HERE = A + 71` before any data-dependent autoexec dictionary
+effects. All four accepted fixtures end there.
 
-Users can re-enable JIT for their own code with `JIT-ON`.
+Startup exposed and now qualifies BIOS's ordinary interpret-time control-flow
+path. An outer `IF` saves a sealed `HERE` checkpoint and accumulates anonymous
+semantic IR across physical inputs. Nested `IF`/`ELSE`/`THEN` uses the same
+control stack. The outer `THEN` returns to interpretation, executes the private
+body, clears its temporary code/literal bytes, restores `HERE`, and publishes
+neither a dictionary word nor a definition-ledger entry. This is not the
+separate conditional-compilation `[IF]` facility, which remains unqualified.
+
+Four focused unchanged-source cases qualify no disk, invalid attached media, a
+valid 15-sector MP64FS with no autoexec, and a tiny valid autoexec through the
+ordinary module loader. They pin exact UART output, filesystem status and
+completion, media immutability, heap headers, the two-definition chain,
+zero-padded `NAMEBUF`, ambient CWD/loader-frame restoration, module identity,
+duplicate suppression, and released locks. The accepted autoexec is
+deliberately small. It does not qualify the repository's standard
+`autoexec.f`, or loading and configuring `networking.f` and `tools.f`; those
+remain later product-journey behavior.
+
+The literal startup path has important limits:
+
+- Lines 9877–9878 say line-by-line evaluation prevents multiline `IF`/`THEN`
+  from gating execution. That contradicts lines 9864–9867 and BIOS's persisted
+  temporary-`IF` implementation. The discrepancy is documented without
+  changing the source.
+- `16 DMA-ALLOCATE DROP DMA-FREE` discards the allocation status. Ordinary OOM
+  returns address zero, which `DMA-FREE` treats as a no-op, and startup
+  continues without reporting the failed probe; a `HEAP-SETUP` throw escapes
+  instead.
+- A false `DISK?` skips `FS-LOAD` but does not clear a stale true `FS-OK`.
+  Autoexec lookup uses ambient `CWD`, not forced root, copies ten bytes and
+  explicitly clears the remaining 14 `NAMEBUF` bytes, and performs a second
+  lookup inside `_MOD-LOAD-BODY`.
+- Neither lookup validates file type, flags, CRC, encryption, or directory
+  policy. The `Running autoexec.f...` line is emitted before empty, allocation,
+  evaluator, or module-identity failure is known.
+- Startup is nontransactional. Filesystem or module throws can retain completed
+  definitions, registry/output/object/media effects, and skip `JIT-OFF` plus
+  the final newline. Autoexec data-stack results are not normalized.
+
+`JIT-ON` occurs near the source entry at line 39 and `JIT-OFF` at line 9893.
+Both are hosted semantic no-ops: startup qualification proves token
+reachability, not a hosted JIT-state transition, native-code generation, or
+speedup. The contiguous unchanged-source frontier now runs from executable
+line 39 through
+EOF line 9894 on one composed simulator runtime. This focused evidence is not
+the resource-deferred monolithic cold-load run and adds no `rich-terminal.f`,
+projection, compositor, viewer, or rich-input work.
 
 ---
 

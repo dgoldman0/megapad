@@ -838,3 +838,83 @@ def test_unresolved_control_flow_is_not_published() -> None:
         runtime.evaluate(b": BROKEN IF 1 ;", source_name="compile.f")
 
     assert runtime.find("BROKEN") is None
+
+
+def test_interpret_if_executes_private_ir_and_restores_dictionary_state() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b": TWICE 2 * ;")
+    context = runtime.main_context
+    here = runtime.dictionary.here
+    latest = runtime.dictionary.latest
+    words = runtime.dictionary.words
+    index = runtime.dictionary_index.state
+    transient_span = CELL_BYTES + len(b"abc\0")
+    runtime.memory.fill(here, transient_span + CELL_BYTES, 0xA5)
+
+    result = runtime.evaluate(
+        b'7 1 IF TWICE S" abc" TYPE ELSE DROP 99 THEN 9',
+        source_name="interpret-if.f",
+    )
+
+    assert context.data.snapshot() == (14, 9)
+    assert context.returns.snapshot() == ()
+    assert runtime.drain_uart_output() == b"abc"
+    assert result.definitions == ()
+    assert runtime.dictionary.here == here
+    assert runtime.dictionary.latest == latest
+    assert runtime.dictionary.words == words
+    assert runtime.dictionary_index.state == index
+    assert runtime.find(b"<interpret-if>") is None
+    assert runtime.memory.read_bytes(here, transient_span) == bytes(transient_span)
+    assert runtime.memory.read_bytes(here + transient_span, CELL_BYTES) == (
+        b"\xA5" * CELL_BYTES
+    )
+
+    context.data.clear()
+    runtime.evaluate(
+        b"0 IF 11 ELSE\n1 IF 22 ELSE 33 THEN\nTHEN",
+        source_name="nested-interpret-if.f",
+    )
+    assert context.data.snapshot() == (22,)
+    assert runtime.dictionary.here == here
+    assert runtime.dictionary.latest == latest
+    assert runtime.dictionary.words == words
+
+
+def test_interpret_if_compiles_false_branches_and_cleans_failed_source() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+    here = runtime.dictionary.here
+    latest = runtime.dictionary.latest
+    words = runtime.dictionary.words
+
+    with pytest.raises(SourceError, match="unknown word.*missing-word"):
+        runtime.evaluate(
+            b"0 IF missing-word THEN",
+            source_name="interpret-if-missing.f",
+        )
+
+    assert context.data.snapshot() == (0,)
+    assert context.returns.snapshot() == ()
+    assert runtime.dictionary.here == here
+    assert runtime.dictionary.latest == latest
+    assert runtime.dictionary.words == words
+    assert runtime.find(b"<interpret-if>") is None
+
+
+def test_unfinished_interpret_if_restores_here_without_consuming_flag() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+    here = runtime.dictionary.here
+    latest = runtime.dictionary.latest
+    words = runtime.dictionary.words
+
+    with pytest.raises(SourceError, match="interpret IF has no terminating THEN"):
+        runtime.evaluate(b"1 IF 42", source_name="unfinished-interpret-if.f")
+
+    assert context.data.snapshot() == (1,)
+    assert context.returns.snapshot() == ()
+    assert runtime.dictionary.here == here
+    assert runtime.dictionary.latest == latest
+    assert runtime.dictionary.words == words
+    assert runtime.find(b"<interpret-if>") is None

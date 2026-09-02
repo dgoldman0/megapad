@@ -21,7 +21,7 @@ from shared.crypto_caps import (
 )
 from simulator.crc import GuestIdentity, HostedCRCService
 from simulator.diagnostics import HostedDiagnosticsService
-from simulator.dictionary import Dictionary, Word
+from simulator.dictionary import Dictionary, DictionaryCheckpoint, Word
 from simulator.dictionary_index import (
     DictionaryIndexState,
     HostedDictionaryIndex,
@@ -349,6 +349,11 @@ class _Compiler:
     operations: list[Operation] = field(default_factory=list)
     controls: list[_ControlFrame] = field(default_factory=list)
     literal_pool: bytearray = field(default_factory=bytearray)
+    temporary_checkpoint: DictionaryCheckpoint | None = None
+
+    @property
+    def temporary(self) -> bool:
+        return self.temporary_checkpoint is not None
 
 
 @dataclass(slots=True)
@@ -647,6 +652,7 @@ class MegaForthRuntime:
         self._active_input_states: list[_EvaluationState] = []
         self._bios_evaluator: _BiosEvaluatorState | None = None
         self._active_dispatches: list[_DispatchFrame] = []
+        self._transient_words: dict[int, Word] = {}
         self._next_dispatch_root_id = 1
         self._uart_input: deque[int] = deque()
         self._uart_output = bytearray()
@@ -901,7 +907,10 @@ class MegaForthRuntime:
         """Discard only persistent guest compiler bookkeeping."""
 
         evaluator = self._require_bios_evaluator()
+        compiler = evaluator.compiler_state.compiler
         evaluator.compiler_state.compiler = None
+        if compiler is not None and compiler.temporary:
+            self._discard_temporary_compiler(compiler)
 
     def bios_evaluator_unwind(self, context: ExecutionContext) -> None:
         """Discard abandoned logical input frames down to one checkpoint."""
@@ -1058,7 +1067,10 @@ class MegaForthRuntime:
         evaluator: _BiosEvaluatorState,
     ) -> None:
         evaluator.frames.clear()
+        compiler = evaluator.compiler_state.compiler
         evaluator.compiler_state.compiler = None
+        if compiler is not None and compiler.temporary:
+            self._discard_temporary_compiler(compiler)
         self.memory.write64(evaluator.depth_address, 0)
 
     def _fail_closed_active_bios_evaluator(self) -> None:
@@ -1749,6 +1761,15 @@ class MegaForthRuntime:
             if state is None:
                 return EvaluationResult(source_name, 0, 0, 0, ())
             if state.compiler is not None:
+                if state.compiler.temporary:
+                    compiler = state.compiler
+                    location = compiler.location
+                    state.compiler = None
+                    self._discard_temporary_compiler(compiler, state)
+                    raise SourceError(
+                        "interpret IF has no terminating THEN",
+                        location,
+                    )
                 raise SourceError(
                     f"definition {state.compiler.name!r} has no terminating ;",
                     state.compiler.location,
@@ -1830,6 +1851,11 @@ class MegaForthRuntime:
                 active_context._mark_host_control_fault(exc)
             raise
         finally:
+            if state is not None:
+                compiler = state.compiler
+                if compiler is not None and compiler.temporary:
+                    state.compiler = None
+                    self._discard_temporary_compiler(compiler, state)
             if not has_enclosing_dispatch:
                 active_context.returns.restore_pointer_captures(
                     capture_checkpoint
@@ -2198,10 +2224,22 @@ class MegaForthRuntime:
             return
 
         compiler = state.compiler
+        if kind is DirectiveKind.IF and compiler is None:
+            compiler = _Compiler(
+                b"<interpret-if>",
+                self._token_location(state),
+                temporary_checkpoint=self.dictionary.checkpoint(),
+            )
+            state.compiler = compiler
         if compiler is None or not compiler.compile_mode:
             self._compile_error(state, f"{kind.name} is compile-only")
 
         if kind is DirectiveKind.SEMICOLON:
+            if compiler.temporary:
+                self._compile_error(
+                    state,
+                    "; cannot terminate a temporary interpret IF",
+                )
             if compiler.controls:
                 self._compile_error(state, "; has unresolved control flow")
             operations = tuple((*compiler.operations, Return()))
@@ -2230,6 +2268,8 @@ class MegaForthRuntime:
                 Branch(target) if frame.has_else else BranchZero(target)
             )
             compiler.controls.pop()
+            if compiler.temporary and not compiler.controls:
+                self._execute_temporary_compiler(compiler, state)
         elif kind is DirectiveKind.BEGIN:
             compiler.controls.append(_BeginFrame(len(compiler.operations)))
         elif kind is DirectiveKind.UNTIL:
@@ -2326,6 +2366,136 @@ class MegaForthRuntime:
             compiler.operations.append(RestoreReturnStackPointer())
         else:
             raise AssertionError(f"unhandled directive {kind}")
+
+    def _execute_temporary_compiler(
+        self,
+        compiler: _Compiler,
+        state: _EvaluationState,
+    ) -> None:
+        """Execute and erase one outer interpret-mode ``IF`` compilation.
+
+        Native BIOS compiles an ordinary interpret-time ``IF`` at the current
+        ``HERE``, switches back to interpretation at the outer ``THEN``, calls
+        that anonymous code, clears its bytes, and restores ``HERE``.  Hosted
+        IR needs no published dictionary header, but it still materializes a
+        private code slot and literal pool so ``S"`` addresses and nested
+        colon continuations have the same lifetime boundary.
+        """
+
+        if state.compiler is not compiler or not compiler.temporary:
+            raise AssertionError("temporary compiler is not the active compiler")
+        if compiler.controls:
+            raise AssertionError("temporary compiler still has open controls")
+
+        checkpoint = compiler.temporary_checkpoint
+        assert checkpoint is not None
+        state.compiler = None
+        scratch_start = self.dictionary.here
+        scratch_limit = scratch_start
+        transient: Word | None = None
+        identity_corrupted = False
+        try:
+            if scratch_start in self._transient_words:
+                raise ExecutionError(
+                    "temporary interpret IF overlaps an active anonymous word"
+                )
+            try:
+                self.dictionary.resolve(scratch_start)
+            except KeyError:
+                pass
+            else:
+                raise ExecutionError(
+                    "temporary interpret IF overlaps a live execution token"
+                )
+
+            literal_pool = bytes(compiler.literal_pool)
+            width = CELL_BYTES + len(literal_pool)
+            self._preflight_dictionary_growth(width, state.context)
+            self.dictionary.allot(width)
+            scratch_limit = scratch_start + width
+            self.memory.fill(scratch_start, width, 0)
+            if literal_pool:
+                self.memory.write_bytes(scratch_start + CELL_BYTES, literal_pool)
+
+            transient = Word(
+                name=b"<interpret-if>",
+                header_address=scratch_start,
+                xt=scratch_start,
+                immediate=False,
+                implementation=ColonDefinition(
+                    tuple((*compiler.operations, Return()))
+                ),
+            )
+            self._transient_words[scratch_start] = transient
+            self._execute_guarded(
+                transient,
+                state.context,
+                state.meter,
+            )
+        finally:
+            if transient is not None:
+                removed = self._transient_words.pop(transient.xt, None)
+                if removed is not transient:
+                    identity_corrupted = True
+            self._discard_temporary_compiler(
+                compiler,
+                state,
+                clear_start=scratch_start,
+                clear_limit=scratch_limit,
+            )
+            if identity_corrupted:
+                raise AssertionError(
+                    "temporary interpret IF identity was corrupted"
+                )
+
+    def _discard_temporary_compiler(
+        self,
+        compiler: _Compiler,
+        state: _EvaluationState | None = None,
+        *,
+        clear_start: int | None = None,
+        clear_limit: int | None = None,
+    ) -> None:
+        """Roll back one anonymous compiler and optionally erase its bytes."""
+
+        checkpoint = compiler.temporary_checkpoint
+        if checkpoint is None:
+            return
+
+        observed_here = self.dictionary.here
+        erase_start = clear_start
+        erase_limit = clear_limit
+        if erase_start is not None and erase_limit is not None:
+            candidate_limit = max(erase_limit, observed_here)
+            for region in self.memory.regions:
+                if (
+                    region.base <= checkpoint.here
+                    and candidate_limit <= region.limit
+                ):
+                    erase_start = checkpoint.here
+                    erase_limit = candidate_limit
+                    break
+
+        self.dictionary.rollback(checkpoint)
+        self.dictionary_index.rebuild()
+        compiler.temporary_checkpoint = None
+        if (
+            erase_start is not None
+            and erase_limit is not None
+            and erase_limit > erase_start
+        ):
+            self.memory.fill(erase_start, erase_limit - erase_start, 0)
+        if state is not None and state.definitions:
+            # BIOS gives every physical EVALUATE a fresh result ledger while
+            # its compiler persists across calls.  Retain entries by live
+            # word identity after rollback instead of applying an opening
+            # call's list offset to the closing call's unrelated ledger.
+            live_by_xt = {word.xt: word for word in self.dictionary.words}
+            state.definitions[:] = [
+                word
+                for word in state.definitions
+                if live_by_xt.get(word.xt) is word
+            ]
 
     def _execute_guarded(
         self,
@@ -2639,7 +2809,7 @@ class MegaForthRuntime:
         if request.xt == 0:
             self._abort_returned_dictionary_fault(context)
         try:
-            target = self.dictionary.resolve(request.xt)
+            target = self._resolve_dispatch_word(request.xt)
         except KeyError:
             raise ExecutionError(
                 "dictionary fault callback is not a live execution token: "
@@ -2676,7 +2846,7 @@ class MegaForthRuntime:
                 self._abort_returned_dictionary_fault(context)
             if not isinstance(invocation, Invoke):
                 raise ExecutionError("primitive returned an invalid control result")
-            target = self.dictionary.resolve(invocation.xt)
+            target = self._resolve_dispatch_word(invocation.xt)
 
         if not isinstance(target.implementation, ColonDefinition):
             raise ExecutionError(
@@ -2699,7 +2869,7 @@ class MegaForthRuntime:
         if resume_cursor is not None:
             if word is not None or fault_request is not None:
                 raise AssertionError("resumed dispatch cannot have a new entry target")
-            current = self.dictionary.resolve(resume_cursor.xt)
+            current = self._resolve_dispatch_word(resume_cursor.xt)
             if not isinstance(current.implementation, ColonDefinition):
                 raise ExecutionError("suspended definition is no longer executable")
             ip = resume_cursor.ip
@@ -2753,7 +2923,7 @@ class MegaForthRuntime:
                     return
                 if not isinstance(invocation, Invoke):
                     raise ExecutionError("primitive returned an invalid control result")
-                target = self.dictionary.resolve(invocation.xt)
+                target = self._resolve_dispatch_word(invocation.xt)
 
         if resume_cursor is None:
             if not isinstance(target.implementation, ColonDefinition):
@@ -2786,7 +2956,7 @@ class MegaForthRuntime:
                 context.data.push(operation.value)
                 ip += 1
             elif isinstance(operation, Call):
-                called = self.dictionary.resolve(operation.xt)
+                called = self._resolve_dispatch_word(operation.xt)
                 entered = self._call_from_colon(
                     called,
                     caller=current,
@@ -2918,7 +3088,7 @@ class MegaForthRuntime:
                             context,
                         )
                     return
-                caller = self.dictionary.resolve(continuation.xt)
+                caller = self._resolve_dispatch_word(continuation.xt)
                 if not isinstance(caller.implementation, ColonDefinition):
                     raise ExecutionError("continuation does not name a colon word")
                 current = caller
@@ -2968,7 +3138,7 @@ class MegaForthRuntime:
                 return None
             if not isinstance(invocation, Invoke):
                 raise ExecutionError("primitive returned an invalid control result")
-            target = self.dictionary.resolve(invocation.xt)
+            target = self._resolve_dispatch_word(invocation.xt)
 
         if not isinstance(target.implementation, ColonDefinition):
             raise ExecutionError(f"word {target.name!r} is not executable")
@@ -2976,18 +3146,26 @@ class MegaForthRuntime:
         return target, 0
 
     def _resolve_does_entry(self, action: DoesBodyRef) -> tuple[Word, int]:
-        source = self.dictionary.resolve(action.source_xt)
+        source = self._resolve_dispatch_word(action.source_xt)
         if not isinstance(source.implementation, ColonDefinition):
             raise ExecutionError("DOES> action does not name a colon definition")
         return source, action.entry_ip
 
     def _resolve_word(self, name_or_xt: bytes | str | int) -> Word:
         if isinstance(name_or_xt, int):
-            return self.dictionary.resolve(name_or_xt)
+            return self._resolve_dispatch_word(name_or_xt)
         word = self.dictionary.find(name_or_xt)
         if word is None:
             raise KeyError(f"unknown word {name_or_xt!r}")
         return word
+
+    def _resolve_dispatch_word(self, xt: int) -> Word:
+        """Resolve a live word, including an active anonymous IF body."""
+
+        transient = self._transient_words.get(xt)
+        if transient is not None:
+            return transient
+        return self.dictionary.resolve(xt)
 
     def _meter_for_public_call(
         self,

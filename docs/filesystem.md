@@ -35,9 +35,9 @@ currently define `FAPPEND`, `FS-CHECK`, `FS-COMPACT`, `STREAM-OPEN`, or
 every update. Those portions below are design/host-tool behavior until
 matching runtime words land and are qualified.
 
-The hosted simulator's contiguous unchanged-source frontier currently ends at
-`kdos.f` line 9853. It qualifies the initial MP64FS cache, derived geometry,
-bitmap, first-fit search, packed directory helpers, and the unchanged
+The hosted simulator's contiguous unchanged-source frontier now reaches
+`kdos.f` EOF at line 9894. It qualifies the initial MP64FS cache, derived
+geometry, bitmap, first-fit search, packed directory helpers, and the unchanged
 `FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
 media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
 bitmap, then exact-name lookup, `MKFILE`/`RMFILE`/`RENAME` metadata mutation,
@@ -56,9 +56,9 @@ boundary, absent-network forward bridge, the complete §9 ANSI screen registry,
 widgets, definitions, dispatch, handlers, and event loop, then §10 Data Port
 structures and bindings, the §11 placeholder, §12 Dashboard, §13 Help, and
 §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19 Hash Table
-Primitives, followed by the complete §20 Module System. §14 Startup begins at
-line 9855 after the line-9854 sentinel; there are no §16 or §17 source blocks
-at their earlier numbering boundary.
+Primitives, followed by the complete §20 Module System and final §14 Startup
+through EOF. There are no §16 or §17 source blocks at their earlier numbering
+boundary.
 
 The §15 `BUNDLE-LOAD` and `BUNDLE-INFO` words are thin wrappers around this
 same raw `LOAD`. They do not enforce file type 7 or directory flags and inherit
@@ -90,6 +90,18 @@ rolls back. The module loader does not enforce file type or directory flags;
 its transaction owns provisional IDs only, not definitions, output, objects,
 or media effects. Duplicate `REQUIRE` still allocates, reads, and prescans the
 file before it skips evaluation, so it is not an I/O-free cache hit.
+
+Final §14 Startup conditionally calls `FS-LOAD` only when `DISK?` reports
+attached media. On a valid load it copies the exact lowercase ten bytes
+`autoexec.f` into `NAMEBUF`, explicitly zeroes the remaining 14 bytes, and
+searches the ambient `CWD`; `_MOD-LOAD-BODY` performs a second lookup before
+transfer/evaluation. Startup adds no root-directory reset and neither lookup
+checks file type, flags, CRC, encryption, or directory policy. It prints
+`Running autoexec.f...` before empty/body/allocation/evaluator validation.
+Focused EOF acceptance covers no disk, invalid media, valid MP64FS without the
+file, and one tiny mounted autoexec through the ordinary module loader. That
+last case does not qualify the standard sample-image `autoexec.f` or its
+`networking.f`/`tools.f` journey.
 
 The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
@@ -973,7 +985,7 @@ continues through complete §9 screen registry, widget, dispatch, registration,
 handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
 Dashboard, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19
 Hash Table Primitives through line 9383, followed by §20 Module System through
-line 9853; §14 Startup begins at line 9855 after the line-9854 sentinel. The
+line 9853 and final §14 Startup through EOF line 9894. The
 bundle wrappers still inherit raw `LOAD` semantics
 rather than forming a typed or transactional filesystem layer. Exact
 provenance and the source-literal limits of that later frontier are recorded
