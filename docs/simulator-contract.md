@@ -3425,3 +3425,34 @@ KDOS load run before the real rich vertical exists. Native/exact-full-core cold
 load, Desktop smoke, sustained cadence, persistence, full renderer, and
 physical-viewer qualification remain deferred to vertical acceptance under
 the project's resource rules.
+
+## 12. Performance evaluation boundary
+
+Performance evidence keeps backend-normal readiness separate from matched
+software work. `bench_bios_kdos_load.py` measures the emulator after
+architectural reset, before its first BIOS instruction, through normal MP64FS
+autoboot and the marker-only autoexec. `bench_simulator_kdos_load.py` measures a
+prepared semantic BIOS immediately before its first checked packed-source line
+through the same unchanged KDOS and marker-only autoexec outcome. The latter
+intentionally omits ROM instruction execution and transfer of `kdos.f` into a
+BIOS load buffer: semantic substitution is the product behavior being timed.
+Consequently, their ratio is a backend-normal time-to-KDOS-ready comparison,
+not equal-work compiler timing or an execution-engine speedup.
+
+`bench_compare_kdos.py` admits that ratio only from clean, fresh processes with
+the same source, deterministic full MP64FS image, canonical one-core geometry,
+host, Python, commit, and position-balanced serial order. It also pins the
+emulator harness and ignored native accelerator by content hash. Emulator
+instructions/cycles and simulator semantic dispatch steps remain backend-local
+diagnostics and are never divided. The coordinator's outer process envelope
+includes unequal import, construction, validation, and JSON work and is
+diagnostic only.
+
+Qualified wall timing additionally requires an otherwise idle host and an
+unprofiled run on one pinned CPU. The explicitly authorized 2026-09-01 harness
+shakedown occurred while unrelated work kept the 16 logical CPUs about 87%
+busy and left the selected CPU about 3% idle. Its child state and provenance
+all passed, but its wall ratios are rejected as performance evidence and are
+not a simulator speed claim. No qualified emulator/simulator speed result is
+recorded yet. The one authorized shakedown does not lift the preceding general
+rich-vertical resource gate for further cold-load qualification.
