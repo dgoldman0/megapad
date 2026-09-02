@@ -569,7 +569,10 @@ residual GLYPH_RUN coverage from the same normal draw, publishes the result
 through these typed PT words, and routes a typed `CONTROL_EVENT` back through
 the ordinary authoritative UIDL action path. The MegaPad model, code-native
 Pygame compositor, shared viewer transport, exact offer acknowledgement, and
-revision-bound hit map carry that same control identity end to end.
+revision-bound hit map carry the same exact-offer retained-wire identity end to
+end. A complete retained replacement assigns fresh control IDs; application
+continuity across it comes from semantic state under unchanged outer lineage,
+not from treating those wire IDs as permanent application identity.
 
 A recorded reference-sink journey at Akashic `d24540e` with MegaPad `c7045d6`
 shows the complete Desk, Pad File-menu activation/open/close, a real Pad edit,
@@ -581,6 +584,19 @@ refresh. The task's unique marker disappeared from Daybook tile 2 after normal
 `Right` input and reappeared with the Daybook heading in Pad tile 0 after
 Daybook's normal `Ctrl+O` capability route. This qualifies those exact
 committed heads for the selected Desk/Pad/Daybook checkpoint.
+
+The later collection checkpoint at Akashic `dd27f34` with MegaPad `29bdfd6`
+carried the same ordinary journey through canonical `TEXT_AREA`, `TEXT_GRID`,
+`TABSET`, and `TAB` values and acknowledged activation of Pad's original tab.
+The current full-vertical run at Akashic `4b6a475` with the same MegaPad head
+then opened Desk's ordinary launcher, launched its normal Sound Lab descriptor,
+and physically composed one generic instrument region containing exactly eight
+`READOUT`, two `METER`, and three `STATUS` objects while retaining the exercised
+Pad and Daybook application state. All 19 immutable offers crossed the exact
+`pygame.display.flip()` acknowledgement boundary, and all 14 inputs were bound
+to the exact offers that had crossed it. These runs qualify
+the selected software/reference-view path, not UART delivery, hardware scanout,
+or panel refresh.
 
 Against the earlier `3404fe9`/`8941782` baseline, post-first-offer decoded
 traffic fell from 1,386 frames / 190,131 bytes to 221 frames / 24,541 bytes,
@@ -611,15 +627,17 @@ functional emulator may remain instruction-level while its deterministic
 virtual-cycle model continues to drive devices, scheduling, and replay.
 
 The current Pygame acceptance runner continues through the ordinary
-Daybook-to-Pad shared-resource handoff and closes the selected software/viewer
-checkpoint. Immutable RGBA resource upload, IMAGE model publication, exact
+Daybook-to-Pad shared-resource handoff, Pad tab restoration, Desk launcher, and
+normally launched Sound Lab instrument graph and closes the selected
+software/viewer vertical. Immutable RGBA resource upload, IMAGE model
+publication, exact
 shared-session offers, viewer verification, and physical IMAGE composition now
 have focused qualification. Bounded SERIES wire/model/view support and the
 complete typed MegaPad object publication boundary also have focused
 qualification. Full semantic replay, retained resize, physical UART delivery,
 and a hardware panel sink remain separate and unqualified.
 
-## 8. Desk, Pad, and Daybook development checkpoint
+## 8. Desk, Pad, Daybook, and Sound Lab development checkpoint
 
 The typed GLYPH_RUN and semantic-control writers, hybrid draw-plane projection,
 immutable display offer, and post-flip acknowledgement path now form the
@@ -649,9 +667,10 @@ geometry, clipping, rasterization, and hit testing. It may publish
 has crossed the selected sink's acknowledgement boundary.
 GLYPH_RUN remains the complete visual fallback for content that has no richer
 projection, but drawing a menu only as glyphs does not satisfy this semantic
-slice. Images, numeric instruments, meters, indicator objects, and series are
-not on this vertical's critical path unless the product composition begins to
-use them.
+slice. The selected composition now uses the complete numeric-instrument
+family through Sound Lab's mounted generic `DATA_GRAPHICS` widget. Images,
+vectors, and bounded series remain outside this selected vertical even though
+their lower MegaPad paths have focused qualification.
 
 MegaPad's additive `RET_CONTROL_COLLECTIONS` foundation now admits and projects
 renderer-neutral text-area, text-grid, tabset, and tab draw values, including
@@ -666,11 +685,17 @@ publishes only enabled TAB children in the same-pass immutable hit map. TAB
 activation therefore reuses the exact selected-sink-acknowledged revision path
 already used by menus. TEXT_AREA and TEXT_GRID item-addressed pointer input
 remain deferred because the current event cannot name an STX1 item revision,
-key, or scalar offset. Bit 9 remains unadvertised until an Akashic core
-UIDL/canonical-widget producer supplies these values and an ordinary
-application journey exercises them end to end. Desk, Pad, and Daybook remain
-unchanged clients with automatic residual coverage; none supplies a collection
-provider.
+key, or scalar offset. The current Akashic `desktop-apt1` profile advertises bit
+9, supplies these values from ordinary UIDL/canonical-widget capture, and has
+exercised them end to end. Desk, Pad, and Daybook remain unchanged clients with
+automatic residual coverage; none supplies a collection provider.
+
+The selected `RET_INSTRUMENT` path likewise consumes ordinary mounted
+`DATA_GRAPHICS` values rather than an application scene. The current Sound Lab
+graph contributes one region with eight `READOUT`, two `METER`, and three
+`STATUS` objects; the typed PT writer, retained model, shared-view projection,
+and physical renderer carry that complete advertised family. Series, vector,
+and image remain separate optional families and are not implied by this pass.
 
 The guest CONTROL writer is now extended in place rather than split into a
 second encoder. It accepts retained mask `0x33f`, requires bit 8 whenever bit 9
@@ -684,19 +709,22 @@ address from those source spans survives the call. Discovery audits the exact
 152-byte outbound-payload, 192-byte TX-staging, and 352-byte
 retained-transaction minima before accepting bit 9. A focused target-Forth
 oracle locks the resulting 152-byte CONTROL payload and complete APT frame. No
-host or product policy advertises bit 9 yet.
+generic MegaPad default advertises bit 9 implicitly; the explicit selected
+Akashic `desktop-apt1` policy now does so with derived caller-owned capacities.
 
-The remaining advertisement work is above this transport seam: an Akashic core
-UIDL type or canonical reusable widget must automatically produce and account
-for the canonical collection bodies through its ordinary lifecycle, and a
-representative ordinary application journey must pass end to end. The real
-Desk/Pad/Daybook journey remains the unchanged menu-plus-residual regression
-witness rather than a source of applet-owned collection code.
+That above-transport work is now complete for the selected collection and
+instrument families: generic Akashic snapshots account for canonical widget
+bodies through their ordinary lifecycle, and the current product journey passes
+end to end. The real applets remain regression witnesses and consumers rather
+than sources of applet-owned protocol code.
 Session configuration already chooses `max_payload` from the greater of the
 CELL-row and retained client-to-terminal requirements, preventing an otherwise
 valid retained policy from silently falling back during discovery. The real
 largest collection must fit both that negotiated payload and the guest's
-existing 8 KiB TX staging before the policy advertises bit 9.
+caller-supplied TX staging before the policy advertises bit 9. The selected
+Akashic `desktop-apt1` product derives a 917,648-byte TX minimum from its full
+CELL, collection, and `DATA_GRAPHICS` envelope; the 8 KiB focused Forth fixtures
+are not a product capacity.
 
 The early physical renderer deliberately exposes the product direction rather
 than postponing visual judgment until Desktop acceptance: a clean deep-neutral
@@ -712,8 +740,10 @@ Later e-paper damage is derived from the completed raster, never from STX1
 revisions or semantic rectangles.
 
 Acceptance requires a complete visible Desk frame, a real Pad edit and visible
-caret/state change, a real Daybook navigation or selection, and the ordinary
-Daybook-to-Pad shared-resource route. At least one ordinary semantic control
+caret/state change, a real Daybook navigation or selection, the ordinary
+Daybook-to-Pad shared-resource route, the normal Desk launcher overlay, and its
+ordinary Sound Lab launch with the complete advertised instrument family. At
+least one ordinary semantic control
 from that composition must also be projected as a control, visibly rendered
 through the selected rich renderer, and activated through normalized input
 bound to its exact displayed revision. That revision becomes input-eligible
@@ -729,8 +759,10 @@ checkpoint.
 The current contract evolves in place; do not add a numbered successor,
 parallel legacy path, Sound Lab fixture, applet-specific scene, or
 renderer-reservation markup. The reference Pygame/Desktop journey above has
-crossed the semantic-control, ordinary shared-resource, and selected
-display-sink gates, and the exact `d24540e`/`c7045d6` reference journey is
-recorded. Reset/resize and other production cases, sustained cadence,
+crossed the collection-control, ordinary shared-resource, foreground-overlay,
+instrument, and selected display-sink gates. The current executable evidence is
+Akashic `4b6a475` with MegaPad `29bdfd6`; the earlier `d24540e`/`c7045d6` run
+remains historical menu-plus-residual evidence. Reset/resize and other
+production cases, sustained cadence,
 persistence, physical UART, and hardware-panel qualification remain separate
 sequential work under the resource gate.

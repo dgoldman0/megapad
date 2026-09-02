@@ -20,8 +20,8 @@ replace application authority checks.
 | Terminal ingress event | Terminal frontend/session | Immutable after admission | Scheduled UART application or epoch retirement | Old-epoch events rejected | Old attachment events cancelled |
 | Geometry generation | Terminal frontend while active; legacy frontend while ANSI | Current authoritative frontend | Replacement by later generation | Preserved unless snapshot geometry changes it | Re-established before boot/negotiation |
 | Normalized input event | Terminal session | Immutable | Akashic validation/dispatch or bounded rejection | Events for an old `presentation_epoch` rejected | Old session events rejected |
-| Optional retained owner ID + generation | Internal session-global retained backend from one exact private UCTX projection binding (not CELL-1) | Backend for that exact live binding only | Successful exact idempotent owner drop | Destroyed; backend allocates/replays a current-epoch wire binding for each still-live UCTX | Destroyed with session |
-| Optional retained region/object/resource/series IDs | Exact live private UCTX projection binding (not CELL-1) | Backend for the exact live owner generation only | Exact item drop or owner drop | Destroyed; regenerated from authoritative UIDL semantics under the new wire binding | Destroyed |
+| Optional retained owner ID + generation | Internal session-global retained backend for one explicit aggregate screen projection binding (not CELL-1) | Backend under that exact live wire tuple only | Successful exact idempotent owner drop | Destroyed; backend allocates and replays one current-epoch aggregate binding from the revalidated live local-attachment set | Destroyed with session |
+| Optional retained region/object/control/resource/series and semantic-content item IDs | Exact live aggregate screen owner generation (not CELL-1) | Backend for that exact live owner generation only | Exact item drop or owner drop | Destroyed; renderer-neutral local source keys remain authoritative while wire IDs are regenerated or rebased under the new aggregate binding | Destroyed |
 
 The terminal reset planner owns the commit/result settlement gate. It emits an
 accepted COMMIT's result before constructing SOFT_RESET_REQUEST and derives
@@ -68,10 +68,13 @@ Owner-wide retirement is atomic and idempotent for the exact generation.
 
 The retained backend is internal and global to the one APT session because
 sequence, credit, transaction IDs, global model revision, resource upload,
-reset, and close are global. It privately maps each exact live host/slot/CINST/
-UCTX binding to a distinct wire owner; applications receive no broker, scope,
-lease, descriptor, provider, or retained mutation API. Wire authority remains
-owner-exact: the backend may not substitute its session ownership for the
+reset, and close are global. It maintains a generation-checked local attachment
+record for each exact live host/slot/CINST/UCTX binding; those records carry no
+wire tuple or mutation authority. The selected composition maps one explicit
+aggregate screen projection over the revalidated local-attachment set to one
+wire owner. Applications receive no broker, scope, lease, descriptor, provider,
+or retained mutation API. Wire authority remains owner-exact: the backend may
+not substitute its session ownership or a local attachment token for the
 `(owner_id,owner_generation)` on an item operation. The normative quota,
-tombstone, hidden-rebuild, immutable-view, and private projection-binding
-lifetimes are in `APT-1-RETAINED-1-OWNERSHIP.md`.
+tombstone, hidden-rebuild, immutable-view, local-attachment, and aggregate-
+projection lifetimes are in `APT-1-RETAINED-1-OWNERSHIP.md`.

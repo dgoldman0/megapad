@@ -9,24 +9,33 @@ and reset/close states.
 
 ## 1. Authority model
 
-RETAINED-1 has two deliberately different ownership layers:
+RETAINED-1 has three deliberately different ownership layers:
 
 1. A single internal session-global retained backend owns discovery, the
    client parser, global model revision, transaction-ID allocator, one
    transaction slot, one resource-upload slot, credit, reset, and close. It is
    the only guest component allowed to emit retained wire frames.
-2. The generic UIDL host gives that backend private per-UCTX projection
-   bindings. On the wire, each materialized binding is represented exactly by
-   a nonzero `(owner_id, owner_generation)`. Every owner-bound frame repeats
-   that tuple. The terminal never infers authority from current focus, region,
-   UIDL identity, object, resource digest, or an unscoped item ID.
+2. The generic UIDL host gives that backend private generation-checked local
+   attachment records for exact host/slot/CINST/UCTX lifetimes. A local record
+   carries visibility, geometry, and renderer-neutral semantic identity, but no
+   wire owner, quota, item ID, tombstone, or mutation authority.
+3. The backend derives one explicit aggregate screen projection binding from
+   the revalidated live local-attachment set. That aggregate alone materializes
+   on the wire as a nonzero `(owner_id, owner_generation)`, and every owner-bound
+   frame repeats that tuple. The terminal never infers authority from current
+   focus, region, UIDL identity, local attachment token, object, resource
+   digest, or an unscoped item ID.
 
-The backend does not collapse bindings into one implicit owner. Conversely, a
-UCTX or application never owns or services the UART. Stable UIDL element and
-semantic-subkey mappings to wire owner/item tuples are private, bounded backend
-state and retire with the exact projection binding. Applications receive no
-broker, scope, lease, retained descriptor/provider contract, wire identity, or
-retained mutation API.
+The backend never collapses wire authority into implicit session ownership. The
+selected aggregate deliberately combines several local UCTX attachments under
+one explicitly recorded screen binding so their CELL and retained output can
+commit atomically. Conversely, a UCTX or application never owns or services the
+UART. Stable mappings are keyed by local attachment/source semantic identity,
+then privately materialized as aggregate-owner item tuples; renderer-neutral
+keys follow the local attachment lifecycle while wire mappings retire or rebase
+with the aggregate wire incarnation. Applications receive no broker, scope,
+lease, retained descriptor/provider contract, wire identity, or retained
+mutation API.
 
 The complete terminal authority key is:
 
@@ -44,14 +53,15 @@ or accepting an older component is an authority violation.
 | Role | Owns | May mutate | Must not do |
 |---|---|---|---|
 | APT host/driver | Host lease, ingress/egress queues, terminal core, retained renderer | Decode and atomically apply validated ordered frames; publish immutable views | Infer guest owner authority; run guest code; fall back from structural LOST |
-| Guest retained backend | One PT adapter, discovery, sequence/credit, revision/txid allocators, private UCTX bindings, replay plan | Project validated UIDL semantics and serialize all wire operations | Publish itself as an application service; expose wire IDs or mutation calls; allow concurrent frame writers |
+| Guest retained backend | One PT adapter, discovery, sequence/credit, revision/txid allocators, private local UCTX attachment records, one aggregate screen binding, replay plan | Project validated UIDL semantics and serialize all wire operations | Publish itself as an application service; expose wire IDs or mutation calls; allow concurrent frame writers |
 | Generic UIDL host/projectors | Exact host/slot/CINST/UCTX lifecycle, UIDL tree/layout/dirty state, backend-neutral semantic snapshots | Attach, quiesce, project, relayout, and detach through the internal backend | Let application code acquire retained authority; maintain a second app-authored scene; emit protocol frames from callbacks |
 | Renderer/view sink | Immutable committed CELL and retained views plus shared immutable resources | Consume every nonempty plane, derive damage, choose sink-local refresh/color policy, and present/coalesce complete images within cadence rules | Drop a retained plane while claiming its revision displayed; mutate authoritative model; expose panel policy through UIDL/wire state; invent samples; release resource backing early |
 | External attachment owner | Machine/session construction and coordinated reset/detach | Recreate a LOST attachment and its caller-owned capacities | Treat LOST as ANSI-safe fallback |
 
 The foreground single-input-owner assumption of CELL-1 is unchanged. RETAINED-1
-adds multiple private UCTX retained owners behind one cooperative backend;
-it does not add multiple raw UART readers or writers.
+adds multiple private local UCTX attachment records feeding one aggregate
+retained owner behind one cooperative backend; it does not add multiple raw
+UART readers or writers.
 
 ## 3. State and allocation ledger
 
@@ -62,11 +72,12 @@ it does not add multiple raw UART readers or writers.
 | Global transaction ID high-water | Backend mints; terminal validates | BEGIN in either CELL or PRESENT family, or OWNER_DROP | `presentation_epoch` end | Reset for new epoch | Destroyed |
 | One open transaction | Backend starts after exact byte/count/credit preflight | Backend appends canonical frames; terminal stages | Commit, abort, rejection, reset, close | Aborted | Destroyed |
 | One outstanding TX_RESULT | Terminal creates after COMMIT or OWNER_DROP processing | Backend consumes and reconciles revision | Exact ordered consume | Settled before ACK | Destroyed |
-| Owner live record | Backend requests for one exact private projection binding; terminal reserves quotas | Exact owner generation only | Successful OWNER_DROP status 0 -> tombstone | Destroyed, not carried across epoch | Destroyed |
+| Owner live record | Backend requests for the explicit aggregate screen projection; terminal reserves quotas | Exact owner generation only | Successful OWNER_DROP status 0 -> tombstone | Destroyed, not carried across epoch | Destroyed |
 | Owner tombstone | Terminal on successful exact OWNER_DROP status 0 | Newer generation open may supersede | Epoch end | Destroyed | Destroyed |
-| Private UCTX projection binding | Backend from exact host/slot/CINST/UCTX authority to one wire tuple | Backend only | Terminal-confirmed OWNER_DROP status 0 or session destruction | Wire tuple invalidated before replay; live UCTX authority remains | Destroyed |
+| Private local UCTX attachment record | Generic host/backend from exact host/slot/CINST/UCTX authority to a generation token; no wire tuple | Backend only after exact revalidation | Host-owned quiesce and detach after source removal | Preserved as local authority, then revalidated before replay | Destroyed |
+| Aggregate screen projection binding | Backend from the validated local-attachment set to one exact wire tuple, quotas, mappings, and replay state | Backend only | Terminal-confirmed OWNER_DROP status 0 or epoch/session destruction | Old wire tuple destroyed; aggregate state rederived and rebound after local revalidation | Destroyed |
 | Item ID high-water | Backend mints per owner generation/namespace; terminal mirrors | Successful DEFINE/BEGIN | Owner/epoch end; never decremented | Destroyed | Destroyed |
-| Active region/object/series model | Terminal from successful commits | Exact owner transactions | Exact drop/owner drop/reset | Destroyed | Destroyed |
+| Active region/object/control/semantic-item/series model | Terminal from successful commits | Exact owner transactions | Exact item drop/owner drop/reset | Destroyed | Destroyed |
 | Hidden retained rebuild | Terminal on valid START commit | Matching CONTINUE commits only | Atomic REVEAL, replacement START, new resize, reset, close | Destroyed | Destroyed |
 | Immutable resource | Terminal after verified upload COMMIT | Never; references change transactionally | Unreferenced RESOURCE_DROP/owner drop/reset | Destroyed | Destroyed |
 | One resource upload | Terminal charges owner-wide usage and physical staging on accepted BEGIN | Ordered exact-tuple chunks, COMMIT, ABORT | Exact COMMIT/ABORT or exact-upload semantic rejection, reset, close | Aborted/destroyed | Destroyed |
@@ -88,68 +99,85 @@ is the acknowledgement boundary; the reference Pygame sink's post-flip host-API
 boundary is not hardware-panel completion. Panel damage, partial/full refresh,
 waveform, ghosting, color conversion, and buffer policy remain sink-local.
 
-## 4. Private projection-binding lifecycle
+## 4. Local attachment and aggregate projection lifecycles
 
-A projection binding is a bounded backend record containing at least:
+The backend keeps two bounded record families. A private local attachment
+record contains at least:
 
 - the exact host, host slot and slot ID, CINST pointer/ID/generation, UCTX, and
-  internal binding-token generation validated by the generic host ABI;
+  internal attachment-token generation validated by the generic host ABI;
+- visibility, resolved geometry, lifecycle state, and renderer-neutral source
+  and semantic keys; and
+- copied or exact-revision-bound UIDL projection state needed to contribute to
+  a synchronous aggregate capture.
+
+The one aggregate screen projection record contains at least:
+
 - wire owner ID and generation when materialized;
 - requested and accepted owner quotas;
 - per-namespace next item ID/high-water;
-- stable mappings from UCTX element index and semantic subkey to exact
+- private mappings from local attachment/source semantic keys to exact
   namespace/item IDs;
-- lifecycle state `LOCAL`, `OPENING`, `LIVE`, `QUIESCING`, `DROPPING`,
-  `TOMBSTONED`, or `QUARANTINED`; and
-- copied or exact-revision-bound UIDL projection state needed for replay.
+- aggregate lifecycle state `OPENING`, `LIVE`, `DROPPING`, `TOMBSTONED`, or
+  `QUARANTINED`; and
+- copied authoritative aggregate desired state needed for replay or retirement.
 
 The backend allocates all storage from product policy and caller-provided
 bounds. Wire maxima are upper bounds, not an instruction to allocate every
-advertised slot eagerly. A profile may configure fewer binding records, but
-the backend rejects projection locally before OWNER_OPEN when it cannot
-represent every accepted wire record, mapping, quota, and retryable tombstone.
-The complete semantic-tree admission derives the owner reservation; no applet
-declares or enlarges terminal quota.
+advertised slot eagerly. A profile may configure fewer local attachment
+records, but the backend rejects local attach before capture when it cannot
+represent the exact host tuple and token. It separately rejects aggregate
+projection before OWNER_OPEN when it cannot represent every accepted wire
+record, mapping, quota, and retryable tombstone. Complete aggregate candidate
+admission derives the one owner reservation; no applet declares or enlarges
+terminal quota.
 
-Attach validates and copies the exact live host tuple and issues an internal
-generation-checked token. Before every later operation, the backend validates
-that token against its own record and revalidates the stored host/slot/CINST/
-UCTX graph. The token and record are private host/backend state, never an
-application capability. A stale token, reused slot, changed CINST generation,
-foreign host, or changed UCTX fails closed without touching wire state.
+Local attach validates and copies the exact live host tuple and issues an
+internal generation-checked token. Before every later capture, the backend
+validates that token against its own record and revalidates the stored
+host/slot/CINST/UCTX graph. The token and record are private host/backend state,
+never an application capability or wire authority. A stale token, reused slot,
+changed CINST generation, foreign host, or changed UCTX fails closed without
+changing the aggregate candidate or touching wire state.
 
-Only LIVE bindings may emit model/resource/series changes. OPENING becomes LIVE
-only after `RET_RESULT(OWNER_OPEN,RET_OK)`. Host-owned pre-shutdown quiesce first
-makes projection stale, synchronously detaches every core projection source,
-and records enough exact owner state for allocation-free retryable retirement.
-If source detachment cannot be proven, application shutdown and state free
-must not run. DROPPING remains authoritative until matching successful
-TX_RESULT. After successful drop, the wire binding becomes TOMBSTONED and the
-internal token is stale; it is never rebound to a new UCTX. A later UCTX gets a
-distinct binding generation and a wire generation newer than any terminal
-tombstone for a reused owner ID.
+Only revalidated attached local records may contribute to the aggregate
+candidate. Host-owned pre-shutdown quiesce first makes that local source stale
+and synchronously detaches every core projection source. If source detachment
+cannot be proven, application shutdown and state free must not run. Final local
+detach then clears the exact host/UCTX record. It emits no OWNER_DROP, creates no
+wire tombstone, and does not change the aggregate owner generation. The next
+aggregate candidate is rebuilt from the remaining live attachments. A later
+UCTX receives a distinct local token, not a wire generation.
+
+Only a `LIVE` aggregate binding may emit model/resource/series changes.
+`OPENING` becomes `LIVE` only after `RET_RESULT(OWNER_OPEN,RET_OK)`.
+`DROPPING` remains authoritative until a matching successful TX_RESULT. After
+successful drop, the aggregate wire binding becomes `TOMBSTONED`; local UCTX
+tokens are unaffected and may be revalidated for a later aggregate incarnation.
 
 Specifically, OWNER_DROP status 2 or 3 clears the outstanding-result gate but
-does not retire a DROPPING binding. The backend retains the exact wire binding,
-authoritative copied desired state, quotas, and model; it neither tombstones nor
-makes the reservation available to another UCTX. It may retry OWNER_DROP with
-a newer transaction ID after reconciling the unchanged reported revision, or
-carry the binding into the prescribed reset path. Only matching status 0
-authorizes local binding retirement. Outside the reset settlement below, any
-other nonzero TX_RESULT follows the base quarantine/close rule rather than this
-lifecycle exception.
+does not retire a `DROPPING` aggregate binding. The backend retains the exact
+wire binding, authoritative copied desired state, quotas, and model; it neither
+tombstones nor makes the reservation available to another aggregate screen
+incarnation. It may retry OWNER_DROP with a newer transaction ID after
+reconciling the unchanged reported revision, or carry the binding into the
+prescribed reset path. Only matching status 0 authorizes aggregate wire-binding
+retirement. Outside the reset settlement below, any other nonzero TX_RESULT
+follows the base quarantine/close rule rather than this lifecycle exception.
 
 If an already-emitted SOFT_RESET_REQUEST crosses the pending drop before the
 terminal accepted it, reset settlement instead returns status 1 without
-mutation. The DROPPING binding remains authoritative until the backend consumes
-that result and sends ACK; ACK then retires the entire old-epoch binding. This
-status 1 permits no old-epoch retry or binding release and is not a general
-third recoverable OWNER_DROP validation result.
+mutation. The `DROPPING` aggregate binding remains authoritative until the
+backend consumes that result and sends ACK; ACK then retires the entire
+old-epoch wire binding while local attachments survive for revalidation. This
+status 1 permits no old-epoch retry or aggregate-binding release and is not a
+general third recoverable OWNER_DROP validation result.
 
-If an owner lifecycle result is lost behind a structural frame/session fault,
-the backend marks every binding QUARANTINED. It does not guess whether quota was
-reserved or released. Coordinated external reset/detach destroys the epoch and
-is the recovery boundary.
+If an aggregate-owner lifecycle result is lost behind a structural
+frame/session fault, the backend marks the aggregate binding `QUARANTINED` and
+prevents every local record from contributing another capture. It does not
+guess whether quota was reserved or released. Coordinated external reset or
+outer attachment detach destroys the epoch and is the recovery boundary.
 
 ## 5. Exact owner and item authority checks
 
@@ -208,10 +236,15 @@ wire authority from another owner's unused usage.
 Accounting units are exact:
 
 - one live region/resource/object/series consumes one respective count slot;
+- one live CONTROL record and every stable-keyed STX1 semantic item each
+  consume one object-count slot even though neither gains OBJECT namespace
+  authority;
 - a resource consumes its declared verified raw byte length;
 - GLYPH_RUN text consumes its exact UTF-8 payload byte count; a READOUT consumes
   the exact complete formatted UTF-8 byte count for its current value, signs,
   punctuation, percent marker, and unit, with no second charge for the unit;
+  control labels/shortcuts and STX1 semantic content consume their exact
+  carried UTF-8 payload byte counts in that same ledger;
 - a series consumes its declared history capacity in sample slots, regardless
   of current sample count;
 - a VECTOR object reservation permits at most `max_path_points`; checked
@@ -219,15 +252,15 @@ Accounting units are exact:
 - transaction staging and upload staging are separate bounded transient pools
   derived from advertised transaction/chunk/resource policies.
 
-For region/object/series counts, UTF-8 bytes, and sample slots, active and
-committed hidden targets each have a separate logical usage ledger checked
-independently against the same immutable owner reservation. They are not summed;
-this permits a complete copy-on-write replacement at the negotiated logical
-quota. A hidden drop changes only hidden usage. Reveal atomically promotes the
-hidden ledger and retires the prior active logical ledger. The host must still
-provision bounded physical staging/backing for both targets and immutable old
-views to coexist; it must not accept START and discover at reveal that physical
-coexistence was impossible.
+For region/object/control/semantic-item/series counts, UTF-8 bytes, and sample
+slots, active and committed hidden targets each have a separate logical usage
+ledger checked independently against the same immutable owner reservation.
+They are not summed; this permits a complete copy-on-write replacement at the
+negotiated logical quota. A hidden drop changes only hidden usage. Reveal
+atomically promotes the hidden ledger and retires the prior active logical
+ledger. The host must still provision bounded physical staging/backing for both
+targets and immutable old views to coexist; it must not accept START and
+discover at reveal that physical coexistence was impossible.
 
 Resource count and byte usage are owner-wide rather than target-local. Every
 committed resource counts once whether referenced by active, hidden, both, or
@@ -316,9 +349,11 @@ wire resource and does not consume guest quota after the drop becomes visible.
 
 ## 9. Semantic series-source and history lifetime
 
-A semantic UIDL series snapshot reserves a fixed history capacity for its
-private owner binding. Its bounded pull source delivers explicit timestamp/value
-pairs or a uniform first timestamp plus i64 values into backend-owned staging.
+A semantic UIDL series snapshot is charged to the exact aggregate screen wire
+owner selected by the backend; its renderer-neutral source identity may still
+originate in one local attachment. Its bounded pull source delivers explicit
+timestamp/value pairs or a uniform first timestamp plus i64 values into
+backend-owned staging.
 The backend copies each append payload before emission and retains it until the
 corresponding transaction result. The source is backend-neutral and exposes no
 wire descriptor, identity, or mutation authority.
@@ -342,28 +377,32 @@ committed state, not an open transaction, and may span several successfully
 committed PRESENT transactions so finite transaction bounds do not impose an
 arbitrary maximum scene size.
 
-Replacement START creates an empty hidden region/object/series model. Layout
-START creates a copy-on-write hidden model from active retained state. Each
-CONTINUE mutation has exact owner authority and quota accounting. Active
-retained content is not mutated by hidden commits and is not visible after the
-reset/resize boundary declares it stale. REVEAL validates the complete hidden
-model and swaps it atomically; old active backing retires after immutable view
-consumers release it.
+Replacement START creates an empty hidden
+region/object/control/semantic-item/series model. Layout START creates a
+copy-on-write hidden model from active retained state. Each CONTINUE mutation
+has exact owner authority and quota accounting. Active retained content is not
+mutated by hidden commits and is not visible after the reset/resize boundary
+declares it stale. REVEAL validates the complete hidden model and swaps it
+atomically; old active backing retires after immutable view consumers release
+it.
 
-A newer resize, soft reset, hard reset, detach, or valid new START retires the
-old hidden target. An ordinary transaction abort retires only that transaction's
-staging, not prior committed hidden work. OWNER_DROP removes matching authority
-from active and hidden state together.
+A newer resize, soft reset, hard reset, outer terminal attachment detach, or
+valid new START retires the old hidden target. Individual UCTX detach
+invalidates any aggregate candidate or hidden target containing that source and
+requires a rebuild from the remaining local attachments; it does not retire the
+aggregate owner. An ordinary transaction abort retires only that transaction's
+staging, not prior committed hidden work. OWNER_DROP removes matching aggregate
+authority from active and hidden state together.
 
 ## 11. Reset, loss, fallback, and close
 
 | Event | Internal backend action | Terminal retained action | ANSI authority |
 |---|---|---|---|
 | Unsupported discovery | Keep CELL-1; never materialize a wire owner | Skip query, send covering CREDIT only | Unchanged CELL-1 rules |
-| Synchronized CLOSE/CLOSE_ACK | Stop projection, quiesce sources, drain/abort bounded lifecycle, close | Destroy retained state with session | Released only at base close boundary |
-| Soft reset ACK | Invalidate wire tuples, preserve live UCTX bindings, rediscover, CELL snapshot first, allocate/replay new-epoch owners | Drop entire retained epoch, revision 0 | Binary remains owned |
+| Synchronized CLOSE/CLOSE_ACK | Stop projection, quiesce local sources, settle/drop the aggregate owner as permitted, drain/abort bounded lifecycle, close | Destroy retained state with session | Released only at base close boundary |
+| Soft reset ACK | Invalidate the aggregate wire tuple, preserve and revalidate live local UCTX attachments, rediscover, CELL snapshot first, allocate/replay one current-epoch aggregate owner | Drop entire retained epoch, revision 0 | Binary remains owned |
 | Resize | Quiesce deltas, CELL replace, hidden layout/reveal | Hide stale regions; accept newest generation layout | Binary remains owned |
-| Structural/session failure | Quarantine backend and every projection binding | Freeze unusable protocol model; retain last immutable view/backing and exclusive stream ownership | Never fallback |
+| Structural/session failure | Quarantine backend and aggregate owner record; prevent local records from further capture | Freeze unusable protocol model; retain last immutable view/backing and exclusive stream ownership | Never fallback |
 | Hard machine reset/detach | External owner destroys and recreates attachment/capacities | Destroy session, tombstones, views, uploads | Base external boundary decides |
 
 Base commit settlement orders every accepted CELL or PRESENT TX_RESULT before a
@@ -393,22 +432,24 @@ until external reset.
 ## 12. Concurrency and backend ownership
 
 The profile assumes one cooperative internal backend owner for the guest
-stream. The generic UIDL host stages projection only through its private
-host/slot/CINST/UCTX binding token while that exact UCTX is active or available
-through validated saved context. Application callbacks cannot enqueue retained
+stream. The generic UIDL host stages a contribution to the aggregate candidate
+only through its private host/slot/CINST/UCTX attachment token while that exact
+UCTX is active or available through validated saved context. The token never
+grants wire projection authority. Application callbacks cannot enqueue retained
 requests. Projection admission copies or revision-binds complete semantic
 snapshots into caller-bounded backend storage and reports explicit accepted,
 backpressured, or failed status; it never retains arbitrary application stack
 addresses or silently drops state.
 
-Before arbitrary application shutdown, the host must quiesce the binding and
-synchronously detach every core UIDL/canonical-widget projection source.
-Quiesce records the exact retryable owner-retirement obligation without
-depending on later application state. If local source detachment cannot be
-proven, shutdown and state free must not proceed. Final host detach scrubs
-remaining UCTX/CINST/region references
-before those objects are freed; wire acknowledgement may retire the independent
-bounded tombstone afterward under the exact owner rules.
+Before arbitrary application shutdown, the host must quiesce the local
+attachment and synchronously detach every core UIDL/canonical-widget projection
+source. Quiesce records the exact retryable local-detach and aggregate-
+invalidation obligation without depending on later application state. If local
+source detachment cannot be proven, shutdown and state free must not proceed.
+Final host detach scrubs remaining UCTX/CINST/region references before those
+objects are freed and causes the next aggregate candidate to omit that source.
+Only final product/screen teardown retains and settles the independent exact
+aggregate OWNER_DROP/tombstone retry state under the owner rules.
 
 The host similarly owns one rich-terminal driver pump. Host service and guest
 run alternate in bounded steps. Zero guest instructions may mean host
@@ -446,6 +487,9 @@ these invariants:
 9. Bulk replay/upload cannot consume the base control reserve.
 10. Structural failure keeps binary ownership quarantined until coordinated
     reset/detach.
+11. A local attachment token never substitutes for wire authority; several
+    revalidated live UCTX attachments may feed the one explicit aggregate
+    screen owner without gaining its tuple or mutation rights.
 
 These are functional contract conditions, not optional hardening. A terminal or
 backend that cannot represent one of them must leave RETAINED-1 unsupported and

@@ -3,10 +3,14 @@
 Status: protocol value, wire codec, immutable retained model, server ingress,
 renderer-neutral immutable draw projection, and exact shared-viewer transport
 implemented. The reference Pygame sink now rasterizes every collection kind and
-publishes immutable TAB hit targets from the exact paint pass. Akashic
-production and text/grid item input are deliberately not implemented in this
-slice. A physical renderer must not advertise `RET_CONTROL_COLLECTIONS` until
-its compositor and acknowledgement path can render every visible kind.
+publishes immutable TAB hit targets from the exact paint pass. The paired
+Akashic `desktop-apt1` producer now advertises the capability, projects ordinary
+UIDL/canonical-widget values, and has exercised all four kinds plus
+acknowledgement-bound TAB activation through that sink. Text/grid item-addressed
+input remains deliberately unimplemented because the current event shape cannot
+name an item revision, key, and scalar offset. A physical renderer must not
+advertise `RET_CONTROL_COLLECTIONS` until its compositor and acknowledgement
+path can render every visible kind.
 
 ## Decision
 
@@ -16,12 +20,15 @@ API, or terminal-buffer reservations.
 
 The wire does not equate one CONTROL root with one UIDL source element. One
 ordinary core UIDL type or canonical reusable widget may automatically project
-multiple roots—such as a TABSET and a TEXT_AREA—using stable control IDs
-derived by the lower producer from its attachment, source index, and stable
-per-element object key. Those producer coordinates do not enter the wire. The
-results remain ordinary independent CONTROL definitions in one owner and
-region, not a mirrored DOM or element-owned scene. Applets do not register a
-provider or maintain a second semantic description.
+multiple roots—such as a TABSET and a TEXT_AREA—using lower-layer control IDs
+associated with its attachment, source index, and stable per-element object
+key. Those producer coordinates do not enter the wire. Control IDs are exact
+retained-graph identities, not permanent application identities: a complete
+replacement may assign fresh IDs while the producer coordinates and value
+signatures preserve semantic continuity. The results remain ordinary
+independent CONTROL definitions in one owner and region, not a mirrored DOM or
+element-owned scene. Applets do not register a provider or maintain a second
+semantic description.
 
 Feature bit 9, `RET_CONTROL_COLLECTIONS`, gates all four kinds and depends on
 bit 8 `RET_CONTROLS`. The same `CONTROL_DEFINE`, `CONTROL_REPLACE`,
@@ -74,9 +81,9 @@ reserved field is still zero as `content_bytes`. This repository is unreleased,
 so no decoder keeps the rejected intermediate interpretation that required the
 field to be reserved forever. Capability bit 9 prevents an older terminal from
 being sent a new kind or body. The current Akashic driver deliberately rejects
-unknown advertised bits, so a terminal policy enabling bit 9 requires the
-synchronized Akashic mask/encoder update; a bit-8-only policy remains the exact
-menu-compatible path during that transition.
+unknown advertised bits. The synchronized driver now understands bit 9, while a
+bit-8-only policy remains the exact menu-compatible path for a terminal that
+does not advertise collections.
 
 ## STX1 body
 
@@ -298,17 +305,18 @@ The coherent protocol slice is owned by:
 - `rich_terminal/final_raster.py`: sink-local final-pixel damage, pinned
   raster/damage/hit-map offers, and acknowledgement-only baseline promotion.
 
-The reference sink no longer blocks collection rendering. Capability bit 9
-remains unadvertised until a synchronized Akashic lower-layer producer and an
-ordinary application journey can supply and exercise these records end to end.
-Akashic can advertise/use bit 9 only after an ordinary core UIDL type or
-canonical reusable widget automatically emits these exact records through the
-CONTROL encoder. Pad, Daybook, and every other applet remain ordinary UIDL/TUI
-clients; none receives a provider callback, terminal API, renderer-specific
-annotation, or future per-applet repair obligation.
+The reference sink no longer blocks collection rendering. The synchronized
+Akashic lower-layer producer now advertises bit 9 in `desktop-apt1`, and ordinary
+core UIDL/canonical widgets emit these exact records through the CONTROL
+encoder. The `4b6a475`/`29bdfd6` physical reference-view journey exercised two
+text areas, one text grid, two tabsets, their tabs, and activation of Pad's
+original tab after the Daybook-to-Pad handoff. Pad, Daybook, and every other
+applet remain ordinary UIDL/TUI clients; none receives a provider callback,
+terminal API, renderer-specific annotation, or future per-applet repair
+obligation.
 
-Advertisement is deliberately one final vertical gate, not an isolated policy
-bit flip. The MegaPad guest module now accepts mask `0x33f`, requires bit 8 for
+Advertisement was deliberately treated as one final vertical gate, not an
+isolated policy bit flip. The MegaPad guest module accepts mask `0x33f`, requires bit 8 for
 bit 9, and evolves the one public CONTROL writer to copy caller-bounded kinds 5
 through 8 without a parallel message or legacy encoder. It enforces exact root,
 child, state, label, shortcut, and zero/nonzero content shapes; TEXT_AREA and
@@ -320,17 +328,19 @@ overlap, then all source borrows are scrubbed after the guarded call.
 
 Bit-9 discovery now audits the 152-byte peer payload, 192-byte guest TX staging,
 and 352-byte retained-transaction minima, and a focused target-Forth oracle
-locks the complete minimum-content CONTROL frame. No host/product policy
-advertises the capability yet. Akashic's real core-owned collection operation
-counts and UTF-8 bytes must still be included in the Desktop caller-owned arena
-derivation, and its ordinary core-widget projection/encoder must drive
-representative records before advertisement.
+locks the complete minimum-content CONTROL frame. No generic MegaPad default
+advertises the capability implicitly; the explicit selected Akashic
+`desktop-apt1` policy does. Its real core-owned collection operation counts and
+UTF-8 bytes are included in the Desktop caller-owned arena derivation, and its
+ordinary core-widget projection/encoder drives the accepted records.
 
 The session configuration derives its transport `max_payload` from both the CELL
 row requirement and the retained client-to-terminal payload policy. This keeps
 an otherwise valid retained policy from failing discovery and quietly selecting
 CELL fallback. The largest supported canonical collection must fit the
-negotiated payload and the guest's current 8 KiB TX staging before
-advertisement.
+negotiated payload and the caller-supplied guest TX staging before
+advertisement. The selected Akashic `desktop-apt1` composition derives a
+917,648-byte TX minimum from its full CELL, collection, and `DATA_GRAPHICS`
+envelope; the 8 KiB focused Forth fixtures are not a product capacity.
 `MANDATORY_CAPABILITIES` remains the base `0x3f`; collection support belongs
 only to the additive `RET_CAPS` negotiation.

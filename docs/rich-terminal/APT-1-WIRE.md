@@ -682,9 +682,9 @@ byte count, shortcut byte count, and semantic-content byte count; label bytes,
 shortcut bytes, and then the optional content body follow without padding. The
 all-zero rectangle is canonical absence. REPLACE resends that complete record
 with the kind-specific immutable and mutable field rules. DROP is exact
-`<QQQ>`. RETAINED-1 Section 9.1 and
-`SEMANTIC-CONTENT-1.md` define the canonical menu, text, grid, and tab graph,
-content, replacement, and state rules.
+`<QQQ>`. RETAINED-1 Section 9.1 and the MegaPad-owned
+`docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract define the canonical menu,
+text, grid, and tab graph, content, replacement, and state rules.
 Controls have an independent ID high-water but share each owner's existing
 object-count and aggregate UTF-8 quotas. One CONTROL record and each
 stable-keyed STX1 item consume one object-count slot. Negotiated inbound

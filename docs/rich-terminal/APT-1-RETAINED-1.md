@@ -938,9 +938,9 @@ Control kinds are:
 
 Menu controls, `TABSET`, and `TAB` require `content_bytes = 0`. `TEXT_AREA`
 and `TEXT_GRID` require one canonical STX1 text collection. Its exact header,
-item, graph, state, replacement, and quota rules are specified in
-`SEMANTIC-CONTENT-1.md`. Menu and collection roots use the same CELL_RECT32
-geometry contract.
+item, graph, state, replacement, and quota rules are specified in the
+MegaPad-owned `docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract. Menu and
+collection roots use the same CELL_RECT32 geometry contract.
 
 State bits are:
 
@@ -1515,8 +1515,8 @@ The blocking vertical uses the real Desk composition with the canonical Pad
 text editor and Daybook calendar both launched and live. It must use their
 unchanged ordinary descriptors, UCTX/UIDL documents, mounted widgets, state,
 Desk tiling/focus/input loop, and normal TUI draw lifecycle. No source-special
-fixture, Sound Lab path, applet scene API, terminal-mode branch, or renderer
-reservation in UIDL may substitute for that composition.
+fixture, special Sound Lab path, applet scene API, terminal-mode branch, or
+renderer reservation in UIDL may substitute for that composition.
 
 This profile defines the required first in-place semantic-control contract in
 Section 9.1. The selected Desktop implementation now carries ordinary menu
@@ -1528,32 +1528,47 @@ carry a protocol control ID, terminal buffer reservation, or renderer-specific
 scene description.
 
 The generic rich path must carry the substantive Desk chrome, Pad editor, and
-Daybook calendar/agenda state through private owner admission, bounded
-publication, immutable composite selection, and the physical view sink. It must
-show at least one real Pad edit and one real Daybook navigation or selection,
-then preserve the ordinary Daybook-to-Pad shared-resource route. The required
-semantic control must be visibly rendered from that projection and activated
-by normalized input bound to the exact selected revision. The sink makes that
+Daybook calendar/agenda state through aggregate screen-owner admission,
+bounded publication, immutable composite selection, and the physical view
+sink. It must show at least one real Pad edit and one real Daybook navigation or
+selection, then preserve the ordinary Daybook-to-Pad shared-resource route. The
+required semantic control must be visibly rendered from that projection and
+activated by normalized input bound to the exact selected revision. The sink makes that
 revision input-eligible only after every nonempty selected plane has been
 completely composed and the exact offer has crossed that sink's documented
 acknowledgement boundary; acceptance also observes the resulting ordinary
 application-state change. A software reference boundary at display-API
 submission does not qualify a hardware-panel claim.
 
+The selected full-vertical extension then launches Sound Lab through Desk's
+ordinary catalog and launcher, after the Pad/Daybook checkpoint above remains
+live. The launcher is normal foreground TUI paint: its intersected UIDL
+documents contribute no semantic slice for that draw, so residual projection
+owns both their visible pixels and hit area atomically. Once dismissed, normal
+document semantics return from the next completed draw. Sound Lab contributes
+one mounted generic `DATA_GRAPHICS` snapshot containing the complete
+`READOUT`/`METER`/`STATUS` instrument family. Neither the overlay nor Sound Lab
+may name a terminal, protocol object, renderer, retained reservation, or
+application-specific scene. Acceptance must preserve the exercised Pad tab and
+editor state and Daybook navigation state while the normally launched
+instrument graph crosses the same immutable-composite acknowledgement boundary.
+
 CELL remains mandatory complete fallback. Retaining a scene diagnostically,
 promoting a composite, exposing only CELL pixels, projecting the whole screen
 only as GLYPH_RUN output, or overlaying one retained glyph run on a
 CELL-rendered Desk/editor/calendar does not complete this checkpoint.
-Binding-local rich refusal must leave CELL usable, but refused CELL pixels are
-not rich-rendering acceptance evidence.
+Local attachment/capture refusal, or aggregate projection refusal before
+OWNER_OPEN, must leave CELL usable, but refused CELL pixels are not
+rich-rendering acceptance evidence.
 
 The checkpoint does not authorize partial capability advertisement. The
-checked-in `desktop-apt1` reference profile advertises exactly `RET_CORE` and
-`RET_CONTROLS`: its CONTROL transaction storage, model validation, renderer
-ownership/hit testing, acknowledgement-bound `CONTROL_EVENT`, and generic UIDL
-projection are implemented as one slice. Instrument, image, vector, series,
-resource, and protocol-advertised cadence families remain disabled in that
-profile and are not acceptance prerequisites for this vertical.
+checked-in `desktop-apt1` reference profile advertises exactly `RET_CORE`,
+`RET_INSTRUMENT`, `RET_CONTROLS`, and `RET_CONTROL_COLLECTIONS`: residual glyph
+runs, the complete readout/meter/status instrument family, menu and collection
+control storage/model/rendering, acknowledgement-bound menu/tab activation, and
+generic UIDL/widget projection are implemented as one slice. Image, vector,
+series, resource, and protocol-advertised cadence families remain disabled in
+that profile and are not acceptance prerequisites for this vertical.
 
 ### 16.2 Production qualification
 
@@ -1564,8 +1579,9 @@ The minimum Akashic journey is:
 1. negotiate APT-1 CELL-1 and reach ACTIVE;
 2. commit the initial CELL snapshot and receive its successful TX_RESULT;
 3. discover RETAINED-1 and validate both fixed replies before covering CREDIT;
-4. attach one UCTX through the internal retained backend and open its bounded
-   projection owner without exposing that owner to application code;
+4. attach the live UCTXs through private local backend records, freeze one
+   renderer-neutral aggregate screen candidate, and open its bounded aggregate
+   projection owner without exposing wire authority to application code;
 5. build the initial hidden replacement with RET_REPLACE_START followed by at
    least one separate RET_REPLACE_CONTINUE transaction, then reveal regions plus
    at least one polyline, glyph run, readout, meter, status, bounded series, plot,
@@ -1582,10 +1598,14 @@ The minimum Akashic journey is:
    geometry generation;
 10. perform a soft reset, CELL snapshot, discovery/owner replay, and a hidden
     RET_REPLACE_START plus RET_REPLACE_CONTINUE replay before reveal;
-11. submit two individually valid OWNER_OPEN quota requests whose aggregate
-    exceeds one advertised global total and observe RET_NO_CAPACITY with the
-    prior ledger unchanged; and
-12. drop the owner and complete synchronized close to unchanged ANSI.
+11. drop the aggregate owner and complete synchronized close to unchanged ANSI.
+
+The global live-owner reservation-sum rule is separately qualified by a
+low-level RETAINED-1 protocol conformance profile that advertises at least two
+owner records and two live owners. That profile submits two individually valid
+OWNER_OPEN quota requests whose aggregate exceeds one advertised global total
+and observes RET_NO_CAPACITY with the prior ledger unchanged. It does not add a
+second wire owner to the selected one-owner Desktop composition.
 
 The journey must exercise ordinary-credit backpressure, the 4096-byte control
 reserve, a rejected over-quota lifecycle request, transaction bytes retained

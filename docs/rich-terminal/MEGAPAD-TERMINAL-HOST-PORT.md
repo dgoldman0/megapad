@@ -171,6 +171,16 @@ offer acknowledgement. Those bytes still crossed the in-process enhanced host
 port, not an attached RTL TX pin, so the run does not close board evidence or
 qualify an e-paper panel.
 
+The current full-vertical reference run at Akashic `4b6a475` with MegaPad
+`29bdfd6` extends that evidence through canonical text/grid/tab collections,
+the ordinary Desk launcher overlay, and a normally launched Sound Lab. Each of
+the 19 offers crossed post-flip acknowledgement, and every one of the 14
+scripted inputs was bound to its exact acknowledged offer. The final
+revision-22 composite contains one 173-cell instrument region with eight
+`READOUT`, two `METER`, and three `STATUS` objects while preserving the exercised
+Pad and Daybook state. It remains software/reference-sink evidence over the
+in-process enhanced host port, not physical UART or panel evidence.
+
 The recorded `eedcfb9`/`4f074ae` reference journey makes the consequence
 quantifiable, although it is not physical-link evidence. At 8N1, 115,200 baud
 has a nominal payload ceiling of 11,520 bytes/s. Its 744,222-byte first offer
@@ -464,10 +474,15 @@ from that exact paint pass. An accepted selected-sink offer therefore
 authorizes TAB ACTIVATE through the existing exact-revision path. Text/grid
 item input remains
 deferred because the current event cannot name content revision, item key, and
-scalar offset. Bit 9 remains unadvertised until a synchronized Akashic core
-UIDL/canonical-widget producer and an ordinary application journey exercise
+scalar offset. The selected Akashic `desktop-apt1` policy now advertises bit 9;
+its generic UIDL/canonical-widget producer and ordinary product journey exercise
 this physical path. Applets do not register that projection or acquire
 renderer-facing code.
+
+That selected policy also advertises `RET_INSTRUMENT`. Sound Lab's ordinary
+mounted `DATA_GRAPHICS` widget reaches the same shared viewer as one complete
+readout/meter/status family; no applet registers a terminal scene. Vector,
+image, series, resource, and cadence remain distinct optional advertisements.
 
 Collection rasterization consumes the immutable values already validated at
 wire/model admission; it does not repeat UTF-8, ordering, family, or rectangle
@@ -545,10 +560,10 @@ The lightweight host-port suite must prove:
     generic renderer fixture additionally covers text, background/fill,
     clipping, styling, and z-order once that bounded vocabulary is present.
 
-Cases 9 and 10 are focused seconds-scale units for the current functional
-slice, not full renderer qualification. A CELL-only snapshot round trip, one
-isolated glyph-run overlay, or even a complete GLYPH_RUN-only screen cannot be
-cited as Desk/Pad/Daybook semantic-rich-rendering acceptance. That acceptance
-also requires a real semantic control, its exact selected-sink acknowledgement,
-and revision-bound normalized activation through the ordinary application
-lifecycle.
+Cases 9 and 10 are focused seconds-scale units for their functional slices, not
+full product qualification. The `4b6a475`/`29bdfd6` physical journey supplies
+the current product/reference-sink evidence for Desk, Pad, Daybook, foreground
+overlay composition, and Sound Lab instruments. A CELL-only snapshot round
+trip, one isolated glyph-run overlay, or even a complete GLYPH_RUN-only screen
+cannot substitute for that journey. Physical UART, panel scanout, and refresh
+completion remain outside this host-port evidence.
