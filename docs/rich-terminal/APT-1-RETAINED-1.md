@@ -1533,9 +1533,9 @@ bounded publication, immutable composite selection, and the physical view
 sink. It must show at least one real Pad edit and one real Daybook navigation or
 selection, then preserve the ordinary Daybook-to-Pad shared-resource route. The
 required semantic control must be visibly rendered from that projection and
-activated by normalized input bound to the exact selected revision. The sink makes that
-revision input-eligible only after every nonempty selected plane has been
-completely composed and the exact offer has crossed that sink's documented
+activated by normalized input bound to the exact selected revision. The sink
+makes that revision input-eligible only after every nonempty selected plane has
+been completely composed and the exact offer has crossed that sink's documented
 acknowledgement boundary; acceptance also observes the resulting ordinary
 application-state change. A software reference boundary at display-API
 submission does not qualify a hardware-panel claim.
