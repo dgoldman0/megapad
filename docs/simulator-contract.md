@@ -120,6 +120,16 @@ and completion/durability publication remain backend-local. Pure marker-1
 MP64FS geometry and metadata acceptance qualify for `shared/`; the three
 checked reads and their scratch/controller effects remain backend-local.
 
+The optional rich-terminal host port follows the same division. Attachment
+epochs, lease validity, bounded admission, publication retention, event order,
+backpressure, and retirement are one backend-neutral state machine in
+`shared/rich_terminal_host.py`. Scheduler exclusion, UART drain and FIFO
+mutation, geometry application, and machine-sink ownership remain explicit
+backend hooks. The emulator adapter supplies those hooks without changing its
+machine boundary. A conforming simulator adapter must supply the same effects
+at semantic batch boundaries; the shared policy alone is not evidence that
+such an adapter or a live APT session exists.
+
 ## 2. Compatibility claims
 
 The simulator claims compatibility for:
@@ -3576,6 +3586,13 @@ payload and transaction limits, credits, geometry, text capacity, snapshot
 need, probe count, sequence state, and empty binary/legacy buffers. This is a
 real host-to-guest negotiation boundary, but it still stops before framed
 SERVER_READY handling, CLIENT_READY, ACTIVE state, or a live driver/session.
+
+Host-port integration begins by extracting the already-qualified emulator
+attachment policy into the shared state machine described in section 1. The
+emulator keeps thin scheduler, UART, geometry, and ingress hooks, so this move
+does not alter its execution-batch settlement or make a simulator claim. The
+simulator adapter, semantic-batch settlement, and live driver handshake remain
+the next boundary.
 
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real

@@ -41,6 +41,11 @@ def _write_native_uart(system: MegapadSystem, payload: bytes) -> bytes:
     return system._drain_native_uart_output()
 
 
+def _queue_native_uart(system: MegapadSystem, payload: bytes) -> None:
+    for value in payload:
+        system.cpu._cs.uart_write8(0x00, value)
+
+
 def test_runtime_attachment_suspends_and_restores_legacy_uart_consumers():
     system = MegapadSystem(ram_size=64 * 1024)
     legacy_batches: list[bytes] = []
@@ -67,6 +72,40 @@ def test_runtime_attachment_suspends_and_restores_legacy_uart_consumers():
     assert _write_native_uart(system, b"C") == b"C"
     assert legacy_batches == [b"A", b"C"]
     assert bytes(system.uart.tx_buffer) == b"AC"
+
+
+def test_attachment_drains_prior_legacy_output_before_binding_enhanced_sink():
+    system = MegapadSystem(ram_size=64 * 1024)
+    legacy_batches: list[bytes] = []
+    system.uart.on_tx = None
+    system.uart.on_tx_batch = legacy_batches.append
+
+    _queue_native_uart(system, b"legacy-before-attach")
+    lease = system.attach_rich_terminal(_limits())
+
+    assert legacy_batches == [b"legacy-before-attach"]
+    assert bytes(system.uart.tx_buffer) == b"legacy-before-attach"
+    assert lease.poll_egress().delivery is None
+    assert lease.close() is AdmissionStatus.ACCEPTED
+
+
+def test_detach_discards_pending_epoch_output_before_restoring_legacy_sink():
+    system = MegapadSystem(ram_size=64 * 1024)
+    legacy_batches: list[bytes] = []
+    system.uart.on_tx = None
+    system.uart.on_tx_batch = legacy_batches.append
+    lease = system.attach_rich_terminal(_limits())
+
+    _queue_native_uart(system, b"old-epoch")
+    assert lease.close() is AdmissionStatus.ACCEPTED
+    assert system._drain_native_uart_output() == b""
+    assert legacy_batches == []
+
+    assert (
+        _write_native_uart(system, b"legacy-after-detach")
+        == b"legacy-after-detach"
+    )
+    assert legacy_batches == [b"legacy-after-detach"]
 
 
 def test_runtime_retains_one_exact_batch_and_stops_before_more_guest_work():
@@ -181,6 +220,9 @@ def test_runtime_applies_protocol_resize_as_one_scheduler_boundary_record():
 
 def test_subsequent_boot_retires_the_active_epoch_before_execution_resumes():
     system = MegapadSystem(ram_size=64 * 1024)
+    legacy_batches: list[bytes] = []
+    system.uart.on_tx = None
+    system.uart.on_tx_batch = legacy_batches.append
     lease = system.attach_rich_terminal(_limits())
     system.boot()
     assert system.rich_terminal_host.enhanced_attached
@@ -193,9 +235,12 @@ def test_subsequent_boot_retires_the_active_epoch_before_execution_resumes():
     system.run_batch_stats(1)
     assert system.uart.rx_pending == 3
 
+    _queue_native_uart(system, b"retired-output")
     system.boot()
     assert not system.rich_terminal_host.enhanced_attached
     assert system.uart.rx_pending == 0
+    assert system._drain_native_uart_output() == b""
+    assert legacy_batches == []
     assert old_delivery.release() is AdmissionStatus.STALE
     assert lease.poll_egress().status is AdmissionStatus.STALE
     assert lease.submit_ingress(b"late") is AdmissionStatus.STALE

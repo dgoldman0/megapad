@@ -8,6 +8,14 @@ Shared code imports neither `emulator` nor `simulator` and cannot inspect a
 backend's private CPU, bus, scheduler, memory, or device objects.  An adapter
 that does so belongs with that backend even if the model behind it is shared.
 
+`rich_terminal_host.py` owns the backend-neutral attachment state machine:
+epochs, leases, bounded admission, publication retention, scheduled-event
+ordering, backpressure, and retirement. Its hook protocol deliberately leaves
+scheduler exclusion, completed-UART drains, geometry application, ingress FIFO
+mutation, and machine-sink binding to each backend adapter. This keeps one
+host-port policy without pretending the emulator and hosted simulator have the
+same execution machinery.
+
 The crypto capability-bit registry, six-mode CRC parameter table and pure
 byte/cell recurrences, AES/GHASH operations, the 24-round Keccak-f[1600]
 permutation, 256-bit Field arithmetic/raw-product values, and RFC 7748 X25519

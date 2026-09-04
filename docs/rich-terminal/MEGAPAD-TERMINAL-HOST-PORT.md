@@ -26,6 +26,14 @@ The machine execution path may copy or transfer bytes into the port. It may
 not parse terminal bytes, mutate a terminal model, render, synthesize replies,
 or invoke terminal-owned code.
 
+The reference host implementation keeps the policy in
+`shared/rich_terminal_host.py`: attachment epochs, leases, bounded queues,
+event ordering, retained publication, backpressure, and retirement. Concrete
+backends provide only the scheduler, UART/FIFO, geometry, and sink-binding
+effects needed at their own execution boundary. This is a code-ownership
+boundary, not permission for either backend to weaken the behavior specified
+here.
+
 The guest-side protocol implementation is likewise not part of KDOS. It is a
 separately source-loadable userland module, `rich-terminal.f`, in the
 same architectural role as `networking.f`. BIOS and KDOS continue to expose
