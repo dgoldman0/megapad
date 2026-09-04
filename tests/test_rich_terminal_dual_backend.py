@@ -3,11 +3,11 @@
 These tests extract contiguous prefixes from the authoritative module and
 execute its source-defined APT path on the exact emulator and hosted
 simulator. The shared byte oracles remain paired across both backends; the
-simulator selector additionally proves the first real driver handshake and
-synchronized close through the unchanged pre-``CATCH`` boundary without
-claiming a complete module load. A separate compile-and-invalid-call oracle
-uses the real KDOS exception closure to cross ``CATCH`` through the resource
-entry points, stopping before CELL/PRESENT transaction construction.
+simulator selector additionally proves a real driver handshake, atomic CELL
+snapshot, result settlement, and synchronized close through the unchanged
+complete module source. A separate compile-and-invalid-call oracle keeps the
+resource-wrapper failure boundary explicit against the real KDOS exception
+closure.
 """
 
 from __future__ import annotations
@@ -57,9 +57,6 @@ PREFIX_END = b"\nVARIABLE _PT-CTL-REASON"
 UART_OFFER_PREFIX_END = (
     b"\n\\ ====================================================================="
     b"\n\\  Input payload validation"
-)
-PRE_CATCH_PREFIX_END = (
-    b"\n\\ Stack: owner generation resource format width height flags byte-length"
 )
 RESOURCE_WRAPPER_PREFIX_END = (
     b"\n\\ ====================================================================="
@@ -239,6 +236,9 @@ VARIABLE DBL-POLL-EVENT?
 VARIABLE DBL-POLL-COMPLETION-S
 VARIABLE DBL-POLL-COMPLETION?
 VARIABLE DBL-CLOSE-S
+VARIABLE DBL-SNAPSHOT-S
+VARIABLE DBL-SNAPSHOT-NEEDED
+VARIABLE DBL-REVISION
 : DBL-BOOT
   DBL-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
   DBL-TX _PT-OPEN-BYTES DBL-EVENT PT-EVENT-SIZE DBL-S
@@ -260,12 +260,27 @@ VARIABLE DBL-CLOSE-S
   DBL-S _PT.S.LOCAL-GRANT @ DBL-LOCAL-GRANT !
   DBL-S _PT.S.MAX-TEXT @ DBL-MAX-TEXT !
   DBL-S _PT.S.TX-SEQ @ DBL-TX-SEQ !
-  DBL-S _PT.S.RX-SEQ @ DBL-RX-SEQ ! ;
+  DBL-S _PT.S.RX-SEQ @ DBL-RX-SEQ !
+  DBL-S PT-SNAPSHOT-NEEDED? DBL-SNAPSHOT-NEEDED !
+  DBL-S _PT.S.REVISION @ DBL-REVISION ! ;
 : DBL-POLL-EMPTY
   DBL-POLL-EVENT DBL-S PT-EVENT-POLL
   DBL-POLL-EVENT? ! DBL-POLL-EVENT-S !
   DBL-POLL-COMPLETION DBL-S PT-COMPLETION-POLL
   DBL-POLL-COMPLETION? ! DBL-POLL-COMPLETION-S ! ;
+: DBL-SNAPSHOT-STATUS
+  DBL-SNAPSHOT-S @ OR DBL-SNAPSHOT-S ! ;
+: DBL-SNAPSHOT
+  0 DBL-SNAPSHOT-S !
+  2 2 2 4 DBL-S PT-SNAPSHOT-BEGIN DBL-SNAPSHOT-STATUS
+  0 0 2 DBL-S PT-SPAN-BEGIN DBL-SNAPSHOT-STATUS
+  65 7 0 1 DBL-S PT-CELL DBL-SNAPSHOT-STATUS
+  66 2 0 8 DBL-S PT-CELL DBL-SNAPSHOT-STATUS
+  1 0 2 DBL-S PT-SPAN-BEGIN DBL-SNAPSHOT-STATUS
+  67 4 0 0 DBL-S PT-CELL DBL-SNAPSHOT-STATUS
+  32 7 1 32 DBL-S PT-CELL DBL-SNAPSHOT-STATUS
+  1 1 1 DBL-S PT-CURSOR DBL-SNAPSHOT-STATUS
+  DBL-S PT-TX-COMMIT DBL-SNAPSHOT-STATUS ;
 : DBL-CLOSE
   7 DBL-S PT-CLOSE DBL-CLOSE-S !
   DBL-S PT-STATE@ DBL-STATE !
@@ -377,23 +392,6 @@ def _rich_terminal_uart_offer_prefix() -> bytes:
     return prefix
 
 
-def _rich_terminal_pre_catch_prefix() -> bytes:
-    """Extract the exact module prefix to the first missing bare dependency."""
-
-    source = RICH_TERMINAL_SOURCE.read_bytes()
-    assert source.count(PREFIX_START) == 1
-    assert source.count(PRE_CATCH_PREFIX_END) == 1
-    start = source.index(PREFIX_START)
-    end = source.index(PRE_CATCH_PREFIX_END, start)
-    prefix = source[start:end]
-    assert prefix.endswith(
-        b"    0 _PT-RBG-PIXELS !\n"
-        b"    0 _PT-RSA ! 0 _PT-RSU ! 0 _PT-RSS !\n"
-        b"    0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV ! ;\n"
-    )
-    return prefix
-
-
 def _rich_terminal_resource_wrapper_prefix() -> bytes:
     """Extract through resource wrappers, before transaction construction."""
 
@@ -407,6 +405,16 @@ def _rich_terminal_resource_wrapper_prefix() -> bytes:
         b"    _PT-RAB-REASON @ _PT-RAB-S @ _PT-RESOURCE-ABORT-TRACKED ;\n"
     )
     return prefix
+
+
+def _rich_terminal_module_source() -> bytes:
+    """Return the authoritative complete optional-module source."""
+
+    source = RICH_TERMINAL_SOURCE.read_bytes()
+    assert source.count(PREFIX_START) == 1
+    assert source.count(b"PROVIDED rich-terminal.f") == 1
+    assert source.endswith(b"    _PT-ABORT-OPEN-RAW ;\n")
+    return source
 
 
 def _stored_cell(runtime: MegaForthRuntime, name: str) -> int:
@@ -987,17 +995,17 @@ def test_simulator_real_kdos_catch_loads_resource_wrappers_before_transactions(
     assert runtime.main_context.returns.snapshot() == ()
 
 
-def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
+def test_simulator_real_driver_snapshot_and_close_use_public_transaction_path(
     request: pytest.FixtureRequest,
 ) -> None:
-    prefix = _rich_terminal_pre_catch_prefix()
-    prefix_digest = hashlib.sha256(prefix).hexdigest()
-    runtime = MegaForthRuntime()
-    runtime.evaluate(
-        ONE_CORE_UART_LOCK_SHIMS + prefix,
+    module_source = _rich_terminal_module_source()
+    source_digest = hashlib.sha256(module_source).hexdigest()
+    runtime = _load_exceptions()
+    source_result = runtime.evaluate(
+        ONE_CORE_UART_LOCK_SHIMS + module_source,
         source_name=(
             "one-core-uart-lock-shims+"
-            f"rich-terminal.f:{prefix_digest}:PT-S-OK..pre-CATCH"
+            f"rich-terminal.f:{source_digest}:complete"
         ),
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,
     )
@@ -1017,8 +1025,12 @@ def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
             "PT-OWNER-DROP",
         )
     )
-    assert runtime.find("_PT-RESOURCE-BEGIN-SCRUB") is not None
-    assert runtime.find("PT-RESOURCE-BEGIN") is None
+    assert source_result.definitions[-1].name == b"PT-TX-ABORT"
+    assert runtime.find("PT-RESOURCE-BEGIN") is not None
+    assert runtime.find("PT-SNAPSHOT-BEGIN") is not None
+    assert runtime.find("PT-PRESENT-BEGIN") is not None
+    assert runtime.find("PT-TX-COMMIT") is not None
+    assert runtime.find("PT-TX-ABORT") is not None
     assert runtime.drain_uart_output() == b""
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
@@ -1153,6 +1165,8 @@ def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
     assert _stored_cell(runtime, "DBL-MAX-TEXT") == 20
     assert _stored_cell(runtime, "DBL-TX-SEQ") == 1
     assert _stored_cell(runtime, "DBL-RX-SEQ") == 1
+    assert _stored_cell(runtime, "DBL-SNAPSHOT-NEEDED") == MASK64
+    assert _stored_cell(runtime, "DBL-REVISION") == 0
     assert not backend.suspended
     assert runtime.uart_input == b""
     assert driver.core.state is TerminalState.OPENING
@@ -1209,6 +1223,74 @@ def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
     assert backend.rich_terminal_host.accepted_egress_bytes == 0
     assert backend.rich_terminal_host.accepted_egress_batches == 0
 
+    snapshot = backend.run_semantic_batch(entry="DBL-SNAPSHOT")
+    assert snapshot.stop_reason is SemanticBatchStop.COMPLETED
+    assert snapshot.semantic_steps > 0
+    assert snapshot.external_events_applied == 0
+    assert _stored_cell(runtime, "DBL-SNAPSHOT-S") == 0
+    assert backend.rich_terminal_host.accepted_egress_bytes == 312
+    assert backend.rich_terminal_host.accepted_egress_batches == 1
+
+    published = driver.service()
+    assert published.status is DriverStatus.PROGRESS
+    assert (
+        published.machine_batches,
+        published.outbound_records,
+        published.ansi_bytes,
+        published.views,
+    ) == (1, 2, 0, 1)
+    assert driver.core.state is TerminalState.ACTIVE
+    assert driver.core.machine_publications_received == 4
+    assert driver.core.machine_publication_bytes_received == 495
+    assert driver.core.frames_received == 6
+    assert driver.core.frame_bytes_received == 384
+    assert driver.core.frames_received_by_type == {
+        int(MessageType.CLIENT_READY): 1,
+        int(MessageType.SNAPSHOT_BEGIN): 1,
+        int(MessageType.CELL_SPAN): 2,
+        int(MessageType.CURSOR): 1,
+        int(MessageType.SNAPSHOT_COMMIT): 1,
+    }
+    assert len(views) == 1
+    view = views[0]
+    assert driver.core.output_view is view
+    assert view.session_id == SESSION_ID
+    assert view.presentation_epoch == 0
+    assert view.revision == 1
+    assert (view.cols, view.rows) == (2, 2)
+    assert tuple(cell.codepoint for row in view.cells for cell in row) == (
+        ord("A"),
+        ord("B"),
+        ord("C"),
+        ord(" "),
+    )
+    assert tuple(
+        (cell.foreground, cell.background, cell.attributes)
+        for row in view.cells
+        for cell in row
+    ) == ((7, 0, 1), (2, 0, 8), (4, 0, 0), (7, 1, 32))
+    assert (view.cursor.row, view.cursor.column, view.cursor.visible) == (1, 1, True)
+    assert driver.core.outstanding_result_transaction_id is None
+    assert backend.rich_terminal_host.accepted_egress_bytes == 0
+    assert backend.rich_terminal_host.accepted_egress_batches == 0
+    assert backend.rich_terminal_host.pending_ingress_bytes == 108
+    assert backend.rich_terminal_host.pending_ingress_events == 2
+
+    snapshot_settled = backend.run_semantic_batch(entry="DBL-SERVICE")
+    assert snapshot_settled.stop_reason is SemanticBatchStop.COMPLETED
+    assert snapshot_settled.semantic_steps > 0
+    assert snapshot_settled.external_events_applied == 2
+    assert _stored_cell(runtime, "DBL-SERVICE-S") == 0
+    assert _stored_cell(runtime, "DBL-STATE") == 3
+    assert _stored_cell(runtime, "DBL-SNAPSHOT-NEEDED") == 0
+    assert _stored_cell(runtime, "DBL-REVISION") == 1
+    assert _stored_cell(runtime, "DBL-TX-SEQ") == 6
+    assert _stored_cell(runtime, "DBL-RX-SEQ") == 3
+    assert runtime.uart_input == b""
+    assert runtime.uart_output == b""
+    assert backend.rich_terminal_host.pending_ingress_bytes == 0
+    assert backend.rich_terminal_host.pending_ingress_events == 0
+
     closing = backend.run_semantic_batch(entry="DBL-CLOSE")
     assert closing.stop_reason is SemanticBatchStop.COMPLETED
     assert closing.semantic_steps > 0
@@ -1217,8 +1299,8 @@ def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
     assert _stored_cell(runtime, "DBL-STATE") == 5
     assert _stored_cell(runtime, "DBL-ACTIVE") == 0
     assert _stored_cell(runtime, "DBL-OWNS") == MASK64
-    assert _stored_cell(runtime, "DBL-TX-SEQ") == 2
-    assert _stored_cell(runtime, "DBL-RX-SEQ") == 1
+    assert _stored_cell(runtime, "DBL-TX-SEQ") == 7
+    assert _stored_cell(runtime, "DBL-RX-SEQ") == 3
     assert driver.core.state is TerminalState.ACTIVE
     assert backend.rich_terminal_host.accepted_egress_bytes == 56
     assert backend.rich_terminal_host.accepted_egress_batches == 1
@@ -1234,13 +1316,17 @@ def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
     assert driver.core.state is TerminalState.ANSI
     assert not driver.core.active
     assert driver.core.session_id is None
-    assert driver.core.machine_publications_received == 4
-    assert driver.core.machine_publication_bytes_received == 239
-    assert driver.core.frames_received == 2
-    assert driver.core.frame_bytes_received == 128
+    assert driver.core.machine_publications_received == 5
+    assert driver.core.machine_publication_bytes_received == 551
+    assert driver.core.frames_received == 7
+    assert driver.core.frame_bytes_received == 440
     assert driver.core.frames_received_by_type == {
-        int(MessageType.CLOSE): 1,
         int(MessageType.CLIENT_READY): 1,
+        int(MessageType.SNAPSHOT_BEGIN): 1,
+        int(MessageType.CELL_SPAN): 2,
+        int(MessageType.CURSOR): 1,
+        int(MessageType.SNAPSHOT_COMMIT): 1,
+        int(MessageType.CLOSE): 1,
     }
     assert driver.core.output_view is None
     assert backend.rich_terminal_host.accepted_egress_bytes == 0
@@ -1256,8 +1342,8 @@ def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
     assert _stored_cell(runtime, "DBL-STATE") == 0
     assert _stored_cell(runtime, "DBL-ACTIVE") == 0
     assert _stored_cell(runtime, "DBL-OWNS") == 0
-    assert _stored_cell(runtime, "DBL-TX-SEQ") == 2
-    assert _stored_cell(runtime, "DBL-RX-SEQ") == 2
+    assert _stored_cell(runtime, "DBL-TX-SEQ") == 7
+    assert _stored_cell(runtime, "DBL-RX-SEQ") == 4
     assert driver.core.state is TerminalState.ANSI
     assert runtime.uart_input == b""
     assert runtime.uart_output == b""
@@ -1273,4 +1359,4 @@ def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
     assert backend.rich_terminal_host.pending_ingress_events == 0
     assert legacy_output == []
     assert ansi_output == []
-    assert views == []
+    assert views == [view]

@@ -3501,9 +3501,9 @@ Claimed comparisons include:
 - Desk, Pad, and Daybook state and ordinary interactions.
 
 Post-flush media comparison is required future vertical-acceptance evidence,
-not a result claimed by the present pre-rich-terminal slice. Current focused
-coverage is limited to semantic ordering, injected flush failure, and
-generation-stale no-effect behavior.
+not a result claimed by the present focused rich-terminal integration. Current
+filesystem coverage is limited to semantic ordering, injected flush failure,
+and generation-stale no-effect behavior.
 
 Comparisons exclude absolute dictionary addresses, compiled native bytes,
 PC/register state, instruction/cycle counters, backend snapshots, and physical
@@ -3553,8 +3553,8 @@ between backends. Fresh runtimes therefore publish 324 pre-KDOS words. Focused
 units qualify widening multiplication, wrapping interval comparison,
 overlap/fault copy order, deterministic latched uptime, and immediate hosted
 flush semantics. Those primitive units alone do not claim a
-`rich-terminal.f` source load or APT/session lifecycle; the contiguous source
-and live-handshake evidence below establishes the larger boundary now reached.
+`rich-terminal.f` source load or APT/session lifecycle; the complete source
+and live-snapshot evidence below establishes the larger boundary now reached.
 
 The first shared-source oracle extracts the current contiguous module prefix
 from `PT-S-OK` through `_PT-SEND-CREDIT` and executes it on both backends. The
@@ -3608,33 +3608,38 @@ releases the backend; callers must perform both lifecycle steps. `TX-FLUSH`
 remains the synchronous hosted primitive it was before and does not acquire
 protocol framing meaning.
 
-The focused simulator integration now loads the unchanged contiguous module
-prefix from `PT-S-OK` through `_PT-RESOURCE-BEGIN-SCRUB`, immediately before
-the first KDOS-owned `CATCH` use in public `PT-RESOURCE-BEGIN`, and attaches
-the production `RichTerminalDriver` to that host port. Three ordinary guest
-calls alternate with three driver service calls: the source emits PROBE,
-accepts OFFER and emits OPEN, then accepts framed SERVER_READY and emits
-framed CLIENT_READY. The source session and host core both reach `ACTIVE` with
-the negotiated session ID, limits, geometry, credit, sequence state, and
-empty transport queues intact. Empty event and completion polls then preserve
-that state. A guest CLOSE and host CLOSE_ACK finally return both endpoints to
-ANSI, release source ownership, and leave both directional sequences at two.
-The machine publications are exactly 38, 73, 72, and 56 bytes; the final ACK
-is an exact 48-byte ingress record. This qualifies the live negotiation,
-session-close, and semantic-call settlement boundaries only. It does not enter
-a resource writer, send a snapshot, project content, compose a view, or
-exercise a physical sink.
-
-A second simulator-only source oracle loads the already-qualified exact KDOS
-exception closure through `CATCH` and `THROW`, rather than adding those words
-to the pseudo-BIOS, then extends the same authoritative terminal prefix through
-public `PT-RESOURCE-ABORT`. Invalid-session calls execute each public resource
-entry point and return `PT-S-INVALID`; the two `CATCH`-protected entry points
-also clear their temporary argument and range state. This proves genuine KDOS
-exception-word linkage, normal-return wrapper execution, balanced stacks, and
-silent failure before the shared CELL/PRESENT transaction-builder section. The
+A simulator-only source oracle first isolates the KDOS exception dependency.
+It loads the already-qualified exact closure through `CATCH` and `THROW`,
+rather than adding those words to the pseudo-BIOS, then evaluates the
+authoritative terminal prefix through public `PT-RESOURCE-ABORT`.
+Invalid-session calls execute each public resource entry point and return
+`PT-S-INVALID`; the two protected entry points also clear their temporary
+argument and range state. This proves genuine KDOS exception-word linkage,
+normal-return wrapper execution, balanced stacks, and silent failure. The
 oracle does not exercise `THROW` recovery, admit a resource, publish a resource
-frame, or qualify any writer behavior.
+frame, or qualify a successful retained writer.
+
+The live simulator integration now evaluates the complete authoritative
+`rich-terminal.f` against that exact exception closure and attaches the
+production `RichTerminalDriver`. Ordinary guest calls alternate with driver
+service: the source emits PROBE, accepts OFFER and emits OPEN, then accepts
+framed SERVER_READY and emits framed CLIENT_READY. Both endpoints reach
+`ACTIVE` with negotiated limits, geometry, credit, and empty queues. The
+unchanged source then emits a complete five-frame, 312-byte 2x2 snapshot via
+`PT-SNAPSHOT-BEGIN`, two `PT-SPAN-BEGIN`/CELL payloads, `PT-CURSOR`, and
+`PT-TX-COMMIT`. The host publishes one immutable revision-1 CELL view with the
+exact A/B/C/space cells and cursor. Its 108-byte TX_RESULT plus CREDIT response
+clears the guest snapshot requirement, moves the client/server directional
+sequences to six and three, and leaves the transport empty. A subsequent
+56-byte guest CLOSE and 48-byte CLOSE_ACK return both endpoints to ANSI with
+source ownership released. The complete journey accounts for 551 machine
+publication bytes and 440 framed bytes, with balanced stacks and no failure.
+
+This is complete terminal-module source evaluation and a real renderer-neutral
+view, but not yet complete rich-terminal vertical acceptance. The test compiles
+the intervening PRESENT and retained writer definitions without invoking them;
+it does not project Akashic content, compose the resulting view, bind input to
+a physically acknowledged revision, or exercise a display sink.
 
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
@@ -3645,15 +3650,13 @@ the BIOS closure grows, each successful increment should span more ordinary
 definitions and the remaining islands should be absorbed into one complete
 `kdos.f` load.
 
-The remaining rich-terminal source load and ordinary Desk/Pad/Daybook journey
-remain part of the compatibility contract, but are later implementation
-phases. The standalone pseudo-BIOS fixture's genuine exception dependency has
-now been crossed with authoritative KDOS source, not a simulator terminal shim.
-The next source boundary is the shared CELL/PRESENT transaction builder after
-`PT-RESOURCE-ABORT`; stopping there is a deliberate functional-scope boundary,
-not another missing simulator primitive. Later work must continue through the
-unchanged module rather than copying terminal semantics into simulator-only
-substitutes.
+The ordinary Desk/Pad/Daybook journey remains part of the compatibility
+contract. The source frontier is no longer the blocker: the complete terminal
+module and its genuine KDOS exception dependency have crossed the simulator
+without terminal-specific semantic substitutes. The next boundary is
+composition and lifecycle integration—sharing the existing presentation,
+physical acknowledgement, and input authority while keeping the simulator's
+run-to-IDL semantic scheduler distinct from emulator instruction batching.
 
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
 KDOS load run before the real rich vertical exists. Native/exact-full-core cold

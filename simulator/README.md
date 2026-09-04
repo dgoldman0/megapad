@@ -2303,14 +2303,14 @@ The contiguous unchanged KDOS core now reaches EOF. The integration branch is
 now synchronized with the current `rich-terminal.f` and adds its five missing
 pseudo-BIOS prerequisites as append-only hosted words: `UM*`, `WITHIN`, `MOVE`,
 `MS@`, and `TX-FLUSH`. Their focused scalar, memory, clock, and UART units are
-qualification of those primitives only. The simulator still stops before
-loading the complete `rich-terminal.f` or claiming its rendering lifecycle.
-Native/full-core cold load, Akashic integration, Desktop smoke, and broader
-renderer or persistence runs remain deferred by that vertical's resource gate.
-Fresh runtimes therefore contain 324 pseudo-BIOS words before KDOS; the
-319-word figure above remains the exact historical-load observation and is not
-silently rewritten as new full-load evidence. The contiguous source and live
-session boundary qualified below are narrower than a complete module load.
+qualification of those primitives only. The focused live integration below
+now evaluates the complete authoritative module against the exact KDOS
+exception closure, but does not yet claim normal MP64FS/`REQUIRE` composition,
+Akashic integration, the Desktop lifecycle, or physical rendering. Those runs
+remain deferred by the vertical's resource gate. Fresh runtimes therefore
+contain 324 pseudo-BIOS words before KDOS; the 319-word figure above remains
+the exact historical-load observation and is not silently rewritten as new
+full-load evidence.
 
 The synchronized cross-backend slice also executes the current
 production prefix from `PT-S-OK` through `_PT-SEND-CREDIT` on both backends.
@@ -2339,32 +2339,34 @@ BIOS `COLS`, `ROWS`, or `RESIZED?` surface. Close the enhanced lease and then
 the backend to return direct ownership to the runtime. The hosted `TX-FLUSH`
 primitive remains immediate and does not split publications.
 
-The simulator selector now loads the authoritative contiguous
-`rich-terminal.f` source through `_PT-RESOURCE-BEGIN-SCRUB`, immediately
-before public `PT-RESOURCE-BEGIN` first requires KDOS-owned `CATCH`, and drives
-it through the real `RichTerminalDriver`. Alternating guest semantic calls and
-driver service crosses PROBE/OFFER, OPEN/SERVER_READY, and CLIENT_READY,
-leaving both the source session and host core `ACTIVE` with exact publication
-sizes and empty transport queues. Empty event/completion polls remain inert;
-then the source publishes CLOSE, the driver returns CLOSE_ACK, and both sides
-return to ANSI with source ownership released and queues empty. No resource
-writer, snapshot, or view is entered, so this proves the live handshake,
-synchronized close, and host-port settlement boundary without claiming
-projection, composition, rendering, or the rest of the module. That left
-`PT-RESOURCE-BEGIN` as the next boundary, requiring the exact KDOS exception
-vocabulary rather than a simulator-specific terminal substitute.
+One focused simulator oracle still isolates the first KDOS-owned `CATCH`
+crossing. It loads the exact exception closure through `CATCH` and `THROW`,
+then evaluates the authoritative terminal prefix through
+`PT-RESOURCE-ABORT`. Invalid-session calls to all five public resource entry
+points return `PT-S-INVALID`; the protected BEGIN and CHUNK wrappers clear
+their temporary argument and range state, with balanced stacks and no UART
+output. This remains exception-linkage and normal-return failure-path evidence;
+`THROW` recovery is covered by its dedicated KDOS units.
 
-The next focused simulator oracle now performs that crossing. It loads the
-existing exact KDOS exception closure through `CATCH` and `THROW`, then extends
-the authoritative terminal prefix through `PT-RESOURCE-ABORT`. Invalid-session
-calls to all five public resource entry points return `PT-S-INVALID`; the
-`CATCH`-protected BEGIN and CHUNK wrappers clear their temporary argument and
-range state, with balanced stacks and no UART output. This is exception-linkage
-and normal-return failure-path evidence only; `THROW` recovery remains covered
-by its existing KDOS units rather than this oracle. The test does not admit or
-publish a resource and stops before the shared CELL/PRESENT transaction
-builder. That builder is now the next deliberate functional boundary, not a
-newly missing simulator primitive.
+The live simulator oracle now evaluates all of `rich-terminal.f`, including
+every intervening CELL, PRESENT, retained writer, commit, and abort definition,
+then attaches the production `RichTerminalDriver`. Alternating guest semantic
+calls and driver service crosses PROBE/OFFER, OPEN/SERVER_READY, and
+CLIENT_READY. The unchanged guest then publishes a five-frame, 312-byte 2x2
+CELL snapshot through `PT-SNAPSHOT-BEGIN`, two spans, four cells, a cursor, and
+`PT-TX-COMMIT`. The host publishes one immutable revision-1 view with the exact
+cells and cursor; its 108-byte TX_RESULT plus CREDIT response clears the guest's
+snapshot requirement and advances both sequence clocks before synchronized
+CLOSE/CLOSE_ACK returns the endpoints to ANSI. Final queues and stacks are
+empty, and neither side reports failure.
+
+That is the first real renderer-neutral simulator view and a complete terminal
+module source evaluation. It does not yet exercise `PT-PRESENT-BEGIN`, a
+retained writer, Akashic projection, composition, revision-bound user input,
+or a physical display acknowledgement. The next functional boundary is the
+backend-neutral presentation/session lifecycle that can carry this already
+working view into the existing viewer and then host the ordinary Akashic
+Desktop journey.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.
