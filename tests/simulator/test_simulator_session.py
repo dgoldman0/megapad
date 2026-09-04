@@ -7,7 +7,7 @@ from rich_terminal.server import TerminalConfig, TerminalState
 from rich_terminal.transport import EgressWatermarks, HostPortLimits
 from session import RichTerminalSessionConfig
 from simulator.rich_terminal_host import SemanticBatchStop
-from simulator_session import SimulatorMachineSession
+from simulator.session import SimulatorMachineSession
 from tests.simulator.test_kdos_exceptions import _load_exceptions
 from tests.test_rich_terminal_dual_backend import (
     LIVE_HANDSHAKE_SCENARIO_SOURCE,

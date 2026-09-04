@@ -2375,8 +2375,8 @@ backend-neutral presentation/session lifecycle that can carry this already
 working view into the existing viewer and then host the ordinary Akashic
 Desktop journey.
 
-`simulator_session.py` now supplies the first half of that lifecycle without a
-fake hardware machine. `SimulatorMachineSession` reuses `MachineSession`'s
+`simulator/session.py` now supplies that lifecycle without a fake hardware
+machine. `SimulatorMachineSession` reuses `MachineSession`'s
 terminal model, ANSI fallback, CELL/retained selection, cadence, immutable
 display offers, physical-acknowledgement authority, and input gates through
 four explicit host hooks. Each simulator owner boundary services the driver,
@@ -2385,8 +2385,17 @@ services the driver again. Its counters remain semantic steps and external
 events; it does not relabel them as instructions or cycles. A focused root-loop
 test reaches the real revision-1 CELL snapshot through this production session
 composition and becomes quiescent with the root continuation suspended at
-`IDL`. Shared JSON-session ownership and normal Akashic image preparation are
-the next seams.
+`IDL`.
+
+`SimulatorSharedMachine` then reuses the existing shared screen, display ACK,
+input, resize, raw/text, and capture authority while replacing only the
+emulator run loop and hardware status paths. The unchanged `SessionServer`
+dispatch reaches the simulator's CELL view, rejects stale-generation input,
+and wakes the suspended guest for admitted input. Status reports semantic
+steps, owner boundaries, and external events rather than invented cycles or
+instructions; emulator-only profiling and hardware diagnostics are explicitly
+unavailable. Normal Akashic image/root preparation, a retained physical offer,
+and the actual socket/viewer journey are the next seams.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

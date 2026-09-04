@@ -3669,7 +3669,8 @@ composition and lifecycle integration—sharing the existing presentation,
 physical acknowledgement, and input authority while keeping the simulator's
 run-to-IDL semantic scheduler distinct from emulator instruction batching.
 
-`SimulatorMachineSession` now establishes that scheduler/session composition.
+`SimulatorMachineSession` in `simulator/session.py` now establishes that
+scheduler/session composition.
 It reuses the existing `MachineSession` terminal frontend through explicit
 attachment, host-state, legacy-input, and legacy-geometry hooks rather than
 impersonating `MegapadSystem`. One owner boundary services the shared driver,
@@ -3678,9 +3679,18 @@ display cadence again. Completion and `IDL`, semantic steps, external-event
 admission, host backpressure, and terminal failure retain their own names and
 cannot be reported as instruction or cycle statistics. Focused evidence drives
 the complete module to the same revision-1 CELL snapshot through this session
-and leaves its root continuation quiescent at `IDL`. It does not yet establish
-the JSON shared owner/server, retained physical display offer, or Akashic image
-and root-entry preparation.
+and leaves its root continuation quiescent at `IDL`.
+
+`SimulatorSharedMachine` carries that session through the existing
+backend-neutral `SharedMachine` presentation and input methods and unchanged
+`SessionServer` dispatch. Its owner thread schedules semantic boundaries rather
+than emulator batches; status names semantic steps, semantic boundaries, and
+external-event admissions explicitly and contains no fabricated cycles, CPU,
+clock, or NIC state. Focused dispatch evidence reaches the same revision-1 CELL
+snapshot, applies generation rejection, admits terminal input, and delivers it
+to the suspended guest. Emulator-only host profiling and hardware diagnostic
+routes still fail explicitly. This does not yet establish a retained physical
+display offer, Akashic image/root preparation, or the socket/viewer journey.
 
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
 KDOS load run before the real rich vertical exists. Native/exact-full-core cold
