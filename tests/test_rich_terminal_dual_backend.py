@@ -1,19 +1,22 @@
 """Shared production-source oracles for the two MegaPad execution backends.
 
-These tests deliberately stop before a complete ``rich-terminal.f`` load or
-live terminal session.  They extract one contiguous pre-session prefix from
-the authoritative module and execute the same source-defined APT encoder on
-the exact emulator and hosted simulator.
+These tests extract contiguous prefixes from the authoritative module and
+execute its source-defined APT path on the exact emulator and hosted
+simulator. The shared byte oracles remain paired across both backends; the
+simulator selector additionally proves the first real driver handshake through
+the unchanged ``PT-SERVICE`` boundary without claiming a complete module load.
 """
 
 from __future__ import annotations
 
+import hashlib
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+from shared.cells import MASK64
 from rich_terminal.apt1 import (
     Frame,
     MessageType,
@@ -25,6 +28,18 @@ from rich_terminal.apt1 import (
     encode_open,
     encode_probe,
     parse_negotiation,
+)
+from rich_terminal.driver import DriverLimits, DriverStatus, RichTerminalDriver
+from rich_terminal.server import TerminalConfig, TerminalState
+from rich_terminal.transport import (
+    AdmissionStatus,
+    EgressWatermarks,
+    HostPortLimits,
+)
+from simulator.rich_terminal_host import (
+    HostedTerminalGeometry,
+    SemanticBatchStop,
+    SimulatorSessionBackend,
 )
 from simulator.runtime import MegaForthRuntime
 
@@ -39,10 +54,15 @@ UART_OFFER_PREFIX_END = (
     b"\n\\ ====================================================================="
     b"\n\\  Input payload validation"
 )
+SERVICE_PREFIX_END = (
+    b"\nVARIABLE _PT-PC-S"
+    b"\nVARIABLE _PT-PC-REASON"
+    b"\n"
+)
 
-# These are watchdogs for one BIOS boot and at most roughly 1,320 lines of
-# inert definitions, not broadened qualification budgets.  The accelerated
-# emulator and semantic simulator normally finish far below them.
+# These are watchdogs for one BIOS boot and the selected contiguous definition
+# prefixes, not broadened qualification budgets. The accelerated emulator and
+# semantic simulator normally finish far below them.
 EMULATOR_BOOT_MAX_STEPS = 2_000_000
 EMULATOR_SOURCE_MAX_STEPS = 40_000_000
 EMULATOR_RUN_BATCH_STEPS = 100_000
@@ -183,6 +203,53 @@ VARIABLE DBR-OFFER?
   12 EMIT TX-FLUSH ;
 """
 
+LIVE_HANDSHAKE_SCENARIO_SOURCE = b"""
+CREATE DBL-RX _PT-CONTROL-RESERVE _PT-HDR + 32 + ALLOT
+CREATE DBL-TX _PT-OPEN-BYTES ALLOT
+CREATE DBL-EVENT PT-EVENT-SIZE ALLOT
+CREATE DBL-S-STORAGE PT-SESSION-SIZE 7 + ALLOT
+: DBL-S  DBL-S-STORAGE 7 + -8 AND ;
+VARIABLE DBL-INIT-S
+VARIABLE DBL-START-S
+VARIABLE DBL-SERVICE-S
+VARIABLE DBL-STATE
+VARIABLE DBL-ACTIVE
+VARIABLE DBL-OWNS
+VARIABLE DBL-SESSION-ID
+VARIABLE DBL-PEER-MAX-PAY
+VARIABLE DBL-PEER-MAX-TX
+VARIABLE DBL-PEER-GRANT
+VARIABLE DBL-COLS
+VARIABLE DBL-ROWS
+VARIABLE DBL-CLIENT-MAX-PAY
+VARIABLE DBL-LOCAL-GRANT
+VARIABLE DBL-MAX-TEXT
+VARIABLE DBL-TX-SEQ
+VARIABLE DBL-RX-SEQ
+: DBL-BOOT
+  DBL-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
+  DBL-TX _PT-OPEN-BYTES DBL-EVENT PT-EVENT-SIZE DBL-S
+  PT-INIT DUP DBL-INIT-S ! IF EXIT THEN
+  DBL-S PT-START DBL-START-S !
+  DBL-S PT-STATE@ DBL-STATE ! ;
+: DBL-SERVICE
+  DBL-S PT-SERVICE DBL-SERVICE-S !
+  DBL-S PT-STATE@ DBL-STATE !
+  DBL-S PT-ACTIVE? DBL-ACTIVE !
+  DBL-S PT-OWNS? DBL-OWNS !
+  DBL-S _PT.S.SESSION-ID @ DBL-SESSION-ID !
+  DBL-S _PT.S.PEER-MAX-PAY @ DBL-PEER-MAX-PAY !
+  DBL-S _PT.S.PEER-MAX-TX @ DBL-PEER-MAX-TX !
+  DBL-S _PT.S.PEER-GRANT @ DBL-PEER-GRANT !
+  DBL-S _PT.S.COLS @ DBL-COLS !
+  DBL-S _PT.S.ROWS @ DBL-ROWS !
+  DBL-S _PT.S.CLIENT-MAX-PAY @ DBL-CLIENT-MAX-PAY !
+  DBL-S _PT.S.LOCAL-GRANT @ DBL-LOCAL-GRANT !
+  DBL-S _PT.S.MAX-TEXT @ DBL-MAX-TEXT !
+  DBL-S _PT.S.TX-SEQ @ DBL-TX-SEQ !
+  DBL-S _PT.S.RX-SEQ @ DBL-RX-SEQ ! ;
+"""
+
 # The production encoder correctly takes KDOS's global UART lock.  This
 # focused fixture intentionally does not load KDOS, so both backends receive
 # the same narrow definitions over BIOS SPIN@/SPIN!.  This retains the real
@@ -261,6 +328,30 @@ def _rich_terminal_uart_offer_prefix() -> bytes:
         b"    TRUE ;\n"
     )
     return prefix
+
+
+def _rich_terminal_service_prefix() -> bytes:
+    """Extract the exact current module prefix through ``PT-SERVICE``."""
+
+    source = RICH_TERMINAL_SOURCE.read_bytes()
+    assert source.count(PREFIX_START) == 1
+    assert source.count(SERVICE_PREFIX_END) == 1
+    start = source.index(PREFIX_START)
+    end = source.index(SERVICE_PREFIX_END, start)
+    prefix = source[start:end]
+    assert prefix.endswith(
+        b"            PT-S-SESSION-LOST EXIT\n"
+        b"        THEN\n"
+        b"    THEN\n"
+        b"    DROP PT-S-OK ;\n"
+    )
+    return prefix
+
+
+def _stored_cell(runtime: MegaForthRuntime, name: str) -> int:
+    word = runtime.find(name)
+    assert word is not None
+    return runtime.memory.read64(word.body_address)
 
 
 def _between_unique(raw: bytes, start: int, end: int) -> bytes:
@@ -727,3 +818,204 @@ def test_production_uart_offer_reaches_opening_with_exact_open_request(
     assert observation.state == (
         b" ".join(str(value).encode("ascii") for value in expected_state) + b" "
     )
+
+
+def test_simulator_real_driver_handshake_reaches_active_through_production_service(
+    request: pytest.FixtureRequest,
+) -> None:
+    prefix = _rich_terminal_service_prefix()
+    prefix_digest = hashlib.sha256(prefix).hexdigest()
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        ONE_CORE_UART_LOCK_SHIMS + prefix,
+        source_name=(
+            "one-core-uart-lock-shims+"
+            f"rich-terminal.f:{prefix_digest}:PT-S-OK..PT-SERVICE"
+        ),
+        step_budget=SIMULATOR_SOURCE_MAX_STEPS,
+    )
+    runtime.evaluate(
+        LIVE_HANDSHAKE_SCENARIO_SOURCE,
+        source_name="dual-backend-live-handshake.f",
+    )
+
+    assert runtime.find("PT-SERVICE") is not None
+    assert runtime.find("PT-CLOSE") is None
+    assert runtime.drain_uart_output() == b""
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
+
+    host_limits = HostPortLimits(
+        egress=EgressWatermarks(
+            high_bytes=8_192,
+            low_bytes=1_024,
+            high_batches=16,
+            low_batches=2,
+        ),
+        retained_publication_bytes=4_608,
+        ingress_bytes=8_192,
+        ingress_events=16,
+        ingress_control_bytes=4_096,
+        ingress_control_events=8,
+        geometry_events=2,
+    )
+    terminal_config = TerminalConfig(
+        max_payload=256,
+        max_transaction_bytes=512,
+        terminal_receive_credit=1_024,
+        max_cells=4,
+        max_feed_bytes=4_608,
+        max_cols=4,
+        max_rows=2,
+        cols=2,
+        rows=2,
+    )
+    legacy_output: list[bytes] = []
+    ansi_output: list[bytes] = []
+    views = []
+    backend = SimulatorSessionBackend(
+        runtime,
+        legacy_output_sink=legacy_output.append,
+    )
+    request.addfinalizer(backend.close)
+    driver = RichTerminalDriver.attach(
+        backend,
+        host_limits,
+        terminal_config,
+        DriverLimits(4_096, 8),
+        ansi_sink=ansi_output.append,
+        view_sink=views.append,
+        session_id_factory=lambda: SESSION_ID,
+    )
+
+    def close_driver() -> None:
+        assert driver.close() is AdmissionStatus.ACCEPTED
+
+    request.addfinalizer(close_driver)
+
+    assert driver.core.state is TerminalState.ANSI
+    assert backend.rich_terminal_host.pending_geometry_events == 1
+    boot = backend.run_semantic_batch(entry="DBL-BOOT")
+    assert boot.stop_reason is SemanticBatchStop.COMPLETED
+    assert boot.semantic_steps > 0
+    assert boot.external_events_applied == 1
+    assert _stored_cell(runtime, "DBL-INIT-S") == 0
+    assert _stored_cell(runtime, "DBL-START-S") == 0
+    assert _stored_cell(runtime, "DBL-STATE") == 1
+    assert driver.core.state is TerminalState.ANSI
+    assert not backend.suspended
+    assert backend.rich_terminal_host.pending_geometry_events == 0
+    assert backend.geometry == HostedTerminalGeometry(cols=2, rows=2, resized=True)
+    assert backend.rich_terminal_host.accepted_egress_bytes == 38
+    assert backend.rich_terminal_host.accepted_egress_batches == 1
+
+    probe = driver.service()
+    assert probe.status is DriverStatus.PROGRESS
+    assert (
+        probe.machine_batches,
+        probe.outbound_records,
+        probe.ansi_bytes,
+        probe.views,
+    ) == (1, 1, 0, 0)
+    assert driver.core.state is TerminalState.PROBING
+    assert driver.core.machine_publications_received == 1
+    assert driver.core.machine_publication_bytes_received == 38
+    assert driver.core.frames_received == 0
+    assert backend.rich_terminal_host.accepted_egress_bytes == 0
+    assert backend.rich_terminal_host.accepted_egress_batches == 0
+    assert backend.rich_terminal_host.pending_ingress_bytes == 92
+    assert backend.rich_terminal_host.pending_ingress_events == 1
+
+    opening = backend.run_semantic_batch(entry="DBL-SERVICE")
+    assert opening.stop_reason is SemanticBatchStop.COMPLETED
+    assert opening.semantic_steps > 0
+    assert opening.external_events_applied == 1
+    assert _stored_cell(runtime, "DBL-SERVICE-S") == 0
+    assert _stored_cell(runtime, "DBL-STATE") == 2
+    assert not backend.suspended
+    assert runtime.uart_input == b""
+    assert backend.rich_terminal_host.pending_ingress_bytes == 0
+    assert backend.rich_terminal_host.pending_ingress_events == 0
+    assert backend.rich_terminal_host.accepted_egress_bytes == 73
+    assert backend.rich_terminal_host.accepted_egress_batches == 1
+
+    opened = driver.service()
+    assert opened.status is DriverStatus.PROGRESS
+    assert (
+        opened.machine_batches,
+        opened.outbound_records,
+        opened.ansi_bytes,
+        opened.views,
+    ) == (1, 1, 0, 0)
+    assert driver.core.state is TerminalState.OPENING
+    assert driver.core.machine_publications_received == 2
+    assert driver.core.machine_publication_bytes_received == 111
+    assert driver.core.frames_received == 0
+    assert backend.rich_terminal_host.accepted_egress_bytes == 0
+    assert backend.rich_terminal_host.accepted_egress_batches == 0
+    assert backend.rich_terminal_host.pending_ingress_bytes == 72
+    assert backend.rich_terminal_host.pending_ingress_events == 1
+
+    active = backend.run_semantic_batch(entry="DBL-SERVICE")
+    assert active.stop_reason is SemanticBatchStop.COMPLETED
+    assert active.semantic_steps > 0
+    assert active.external_events_applied == 1
+    assert _stored_cell(runtime, "DBL-SERVICE-S") == 0
+    assert _stored_cell(runtime, "DBL-STATE") == 3
+    assert _stored_cell(runtime, "DBL-ACTIVE") == MASK64
+    assert _stored_cell(runtime, "DBL-OWNS") == MASK64
+    assert _stored_cell(runtime, "DBL-SESSION-ID") == SESSION_ID
+    assert _stored_cell(runtime, "DBL-PEER-MAX-PAY") == 256
+    assert _stored_cell(runtime, "DBL-PEER-MAX-TX") == 512
+    assert _stored_cell(runtime, "DBL-PEER-GRANT") == 1_024
+    assert _stored_cell(runtime, "DBL-COLS") == 2
+    assert _stored_cell(runtime, "DBL-ROWS") == 2
+    assert _stored_cell(runtime, "DBL-CLIENT-MAX-PAY") == 32
+    assert _stored_cell(runtime, "DBL-LOCAL-GRANT") == 72
+    assert _stored_cell(runtime, "DBL-MAX-TEXT") == 20
+    assert _stored_cell(runtime, "DBL-TX-SEQ") == 1
+    assert _stored_cell(runtime, "DBL-RX-SEQ") == 1
+    assert not backend.suspended
+    assert runtime.uart_input == b""
+    assert driver.core.state is TerminalState.OPENING
+    assert backend.rich_terminal_host.pending_ingress_bytes == 0
+    assert backend.rich_terminal_host.pending_ingress_events == 0
+    assert backend.rich_terminal_host.accepted_egress_bytes == 72
+    assert backend.rich_terminal_host.accepted_egress_batches == 1
+
+    ready = driver.service()
+    assert ready.status is DriverStatus.PROGRESS
+    assert (
+        ready.machine_batches,
+        ready.outbound_records,
+        ready.ansi_bytes,
+        ready.views,
+    ) == (1, 0, 0, 0)
+    assert driver.core.state is TerminalState.ACTIVE
+    assert driver.core.active
+    assert driver.core.session_id == SESSION_ID
+    assert driver.core.machine_publications_received == 3
+    assert driver.core.machine_publication_bytes_received == 183
+    assert driver.core.frames_received == 1
+    assert driver.core.frame_bytes_received == 72
+    assert driver.core.frames_received_by_type == {
+        int(MessageType.CLIENT_READY): 1,
+    }
+    assert driver.core.decoder_buffered_bytes == 0
+    assert driver.core.max_text_bytes == 20
+    assert driver.core.output_view is None
+    assert runtime.uart_input == b""
+    assert runtime.uart_output == b""
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
+    assert driver.pending_outbound_bytes == 0
+    assert driver.pending_outbound_events == 0
+    assert driver.failure_reason is None
+    assert backend.rich_terminal_host.failure_reason is None
+    assert backend.rich_terminal_host.accepted_egress_bytes == 0
+    assert backend.rich_terminal_host.accepted_egress_batches == 0
+    assert backend.rich_terminal_host.pending_ingress_bytes == 0
+    assert backend.rich_terminal_host.pending_ingress_events == 0
+    assert legacy_output == []
+    assert ansi_output == []
+    assert views == []

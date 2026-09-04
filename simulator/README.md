@@ -2304,12 +2304,13 @@ now synchronized with the current `rich-terminal.f` and adds its five missing
 pseudo-BIOS prerequisites as append-only hosted words: `UM*`, `WITHIN`, `MOVE`,
 `MS@`, and `TX-FLUSH`. Their focused scalar, memory, clock, and UART units are
 qualification of those primitives only. The simulator still stops before
-loading `rich-terminal.f` or claiming its transport/session lifecycle.
+loading the complete `rich-terminal.f` or claiming its rendering lifecycle.
 Native/full-core cold load, Akashic integration, Desktop smoke, and broader
 renderer or persistence runs remain deferred by that vertical's resource gate.
 Fresh runtimes therefore contain 324 pseudo-BIOS words before KDOS; the
 319-word figure above remains the exact historical-load observation and is not
-silently rewritten as new full-load evidence.
+silently rewritten as new full-load evidence. The contiguous source and live
+session boundary qualified below are narrower than a complete module load.
 
 The synchronized cross-backend slice also executes the current
 production prefix from `PT-S-OK` through `_PT-SEND-CREDIT` on both backends.
@@ -2336,9 +2337,19 @@ public execution and host-side UART mutation bypasses are rejected. Hosted
 geometry is read-only adapter bookkeeping and does not yet implement the guest
 BIOS `COLS`, `ROWS`, or `RESIZED?` surface. Close the enhanced lease and then
 the backend to return direct ownership to the runtime. The hosted `TX-FLUSH`
-primitive remains immediate and does not split publications. This is transport
-plumbing rather than a live-session claim: the complete unchanged module and
-`RichTerminalDriver` handshake are still the next slice.
+primitive remains immediate and does not split publications.
+
+The simulator selector now loads the authoritative contiguous
+`rich-terminal.f` source through `PT-SERVICE` and drives it through the real
+`RichTerminalDriver`. Alternating guest semantic calls and driver service
+crosses PROBE/OFFER, OPEN/SERVER_READY, and CLIENT_READY, leaving both the
+source session and host core `ACTIVE` with exact publication sizes and empty
+transport queues. No snapshot or view is produced, so this proves the live
+handshake and host-port settlement boundary without claiming projection,
+composition, rendering, or the rest of the module. Advancing the unchanged
+source beyond `PT-SERVICE` is the next slice; the standalone fixture must use
+the KDOS-owned exception vocabulary it encounters rather than a
+simulator-specific terminal substitute.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

@@ -151,6 +151,13 @@ backend acquires ownership retains its earlier legacy boundary and is drained
 before attachment. Once owned, public execution and host-side UART mutation
 must enter through the backend; direct calls are rejected.
 
+Focused hosted-simulator evidence loads the unchanged `rich-terminal.f`
+prefix through public `PT-SERVICE` and alternates ordinary semantic calls with
+the production driver. PROBE/OFFER, OPEN/SERVER_READY, and CLIENT_READY move
+both endpoints to `ACTIVE` with empty queues. That is host-port and handshake
+evidence only: no snapshot, projection, view, compositor, or physical sink is
+claimed by this test.
+
 A valid in-contract publication must not raise into scheduler settlement.
 Consumer failures are recorded as terminal-session failures and processed
 after the machine boundary.

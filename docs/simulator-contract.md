@@ -3552,8 +3552,9 @@ execution tokens retain their addresses; absolute tokens remain nonportable
 between backends. Fresh runtimes therefore publish 324 pre-KDOS words. Focused
 units qualify widening multiplication, wrapping interval comparison,
 overlap/fault copy order, deterministic latched uptime, and immediate hosted
-flush semantics. This does not yet claim a `rich-terminal.f` source load or a
-live APT/session lifecycle.
+flush semantics. Those primitive units alone do not claim a
+`rich-terminal.f` source load or APT/session lifecycle; the contiguous source
+and live-handshake evidence below establishes the larger boundary now reached.
 
 The first shared-source oracle extracts the current contiguous module prefix
 from `PT-S-OK` through `_PT-SEND-CREDIT` and executes it on both backends. The
@@ -3605,8 +3606,19 @@ the emulator facade safeguard. The backend holds exclusive runtime ownership
 until its enhanced lease is closed and `SimulatorSessionBackend.close()`
 releases the backend; callers must perform both lifecycle steps. `TX-FLUSH`
 remains the synchronous hosted primitive it was before and does not acquire
-protocol framing meaning. Loading the remaining unchanged source and crossing
-a live driver handshake remain the next boundary.
+protocol framing meaning.
+
+The focused simulator integration now loads the unchanged contiguous module
+prefix from `PT-S-OK` through public `PT-SERVICE` and attaches the production
+`RichTerminalDriver` to that host port. Three ordinary guest calls alternate
+with three driver service calls: the source emits PROBE, accepts OFFER and
+emits OPEN, then accepts framed SERVER_READY and emits framed CLIENT_READY.
+The source session and host core both reach `ACTIVE` with the negotiated
+session ID, limits, geometry, credit, sequence state, and empty transport
+queues intact. The observed machine publications are exactly 38, 73, and 72
+bytes. This qualifies the live negotiation/session handshake and semantic-call
+settlement boundary only. It does not load the rest of `rich-terminal.f`, send
+a snapshot, project content, compose a view, or exercise a physical sink.
 
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
@@ -3617,12 +3629,14 @@ the BIOS closure grows, each successful increment should span more ordinary
 definitions and the remaining islands should be absorbed into one complete
 `kdos.f` load.
 
-Rich-terminal source loading, host transport integration, and the ordinary
-Desk/Pad/Daybook journey remain part of the compatibility contract, but are a
-later implementation phase. With the backend synchronized to the current
-rich-terminal vertical, the next slice must load that unchanged source and
-cross the ordinary UART/transport boundary rather than copy terminal semantics
-into simulator-only substitutes.
+The remaining rich-terminal source load and ordinary Desk/Pad/Daybook journey
+remain part of the compatibility contract, but are later implementation
+phases. With the backend synchronized to the current rich-terminal vertical,
+the next source slice starts after `PT-SERVICE` and continues through the
+unchanged module rather than copying terminal semantics into simulator-only
+substitutes. The standalone pseudo-BIOS fixture next reaches KDOS-owned
+exception vocabulary; ordinary composition must obtain that vocabulary from
+KDOS, not from a simulator terminal shim.
 
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
 KDOS load run before the real rich vertical exists. Native/exact-full-core cold
