@@ -669,6 +669,26 @@ class TestNIC(unittest.TestCase):
             total |= si.read8(0x30 + i) << (8 * i)
         self.assertEqual(total, 4 * (1 << 20))
 
+    def test_sysinfo_zero_capacity_optional_regions_have_zero_bases(self):
+        """Absent optional memories do not publish phantom base addresses."""
+        si = SystemInfo(
+            hbw_base=0xFFD0_0000,
+            hbw_size=0,
+            ext_mem_base=0x0010_0000,
+            ext_mem_size=0,
+            vram_base=0xFFC0_0000,
+            vram_size=0,
+        )
+        self.assertEqual(si.hbw_base, 0)
+        self.assertEqual(si.ext_mem_base, 0)
+        self.assertEqual(si.vram_base, 0)
+        for offset in (0x20, 0x38, 0x50):
+            published = sum(
+                si.read8(offset + index) << (8 * index)
+                for index in range(8)
+            )
+            self.assertEqual(published, 0)
+
     def test_sysinfo_cluster_en_rw(self):
         """SysInfo cluster_en at offset 0x18 is read-write."""
         si = SystemInfo()
@@ -1046,6 +1066,28 @@ class TestHBWMemory(unittest.TestCase):
         sys = make_system()
         self.assertEqual(len(sys._hbw_mem), 3 * (1 << 20))
         self.assertEqual(sys.hbw_size, 3 * (1 << 20))
+
+    def test_absent_hbw_has_zero_system_and_sysinfo_geometry(self):
+        """A zero-capacity HBW profile publishes no usable address span."""
+        sys = MegapadSystem(
+            ram_size=64 * 1024,
+            hbw_size=0,
+            ext_mem_size=0,
+            vram_size=0,
+        )
+
+        self.assertEqual(len(sys._hbw_mem), 0)
+        self.assertEqual(sys.hbw_base, 0)
+        self.assertEqual(sys.hbw_end, 0)
+        hbw_base = sum(
+            sys.sysinfo.read8(0x20 + index) << (8 * index)
+            for index in range(8)
+        )
+        hbw_size = sum(
+            sys.sysinfo.read8(0x28 + index) << (8 * index)
+            for index in range(8)
+        )
+        self.assertEqual((hbw_base, hbw_size), (0, 0))
 
     def test_sysinfo_reports_hbw(self):
         """SysInfo registers reflect HBW configuration."""
@@ -3820,15 +3862,35 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("1", nums)
 
     def test_min_max_bios(self):
-        """MIN and MAX work at the BIOS level."""
+        """MIN and MAX use signed cell ordering at the BIOS level."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             "3 7 MIN .",
             "3 7 MAX .",
+            "-3 7 MIN .",
+            "-3 7 MAX .",
+            (
+                "HEX 8000000000000000 7FFFFFFFFFFFFFFF MIN "
+                "8000000000000000 = DECIMAL ."
+            ),
+            (
+                "HEX 7FFFFFFFFFFFFFFF 8000000000000000 MIN "
+                "8000000000000000 = DECIMAL ."
+            ),
+            (
+                "HEX 8000000000000000 7FFFFFFFFFFFFFFF MAX "
+                "7FFFFFFFFFFFFFFF = DECIMAL ."
+            ),
+            (
+                "HEX 7FFFFFFFFFFFFFFF 8000000000000000 MAX "
+                "7FFFFFFFFFFFFFFF = DECIMAL ."
+            ),
         ])
-        nums = [x for x in text.split() if x.isdigit()]
-        self.assertIn("3", nums)
-        self.assertIn("7", nums)
+        results = re.findall(r"\r\n(-?\d+)  ok\r\n", text)
+        self.assertEqual(
+            results,
+            ["3", "7", "-3", "7", "-1", "-1", "-1", "-1"],
+        )
 
     def test_cells_cell_plus(self):
         """CELLS and CELL+ work at the BIOS level."""
@@ -4070,8 +4132,9 @@ class TestBIOS(unittest.TestCase):
 
     def test_two_slash(self):
         sys, buf = self._boot_bios()
-        text = self._run_forth(sys, buf, ["10 2/ ."])
+        text = self._run_forth(sys, buf, ["10 2/ .", "-3 2/ ."])
         self.assertIn("5 ", text)
+        self.assertIn("-2 ", text)
 
     def test_count(self):
         sys, buf = self._boot_bios()

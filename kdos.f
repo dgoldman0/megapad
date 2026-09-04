@@ -1517,8 +1517,8 @@ CREATE _FRH 32 ALLOT
 \ =====================================================================
 \  §1.11  NTT Engine — 256-point Number Theoretic Transform
 \ =====================================================================
-\  Hardware-accelerated NTT for ML-KEM (Kyber) and ML-DSA (Dilithium)
-\  post-quantum lattice-based cryptography.
+\  Generic cyclic NTT service over x^256 - 1; this is not the standardized
+\  negacyclic transform used by ML-KEM or ML-DSA.
 \
 \  BIOS primitives:
 \    NTT-SETQ ( q -- )          Set modulus
@@ -1597,7 +1597,7 @@ CREATE _NTT-TMP-B 1024 ALLOT
 3 CONSTANT KBUF-CT
 4 CONSTANT KBUF-SS
 
-32  CONSTANT KEM-SEED-SIZE
+64  CONSTANT KEM-SEED-SIZE
 800 CONSTANT KEM-PK-SIZE
 1632 CONSTANT KEM-SK-SIZE
 768 CONSTANT KEM-CT-SIZE
@@ -2072,14 +2072,14 @@ VARIABLE HBW-LIMIT   0 HBW-LIMIT !
 
 \ HBW-ALLOT ( u -- addr )  bump-allocate u bytes from HBW
 : HBW-ALLOT  ( u -- addr )
-    HBW-HERE @ SWAP                  \ addr u
+    HBW-SIZE 0= ABORT" HBW unavailable"  HBW-HERE @ SWAP  \ addr u
     OVER + DUP HBW-LIMIT @ > ABORT" HBW overflow"
     HBW-HERE !                        \ update pointer
     ;                                 \ leave addr on stack
 
 \ HBW-ALLOT? ( u -- addr ior )  like HBW-ALLOT but returns ior
 : HBW-ALLOT?  ( u -- addr ior )
-    HBW-HERE @ SWAP
+    HBW-SIZE 0= IF DROP 0 -1 EXIT THEN  HBW-HERE @ SWAP
     OVER + DUP HBW-LIMIT @ > IF
         2DROP 0 -1 EXIT              \ overflow → (0, -1)
     THEN
@@ -2856,8 +2856,8 @@ VARIABLE BDESC
     BDESC @ B.WIDTH *         \ total data bytes
     0 ,                       \ +24 reserve cell for data_addr
     HBW-TALIGN                \ align HBW pointer
-    HBW-HERE @ BDESC @ 24 + ! \ +24 data_addr = HBW-HERE
-    HBW-ALLOT DROP            \ advance HBW-HERE past data region
+    HBW-ALLOT BDESC @ 24 + !  \ allocate and publish returned address
+
     \ register
     BDESC @ (BUF-REG)
     BDESC @ CONSTANT ;
@@ -2874,8 +2874,8 @@ VARIABLE BDESC
     BDESC @ B.WIDTH *         \ total data bytes
     0 ,                       \ +24 reserve cell for data_addr
     XMEM-TALIGN               \ align ext mem pointer
-    XMEM-HERE @ BDESC @ 24 + ! \ +24 data_addr = XMEM-HERE
-    XMEM-ALLOT DROP           \ advance XMEM-HERE past data region
+    XMEM-ALLOT BDESC @ 24 + ! \ allocate and publish returned address
+
     \ register
     BDESC @ (BUF-REG)
     BDESC @ CONSTANT ;
@@ -4969,8 +4969,8 @@ VARIABLE FR-CHUNK   \ temp: byte count for head copy
 : FREAD  ( addr len fdesc -- actual )
     FR-FD !  FR-LEN !  FR-ADDR !
     \ Guard: cursor already at or past file end → return 0
-    \ (MIN is unsigned; without this guard the subtraction below
-    \  wraps to a huge value and FREAD loops forever.)
+    \ Without this guard the subtraction below can wrap before the
+    \ signed MIN clamp and make FREAD loop or access outside the file.
     FR-FD @ F.CURSOR  FR-FD @ F.USED  < 0= IF 0 EXIT THEN
     \ Clamp len to available bytes (safe: cursor < used)
     FR-FD @ F.USED FR-FD @ F.CURSOR -
@@ -5612,38 +5612,34 @@ DEFER OPEN
 \ LOAD ( "filename" -- ) open a file by name, read it, EVALUATE it
 \   Reads the entire file into a reclaimable loader allocation, then walks
 \   through it line by line, EVALUATEing each line.
-
 VARIABLE LD-BUF
 VARIABLE LD-SZ
 VARIABLE LD-CUR
 VARIABLE LD-LEN
-
+VARIABLE LD-LINE
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
 \ Includes CWD so relative-path loads restore the working directory.  Each
-\ frame also owns an evaluator-depth checkpoint and a private transaction
-\ pointer used by the module registry.  The loader hooks below are no-ops
-\ until §20 installs that registry's commit and rollback actions.
+\ frame owns evaluator-depth and HERE/LATEST checkpoints plus a private module
+\ transaction pointer.  Only the module-ID hooks are no-ops until §20 binds
+\ them; dictionary rollback is intrinsic to every guarded loader frame.
 \
-\ Frame layout (7 cells, 56 bytes):
+\ Frame layout (11 cells, 88 bytes):
 \   +0  saved LD-BUF       +8  saved LD-SZ
 \   +16 saved LD-CUR       +24 saved LD-LEN
-\   +32 saved CWD          +40 evaluator-depth checkpoint
-\   +48 loader transaction head
-56 CONSTANT _LD-FRAME
+\   +32 saved LD-LINE      +40 saved EVAL-LINE
+\   +48 saved CWD          +56 evaluator depth
+\   +64 transaction head   +72 saved HERE       +80 saved LATEST
+88 CONSTANT _LD-FRAME
 16 CONSTANT _LD-MAXLVL
 CREATE _LD-STK _LD-FRAME _LD-MAXLVL * ALLOT
 VARIABLE _LD-SP
 0 _LD-SP !
-
 : _LD-ACTIVE-FRAME  ( -- addr )
     _LD-SP @ _LD-FRAME - _LD-STK + ;
-
 : _LD-EVAL-CHECKPOINT  ( -- n )
-    _LD-ACTIVE-FRAME 40 + @ ;
-
+    _LD-ACTIVE-FRAME 56 + @ ;
 : _LD-TXN-HEAD  ( -- addr )
-    _LD-ACTIVE-FRAME 48 + ;
-
+    _LD-ACTIVE-FRAME 64 + ;
 : _LD-TXN-NOOP  ( -- ) ;
 DEFER _LD-TXN-COMMIT
 DEFER _LD-TXN-ROLLBACK
@@ -5651,7 +5647,6 @@ DEFER _LD-TXN-AFTER-RELEASE
 ' _LD-TXN-NOOP IS _LD-TXN-COMMIT
 ' _LD-TXN-NOOP IS _LD-TXN-ROLLBACK
 ' _LD-TXN-NOOP IS _LD-TXN-AFTER-RELEASE
-
 : _LD-SAVE  ( -- )
     _LD-SP @ _LD-FRAME _LD-MAXLVL * >= ABORT" REQUIRE nested too deep"
     _LD-SP @ _LD-STK +
@@ -5659,11 +5654,14 @@ DEFER _LD-TXN-AFTER-RELEASE
     LD-SZ  @ OVER  8 + !
     LD-CUR @ OVER 16 + !
     LD-LEN @ OVER 24 + !
-    CWD    @ OVER 32 + !
-    EVAL-DEPTH @ OVER 40 + !
-    0 SWAP 48 + !
+    LD-LINE @ OVER 32 + !
+    EVAL-LINE @ OVER 40 + !
+    CWD @ OVER 48 + !
+    EVAL-DEPTH @ OVER 56 + !
+    0 OVER 64 + !
+    HERE OVER 72 + !
+    LATEST SWAP 80 + !
     _LD-FRAME _LD-SP +! ;
-
 : _LD-RESTORE  ( -- )
     _LD-SP @ 0= ABORT" REQUIRE nesting underflow"
     _LD-FRAME NEGATE _LD-SP +!
@@ -5672,22 +5670,19 @@ DEFER _LD-TXN-AFTER-RELEASE
     DUP  8 + @ LD-SZ  !
     DUP 16 + @ LD-CUR !
     DUP 24 + @ LD-LEN !
-        32 + @ CWD    ! ;
-
+    DUP 32 + @ LD-LINE !  DUP 40 + @ EVAL-LINE !
+        48 + @ CWD    ! ;
 VARIABLE _LD-RUN-SEC
 VARIABLE _LD-RUN-CNT
 VARIABLE _LD-RUN-ADDR
-
 \ _LD-READ-RUN ( sector count addr -- next-addr )
 \ The BIOS checked layer owns hardware-sized splitting and completion.
 : _LD-READ-RUN  ( sector count addr -- next-addr )
     _LD-RUN-ADDR ! _LD-RUN-CNT ! _LD-RUN-SEC !
-    _LD-RUN-ADDR @ _LD-RUN-SEC @ _LD-RUN-CNT @ _DISK-READ
+    _LD-RUN-ADDR @ _LD-RUN-SEC @ _LD-RUN-CNT @ _DISK-READ? 0= IF DISK-IO-IOR @ THROW THEN
     _LD-RUN-ADDR @ _LD-RUN-CNT @ SECTOR * + ;
-
 : _LD-SLOT-BYTES  ( slot -- bytes )
     DIRENT DUP DE.COUNT SWAP DE.EXT1-CNT + SECTOR * ;
-
 \ _LD-READ-SLOT ( slot -- )  Concatenate both validated extents in LD-BUF.
 : _LD-READ-SLOT  ( slot -- )
     DIRENT
@@ -5697,7 +5692,6 @@ VARIABLE _LD-RUN-ADDR
     ELSE
         DROP 2DROP
     THEN ;
-
 \ ── Relative-path resolution for LOAD / REQUIRE ─────────────────────
 \  Paths like "../markup/html.f" or "lib/util.f" are split on '/'.
 \  Each intermediate component adjusts CWD (".." goes to parent,
@@ -5705,11 +5699,9 @@ VARIABLE _LD-RUN-ADDR
 \  (the filename) is left in NAMEBUF for FIND-BY-NAME.  CWD is
 \  saved by _LD-SAVE and restored by _LD-RESTORE so that nested
 \  loads always return to the caller's working directory.
-
 CREATE _RP-PATH 128 ALLOT    \ copy of full path from PATHBUF (up to 128 B)
 CREATE _RP-COMP 24 ALLOT     \ current component being processed (≤ 23 chars)
 VARIABLE _RP-I                \ scan position within _RP-PATH
-
 \ _HAS-SLASH? ( -- flag )  True if PATHBUF contains a '/' character.
 : _HAS-SLASH?  ( -- flag )
     FALSE
@@ -5717,7 +5709,6 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
         PATHBUF I + C@ DUP 0= IF DROP LEAVE THEN
         47 = IF DROP TRUE LEAVE THEN
     LOOP ;
-
 \ _RP-NEXT-SEP ( -- pos )  Index of next '/' or NUL from _RP-I.
 : _RP-NEXT-SEP  ( -- pos )
     _RP-I @
@@ -5727,13 +5718,11 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
             IF TRUE ELSE 1+ FALSE THEN
         ELSE TRUE THEN
     UNTIL ;
-
 \ _RP-IS-DOTDOT? ( -- flag )  True if _RP-COMP is "..\0".
 : _RP-IS-DOTDOT?  ( -- flag )
     _RP-COMP     C@ 46 =
     _RP-COMP 1+  C@ 46 = AND
     _RP-COMP 2 + C@ 0=  AND ;
-
 \ _RP-CD-COMP ( -- ok? )  CD into directory named in _RP-COMP.
 : _RP-CD-COMP  ( -- ok? )
     NAMEBUF 24 0 FILL
@@ -5741,7 +5730,6 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
     FIND-BY-NAME DUP -1 = IF DROP FALSE EXIT THEN
     DUP DIRENT DE.TYPE 8 <> IF DROP FALSE EXIT THEN
     CWD ! TRUE ;
-
 \ _RESOLVE-PATH ( -- )
 \   If PATHBUF contains '/', walk directory components adjusting CWD
 \   and leave the final filename in NAMEBUF.  No-op for plain names.
@@ -5869,52 +5857,66 @@ VARIABLE _SEC-LINE
     _SEC-LINE @ EVAL-LINE !
     EVALUATE-FINISH ;
 
-\ _LD-WALK ( -- ) Walk file buffer line-by-line, EVALUATEing each.
-\   Uses LD-BUF / LD-SZ / LD-CUR / LD-LEN.  The data stack is kept
-\   clean across EVALUATE calls so compile-time control-flow items
-\   (DO..LOOP, IF..THEN, BEGIN..REPEAT etc.) are undisturbed.
+\ Translate checked status back to the loader's THROW surface.  Status 5
+\ represents a caught source THROW, whose exact code is retained separately.
+: _LD-STATUS-THROW  ( status -- )
+    DUP EVAL-S-THROW = IF DROP EVAL-THROW @ THEN THROW ;
+
+\ _LD-WALK checks each bounded physical line independently.  Its private
+\ LD-* cursor is frame-saved because a line may execute nested LOAD/REQUIRE.
 : _LD-WALK  ( -- )
     LD-BUF @ LD-CUR !
+    0 LD-LINE !
     BEGIN LD-SZ @ 0> WHILE
-        \ Find length of current line (up to newline or end)
-        LD-SZ @                          ( rem )
-        0                                ( rem i )
+        1 LD-LINE +!
+        LD-LINE @ EVAL-LINE !
+        LD-SZ @ 0
         BEGIN
             DUP 2 PICK < IF
                 LD-CUR @ OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
             ELSE TRUE THEN
-        UNTIL                            ( rem linelen )
+        UNTIL
         NIP LD-LEN !
-        \ EVALUATE if non-empty
-        LD-LEN @ 0> IF
-            LD-CUR @ LD-LEN @ EVALUATE
+        LD-LEN @ DUP 0> IF
+            LD-CUR @ OVER 1- + C@ 13 = IF 1- THEN
         THEN
-        \ Advance past line + newline
-        LD-LEN @ 1+
-        DUP NEGATE LD-SZ +!
-        LD-CUR +!
-    REPEAT ;
+        DUP 0> IF
+            LD-CUR @ SWAP EVALUATE-CHECKED _LD-STATUS-THROW
+        ELSE DROP THEN
+        LD-LEN @ DUP LD-CUR +! NEGATE LD-SZ +!
+        LD-SZ @ 0> IF 1 LD-CUR +! -1 LD-SZ +! THEN
+    REPEAT
+    EVALUATE-FINISH _LD-STATUS-THROW ;
 
 : _LD-RELEASE  ( -- )
     LD-BUF @ FREE
     _LD-RESTORE ;
+\ Every operation after allocation runs inside this guard.  Roll back module
+\ identities before their defining dictionary entries, reset compiler state,
+\ then release and restore the loader frame before rethrowing the exact code.
+: _LD-FAIL  ( exception -- )
+    >R
+    EVAL-LINE @ >R
+    _LD-EVAL-CHECKPOINT EVALUATOR-UNWIND
+    _LD-TXN-ROLLBACK
+    _LD-ACTIVE-FRAME DUP 72 + @ SWAP 80 + @ DICT-ROLLBACK
+    EVALUATOR-RESET
+    _LD-RELEASE
+    _LD-TXN-AFTER-RELEASE
+    R> EVAL-LINE ! R> THROW ;
 
-\ Run a source walk with the loader allocation and nesting frame owned by
-\ this call.  Cleanup precedes rethrow so a bad module cannot poison the next
-\ LOAD/REQUIRE or strand its sector-rounded source allocation.
-: _LD-WALK-GUARDED  ( -- )
-    ['] _LD-WALK CATCH
-    DUP IF
-        _LD-EVAL-CHECKPOINT EVALUATOR-UNWIND
-        _LD-TXN-ROLLBACK
-        _LD-RELEASE
-        _LD-TXN-AFTER-RELEASE
-        THROW
-    THEN
-    DROP
+: _LD-GUARDED  ( xt -- )
+    CATCH DUP IF _LD-FAIL THEN DROP
     _LD-TXN-COMMIT
     _LD-RELEASE
     _LD-TXN-AFTER-RELEASE ;
+
+: _LD-WALK-GUARDED  ( -- )
+    ['] _LD-WALK _LD-GUARDED ;
+
+: _LD-READ-WALK  ( -- )
+    LD-CUR @ _LD-READ-SLOT
+    _LD-WALK ;
 
 : LOAD  ( "filename" -- )
     FS-ENSURE
@@ -5938,10 +5940,8 @@ VARIABLE _SEC-LINE
         2DROP ."  File buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF !
-    _LD-READ-SLOT
-    _LD-WALK-GUARDED ;
-
+    LD-BUF ! LD-CUR !
+    ['] _LD-READ-WALK _LD-GUARDED ;
 \ ── Application Loading ──────────────────────────────────────────────
 \  APP-EVAL evaluates a string.  ENTER-USER / SYS-EXIT are retained
 \  as no-ops for API compatibility (hardware user mode was removed
@@ -5951,7 +5951,7 @@ VARIABLE _SEC-LINE
 \  inert since MPU is gated on priv_level which is always 0.
 \
 \  LOAD / FSLOAD remain for OS modules and drivers.
-
+\ Application loader setup and checked execution follow.
 \ _APP-MPU-ON ( -- )  set MPU window to cover Bank 0 + ext mem
 : _APP-MPU-ON  ( -- )
     0 MPU-BASE!
@@ -5971,31 +5971,17 @@ VARIABLE _SEC-LINE
     _APP-MPU-OFF ;
 
 : _APP-LOAD-WALK  ( -- )
-    LD-BUF @
-    LD-SZ @
-    BEGIN DUP 0> WHILE
-        OVER
-        2 PICK
-        0
-        BEGIN
-            DUP 2 PICK < IF
-                OVER OVER + C@ 10 = IF
-                    TRUE
-                ELSE
-                    1+ FALSE
-                THEN
-            ELSE TRUE THEN
-        UNTIL
-        NIP
-        DUP 0> IF
-            2DUP EVALUATE
-        THEN
-        1+
-        ROT OVER - >R
-        + SWAP DROP
-        R>
-    REPEAT
-    2DROP ;
+    _LD-WALK ;
+
+: _APP-LOAD-USER  ( -- )
+    _APP-MPU-ON ENTER-USER _APP-LOAD-WALK ;
+
+: _APP-LOAD-RUN  ( -- )
+    LD-CUR @ _LD-READ-SLOT
+    ['] _APP-LOAD-USER CATCH
+    SYS-EXIT
+    _APP-MPU-OFF
+    THROW ;
 
 : APP-LOAD  ( "filename" -- )
     FS-ENSURE
@@ -6013,26 +5999,40 @@ VARIABLE _SEC-LINE
         2DROP ."  File buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF !
-    _LD-READ-SLOT
-    \ Configure MPU (Bank 0 + ext mem visible) and enter user mode
-    _APP-MPU-ON
-    ENTER-USER
-    ['] _APP-LOAD-WALK CATCH
-    DUP IF
-        SYS-EXIT _APP-MPU-OFF
-        _LD-EVAL-CHECKPOINT EVALUATOR-UNWIND
-        _LD-TXN-ROLLBACK
-        _LD-RELEASE
-        _LD-TXN-AFTER-RELEASE
-        THROW
-    THEN
-    DROP
-    SYS-EXIT
-    _APP-MPU-OFF
-    _LD-TXN-COMMIT
-    _LD-RELEASE
-    _LD-TXN-AFTER-RELEASE ;
+    LD-BUF ! LD-CUR !
+    ['] _APP-LOAD-RUN _LD-GUARDED ;
+
+\ APP-LOAD intentionally uses the same checked physical-line walker and the
+\ same transaction guard as LOAD and REQUIRE.  It does not copy the complete
+\ source into SOURCE-EVALUATE-CHECKED because that helper's _SEC-* cursor is
+\ global and would be overwritten by a nested REQUIRE.
+\
+\ The loader frame instead owns every mutable cursor value needed to resume an
+\ outer application after nested loading.  A nonempty line has one terminal CR
+\ removed, receives EVALUATE-CHECKED, and prevents all later lines from running
+\ when its status is nonzero.  A clean EOF receives EVALUATE-FINISH before the
+\ transaction can commit.
+\
+\ _APP-LOAD-RUN places extent transfer under _LD-GUARDED but delays MPU setup
+\ until that transfer succeeds.  Once user execution starts, normal return or
+\ catchable THROW reaches the inner CATCH, which performs SYS-EXIT and disables
+\ the compatibility MPU window before passing the result to the common guard.
+\
+\ The common failure path restores evaluator depth, provisional module state,
+\ dictionary HERE/LATEST, compiler bookkeeping, the transfer allocation, the
+\ loader frame, and ambient CWD before rethrow.  Source status 5 maps back to
+\ EVAL-THROW; statuses 1 through 4 retain their checked status values.
+\
+\ These are lifecycle guarantees, not application isolation.  Completed UART,
+\ storage, device, or writes to objects that predate the loader checkpoint are
+\ not undone.  APP-LOAD also intentionally retains direct current-directory
+\ lookup and the existing public parsing/stack contract.
+\
+\ A successful nested module remains provisional to every enclosing loader
+\ transaction until the outermost source completes.  This keeps its registry
+\ identity and dictionary definitions in the same rollback closure.
+\ Public LOAD, APP-LOAD, REQUIRE, and PROVIDED stack effects remain unchanged;
+\ the transaction machinery is deliberately private loader infrastructure.
 
 \ -- ANSI helpers (canonical definitions; used by .DOC-CHUNK and §9) --
 : ESC   ( -- )  27 EMIT ;
@@ -9125,7 +9125,7 @@ VARIABLE BDL-SCR-MASK 255 BDL-SCR-MASK !
 \
 \  Lock-aware circular buffer for multi-core producer/consumer patterns.
 \
-\  Ring descriptor layout (7 cells = 56 bytes):
+\  Ring descriptor layout (6 cells = 48 bytes, then payload):
 \    +0   elem-size   bytes per element
 \    +8   capacity    max number of elements
 \    +16  head        index of oldest element (read position)
@@ -9395,8 +9395,8 @@ VARIABLE _HTE-HT
 \ A loader pre-registers the first PROVIDED identity before evaluating any
 \ source.  This remains the cycle-breaking rule.  Every new identity declared
 \ while that source is active joins the loader frame's provisional list.
-\ Successful evaluation commits the whole list; a throw unlinks and frees the
-\ whole list before the source allocation is released and the error rethrown.
+\ Nested success merges into its parent; outermost success commits the list.
+\ A throw unlinks and frees it before releasing source and rethrowing.
 \
 \ All public module operations are core-0-only.  Registry operations use
 \ HT-LOCK, but never hold it while allocating, freeing, or evaluating source.
@@ -9603,7 +9603,6 @@ VARIABLE _MU-LINK
     DROP ;
 
 VARIABLE _MRB-NODE
-
 : _MOD-ROLLBACK-FRAME  ( -- )
     _LD-TXN-HEAD @ DUP 0= IF DROP EXIT THEN
     0 _LD-TXN-HEAD !
@@ -9618,19 +9617,24 @@ VARIABLE _MRB-NODE
         DUP _MN-PROV @ SWAP _MOD-FREE
     REPEAT
     DROP ;
-
 : _MOD-COMMIT-FRAME  ( -- )
     _LD-TXN-HEAD @
     0 _LD-TXN-HEAD !
-    DUP IF
-        1 _MOD-GROW-PENDING !
-        1 _MOD-GROW-READY !
+    DUP 0= IF DROP EXIT THEN
+    _LD-SP @ _LD-FRAME > IF
+        DUP
+        BEGIN DUP _MN-PROV @ WHILE _MN-PROV @ REPEAT
+        _LD-ACTIVE-FRAME _LD-FRAME - 64 + >R
+        R@ @ OVER _MN-PROV !
+        DROP R> !
+        EXIT
     THEN
+    1 _MOD-GROW-PENDING !
+    1 _MOD-GROW-READY !
     BEGIN DUP WHILE
         DUP _MN-PROV @ SWAP _MN-PROV 0 SWAP !
     REPEAT
     DROP ;
-
 : _MOD-AFTER-RELEASE  ( -- )
     _LD-SP @ 0= _MOD-GROW-READY @ AND IF
         0 _MOD-GROW-READY !
@@ -9692,7 +9696,6 @@ CREATE _PS-TAG  9 ALLOT   \ "PROVIDED" + NUL
 VARIABLE _PS-PTR
 VARIABLE _PS-REM
 VARIABLE _PS-LINE-U
-
 : _PS-LINE-LEN  ( addr rem -- len )
     0
     BEGIN
@@ -9707,10 +9710,11 @@ VARIABLE _PS-LINE-U
     LD-SZ @ _PS-REM !
     BEGIN _PS-REM @ 0> WHILE
         _PS-PTR @ _PS-REM @ _PS-LINE-LEN DUP _PS-LINE-U !
+        DUP 0> IF _PS-PTR @ OVER 1- + C@ 13 = IF 1- THEN THEN DUP LD-LEN !
         _PS-PTR @ SWAP _PS-SKIP-WS
         2DUP _PS-TOKEN-LEN 8 = IF
             OVER _PS-MATCH8? IF
-                _PS-LINE-U @ _MOD-EVAL-LINE-MAX > IF
+                LD-LEN @ _MOD-EVAL-LINE-MAX > IF
                     2DROP 0 0 TRUE EXIT
                 THEN
                 8 - SWAP 8 + SWAP _PS-SKIP-WS
@@ -9753,6 +9757,23 @@ VARIABLE _PS-LINE-U
 \   _RESOLVE-PATH when the REQUIRE argument contains '/').
 \   After reading the file, pre-scans for PROVIDED.  If the module
 \   is already loaded, skips execution entirely (zero side effects).
+: _MOD-READ-WALK  ( -- )
+    LD-CUR @ _LD-READ-SLOT
+    \ Pre-register the exact source-buffer slice before executing anything.
+    _MOD-PRESCAN IF
+        _MOD-INSERT                     ( node inserted? ior )
+        DUP IF
+            >R 2DROP R> THROW
+        THEN
+        DROP                            ( node inserted? )
+        DUP 0= IF
+            2DROP EXIT
+        THEN
+        _MOD-ADOPT
+    ELSE
+        2DROP
+    THEN
+    _LD-WALK ;
 : _MOD-LOAD-BODY  ( -- )
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
@@ -9769,29 +9790,8 @@ VARIABLE _PS-LINE-U
         2DROP ."  Module buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF !
-    _LD-READ-SLOT
-    \ Pre-register the exact source-buffer slice before executing anything.
-    _MOD-PRESCAN IF
-        _MOD-INSERT                     ( node inserted? ior )
-        DUP IF
-            >R 2DROP
-            _LD-RELEASE
-            _LD-TXN-AFTER-RELEASE
-            R> THROW
-        THEN
-        DROP                            ( node inserted? )
-        DUP 0= IF
-            2DROP
-            _LD-RELEASE
-            _LD-TXN-AFTER-RELEASE
-            EXIT
-        THEN
-        _MOD-ADOPT
-    ELSE
-        2DROP
-    THEN
-    _LD-WALK-GUARDED ;
+    LD-BUF ! LD-CUR !
+    ['] _MOD-READ-WALK _LD-GUARDED ;
 
 \ REQUIRE ( "name" -- )  Load a module file.
 \   The file's own PROVIDED line is the sole guard against duplicate
@@ -9871,7 +9871,7 @@ DISK? IF FS-LOAD THEN
 \ DMA-ALLOCATE 16 bytes to trigger lazy HEAP-SETUP, then DMA-FREE.
 \ Must use DMA- variants to target Bank 0 directly (ALLOCATE routes
 \ to xmem when extended memory is present).
-16 DMA-ALLOCATE DROP DMA-FREE
+16 DMA-ALLOCATE DUP IF NIP THROW THEN DROP DMA-FREE
 
 \ -- AUTOEXEC: run autoexec.f if present on disk --
 \ Must use a colon definition because FSLOAD evaluates each line

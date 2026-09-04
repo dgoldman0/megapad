@@ -47,7 +47,8 @@ disk, interactive TUI, built-in documentation browser, **16-core
 heterogeneous SoC** (4 full cores + 3 micro-clusters of 4 cores each)
 with IPI, spinlocks, barriers, and **3 MiB HBW math RAM**,
 **core-type-aware scheduling**, and **post-quantum crypto** (Field ALU,
-NTT, ML-KEM-512, hybrid PQ exchange).
+NTT, ML-KEM-512, and a source-defined X25519+ML-KEM/HKDF hybrid
+composition).
 
 Transport is still under active qualification. The current TCP sender is a
 one-outstanding-segment profile: retained data now has strict cumulative-ACK
@@ -149,7 +150,7 @@ and full ISA) plus three micro-core clusters of 4 cores each (scalar-only,
 shared MUL/DIV, 1 KiB scratchpad, hardware barrier per cluster).  All 16
 cores share a unified address space via a round-robin bus arbiter with
 per-core QoS weights.  Cores communicate through a hardware mailbox (IPI)
-and 8 spinlocks.  Micro-clusters are gated by the SysInfo CLUSTER_EN
+and 16 spinlocks.  Micro-clusters are gated by the SysInfo CLUSTER_EN
 register.  KDOS automatically routes tile/SIMD work to full cores only.
 
 **Scalar CPU** — Each full core has 32 general-purpose 64-bit registers,
@@ -184,8 +185,9 @@ DMA), CRC ISA engine (three exact non-reflected 32/64-bit tuples), AES-256-GCM (
 authentication), SHA-3/SHAKE (Keccak-f[1600], 4 modes + XOF squeeze),
 TRNG (hardware CSPRNG, ring-oscillator on FPGA), Field ALU (GF(2²⁵⁵−19)
 arithmetic + raw 256×256→512-bit multiply), NTT Engine (256-point NTT/
-INTT, configurable modulus for ML-KEM/ML-DSA), KEM Engine (ML-KEM-512
-key encapsulation via NTT+SHA3+TRNG), one-shot PCM Audio (deterministic
+INTT, configurable modulus), KEM Engine (working synchronous Python
+ML-KEM-512 values for generated/well-formed keys; current RTL is an
+incompatible non-cryptographic stub), one-shot PCM Audio (deterministic
 headless capture with optional host playback), SystemInfo (CPUID, memory
 size), Mailbox (inter-core IPI), and Spinlocks (8 hardware mutexes). Peripheral
 devices are memory-mapped at `0xFFFF_FF00+`; CRC, SHA-2, and Field ALU
@@ -210,7 +212,7 @@ is implemented in the emulator; its physical DMA/I2S bridge remains pending.
 │         BIOS (bios.asm)         │  ← Subroutine-threaded Forth,
 │  360 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
-│         Hardware / Emulator     │  ← megapad64.py + devices.py
+│         Hardware / Emulator     │  ← emulator/megapad64.py + emulator/devices.py
 └─────────────────────────────────┘
 ```
 
@@ -221,7 +223,8 @@ strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
 (COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
 **performance counters**, **CRC engine**, **AES-256-GCM**, **SHA-3/SHAKE**,
 **TRNG**, **Field ALU** (FADD–FPOW + MUL_RAW), **NTT engine**,
-**KEM engine** (ML-KEM-512), **memory BIST**, **tile self-test**,
+**KEM words** (Python ML-KEM-512 value path; RTL stub), **memory BIST**,
+**tile self-test**,
 **strided/2D addressing**, and **FP16/BF16 modes**.
 Includes `FSLOAD` for booting KDOS directly from a disk image.  Hardened
 with stack underflow detection, EVALUATE depth limiting, dictionary-full
@@ -229,7 +232,8 @@ guards, and FSLOAD error recovery with file/line context.
 
 **KDOS core** — The Bank 0-resident part of the Kernel Dashboard OS,
 written entirely in Forth.  It covers utility words, described buffers with
-tile-aligned storage, tile-accelerated buffer operations (B.SUM, B.ADD, etc.), a kernel
+constructor-specific alignment guarantees, tile-accelerated buffer operations
+(B.SUM, B.ADD, etc.), a kernel
 registry with 18 built-in compute kernels, a pipeline engine, raw and
 named file I/O, the MP64FS filesystem, a documentation browser, dictionary
 search tools, a cooperative scheduler with timer-assisted preemption, a
@@ -346,16 +350,16 @@ Type TOPICS or LESSONS for documentation.
 HELP                              \ Full command reference
 DASHBOARD                         \ System overview
 
-256 0 1 BUFFER: demo              \ Create a 256-byte buffer
+0 1 256 BUFFER demo              \ Create a 256-byte buffer
 42 demo B.FILL                    \ Fill every byte with 42
 demo B.SUM .                      \ Sum → 10752
 demo kstats                       \ Prints sum, min, max
 
-256 0 1 BUFFER: a                 \ Two more buffers
-256 0 1 BUFFER: b
+0 1 256 BUFFER a                 \ Two more buffers
+0 1 256 BUFFER b
 10 a B.FILL  20 b B.FILL
 a b demo kadd                     \ Tile-accelerated add: demo = a + b
-demo B.PREVIEW                    \ Hex dump first 64 bytes
+HEX demo B.PREVIEW DECIMAL        \ Show first 64 bytes in hex
 
 SCREENS                           \ Launch 9-screen TUI dashboard
 ```
@@ -397,17 +401,17 @@ make test-net              # requires mp64tap0 TAP device (see cli.py --nic-tap)
 
 | File | Purpose |
 |------|---------|
-| `megapad64.py` | CPU and tile-engine emulator, including extended operations and FP16/BF16 |
-| `accel/` | Optional multi-source pybind11 execution kernel |
-| `accel_wrapper.py` | Drop-in Python wrapper for the C++ CPU core |
-| `system.py` | SoC integration and batched execution |
+| `emulator/megapad64.py` | CPU and tile-engine emulator, including extended operations and FP16/BF16 |
+| `emulator/accel/` | Optional multi-source pybind11 execution kernel |
+| `emulator/accel_wrapper.py` | Drop-in Python wrapper for the C++ CPU core |
+| `emulator/system.py` | SoC integration and batched execution |
 | `bios.asm` | Forth BIOS in assembly: boot, devices, multicore, and checked crypto |
 | `bios.rom` | Pre-assembled BIOS binary |
 | `kdos.f` | Bank 0 KDOS core: compute, storage, scheduler, UI, modules, crypto, and multicore |
 | `networking.f` | Userland Ethernet-through-TLS module, sockets, and UDP data-port transport |
 | `cli.py` | CLI, boot modes, headless TCP terminal, and debug monitor |
 | `asm.py` | Two-pass assembler with listing output |
-| `devices.py` | MMIO device models |
+| `emulator/devices.py` | MMIO device models |
 | `audio_sinks.py` | Explicit opt-in audio playback adapters |
 | `nic_backends.py` | Loopback, UDP-tunnel, and Linux TAP NIC backends |
 | `data_sources.py` | Simulated network data sources |
@@ -492,7 +496,8 @@ and block-RAM-backed memory:
 - **Four full cores plus three four-microcore clusters** with round-robin bus
   arbitration and per-core QoS weights
 - **Crypto accelerators**: AES-256-GCM, SHA-3/SHAKE, CRC, TRNG, X25519/
-  Field ALU, NTT, KEM (ML-KEM-512)
+  Field ALU, NTT, and a working Python ML-KEM-512 value path whose current
+  RTL counterpart remains a stub
 - **Fully static design** — retains state down to DC for ultra-low power
 
 Manual resource estimates (Kintex-7 325T, no Vivado synthesis yet):

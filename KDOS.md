@@ -13,11 +13,16 @@ active KDOS boot buffer.  Transfer allocations are reclaimed after normal or
 thrown evaluation.  Its dynamic module registry retains complete,
 case-sensitive IDs in the Bank 0 heap, independent of filename limits and
 XMEM resets; chained entries are limited by available memory rather than a
-fixed module count.  `REQUIRE` pre-registers an ID to break dependency cycles.
-If evaluation throws, evaluator and directory state are restored and every ID
-owned by that loader frame is rolled back, while already successful nested
-dependencies survive.  Entry OOM throws before any source line executes, and
-duplicate registration allocates nothing.  This keeps Ethernet through TLS,
+fixed module count. `REQUIRE` pre-registers an ID to break dependency cycles.
+Successful nested ID chains remain provisional by merging into their parent.
+If evaluation exits through a catchable guest `THROW`, evaluator and directory
+state are restored, every ID owned by that frame (including merged nested IDs)
+is removed, and definitions since its saved `HERE`/`LATEST` are rolled back.
+Task-resetting `ABORT`/`ABORT"` and backend faults outside guest `THROW` bypass
+that transaction guard. Non-dictionary output,
+allocator/registry effects, and media effects remain non-atomic. Entry OOM
+throws before any source line executes, and duplicate registration allocates
+nothing. This keeps Ethernet through TLS,
 sockets, and the UDP-backed data-port transport out of the Bank 0 core.
 
 ---
@@ -83,13 +88,13 @@ myfile FREWIND                \ Reset cursor to 0
 HERE 128 myfile FREAD .       \ Read back, print bytes read
 FILES                         \ List registered files
 
-\ Scheduler & tasks
+\ Task registry and synchronous execution
 : my-work 99 . ;              \ Define task body
-' my-work 10 TASK my-task     \ Create task, priority 10
+' my-work 10 TASK my-task     \ Store task descriptor (priority is metadata)
 TASKS                         \ List all tasks
-SCHEDULE                      \ Run all READY tasks
+SCHEDULE                      \ Run READY entries serially in table order
 my-task T.INFO                \ Show task status (DONE)
-' my-work BG                  \ One-shot: spawn + schedule
+' my-work BG                  \ Spawn and execute before returning
 
 \ Interactive TUI
 SCREENS                       \ Enter full-screen TUI
@@ -142,23 +147,60 @@ PORTS                          \ List all port bindings
 - **TRNG**: RANDOM, RANDOM8, SEED-RNG
 - **Field ALU**: FADD, FSUB, FMUL, FSQR, FINV, FPOW, FMUL-RAW, GF-A!, GF-R@, GF-PRIME, LOAD-PRIME, FMUL-ADD-RAW
 - **NTT engine**: NTT-LOAD, NTT-STORE, NTT-FWD, NTT-INV, NTT-PMUL, NTT-PADD, NTT-SETQ, NTT-STATUS@, NTT-WAIT
-- **KEM engine**: KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-SETQ, KEM-STATUS@, KEM-PK@, KEM-CT@
+- **KEM engine**: KEM-SEL!, KEM-LOAD, KEM-STORE, KEM-KEYGEN, KEM-ENCAPS, KEM-DECAPS, KEM-STATUS@
 - **CRC**: exact-length byte/quad feeds, reflected and non-reflected 32/64-bit tuples, and raw finalization
+
+The seven KEM names above are the exact raw BIOS surface. They select and
+stream five retained buffers at executable MMIO base
+`0xFFFF_FF00_0000_0900`; the Python device uses STATUS `+00`, CMD `+01`,
+BUF_SEL `+08`, DIN `+10`, DOUT `+18`, and uint16-LE BUF_SIZE `+20..+21` in a
+40-byte window. Keygen/encaps/decaps complete synchronously and retain DONE=2.
+This shared state has no requester ownership or automatic wipe.
+
+KDOS declares `KEM-SEED-SIZE=64`, matching the complete 64-byte `d || z`
+input loaded by `KYBER-KEYGEN`; `KYBER-ENCAPS` uses the first 32 bytes as
+coins. This is the locked Akashic-facing contract. Deterministic
+generated/well-formed-key vectors match local OpenSSL 3.5.2 ML-KEM-512, but
+the implementation is not FIPS-certified, constant time, a hostile-key
+validator, or a protected host-secret boundary. Current RTL uses an
+incompatible 64-bit-slot map, observable BUSY lifecycle, and deterministic XOR
+crypto stub, so it is not evidence for executable KEM behavior. See the
+[BIOS KEM contract](docs/bios-forth.md#kem-engine--ml-kem-512-7-words).
+
+KDOS's high-level `PQ-EXCHANGE-INIT`/`PQ-EXCHANGE-RESP` path is an ordinary
+source composition of X25519, ML-KEM-512, and SHA3-HMAC HKDF with info
+`pq-hybrid`. It has global unwiped PQ scratch and no outer owner or rollback;
+extract and expand are separate lock-9 transactions. The final status reports
+HKDF only, after earlier X25519/KEM effects may already be visible. Hosted
+qualification therefore proves the source's values and mutation order, not a
+standardized hybrid KEM, concurrency-safe session abstraction, protected
+secret boundary, or security proof.
 
 **KDOS core (`kdos.f`):**
 - **Utility words**: CELLS, CELL+, MIN, MAX, ABS, +!, CMOVE, and more
-- **Buffer subsystem**: Typed tile-aligned buffers with descriptors (up to 16 registered)
-- **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, B.SUB, B.SCALE (all using MEX)
-- **Kernel registry**: Metadata for compute kernels (up to 16 registered)
+- **Buffer subsystem**: Typed buffers with 32-byte descriptors and an
+  allocation-backed linked registry (no fixed slot limit)
+- **Tile-aware operations**: B.SUM, B.MIN, B.MAX, B.ADD, and B.SUB use MEX;
+  B.SCALE is a scalar byte loop
+- **Kernel registry**: Metadata for compute kernels (up to 32 registered)
 - **7 sample kernels**: kzero, kfill, kadd, ksum, kstats, kscale, kthresh
 - **11 advanced kernels**: kclamp, kavg, khistogram, kdelta, knorm, kpeak, krms-buf, kcorrelate, kconvolve3, kinvert, kcount
 - **Pipeline engine**: Ordered kernel pipelines with per-step timing (up to 8 registered)
 - **3 demo pipelines**: fill-sum, add-stats, threshold (with demo buffers)
 - **Storage & persistence**: Buffer save/load to disk, file abstraction layer
 - **File abstraction**: Sector-backed files with cursor I/O (up to 8 registered)
-- **Scheduler & tasks**: Cooperative multitasking with task registry (up to 8 tasks)
+- **Scheduler & tasks**: Fixed eight-entry registry with synchronous
+  table-ordered execution; no resumable cooperative task contexts
 - **Task lifecycle**: TASK, SPAWN, KILL, RESTART, BG, YIELD, SCHEDULE
-- **Timer preemption**: PREEMPT-ON/PREEMPT-OFF for timer-based preemption
+- **Timer controls**: PREEMPT-ON/PREEMPT-OFF configure a software gate and
+  timer registers, but the current source does not connect timer status to a
+  suspending task switch
+- **Multicore dispatch surface**: Source validation, status, lock wrappers,
+  and pipeline fallback are qualified on one full core; no secondary worker,
+  concurrency, or parallel speedup is implemented by the hosted profile
+- **Per-core state tables**: Run queues, affinity, manual preemption flags,
+  software message inboxes, and named locks are executable on one core, with
+  the source limitations below rather than a simulated multicore scheduler
 - **Interactive screens**: Full-screen ANSI TUI with 9 screens and keyboard navigation
 - **ANSI terminal**: ESC, CSI, AT-XY, PAGE, SGR colors, BOLD, DIM, REVERSE
 - **Screen system**: SCREENS entry point, RENDER-SCREEN, HANDLE-KEY event loop
@@ -172,7 +214,8 @@ PORTS                          \ List all port bindings
 - **String utilities**: .ZSTR, SAMESTR?, NAMEBUF, PARSE-NAME (from input stream via WORD)
 - **Comparison operators**: >=, <= (defined atop BIOS < and >)
 - **MP64FS file system**: Named on-disk files with bitmap allocation and directory
-- **FS operations**: FORMAT, FS-LOAD, FS-SYNC, DIR, CATALOG, MKFILE, RMFILE, OPEN, FCLOSE, FFLUSH
+- **FS operations**: FORMAT, FS-LOAD, FS-SYNC, DIR, CATALOG, MKFILE,
+  RMFILE, OPEN, FCLOSE, FFLUSH, PWD, direct-component CD, MKDIR, RMDIR
 - **FD pool**: 16-slot fixed pool (1,152 bytes) — OPEN and OPEN-BY-SLOT allocate from pool, FCLOSE reclaims
 - **DEFER/IS**: Deferred word mechanism — OPEN is a DEFER word for VFS interception
 - **Bitmap allocator**: BIT-FREE?, BIT-SET, BIT-CLR, FIND-FREE (contiguous sector search)
@@ -182,7 +225,8 @@ PORTS                          \ List all port bindings
   allocation-neutral duplicates, cycle-breaking pre-registration, and
   frame-scoped rollback
 - **Python diskutil.py**: MP64FS image formatter, file injector/reader/lister/deleter
-- **Documentation browser**: TOPICS, LESSONS, DOC, TUTORIAL, DESCRIBE (word lookup)
+- **Documentation browser**: TOPICS, LESSONS, DOC, TUTORIAL, and DESCRIBE
+  (global exact documentation-filename lookup, not dictionary/content search)
 - **Doc file display**: .DOC-CHUNK with 20-line pagination and "--- more ---" prompt
 - **OPEN-BY-SLOT**: Open file by directory slot index for DESCRIBE lookup
 - **SCR-DOCS**: Screen 7 — documentation browser listing topics and tutorials
@@ -209,7 +253,8 @@ PORTS                          \ List all port bindings
   MMIO Keccak engine; focused coverage and the complete checkpoint-2 KDOS/TLS
   source-load gate are green
 - **§1.7 KDOS Crypto**: ENCRYPT / DECRYPT / VERIFY — unified crypto API (10 tests)
-- **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — sector-level file encryption (8 tests)
+- **§7.6.1 Filesystem Encryption**: FENCRYPT / FDECRYPT / FS-KEY! / ENCRYPTED? — one primary-extent whole-file GCM transaction with a slot-derived IV
+- **§7.6.2 Subdirectory Navigation**: PWD / CD / MKDIR / RMDIR — parent-byte cache navigation and metadata-only directory mutation
 
 **Checkpoint-4 full Python regression**: 3,425 passed, with three conditional
 live-network skips. The ordered crypto/GPT gates and the complete serial RTL
@@ -246,14 +291,14 @@ complete; Akashic refactoring is a separate task in a user-selected worktree.
 - FWRITE / FREAD / FSEEK / FREWIND / FSIZE — cursor-based I/O
 - F.INFO, FILES — file introspection
 
-**Phase 3: Scheduler & Preemption** (✅ complete — v0.5)
+**Phase 3: Task Registry & Timer Controls** (source present; scheduler incomplete)
 - 6 BIOS timer/interrupt words: TIMER!, TIMER-CTRL!, TIMER-ACK, EI!, DI!, ISR!
-- IVT slot 7 (IVEC_TIMER) wired with IRQ delivery in system.py
+- IVT slot 7 (IVEC_TIMER) wired with IRQ delivery in emulator/system.py
 - Task descriptor: 6-cell (48 bytes) — status, priority, xt, dsp, rsp, name
-- Task registry: up to 8 tasks, cooperative scheduling via SCHEDULE
+- Task registry: up to 8 table entries; `SCHEDULE` executes READY XTs inline
 - TASK, SPAWN, KILL, RESTART, BG — task lifecycle management
-- YIELD for cooperative release, FIND-READY for round-robin scan
-- Timer-based preemption: PREEMPT-ON / PREEMPT-OFF
+- `YIELD` marks DONE but continues the same XT; `FIND-READY` scans lowest slot
+- PREEMPT-ON / PREEMPT-OFF do not by themselves implement timer preemption
 - Introspection: T.INFO, TASKS, TASK-COUNT-READY
 
 **Phase 4: Interactive Screens** (✅ complete — v0.6)
@@ -357,6 +402,7 @@ KDOS rewrite — new Forth words:
 - RAM caches: FS-SUPER, FS-BMAP, FS-DIR
 - FS-LOAD / FS-SYNC: disk ↔ RAM
 - FORMAT, DIR / CATALOG, MKFILE, RMFILE, OPEN
+- Parent-byte navigation: PWD, direct-component CD, MKDIR, RMDIR
 - FWRITE / FREAD with proper cursor advancement
 - FFLUSH: persist descriptor metadata
 
@@ -368,10 +414,10 @@ New Forth words (§7.7, ~120 lines):
 - `FTYPE-DOC` / `FTYPE-TUT` / `FTYPE-BUNDLE`: file type constants (4, 6, 7)
 - `DOC` ( "topic" -- ): open and display documentation file with pagination
 - `TUTORIAL` ( "name" -- ): open and display tutorial file
-- `DESCRIBE` ( "word" -- ): search directory for matching doc, display or suggest TOPICS
+- `DESCRIBE` ( "word" -- ): globally select the first case-sensitive matching doc filename, display or suggest TOPICS
 - `TOPICS` / `LESSONS`: list all doc/tutorial files from FS directory
 - `OPEN-BY-SLOT` ( slot -- fdesc | 0 ): open file by directory slot index (uses FD pool; caller should FCLOSE)
-- `SHOW-FILE` ( fdesc -- ): read and display entire file via FREAD (caller should FCLOSE)
+- `SHOW-FILE` ( fdesc -- ): display from the descriptor's current cursor through logical EOF via FREAD (caller should FCLOSE)
 - `.DOC-CHUNK` ( addr len -- ): paginated display (20-line pages, KEY to continue)
 - SCR-DOCS: screen 7 — documentation browser listing topics and tutorials
 
@@ -412,12 +458,12 @@ diskutil.py:
 **v0.9d — Dictionary Search, Stack Safety & Diagnostics** (done)
 
 Dictionary search (§7.8):
-- `WORDS-LIKE` ( "pattern" -- ): case-insensitive substring search across dictionary
+- `WORDS-LIKE` ( "pattern" -- ): ASCII-case-insensitive raw-header substring search, newest-first and including shadowed duplicates
 - `APROPOS` ( "pattern" -- ): alias for WORDS-LIKE
 - `.RECENT` ( n -- ): show last n defined words
 - `ENTRY>NAME` ( entry -- addr len ): extract name from dictionary entry
 - `ENTRY>LINK` ( entry -- next ): follow dictionary link to previous entry
-- `ICONTAINS?` ( pa pl sa sl -- flag ): case-insensitive substring match
+- `ICONTAINS?` ( pa pl sa sl -- flag ): substring match with ASCII `a`–`z` folding only
 
 Stack safety & diagnostics (§1):
 - `NEEDS` ( n -- ): warn if stack has fewer than n items
@@ -473,9 +519,13 @@ be extended dynamically without breaking continuity between firmware and OS.
 
 3. **Buffers as the Universal Medium**
 
-   * All data lives in typed, tile-aligned buffers.
+   * Data is described by typed buffers; ordinary and HBW constructors align
+     data to tiles, while the current Arena constructor guarantees only
+     eight-byte alignment.
    * Files, streams, datasets, views, UI previews are all buffer-backed.
-   * No hidden mutable global state.
+   * The design goal is no hidden mutable global state. The current Buffer
+     implementation has explicit exceptions: its registry and the
+     `BDESC`/`AB-AR`/`AB-DESC` constructor scratch cells are shared globals.
 
 4. **Single Interactive Core**
 
@@ -543,8 +593,8 @@ accumulation supported via TCTRL (ACC_ACC bit).
 | **WOTS Chain** | Checked 0..15-step sequencer using read-only Bank 0 context DMA and the shared Keccak service |
 | **TRNG** | Hardware CSPRNG (ring-oscillator + SHA-3 conditioner on FPGA) |
 | **Field ALU** | GF(2²⁵⁵−19) arithmetic + raw 256×256→512-bit multiply |
-| **NTT** | 256-point NTT/INTT, configurable modulus (ML-KEM / ML-DSA) |
-| **KEM** | ML-KEM-512 key encapsulation (KeyGen/Encaps/Decaps) |
+| **NTT** | Generic 256-point cyclic NTT/INTT with configurable modulus; not the standardized ML-KEM/ML-DSA negacyclic operation |
+| **KEM** | Synchronous Python ML-KEM-512 value path for generated/well-formed keys; current RTL is an incompatible non-cryptographic stub |
 
 ### 3.4 Memory
 
@@ -614,7 +664,8 @@ approved Python regression. Akashic adoption remains separately scoped.
 
 ### 5.1 Buffer (IMPLEMENTED)
 
-A buffer is a typed, tile-aligned data region with a 32-byte descriptor.
+A buffer is a typed data region with a 32-byte descriptor. `BUFFER` and
+`HBW-BUFFER` tile-align their data; the current `ARENA-BUFFER` source does not.
 
 **Implementation (kdos.f §2)**:
 ```forth
@@ -622,7 +673,7 @@ buffer-descriptor:
   +0   type        ( 0=raw  1=records  2=tiles  3=bitset )
   +8   elem_width  ( bytes per element: 1, 2, 4, or 8 )
   +16  length      ( number of elements )
-  +24  data_addr   ( pointer to tile-aligned data )
+  +24  data_addr   ( pointer to data region )
 ```
 
 **Usage**:
@@ -636,6 +687,7 @@ mybuf B.SUM .          \ Sum via tile engine → 5376
 ```
 
 **Implemented operations**:
+- `BUFFER`, `HBW-BUFFER`, `XBUFFER`, `ARENA-BUFFER` — named constructors
 - `B.TYPE`, `B.WIDTH`, `B.LEN`, `B.DATA` — field accessors
 - `B.BYTES`, `B.TILES` — derived queries
 - `B.FILL`, `B.ZERO` — basic fill operations
@@ -643,8 +695,24 @@ mybuf B.SUM .          \ Sum via tile engine → 5376
 - `B.ADD`, `B.SUB` — element-wise SIMD ops on two buffers
 - `B.SCALE` — multiply each element by scalar
 - `B.INFO` — print descriptor details
-- `B.PREVIEW` — hex dump first tile
-- `BUFFERS` — list all registered buffers (up to 16)
+- `B.PREVIEW` — print exactly 64 bytes in the current numeric base
+- `BUFFERS` — list the uncapped linked registry newest-first
+
+The registry uses `BUF-HEAD` plus one 16-byte dictionary link per
+registration; `BUF-NTH` has no bounds check. Constructors publish their
+descriptor, capacity, registry entry, and named constant in ordinary source
+order, so a late failure is not transactional. `B.PREVIEW` does not clip short
+buffers and does not switch to hexadecimal; use `HEX ... B.PREVIEW DECIMAL`
+when hexadecimal output is wanted. `B.TILES` adds 63 to the wrapped byte count
+and applies signed `/`, so its ceiling result assumes an ordinary nonnegative,
+nonoverflowing size.
+
+`XBUFFER` and `HBW-BUFFER` publish the exact address returned by their
+allocator, including XMEM free-list reuse. `ARENA-BUFFER` still rounds data
+only to eight bytes, and `ARENA-DESTROY` unlinks its descriptor without reclaiming the
+dictionary link node or undefining the now-dangling constant. `ARENA-RESET`
+makes the storage reusable without unregistering it, and dictionary rollback
+past published links/names does not repair `BUF-HEAD` or `BUF-COUNT`.
 
 ### 5.2 Kernel (IMPLEMENTED)
 
@@ -677,7 +745,18 @@ kernel-descriptor:
 **Dashboard**:
 - `K.IN`, `K.OUT`, `K.FOOT`, `K.FLAGS` — field accessors
 - `K.INFO` — print kernel descriptor
-- `KERNELS` — list all registered kernels (up to 16)
+- `KERNELS` — list all registered kernels (up to 32)
+
+The 32-entry table is a literal source capacity. A later `KERNEL` still
+allocates its descriptor and defines the constant but is silently omitted from
+the registry; there is no unregister path. Several sample implementations are
+also intentionally documented as current discrepancies: `kavg` is an identity
+copy for a nonzero input of at most 256 bytes: it records its window and byte
+count but performs no averaging. `kdelta` emits `src[0]` rather than zero for
+its first result, short `kpeak` zeroes the destination and then underflows its
+cleanup, and `krms-buf` divides by zero when mean square is one. `kavg` and
+`kconvolve3` use fixed 256-byte scratch with no length check. Their oversized
+domains can overwrite following dictionary state and should not be used.
 
 ### 5.3 Pipeline (IMPLEMENTED)
 
@@ -712,6 +791,13 @@ my-pipe P.BENCH             \ Time each step
 - `P.INFO` — print pipeline descriptor
 - `PIPES` — list all registered pipelines (up to 8)
 
+Once the eight-entry pipeline registry is full, `PIPELINE` still allocates and
+defines a constant but silently omits it from the registry, and `P.ADD`
+silently ignores another XT. `P.GET`
+and `P.SET` are unchecked. `P.CLEAR` stores zero only into the count; old XT
+cells remain in the descriptor. Capacities, counts, and shared construction
+scratch are trusted rather than validated.
+
 **Built-in demo pipelines** (with demo-a, demo-b, demo-c buffers):
 - `pipe-fill-sum` — fill demo-a with 42, sum via tile engine (→ 2688)
 - `pipe-add-stats` — fill a=10, b=20, add a+b→c, print stats (→ sum=1920)
@@ -721,11 +807,12 @@ my-pipe P.BENCH             \ Time each step
 
 ## 6. Tile Engine Integration (v0.2)
 
-KDOS v0.2 makes full use of the MEX tile engine for all buffer operations.
+KDOS v0.2 uses the MEX tile engine for reductions and binary Buffer
+operations. `B.SCALE` remains an ordinary byte-at-a-time Forth loop.
 
 ### 6.1 Accumulator Readback
 
-**Critical addition**: ACC@ word reads the 256-bit accumulator back to the Forth stack.
+**Critical addition**: ACC@ reads ACC0, the low 64 bits of the 256-bit accumulator, back to the Forth stack.
 
 Before v0.4, reductions like TSUM/TMIN/TMAX wrote results to ACC0-ACC3 CSRs but there was no way to read them from Forth. Now:
 
@@ -754,6 +841,18 @@ B.SUM demonstrates multi-tile accumulation:
     DROP ACC@ ;           \ Read final result
 ```
 
+The present implementation rounds byte counts up to whole tiles and does not
+mask a final partial tile, so its trailing physical bytes participate. The
+same whole-tile rule lets `B.ADD`/`B.SUB` overwrite bytes beyond a partial
+logical destination. Their loop count comes only from the leftmost stack
+argument named `src1`, loaded into hardware TSRC0; the stated equal-size
+precondition is not checked.
+
+`B.MIN` and `B.MAX` are currently correct only for one tile. Their stack order
+causes iterations after the first to program the running extreme into TSRC0
+instead of the advanced buffer address. This is an open KDOS source defect,
+not tile-engine behavior.
+
 ### 6.3 Element-Wise Operations
 
 B.ADD uses TADD for SIMD element-wise addition:
@@ -773,7 +872,35 @@ B.ADD uses TADD for SIMD element-wise addition:
 
 All 64 lanes operate in parallel. For 8-bit data, that's 64 additions per TADD.
 
-### 6.4 Performance
+### 6.4 FP16 and BF16 Buffers
+
+`F.SUM`, `F.DOT`, `F.SUMSQ`, `F.ADD`, and `F.MUL` interpret complete tiles as
+32 FP16 lanes. `BF.SUM` and `BF.DOT` do the same for BF16. Reductions return
+the raw binary32 encoding in ACC0 through `ACC@`; the result is an integer cell
+containing float bits, not a Forth floating-point value.
+
+These words do not validate descriptor type, width, an even byte count, equal
+sizes, or a partial logical tail. Two-input operations take their tile count
+only from the leftmost stack argument named `src1`, which is loaded into
+hardware TSRC0, and every selected tile reads or writes all 64 bytes.
+Normal return resets TMODE to zero rather than restoring the caller's prior
+mode; a tile-loop memory fault or budget fault before the final `0 TMODE!`
+leaves FP16/BF16 mode active. The source example `0 1 64 BUFFER` has the right
+physical byte count for 32 half lanes but describes 64 one-byte elements; `0 2
+32 BUFFER` matches the descriptor model.
+
+Floating reduction order is not yet uniform across backends. The Python
+executable model and hosted simulator use host-language per-tile SUM/SUMSQ;
+the native accelerator currently falls back to Python, while its bypassed
+direct C++ bodies use sequential binary32 and RTL uses a balanced binary32
+tree. Python and active native TDOT use a binary64 loop before one binary32
+pack; RTL again uses its own tree. With ACC_ACC, the existing binary32 ACC0 is
+widened, added to the tile subtotal in binary64, and repacked at the inter-tile
+rounding point. The current executable FP16 encoder also has a carry-boundary
+discrepancy at the largest-subnormal/minimum-normal transition. These behaviors
+are tracked explicitly rather than treated as a settled hardware contract.
+
+### 6.5 Performance
 
 Measured with BENCH:
 ```forth
@@ -868,7 +995,12 @@ DISK-INFO                     \ Print "Storage: present" or "not attached"
 
 `B.SAVE` and `B.LOAD` compute the number of sectors from the buffer descriptor
 and issue one checked public request; the BIOS splits it into controller-sized
-chunks when necessary.
+chunks when necessary. The current source passes `B.DATA` directly while
+rounding `B.BYTES` up to complete sectors. Unless the allocation itself
+contains that full rounded tail, `B.SAVE` reads and `B.LOAD` writes up to 511
+bytes beyond the logical Buffer payload; a zero-byte Buffer produces a rejected
+zero-sector request. This is an open source/descriptor discrepancy, not an
+implicit promise that the checked storage layer pads or reserves the tail.
 
 ### 7.4 File Abstraction
 
@@ -990,7 +1122,14 @@ KDOS | bufs=3  kerns=7  pipes=3  files=0  disk=no  HERE=24576
 ' my-operation .BENCH      \ Prints "cycles=NNN"
 ```
 
-Uses the CYCLES word (reads timer MMIO) and EXECUTE for indirect call.
+On hardware this uses `CYCLES`, the intended wrapping 32-bit Timer COUNT, and
+`EXECUTE` for indirect call. The hosted simulator retains a runtime-local
+32-bit Timer driven once per admitted semantic guest step. It is distinct from
+the semantic-work/performance diagnostics and unaffected by `PERF-RESET`; it
+is deterministic work evidence, not MP64 timing.
+The current RTL SoC Timer wiring exposes only `COUNT_LO` to `CYCLES` and accepts
+only `COMPARE_LO` from `TIMER!`, unlike emulator/native and the documented
+32-bit ABI, so that discrepancy remains open.
 
 ---
 
@@ -1002,46 +1141,92 @@ Uses the CYCLES word (reads timer MMIO) and EXECUTE for indirect call.
 
 **Additions needed**:
 
-### 5.4 Scheduler (IMPLEMENTED)
+### 5.4 Task Registry and Synchronous Executor
 
-The scheduler provides cooperative multitasking with a task registry
-and round-robin dispatching.
+Unchanged `kdos.f` §8 publishes task-shaped descriptors and scheduling names,
+but its executable behavior is a fixed registry plus synchronous
+run-to-completion dispatch. It does not save or install task contexts, suspend
+at `YIELD`, order by priority, or preempt an XT.
 
 **Task descriptor** (6 cells = 48 bytes, kdos.f §8):
 ```forth
 task-descriptor:
   +0   status      ( 0=FREE  1=READY  2=RUNNING  3=BLOCKED  4=DONE )
-  +8   priority    ( 0-255, lower = higher priority )
+  +8   priority    ( stored/displayed only; not consulted )
   +16  xt          ( execution token of task body )
-  +24  dsp_save    ( saved data stack pointer — reserved )
-  +32  rsp_save    ( saved return stack pointer — reserved )
-  +40  name_addr   ( address of name string )
+  +24  dsp_save    ( computed nominal midpoint; never installed )
+  +32  rsp_save    ( initialized to zero; no return-stack arena )
+  +40  name_addr   ( initialized to zero; never populated )
 ```
 
-**Task registry**: `TASK-TABLE` — up to 8 tasks. `TASK-COUNT` tracks count.
+**Task registry**: `TASK-TABLE` holds up to eight descriptor pointers and
+`TASK-COUNT` is monotonic. `TASK-STACKS` occupies 2,055 bytes because an
+eight-byte `VARIABLE` body is followed by `2047 ALLOT`; the source comment's
+2,048-byte claim is incorrect. No execution word uses that arena. All XTs run
+on the caller's live data/return stacks, loop frames, and exception context.
 
 **Task lifecycle words**:
 | Word | Stack | Description |
 |---|---|---|
-| `TASK` | `( xt priority "name" -- )` | Create named task |
-| `SPAWN` | `( xt -- )` | Anonymous task, priority 128 |
+| `TASK` | `( xt priority "name" -- )` | Append a descriptor, register it if capacity remains, and define a constant |
+| `SPAWN` | `( xt -- )` | Append an anonymous descriptor with stored priority 128 |
 | `KILL` | `( tdesc -- )` | Mark task DONE |
 | `RESTART` | `( tdesc -- )` | Mark task READY again |
-| `BG` | `( xt -- )` | SPAWN + SCHEDULE |
-| `YIELD` | `( -- )` | Cooperatively mark current task DONE |
+| `BG` | `( xt -- )` | Execute `SPAWN SCHEDULE` before returning |
+| `YIELD` | `( -- )` | Mark the current descriptor DONE, then continue the same XT |
 
 **Scheduling words**:
 | Word | Stack | Description |
 |---|---|---|
-| `SCHEDULE` | `( -- )` | Run all READY tasks until none remain |
-| `FIND-READY` | `( -- tdesc\|0 )` | Find first READY task |
-| `RUN-TASK` | `( tdesc -- )` | Execute task, mark DONE on return |
+| `SCHEDULE` | `( -- )` | Repeatedly execute the first READY table entry to return |
+| `FIND-READY` | `( -- tdesc\|0 )` | Scan from slot zero; stored priority is ignored |
+| `RUN-TASK` | `( tdesc -- )` | Set RUNNING, execute inline, and mark DONE after normal return |
 
-**Timer preemption**:
-| Word | Stack | Description |
-|---|---|---|
-| `PREEMPT-ON` | `( -- )` | Enable timer-based preemption flag |
-| `PREEMPT-OFF` | `( -- )` | Disable timer preemption |
+DONE slots are never reclaimed. After eight registrations, `TASK` and `SPAWN`
+still append orphan 48-byte descriptors with an out-of-arena nominal DSP;
+`TASK` also publishes its constant and `SPAWN` still advances `SPAWN-COUNT`.
+Late constant parsing/publication or an exception from a task retains earlier
+registry and scheduler-state mutations. `CURRENT-TASK` remains stale even
+after ordinary completion.
+
+**Timer-control discrepancy:** `PREEMPT-ON` writes timer control value 5,
+which enables auto-reload but not IRQ generation. This source block never
+reads timer status or otherwise sets `PREEMPT-FLAG`. A manually set flag only
+reaches the non-suspending `YIELD`; `PREEMPT-OFF` writes control value 1, so it
+leaves the counter enabled and clears only the software gate. The words do not
+currently implement timer preemption.
+
+**Multicore-dispatch discrepancy:** The qualified hosted topology advertises
+one full core. `CORE-RUN` therefore has no valid target, `CORE-WAIT 0` observes
+only an idle worker slot, and `P.RUN-PAR` takes ordinary ordered `P.RUN`
+without dispatch or speedup. Direct `WAKE-CORE` fails rather than inventing a
+worker. Both all-core wait loops use plain `DO`; with equal bounds at one they
+enter phantom core 1, so strict `CORE-STATUS` makes them and `BARRIER` fail
+instead of silently treating them as no-ops. The larger-topology pipeline
+branch is not round-robin, uses shared scratch, does not check worker
+availability, and can violate ordered dependencies. `P.BENCH-PAR` also leaks
+its input pipeline. Exact provenance and the complete edge contract are in
+`docs/kdos-reference.md` §8.1.
+
+**Run-queue through lock discrepancy:** The §8.2–§8.7 source surface is
+executable as one-core state tables, not as a multicore OS. The eight-index
+run queues and inboxes have sentinel-ring capacity seven. `SCHED-CORE 0` runs
+FIFO XTs inline, but both passes in `SCHED-ALL` repeat the equal-bound plain
+`DO` defect. They enter phantom queue tables, then unchecked addresses beyond
+the initialized arrays; bounded hosted execution does not reach the core-0
+drain. Balanced and affinity schedulers inherit that tail. Work stealing is
+unlocked explicit queue motion, and `BALANCE` is a one-core no-op.
+
+`SPAWN-ON` queues before registration, can retain a queue-only XT when the
+task table is full, and produces a READY descriptor which `SCHED-AFFINE`
+queues a second time before marking it RUNNING. Per-core preemption flags are
+manual: Timer control 7 has no ISR-to-flag connection, and checkpointing only
+clears a flag and continues. Messaging is a software inbox without an IPI;
+successful `MSG-RECV` leaks an extra core cell, which propagates through
+dispatch and flush. Named locks are depthless physical-core conventions;
+`WITH-LOCK` strands ownership on exceptional exit. Complete stack effects,
+load provenance, and index hazards are recorded in `docs/kdos-reference.md`
+§8.2–§8.7.
 
 **BIOS timer/interrupt words** (bios.asm):
 | Word | Stack | Description |
@@ -1093,6 +1278,10 @@ provide visual hierarchy within each screen.
    Scheduler: cooperative     (or "preempt ON" in green)
    Tasks rdy: 0
 ```
+
+The literal `cooperative` / `preempt ON` labels report the source's selected
+software mode. They overstate the execution semantics described in §5.4 and
+are not evidence of task suspension or timer-driven switching.
 
 ### Screen 2 — Buffers
 
@@ -1340,7 +1529,8 @@ data-pipe P.RUN
 * OS is a set of vocabularies layered on top
 * UI screens are Forth words that emit UART escape sequences
 * Kernel installation = defining Forth words that drive the tile engine
-* Buffer creation = allocating tile-aligned RAM and writing a descriptor
+* Buffer creation = allocating data and writing a descriptor; alignment is a
+  constructor-specific guarantee
 * Scheduling = a Forth word that walks the pipeline DAG
 
 If the OS faults:
@@ -1364,7 +1554,8 @@ Summary:
 - **Phase 5**: Data Ports (✅ v0.7)
 - **Phase 6**: Advanced Kernels & Real-World Data (✅ v0.8)
 - **Phase 7**: User Experience (✅ v0.9a–v0.9e, v1.0)
-- **Phase 8**: Multicore (✅ v1.1 — BIOS multicore words, KDOS dispatch, parallel pipelines)
+- **Phase 8**: Multicore (source surface qualified on one core; secondary
+  dispatch, synchronization, and parallel speedup remain unimplemented)
 
 ---
 
@@ -1379,7 +1570,8 @@ This machine is:
 It is a **Kernel Computer**:
 
 * where computation is installed as named, inspectable objects
-* data is explored live through typed, tile-aligned buffers
+* data is explored live through typed buffers, with tile alignment made
+  explicit where the constructor actually guarantees it
 * performance is visible in tile ops, cycle counts, and residency state
 * the tile engine is the unquestioned center of gravity
 * and the Forth console is always one fault away

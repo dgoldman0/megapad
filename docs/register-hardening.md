@@ -175,7 +175,7 @@ mechanical widening of register indices).  Cost: ~100 extra LUTs per
 micro-core for the wider register file (32×64 vs 16×64).  Can defer to
 a follow-up if area is tight on Kintex-7.
 
-### 4.4  Emulator (megapad64.py)
+### 4.4  Emulator (emulator/megapad64.py)
 
 | Location | Change |
 |----------|--------|
@@ -270,7 +270,7 @@ Trivially fits on Kintex-7.
 3. **mp64_cpu.v** — convert all register index expressions to use `nib5`/`dst5`/`src5`
 4. **mp64_cpu.v** — update MARK/RET/DIS/SAV for 16-bit T
 5. **mp64_cpu.v** — update reset to clear R[0:31]
-6. **megapad64.py** — REX prefix handling + T widening
+6. **emulator/megapad64.py** — REX prefix handling + T widening
 7. **asm.py** — R16–R31 support + auto REX emission
 8. **tests** — verify R16+ load/store/ALU, SEP R16+, MARK/RET round-trip
 9. **isa-reference.md** — document everything

@@ -185,6 +185,16 @@ holding it. They also must not enter those wrappers while retaining lock 8 via
 an active `SHA3-BEGIN`/SHAKE transaction; such a call is an API-order error even
 though both guards are nonblocking and therefore cannot deadlock.
 
+There is an open limitation in the cleanup-failure wording. KDOS retains lock
+9 when its selected lower hash clear fails and describes that state as
+fail-closed. The depthless hardware bank still reports a same-physical-core
+reacquire as success, however, so the retained lock excludes other cores but
+does not exclude a later task or wrapper on the retaining core; one later
+release can free it. This record does not choose between adding exact software
+owner bookkeeping to KDOS and changing the hardware lock contract. Until one
+of those changes is qualified, callers must treat the retaining core as
+unusable for further HMAC/HKDF work after that cleanup failure.
+
 Public KDOS TLS operations that touch shared workspace acquire lock 10 first.
 Recursive entry is tracked in software by the exact
 `(COREID,TASK-ID)` and a depth count because hardware same-core reacquisition
@@ -1225,8 +1235,8 @@ fixtures in:
 - `rtl/sim/tb_cpu_micro.v`; and
 - `rtl/sim/tb_cpu_smoke.v`.
 
-The implementation cutover updates `asm.py`, `megapad64.py`,
-`accel/mp64_accel.cpp`, `accel_wrapper.py`, `rtl/pkg/mp64_pkg.vh`,
+The implementation cutover updates `asm.py`, `emulator/megapad64.py`,
+`emulator/accel/mp64_accel.cpp`, `emulator/accel_wrapper.py`, `rtl/pkg/mp64_pkg.vh`,
 `rtl/pkg/mp64_cpu_funcs.vh`, `rtl/crypto/mp64_crc_isa.v`, both CPU decoders,
 cluster arbitration/state, native snapshots, and runtime instruction-length
 classification together. Full-core and microcore SKIP paths use

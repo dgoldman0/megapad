@@ -69,7 +69,13 @@ The tile engine is controlled entirely through **Control/Status Registers**
 | `TSRC1` | `0x17` | `TSRC1!` | **Source tile 1** — pointer to the second input tile |
 | `TDST` | `0x18` | `TDST!` | **Destination tile** — where results are written |
 
-All three must point to **64-byte-aligned** addresses.
+Software should normally make all three addresses **64-byte aligned**. The
+current backends do not yet agree on misalignment: internal RTL aliases down
+to a tile boundary, the untimed executable emulator uses the exact address,
+and strict-cycle transport rejects an unaligned beat. KDOS `ARENA-BUFFER`
+guarantees only eight-byte alignment. Until that discrepancy is resolved,
+portable code must align explicitly; the hosted semantic simulator uses the
+exact address and requires the complete 64-byte span to fit one mapped region.
 
 ### Mode Register (TMODE, CSR `0x14`)
 
@@ -466,11 +472,28 @@ All standard TALU, TMUL, and TRED operations work with FP16/BF16:
 
 ### FP32 Accumulation
 
-When computing DOT, SUM, or SUMSQ with FP16/BF16 inputs, products are
-computed in **FP32 precision** and accumulated with FP32 addition.  The
-accumulator registers ACC0–ACC3 hold FP32 values.  This matches modern
-AI accelerator behavior (TPU, Tensor Cores) and prevents catastrophic
-precision loss during large summations.
+DOT, SUM, and SUMSQ publish one raw binary32 result in ACC0; the Python and
+hosted paths clear ACC1--ACC3. `TDOTACC` instead publishes four binary32 chunk
+results across ACC0--ACC3.
+
+The reduction order is not yet one backend-independent FP32 algorithm. Python
+and the hosted simulator use host-language `sum` for each SUM/SUMSQ tile and
+pack once to binary32; the native accelerator currently routes those functions
+back to Python, though its direct C++ body uses sequential binary32. RTL uses a
+balanced binary32 tree. TDOT uses a binary64 loop in Python/native before its
+binary32 pack, while RTL has its own tree. Cancellation and signed-zero results
+can differ, so “FP32 accumulation” names the output/intent rather than a bitwise
+cross-backend guarantee.
+For ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds it
+to the tile subtotal in binary64, and repacks; that pack is the inter-tile
+rounding point.
+
+There is also a known executable conversion discrepancy: the exact FP16
+product `0x0017 * 0x5190` lies at the largest-subnormal/minimum-normal tie.
+Python/C++ and the hosted compatibility model currently encode it as zero,
+where IEEE round-to-nearest-even would produce `0x0400`. Reserved EW 6/7 are
+not formats: hosted execution rejects them, while existing Python/C++ and RTL
+paths alias them differently. These discrepancies remain open.
 
 ---
 
@@ -840,6 +863,16 @@ for each chunk automatically:
 | `B.ADD` | `( src1 src2 dst -- )` | Element-wise add using tile TADD per tile pair |
 | `B.SUB` | `( src1 src2 dst -- )` | Element-wise subtract using tile TSUB per tile pair |
 
+This table names the intended operation family, not stronger validation than
+the current source performs. Every word above forces unsigned-byte TMODE.
+Rounded-up final tiles are processed in full, so reductions include trailing
+physical bytes and ADD/SUB can overwrite a partial destination tail. ADD/SUB
+take their count only from the leftmost stack argument named `src1`, loaded
+into hardware TSRC0. Current multi-tile B.MIN/B.MAX also have a
+stack-order defect: after the first tile they use the running byte extreme as
+TSRC0 instead of the advanced data address. `B.SCALE` is a separate scalar
+modulo-256 byte loop, not a MEX operation.
+
 **How `B.SUM` works internally:**
 
 1. Set `TMODE` to 8-bit unsigned (`0`)
@@ -852,7 +885,7 @@ for each chunk automatically:
 
 **How `B.ADD` works internally:**
 
-1. Compute the number of tiles: `buffer-size / 64`
+1. Compute the ceiling tile count from `src1`'s byte size
 2. For each tile index:
    - Point `TSRC0` at src1's tile, `TSRC1` at src2's tile, `TDST` at dst's tile
    - Execute `TADD`
@@ -926,8 +959,8 @@ ACC@ .   \ Prints 5376  (= 256 × 3 × 7)
 Or, using KDOS buffers (much simpler):
 
 ```forth
-256 0 1 BUFFER: my-a
-256 0 1 BUFFER: my-b
+0 1 256 BUFFER my-a
+0 1 256 BUFFER my-b
 3 my-a B.FILL   7 my-b B.FILL
 my-a my-b kcorrelate .   \ Prints 5376
 ```

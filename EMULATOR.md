@@ -11,7 +11,8 @@ and an interactive CLI monitor/debugger.
 > seven physical tile engines, seven 2,048-bit full-width TACCs,
 > 3 MiB HBW math RAM, mailbox IPI, spinlocks, extended tile execution
 > (saturating, FP16/BF16, strided/2D, CRC, BIST), crypto accelerators
-> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, ML-KEM-512) plus a
+> (AES-256-GCM, SHA-3/SHAKE, TRNG, Field ALU, NTT, and a working Python
+> ML-KEM-512 value path whose current RTL counterpart remains a stub) plus a
 > qualified checked WOTS chain with real Bank 0 DMA and shared
 > Keccak, optional
 > C++ CPU accelerator (63× speedup), pluggable NIC backends (loopback,
@@ -97,12 +98,12 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 └──────────────────────┬───────────────────────────────────┘
                        │
 ┌──────────────────────▼───────────────────────────────────┐
-│                    system.py                              │
+│                emulator/system.py                        │
 │       MegapadSystem — 16-core heterogeneous SoC          │
 │                                                          │
 │  ┌──────────────┐    ┌────────────────────────────┐  │
-│  │  megapad64.py │    │       devices.py          │  │
-│  │   CPU core    │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
+│  │ megapad64.py │    │ devices.py                 │  │
+│  │   CPU core   │    │ ┌──────┐ ┌─────┐ ┌─────────┐ │  │
 │  │  32 × 64-bit  │◄──►│ │ UART │ │Timer│ │ Storage │ │  │
 │  │  registers    │    │ └──────┘ └─────┘ └─────────┘ │  │
 │  │  full ISA     │    │ ┌─────────┐ ┌───────┐        │  │
@@ -134,13 +135,13 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 
 | File | Lines | Role |
 |---|---|---|
-| `megapad64.py` | — | CPU core — 32×64-bit GPRs (R0–R31 via REX), all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
-| `accel/` | — | Multi-source C++ execution kernel (pybind11), including host DBT support |
-| `accel_wrapper.py` | — | Drop-in Python wrapper; `system.py` tries this first, falls back to `megapad64.py` |
+| `emulator/megapad64.py` | — | CPU core — 32×64-bit GPRs (R0–R31 via REX), all 16 instruction families, flags, CSRs, traps, tile engine, extended ops, FP16/BF16, STXI/STXD.D, micro-core variant (1802-heritage stripped) |
+| `emulator/accel/` | — | Multi-source C++ execution kernel (pybind11), including host DBT support |
+| `emulator/accel_wrapper.py` | — | Drop-in Python wrapper; `emulator/system.py` tries this first, falls back to `emulator/megapad64.py` |
 | `asm.py` | — | Two-pass assembler — full mnemonic set, `ldi64`, `.ascii`, `.asciiz`, `.db`/`.dw`/`.dd`/`.dq`, SKIP |
-| `devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
+| `emulator/devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
 | `nic_backends.py` | — | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
-| `system.py` | — | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
+| `emulator/system.py` | — | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | — | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
 | `bios.asm` | — | Forth BIOS v1.0 — subroutine-threaded interpreter, 481 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile/TACC, I-cache, cooperative multitasking) |
 | `tests/test_megapad64.py` | — | CPU + tile engine test suite |
@@ -181,7 +182,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0400` | 128 B | NIC (Network Interface) |
 | `+0x0500` | 16 B | Mailbox (inter-core IPI) |
 | `+0x0600` | 64 B | Spinlock (hardware mutexes) |
-| `+0x0700` | 64 B | AES-256/128-GCM (authenticated encryption) |
+| `+0x0700` | 112 B | AES-256/128-GCM (authenticated encryption; key mode at `+0x073A`) |
 | `+0x0780` | 96 B | SHA-3/SHAKE (hashing, key derivation) |
 | `+0x07E0` | 16 B | Reserved; no integrated QoS MMIO device (access faults) |
 | `+0x0800` | 32 B | TRNG (hardware entropy source) |
@@ -189,8 +190,8 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x0880` | 16 B | Port I/O Bridge (remap CSR — maps OUT/INP to MMIO targets) |
 | `+0x08A0` | 32 B | Qualified checked byte-only WOTS chain (64-bit read-only Bank 0 context DMA) |
 | `+0x08C0` | 64 B | NTT Engine (256-point NTT/INTT) |
-| `+0x0900` | 64 B | KEM Engine (ML-KEM-512) |
-| `+0x0A00` | 64 B | Framebuffer controller |
+| `+0x0900` | 40 B | Executable Python KEM Engine (ML-KEM-512); the 64-byte RTL allocation has an incompatible slot ABI and crypto stub |
+| `+0x0A00` | 80 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
 | `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
 
@@ -614,15 +615,47 @@ following status check, including after the final byte.
 
 **Field ALU (GF(p) arithmetic)**
 `FADD` `FSUB` `FMUL` `FSQR` `FINV` `FPOW` `FMUL-RAW`
-`GF-A!` `GF-R@` `GF-PRIME` `LOAD-PRIME` `FMUL-ADD-RAW`
+`FCMOV` `FCEQ` `FMAC` `FMUL-ADD-RAW`
+`GF-A!` `GF-R@` `GF-PRIME` `LOAD-PRIME`
+
+These 15 raw words use addresses to 32-byte little-endian values; raw
+multiply/MAC take separate low and high destinations, and `FCMOV` takes an
+operand address plus a condition-byte address. See the
+[BIOS reference](docs/bios-forth.md#field-alu--multi-prime-arithmetic-15-raw-words)
+for persistent per-core state, canonical-input qualifications, and current
+Python/native/RTL discrepancies.
 
 **NTT Engine**
 `NTT-LOAD` `NTT-STORE` `NTT-FWD` `NTT-INV` `NTT-PMUL`
-`NTT-PADD` `NTT-SETQ` `NTT-STATUS@` `NTT-WAIT`
+`NTT-PADD` `NTT-SETQ` `NTT-IDX!` `NTT-STATUS@` `NTT-WAIT`
+
+These are the 10 raw words in the checked-in dictionary chain. The executable
+BIOS/Python-device contract and current RTL NTT differ in register layout,
+transfer width, configurable-root behavior, and timing. The retained public
+service is the executable generic cyclic transform, not a standardized
+ML-KEM/ML-DSA negacyclic operation; see the
+[BIOS reference](docs/bios-forth.md#ntt-engine-10-raw-words).
 
 **KEM Engine (ML-KEM-512)**
-`KEM-KEYGEN` `KEM-ENCAPS` `KEM-DECAPS` `KEM-SETQ`
-`KEM-STATUS@` `KEM-PK@` `KEM-CT@`
+`KEM-SEL!` `KEM-LOAD` `KEM-STORE` `KEM-KEYGEN`
+`KEM-ENCAPS` `KEM-DECAPS` `KEM-STATUS@`
+
+These are the exact seven raw words in the checked-in dictionary chain. The
+working Python byte map at `+0x0900` is STATUS `+00`, CMD `+01`, BUF_SEL `+08`,
+DIN `+10`, DOUT `+18`, and uint16-LE BUF_SIZE `+20..+21`. Commands complete
+synchronously and leave status DONE=2; five shared retained buffers have no
+owner or automatic wipe. The current RTL instead combines CMD/STATUS at the
+`+00` 64-bit slot, DIN/DOUT at `+10`, IDX_SET/BUF_SIZE at `+18`, exposes IDX at
+`+20`, reports BUSY during a multi-cycle operation, and emits deterministic
+XOR stub output. It is not BIOS-compatible ML-KEM execution.
+
+The valid-key zero-seed/zero-coin fixture agrees byte-for-byte with local
+OpenSSL 3.5.2 ML-KEM-512, but this is not FIPS certification, hostile external
+key validation, constant-time execution, or a protected host-secret boundary.
+KDOS declares `KEM-SEED-SIZE=64`, matching the complete 64-byte `d || z`
+input loaded by `KYBER-KEYGEN`; `KYBER-ENCAPS` continues to consume the first
+32 bytes as coins. This is the locked Akashic-facing contract. See the
+[BIOS reference](docs/bios-forth.md#kem-engine--ml-kem-512-7-words).
 
 **Disk / Storage**
 `DISK@` `DISK-SEC!` `DISK-DMA!` `DISK-N!` `DISK-READ` `DISK-WRITE` `DISK-FLUSH`
@@ -870,8 +903,8 @@ unchanged. Namespaced artifacts live in the UID-owned, mode-`0700` directory
 | PyPy + xdist -n 8 | 8 workers | ~24 min | 1.7× |
 | **CPython + C++ accel -n 8** | **8 workers** | **~23 s** | **104×** |
 
-The C++ accelerator (`accel/`) reimplements the CPU step loop as a
-multi-source pybind11 execution kernel. `system.py` imports it automatically
+The C++ accelerator (`emulator/accel/`) reimplements the CPU step loop as a
+multi-source pybind11 execution kernel. `emulator/system.py` imports it automatically
 when available and falls back to pure Python if not. The accelerator handles
 single-core and multicore execution (C++ for the active core, Python for device I/O
 and MMIO dispatch).

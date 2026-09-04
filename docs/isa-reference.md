@@ -1007,19 +1007,20 @@ RTL decode and cluster-lock paths implement this `SHA.RELEASE` contract.
 #### Field ALU Sub-Operations (sub-op 0x20–0x2D)
 
 All Field ALU operands and results are 256-bit, stored in ACC0–ACC3 (CSRs
-0x19–0x1C).  Operand B comes from tile memory at M[TSRC0] (32 bytes).
+0x19–0x1C). Operand B is read as four ascending little-endian qwords from
+M[TSRC0]. Raw high halves are written as four ascending qwords to M[TDST].
 
 | Sub-op | Mnemonic | Bytes | Cycles | Operation |
 |--------|----------|-------|--------|-----------|
-| `0x20` | **GF.ADD** | 2 | 1 | `ACC ← (ACC + M[TSRC0]) mod p` |
-| `0x21` | **GF.SUB** | 2 | 1 | `ACC ← (ACC − M[TSRC0]) mod p` |
+| `0x20` | **GF.ADD** | 2 | 1 | One-subtraction selected-prime addition; `(ACC + B) mod p` for canonical inputs |
+| `0x21` | **GF.SUB** | 2 | 1 | Selected-prime subtract/compensate; `(ACC − B) mod p` for canonical inputs |
 | `0x22` | **GF.MUL** | 2 | 1–4 | `ACC ← (ACC × M[TSRC0]) mod p` (1 cy built-in, 4 cy REDC). |
 | `0x23` | **GF.SQR** | 2 | 1–4 | `ACC ← ACC² mod p` |
 | `0x24` | **GF.INV** | 2 | ~767 | `ACC ← ACC^(p−2) mod p` (Fermat's little theorem) |
 | `0x25` | **GF.POW** | 2 | ~767 | `ACC ← ACC^(M[TSRC0]) mod p` (binary method) |
 | `0x26` | **GF.MULR** | 2 | 1 | Raw 256×256→512: `{M[TDST], ACC} ← ACC × M[TSRC0]` |
-| `0x27` | **GF.MAC** | 2 | 1–4 | `ACC ← (prev + ACC × M[TSRC0]) mod p` (accumulate) |
-| `0x28` | **GF.MACR** | 2 | 1 | Raw MAC: `{M[TDST], ACC} ← prev_512 + ACC × M[TSRC0]` |
+| `0x27` | **GF.MAC** | 2 | 1–4 | One-subtraction add of previous-low to the selected product |
+| `0x28` | **GF.MACR** | 2 | 1 | Raw MAC: `{M[TDST], ACC} ← (prev_512 + ACC × M[TSRC0]) mod 2^512` |
 | `0x29` | **GF.CMOV Rd** | 3 | 1 | If `R[d] ≠ 0`: `ACC ← M[TSRC0]`; else unchanged. Constant-time. |
 | `0x2A` | **GF.CEQ** | 2 | 1 | Constant-time equality: `ACC ← (ACC == M[TSRC0]) ? 1 : 0`, sets Z flag. |
 | `0x2B` | **GF.PRIME imm8** | 3 | 1 | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom. |
@@ -1033,15 +1034,31 @@ All Field ALU operands and results are 256-bit, stored in ACC0–ACC3 (CSRs
 |-----|------|-------------|
 | `0x85` | GF_PRIME_SEL | Active prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
 
-**Primes:** GF.ADD/SUB/MUL/SQR use the selected prime for modular
-reduction.  Built-in primes (0–2) have optimised single-cycle reducers.
-Custom prime (sel=3) uses Montgomery REDC (4-cycle multiply pipeline).
+**Primes:** selectors 0–2 name Curve25519, secp256k1, and NIST P-256.
+Selector 3 names the custom value latched by GF.LDPRIME; native C++ and the
+Python model fall back to Curve25519 when that value is zero. GF.LDPRIME does
+not change the selector or validate `p`/`p_inv`. Montgomery REDC is enabled
+only for selector 3 with nonzero `p_inv`, and only for GF.MUL, GF.SQR, and the
+product portion of GF.MAC. GF.INV and GF.POW use ordinary residues.
 
-**Flags:** GF.CEQ sets the Z flag (constant-time).  All other field ALU
-ops do not modify flags (side-channel resistance).
+The portable arithmetic domain is canonical inputs and a valid prime/custom
+Montgomery tuple. ADD/SUB behavior outside it differs among native C++, Python,
+and standalone RTL. Native C++ can retain hidden upper previous-low limbs after
+noncanonical ADD/SUB, and its current GF.MACR misses a low-to-high carry; the
+Python model and standalone RTL implement the wrapped 512-bit raw result.
+Standalone RTL also lacks the custom-zero fallback. These are implementation
+defects/discrepancies, not additional ISA results.
 
-**Micro-cores:** CRC is available through the cluster-shared engine described
-above. Availability of the other EXT.CRYPTO units is implementation-specific.
+**Flags:** raw GF.CEQ sets Z; the other raw Field operations do not. The BIOS
+`FCEQ` wrapper subsequently runs flag-writing address increments while storing
+ACC, so it exposes only its 256-bit 1/0 memory result. Constant-time wording
+describes the intended hardware datapath, not host emulator/simulator timing.
+
+**Integration:** the standalone Field leaf is not wired into the current
+full-core dispatch, and the microcore/cluster path does not currently provide
+a complete Field execution route. CRC remains available through the
+cluster-shared engine described above; other EXT.CRYPTO availability is
+implementation-specific.
 
 ---
 
@@ -1131,9 +1148,15 @@ low nibble of the opcode byte.
 | `0x6A` | **PERF_TILE_OPS** | 64 | R | Total MEX instructions completed |
 | `0x6B` | **PERF_EXTMEM** | 64 | R | 64-bit external memory transfers |
 | `0x6C` | **PERF_CTRL** | 64 | RW | Bit 0: enable counting, Bit 1: reset all |
+| `0x6D` | **CL_PRIV** | 1 | RW cluster | Shared privilege state for the caller's micro-core cluster |
+| `0x6E` | **CL_MPU_BASE** | 64 | RW cluster | Shared cluster MPU lower bound (inclusive) |
+| `0x6F` | **CL_MPU_LIMIT** | 64 | RW cluster | Shared cluster MPU upper bound (exclusive) |
 | `0x70` | **ICACHE_CTRL** | 64 | RW | Bit 0: enable, Bit 1: invalidate all (auto-clear) |
 | `0x71` | **ICACHE_HITS** | 64 | R | I-cache hit counter (since last invalidate) |
 | `0x72` | **ICACHE_MISSES** | 64 | R | I-cache miss counter (since last invalidate) |
+| `0x73` | **CL_IVTBASE** | 64 | RW cluster | Shared interrupt-vector base for the caller's micro-core cluster |
+| `0x74` | **BARRIER_ARRIVE** | N | RW cluster | Read the N-bit arrival mask; a write marks the calling micro-core as arrived regardless of data |
+| `0x75` | **BARRIER_STATUS** | 64 | R cluster | Cluster arrival vector plus done indication; current backends disagree on the done bit and lifetime |
 | | | | | |
 | `0x80` | **CRC_ACC** | 64 | RW full / R micro | Running or finalized CRC accumulator; micro-core writes are ignored |
 | `0x81` | **CRC_MODE** | 64 | RW full / R micro | 0/1/2/4/5/6 select a complete CRC mode; every other complete value becomes 0 on full-core writes, and micro-core writes are ignored |
@@ -1188,8 +1211,17 @@ A violation fires `IVEC_PRIV_FAULT` (vector 15) with the faulting address
 saved in `TRAP_ADDR`.  Supervisor mode (`PRIV == 0`) is never checked —
 all addresses are accessible.
 
-Micro-cores do not implement the MPU (they have no privilege model and run
-exclusively in supervisor-equivalent mode).
+Micro-cores use cluster-shared `CL_PRIV`, `CL_MPU_BASE`, and `CL_MPU_LIMIT`
+state in the RTL. Its scalar arbiter always permits MMIO and cluster-local
+scratchpad, blocks HBW in user mode, and otherwise enforces the half-open
+cluster window. Full cores do not own that cluster domain: current full-core
+CSR reads return zero and writes are ignored.
+
+Backend parity remains open. The Python cluster model retains and forwards the
+three CSRs but explicitly omits scalar MPU enforcement, while the current RTL
+and Python paths do not enforce the documented supervisor-only restriction on
+cluster-state writes. These are implementation discrepancies, not additional
+portable privilege guarantees.
 
 ### Trap Entry Sequence
 

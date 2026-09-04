@@ -7248,8 +7248,19 @@ w_min:
     addi r14, 8
     ldn r7, r14               ; a
     cmp r7, r1
-    brle w_min_done            ; a <= b, keep a
-    mov r7, r1                ; a > b, use b
+    ; Signed less-than is N xor V after CMP.  The architectural G/LE
+    ; conditions are unsigned, so derive the signed condition explicitly.
+    ldi r0, 0
+    csrr r0, 0x00             ; FLAGS
+    mov r11, r0
+    lsri r11, 2
+    andi r11, 0x01            ; N
+    lsri r0, 3
+    andi r0, 0x01             ; V
+    xor r11, r0
+    cmpi r11, 0
+    brne w_min_done            ; a < b, keep a
+    mov r7, r1                ; a >= b, use b
 w_min_done:
     str r14, r7
     ret.l
@@ -7260,13 +7271,20 @@ w_max:
     addi r14, 8
     ldn r7, r14               ; a
     cmp r7, r1
-    brgt w_max_a              ; a > b, keep a
-    brle w_max_b              ; a <= b, use b
-w_max_a:
+    ; Signed less-than is N xor V after CMP.
+    ldi r0, 0
+    csrr r0, 0x00             ; FLAGS
+    mov r11, r0
+    lsri r11, 2
+    andi r11, 0x01            ; N
+    lsri r0, 3
+    andi r0, 0x01             ; V
+    xor r11, r0
+    cmpi r11, 0
+    breq w_max_done            ; a >= b, keep a
+    mov r7, r1                ; a < b, use b
+w_max_done:
     str r14, r7
-    ret.l
-w_max_b:
-    str r14, r1
     ret.l
 
 ; CELLS ( n -- n*8 )
@@ -10595,7 +10613,7 @@ w_leave_ok:
 ; 2/ ( n -- n/2 ) arithmetic shift right by 1
 w_two_slash:
     ldn r1, r14
-    lsri r1, 1
+    asri r1, 1
     str r14, r1
     ret.l
 
@@ -12977,7 +12995,7 @@ w_sep_snap:
 ;  Framebuffer — MMIO at 0xFFFF_FF00_0000_0A00
 ; =====================================================================
 ;  A memory-mapped framebuffer controller.  Does not own pixel memory;
-;  reads from HBW RAM at the address set by FB-BASE!.
+;  scanout resolves the VRAM, XMEM, or HBW address set by FB-BASE!.
 ;  Register offsets (from 0x0A00):
 ;    0x00  FB_BASE     (RW)  64-bit pixel data address
 ;    0x08  FB_WIDTH    (RW)  32-bit width in pixels

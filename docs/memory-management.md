@@ -114,7 +114,10 @@ recovered by `FREE`.
   data stack.
 - **Cost:** O(n) free-list search in the selected allocator; the XMEM path may
   fall back to an O(1) bump allocation.
-- **Constraint:** core-0 only (`?CORE0` guard).
+- **Constraint:** intended for serialized core-0 use. The XMEM `ALLOCATE` path
+  enforces `?CORE0`, but the current source does not put the same guard on raw
+  XMEM allocation/free/reset, XMEM `FREE`, or the shared `_RS-OLD` write at the
+  start of XMEM `RESIZE`. See the multicore discrepancy in §5.1.
 - **Size contract:** requests must be strictly positive. Values that cannot be
   aligned and represented in a signed cell fail before heap or free-list state
   changes.
@@ -197,6 +200,17 @@ pre-write validation rejects any returned span that intersects
 `[U-DICT-BASE,U-DICT-LIMIT)`. Wholly reclaimed pre-init buffers below the
 dictionary base remain valid free-list nodes.
 
+These checks prove only interval bounds. The current source has no allocation
+ledger and does not prove that a returned span starts at a live allocation,
+is aligned, is disjoint from another returned span, or has not already been
+freed. An interior subspan can therefore be admitted, and a double free can
+make a free-list node point to itself. This is an open source/contract gap;
+callers must pass each valid owned allocation exactly once. `XMEM-FREE` and
+`.XMEM` report the unused bump tail only, not bytes available in the free list.
+The floor constrains bulk reset only: free-list insertion does not compare a
+span with `XMEM-FLOOR`, so it is not an ownership barrier for persistent XBUF
+or dictionary-index storage.
+
 **Floor protection:** `XMEM-FLOOR` is the lowest address to which the bump
 allocator may reset. Before userland it protects persistent kernel XMEM
 allocations; userland initialization advances it to `U-DICT-LIMIT`, thereby
@@ -235,6 +249,7 @@ pool itself survives the admitted reset.
 
 ```forth
 HBW-ALLOT    ( u -- addr )   \ bump-allocate u bytes
+HBW-ALLOT?   ( u -- addr ior ) \ checked form; 0/-1 on ordinary overflow
 HBW-RESET    ( -- )          \ reset pointer (bulk free)
 HBW-TALIGN   ( -- )          \ align to 64-byte tile boundary
 HBW-FREE     ( -- u )        \ bytes remaining
@@ -245,6 +260,31 @@ HBW is a pure bump allocator with no individual free.  It has no
 free-list.  In practice, HBW arenas are short-lived tile/SIMD
 scratch buffers, and HBW is large (3 MiB), so abandoned slivers
 are tolerable.
+
+When HBW is present, zero-byte and exact-fit allocations succeed. Allocation
+returns the old pointer, advances by exactly the requested cell, and neither
+aligns nor clears storage. When HBW is absent, every allocation request,
+including zero bytes, fails. `HBW-RESET` resets only the shared pointer; stale
+addresses and bytes remain usable and may alias later allocations. All callers
+therefore share one cooperatively managed arena with no lock or owner.
+
+The current `graphics.f` placement at `HBW-BASE + 0x200000` does not advance
+`HBW-HERE` and can overlap an ordinary third-MiB allocation. It is not a hidden
+reservation contract. Graphics using HBW or XMEM must receive caller-owned
+storage or obtain it through the ordinary visible allocator and then program
+the framebuffer base from that allocation; dedicated VRAM remains separate.
+This is one target-source composition
+change shared by emulator and simulator, not a backend semantic divergence;
+implementation remains deferred until work resumes beyond the current
+rich-terminal stop line.
+
+The safe domain is a nonwrapping request no larger than the remaining mapped
+span. The current source adds before a signed `>` bound check even though its
+stack comment calls the request unsigned, so a high-cell request can wrap and
+be accepted. `HBW-TALIGN` also performs no limit check and can cross a
+non-64-aligned configured limit. Canonical 3 MiB HBW geometry is aligned. These
+are documented source limitations, not permission to substitute a different
+host allocator.
 
 **When to use XMEM:** large datasets, file contents, network buffers,
 map data — anything big that doesn't need 1-cycle latency.
@@ -257,9 +297,10 @@ CPU.
 ### 2.4 Arenas — `ARENA-NEW`, `ARENA-ALLOT`, `ARENA-DESTROY`
 
 Region-based scoped allocation.  An arena pre-allocates a backing block
-from any of the three regions, then provides O(1) bump allocation
-within it and O(1) bulk deallocation.  No per-object headers, no
-free-list, no fragmentation within the arena.
+from any of the three regions, then provides O(1) bump allocation and O(1)
+pointer reset within it. Destruction performs one backing-release dispatch;
+its cost and reclamation behavior depend on the source. No per-object headers,
+no internal free-list, no fragmentation within the arena.
 
 Full specification: [arenas.md](arenas.md)
 
@@ -276,10 +317,16 @@ Full specification: [arenas.md](arenas.md)
 #### Core API
 
 ```forth
+\ Example checked helpers (not built-in KDOS words)
+: MUST-ARENA  ( size source -- arena )
+    ARENA-NEW ABORT" arena fail" ;
+: MUST-ARENA-AT  ( desc size source -- )
+    ARENA-NEW-AT ABORT" arena fail" ;
+
 \ Create
-4096 A-HEAP ARENA-NEW CONSTANT scratch    \ permanent descriptor
+4096 A-HEAP MUST-ARENA CONSTANT scratch
 CREATE my-desc 32 ALLOT                   \ or: user-placed descriptor
-my-desc 4096 A-XMEM ARENA-NEW-AT         \ no dictionary leak
+my-desc 4096 A-XMEM MUST-ARENA-AT
 
 \ Use
 scratch 256 ARENA-ALLOT   ( addr )        \ O(1) bump
@@ -304,6 +351,19 @@ scratch ARENA-DESTROY                     \ backing freed, descriptor zeroed
 | `A-XMEM` | 1 | External RAM (XMEM bump + free-list) |
 | `A-HBW` | 2 | HBW math RAM (bump only) |
 
+`ARENA-NEW` stores the caller's requested capacity, not the backing
+allocator's normalized size. Backing allocation happens before the four
+descriptor stores, so a later dictionary fault can leak the span.
+`ARENA-NEW-AT` likewise trusts its caller-provided destination and can leak or
+partially publish if a store faults; it does not reject reuse of a still-live
+descriptor.
+
+The normal bump-allocation domain is a positive representable request within
+capacity. Current source aligns through wrapping `7 + -8 AND` and then uses a
+signed `<` comparison. High-cell inputs can consequently round to zero or
+wrap the pointer below base. This is an open source defect, not large-size
+support.
+
 #### Snapshots
 
 ```forth
@@ -311,6 +371,10 @@ scratch ARENA-SNAP       ( snap )         \ save pointer
   \ ... tentative work ...
   ok? IF DROP ELSE scratch SWAP ARENA-ROLLBACK THEN
 ```
+
+Snapshot tokens are bare addresses. Rollback checks only that the value lies
+in the inclusive descriptor interval; it accepts future and unaligned values
+that were never returned by `ARENA-SNAP`.
 
 #### Scoped Arena Stack
 
@@ -320,16 +384,23 @@ scratch ARENA-PUSH                        \ push onto 4-deep stack
 ARENA-POP
 ```
 
-This supports **allocation-polymorphic code** — library words that call
-`AALLOT` without knowing which arena (or which region) is current.
+This supports **allocation-polymorphic code** under one coordinated owner —
+library words can call `AALLOT` without knowing which arena (or which region)
+is current. `ARENA-STK` and `ARENA-SP` are runtime-global, not task-local;
+parallel owners must pass distinct descriptors and call `ARENA-ALLOT`
+directly.
 
 #### Arena-Scoped Buffers
 
 ```forth
-65536 A-XMEM ARENA-NEW CONSTANT map-arena
-2 8 4096 map-arena ARENA-BUFFER tile-data  \ buffer lives in the arena
-map-arena ARENA-DESTROY                     \ buffer auto-unregistered
+65536 A-XMEM MUST-ARENA CONSTANT map-arena
+2 8 4096 map-arena ARENA-BUFFER arena-data \ only 8-byte data alignment
+map-arena ARENA-DESTROY                    \ unregister and destroy backing
 ```
+
+`ARENA-BUFFER` does not guarantee the 64-byte alignment required by tile
+operations. Destruction unlinks the descriptor from `BUFFERS`, but its named
+constant and 16-byte dictionary link remain; the old name is dangling.
 
 **When to use:** any pattern where multiple allocations share a
 lifetime — parse buffers, tile map scratch, per-task working memory,
@@ -387,6 +458,23 @@ dictionary full`; the corresponding Bank-0 diagnostic remains `dictionary
 overflow`. Even native `WORD` is checked because its transient counted string
 is written at `HERE` without advancing it.
 
+The partition policy proves nonempty spans, not useful minimum dictionary
+capacity or alignment of a nonstandard external-memory end. For example, a
+17-byte external region produces a one-byte user dictionary and a 16-byte
+general reserve, then moves XMEM HERE/floor to the resulting misaligned limit.
+Very large positive reserve rounding can cross the signed-cell boundary; the
+later signed minimum check then aborts before partition publication. These are
+current source edges rather than recommended machine profiles.
+
+Among the partition and allocator cells, a late initialization failure can
+update only the `_U-AVAILABLE` scratch before a later `ABORT"`; the published
+base, limit, saved HERE, allocator HERE/floor, and done flag remain unchanged.
+Before initialization, `.USERLAND` computes its displayed reserve from a zero
+dictionary limit and therefore prints the absolute external end. The display
+is capacity-meaningful only after the partition is sealed. Entry and leave are
+shared ordered state transitions, not locked transactions against corrupted
+public cells or concurrent callers.
+
 ---
 
 ## 3. Memory Lifetime Hierarchy
@@ -396,11 +484,14 @@ Lifetime         Strategy           Reclaim             Region
 ────────────────────────────────────────────────────────────────
 Permanent        Dictionary         MARKER / FORGET     Bank 0 / XMEM
 Long-lived       General heap ALLOCATE  FREE            XMEM / Bank 0
-Scoped           Arena              ARENA-DESTROY       Any
+Scoped           Arena              ARENA-DESTROY*      General / XMEM / HBW
 Transactional    Arena + snapshot    ARENA-ROLLBACK      Any
 Ephemeral        Bump (raw)         XMEM-RESET /        XMEM / HBW
                                     HBW-RESET
 ```
+
+`*` Arena destruction immediately reclaims general and raw-XMEM backing, but
+HBW backing remains abandoned until `HBW-RESET`.
 
 The discipline is: **choose the shortest lifetime that fits**.
 
@@ -464,9 +555,16 @@ The allocators use shared scratch `VARIABLE`s (`A-PREV`, `A-CURR`,
 cores calling `ALLOCATE` concurrently would corrupt these variables
 and silently destroy the free list.
 
-The rule: **all allocator words that touch shared state are core-0
-only.**  They enforce this with `?CORE0`, which aborts with a clear
-message if `COREID` ≠ 0.
+The intended rule is: **all allocator words that touch shared state are
+serialized and core-0 only.** The current enforcement is incomplete.
+Bank-0 allocation paths enforce `?CORE0`, as does the XMEM branch of public
+`ALLOCATE`. Raw `XMEM-ALLOT`, `XMEM-ALLOT?`, `XMEM-FREE-BLOCK`,
+`XMEM-TALIGN`, and `(XMEM-RESET)` do not. Public XMEM `FREE` reaches the
+unguarded raw free, and XMEM `RESIZE` writes shared `_RS-OLD` before its
+nested `ALLOCATE` performs the guard. Thus the table below states the caller
+contract, not a claim that every entry currently self-enforces it. This
+documentation/source discrepancy remains open rather than being hidden by a
+simulator-only lock.
 
 | Core-0 only | Why |
 |---|---|
@@ -475,13 +573,17 @@ message if `COREID` ≠ 0.
 | `ARENA-NEW`, `ARENA-NEW-AT` | Uses AR-SZ, AR-SRC, AR-BLK |
 | `ARENA-DESTROY` | Calls `FREE` or `XMEM-FREE-BLOCK` |
 
-| Safe on any core | Why |
+| Safe on any core with an exclusively owned descriptor | Why |
 |---|---|
 | `ARENA-ALLOT`, `ARENA-ALLOT?` | Pure stack + one arena-local pointer |
 | `ARENA-FREE`, `ARENA-USED` | Read-only |
-| `ARENA-SNAP`, `ARENA-ROLLBACK` | Single pointer write to own arena |
-| `AALLOT` | Delegates to `ARENA-ALLOT` via current-arena |
+| `ARENA-RESET`, `ARENA-SNAP`, `ARENA-ROLLBACK` | Read or write only the owned descriptor |
 | `@`, `!`, `C@`, `C!`, `MOVE`, `FILL` | Direct memory access |
+
+`ARENA-PUSH`, `ARENA-POP`, `CURRENT-ARENA`, and `AALLOT` use one global
+four-cell `ARENA-STK` plus `ARENA-SP`. They are unsynchronized, not task-local,
+and not automatically unwound on abort. They must not be used as concurrent
+per-core arena selection.
 
 ### 5.2 The Pattern: Core 0 as Memory Manager
 
@@ -491,9 +593,9 @@ time rather than implicitly on every memory access:
 
 ```forth
 \ ── Core 0: set up ──
-4096 A-XMEM ARENA-NEW CONSTANT c1-arena   \ allocate
-4096 A-XMEM ARENA-NEW CONSTANT c2-arena
-4096 A-XMEM ARENA-NEW CONSTANT c3-arena
+4096 A-XMEM MUST-ARENA CONSTANT c1-arena
+4096 A-XMEM MUST-ARENA CONSTANT c2-arena
+4096 A-XMEM MUST-ARENA CONSTANT c3-arena
 
 \ ── Core 0: dispatch ──
 ' task1 1 CORE-RUN                          \ map (hand arena to core)
@@ -510,16 +612,13 @@ c3-arena ARENA-DESTROY
 ```forth
 \ ── Secondary core: task body ──
 : task1  ( -- )
-    c1-arena ARENA-PUSH
-    256 AALLOT                              \ bump from own arena — no locks
-    ( ... compute ... )
-    ARENA-POP ;
+    c1-arena 256 ARENA-ALLOT                \ direct private-descriptor bump
+    ( ... compute ... ) ;
 ```
 
-Each core writes only to its own bump pointer.  No locks, no atomic
-CAS, no cache flushes, no false sharing.  The only synchronization
-points are arena creation (before dispatch) and arena destruction
-(after barrier).
+Each core writes only to its own descriptor and backing span. The lifecycle
+still requires arena creation before dispatch and destruction after the
+barrier; the global current-arena stack is deliberately not involved.
 
 This is equivalent to an MMU that maps a private virtual address space
 per process — but the "mapping" happens once at dispatch time in
@@ -533,16 +632,22 @@ barrier.  For cluster workloads, core 0 can pre-allocate an HBW arena
 and pass it to the cluster lead, which distributes sub-regions to
 micro-cores:
 
+`SPAD` is caller-relative cluster storage, not a portable core-0 address.
+Current Python micro-cores provide byte access modulo 1 KiB, whereas current
+RTL indexes `addr[9:3]` and transfers whole qwords, so KDOS byte words
+`SPAD-C@` and `SPAD-C!` are not yet cross-backend qualified. Full-core access
+has no legitimate cluster-local target. The hosted one-core simulator returns
+the architectural sentinel but deliberately leaves it unmapped rather than
+preserving an emulator fall-through alias.
+
 ```forth
 \ Core 0: allocate HBW scratch for cluster 0
-4096 A-HBW ARENA-NEW CONSTANT cl0-arena
+4096 A-HBW MUST-ARENA CONSTANT cl0-arena
 
 \ Cluster lead (core 4): split among 4 micro-cores
 : cluster-task  ( -- )
-    cl0-arena ARENA-PUSH
-    1024 AALLOT   ( my-scratch )
-    ( ... each micro-core gets its own slice ... )
-    ARENA-POP ;
+    cl0-arena 1024 ARENA-ALLOT   ( my-scratch )
+    ( ... cluster lead distributes disjoint slices ... ) ;
 ```
 
 ---
@@ -566,14 +671,16 @@ XMEM region:
   └──────────────────────────────┘  XMEM-LIMIT
 ```
 
-The one-shot KDOS initializer reserves at most 1/128 of free XMEM for the BIOS
-dictionary index, rounded down to a power-of-two number of 16-byte slots. The
+The one-shot KDOS initializer reserves at most 1/128 of the virgin XMEM bump
+tail for the BIOS dictionary index, rounded down to a power-of-two number of
+16-byte slots. Reclaimed free-list bytes are not part of this sizing input. The
 canonical 128 MiB arrangement uses 1 MiB. `XMEM-FLOOR` protects that table,
 later kernel allocations, and the dictionary from `XMEM-RESET`. The userland
-interval is sealed at `ENTER-USERLAND` time and is not reclaimable by the XMEM
-allocator. `LEAVE-USERLAND` disables the active BIOS bounds and switches
-`HERE` back to Bank 0 without affecting either XMEM side. `XMEM-INIT` is a
-boot-only one-shot; use `XMEM-RESET` for the supported post-boot reset.
+interval is sealed by `USERLAND-INIT`, normally lazily on the first
+`ENTER-USERLAND`, and is not reclaimable by the XMEM allocator.
+`LEAVE-USERLAND` disables the active BIOS bounds and switches `HERE` back to
+Bank 0 without affecting either XMEM side. `XMEM-INIT` is a boot-only
+one-shot; use `XMEM-RESET` for the supported post-boot reset.
 
 The module registry deliberately does not live in either XMEM zone.  Its
 stable exact-ID entries and any grown bucket vector use the Bank 0 heap through
@@ -586,6 +693,12 @@ Bank 0 dictionary space), then advances the floor:
 ```forth
 16384 XBUF my-data   \ lives in XMEM, protected from XMEM-RESET
 ```
+
+Publication is not transactional: on an XMEM system, allocation precedes the
+`CONSTANT` definition and floor advance. A later dictionary-publication fault
+can therefore leak an allocated block below the old floor. Boot composition
+must leave dictionary room for the definition; this remains an open failure
+atomicity gap rather than an implied rollback guarantee.
 
 ---
 
@@ -612,7 +725,7 @@ Bank 0 dictionary space), then advances the floor:
 |----------|------|------|-------|
 | Dictionary rewind | `CLEAN` (marker word) | O(dictionary + index capacity) | Contiguous active-zone history after marker |
 | Individual heap free | `addr FREE` | O(n) | One block |
-| Arena destroy | `arena ARENA-DESTROY` | O(1) | Entire arena |
+| Arena destroy | `arena ARENA-DESTROY` | One backing-release dispatch | Entire arena where the source supports reclaim |
 | Arena reset | `arena ARENA-RESET` | O(1) | All arena allocs (keeps backing) |
 | Arena rollback | `arena snap ARENA-ROLLBACK` | O(1) | Allocs after snapshot |
 | Checked bulk XMEM reset | `XMEM-RESET` | O(1) | All XMEM above floor, only when no TLS credential is active; no-op without XMEM |
@@ -672,7 +785,8 @@ task dispatch time:
 |---|---|---|
 | Page allocation | `ARENA-NEW` | Setup time |
 | Address mapping | `WAKE-CORE` (pass arena base) | Dispatch time |
-| Protection | Arena bounds + `?CORE0` | Enforced at call boundary |
+| Coordination guard | `?CORE0` | Enforced on shared allocator lifecycle calls |
+| Object bounds | Arena bump check | Intended per allocation; signed/wrapping source defects remain |
 
 The cost of a hardware MMU is attached to translation: a TLB hit is commonly
 part of the access pipeline, while a miss may require a page walk. The cost of
@@ -724,13 +838,13 @@ you do.
     DUP 4096 ARENA-ALLOT           ( arena buf )
     S" data.txt" READ-FILE
     ( ... parse buf ... )
-    ARENA-DESTROY ;                \ everything freed
+    ARENA-DESTROY ;                \ backing reclaimed; descriptor remains
 ```
 
 ### 9.2 Tile Map with Undo
 
 ```forth
-65536 A-XMEM ARENA-NEW CONSTANT map-arena
+65536 A-XMEM MUST-ARENA CONSTANT map-arena
 
 : TRY-BRUSH  ( x y tile -- )
     map-arena ARENA-SNAP
@@ -745,15 +859,19 @@ you do.
 ### 9.3 Per-Core Parallel Workload
 
 ```forth
+VARIABLE c1-work
+VARIABLE c2-work
+VARIABLE c3-work
+
 : SETUP-CORES  ( -- )
-    4096 A-XMEM ARENA-NEW CONSTANT c1-work
-    4096 A-XMEM ARENA-NEW CONSTANT c2-work
-    4096 A-XMEM ARENA-NEW CONSTANT c3-work ;
+    4096 A-XMEM ARENA-NEW ABORT" OOM" c1-work !
+    4096 A-XMEM ARENA-NEW ABORT" OOM" c2-work !
+    4096 A-XMEM ARENA-NEW ABORT" OOM" c3-work ! ;
 
 : TEARDOWN-CORES  ( -- )
-    c1-work ARENA-DESTROY
-    c2-work ARENA-DESTROY
-    c3-work ARENA-DESTROY ;
+    c1-work @ ARENA-DESTROY
+    c2-work @ ARENA-DESTROY
+    c3-work @ ARENA-DESTROY ;
 
 : PARALLEL-COMPUTE  ( -- )
     SETUP-CORES
@@ -806,8 +924,11 @@ Need permanent data or code?
 Need large storage with moderate latency?
   └─ XMEM arena  (A-XMEM)
 
-Need tile-engine-accessible working buffers?
-  └─ HBW arena  (A-HBW)
+Need HBW working storage with one shared lifetime?
+  └─ HBW arena  (A-HBW; individual destroy abandons backing until HBW-RESET)
+
+Need a tile-engine-aligned buffer?
+  └─ BUFFER / HBW-BUFFER, or explicitly prove a manually aligned arena address
 
 Running on a secondary core?
   └─ Arena only  (ARENA-ALLOT / AALLOT)
@@ -844,7 +965,7 @@ Switch the affected workload to arenas — arenas cannot fragment.
 | **Bank 0** | 1 MiB on-chip BRAM at address 0.  Holds BIOS, dictionary, heap, stacks. |
 | **XMEM** | External RAM (HyperRAM/SDRAM).  Large, higher latency.  Starts at 0x0010_0000. |
 | **HBW** | High-Bandwidth math RAM.  3 MiB on-chip BRAM at 0xFFD0_0000.  512-bit tile ports. |
-| **Arena** | Pre-allocated region with O(1) bump allocation and O(1) bulk free. |
+| **Arena** | Pre-allocated region with O(1) bump allocation and O(1) pointer reset; destruction is source-dependent. |
 | **Bump allocator** | Advances a pointer; no individual free.  Cannot fragment. |
 | **Free-list** | Linked list of available blocks.  First-fit search.  Can fragment. |
 | **Coalescing** | Merging adjacent free blocks to reduce fragmentation. |

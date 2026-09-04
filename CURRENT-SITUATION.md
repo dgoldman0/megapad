@@ -67,6 +67,18 @@
 > those pre-landing heads and adds no executable qualification. Exact
 > `ca02a40`/`4b86805` remain the qualified executable pair.
 
+> **Hosted-backend integration — 2026-09-04:** Canonical machine-emulator
+> implementation now lives under `emulator/`, hosted source execution under
+> `simulator/`, and backend-neutral models under `shared/`. Temporary flat
+> modules alias the canonical emulator modules during migration. The merged
+> source tree contains the rich-terminal implementation, but the simulator's
+> qualified frontier still stops after the ordinary checked KDOS load; loading
+> `rich-terminal.f` and driving its live session remain the next integration
+> phase. `bios.rom` is regenerated from the merged `bios.asm`. The checked-in
+> `fpga/bios.hex` remains the rich-terminal branch's pre-integration firmware
+> image and is not evidence for the newly locked emulator/simulator semantic
+> decisions.
+
 **Date:** 2026-03-07  
 **Branch:** `main`  
 **Status:** 1,797 tests passing, 35 skipped.
@@ -87,7 +99,7 @@
 - **UART device registers** — TX_FLUSH (`+0x06`, W), UART_CAPS (`+0x07`, R),
   and TX_RING_BASE (`+0x08`–`+0x0F`, W, 64-bit LE) are implemented by the
   emulator; RTL implements CAPS=0 alongside architectural TX/STATUS.
-- **Python batch callbacks** — `on_tx_batch(data)` in `devices.py`;
+- **Python batch callbacks** — `on_tx_batch(data)` in `emulator/devices.py`;
   `cli.py` uses `os.write` for console, `sendall` for headless TCP.
 - **New Forth word** — `TX-FLUSH` (dictionary entry #87).
 
@@ -186,11 +198,11 @@ line or test counts as current qualification evidence.
 | KDOS core (Bank 0) | `kdos.f` | ~8,100 |
 | Networking (userland) | `networking.f` | ~7,500 |
 | Tools | `tools.f` | 990 |
-| CPU emulator | `megapad64.py` | 3,002 |
-| SoC | `system.py` | 1,018 |
-| Devices | `devices.py` | 2,542 |
+| CPU emulator | `emulator/megapad64.py` | 3,002 |
+| SoC | `emulator/system.py` | 1,018 |
+| Devices | `emulator/devices.py` | 2,542 |
 | CLI | `cli.py` | 1,557 |
-| C++ accel | `accel/mp64_accel.cpp` | 3,295 |
+| C++ accel | `emulator/accel/mp64_accel.cpp` | 3,295 |
 | Assembler | `asm.py` | 909 |
 | Tests | `tests/test_system.py` | 24,761 (1,634 tests, 77 classes) |
 |       | `tests/test_networking.py` | 187 (13 tests) |

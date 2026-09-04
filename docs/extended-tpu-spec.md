@@ -323,39 +323,58 @@ them data via MMIO register writes and reads results back.
 
 ### 4.1 AES-256/128-GCM
 
-A hardware AES block supporting AES-256 and AES-128 encryption/decryption
-in GCM (Galois/Counter Mode) for authenticated encryption. The key size
-is selected via the `AES_KEY_MODE` register.
+The normative executable/native software ABI provides AES-256 and AES-128
+encryption/decryption in GCM (Galois/Counter Mode). The key size is selected
+via `AES_KEY_MODE`. The register image below describes that ABI; the current
+integrated RTL mismatch is recorded after the table.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
-| `AES_KEY[0..7]` | 0x700 | W | 256-bit key (8 × 32-bit writes; for AES-128 only first 4 used) |
-| `AES_IV[0..2]` | 0x720 | W | 96-bit IV/nonce |
-| `AES_AAD_LEN` | 0x730 | W | Additional authenticated data length |
-| `AES_DATA_LEN` | 0x734 | W | Plaintext/ciphertext length |
-| `AES_CMD` | 0x738 | W | Start: 0=encrypt, 1=decrypt |
-| `AES_STATUS` | 0x739 | R | Busy/done/auth-fail flags |
-| `AES_DIN` | 0x740 | W | 128-bit data input (4 × 32-bit writes) |
-| `AES_DOUT` | 0x750 | R | 128-bit data output |
-| `AES_TAG[0..3]` | 0x760 | R/W | 128-bit GCM authentication tag |
-| `AES_KEY_MODE` | 0x770 | W | Key size: 0 = AES-256 (default), 1 = AES-128 |
+| `AES_KEY[0..31]` | 0x700..0x71F | W | 32 key bytes; all 32 must be written in either mode |
+| `AES_IV[0..11]` | 0x720..0x72B | W | 12-byte IV/nonce |
+| `AES_AAD_LEN` | 0x730..0x733 | W32 LE | Additional-authenticated-data length in bytes |
+| `AES_DATA_LEN` | 0x734..0x737 | W32 LE | Plaintext/ciphertext length in bytes |
+| `AES_CMD` | 0x738 | W8 | Start: low bit 0 = encrypt, 1 = decrypt |
+| `AES_STATUS` | 0x739 | R8 | 0 = idle, 1 = active, 2 = done, 3 = authentication or transaction failure |
+| `AES_KEY_MODE` | 0x73A | W8 | Low bit 0 = AES-256 (default), 1 = AES-128 |
+| `AES_DIN[0..15]` | 0x740..0x74F | W | Ordered 16-byte input window |
+| `AES_DOUT[0..15]` | 0x750..0x75F | R | 16-byte output window |
+| `AES_TAG[0..15]` | 0x760..0x76F | R/W | 16-byte GCM authentication tag |
 
-**Data flow**: Software writes key, IV, then streams 16-byte blocks via
-AES_DIN. The hardware computes AES rounds and GHASH in parallel. When
-done, read AES_TAG for authentication. For decryption, write the
-expected tag first, then stream ciphertext — AES_STATUS reports
-auth-fail if the tag doesn't match.
+Naturally aligned 1-, 2-, 4-, and 8-byte native accesses are admitted when the
+whole access remains in `0x700..0x76F` and are decomposed little-endian into
+byte callbacks. The BIOS transfers key, IV, input, output, and tag byte-by-byte
+and uses 32-bit length stores. Software writes the complete configuration, writes
+the expected tag before a decrypt command, then feeds AAD blocks followed by
+data blocks through `AES_DIN`. `AES_STATUS` reaches 2 only after final GCM tag
+generation or successful comparison; malformed transactions and tag mismatch
+reach 3.
 
-**Performance target**: 1 block (16 bytes) per 11 cycles (pipelined
-AES-256 round function, 9 cycles for AES-128) + 1 cycle GHASH.
+> **Integrated RTL discrepancy.** The current SoC selects
+> `0x700..0x77F`, supplies no access-size signal to `mp64_aes`, and the leaf
+> recognizes mostly 32-bit register starts plus isolated command, status, and
+> key-mode byte offsets rather than the executable callback at every byte. It
+> also publishes a busy/done/auth-fail bitfield and lacks the executable
+> AAD/length-finalization, tag-comparison, and fail-closed transaction behavior.
+> It therefore does not currently implement the table above for unchanged BIOS
+> software. This is an unresolved implementation mismatch, not an alternative
+> normative ABI.
+
+**Historical, unqualified RTL performance target**: 1 block (16 bytes) per
+11 cycles (pipelined AES-256 round function, 9 cycles for AES-128) plus 1 cycle
+GHASH. Neither the executable native value model nor the hosted simulator
+claims this latency, and the current RTL has not qualified the target against
+the ABI above.
 
 **AES-128 mode**: Write 1 to `AES_KEY_MODE` before loading the key.
-The hardware uses a 10-round key schedule instead of 14. Only the
-first 4 key registers (`AES_KEY[0..3]`) are used. Used by TLS 1.3
-cipher suite 0x1301 (TLS_AES_128_GCM_SHA256).
+The executable/native mode uses a 10-round key schedule instead of 14. Only the
+first 16 key bytes affect AES-128, but the current executable native transaction
+check still requires software to write all 32 key bytes; the BIOS does so. Used
+by TLS 1.3 cipher suite 0x1301 (TLS_AES_128_GCM_SHA256).
 
-**Interrupt**: `IRQX_AES` (vector 12) fires when a block is done, for
-interrupt-driven streaming.
+**Unqualified RTL interrupt target**: `IRQX_AES` (vector 12) on block
+completion for interrupt-driven streaming. Interrupt behavior is not part of
+the current executable/native or hosted AES acceptance claim.
 
 ### 4.2 SHA-3 / SHAKE / raw Keccak accelerator
 
@@ -626,7 +645,7 @@ Additions to the existing MMIO map:
 | 0x400 | 128B | NIC (existing) |
 | 0x500 | 16B | Mailbox (existing) |
 | 0x600 | 64B | Spinlocks (existing) |
-| **0x700** | **64B** | **AES-256/128-GCM** |
+| **0x700** | **112B** | **AES-256/128-GCM** |
 | **0x780** | **96B** | **SHA-3/SHAKE** |
 | **0x7E0** | **16B** | **Reserved; no integrated QoS MMIO device** |
 | **0x800** | **32B** | **TRNG** |
@@ -746,7 +765,7 @@ Each feature gets:
    new module or datapath
 2. **Integration test**: added to `tb_multicore_smoke.v` or a new
    `tb_extended_tpu.v` that runs in full SoC context
-3. **Emulator parity**: matching implementation in `megapad64.py` so
+3. **Emulator parity**: matching implementation in `emulator/megapad64.py` so
    software can be developed in parallel with RTL
 4. **BIOS Forth words**: thin wrappers (TSHUFFLE, TPACK, TAES-ENC, etc.)
    added to the BIOS dictionary as each feature lands

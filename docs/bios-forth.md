@@ -30,7 +30,7 @@ English description, and notes on edge cases where relevant.
 
 ---
 
-## Stack Manipulation (16 words)
+## Stack Manipulation (17 words)
 
 These words rearrange the data stack without performing any computation.
 If you are new to Forth, mastering `DUP SWAP DROP ROT OVER` is the
@@ -53,6 +53,7 @@ essential first step.
 | `2OVER` | `( a b c d -- a b c d a b )` | Copy the second pair to the top. |
 | `2ROT` | `( a b c d e f -- c d e f a b )` | Rotate the third pair to the top. |
 | `PICK` | `( xn ... x0 n -- xn ... x0 xn )` | Copy the *n*-th item (0 = top) to the top. |
+| `ROLL` | `( xu xu-1 ... x0 u -- xu-1 ... x0 xu )` | Remove the *u*-th item and move it to the top. `0 ROLL` is a no-op, `1 ROLL` is `SWAP`, and `2 ROLL` is `ROT`. |
 | `DEPTH` | `( -- n )` | Number of items currently on the stack. |
 
 **Example — swapping and duplicating:**
@@ -67,8 +68,10 @@ ROT           \ stack: 10 10 20
 ## Return Stack (6 words)
 
 The return stack is normally used by the compiler for loop counters and
-subroutine returns, but you can temporarily stash values there.  **Always
-balance your `>R` / `R>` pairs within a single definition.**
+subroutine returns, but you can temporarily stash values there. **Always
+balance `>R`/`R>` and `2>R`/`2R>` within a single definition.** These six words
+are immediate compile-inline words intended for compiled definitions, not
+ordinary interpretation.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -78,6 +81,19 @@ balance your `>R` / `R>` pairs within a single definition.**
 | `2>R` | `( a b -- ) R:( -- a b )` | Move a pair to the return stack (a pushed first). |
 | `2R>` | `( -- a b ) R:( a b -- )` | Move a pair back from the return stack. |
 | `2R@` | `( -- a b ) R:( a b -- a b )` | Copy a pair from the return stack (non-destructive). |
+
+The return stack is one ordered structure. While a saved value or pair is
+above a `DO` frame, fixed-position words such as `I`, `J`, `LOOP`, `+LOOP`,
+`UNLOOP`, and `LEAVE` see that saved data where they expect loop state. Restore
+it first. A called helper also has its own continuation above the caller's
+saved data, so the helper must not try to retrieve the caller's value or pair.
+
+> **Open compile-state guard discrepancy.** The current executable BIOS marks
+> all six words immediate and their handlers emit inline MP64 instructions,
+> but those handlers do not check compilation state. Interpreting one can
+> therefore append raw instruction bytes at `HERE`. Hosted execution rejects
+> this use as compile-only; this documents a missing native guard rather than
+> treating dictionary corruption as a supported Forth behavior.
 
 **Example — saving a value across a computation:**
 ```forth
@@ -102,14 +118,28 @@ CPU trap (vector `IVEC_DIV_ZERO`).
 | `/MOD` | `( a b -- rem quot )` | Signed division with remainder. |
 | `NEGATE` | `( n -- -n )` | Two's-complement negation. |
 | `ABS` | `( n -- |n| )` | Absolute value. |
-| `MIN` | `( a b -- min )` | Smaller of two signed values. |
-| `MAX` | `( a b -- max )` | Larger of two signed values. |
+| `MIN` | `( a b -- min )` | Signed two's-complement minimum. |
+| `MAX` | `( a b -- max )` | Signed two's-complement maximum. |
 | `1+` | `( n -- n+1 )` | Increment by one. |
 | `1-` | `( n -- n-1 )` | Decrement by one. |
-| `2+` | `( n -- n+2 )` | Increment by two. |
-| `2-` | `( n -- n-2 )` | Decrement by two. |
+| `2*` | `( n -- n*2 )` | Left shift by one. |
+| `2/` | `( n -- n/2 )` | Arithmetic right shift by one, retaining the sign bit. |
 | `CELLS` | `( n -- n*8 )` | Convert a cell count to bytes (cells are 8 bytes). |
 | `CELL+` | `( addr -- addr+8 )` | Advance an address by one cell (8 bytes). |
+
+`MIN`, `MAX`, and `2/` are signed operations. This choice preserves Akashic's
+geometry, clipping, clamp, and signed-delta usage without source changes.
+`RSHIFT` remains the explicit logical right shift. The former unsigned
+`MIN`/`MAX` branches and logical `2/` implementation were backend defects, not
+alternate public meanings. Unsigned extrema, if introduced, use distinct
+`UMIN`/`UMAX` names.
+
+> **Open signed-`MOD` overflow edge.** The current native C++ and hosted Python
+> backends both handle `INT64_MIN % -1` without host-language overflow and
+> provisionally return the mathematical remainder zero. That safe backend
+> behavior does not decide whether the eventual public architecture should
+> return zero or trap. Current KDOS `RAND-RANGE` qualification requires a
+> positive signed divisor and cannot reach this edge.
 
 **Example — computing an average:**
 ```forth
@@ -169,7 +199,7 @@ All comparisons return a **flag**: `-1` for true, `0` for false.
 
 ---
 
-## Memory Access (18 words)
+## Memory Access (20 words)
 
 The Megapad-64 is a **64-bit little-endian** machine with byte-addressable
 memory.  A **cell** is 8 bytes (one 64-bit word).
@@ -178,6 +208,8 @@ memory.  A **cell** is 8 bytes (one 64-bit word).
 |------|-------------|-------------|
 | `@` | `( addr -- x )` | Fetch a cell (8 bytes) from memory. |
 | `!` | `( x addr -- )` | Store a cell (8 bytes) to memory. |
+| `+!` | `( n addr -- )` | Add *n* to the cell at *addr*, wrapping modulo 2^64. |
+| `OFF` | `( addr -- )` | Store a zero cell at *addr*. |
 | `C@` | `( addr -- c )` | Fetch a single byte. |
 | `C!` | `( c addr -- )` | Store a single byte. |
 | `W@` | `( addr -- u16 )` | Fetch a 16-bit unsigned halfword. |
@@ -194,6 +226,13 @@ memory.  A **cell** is 8 bytes (one 64-bit word).
 | `ERASE` | `( addr n -- )` | Zero *n* bytes starting at addr (`0 FILL`). |
 | `DUMP` | `( addr n -- )` | Hex-dump *n* bytes in a readable format. |
 | `TALIGN` | `( -- )` | Align HERE to the next 64-byte boundary (tile-alignment). |
+
+`W@`, `W!`, `L@`, and `L!` perform separate byte accesses from low address to
+high address; they are not atomic wide-memory operations.  A late fetch fault
+leaves the input address on the stack, while a late store fault occurs after
+both inputs were consumed and may leave a low-byte prefix written.  Address
+increments wrap as 64-bit cells, and each byte is routed independently across
+ordinary memory or MMIO.
 
 **Example — reading and writing memory:**
 ```forth
@@ -231,10 +270,26 @@ output.
 | `WORDS` | `( -- )` | Print all words in the dictionary. |
 | `BYE` | `( -- )` | Flush the TX buffer and halt the CPU (exit Forth). |
 | `TX-FLUSH` | `( -- )` | Publish the emulator ring batch, or wait for physical FIFO-and-shifter idle. |
-| `CYCLES` | `( -- u )` | Read the free-running cycle counter (for timing). |
+| `CYCLES` | `( -- u )` | Read the zero-extended, wrapping 32-bit Timer COUNT value. |
 | `MS` | `( n -- )` | Delay approximately *n* milliseconds. |
 | `HEX` | `( -- )` | Set numeric output base to 16. |
 | `DECIMAL` | `( -- )` | Set numeric output base to 10. |
+
+The hosted simulator has no MP64 timer cadence. Its pseudo-BIOS `CYCLES` reads
+a retained 32-bit Timer counter which advances once per admitted semantic guest
+step, including the `CYCLES` operation before its read. The counter is shared
+by contexts in one runtime, isolated between runtimes, and unaffected by
+`PERF-RESET`. `TIMER!`, `TIMER-CTRL!`, and `TIMER-ACK` preserve compare,
+enable/freeze, auto-reload, sticky match, and conditional IRQ-latch semantics.
+Raw Timer MMIO, vector delivery, and automatic IDL wake remain unadmitted. This
+Timer is distinct from the hosted 64-bit semantic-work/performance diagnostics
+and is deterministic semantic time, not hardware timing.
+
+The executable/emulator Timer ABI uses full 32-bit little-endian COUNT and
+COMPARE accesses. The current RTL SoC integration routes the Timer as a byte
+peripheral: `CYCLES` sees only zero-extended `COUNT_LO`, and `TIMER!` updates
+only `COMPARE_LO`. That is a deferred RTL implementation defect, not an extra
+hosted compatibility mode or an ambiguity in the public ABI.
 
 **Example — printing a greeting:**
 ```forth
@@ -251,7 +306,7 @@ stack) or **compiled inline** (the `S"` and `."` pattern).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `S"` | `( -- addr len )` | In a definition, compile an inline string literal whose address and length are pushed at runtime. At the REPL, return a transient literal in the BIOS-private string buffer. The transient form is suitable for immediate CPU-only consumers such as `COMPARE`, but checked device words reject it as protected memory; compile the literal or copy it into caller-managed storage before passing it to checked crypto, entropy, or DMA interfaces. |
+| `S"` | `( -- addr len )` | In a definition, compile an inline NUL-terminated string literal whose stable address and length are pushed at runtime. At the REPL, return up to 255 bytes in one reused BIOS-private transient buffer. Caller-span-checked crypto, entropy, and DMA paths reject that protected span, although raw/static physical-span interfaces such as checked SHA-2 apply their own policy; compile or copy the literal before retaining it or passing it across an interface. |
 | `."` | *see below* | Print a string literal.  Works in **both** interpret and compile modes: in a definition it compiles inline and prints at runtime; at the REPL it prints immediately. |
 | `WORD` | `( delim -- addr )` | Parse the next token delimited by *delim* from the input buffer.  Returns a counted-string address. |
 | `COUNT` | `( c-addr -- addr len )` | Convert a counted string (length byte at c-addr) to an address+length pair. |
@@ -264,9 +319,16 @@ stack) or **compiled inline** (the `S"` and `."` pattern).
 ```forth
 : SAME?  ( a1 n1 a2 n2 -- )
     COMPARE 0= IF ." match" ELSE ." differ" THEN CR ;
-S" hello" S" hello" SAME?    \ prints "match"
-S" hello" S" world" SAME?    \ prints "differ"
+: SAME-LITERALS       S" hello" S" hello" SAME? ;
+: DIFFERENT-LITERALS  S" hello" S" world" SAME? ;
+SAME-LITERALS          \ prints "match"
+DIFFERENT-LITERALS     \ prints "differ"
 ```
+
+Two interpreted `S"` calls cannot safely supply both operands: the second
+call overwrites the same transient buffer used by the first. A shorter later
+literal writes its NUL terminator but does not clear the older tail beyond it.
+An absent closing quote is accepted through the current physical line.
 
 ---
 
@@ -508,7 +570,7 @@ primitives.
 | `DISK-SECTORS` | `( -- count )` | Read the attached media capacity as an unsigned count of 512-byte sectors. |
 | `DISK-MEDIA-GEN` | `( -- generation )` | Read the current attachment generation as an unsigned 32-bit identity. It changes whenever media is attached, detached, or replaced. |
 | `DISK-CAPS` | `( -- caps )` | Read controller capabilities: read=bit 0, write=bit 1, flush=bit 2, precise result=bit 3, completion=bit 4, media generation=bit 5, generation guard=bit 6. |
-| `MP64FS-VALID?` | `( -- flag )` | Validate the attached marker, derived geometry, reserved bitmap, directory entries, parents, extents, and byte bounds. |
+| `MP64FS-VALID?` | `( -- flag )` | Return literal 1/0 after validating raw attached-device marker-1 geometry, reserved allocation bits, occupied-entry parent/type rules, allocated extent bounds, directory zero-extent rules, and used-byte capacity. |
 | `DISK-READ-CHECKED` | `( dma lba count -- completed status )` | Production read. Returns only confirmed whole sectors and the stable controller result byte. |
 | `DISK-WRITE-CHECKED` | `( dma lba count -- completed status )` | Production write. Completion is not durability; follow persistent updates with checked flush. |
 | `DISK-FLUSH-CHECKED` | `( -- status )` | Production ordering and durability barrier for all earlier successful writes. |
@@ -582,8 +644,8 @@ Each of these operates on every lane independently: `dst[i] = srcA[i] OP srcB[i]
 | `TAND` | `( -- )` | `dst[lane] = src0[lane] AND src1[lane]`. |
 | `TOR` | `( -- )` | `dst[lane] = src0[lane] OR src1[lane]`. |
 | `TXOR` | `( -- )` | `dst[lane] = src0[lane] XOR src1[lane]`. |
-| `TMIN` | `( -- )` | `dst[lane] = min(src0[lane], src1[lane])`. |
-| `TMAX` | `( -- )` | `dst[lane] = max(src0[lane], src1[lane])`. |
+| `TEMIN` | `( -- )` | `dst[lane] = min(src0[lane], src1[lane])`. |
+| `TEMAX` | `( -- )` | `dst[lane] = max(src0[lane], src1[lane])`. |
 | `TABS` | `( -- )` | `dst[lane] = abs(src0[lane])` (signed mode). |
 
 ### Tile Multiply
@@ -602,13 +664,13 @@ Each of these operates on every lane independently: `dst[i] = srcA[i] OP srcB[i]
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TSUM` | `( -- )` | `ACC = Σ src0[lane]` — sum all lanes. |
-| `TEMIN` | `( -- )` | `ACC = min(src0[lane])` — minimum across all lanes. |
-| `TEMAX` | `( -- )` | `ACC = max(src0[lane])` — maximum across all lanes. |
+| `TMIN` | `( -- )` | `ACC = min(src0[lane])` — minimum across all lanes. |
+| `TMAX` | `( -- )` | `ACC = max(src0[lane])` — maximum across all lanes. |
 | `TPOPCNT` | `( -- )` | `ACC = Σ popcount(src0[lane])` — total bit count. |
 | `TL1` | `( -- )` | `ACC = Σ |src0[lane]|` — L1 norm. |
 | `TSUMSQ` | `( -- )` | `ACC = Σ src0[lane]²` — sum of squares. |
-| `TMINIDX` | `( -- )` | Minimum with index: ACC0 = min value, ACC1 = lane index. |
-| `TMAXIDX` | `( -- )` | Maximum with index: ACC0 = max value, ACC1 = lane index. |
+| `TMINIDX` | `( -- )` | Minimum with index: ACC0 = lane index, ACC1 = min value. |
+| `TMAXIDX` | `( -- )` | Maximum with index: ACC0 = lane index, ACC1 = max value. |
 
 ### Tile System
 
@@ -735,10 +797,16 @@ Low-level access to the network interface controller.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `NET-STATUS` | `( -- status )` | Read NIC status. Bit 1: RX available, bit 2: link, bit 3: error (sticky until `NET-RESET`), bit 4: RX DMA busy, bit 7: present. |
+| `NET-STATUS` | `( -- status )` | Read NIC status. Bit 0: TX busy, bit 1: RX available, bit 2: link up, bit 3: error (sticky until direct command-register RESET `0x04`), bit 4: RX DMA busy, bits 5–6: zero, bit 7: present. |
 | `NET-SEND` | `( addr len -- )` | Send a frame: set DMA address + length, issue SEND command. |
 | `NET-RECV` | `( addr -- actual )` | Receive a frame into `addr`; wait for RTL RX DMA completion before publishing the length. Returns 0 if nothing is available. |
 | `NET-MAC@` | `( -- addr )` | Return the MMIO address of the six MAC bytes. |
+
+The current hosted one-core profile admits only a pseudo-BIOS
+`NET-STATUS`, which returns zero to report that no NIC is present. It does not
+route the physical NIC MMIO window or claim send, receive, DMA, link, MAC,
+queue, or interrupt behavior; direct NIC MMIO remains faulting. The remaining
+three words in this table describe the native BIOS and are not yet hosted.
 
 ---
 
@@ -783,10 +851,24 @@ device.
 | `IPI-ACK` | `( core -- )` | Acknowledge (clear) the pending IPI from the given core. |
 | `MBOX!` | `( d -- )` | Write a 64-bit value to the mailbox outgoing data register (8 bytes LE). |
 | `MBOX@` | `( -- d )` | Read the 64-bit value from the mailbox incoming data register. |
-| `SPIN@` | `( n -- flag )` | Try to acquire spinlock *n*.  Returns 0 if successfully acquired, 1 if the lock is already held. |
-| `SPIN!` | `( n -- )` | Release spinlock *n*. |
+| `SPIN@` | `( n -- flag )` | Try to acquire spinlock *n*. Returns 0 if free or already owned by this physical core, 1 if owned by another core. |
+| `SPIN!` | `( n -- )` | Release spinlock *n* only when this physical core owns it; a free or foreign-owned release is ignored. |
 | `WAKE-CORE` | `( xt core -- )` | Convenience wrapper: pre-writes the XT into the shared worker table, then sends the IPI.  This ensures `CORE-STATUS` sees the pending work immediately. |
 | `CORE-STATUS` | `( core -- n )` | Read the worker XT slot for a core.  Returns 0 if the core is idle, or the pending XT if it’s busy/dispatched. |
+
+The hosted simulator advertises exactly one full core and does not manufacture
+a secondary worker. In that profile `CORE-STATUS 0` returns zero for the
+core-0 worker slot, while any other ID fails without consuming it.
+`WAKE-CORE` always fails without consuming or executing its operands because
+there is no valid secondary target. This is an explicit capability boundary,
+not a silent dispatch no-op, mailbox model, IPI model, or concurrency claim.
+
+The bank contains 16 locks and records global physical-core identity, not a
+task identity. Same-core acquisition is depthless: repeated `SPIN@` calls all
+return 0, but one `SPIN!` releases the lock. The BIOS words do not validate
+the lock number before forming their raw MMIO address, so only IDs 0 through
+15 name the documented spinlock ABI; an out-of-range cell can fault or alias
+another MMIO window rather than returning a portable status.
 
 **Example — dispatching work to core 1:**
 ```forth
@@ -797,11 +879,53 @@ BEGIN 1 CORE-STATUS 0= UNTIL  \ wait until core 1 finishes
 
 ---
 
+## Micro-Cluster Control and Cluster MPU (12 words)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `CLUSTER-EN!` | `( mask -- )` | Write the SysInfo cluster-enable mask. |
+| `CLUSTER-EN@` | `( -- mask )` | Read the SysInfo cluster-enable mask. |
+| `BARRIER-ARRIVE` | `( -- )` | Signal this micro-core's arrival at its cluster barrier. |
+| `BARRIER-STATUS` | `( -- n )` | Read the cluster barrier arrival/done state. |
+| `SPAD` | `( -- addr )` | Return the cluster scratchpad address sentinel. |
+| `MICRO?` | `( id -- flag )` | Return true when unsigned `id >= N-FULL`; this classifies an encoding and does not validate it against `NCORES`. |
+| `CL-PRIV!` | `( n -- )` | Set the caller's cluster privilege state. |
+| `CL-PRIV@` | `( -- n )` | Read the caller's cluster privilege state. |
+| `CL-MPU-BASE!` | `( n -- )` | Set the caller's cluster MPU lower bound. |
+| `CL-MPU-LIMIT!` | `( n -- )` | Set the caller's cluster MPU upper bound. |
+| `CL-MPU-BASE@` | `( -- n )` | Read the caller's cluster MPU lower bound. |
+| `CL-MPU-LIMIT@` | `( -- n )` | Read the caller's cluster MPU upper bound. |
+
+The one-core hosted profile has no cluster caller or cluster-local state.
+`CLUSTER-EN@` returns zero; storing zero succeeds as an idempotent disable,
+while every nonzero store fails without consuming the mask. Both barrier
+words and all cluster privilege/MPU words fail without changing the caller's
+stacks. This is deliberately stricter than the current executable BIOS on a
+full core, where the unimplemented barrier and `CL-*` CSR reads return zero
+and writes are ignored. (`CLUSTER-EN!` is instead real SysInfo MMIO on that
+target.) Reporting the CSR zero/no-op behavior as hosted success would make
+absent hardware appear usable and make the KDOS barrier wrapper poll forever.
+
+`SPAD` still returns the exact native sentinel
+`0xFFFF_FE00_0000_0000`, but the hosted profile does not map scratchpad
+storage at that address. `MICRO?` retains the executable BIOS's unsigned
+threshold behavior, so with hosted `N-FULL = 1`, zero is false and every
+other uint64 value is true even though there are no hosted micro-core IDs.
+
+The checked-in native barrier implementations do not currently agree. The
+BIOS ABI identifies done as bit 8 and KDOS polls that bit; four-core-cluster
+RTL packs done at bit 4 and pulses it for one cycle, while the Python emulator
+exposes a sticky bit 8. Thus no reusable cross-backend barrier contract is
+qualified here; the hosted path's explicit failure avoids selecting any of
+those incompatible behaviors.
+
+---
+
 ## Performance Counters (5 words)
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `PERF-CYCLES` | `( -- n )` | Read the cycle counter (CSR 0x68). |
+| `PERF-CYCLES` | `( -- n )` | Read the 64-bit per-core performance cycle counter (CSR 0x68). |
 | `PERF-STALLS` | `( -- n )` | Read the stall counter (CSR 0x69). |
 | `PERF-TILEOPS` | `( -- n )` | Read the tile operation counter (CSR 0x6A). |
 | `PERF-EXTMEM` | `( -- n )` | Read the external memory beat counter (CSR 0x6B). |
@@ -856,11 +980,21 @@ Built-in self-test for RAM (March C−, checkerboard, address-as-data patterns).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `BIST-FULL` | `( -- )` | Start full memory BIST (all three test patterns). |
+| `BIST-FULL` | `( -- )` | Start the documented full memory BIST (all three test patterns); current implementations differ as noted below. |
 | `BIST-QUICK` | `( -- )` | Start quick BIST (March C− only). |
 | `BIST-STATUS` | `( -- n )` | Read BIST status: 0=idle, 1=running, 2=pass, 3=fail. |
 | `BIST-FAIL-ADDR` | `( -- n )` | Read first failing address (valid after fail). |
-| `BIST-FAIL-DATA` | `( -- n )` | Read expected/actual data (packed, valid after fail). |
+| `BIST-FAIL-DATA` | `( -- n )` | Read documented packed expected/actual data after failure; current implementations differ as noted below. |
+
+> **Open BIST implementation discrepancy.** The public design describes a
+> 1 MiB full test containing March C−, checkerboard, and address-as-data
+> patterns. The pure-Python emulator runs those three patterns over its own
+> bounded range, the current full-core RTL command selects one smaller pattern
+> run over a much smaller interval, and the accelerated emulator reports pass
+> without executing the destructive sweep. `BIST-FAIL-DATA` also differs:
+> documented/Python packing retains expected and actual values, while current
+> RTL retains only the observed read data. This records the mismatch without
+> selecting one implementation as the final contract.
 
 ---
 
@@ -871,8 +1005,17 @@ Functional check of the tile engine datapath (~200 cycles).
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `TILE-TEST` | `( -- )` | Start tile datapath self-test. |
-| `TILE-TEST@` | `( -- n )` | Read self-test status: 0=idle, 2=pass, 3=fail. |
+| `TILE-TEST@` | `( -- n )` | Read self-test status: 0=idle, 1=running, 2=pass, 3=fail. |
 | `TILE-DETAIL@` | `( -- n )` | Read failed sub-test bitmask (for diagnostics). |
+
+> **Open tile self-test discrepancy.** The public design describes an
+> ADD/MUL/DOT/SUM datapath test and admits status 1 while it is running. The
+> pure-Python emulator performs those four value tests synchronously, current
+> full-core RTL counts down to pass without performing them, and the accelerated
+> emulator passes immediately. Unchanged KDOS currently waits only while the
+> status is 0, so an observable running status is rendered as failure. This note
+> does not decide whether the source, ABI description, or implementations must
+> change before an asynchronous self-test is admitted.
 
 ---
 
@@ -894,20 +1037,38 @@ memory regions (e.g., extracting an 8×8 patch from a 640-wide framebuffer).
 
 ## FP16 / BF16 Modes (2 words)
 
-Half-precision floating-point tile operations.  Reductions (SUM, DOT,
-SUMSQ) use FP32 accumulation for numerical stability.
+Half-precision floating-point tile operations. Reductions publish raw binary32
+bits in ACC0. “FP32 accumulation” is the intended operation family, not yet a
+bitwise cross-backend ordering guarantee: Python/hosted SUM and SUMSQ perform a
+host-language per-tile sum before one binary32 pack. The native accelerator
+currently falls back to Python for those reductions; its bypassed direct C++
+bodies use sequential binary32, and RTL uses a balanced binary32 tree. Python
+and active native TDOT use a binary64 loop before packing, while RTL uses its
+own tree.
+With ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds
+it to the tile subtotal in binary64, and repacks; that pack is the inter-tile
+rounding point.
+With ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds
+it to the tile subtotal in binary64, and repacks; that pack is the inter-tile
+rounding point.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `FP16-MODE` | `( -- )` | Set TMODE to FP16 half-precision (EW=4, 32 lanes). |
 | `BF16-MODE` | `( -- )` | Set TMODE to bfloat16 (EW=5, 32 lanes). |
 
+EW 6 and 7 are reserved. Hosted execution rejects them; current emulator and
+RTL paths alias them inconsistently and must not be used as extra formats. The
+current executable FP16 converter also encodes the exact carry-boundary product
+`0x0017 * 0x5190` as zero rather than IEEE minimum-normal `0x0400`; this remains
+an explicit compatibility discrepancy.
+
 ---
 
-## AES-256-GCM Engine (10 words)
+## AES-256/128-GCM Engine (11 words)
 
-Hardware-accelerated authenticated encryption via the MMIO AES engine
-at `0xFFFF_FF00_0000_0700`.
+Authenticated encryption via the executable/native MMIO AES ABI at
+`0xFFFF_FF00_0000_0700`.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -915,12 +1076,34 @@ at `0xFFFF_FF00_0000_0700`.
 | `AES-IV!` | `( addr -- )` | Load 96-bit IV (12 bytes at addr) into AES engine. |
 | `AES-AAD-LEN!` | `( n -- )` | Set additional authenticated data length (bytes). |
 | `AES-DATA-LEN!` | `( n -- )` | Set plaintext/ciphertext data length (bytes). |
-| `AES-CMD!` | `( cmd -- )` | Start operation: 1 = encrypt, 2 = decrypt. |
-| `AES-STATUS@` | `( -- status )` | Read status: 0 = busy, 1 = done, 2 = auth fail. |
+| `AES-CMD!` | `( cmd -- )` | Start operation: low bit 0 = encrypt, 1 = decrypt. |
+| `AES-STATUS@` | `( -- status )` | Read status: 0 = idle, 1 = active, 2 = done, 3 = authentication or transaction failure. |
+| `AES-KEY-MODE!` | `( n -- )` | Select key mode: low bit 0 = AES-256, 1 = AES-128. The current executable device still requires all 32 key bytes to be written. |
 | `AES-DIN!` | `( addr -- )` | Feed input data block (16 bytes at addr) to engine. |
 | `AES-DOUT@` | `( addr -- )` | Read output data block (16 bytes) from engine. |
 | `AES-TAG@` | `( addr -- )` | Read 128-bit authentication tag (16 bytes) from engine. |
 | `AES-TAG!` | `( addr -- )` | Write expected tag (16 bytes) for decryption verification. |
+
+> **AES ABI discrepancy record.** The table above follows unchanged KDOS,
+> `bios.asm`, and the native architectural device: the byte aperture is
+> `+0x700..+0x76F`, key mode is at `+0x3A`, commands are 0/1, and statuses are
+> 0/1/2/3. Naturally aligned 1-, 2-, 4-, and 8-byte native accesses are
+> preflighted as complete spans and decomposed little-endian; the BIOS uses
+> byte loops for key, IV, data, and tag transfers and 32-bit stores for the two
+> lengths. Older tables published commands 1/2, statuses 0/1/2, a 64-byte
+> aperture, or key mode at `+0x70`.
+>
+> Current integrated RTL is not compatible with that executable byte ABI. The
+> SoC decodes `+0x700..+0x77F`, does not pass access size to the AES leaf, and
+> the leaf recognizes mostly 32-bit register starts plus isolated command,
+> status, and key-mode byte offsets, rather than one callback at every byte;
+> the BIOS byte loops therefore do not configure or transfer the same register
+> image. RTL also exposes a busy/done/auth-fail bitfield rather than statuses
+> 0/1/2/3 and does not implement the executable AAD/length-finalization/tag-
+> comparison and fail-closed transaction protocol. Published throughput and
+> interrupt behavior remain unqualified RTL design targets, not current
+> executable/native ABI guarantees. This records the mismatch without choosing
+> which implementation must ultimately change.
 
 ---
 
@@ -1025,6 +1208,21 @@ and aborts the context.
 aborts and wipes the active context. A failed `FINAL` publishes no digest and
 does not modify a non-context destination. Streaming contexts are core-local
 and must be updated, finalized, or cleared on their originating core.
+
+> **Deferred RTL SHA-2 implementation discrepancy.** The checked BIOS above
+> produces standard SHA-256/SHA-512 through the Python and native executable
+> models, but the current RTL instruction glue is not equivalent. Full-core
+> and cluster RTL make `SHA.PAD`/`SHA.FINAL` data-path no-ops even though BIOS
+> relies on `SHA.FINAL` to pad; their `SHA.DOUT` selects from the encoded
+> register field rather than `R[Rs] & 7`; `SHA.DIN` writes an accumulator
+> qword rather than feeding one buffer byte; and their ROUND memory loaders do
+> not perform the required little-endian-memory to big-endian-word conversion.
+> The RTL SHA leaf also leaves SHA-384/512 as future work. Existing RTL tests
+> bypass these seams with pre-padded/endian-correct words or test ownership
+> only. The checked BIOS/KDOS word ABI, status behavior, span rules, digest
+> bytes, finalization, and cleanup are authoritative. Hosted semantic execution
+> follows that working behavior and is not RTL evidence; bringing the RTL or
+> its instruction adapter into conformance is deferred.
 
 ---
 
@@ -1184,63 +1382,211 @@ mandatory final read).
 
 ---
 
-## Field ALU — GF(2²⁵⁵−19) Arithmetic (13 words)
+## X25519 — RFC 7748 Scalar Multiplication (6 raw words)
 
-General-purpose finite-field coprocessor, per-core ISA (EXT.CRYPTO FB,
-sub-ops 0x20–0x2D).  Operands staged via ACC0–ACC3 CSR writes;
-results read back via CSR reads.
+Per-core Field-ALU state exposes X25519 through EXT.CRYPTO `FB 2D`:
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `GF-A!` | `( addr -- )` | Load 256-bit operand A from addr into ACC0–ACC3. |
-| `GF-R@` | `( addr -- )` | Store ACC0–ACC3 (256-bit result) to addr. |
-| `GF-PRIME` | `( n -- )` | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom. |
-| `LOAD-PRIME` | `( p-addr pinv-addr -- )` | Latch custom prime + Montgomery p_inv. |
-| `FADD` | `( a b -- r )` | (a + b) mod p — loads operands, executes, returns result. |
-| `FSUB` | `( a b -- r )` | (a − b) mod p. |
-| `FMUL` | `( a b -- r )` | (a · b) mod p. |
-| `FSQR` | `( a -- r )` | a² mod p. |
-| `FINV` | `( a -- r )` | a^(p−2) mod p (modular inverse). |
-| `FPOW` | `( a b -- r )` | a^b mod p. |
-| `FMUL-RAW` | `( a b -- rlo rhi )` | Raw 256×256→512-bit multiply (no reduction). |
-| `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | Multiply-accumulate (raw). |
+| `X25519-SCALAR!` | `( addr -- )` | Load four ascending little-endian qwords into ACC0–ACC3. |
+| `X25519-POINT!` | `( addr -- )` | Set TSRC0 to the deferred 32-byte point address without reading it. |
+| `X25519-GO` | `( -- )` | Clamp the scalar in ACC, mask the point's top bit, run Curve25519 synchronously, and replace ACC. |
+| `X25519-WAIT` | `( -- )` | No-op because the ISA operation completes synchronously. |
+| `X25519-STATUS@` | `( -- 2 )` | Return 2 unconditionally, before or after a computation. |
+| `X25519-RESULT@` | `( addr -- )` | Store ACC0–ACC3 as four ascending little-endian qwords. |
+
+This is deliberately a raw, status-free ABI. It has no capability bit,
+software owner, hardware lock, complete-span check, cleanup, or all-zero
+shared-secret rejection. ACC0–ACC3 and TSRC0 belong to the physical core and
+are shared by its tasks. Scalar loads and result stores mutate one qword at a
+time, so a later fault can leave a prefix changed; `GO` reads all point qwords
+before replacing ACC. Ordinary unaligned memory is valid, and output may
+alias an already consumed scalar or point.
+
+The RFC calculation uses `A24=121665` with `E*(AA+A24*E)`. Native C++, the
+architectural Python emulator, the hosted simulator, and the standalone
+Field-ALU RTL use that value. The former Python-emulator value 121666 with the
+same formula was an implementation error, not a compatibility mode. Current
+SoC RTL still does not connect the standalone Field engine to either executing
+core path; resolving and qualifying that integration is deferred, and hosted
+X25519 qualification is not evidence that it works.
 
 ---
 
-## NTT Engine (9 words)
+## Field ALU — Multi-Prime Arithmetic (15 raw words)
 
-256-point Number Theoretic Transform accelerator at
-`0xFFFF_FF00_0000_08C0`.  Configurable modulus (q=3329 for ML-KEM,
-q=8380417 for ML-DSA).
+The per-core Field unit is exposed through EXT.CRYPTO `FB 20`–`FB 2D`.
+Every `a`, `b`, `e`, `r`, `rlo`, `rhi`, `p`, and `pinv` argument below is an
+address. Field values are 32-byte little-endian integers; raw products use two
+separate 32-byte low/high destinations.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `NTT-LOAD` | `( addr -- )` | Load 256-element polynomial from addr. |
-| `NTT-STORE` | `( addr -- )` | Store 256-element result to addr. |
-| `NTT-FWD` | `( -- )` | Run forward NTT (time → frequency). |
-| `NTT-INV` | `( -- )` | Run inverse NTT (frequency → time). |
-| `NTT-PMUL` | `( addr -- )` | Pointwise multiply with polynomial at addr. |
-| `NTT-PADD` | `( addr -- )` | Pointwise add with polynomial at addr. |
+| `GF-A!` | `( a-addr -- )` | Load four ascending qwords into ACC0–ACC3. |
+| `GF-R@` | `( r-addr -- )` | Store ACC0–ACC3 as four ascending qwords. |
+| `GF-PRIME` | `( selector -- )` | Select by the low two bits: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom. |
+| `LOAD-PRIME` | `( p-addr pinv-addr -- )` | Latch custom `p` and Montgomery `-p^-1 mod 2^256`; it does not select custom mode. |
+| `FADD` | `( a-addr b-addr r-addr -- )` | Add under the selected prime. |
+| `FSUB` | `( a-addr b-addr r-addr -- )` | Subtract under the selected prime. |
+| `FMUL` | `( a-addr b-addr r-addr -- )` | Multiply under the selected prime. |
+| `FSQR` | `( a-addr r-addr -- )` | Square under the selected prime. |
+| `FINV` | `( a-addr r-addr -- )` | Compute `a^(p-2) mod p`. |
+| `FPOW` | `( a-addr e-addr r-addr -- )` | Compute `a^e mod p`. |
+| `FMUL-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Publish the raw 256×256 product as low and high halves. |
+| `FCMOV` | `( a-addr cond-addr -- )` | Read `cond-addr C@`; if nonzero replace ACC with `a`, otherwise retain ACC. The `a` span is read in either case. |
+| `FCEQ` | `( a-addr b-addr r-addr -- )` | Store a 256-bit 1 when equal, otherwise 0. |
+| `FMAC` | `( a-addr b-addr r-addr -- )` | Add the retained previous low result to the selected product. |
+| `FMUL-ADD-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Add the product to the retained 512-bit previous result, wrapping at 512 bits. |
+
+ACC, TSRC0, TDST, prime configuration, and previous low/high results belong to
+the physical core and are shared by its tasks. Ordinary result operations
+replace previous-low only; raw operations replace both halves. `GF-A!`,
+`GF-R@`, prime selection, and `LOAD-PRIME` do not themselves publish a
+previous result. Loads and stores proceed one qword at a time, so a later
+fault may retain an ACC or destination prefix. `FCEQ` sets the raw instruction
+Z flag, but `_gf_store_acc` executes flag-writing `ADDI` instructions before
+the Forth word returns; callers must use the stored 1/0 result.
+
+For valid primes and canonical field inputs, the modular words have their
+displayed mathematical meaning. Custom parameters are not validated. Current
+C++ and standalone RTL subtract at most one `p` for ADD, while the Python
+emulator uses full `% p`; SUB has further noncanonical backend differences.
+The native C++ `BigNum` can also retain non-architectural upper limbs from
+such an add/subtract into a later `FMAC`. For raw MAC carry, the hosted model,
+Python emulator, and standalone RTL implement wrapped 512-bit addition, while
+native C++ currently misses a carry from bit 255 into the high half. These are
+open backend defects, not alternate public ABIs. No hosted execution path
+claims constant-time behavior.
+
+---
+
+## NTT Engine (10 raw words)
+
+256-point Number Theoretic Transform accelerator at
+`0xFFFF_FF00_0000_08C0`. The working BIOS plus architectural Python device
+retain a configurable uint64 modulus (normally 3329 or 8380417), two
+256-entry uint32 input buffers, one result buffer, a 16-bit index, and
+idle/busy/done state.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
 | `NTT-SETQ` | `( q -- )` | Set modulus (3329 or 8380417). |
+| `NTT-IDX!` | `( idx -- )` | Set the raw 16-bit coefficient index. |
+| `NTT-LOAD` | `( addr buf -- )` | Load 256 uint32-LE coefficients; `buf=0` selects A and every nonzero value selects B. |
+| `NTT-STORE` | `( addr -- )` | Store 256 uint32-LE result coefficients. |
+| `NTT-FWD` | `( -- )` | Run the generic forward transform on A. |
+| `NTT-INV` | `( -- )` | Run the generic inverse transform on A. |
+| `NTT-PMUL` | `( -- )` | Pointwise multiply retained A and B modulo q. |
+| `NTT-PADD` | `( -- )` | Pointwise add retained A and B modulo q. |
 | `NTT-STATUS@` | `( -- status )` | Read engine status. |
-| `NTT-WAIT` | `( -- )` | Busy-wait until NTT operation completes. |
+| `NTT-WAIT` | `( -- )` | Poll until DONE bit 1 is set; calling it while idle does not return. |
+
+The executable device starts at status 0. Commands use bytes 1, 3, 5, and 7
+(`go` in bit 0, operation in bits 2:1), complete synchronously, and retain
+status 2. Loading or storing resets IDX and transfers four bytes per
+coefficient. A load publishes a coefficient and advances only after byte 3;
+a result read advances before the corresponding byte-3 destination write.
+There is no complete-span preflight, lock, owner, capability bit, checked
+error status, automatic wipe, or unwind cleanup. Later memory faults therefore
+retain completed coefficients, staging/destination prefixes, and the exact
+current index.
+
+The Python device chooses a primitive 256th root for the selected q and
+implements an ordinary radix-2 transform. Consequently
+`INTT(NTT(a)*NTT(b))` is cyclic convolution modulo `x^256-1`, not the
+negacyclic multiplication required by ML-KEM or ML-DSA. The KEM device uses
+separate ML-KEM-specific polynomial routines. Invalid or composite moduli are
+outside the portable contract; a modulus without a selected root completes a
+command without replacing the prior result, while q=0 faults on coefficient
+commit in the current Python model.
+
+> **Executable/RTL discrepancy.** Native accelerated execution has no C++ NTT
+> algorithm and delegates this MMIO range to the Python device. That working
+> byte map is STATUS `+00`, Q `+08..0F`, IDX `+10..11`, A `+18..1B`, B
+> `+1C..1F`, RESULT `+20..23`, and CMD `+28`. Current RTL instead decodes
+> 64-bit slots with CMD/STATUS `+00`, 32-bit Q `+08`, 8-bit IDX `+10`, A
+> `+18`, and B/RESULT `+20`; it also retains q=3329 twiddles and inverse scale
+> when Q changes. BIOS byte accesses therefore cannot operate that RTL path,
+> and its multi-cycle BUSY behavior is not evidence for executable or hosted
+> timing. The executable byte window and ten-word Forth surface are the locked
+> emulator/simulator ABI for this generic cyclic service. RTL convergence is
+> deferred; a future standardized-PQ transform requires a distinct, versioned
+> contract.
 
 ---
 
 ## KEM Engine — ML-KEM-512 (7 words)
 
-Key encapsulation mechanism at `0xFFFF_FF00_0000_0940`.  Uses NTT,
-SHA-3, and TRNG for NIST ML-KEM-512 (Kyber).
+The authoritative raw dictionary surface drives the executable Python KEM
+device at `0xFFFF_FF00_0000_0900`. The caller supplies all key-generation and
+encapsulation randomness; these words do not obtain entropy from the TRNG.
+Operands and results live in five retained device buffers: 0=SEED/COIN (64
+bytes), 1=PK (800 bytes), 2=SK (1,632 bytes), 3=CT (768 bytes), and 4=SS (32
+bytes).
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `KEM-KEYGEN` | `( -- )` | Generate ML-KEM-512 keypair.  Public key readable via KEM-PK@. |
-| `KEM-ENCAPS` | `( pk-addr -- )` | Encapsulate: produce ciphertext + shared secret. |
-| `KEM-DECAPS` | `( ct-addr -- )` | Decapsulate: recover shared secret from ciphertext. |
-| `KEM-SETQ` | `( q -- )` | Set underlying NTT modulus. |
-| `KEM-STATUS@` | `( -- status )` | Read engine status. |
-| `KEM-PK@` | `( addr -- )` | Read public key to addr. |
-| `KEM-CT@` | `( addr -- )` | Read ciphertext to addr. |
+| `KEM-SEL!` | `( n -- )` | Select a retained buffer and reset its byte index. The executable device takes the low byte and clamps values above 4 to 4. |
+| `KEM-LOAD` | `( addr count -- )` | Copy exactly *count* caller bytes to the selected buffer through DIN. |
+| `KEM-STORE` | `( addr count -- )` | Copy exactly *count* DOUT bytes from the selected buffer to caller memory. |
+| `KEM-KEYGEN` | `( -- )` | Replace PK and SK from the retained 64-byte `d || z` seed. |
+| `KEM-ENCAPS` | `( -- )` | Replace CT and SS from retained PK and the first 32 SEED/COIN bytes. |
+| `KEM-DECAPS` | `( -- )` | Replace SS from retained CT and SK. |
+| `KEM-STATUS@` | `( -- n )` | Read the retained status byte: 0 initially, 2 after a completed command. |
+
+The executable Python byte window is the half-open range
+`[0xFFFF_FF00_0000_0900, 0xFFFF_FF00_0000_0928)`:
+
+| Offset | Register | Access | Executable behavior |
+|--------|----------|--------|---------------------|
+| `+0x00` | STATUS | R byte | 0=idle, 2=done |
+| `+0x01` | CMD | W byte | 1=KEYGEN, 2=ENCAPS, 3=DECAPS |
+| `+0x08` | BUF_SEL | W byte | Select 0..4 and reset the retained index |
+| `+0x10` | DIN | W byte | Write one selected-buffer byte and auto-increment while in bounds |
+| `+0x18` | DOUT | R byte | Read one selected-buffer byte and auto-increment while in bounds |
+| `+0x20..+0x21` | BUF_SIZE | R bytes | Selected capacity as uint16 little-endian |
+
+Commands complete within the triggering Python write, so executable code does
+not observe BUSY=1. DONE remains set across selection and transfer operations
+until device reset; starting another command replaces the appropriate outputs
+and leaves DONE set. Selection resets only the index. Short loads retain the
+old suffix of a buffer. At capacity the executable index pins: excess DIN is
+dropped and excess DOUT returns zero. The raw transfer loops do no complete-span
+preflight. LOAD reads each caller byte before attempting DIN, and STORE reads
+DOUT before writing the corresponding caller byte, so a failing destination
+write has already consumed that device byte. There is no lock, requester
+owner, capability check, transactional rollback, automatic wipe, or Forth
+unwind cleanup; all callers share the buffers and status.
+
+`KEM-SEED-SIZE` is 64. `KYBER-KEYGEN` loads and the executable SEED
+buffer/key-generation primitive consumes all 64 bytes as `d || z`.
+`KYBER-ENCAPS` uses the first 32 bytes from that same buffer as its coin input.
+The former value 32 for the key-generation constant was a source/API error,
+not a second supported interface.
+
+For generated/well-formed keys, the deterministic zero-`d || z`, zero-coin
+fixture produces byte-identical keys, ciphertext, and shared secret to the
+locally audited OpenSSL 3.5.2 ML-KEM-512 implementation. That is interoperability
+evidence for the valid-key value path, not FIPS 203 certification. The Python
+implementation accepts merely length-correct noncanonical public keys and
+secret keys with inconsistent embedded hashes that OpenSSL rejects, uses a
+fixed 840-byte SHAKE rejection-sampling window rather than an unbounded stream,
+and is ordinary non-constant-time Python. Retained buffers and host allocations
+are not a protected secret boundary and are not physically erased; do not use
+this service to protect host secrets.
+
+> **Executable/RTL discrepancy.** The current RTL block has a different
+> 64-bit-slot interface: CMD-write/STATUS-read share `+0x00`, BUF_SEL is
+> `+0x08`, DIN-write/DOUT-read share `+0x10`, IDX_SET-write/BUF_SIZE-read share
+> `+0x18`, and IDX is readable at `+0x20`. It exposes BUSY during a multi-cycle
+> FSM and fills outputs with deterministic XOR test data, not ML-KEM. In
+> particular, the checked-in BIOS reads executable DOUT at `+0x18`, which is
+> BUF_SIZE on RTL. RTL index-overrun and out-of-range-selector behavior also
+> differ. The executable byte window and seven-word Forth surface are the
+> retained emulator/simulator ABI. The RTL is interface-stub evidence only;
+> its deterministic XOR output is not ML-KEM and must not advertise or qualify
+> that capability. RTL convergence is deferred, and executable/hosted evidence
+> does not qualify it.
 
 ---
 

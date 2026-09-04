@@ -249,9 +249,9 @@ or erase the last status and diagnostics.
 | 25 | `1+` | `( n -- n+1 )` | | Increment by 1 |
 | 26 | `1-` | `( n -- n-1 )` | | Decrement by 1 |
 | 27 | `2*` | `( n -- n*2 )` | | Left shift by 1 (multiply by 2) |
-| 28 | `2/` | `( n -- n/2 )` | | Right shift by 1 (divide by 2, logical) |
-| 29 | `MIN` | `( a b -- min )` | | Signed minimum |
-| 30 | `MAX` | `( a b -- max )` | | Signed maximum |
+| 28 | `2/` | `( n -- n/2 )` | | Arithmetic right shift by 1, retaining the sign bit |
+| 29 | `MIN` | `( a b -- min )` | | Signed two's-complement minimum |
+| 30 | `MAX` | `( a b -- max )` | | Signed two's-complement maximum |
 | 31 | `CELLS` | `( n -- n*8 )` | | Convert cell count to byte offset (cell = 8 bytes) |
 | 32 | `CELL+` | `( a -- a+8 )` | | Advance address by one cell (8 bytes) |
 
@@ -312,6 +312,12 @@ or erase the last status and diagnostics.
 | 68 | `FILL` | `( addr n byte -- )` | | Fill n bytes with byte value |
 | 69 | `DUMP` | `( addr n -- )` | | Hex dump n bytes (16 per line with address prefix) |
 
+The `W`/`L` fetch and store words issue low-to-high byte accesses rather than
+one atomic wide access.  Fetch publication occurs after the final byte; stores
+consume both stack inputs before the first byte and can retain a written prefix
+if a later access faults.  Address stepping wraps modulo 2^64 and routes every
+byte independently.
+
 ### I/O & Display (18 words)
 
 | # | Word | Stack Effect | Imm | Description |
@@ -339,7 +345,7 @@ or erase the last status and diagnostics.
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
-| 88 | `S"` | `( -- addr len )` | ✓ | Compile inline string; at the REPL return a BIOS-private transient buffer that checked crypto, entropy, and DMA words reject as protected |
+| 88 | `S"` | `( -- addr len )` | ✓ | Compile an inline stable string; at the REPL return one reused 255-byte BIOS-private transient buffer (caller-span-checked crypto/entropy/DMA paths reject it as protected, while raw/static span interfaces have their own policy) |
 | 89 | `."` | `( -- )` | ✓ | State-smart: interpret → print immediately; compile → compile inline string + print at runtime |
 | 90 | `WORD` | `( char "ccc" -- c-addr )` | | Parse input delimited by char, store counted string at HERE (transient) |
 | 91 | `COUNT` | `( c-addr -- addr len )` | | Convert counted string to (addr len) pair |
@@ -528,8 +534,8 @@ of compiled code.
 | 179 | `TEMAX` | `( -- )` | | Tile element-wise max, writes to DST (t.max) |
 | 180 | `TABS` | `( -- )` | | Tile element-wise absolute value, writes to DST (t.abs) |
 | 181 | `TSUMSQ` | `( -- )` | | Tile sum-of-squares reduction, result in ACC (t.sumsq) |
-| 182 | `TMINIDX` | `( -- )` | | Tile min-with-index reduction, ACC0=min, ACC1=index (t.minidx) |
-| 183 | `TMAXIDX` | `( -- )` | | Tile max-with-index reduction, ACC0=max, ACC1=index (t.maxidx) |
+| 182 | `TMINIDX` | `( -- )` | | Tile min-with-index reduction, ACC0=index, ACC1=min (t.minidx) |
+| 183 | `TMAXIDX` | `( -- )` | | Tile max-with-index reduction, ACC0=index, ACC1=max (t.maxidx) |
 | 184 | `TWMUL` | `( -- )` | | Tile widening multiply: 8b×8b→16b, 16b×16b→32b (t.wmul) |
 | 185 | `TMAC` | `( -- )` | | Tile multiply-accumulate: DST += SRC0 × SRC1 (t.mac) |
 | 186 | `TFMA` | `( -- )` | | Tile fused multiply-add: DST = SRC0 × SRC1 + DST (t.fma) |
@@ -575,7 +581,7 @@ of compiled code.
 | 211 | `DISK-READ` | `( -- )` | | Diagnostic: issue raw READ command 0x01 without waiting |
 | 212 | `DISK-WRITE` | `( -- )` | | Diagnostic: issue raw WRITE command 0x02 without waiting |
 | 213 | `DISK-FLUSH` | `( -- )` | | Diagnostic: issue raw FLUSH command 0xFF without waiting |
-| 214 | `MP64FS-VALID?` | `( -- flag )` | | Validate the attached marker, derived geometry, reserved bitmap, complete directory, parents, extents, and byte bounds. |
+| 214 | `MP64FS-VALID?` | `( -- flag )` | | Return literal 1/0 after validating raw attached-device marker-1 geometry, reserved allocation bits, occupied-entry parent/type rules, allocated extent bounds, directory zero-extent rules, and used-byte capacity. |
 | 215 | `DISK-READ-CHECKED` | `( dma lba count -- completed status )` | | Production checked read: validates, locks, splits, waits for matching completion, and returns precise progress/result |
 | 216 | `DISK-WRITE-CHECKED` | `( dma lba count -- completed status )` | | Production checked write; successful completion is not a durability claim |
 | 217 | `DISK-FLUSH-CHECKED` | `( -- status )` | | Production ordering and durability barrier |
@@ -619,8 +625,8 @@ of compiled code.
 | 213 | `IPI-ACK` | `( core -- )` | | Acknowledge IPI from the given core. Clears the pending bit. MMIO at MBOX_BASE+0x0A. |
 | 214 | `MBOX!` | `( d -- )` | | Write 64-bit value to mailbox outgoing data register (8 bytes LE at MBOX_BASE+0x00). |
 | 215 | `MBOX@` | `( -- d )` | | Read 64-bit value from mailbox incoming data register (8 bytes LE at MBOX_BASE+0x00). |
-| 216 | `SPIN@` | `( n -- flag )` | | Try to acquire spinlock *n*. Returns 0 if acquired, 1 if busy. MMIO at SPINLOCK_BASE + n*4. |
-| 217 | `SPIN!` | `( n -- )` | | Release spinlock *n*. Writes to SPINLOCK_BASE + n*4 + 1. |
+| 216 | `SPIN@` | `( n -- flag )` | | Try to acquire spinlock *n*. Returns 0 when free or already owned by this physical core, 1 when another core owns it. Same-core reacquisition has no depth count. MMIO at SPINLOCK_BASE + n*4. |
+| 217 | `SPIN!` | `( n -- )` | | Release spinlock *n* only for its owning physical core; free and foreign-owned release writes are ignored. MMIO at SPINLOCK_BASE + n*4 + 1. |
 | 218 | `WAKE-CORE` | `( xt core -- )` | | Convenience: pre-writes XT into shared worker table, then sends IPI to wake the target core. |
 | 219 | `CORE-STATUS` | `( core -- n )` | | Read worker XT slot for core. Returns 0 if core is idle, non-zero (= pending XT) if busy. |
 
@@ -707,13 +713,20 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 253 | `AES-IV!` | `( addr -- )` | | Load 96-bit IV (12 bytes at addr) into AES engine |
 | 254 | `AES-AAD-LEN!` | `( n -- )` | | Set additional authenticated data length (bytes) |
 | 255 | `AES-DATA-LEN!` | `( n -- )` | | Set plaintext/ciphertext data length (bytes) |
-| 256 | `AES-CMD!` | `( cmd -- )` | | Start operation: 1 = encrypt, 2 = decrypt |
-| 257 | `AES-STATUS@` | `( -- status )` | | Read status: 0 = busy, 1 = done, 2 = auth fail |
-| 258 | `AES-DIN!` | `( addr -- )` | | Feed input data block (16 bytes at addr) to engine |
-| 259 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
-| 260 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
-| 261 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
-| 262 | `AES-KEY-MODE!` | `( n -- )` | | Set key mode: 0 = AES-256 (14 rounds), 1 = AES-128 (10 rounds) |
+| 256 | `AES-CMD!` | `( cmd -- )` | | Start operation: low bit 0 = encrypt, 1 = decrypt |
+| 257 | `AES-STATUS@` | `( -- status )` | | Read status: 0 = idle, 1 = active, 2 = done, 3 = authentication or transaction failure |
+| 258 | `AES-KEY-MODE!` | `( n -- )` | | Set key mode: 0 = AES-256 (14 rounds), 1 = AES-128 (10 rounds) |
+| 259 | `AES-DIN!` | `( addr -- )` | | Feed input data block (16 bytes at addr) to engine |
+| 260 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
+| 261 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
+| 262 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
+
+The executable BIOS/native ABI places key mode at AES offset `+0x3A` inside
+the `+0x700..+0x76F` byte aperture. The native configuration check requires
+all 32 key bytes in either mode, although AES-128 uses the first 16. Integrated
+RTL currently differs in aperture, access shape, byte protocol, status,
+authentication, and qualified timing/interrupt behavior; see
+`docs/bios-forth.md` for the discrepancy record.
 
 ### Checked SHA-3 / SHAKE / raw Keccak (9 words)
 
@@ -858,48 +871,105 @@ intentionally does not expose readable static BIOS storage. Success proves
 geometry and platform protection only, not allocation ownership, mutability,
 initialization, lifetime, or freedom from application-level aliases.
 
-### Field ALU (12 words)
+### X25519 (6 raw words) — ISA-native (EXT.CRYPTO `FB 2D`)
 
-| # | Word | Stack Effect | Imm | Description |
-|---|------|-------------|-----|-------------|
-| 282 | `GF-A!` | `( addr -- )` | | Load 256-bit operand A from addr into ACC0–ACC3 |
-| 283 | `GF-R@` | `( addr -- )` | | Store ACC0–ACC3 (256-bit result) to addr |
-| 284 | `GF-PRIME` | `( n -- )` | | Select prime: 0=Curve25519, 1=secp256k1, 2=P-256, 3=custom |
-| 285 | `LOAD-PRIME` | `( p-addr pinv-addr -- )` | | Latch custom prime + Montgomery p_inv |
-| 286 | `FADD` | `( a b -- r )` | | (a + b) mod p |
-| 287 | `FSUB` | `( a b -- r )` | | (a − b) mod p |
-| 288 | `FMUL` | `( a b -- r )` | | (a · b) mod p |
-| 289 | `FSQR` | `( a -- r )` | | a² mod p |
-| 290 | `FINV` | `( a -- r )` | | a^(p−2) mod p |
-| 291 | `FPOW` | `( a b -- r )` | | a^b mod p |
-| 292 | `FMUL-RAW` | `( a b -- rlo rhi )` | | Raw 256×256→512-bit multiply |
-| 293 | `FMUL-ADD-RAW` | `( a b -- rlo rhi )` | | Multiply-accumulate (raw) |
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `X25519-SCALAR!` | `( addr -- )` | Load four ascending little-endian qwords into this core's ACC0–ACC3. |
+| `X25519-POINT!` | `( addr -- )` | Record the deferred 32-byte point operand in this core's TSRC0. |
+| `X25519-GO` | `( -- )` | Synchronously clamp ACC as an RFC 7748 scalar, multiply by the TSRC0 point using Curve25519, and replace ACC. |
+| `X25519-WAIT` | `( -- )` | No-op; the ISA operation is synchronous. |
+| `X25519-STATUS@` | `( -- n )` | Return 2 unconditionally, including before an operation. |
+| `X25519-RESULT@` | `( addr -- )` | Store ACC0–ACC3 as four ascending little-endian qwords. |
 
-### NTT Engine (9 words)
+These are raw architectural-state words, not checked transactions. They have
+no capability bit, lock, task owner, complete-span preflight, wipe, or
+low-order/all-zero-result rejection. `POINT!` does not touch memory until
+`GO`; later scalar/result qword faults can retain an already mutated prefix.
+Unaligned ordinary memory is accepted. `GO` always uses `2^255-19` regardless
+of the current Field prime selection.
 
-| # | Word | Stack Effect | Imm | Description |
-|---|------|-------------|-----|-------------|
-| 295 | `NTT-LOAD` | `( addr -- )` | | Load 256-element polynomial |
-| 296 | `NTT-STORE` | `( addr -- )` | | Store 256-element result |
-| 297 | `NTT-FWD` | `( -- )` | | Forward NTT (time → frequency) |
-| 298 | `NTT-INV` | `( -- )` | | Inverse NTT (frequency → time) |
-| 299 | `NTT-PMUL` | `( addr -- )` | | Pointwise multiply |
-| 300 | `NTT-PADD` | `( addr -- )` | | Pointwise add |
-| 301 | `NTT-SETQ` | `( q -- )` | | Set modulus (3329 or 8380417) |
-| 302 | `NTT-STATUS@` | `( -- status )` | | Read engine status |
-| 303 | `NTT-WAIT` | `( -- )` | | Busy-wait until complete |
+> **Open accelerator-catalog discrepancy.** These six dictionary entries are
+> absent from the legacy ordinal/count tables below, which also disagree with
+> the checked-in Field/NTT/KEM chain about several word counts and names. The
+> `.dq` dictionary chain in `bios.asm` is authoritative until those later
+> tables are regenerated; this X25519 table deliberately does not invent
+> replacement ordinal numbers during the simulator slice.
+
+### Field ALU (15 raw words)
+
+All field operands and results are addresses of 32-byte little-endian values.
+The raw operations take separate 32-byte low and high destination addresses.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `GF-A!` | `( a-addr -- )` | Load ACC0–ACC3 from four ascending qwords |
+| `GF-R@` | `( r-addr -- )` | Store ACC0–ACC3 as four ascending qwords |
+| `GF-PRIME` | `( selector -- )` | Select by low two bits: Curve25519, secp256k1, P-256, or custom |
+| `LOAD-PRIME` | `( p-addr pinv-addr -- )` | Latch custom `p` and Montgomery inverse without changing the selector |
+| `FADD` | `( a-addr b-addr r-addr -- )` | Selected-prime addition for canonical inputs |
+| `FSUB` | `( a-addr b-addr r-addr -- )` | Selected-prime subtraction for canonical inputs |
+| `FMUL` | `( a-addr b-addr r-addr -- )` | Selected ordinary/Montgomery product |
+| `FSQR` | `( a-addr r-addr -- )` | Selected ordinary/Montgomery square |
+| `FINV` | `( a-addr r-addr -- )` | Fermat exponent `a^(p-2) mod p` |
+| `FPOW` | `( a-addr e-addr r-addr -- )` | Ordinary modular exponentiation |
+| `FMUL-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Raw 256×256 product |
+| `FCMOV` | `( a-addr cond-addr -- )` | Replace ACC when `cond-addr C@` is nonzero; always read `a` |
+| `FCEQ` | `( a-addr b-addr r-addr -- )` | Store exact-representation equality as 256-bit 1/0 |
+| `FMAC` | `( a-addr b-addr r-addr -- )` | Add retained previous-low to the selected product |
+| `FMUL-ADD-RAW` | `( a-addr b-addr rlo-addr rhi-addr -- )` | Wrapped 512-bit raw multiply-accumulate |
+
+The old ordinal table placed only 12 Field entries before NTT. It cannot be
+repaired locally without regenerating every later ordinal, so this section
+deliberately omits invented numbers and follows the checked-in `.dq` chain.
+Canonical field elements and valid custom-prime/Montgomery tuples are the
+portable arithmetic domain; backend discrepancies outside it and the native
+raw-MAC carry defect are recorded in [bios-forth.md](bios-forth.md#field-alu--multi-prime-arithmetic-15-raw-words).
+
+### NTT Engine (10 raw words)
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `NTT-SETQ` | `( q -- )` | Set the retained uint64 modulus |
+| `NTT-IDX!` | `( idx -- )` | Set the raw 16-bit coefficient index |
+| `NTT-LOAD` | `( addr buf -- )` | Load 256 uint32-LE coefficients; zero selects A, nonzero selects B |
+| `NTT-STORE` | `( addr -- )` | Store 256 uint32-LE result coefficients |
+| `NTT-FWD` | `( -- )` | Generic forward NTT of A |
+| `NTT-INV` | `( -- )` | Generic inverse NTT of A |
+| `NTT-PMUL` | `( -- )` | Pointwise multiply A and B modulo q |
+| `NTT-PADD` | `( -- )` | Pointwise add A and B modulo q |
+| `NTT-STATUS@` | `( -- status )` | Read 0 idle, 1 busy, or 2 done |
+| `NTT-WAIT` | `( -- )` | Poll DONE; idle is not terminal |
+
+As with the corrected Field section, these entries follow the authoritative
+`.dq` chain and deliberately omit obsolete ordinal numbers instead of shifting
+every later legacy row locally. Transfer/state details and the incompatible
+current RTL surface are recorded in
+[bios-forth.md](bios-forth.md#ntt-engine-10-raw-words).
 
 ### KEM Engine — ML-KEM-512 (7 words)
 
-| # | Word | Stack Effect | Imm | Description |
-|---|------|-------------|-----|-------------|
-| 304 | `KEM-KEYGEN` | `( -- )` | | Generate ML-KEM-512 keypair |
-| 305 | `KEM-ENCAPS` | `( pk-addr -- )` | | Encapsulate: ciphertext + shared secret |
-| 306 | `KEM-DECAPS` | `( ct-addr -- )` | | Decapsulate: recover shared secret |
-| 307 | `KEM-SETQ` | `( q -- )` | | Set underlying NTT modulus |
-| 308 | `KEM-STATUS@` | `( -- status )` | | Read engine status |
-| 309 | `KEM-PK@` | `( addr -- )` | | Read public key to addr |
-| 310 | `KEM-CT@` | `( addr -- )` | | Read ciphertext to addr |
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `KEM-SEL!` | `( n -- )` | Select retained buffer 0..4 and reset its byte index |
+| `KEM-LOAD` | `( addr count -- )` | Copy caller bytes to the selected buffer |
+| `KEM-STORE` | `( addr count -- )` | Copy selected-buffer bytes to caller memory |
+| `KEM-KEYGEN` | `( -- )` | Replace PK and SK from retained 64-byte `d || z` |
+| `KEM-ENCAPS` | `( -- )` | Replace CT and SS from retained PK and 32-byte coin |
+| `KEM-DECAPS` | `( -- )` | Replace SS from retained CT and SK |
+| `KEM-STATUS@` | `( -- n )` | Read retained raw status (0 idle, 2 done in Python execution) |
+
+These are the seven entries in the authoritative `.dq` chain. As in the
+corrected Field and NTT sections, obsolete ordinal numbers are omitted rather
+than shifting every later legacy row locally. The executable device uses a
+40-byte byte-register window at `+0x0900`, completes commands synchronously,
+and retains shared buffers and DONE state without ownership or automatic wipe.
+Current RTL instead exposes an incompatible 64-bit-slot map, BUSY timing, and
+non-cryptographic deterministic stub values and does not qualify ML-KEM. The
+public `KEM-SEED-SIZE` is 64, matching the complete `d || z` key-generation
+input. The full transfer/lifecycle, valid-key interoperability, and
+secret-boundary qualifications are recorded in
+[bios-forth.md](bios-forth.md#kem-engine--ml-kem-512-7-words).
 
 ### Cooperative Multitasking (9 words)
 
@@ -969,7 +1039,7 @@ machine reset.
 
 | Category | Count |
 |----------|-------|
-| Stack Manipulation | 16 |
+| Stack Manipulation | 17 |
 | Arithmetic | 17 |
 | Logic & Bitwise | 6 |
 | Comparison | 13 |
@@ -984,7 +1054,7 @@ machine reset.
 | Miscellaneous / System | 9 |
 | Tile Engine | 39 |
 | NIC | 4 |
-| Disk / Storage | 12 |
+| Disk / Storage | 17 |
 | Timer & Interrupts | 6 |
 | RTC / System Clock | 7 |
 | Multicore | 11 |
@@ -1002,15 +1072,15 @@ machine reset.
 | TRNG | 3 |
 | Checked Entropy Boundaries | 2 |
 | Caller Span Boundary | 1 |
-| Field ALU | 13 |
-| NTT Engine | 9 |
+| Field ALU | 15 |
+| NTT Engine | 10 |
 | KEM Engine | 7 |
 | Cooperative Multitasking | 9 |
 | Full-width TACC | 8 |
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **388** |
+| **Catalogued subtotal** | **391** |
 
 ### All Immediate Words (34)
 
@@ -1050,8 +1120,8 @@ WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
 | `0xFFFF_FF00_0000_0840` | *(free)* | Field ALU is ISA-native (`EXT.CRYPTO FB 20..2D`); no MMIO device occupies this range |
 | `0xFFFF_FF00_0000_0880` | Port I/O Bridge | PORT1_TARGET..PORT7_TARGET=+00..+0D (16-bit LE, low 12 bits used), BRIDGE_CTRL=+0E |
 | `0xFFFF_FF00_0000_08A0` | WOTS Chain | Exact byte-only 32-byte aperture: CONTEXT_ADDR=+00..+07, STEPS=+08, START=+09, CMD/STATUS=+0A, ERROR=+0B, CYCLES=+0C..+0F, DOUT=+10..+1F |
-| `0xFFFF_FF00_0000_08C0` | NTT Engine | COEFF=+0..+1FF, CMD=+200, STATUS=+201, Q=+208..+20B |
-| `0xFFFF_FF00_0000_0900` | KEM Engine | CMD=+0, STATUS=+1, Q=+8, PK=+10, CT=+100, SS=+200 |
+| `0xFFFF_FF00_0000_08C0` | NTT Engine | Executable byte map: STATUS=+00, Q=+08..+0F, IDX=+10..+11, LOAD_A=+18..+1B, LOAD_B=+1C..+1F, RESULT=+20..+23, CMD=+28; current RTL uses incompatible 64-bit slots |
+| `0xFFFF_FF00_0000_0900` | KEM Engine | Executable 40-byte window: STATUS(R)=+00, CMD(W)=+01, BUF_SEL(W)=+08, DIN(W)=+10, DOUT(R)=+18, BUF_SIZE(R,uint16-LE)=+20..+21; current RTL uses an incompatible 64-bit-slot map and deterministic crypto stub |
 | `0xFFFF_FF00_0000_0940` | ~~SHA-2~~ | Removed — now ISA (`sha.init`/`sha.din`/`sha.final`/`sha.dout`/`sha.release`) |
 | `0xFFFF_FF00_0000_0980` | ~~CRC Engine~~ | Removed — now ISA-native (`crc.mode`/`crc.init`/`crc.seed`/`crc.b`/`crc.q`/`crc.fin`/`crc.finraw`) |
 | `0xFFFF_FF00_0000_0B00` | RTC | UPTIME=+0..7 (R,latched), EPOCH=+8..F (RW,latched), SEC=+10, MIN=+11, HOUR=+12, DAY=+13, MON=+14, YEAR=+15..16, DOW=+17, CTRL=+18, STATUS=+19, ALARM=+1A..1C |

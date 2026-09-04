@@ -6,13 +6,47 @@ import pytest
 
 from accel_wrapper import Megapad64 as NativeMegapad64
 from asm import assemble
-from megapad64 import Megapad64 as PythonMegapad64
+from megapad64 import (
+    IVEC_DIV_ZERO,
+    Megapad64 as PythonMegapad64,
+    TrapError,
+)
 
 
 MMIO_START = 0xFFFF_FF00_0000_0000
 CPU_TYPES = (
     pytest.param(PythonMegapad64, id="python"),
     pytest.param(NativeMegapad64, id="native"),
+)
+SIGNED_DIVISION_CASES = (
+    pytest.param(
+        (1 << 63) - 1,
+        3,
+        3_074_457_345_618_258_602,
+        1,
+        id="max-by-positive",
+    ),
+    pytest.param(
+        (1 << 63) - 1,
+        -3,
+        -3_074_457_345_618_258_602,
+        1,
+        id="max-by-negative",
+    ),
+    pytest.param(
+        -(1 << 63) + 1,
+        3,
+        -3_074_457_345_618_258_602,
+        -1,
+        id="near-min-by-positive",
+    ),
+    pytest.param(
+        -(1 << 63) + 1,
+        -3,
+        3_074_457_345_618_258_602,
+        -1,
+        id="near-min-by-negative",
+    ),
 )
 
 
@@ -44,6 +78,64 @@ def _cpu_pair(code: bytes):
         cpu.pc = 0
         cpu.perf_enable = 1
     return oracle, native
+
+
+@pytest.mark.parametrize("cpu_type", CPU_TYPES)
+@pytest.mark.parametrize(
+    ("dividend", "divisor", "quotient", "remainder"),
+    SIGNED_DIVISION_CASES,
+)
+def test_signed_division_and_modulus_use_exact_truncation_toward_zero(
+    cpu_type,
+    dividend: int,
+    divisor: int,
+    quotient: int,
+    remainder: int,
+) -> None:
+    cpu = cpu_type(mem_size=4096)
+    cpu.load_bytes(0, assemble("div r1, r2\nmod r4, r2"))
+    cpu.regs[1] = dividend & 0xFFFF_FFFF_FFFF_FFFF
+    cpu.regs[2] = divisor & 0xFFFF_FFFF_FFFF_FFFF
+    cpu.regs[4] = dividend & 0xFFFF_FFFF_FFFF_FFFF
+    cpu.pc = 0
+
+    cpu.step()
+
+    assert cpu.regs[1] == quotient & 0xFFFF_FFFF_FFFF_FFFF
+    assert cpu.regs[0] == remainder & 0xFFFF_FFFF_FFFF_FFFF
+
+    cpu.step()
+
+    assert cpu.regs[4] == remainder & 0xFFFF_FFFF_FFFF_FFFF
+
+
+@pytest.mark.parametrize("cpu_type", CPU_TYPES)
+def test_signed_mod_overflow_edge_returns_zero_without_host_overflow(
+    cpu_type,
+) -> None:
+    cpu = cpu_type(mem_size=4096)
+    cpu.load_bytes(0, assemble("mod r1, r2"))
+    cpu.regs[1] = 1 << 63
+    cpu.regs[2] = 0xFFFF_FFFF_FFFF_FFFF
+    cpu.pc = 0
+
+    cpu.step()
+
+    assert cpu.regs[1] == 0
+
+
+@pytest.mark.parametrize("cpu_type", CPU_TYPES)
+def test_signed_div_overflow_remains_a_divide_trap(cpu_type) -> None:
+    cpu = cpu_type(mem_size=4096)
+    cpu.load_bytes(0, assemble("div r1, r2"))
+    cpu.regs[1] = 1 << 63
+    cpu.regs[2] = 0xFFFF_FFFF_FFFF_FFFF
+    cpu.pc = 0
+
+    with pytest.raises(TrapError) as raised:
+        cpu.step()
+
+    assert raised.value.ivec_id == IVEC_DIV_ZERO
 
 
 @pytest.mark.parametrize("condition", range(16))

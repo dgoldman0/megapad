@@ -7,7 +7,7 @@ Megapad-64 development environment:
 2. **Assembler** (`asm.py`) — translate assembly source to machine code
 3. **Disk Utility** (`diskutil.py`) — create and manage MP64FS disk images
 4. **Test Suite** (`test_megapad64.py`, `test_system.py`) — verify everything works
-5. **C++ Accelerator** (`accel/`) — optional multi-source execution kernel
+5. **C++ Accelerator** (`emulator/accel/`) — optional multi-source execution kernel
 
 The core tools are pure Python 3 with no external dependencies.
 The optional C++ accelerator requires CPython 3.12 and pybind11.
@@ -579,7 +579,7 @@ do not overlap either with another test suite.
 ### Accelerated and Focused Tests
 
 The optional C++ accelerator reimplements the CPU step loop in pybind11.
-`system.py` imports it automatically when the shared library is present;
+`emulator/system.py` imports it automatically when the shared library is present;
 otherwise it falls back to pure Python. The Makefile's current foreground
 qualification path is sequential.
 
@@ -620,13 +620,13 @@ the boot cost; subsequent tests restore from the cached snapshot.
 
 | File | Purpose |
 |------|---------|
-| `megapad64.py` | CPU and tile-engine emulator |
-| `accel/` | Optional multi-source pybind11 execution kernel |
-| `accel_wrapper.py` | Drop-in wrapper for the C++ CPU core |
-| `system.py` | SoC/device/memory integration and batched execution |
+| `emulator/megapad64.py` | CPU and tile-engine emulator |
+| `emulator/accel/` | Optional multi-source pybind11 execution kernel |
+| `emulator/accel_wrapper.py` | Drop-in wrapper for the C++ CPU core |
+| `emulator/system.py` | SoC/device/memory integration and batched execution |
 | `cli.py` | Boot modes, debug monitor, and headless terminal server |
 | `asm.py` | Two-pass assembler and listing output |
-| `devices.py` | MMIO device models and accelerator facades |
+| `emulator/devices.py` | MMIO device models and accelerator facades |
 | `nic_backends.py` | Loopback, UDP-tunnel, and Linux TAP backends |
 | `data_sources.py` | Simulated network data sources |
 | `diskutil.py` | MP64FS image utility |

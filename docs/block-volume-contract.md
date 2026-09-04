@@ -30,6 +30,17 @@ Close operations are idempotent for already-invalid objects.  A caller must
 not copy a live descriptor byte-for-byte: cookies and reference ownership
 belong to the original object address.
 
+Validation is structural and does not span-preflight an arbitrary descriptor
+pointer or the nested parent pointer stored in a volume. A null pointer is
+handled by the public validators, but an otherwise forged, truncated,
+read-only, crossing, or unmapped object may fault while being inspected or
+cleared. `BD.REFS` increments and decrements use unchecked wrapping cell
+arithmetic. Copying authority can therefore double-release a parent or
+underflow/overflow its count; the wrapping cookie allocator also has an ABA
+horizon after `2^64-1` nonzero identities. Callers provide and protect the
+complete object extents rather than relying on these words as safe pointer
+probes.
+
 A descriptor destination is caller-owned lifecycle state, not arbitrary
 uninitialized storage.  Before its first construction it must be zero-filled;
 on later construction it may instead contain the same caller's live object,
@@ -141,6 +152,44 @@ unsigned.  A request is valid exactly when `count > 0`, `count <= length`, and
 is valid, zero-length requests are invalid, and arithmetic wraparound cannot
 turn an out-of-range request into an accepted one.
 
+## Singleton compatibility binding
+
+`SYSTEM-BD` and `SYSTEM-RAW-VOLUME` are KDOS-global, runtime-local raw recovery
+singletons. `FS-VOLUME` points either to that raw volume or to a
+caller-selected validated volume. This is a compatibility binding for ordinary
+KDOS file paths; it does not replace independently owned volumes used by
+Akashic VFS instances.
+
+`STORAGE-OPEN` attempts `VOL-CLOSE`, then `BD-CLOSE`, discards both close
+results, and only then attempts `BD-OPEN`. Replacement is destructive and is
+not rolled back if a later step fails. In particular, an extra live volume can
+make the block close busy after the raw singleton has already been cleared;
+the subsequent open then returns `BD-E-BUSY` while that extra volume and block
+remain live. The word publishes a new raw volume on success but does not clear
+`FS-OK`; a direct management caller must invalidate filesystem cache state
+before rebinding. `FS-VOLUME!` instead validates a current volume, publishes
+its pointer, and clears `FS-OK`. It borrows the descriptor without incrementing
+the parent reference count, so its owner must keep it live until selection
+changes.
+
+`STORAGE-ENSURE` lazily opens the singleton only when the selection is invalid
+and `FS-OK` is already zero. If the selection is invalid while `FS-OK` is
+nonzero, it clears the marker and returns `VOL-E-STALE` without opening; a
+later call may then open. A structurally valid but generation-stale selection
+continues to return stale until an explicit management operation replaces it.
+
+`DISK-IO-STATUS`, `DISK-IO-COMPLETED`, and `DISK-IO-IOR` are shared retained
+diagnostics for the compatibility wrappers. Reads and writes update all three;
+a zero-ior short completion is normalized to raw status 14 and
+`BD-E-INTERNAL`, retaining the actual completed count. Flushes update status
+and ior but preserve the preceding completed count. Stale read, write, and
+selected-volume flush results clear `FS-OK`; `_RAW-DISK-FLUSH?` does not. These
+cells, singleton management, selection lifetime, and diagnostic consumption
+are unlocked global state. Concurrent calls can expose a noncoherent mixture
+of the three diagnostics, so their caller must serialize them. The detailed
+compatibility surface and Buffer-sector caveats are recorded in the
+[KDOS reference](kdos-reference.md#7-storage--persistence).
+
 ## Generation safety and completion
 
 A descriptor's media generation is part of its authority.  Every operation
@@ -171,7 +220,7 @@ The low 32 bits of a storage ior are stable:
 
 | Bits | Reader | Meaning |
 | --- | --- | --- |
-| 7..0 | `IOR>RAW` | Unmodified controller or source cause |
+| 7..0 | `IOR>RAW` | Low-seven-bit controller or source cause; controller `PARTIAL` bit 7 is split into `IOR-F-PARTIAL` rather than retained here |
 | 15..8 | `IOR>CODE` | Stable KDOS error class |
 | 23..16 | `IOR>DOMAIN` | Block, device, volume, or partition domain |
 | 31..24 | `IOR>FLAGS` | Partial, retryable, stale, corrupt, unsupported, or read-only |
@@ -181,11 +230,11 @@ Zero alone denotes success.  Public predicates include `IOR-PARTIAL?` and
 partition 4.  Range errors use code 18; partition capacity and workspace
 errors use codes 21 and 22 respectively.
 
-GPT's checked CRC source retains the BIOS status in `IOR>RAW`: missing
-reflected/raw capability is raw 1, partition code 23, and the unsupported
-flag; CRC ownership contention is raw 2 and partition code 24.  The scanner
-does not relabel either failure as corrupt media and does not fall back to a
-private software checksum.
+GPT's checked CRC source retains the low-seven-bit BIOS status in `IOR>RAW`.
+Missing reflected/raw capability is raw 1, partition code 23, and the
+unsupported flag; CRC ownership contention is raw 2 and partition code 24.
+The scanner does not relabel either failure as corrupt media and does not fall
+back to a private software checksum.
 
 ## Partition discovery API
 
@@ -199,9 +248,18 @@ PART-SCAN  ( bd volumes max workspace bytes -- count ior )
 
 `volumes` points to `max * /VOLUME` writable bytes whose slots satisfy the
 zero-or-live lifecycle rule above.  `workspace` points to at least
-`PART-WORKSPACE-MIN` writable bytes.  The buffers must not overlap the live
-block-device descriptor.  `count` is the number of consecutive valid volume
-objects beginning at `volumes`.
+`PART-WORKSPACE-MIN` writable bytes.  The output extent, workspace extent,
+and live block-device descriptor must be pairwise disjoint.  GPT reuses the
+workspace for repeated sector reads and temporarily zeros the header CRC field
+at `workspace + 16`; overlap can overwrite an already staged output slot or a
+live descriptor.  `count` is the number of consecutive valid volume objects
+beginning at `volumes`.
+
+These are caller-trusted extents, not checked-span interfaces.  The scanners
+do not preflight writability, prove disjointness, or check multiplication wrap
+in `max * /VOLUME`.  A forged live slot, truncated extent, or overlapping
+buffer can fault or corrupt guest state rather than returning a structured
+partition ior.
 
 The public scanners serialize their shared parser state with machine
 spinlock 0; callers must not enter them while already holding that lock.
@@ -215,7 +273,9 @@ later error—including invalid device identity, insufficient workspace, or
 insufficient output capacity—leaves every output slot clear and returns
 `count = 0`; callers never receive either a stale prior result or a valid
 prefix from a rejected table.  A null/zero output extent is rejected without
-dereferencing it.
+dereferencing it.  These guarantees cover structured returns under the caller
+preconditions.  The public wrapper releases lock 0 and rethrows an unexpected
+`THROW`; that exceptional path does not add a second output-clear pass.
 
 `PART-SCAN` is the policy entry point.  It recognizes a protective MBR and
 dispatches GPT, applies MBR validation to a nonempty ordinary table, and
@@ -276,6 +336,12 @@ The current contract does not silently recover one GPT copy from the other.
 Both headers, both arrays, and their mutual agreement are required; any
 single-copy corruption rejects the table transactionally.
 
+Generation guarding applies independently to every metadata read.  The scan
+does not hold the block lock across the whole operation and is therefore not a
+same-medium content snapshot against concurrent writes.  Attachment changes
+fail through the saved generation, but callers must serialize other writers
+while discovering partitions.
+
 All GPT CRC-32 values use checked hardware mode 4 (CRC-32/ISO-HDLC).  A header
 is checked in one transaction after temporarily zeroing its stored CRC field;
 the field is restored even when acquisition is unsupported or busy.  Entry
@@ -301,6 +367,8 @@ The executable storage-object suite must cover:
   capability absence, busy-owner preservation, and reacquisition after an
   injected later-sector read failure;
 - independent primary/backup header and primary/backup array CRC corruption;
-  and
 - corrupt signatures, extents, capacity, and workspace with no partial
-  volume publication.
+  volume publication;
+- disjoint caller-owned output/workspace geometry; and
+- exact output clearing without touching a canary beyond the caller's `max`
+  extent.

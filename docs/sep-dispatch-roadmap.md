@@ -405,7 +405,7 @@ separate Phase 4f trace unit.
 #### Prerequisites
 
 1. **ISA team:** Extended register file (R16–R31) implemented in RTL
-2. **Emulator team:** `SEP Rn` for n ≥ 16 implemented in `megapad64.py`
+2. **Emulator team:** `SEP Rn` for n ≥ 16 implemented in `emulator/megapad64.py`
 3. **Confirm encoding:** `sep r16` instruction size (1 byte or 2 bytes)
    determines exact savings
 
@@ -1085,7 +1085,7 @@ registers, collapsing DMA address writes to `OUT n` chains.
 
 ## RTL / Emulator Considerations
 
-- **Emulator (`megapad64.py`):** Must correctly implement `SEP Rn` as
+- **Emulator (`emulator/megapad64.py`):** Must correctly implement `SEP Rn` as
   `PSEL ← n` with the next fetch from `R[n]`.  Verify R[old_PSEL]
   freezes at PC+1 (byte after the SEP instruction).
 - **RTL (`mp64_cpu.v`):** The fetch stage already muxes PC from

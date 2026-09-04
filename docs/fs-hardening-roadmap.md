@@ -53,21 +53,20 @@ the attached media before variable-size DMA.
 
 ## Phase 2 — Allocation Pre-Check & Reporting
 
-**Problem:** `MKFILE` in kdos.f prints "No space on disk" and drops the
-request.  The user gets no guidance on *how much* space is needed vs
-available, or whether compaction would help.
+**Status: implemented for the current reporting surface.** `MKFILE` reports
+the requested and total-free sector counts when its single-run allocation
+fails. `FS-LARGEST-FREE` scans the cached bitmap, and `FS-FREE` publishes total
+free sectors/bytes, the largest run, and global occupied-entry count. The
+unchanged KDOS definitions through line 5471 are also admitted by the hosted
+simulator.
 
-**Plan:**
-- `MKFILE` error message: include requested vs available sector counts.
-  `"  Need 938 sectors, only 222 free"`.
-- Add `FS-LARGEST-FREE ( -- n )` that scans the bitmap and returns the
-  largest contiguous run.  Print it alongside free count in `FS-FREE`.
-- `diskutil.py` `inject_file()`: raise a descriptive `RuntimeError`
-  with the same numbers instead of the generic message.
-- Consider auto-suggesting `FS-COMPACT` when total free ≥ needed but
-  largest contiguous < needed (fragmentation case).
+The host `diskutil.py` path likewise reports total free and largest-run state;
+when two extents still cannot satisfy a request, it suggests compacting or
+using a larger image. KDOS does not yet automatically correlate a failed
+`MKFILE` request with `FS-LARGEST-FREE` or suggest the still-planned runtime
+`FS-COMPACT`. That optional guidance remains future work.
 
-**Estimated scope:** ~20 lines Forth, ~10 lines Python.
+**Original estimated scope:** ~20 lines Forth, ~10 lines Python.
 
 ---
 
@@ -92,16 +91,17 @@ the secondary.
 
 ## Phase 4 — Bitmap ↔ Directory Cross-Validation
 
-**Problem:** No tool currently checks whether the bitmap and directory
-agree.  A stale bitmap bit (from a crash mid-`FS-SYNC`) silently leaks
-sectors.  A cleared bit on an allocated sector silently corrupts data.
+**Problem:** BIOS already requires every sector declared by an extent to have
+its allocation bit set, but it does not reconstruct ownership. A stale extra
+bit can silently leak a sector, and two entries can claim the same allocated
+sector.
 
 **Plan:**
-- `FS-CHECK` already walks files and verifies CRC.  Extend it:
+- Implement the still-planned runtime `FS-CHECK` so it:
   1. Rebuild a shadow bitmap from directory entries (both extents).
   2. Compare against on-disk bitmap bit-by-bit.
-  3. Report leaked sectors (bitmap=1, no file claims it) and
-     collisions (bitmap=0, but file claims it; or two files overlap).
+  3. Report leaked sectors (bitmap=1, no file claims it), missing allocation
+     bits, and collisions where two extents claim one sector.
 - `diskutil.py` `check()` gets the same logic.
 - Optional `FS-REPAIR` to fix the bitmap from directory truth.
 
@@ -157,8 +157,8 @@ bundles, streams, and links all compete for slots.
 | 6 | **P2** | Phase 1 | Nice-to-have, only matters at scale |
 | 5 | **P2** | Phase 4 | Significant complexity; reserve for a later hardening milestone |
 
-Phases 1 and 2 can ship together as a single PR.  Phase 4 is a natural
-follow-up.  Phase 5 is a design decision that warrants its own RFC.
+Phase 1 and the Phase 2 reporting surface are implemented. Phase 4 remains a
+natural follow-up. Phase 5 is a design decision that warrants its own RFC.
 
 ---
 

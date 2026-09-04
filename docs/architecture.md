@@ -31,7 +31,7 @@ layers (BIOS, KDOS, filesystem) build on top of the hardware.
     │              │  BIOS code + dict    │ │
     │              │  KDOS Forth dict     │ │
     │              │  Buffers & data      │ │
-    │              │  FS cache (3 KB)     │ │
+    │              │  FS cache (~14.5 KiB)│ │
     │              │  Task stacks (2 KB)  │ │
     │              │         ↓ HERE       │ │
     │              │         ...          │ │
@@ -147,15 +147,15 @@ device occupies a small range:
 | **NIC** | `+0x0400` | 128 bytes | Network interface controller |
 | **Mailbox** | `+0x0500` | 16 bytes | Inter-core IPI (data + send + status + ack) |
 | **Spinlock** | `+0x0600` | 64 bytes | 16 hardware locks, 4 bytes each; lock 8 is reserved by the checked MMIO crypto guard |
-| **AES-256/128-GCM** | `+0x0700` | 64 bytes | Authenticated encryption accelerator (AES-256 and AES-128) |
+| **AES-256/128-GCM** | `+0x0700` | 112 bytes | Authenticated encryption accelerator (AES-256 and AES-128); executable key-mode byte at `+0x073A` |
 | **SHA-3/SHAKE/raw Keccak** | `+0x0780` | 96 bytes | Checked hash/XOF streaming plus indexed caller-owned Keccak-f[1600] state |
 | **Reserved** | `+0x07E0` | 16 bytes | No integrated QoS MMIO device; accesses fault |
 | **TRNG** | `+0x0800` | 32 bytes | Checked hardware entropy source |
 | **Port I/O Bridge** | `+0x0880` | 16 bytes | Remap CSR — maps OUT N / INP N to configurable MMIO targets |
 | **WOTS Chain** | `+0x08A0` | 32 bytes | Qualified checked byte-only WOTS chain sequencer with 64-bit read-only Bank 0 context DMA |
-| **NTT Engine** | `+0x08C0` | 64 bytes | 256-point Number Theoretic Transform (ML-KEM/ML-DSA) |
-| **KEM** | `+0x0900` | 64 bytes | ML-KEM-512 key encapsulation accelerator |
-| **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
+| **NTT Engine** | `+0x08C0` | 64 bytes | Generic 256-point cyclic transform; executable byte ABI and current RTL slots differ |
+| **KEM** | `+0x0900` | 40 executable bytes | Synchronous Python ML-KEM-512 value device; the allocated 64-byte RTL block has an incompatible slot ABI and crypto stub |
+| **Framebuffer** | `+0x0A00` | 80 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 | **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
 
@@ -309,11 +309,14 @@ and interrupts are enabled (IE=1), the timer fires `IVEC_TIMER`.  With
 auto-reload (bit 2), the counter resets to 0 on match, creating a periodic
 interrupt.
 
-KDOS uses this for **cooperative preemption checkpoints** — `PREEMPT-ON`
-configures a 50,000-cycle timer with auto-reload, and `CORE-CHECKPOINT`
-(`YIELD?`) checks the per-core flag set by the timer handler. Core 0 may
-retire its current KDOS task; secondary one-shot workers acknowledge the
-checkpoint without touching the core-0 scheduler.
+The architectural intent is **cooperative preemption checkpoints**. Current
+unchanged KDOS is narrower: early `PREEMPT-ON` writes control 5, leaving IRQ
+generation disabled; later `PREEMPT-ON-ALL` writes control 7 and rebinds
+`CORE-CHECKPOINT` to a per-core flag table, but the source installs no handler
+that maps Timer status to those flags. A manually populated core-0 flag is
+cleared before non-suspending `SCHED-YIELD`, after which execution continues;
+a worker checkpoint only clears and continues. The hosted semantic profile
+does not synthesize the missing interrupt-to-flag or task-switch path.
 
 ---
 
@@ -404,8 +407,9 @@ READ, WRITE, or FLUSH to `GUARDED_CMD`.  A generation mismatch completes as
 `DISK-WRITE-CHECKED`, and `DISK-FLUSH-CHECKED`.  Raw `DISK-SEC!`,
 `DISK-DMA!`, `DISK-N!`, `DISK-READ`, `DISK-WRITE`, and `DISK-FLUSH` remain
 diagnostic compatibility words.  `DISK@` reads status, `DISK-SECTORS` reads
-attached capacity, and `MP64FS-VALID?` validates the complete attached
-filesystem before use.
+attached capacity, and `MP64FS-VALID?` validates marker-1 geometry, reserved
+allocation bits, and occupied directory-entry extent/parent bounds before
+use. It does not prove names, ownership, acyclicity, CRCs, or file data.
 
 ---
 
@@ -584,9 +588,9 @@ zeroizes the bank before another TACC operation is admitted.
 | WOTS Chain | 0–15 shared Keccak permutations after one 64-byte context read | Production Winternitz chain primitive over a caller-owned Bank 0 context |
 | SHA-256 | 64 bytes / 64 cycles | TLS 1.3, HMAC-SHA256, HKDF (per-core ISA, no MMIO) |
 | CRC (32/64-bit tuples) | 8 bytes / feed | Data integrity (private full-core / cluster-shared ISA, no MMIO) |
-| Field ALU | 1 FMUL / ~255 cycles | GF(2²⁵⁵−19) field arithmetic (8 modes incl. X25519, per-core ISA) |
-| NTT Engine | 256-pt NTT / ~1280 cycles | Lattice crypto polynomial multiply (ML-KEM, ML-DSA) |
-| KEM | keygen+encaps / ~500 cycles | ML-KEM-512 key encapsulation (FIPS 203) |
+| Field ALU | 1–4335 nominal ISA cycles, operation-dependent | Per-core multi-prime arithmetic, raw 512-bit products, and X25519 |
+| NTT Engine | Python device synchronous; current RTL ~2304 FWD / ~2560 INV work cycles | Generic cyclic polynomial transform; not the standards' negacyclic ML-KEM/ML-DSA operation |
+| KEM | Python device synchronous; current RTL exposes a multi-cycle stub | Deterministic ML-KEM-512 values for generated/well-formed keys; no hardware/FIPS-validation claim |
 | TRNG | 64 bits / 2 cycles | Hardware true random number generator |
 
 ### SHA-3/SHAKE and raw Keccak-f[1600]
@@ -749,73 +753,164 @@ responses, with acquire reported busy. Spinlock owner storage covers the
 complete `NUM_CORES` global topology independently of mailbox full-core
 capacity.
 
-### Field ALU (GF(2²⁵⁵−19) Coprocessor)
+### Field ALU (Multi-Prime Coprocessor)
 
-A general-purpose field arithmetic unit implemented as per-core ISA
-instructions (EXT.CRYPTO FB, sub-ops 0x20–0x2D).  Eight operation modes:
+The Field unit is per physical core and uses EXT.CRYPTO `FB 20`–`FB 2D`:
 
-| Mode | Name | Description |
-|------|------|-------------|
-| 0 | X25519 | Full scalar multiplication (Montgomery ladder, ~255 iterations) |
-| 1 | FADD | (a + b) mod p |
-| 2 | FSUB | (a − b) mod p |
-| 3 | FMUL | (a · b) mod p (shared 256-bit multiplier) |
-| 4 | FSQR | a² mod p |
-| 5 | FINV | a^(p−2) mod p (Fermat's little theorem) |
-| 6 | FPOW | a^b mod p (general exponentiation) |
-| 7 | MUL_RAW | Raw 256×256→512-bit multiply (no modular reduction) |
+| Sub-op | Name | Description |
+|--------|------|-------------|
+| `20` | GF.ADD | Selected-prime addition |
+| `21` | GF.SUB | Selected-prime subtraction |
+| `22` | GF.MUL | Ordinary or custom Montgomery product |
+| `23` | GF.SQR | Ordinary or custom Montgomery square |
+| `24` | GF.INV | Fermat exponent `a^(p-2) mod p` |
+| `25` | GF.POW | Ordinary modular exponentiation |
+| `26` | GF.MULR | Raw 256×256 product |
+| `27` | GF.MAC | Selected product plus retained previous-low |
+| `28` | GF.MACR | Wrapped raw 512-bit multiply-accumulate |
+| `29` | GF.CMOV | Register-conditioned exact 256-bit move |
+| `2A` | GF.CEQ | Exact 256-bit equality result |
+| `2B` | GF.PRIME | Select Curve25519, secp256k1, P-256, or custom |
+| `2C` | GF.LDPRIME | Latch custom prime and Montgomery inverse |
+| `2D` | GF.X25519 | RFC 7748 scalar multiplication |
 
-Operands are staged via CSR writes (ACC0–ACC3 for A, TSRC0 for B
-address); results read back via CSR reads.  The ISA instructions are
-synchronous — each completes in deterministic cycles with no polling.
+ACC0–ACC3 stage A/result, TSRC0 names B, and TDST names the raw high-half
+destination. Prime configuration and previous low/high results persist across
+calls and are shared by tasks on the core. Instructions are synchronous; the
+BIOS wrappers transfer four ascending little-endian qwords without a complete
+32-byte preflight.
 
-Zero additional DSPs — reuses the existing shared 256-bit multiplier.
-**BIOS words:** `GF-A!`, `GF-R@`, `GF-PRIME`, `LOAD-PRIME`,
-`FADD`, `FSUB`, `FMUL`, `FSQR`, `FINV`, `FPOW`, `FMUL-RAW`, `FMUL-ADD-RAW`.
-**KDOS words (§1.10):** `F+`, `F-`, `F*`.
+The checked-in dictionary exposes 15 raw words: `GF-A!`, `GF-R@`,
+`GF-PRIME`, `LOAD-PRIME`, `FADD`, `FSUB`, `FMUL`, `FSQR`, `FINV`, `FPOW`,
+`FMUL-RAW`, `FCMOV`, `FCEQ`, `FMAC`, and `FMUL-ADD-RAW`. KDOS §1.10 adds
+four named prime selectors and four scratch buffers; it does not define
+`F+`, `F-`, or `F*`.
+
+The standalone Field RTL is not currently connected into either complete core
+path. Canonical-input, custom-prime, raw-MAC carry, and emulator discrepancies
+are therefore tracked in the [BIOS reference](bios-forth.md#field-alu--multi-prime-arithmetic-15-raw-words)
+and simulator contract rather than inferred from the leaf block alone.
 
 ### NTT Engine (Number Theoretic Transform)
 
 A 256-point NTT accelerator at MMIO base `+0x08C0` for lattice-based
-post-quantum cryptography (ML-KEM, ML-DSA).
+experimentation. The executable BIOS path uses the architectural Python device
+even when CPU execution is native-accelerated; no separate C++ NTT algorithm
+exists.
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
-| CMD | `+0x00` | W | **1:** NTT_FWD, **2:** NTT_INV, **3:** NTT_PMUL, **4:** NTT_PADD |
-| Q | `+0x08` | RW | Modulus (default 3329 for ML-KEM, 8380417 for ML-DSA) |
-| IDX | `+0x10` | RW | Coefficient index (0–255), auto-increments on RESULT read |
-| LOAD_A | `+0x18` | W | Write coefficient to polynomial A[IDX] |
-| LOAD_B / RESULT | `+0x20` | RW | Write to B[IDX], read from work[IDX] |
+| STATUS | `+0x00` | R byte | 0 idle, 1 busy, 2 done |
+| Q | `+0x08..+0x0F` | RW bytes | Retained uint64 modulus, default 3329 |
+| IDX | `+0x10..+0x11` | RW bytes | Retained 16-bit index; data access uses modulo 256 |
+| LOAD_A | `+0x18..+0x1B` | W bytes | Stage one uint32-LE A coefficient; byte 3 commits and increments |
+| LOAD_B | `+0x1C..+0x1F` | W bytes | Stage one uint32-LE B coefficient; byte 3 commits and increments |
+| RESULT | `+0x20..+0x23` | R bytes | Read one uint32-LE result; byte 3 increments |
+| CMD | `+0x28` | W byte | **1:** FWD, **3:** INV, **5:** PMUL, **7:** PADD |
 
-Internal storage: 3 × 256 × 32-bit register files (poly_a, poly_b, work).
-Cooley-Tukey butterfly with precomputed twiddle ROM (ω = 17 for q = 3329).
-~1,280 cycles for forward/inverse NTT, ~256 cycles for PMUL/PADD.
+Internal executable storage is 3 × 256 × 32-bit coefficient arrays. The
+Python device selects a primitive 256th root for q, completes commands
+synchronously, and is shared system-wide. Its generic transform implements
+cyclic convolution modulo `x^256-1`; the separate ML-KEM device contains its
+own ML-KEM-specific NTT/basemul routines.
 
-**BIOS words:** `NTT-LOAD`, `NTT-STORE`, `NTT-FWD`, `NTT-INV`, `NTT-PMUL`,
-`NTT-PADD`, `NTT-SETQ`, `NTT-STATUS@`, `NTT-WAIT`.
-**KDOS word (§1.11):** `NTT-POLYMUL` (full polynomial multiply via NTT).
+The current RTL is not register-compatible with this table. It decodes
+64-bit slots with CMD/STATUS at `+0x00`, 32-bit Q at `+0x08`, 8-bit IDX at
+`+0x10`, A at `+0x18`, and B-write/result-read at `+0x20`. BIOS byte accesses
+therefore write the wrong values/slots and cannot start the unit. The RTL also
+uses permanent q=3329 twiddle tables and `N_INV=3316` after Q changes, and its
+state machine exposes approximately 2304 forward, 2560 inverse, or 256
+pointwise work cycles before bus overhead. The older ~1280-cycle and
+configurable-Dilithium RTL descriptions are not current implementation facts.
+
+The table and the ten BIOS words below are the retained emulator/simulator ABI
+for this generic cyclic service. RTL convergence is deferred. Any future
+standardized ML-KEM/ML-DSA transform receives a distinct, versioned identity;
+it does not silently redefine this NTT.
+
+**BIOS words:** `NTT-SETQ`, `NTT-IDX!`, `NTT-LOAD`, `NTT-STORE`, `NTT-FWD`,
+`NTT-INV`, `NTT-PMUL`, `NTT-PADD`, `NTT-STATUS@`, `NTT-WAIT`.
+**KDOS word (§1.11):** `NTT-POLYMUL` (generic cyclic polynomial multiply via
+NTT).
 
 ### KEM (ML-KEM-512 Key Encapsulation)
 
-An ML-KEM-512 accelerator framework at MMIO base `+0x0900`.  Provides
-hardware-managed key/ciphertext buffers and keygen/encaps/decaps operations.
+The working architectural path is a Python ML-KEM-512 value device at MMIO
+base `+0x0900`. Each emulator system or hosted runtime owns five retained
+buffers shared by its guest callers: SEED/COIN=64 bytes, PK=800, SK=1,632,
+CT=768, and SS=32. Callers explicitly load randomness and keys and explicitly
+store results; the device does not source the TRNG and does not call the
+generic cyclic NTT service described above.
 
-| Register | Offset | R/W | Description |
-|----------|--------|-----|-------------|
-| CMD | `+0x00` | W | **1:** KEYGEN, **2:** ENCAPS, **3:** DECAPS |
-| BUF_SEL | `+0x08` | RW | Buffer select: 0=SEED(64B), 1=PK(800B), 2=SK(1632B), 3=CT(768B), 4=SS(32B) |
-| DIN / DOUT | `+0x10` | RW | Byte-streaming data port (auto-increment index) |
-| IDX_SET / BUF_SIZE | `+0x18` | RW | Write: set byte index; Read: selected buffer size |
-| IDX | `+0x20` | R | Current byte index |
+The executable aperture is exactly 40 bytes, `[+0x0900,+0x0928)`:
 
-5 internal buffers (3,296 bytes total).  Current RTL has stub crypto
-datapath (deterministic XOR fill); phase 2 will add real CRYSTALS-Kyber
-polynomial arithmetic.
+| Register | Offset | Access | Working Python behavior |
+|----------|--------|--------|-------------------------|
+| STATUS | `+0x00` | R byte | 0 initially; retained 2 after command completion |
+| CMD | `+0x01` | W byte | **1:** KEYGEN, **2:** ENCAPS, **3:** DECAPS |
+| BUF_SEL | `+0x08` | W byte | Low-byte selector, clamped to 0..4; resets index |
+| DIN | `+0x10` | W byte | Write selected-buffer byte and increment while in bounds |
+| DOUT | `+0x18` | R byte | Read selected-buffer byte and increment while in bounds; zero past capacity |
+| BUF_SIZE | `+0x20..+0x21` | R bytes | Selected capacity as uint16 little-endian |
+
+KEYGEN consumes all 64 retained SEED bytes as `d || z` and replaces PK and SK.
+ENCAPS consumes retained PK plus the first 32 SEED bytes as caller-provided
+coin and replaces CT and SS. DECAPS consumes retained CT and SK and replaces
+SS. Each Python command is complete before its triggering write returns, so
+BUSY=1 is not observable; selection and transfers do not clear retained DONE.
+The byte index pins at capacity. Short input preserves a buffer suffix, and
+there is no lock, task owner, capability bit, complete-span transaction,
+implicit cleanup, or wipe. These shared buffers therefore are not a protected
+secret boundary.
+
+`KEM-SEED-SIZE` is 64, matching the complete `d || z` input consumed by
+`KYBER-KEYGEN`. `KYBER-ENCAPS` continues to consume the first 32 bytes as its
+coin input. The former 32-byte key-generation constant was an API defect, not
+a second supported size.
+
+A pinned zero-`d || z`/zero-coin valid-key fixture matches OpenSSL 3.5.2
+ML-KEM-512 byte for byte through keygen, encapsulation, and decapsulation. This
+qualifies deterministic interoperability for generated/well-formed keys only.
+The Python implementation is not FIPS-certified, is not constant time, uses a
+fixed 840-byte SHAKE rejection-sampling window, and does not enforce all
+external-key checks: it accepts noncanonical encapsulation keys and
+decapsulation keys with inconsistent embedded hashes that OpenSSL rejects. It
+must not be treated as a host-secret cryptography API or physical-erasure
+boundary.
+
+The current RTL at the same allocated 64-byte block is materially different:
+
+| RTL 64-bit slot | Write meaning | Read meaning |
+|-----------------|---------------|--------------|
+| `+0x00` | CMD | STATUS |
+| `+0x08` | BUF_SEL | BUF_SEL |
+| `+0x10` | DIN | DOUT |
+| `+0x18` | IDX_SET | BUF_SIZE |
+| `+0x20` | — | IDX |
+
+That RTL exposes BUSY during a multi-cycle FSM and produces deterministic XOR
+fill, not ML-KEM. The BIOS byte ABI writes CMD at `+0x01` and reads DOUT at
+`+0x18`, so it cannot operate this RTL contract (the latter read obtains
+BUF_SIZE). RTL overflow/index and invalid-selector details also differ from
+Python execution. The executable byte window and seven BIOS words are the
+retained emulator/simulator ABI. The RTL block is a non-cryptographic interface
+stub and must not advertise or qualify ML-KEM. RTL convergence is deferred;
+neither implementation supplies value, register, or timing evidence for the
+other.
 
 **BIOS words:** `KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`, `KEM-KEYGEN`,
 `KEM-ENCAPS`, `KEM-DECAPS`, `KEM-STATUS@`.
 **KDOS words (§1.12–§1.13):** `KYBER-KEYGEN`, `KYBER-ENCAPS`,
-`KYBER-DECAPS`, `PQ-EXCHANGE` (hybrid X25519 + ML-KEM).
+`KYBER-DECAPS`, `PQ-DERIVE`, `PQ-EXCHANGE-INIT`, and `PQ-EXCHANGE-RESP`.
+
+The three PQ words are ordinary KDOS composition, not another device: INIT
+and RESP combine X25519 and ML-KEM secrets, while `PQ-DERIVE` applies
+SHA3-HMAC HKDF with the literal info `pq-hybrid`. Their X25519 key, KEM state,
+and secret-bearing PQ scratch are shared and unwiped, with no owner or outer
+transaction; extract and expand take lock 9 separately. Consequently an HKDF
+failure can follow entropy consumption and ciphertext publication. This is
+executable application behavior, not a standardized hybrid-KEM,
+concurrency-safety, constant-time, or security-proof claim.
 
 ### SHA-2 (Per-Core / Micro-Cluster ISA)
 
@@ -848,6 +943,12 @@ bounded partial offset, byte alignment, and low-length/offset agreement.
 `HKDF-SHA256-EXTRACT`, `HKDF-SHA256-EXPAND`.
 Those SHA-256-family KDOS words return the BIOS status unchanged so
 networking and TLS key-schedule callers can fail closed.
+
+This checked BIOS/KDOS SHA-2 surface is the public compatibility ABI. The
+current RTL instruction glue does not yet reproduce its padding, DIN/DOUT,
+endian-load, or SHA-512 behavior and is not qualified by emulator or simulator
+results. Bringing RTL into conformance is deferred; Akashic-facing words and
+statuses do not change to accommodate that implementation lag.
 
 ### Checked Caller-Managed Spans
 
@@ -969,7 +1070,15 @@ Estimated area savings: ~300 FFs / ~200 LUTs per micro-core vs a full core.
 
 ### Privilege Model
 
-The Megapad-64 implements a two-level privilege model:
+Full cores implement the two-level model below through private `PRIV` and MPU
+CSRs. Micro-cores instead use cluster-shared `CL_PRIV`, `CL_MPU_BASE`, and
+`CL_MPU_LIMIT` state. Current RTL enforces that shared window in its scalar
+arbiter, while the Python cluster model retains the CSRs but omits scalar MPU
+enforcement; both currently accept cluster-state writes without the intended
+supervisor guard. That backend discrepancy is open and is not a portable
+privilege guarantee.
+
+The full-core model is:
 
 | Level | Value | Name | Context |
 |-------|-------|------|---------|
@@ -1198,7 +1307,7 @@ key coroutine-local state such as exception chains.
 The bus-fault handler now captures and displays the **T register**
 (pre-interrupt X/P state), giving the programmer visibility into which
 register pair was active when a fault occurred.  The MMIO routing in
-`system.py` was also deduplicated (Phase 7 prep) to reduce dispatch
+`emulator/system.py` was also deduplicated (Phase 7 prep) to reduce dispatch
 overhead.
 
 ### Boot Sequence
@@ -1241,7 +1350,7 @@ After a full KDOS boot with filesystem loaded:
 | KDOS core dictionary | Build-dependent | Bank 0 definitions and strings from `kdos.f` |
 | Userland dictionary | Build-dependent | `networking.f`, `tools.f`, and later user definitions in XMEM |
 | Buffers | ~10 KB | 6 demo buffers, histogram bins |
-| FS cache | ~7.5 KB | Superblock (512B) + bitmap (up to 1024B) + directory (6144B) |
+| FS cache | 14,869 B raw reservation | Operational windows: superblock (512 B) + bitmap capacity (8192 B) + directory (6144 B), plus three seven-byte declaration tails |
 | Task stacks | 2 KB | 8 × 256 bytes |
 | Frame buffer | 1.5 KB | NIC frame receive buffer |
 | Bank 0 headroom | Build-dependent | Core dictionary, heap, and stacks share the 1 MiB bank |
@@ -1264,7 +1373,7 @@ interrupt or trap fires:
 | Vector | Used By | Purpose |
 |--------|---------|---------|
 | `IVEC_BUS_FAULT` (5) | BIOS | Catches accesses beyond memory bounds or unmapped MMIO offsets (bus timeout); prints fault address and aborts |
-| `IVEC_TIMER` (7) | KDOS scheduler | Sets `PREEMPT-FLAG` for cooperative preemption |
+| `IVEC_TIMER` (7) | Intended KDOS scheduler | Architectural timer vector; the currently qualified KDOS source does not install the flag-setting ISR |
 | `IVEC_DIV_ZERO` (4) | Hardware | Traps on division by zero |
 | `IVEC_RTC` (16) | Application | Fires on alarm match; cleared by writing 0x01 to STATUS (+0x19) |
 
@@ -1296,9 +1405,9 @@ DMA, and reliability specifications.
 
 | Component | File | Lines | Role |
 |-----------|------|-------|------|
-| CPU emulator | `megapad64.py` | — | Full ISA + extended tile engine implementation |
-| System glue | `system.py` | — | Heterogeneous SoC, MMIO, mailbox IPI, spinlocks, shared native execution state |
-| Devices | `devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
+| CPU emulator | `emulator/megapad64.py` | — | Full ISA + extended tile engine implementation |
+| System glue | `emulator/system.py` | — | Heterogeneous SoC, MMIO, mailbox IPI, spinlocks, shared native execution state |
+| Devices | `emulator/devices.py` | — | MMIO device/reference/proxy implementations, including checked WOTS and the Port I/O Bridge |
 | BIOS | `bios.asm` | — | Forth interpreter, boot, multicore, 481 dictionary words |
 | OS core | `kdos.f` | — | Bank 0 buffers, kernels, TUI, FS, crypto, module loading, PQC, multicore |
 | Networking | `networking.f` | — | Userland Ethernet through TLS, sockets, and UDP data-port transport |
@@ -1310,6 +1419,6 @@ DMA, and reliability specifications.
 | Tests | `tests/test_system.py` | — | System integration coverage |
 | Tests | `tests/test_networking.py` | — | Real-network coverage |
 | Tests | `tests/test_fs_hardening.py` | — | Filesystem hardening coverage |
-| C++ accel | `accel/` | — | Multi-source native execution and system-state accelerator |
+| C++ accel | `emulator/accel/` | — | Multi-source native execution and system-state accelerator |
 | RTL | `rtl/` | — | Portable Verilog modules and target overrides |
 | RTL tests | `rtl/sim/` | — | Verilog testbenches |

@@ -98,12 +98,12 @@ counts below remain historical.
 |-----------|------:|------------|
 | `bios.asm` | 15,203 | 396 dictionary entries |
 | `kdos.f` | 11,815 | 962 colon defs, 523 vars/constants, §1–§20 |
-| `megapad64.py` | 3,315 | Full CPU + extended tile + FP16/BF16 |
-| `accel/mp64_accel.cpp` | 3,295 | C++ CPU core (pybind11, ~63× speedup) |
-| `accel/*.h` | 2,436 | Crypto, FB, NIC, timer C++ device accel |
-| `accel_wrapper.py` | 897 | Drop-in C++ ↔ Python bridge |
-| `system.py` | 1,018 | Multi-core SoC (up to 16 cores + clusters) |
-| `devices.py` | 2,542 | 18 device classes |
+| `emulator/megapad64.py` | 3,315 | Full CPU + extended tile + FP16/BF16 |
+| `emulator/accel/mp64_accel.cpp` | 3,295 | C++ CPU core (pybind11, ~63× speedup) |
+| `emulator/accel/*.h` | 2,436 | Crypto, FB, NIC, timer C++ device accel |
+| `emulator/accel_wrapper.py` | 897 | Drop-in C++ ↔ Python bridge |
+| `emulator/system.py` | 1,018 | Multi-core SoC (up to 16 cores + clusters) |
+| `emulator/devices.py` | 2,542 | 18 device classes |
 | `cli.py` | 1,557 | Interactive monitor/debugger |
 | `display.py` | 1,872 | Pygame GUI: terminal + graphics + debug |
 | `asm.py` | 909 | Two-pass assembler (full ISA + EXT) |
@@ -199,15 +199,24 @@ Implemented network components, bottom-up:
     shared NIO byte stream. The returned socket is qualified through
     application I/O and graceful close.
 
-### Layer 3: Multi-Core OS (Items 19–24) — ✅ DONE
+### Layer 3: Multi-Core OS (Items 19–24) — source surface present
 
-19. ✅ **Per-core run queues**
-20. ✅ **Work stealing** — `BALANCE` converges sparse and skewed queues to a
-    maximum count difference of one without stack leakage
-21. ✅ **Core affinity**
-22. ✅ **Per-core preemption** — timer IRQ on all cores
-23. ✅ **IPI messaging** — mailbox for structured inter-core messages
-24. ✅ **Shared resource locks** — dictionary, UART, filesystem
+19. ⚠️ **Per-core run queues** — core-0 FIFO execution is qualified; the
+    one-core `SCHED-ALL` path has an equal-bound `DO` defect
+20. ⚠️ **Work stealing** — `BALANCE` converges canonical multi-queue
+    counts, but it is unlocked explicit table motion and a one-core no-op
+21. ⚠️ **Core affinity** — metadata and queue publication exist, with
+    duplicate/partial state and the broken `SCHED-ALL` tail
+22. ⚠️ **Per-core preemption** — manual flag polling exists; the admitted
+    hosted path has no Timer-IRQ-to-flag or suspending-switch connection
+23. ⚠️ **IPI messaging** — shared-memory inboxes exist without an IPI
+    notification, and successful receive leaks an extra core cell
+24. ⚠️ **Shared resource locks** — named depthless wrappers exist but are
+    opt-in and not exception-safe
+
+These entries record source availability, not completed hosted multicore
+execution. The semantic simulator currently advertises one full core and
+synthesizes no worker, concurrency, preemption, IPI delivery, or speedup.
 
 ### Layer 5: Field ALU & Post-Quantum Crypto (Items 34–38) — ✅ DONE
 
@@ -215,8 +224,14 @@ Implemented network components, bottom-up:
     P-256, custom), modes 0–12 (15 + 39 tests)
 35. ✅ **NTT Engine** — 256-point NTT/INTT, dual modulus (12 tests)
 36. ✅ **SHA-3 SHAKE Streaming** — XOF auto-squeeze
-37. ✅ **ML-KEM-512 (Kyber)** — keygen/encaps/decaps via NTT+SHA3+TRNG (11 tests)
-38. ✅ **Hybrid PQ Key Exchange** — X25519 + ML-KEM + HKDF (7 tests)
+37. ✅ **ML-KEM-512 executable model** — deterministic
+    keygen/encaps/decaps with caller-supplied `d`, `z`, and coin through
+    ML-KEM-specific routines; ⚠ the current RTL block has an incompatible ABI
+    and non-cryptographic stub datapath
+38. ✅ **Hybrid PQ Key Exchange** — source-defined X25519 + ML-KEM +
+    SHA3-HMAC HKDF composition; ⚠ it has shared unwiped scratch and no outer
+    transaction/owner, uses deterministic hosted entropy in simulator tests,
+    and is not a standardized hybrid-KEM or security-proof claim
 
 ### Layer 6: Architecture & Portability (Items 39–42) — ✅ DONE
 
@@ -289,7 +304,8 @@ AES, SHA3, SHA256, HKDF, X25519, Field ALU, NTT, KEM, PQ exchange,
 HBW/ext-mem allocators, userland isolation), §2 Buffers, §3 Tile ops
 (+ FP16/BF16), §4 Kernel registry, §5 Sample kernels, §6 Pipeline
 engine, §7 Storage (filesystem, encryption, subdirectories, doc
-browser), §8 Scheduler (preemptive, multicore, work stealing), §9 TUI
+browser), §8 Scheduler (synchronous task registry plus multicore-oriented
+queue, affinity, flag, messaging, and lock source surfaces), §9 TUI
 (9 screens + subscreens, widget SDL), §10 Data port transport, §11
 Benchmarking, §12 Dashboard, §13 Help system, §14 Startup, §15 Pipeline
 bundles, §16 Network stack (Ethernet → ARP → IPv4 → ICMP → UDP → DHCP
@@ -298,14 +314,14 @@ buffers, §19 Hash tables, §20 Module system.
 
 ### Emulator — ✅ DONE
 
-- `megapad64.py`: 3,315 lines — full ISA including EXT.STRING, EXT.DICT,
+- `emulator/megapad64.py`: 3,315 lines — full ISA including EXT.STRING, EXT.DICT,
   64-lane tile engine with FP16/BF16, BIST, I-cache model
-- `accel_wrapper.py`: 897 lines — transparent C++ ↔ Python bridge
-- `accel/mp64_accel.cpp`: 3,295 lines + 2,436 lines headers — C++ fast
+- `emulator/accel_wrapper.py`: 897 lines — transparent C++ ↔ Python bridge
+- `emulator/accel/mp64_accel.cpp`: 3,295 lines + 2,436 lines headers — C++ fast
   path (~63× speedup), crypto device integration, pybind11
-- `system.py`: 1,018 lines — multi-core SoC wiring (up to 16 cores +
+- `emulator/system.py`: 1,018 lines — multi-core SoC wiring (up to 16 cores +
   micro-clusters), device bus, IRQ routing
-- `devices.py`: 2,542 lines — 18 device classes (UART, Timer, Storage,
+- `emulator/devices.py`: 2,542 lines — 18 device classes (UART, Timer, Storage,
   SysInfo, NIC, Mailbox, Spinlock, KEM, CRC, NTT, Framebuffer, CppFBProxy,
   CppTimerProxy, RTC, PortBridgeCSR, checked WotsChainAccel and CppWotsProxy,
   DeviceBus, plus
@@ -420,7 +436,7 @@ or hardware extension.
 Layer 0  Items  1– 4  Foundation                              ✅ DONE
 Layer 1  Items  5– 8  Crypto Stack                            ✅ DONE
 Layer 2  Items  9–18  Network Stack bounded profile            ✅ COMPLETE
-Layer 3  Items 19–24  Multi-Core OS                           ✅ DONE
+Layer 3  Items 19–24  Multi-Core OS                           ⚠️ SOURCE SURFACE; HOSTED ONE-CORE ONLY
 Layer 4  Items 25–30  Application-Level                       🔄 3 of 6 open
 Layer 5  Items 34–38  Field ALU & Post-Quantum Crypto          ✅ DONE
 Layer 6  Items 39–42  Architecture & Portability               ✅ DONE
@@ -443,12 +459,12 @@ Compiler Item 49      STC Compiler Checks                     ✅ DONE
 | `autoexec.f` | 47 | ✅ Boot script: DHCP + userland + REQUIRE |
 | `tools.f` | 1,534 | ✅ Loadable tools module |
 | `graphics.f` | 64 | ✅ Graphics module |
-| `megapad64.py` | 3,315 | ✅ Full CPU + extended tile + FP16/BF16 |
-| `accel/mp64_accel.cpp` | 3,295 | ✅ C++ CPU core (pybind11, ~63× speedup) |
-| `accel/*.h` | 2,436 | ✅ Crypto, FB, NIC, timer C++ devices |
-| `accel_wrapper.py` | 897 | ✅ Drop-in C++ ↔ Python wrapper |
-| `system.py` | 1,018 | ✅ Multi-core SoC (16 cores + clusters) |
-| `devices.py` | 2,542 | ✅ 18 device classes |
+| `emulator/megapad64.py` | 3,315 | ✅ Full CPU + extended tile + FP16/BF16 |
+| `emulator/accel/mp64_accel.cpp` | 3,295 | ✅ C++ CPU core (pybind11, ~63× speedup) |
+| `emulator/accel/*.h` | 2,436 | ✅ Crypto, FB, NIC, timer C++ devices |
+| `emulator/accel_wrapper.py` | 897 | ✅ Drop-in C++ ↔ Python wrapper |
+| `emulator/system.py` | 1,018 | ✅ Multi-core SoC (16 cores + clusters) |
+| `emulator/devices.py` | 2,542 | ✅ 18 device classes |
 | `cli.py` | 1,557 | ✅ Interactive monitor/debugger |
 | `display.py` | 1,872 | ✅ Pygame GUI: terminal + graphics + debug |
 | `asm.py` | 909 | ✅ Two-pass assembler (full ISA + EXT) |

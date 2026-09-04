@@ -207,16 +207,21 @@
   waits up to 64 cycles. Completely timing-dependent.
 - **Severity:** **HIGH**
 
-### E-2. Hardware Barrier Auto-Clear Race
-- **File:** `rtl/core/mp64_cluster.v` lines 140–165
-- **Mechanism:** The cluster barrier tracks which cores have arrived via
-  `barrier_arrive` bits. When all cores arrive, `barrier_done` is set for one
-  cycle, then auto-clears. If a core reads `CSR_BARRIER_STATUS` on the exact
-  cycle of auto-clear, it may see `done=0` despite having arrived.
-- **Cycle-accuracy impact:** Barrier synchronization granularity is cycle-exact;
-  a 1-cycle polling window difference can cause a core to spin an extra
-  iteration.
-- **Severity:** **MEDIUM**
+### E-2. Hardware Barrier Encoding and Lifetime Mismatch
+- **Files:** `rtl/core/mp64_cluster.v`, `bios.asm`, `kdos.f`, and the Python
+  cluster model
+- **Mechanism:** The BIOS ABI identifies barrier-done as bit 8 and KDOS polls
+  that bit. The current RTL packs done immediately above the arrival vector,
+  which is bit 4 for the default four-core cluster, and exposes it for only
+  one cycle before clearing the arrivals. Current KDOS therefore never
+  observes RTL completion. Even after correcting the bit position, a polling
+  core that misses the pulse can spin forever. The Python emulator instead
+  exposes sticky bit 8 and clears the arrival vector, so later barriers can
+  observe stale completion and return immediately.
+- **Cycle-accuracy impact:** This is not merely an extra polling iteration.
+  Current backends have no common reusable barrier ABI: one path can deadlock
+  permanently, while another can complete a later barrier spuriously.
+- **Severity:** **CRITICAL**
 
 ### E-3. Tile Memory Priority Arbiter (Starvation)
 - **File:** `rtl/gpu/mp64_tile.v` lines 50–85
@@ -419,7 +424,7 @@
 - **Severity:** **HIGH**
 
 ### H-2. FP WMUL Precision Mismatch (RTL vs. Emulator)
-- **File:** `rtl/gpu/mp64_tile.v` lines 625–650 (RTL), `megapad64.py`
+- **File:** `rtl/gpu/mp64_tile.v` lines 625–650 (RTL), `emulator/megapad64.py`
   lines 3180–3195 (emulator)
 - **Mechanism:** RTL computes FP WMUL as: `fp16_mul(a, b)` then widen the
   FP16 product to FP32 (losing precision to 10-bit mantissa before widening).
@@ -432,7 +437,7 @@
 
 ### H-3. FP32 Accumulator Adder Tree Ordering
 - **File:** `rtl/gpu/mp64_tile.v` lines 1510–1570 (5-level binary tree),
-  `megapad64.py` lines 3155–3170 (sequential `sum()`)
+  `emulator/megapad64.py` lines 3155–3170 (sequential `sum()`)
 - **Mechanism:** RTL reduces 32 FP32 partial products via a 5-level binary
   tree (32→16→8→4→2→1). The emulator uses Python's `sum()` which is
   left-to-right sequential accumulation. Different addition ordering produces
@@ -443,7 +448,7 @@
 
 ### H-4. FP NaN Propagation in Reductions
 - **File:** `rtl/gpu/mp64_tile.v` lines 750–820 (RTL MIN/MAX),
-  `megapad64.py` lines 3370–3420 (emulator MIN/MAX)
+  `emulator/megapad64.py` lines 3370–3420 (emulator MIN/MAX)
 - **Mechanism:** RTL skips NaN values in MIN/MAX reductions (first non-NaN
   wins, using a signed-magnitude comparison with unsigned operators on the
   exponent+mantissa bits, sign bit directing the sense). Emulator uses Python
@@ -458,7 +463,7 @@
 
 ### H-5. LOAD2D / STORE2D Variable Cycle Count
 - **File:** `rtl/gpu/mp64_tile.v` lines 1800–1900 (S_LOAD2D_REQ/WAIT,
-  S_STORE2D_REQ/WAIT), `megapad64.py` lines 3530–3570
+  S_STORE2D_REQ/WAIT), `emulator/megapad64.py` lines 3530–3570
 - **Mechanism:** 2D strided load/store performs `ttile_h` row reads/writes
   through external memory, each requiring a bus transaction. Cycle count =
   `ttile_h` × (1 + bus_wait). Emulator returns `h` cycles (no bus model).
@@ -527,7 +532,7 @@
 ## Category J — Emulator / RTL Divergence
 
 ### J-1. No Bus Contention Model
-- **File:** `system.py` lines 500–520 (step/run methods)
+- **File:** `emulator/system.py` lines 500–520 (step/run methods)
 - **Mechanism:** The Python emulator performs all memory reads/writes as instant
   Python dict/bytearray accesses. There is no bus arbiter, no wait states,
   no bank conflicts. Every load/store takes 0 additional cycles.
@@ -537,7 +542,7 @@
 - **Severity:** **HIGH**
 
 ### J-2. Round-Robin Stepping (No True Concurrency)
-- **File:** `system.py` lines 810–840 (step method), lines 870–920 (run_batch)
+- **File:** `emulator/system.py` lines 810–840 (step method), lines 870–920 (run_batch)
 - **Mechanism:** `step()` iterates cores sequentially:
   `for core in self.cores: core.step()`. There is no interleaving within an
   instruction, no concurrent bus requests, no race conditions. `run_batch()`
@@ -549,16 +554,16 @@
 - **Severity:** **HIGH**
 
 ### J-3. MicroCluster Shared MUL/DIV — No Contention
-- **File:** `system.py` lines 650–680 ("modelled as immediate, no contention")
-- **Mechanism:** The system.py comments explicitly state that shared MUL/DIV
+- **File:** `emulator/system.py` lines 650–680 ("modelled as immediate, no contention")
+- **Mechanism:** The emulator/system.py comments explicitly state that shared MUL/DIV
   is "modelled as immediate, no contention." The emulator adds a flat +3
-  cycle overhead (`megapad64.py` line 4048) regardless of actual conflict.
+  cycle overhead (`emulator/megapad64.py` line 4048) regardless of actual conflict.
 - **Cycle-accuracy impact:** RTL contention can add 4–64+ cycles; emulator
   always adds exactly 3.
 - **Severity:** **HIGH**
 
 ### J-4. BIST is Instant in Emulator
-- **File:** `system.py` lines 660–690 (MicroCluster BIST), `rtl/core/mp64_cpu.v`
+- **File:** `emulator/system.py` lines 660–690 (MicroCluster BIST), `rtl/core/mp64_cpu.v`
   lines 1780–1830 (CPU_BIST March C-)
 - **Mechanism:** Emulator BIST runs as a synchronous Python loop (instant).
   RTL BIST performs March C- write/read patterns through the bus arbiter,
@@ -567,7 +572,7 @@
 - **Severity:** **MEDIUM**
 
 ### J-5. FP Precision — Python Double vs. RTL Bit-Exact
-- **File:** `megapad64.py` lines 50–120 (`_fp_decode`/`_fp_encode`), 
+- **File:** `emulator/megapad64.py` lines 50–120 (`_fp_decode`/`_fp_encode`),
   `rtl/core/mp64_fp16_alu.v` (full file)
 - **Mechanism:** The emulator converts FP16/BF16 to Python `float` (64-bit
   double), performs arithmetic in double precision, then re-encodes to FP16
@@ -580,7 +585,7 @@
 - **Severity:** **HIGH** (correctness)
 
 ### J-6. SHA-256 Operator Precedence Bug
-- **File:** `megapad64.py` lines 165–175 (`_sha256_compress`)
+- **File:** `emulator/megapad64.py` lines 165–175 (`_sha256_compress`)
 - **Mechanism:** The `ch` computation in the emulator's SHA-256 compression:
   ```python
   ch = (e & f) ^ ((~e) & g) & _M32
@@ -594,7 +599,7 @@
 - **Severity:** **HIGH** (correctness bug)
 
 ### J-7. Timer Batch Tick
-- **File:** `devices.py` lines 200–240 (Timer.step_batch)
+- **File:** `emulator/devices.py` lines 200–240 (Timer.step_batch)
 - **Mechanism:** The emulator Timer advances by `n` ticks in O(1) using
   arithmetic (modular division to compute how many compare-match events
   occur in `n` ticks). The RTL increments per-cycle. Final timer value is
@@ -605,7 +610,7 @@
 - **Severity:** **MEDIUM**
 
 ### J-8. Timer IRQ Delivery Timing
-- **File:** `system.py` lines 830–845
+- **File:** `emulator/system.py` lines 830–845
 - **Mechanism:** In the emulator, timer IRQs are delivered after all cores have
   stepped in a round. In RTL, the timer IRQ fires on the exact cycle of the
   compare match and is visible to each core independently.
@@ -614,14 +619,14 @@
 - **Severity:** **MEDIUM**
 
 ### J-9. UART TX Always Ready
-- **File:** `devices.py` lines 100–130
+- **File:** `emulator/devices.py` lines 100–130
 - **Mechanism:** The emulator UART has a 16-byte TX FIFO but `tx_ready` is
   always true (infinite drain rate). RTL UART TX uses a shift register with
   baud-rate timing — FIFO can fill and stall the CPU.
 - **Severity:** **LOW**
 
 ### J-10. String/Dict Engine Cycle Counts
-- **File:** `megapad64.py` lines 1600–1700 (string), 1720–1800 (dict),
+- **File:** `emulator/megapad64.py` lines 1600–1700 (string), 1720–1800 (dict),
   `rtl/core/mp64_string.v`, `rtl/core/mp64_dict.v`
 - **Mechanism:** Emulator string ops return `len + 2` cycles (1 cycle per byte
   + setup). RTL string engine performs byte-by-byte bus transactions, each
@@ -632,7 +637,7 @@
 - **Severity:** **MEDIUM**
 
 ### J-11. Division Fixed 64 Cycles vs. Variable
-- **File:** `megapad64.py` lines 2831–2900 (`_exec_muldiv`),
+- **File:** `emulator/megapad64.py` lines 2831–2900 (`_exec_muldiv`),
   `rtl/core/mp64_cpu.v` lines 1500–1530 (CPU_MULDIV)
 - **Mechanism:** RTL uses a 64-cycle iterative restoring divider. Emulator
   uses Python `//` and `%` operators (instant). The emulator does not model
@@ -642,7 +647,7 @@
 - **Severity:** **MEDIUM**
 
 ### J-12. I-Cache Not Modeled in Emulator
-- **File:** `megapad64.py` lines 2270–2340 (step function — flat fetch)
+- **File:** `emulator/megapad64.py` lines 2270–2340 (step function — flat fetch)
 - **Mechanism:** The emulator `fetch8()` reads directly from the memory array.
   There is no I-cache model — every fetch is a hit. CSRs for I-cache hits/
   misses are maintained but never incremented during normal execution.
@@ -651,7 +656,7 @@
 - **Severity:** **HIGH**
 
 ### J-13. Micro-Core MEX Flat +3 Overhead
-- **File:** `megapad64.py` lines 3995–4000 (`Megapad64Micro._exec_mex`)
+- **File:** `emulator/megapad64.py` lines 3995–4000 (`Megapad64Micro._exec_mex`)
 - **Mechanism:** Micro-core MEX operations add a flat `+3` cycle overhead for
   "shared unit arbitration" regardless of actual contention or queue depth.
   RTL arbitration delay is O(queue_depth × op_latency).
@@ -712,7 +717,7 @@
 
 ### L-2. Performance Counters Reflect All Timing Variations
 - **Files:** `rtl/core/mp64_cpu.v` lines 150–170 (perf counter logic),
-  `megapad64.py` lines 2360–2375 (`perf_cycles`, `perf_stalls`, `perf_tileops`)
+  `emulator/megapad64.py` lines 2360–2375 (`perf_cycles`, `perf_stalls`, `perf_tileops`)
 - **Mechanism:** Hardware performance counters (`PERF_CYCLES`, `PERF_STALLS`,
   `PERF_TILEOPS`, `PERF_EXTMEM`) faithfully reflect actual cycle counts
   including all bus contention, cache misses, and interrupt latency. The
@@ -737,7 +742,7 @@
 
 ### L-4. DMA Ring Buffer Not Fully Implemented
 - **File:** `rtl/core/mp64_cpu.v` lines 1000–1020 (DMA CSR writes),
-  `megapad64.py` lines 720–740 (DMA state in CPU init)
+  `emulator/megapad64.py` lines 720–740 (DMA state in CPU init)
 - **Mechanism:** DMA ring buffer CSRs (`CSR_DMA_RING_BASE`, `CSR_DMA_RING_SZ`,
   `CSR_DMA_HEAD`, `CSR_DMA_TAIL`, `CSR_DMA_CTRL`, `CSR_DMA_STATUS`) are
   declared and writable, but DMA processing logic is not connected. Writes
@@ -786,7 +791,7 @@
 | D-2  | IRQ handler bus txns  | MEDIUM   | ✓       |       |            |
 | D-3  | MPU fault bus txns    | LOW      | ✓       |       |            |
 | E-1  | Cluster shared units  | HIGH     | ✓       |       |            |
-| E-2  | Barrier auto-clear    | MEDIUM   | ✓       |       |            |
+| E-2  | Barrier ABI mismatch  | CRITICAL | ✓       |       |            |
 | E-3  | Tile mem priority     | HIGH     | ✓       |       |            |
 | E-4  | Mailbox requester ID  | MEDIUM   |         | ✓     |            |
 | E-5  | Spinlock no backoff   | LOW      | ✓       |       |            |

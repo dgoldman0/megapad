@@ -6,8 +6,7 @@ uses the same derived-geometry rule from 15 through 65536 sectors (32 MiB).
 The host utility still defaults to **1 MiB** (2048 × 512-byte sectors) and
 the filesystem supports up to
 **128 named files** with 23-character names, hierarchical subdirectories,
-two-extent allocation, RTC timestamps, and hardware-verified CRC32
-integrity.
+two-extent metadata, RTC timestamp fields, and a CRC32 integrity field.
 
 This document covers:
 
@@ -20,6 +19,143 @@ This document covers:
 - CRC32 data integrity (hardware-accelerated)
 - The Python `diskutil.py` tool for managing disk images
 - The KDOS Forth words for runtime filesystem access
+
+## Implementation Status
+
+This document specifies the on-disk format and also records intended MP64FS
+behavior. It is not a blanket claim that every described maintenance workflow
+already exists in `kdos.f`. The current source defines secondary-extent
+metadata; its later loader concatenates both validated extents, `RMFILE` frees
+both, and `FD-FILL` copies both into a descriptor. Its `MKFILE` allocates only
+one contiguous primary run, while legacy `FREAD`/`FWRITE`, `CAT`,
+`SAVE-BUFFER`, and `LOAD-BUFFER` do not generally traverse the secondary
+extent. It does not
+currently define `FAPPEND`, `FS-CHECK`, `FS-COMPACT`, `STREAM-OPEN`, or
+`STREAM-WRITE`, and its ordinary file writes do not maintain `data_crc32` on
+every update. Those portions below are design/host-tool behavior until
+matching runtime words land and are qualified.
+
+The hosted simulator's contiguous unchanged-source frontier now reaches
+`kdos.f` EOF at line 9894. It qualifies the initial MP64FS cache, derived
+geometry, bitmap, first-fit search, packed directory helpers, and the unchanged
+`FS-LOAD`, `FS-SYNC`, `FS-ENSURE`, and `FORMAT` lifecycle on pathless in-memory
+media, followed by `.FTYPE`, `DIR`, and `CATALOG` over the cached directory and
+bitmap, then exact-name lookup, `MKFILE`/`RMFILE`/`RENAME` metadata mutation,
+bounded primary-extent `CAT` publication, cache-only total/largest-free and
+global occupancy reporting, primary-extent `SAVE-BUFFER`/`LOAD-BUFFER`, the
+fixed FD pool with cached `OPEN`, used-metadata `FFLUSH`, and final `FCLOSE`,
+then the checked source compiler, nested two-extent filesystem `LOAD`,
+application loader, ANSI byte helpers, whole-file encryption, parent-byte
+subdirectory navigation/mutation, and the paged Documentation Browser through
+ordinary descriptors and `FREAD`/`FCLOSE`, followed by raw linked-header
+Dictionary Search, the task registry/synchronous run-to-completion executor,
+Timer Preemption Setup, Multicore Dispatch's honest one-core
+validation/fallback behavior, the §8.2–§8.7 queue, affinity, flag, message,
+and named-lock state machines, the §8.8–§8.9 cluster-control and MPU failure
+boundary, absent-network forward bridge, the complete §9 ANSI screen registry,
+widgets, definitions, dispatch, handlers, and event loop, then §10 Data Port
+structures and bindings, the §11 placeholder, §12 Dashboard, §13 Help, and
+§15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19 Hash Table
+Primitives, followed by the complete §20 Module System and final §14 Startup
+through EOF. There are no §16 or §17 source blocks at their earlier numbering
+boundary.
+
+The §15 `BUNDLE-LOAD` and `BUNDLE-INFO` words are thin wrappers around this
+same raw `LOAD`. They do not enforce file type 7 or directory flags and inherit
+its false-`FS-OK` name-consumption edge. The loader now checks each LF-delimited
+record and final evaluator state, and every guarded frame rolls dictionary
+definitions/bodies back to its saved `HERE`/`LATEST` on an admitted failure
+delivered as guest `THROW`. The §20 hooks add provisional module-ID rollback.
+Neither mechanism transacts bundle-owned
+allocator reservations, registry links/counts, media changes, output, or other
+non-dictionary source effects.
+`BUNDLE-INFO` only makes the three `BDL-BUF`/`BDL-KERN`/`BDL-PIPE` wrappers
+skip construction; it is not a general dry-run or validation boundary. Exact
+Pipeline Bundle provenance and discrepancies are recorded in
+`docs/kdos-reference.md`.
+
+The §18 ring words construct in-memory dictionary objects and add no
+filesystem or media behavior. Their exact provenance, admitted domain, and
+source discrepancies are also recorded in `docs/kdos-reference.md`.
+The §19 hash-table words are likewise in-memory dictionary objects and add no
+filesystem or media behavior; the same reference records their exact probing
+contract and source-literal limits.
+
+The §20 `REQUIRE` path now shadows the bootstrap loader with ordinary MP64FS
+lookup and the existing validated two-extent transfer machinery. It
+prescans the first exact-uppercase, first-token `PROVIDED` identity, installs
+that ID provisionally to break cycles, evaluates through the ordinary checked
+loader, and restores CWD/loader state on an admitted catchable failure. Successful nested
+provisional chains merge into their parent; a later parent failure removes
+those IDs and all definitions added since the parent's dictionary checkpoint.
+Evaluator statuses 1 through 4 rethrow unchanged, status 5 rethrows the exact
+`EVAL-THROW`, and checked extent-read failure rethrows the exact nonzero
+`DISK-IO-IOR`, in each case after the shared rollback and cleanup path.
+Task-resetting `ABORT`/`ABORT"` and backend faults that do not become guest
+`THROW` bypass that path and are outside this lifecycle repair.
+The module loader does not enforce file type or directory flags, and output,
+allocator/registry effects outside the provisional-ID chain, objects, and
+media effects remain non-atomic. Duplicate `REQUIRE` still allocates, reads,
+and prescans the file before it skips evaluation, so it is not an I/O-free
+cache hit.
+
+Final §14 Startup conditionally calls `FS-LOAD` only when `DISK?` reports
+attached media. On a valid load it copies the exact lowercase ten bytes
+`autoexec.f` into `NAMEBUF`, explicitly zeroes the remaining 14 bytes, and
+searches the ambient `CWD`; `_MOD-LOAD-BODY` performs a second lookup before
+transfer/evaluation. Startup adds no root-directory reset and neither lookup
+checks file type, flags, CRC, encryption, or directory policy. It prints
+`Running autoexec.f...` before empty/body/allocation/evaluator validation.
+Focused EOF acceptance covers no disk, invalid media, valid MP64FS without the
+file, and one tiny mounted autoexec through the ordinary module loader. That
+last case does not qualify the standard sample-image `autoexec.f` or its
+`networking.f`/`tools.f` journey.
+
+The exact 5286–5408 fixture contains 123 lines and 4,020 bytes, with SHA-256
+`a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`.
+The exact 5409–5436 fixture contains 28 LF lines and 838 bytes, with SHA-256
+`e645378a2f4a6a6f5e5e46716a9d12513397bdfa6ec441aba9af51d36ff86f23`
+and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`.
+The exact 5437–5471 fixture contains 35 LF lines and 984 bytes, with SHA-256
+`6ad3b135d3b2b69f651814349899f507d56dde4c876c8be9e0cd7aefd4a1d75c`
+and Git blob `1884c81ba2b8aa48082d472250f13a2265fd1def`.
+The exact 5472–5514 fixture contains 43 LF lines and 1,317 bytes, with SHA-256
+`7b4511333822c8f4aca8e3fd0768fa520d72e398a14529240bf6e66792627104`
+and Git blob `8b4645f16c7ac2f21036282a896b7ede6bad16b0`. Its six definitions, in source
+order, are `SB-SLOT`, `SB-DESC`, `SAVE-BUFFER`, `LB-SLOT`, `LB-DESC`, and
+`LOAD-BUFFER`; loading zeroes the four variables and installs the two colon
+bodies and strings without any filesystem, Buffer, media, diagnostic, flush,
+or output effect.
+The exact 5515–5610 fixture contains 96 LF lines and 3,397 bytes, with SHA-256
+`16637705bd8d26e0e92b14605ba0e4e772ec2d5d5c9eb02bbd107714c8650c78`
+and Git blob `e01ffa80d946b2cddd50e37bcefd9421a1b8dbb9`. Its 14-definition
+source-order ledger is `FD-MAX`, `FD-SLOT-SZ`, `FD-POOL`, `FD-SLOT`,
+`FD-ALLOC`, `(FCLOSE-NOFS)`, `FCLOSE`, `FD-FILL`, `OP-SLOT`, `(OPEN)`,
+`OPEN`, `F.SLOT`, `FFLUSH`, and `(FCLOSE)`. Load zero-fills the 1,152-byte
+pool, zeroes `OP-SLOT`, binds `FCLOSE` first to `(FCLOSE-NOFS)` and finally to
+`(FCLOSE)`, and binds `OPEN` to `(OPEN)`. It performs no filesystem or media
+I/O, synchronization, diagnostic update, or output.
+The exact 6201–6296 navigation fixture contains 96 LF records and 3,082 bytes,
+with SHA-256
+`dc7f065cfac1fc3eb6efd1de7f4b0f472ff40e66fa14666e1087c18047e1d6c8`
+and Git blob `b964ca87a1af44e54b22abd25116edd2a7e2a853`. Its ledger is the raw
+64-byte `_PWD-STK` body followed by `PWD`, `CD`, `MKDIR`, and `RMDIR`; loading
+publishes those words without a filesystem, cache, media, RTC, diagnostic,
+lock, or output effect.
+
+The exact 6297–6427 Documentation Browser fixture contains 131 LF records and
+3,945 bytes, with SHA-256
+`442e5e39598d71a589bf19d6345c5bb042d678ba9f51607a878ae5030fbdcee6`
+and Git blob `242fc879957ba14f3a00b3284e8af921a4fa365c`. It publishes 13
+definitions, including a raw 512-byte buffer and one zeroed counter, without
+filesystem/media access, FD allocation, input, output, or synchronization.
+
+`FS-LOAD` consumes the separately qualified native
+`MP64FS-VALID?` word with its executable raw-device reads, scratch layout,
+metadata predicate, and generation check. This boundary is not evidence of
+file-backed close/reopen durability, later KDOS source, general multi-extent
+content I/O, malformed mutation/content safety,
+allocator improvement, compaction, repair, or stronger filesystem validation.
 
 ---
 
@@ -72,7 +208,7 @@ geometry.  The first 4 bytes are the magic number — if they don't read
 | +18 | 2 | `data_start` | u16 LE | Exactly `dir_start + dir_sectors`. |
 | +20 | 1 | `max_files` | 128 (u8) | Maximum directory entries. |
 | +21 | 1 | `entry_size` | 48 (u8) | Bytes per directory entry. |
-| +22 | 490 | *reserved* | zeroes | Padding to fill the 512-byte sector. |
+| +22 | 490 | *reserved* | zeroes | Canonical producer padding; executable BIOS validation ignores it. |
 
 ### Allocation Bitmap (Starting at Sector 1)
 
@@ -109,7 +245,30 @@ Offset   Size   Field        Description
 
 128 entries × 48 bytes = 6,144 bytes = 12 sectors.
 
-An entry is **free** (empty) if `type == 0` and the name is all zeros.
+Canonical producers encode a **free** slot by zeroing all 48 bytes. Executable
+BIOS validation and the low-level `FIND-FREE-SLOT` helper, however, use only
+`name[0]`: zero makes the slot empty and the other 47 bytes are ignored.
+Fully zero tails are therefore a producer convention, not a validator-enforced
+invariant.
+
+The BIOS predicate performs up to three raw whole-device checked reads in
+order: superblock, active bitmap, and the 12-sector directory. It checks canonical geometry,
+reserved allocation bits, occupied-entry parent/type rules, allocated extent
+bounds, directory zero-extent rules, and used-byte capacity. It does not check
+name termination or character policy, uniqueness, flags, reserved entry
+bytes, timestamps, CRCs, parent cycles or root reachability, extent
+disjointness, orphan allocations, bitmap tail bits, or file data. Those
+producer rules and stronger integrity properties remain format requirements
+or planned checks, not facts established by `MP64FS-VALID?`.
+
+`DIR` and `CATALOG` pass every occupied entry name directly to BIOS `.ZSTR`.
+That word consumes its address, publishes bytes one at a time until the first
+NUL, and has no length bound; it also publishes control and escape bytes
+without sanitizing them. A later memory fault preserves its already published
+prefix. Because the validator does not require termination, an accepted
+occupied entry can make those listings publish adjacent metadata or entries.
+Hosted listing qualification therefore requires the canonical producer
+invariant of a NUL within the 24-byte name field.
 
 #### Key Fields
 
@@ -118,11 +277,21 @@ An entry is **free** (empty) if `type == 0` and the name is all zeros.
 
 - **`mtime`** — Last-modified timestamp as seconds since Unix epoch,
   read from the RTC's epoch counter (`EPOCH@ 1000 /`).  Set on every
-  write or rename.
+  source path that explicitly updates it. The layout comment at `kdos.f` line
+  5026 instead says “seconds since boot”; that comment disagrees with the
+  executable `TICKS@` definition and this format specification.
 
-- **`data_crc32`** — CRC32 of the file's content bytes (not the full
-  sector padding).  Computed by the hardware CRC DMA engine on every
-  write.  See §Integrity below.
+  The hosted epoch register is explicit and deterministic: it defaults to
+  zero, changes only through host control or direct MMIO writes, and does not
+  consult or advance with wall time. `TICKS@` uses signed division and returns
+  a full cell; `MKFILE` stores only its low 32 bits. `RENAME` does not update
+  this field. `MS@`, calendar, automatic, and realtime RTC behavior remain
+  unqualified.
+
+- **`data_crc32`** — CRC32 of the file's content bytes (not the full sector
+  padding). The host tool populates it; automatic hardware recomputation on
+  every KDOS write is intended but not currently implemented. See §Integrity
+  below.
 
 - **`ext1_start` / `ext1_count`** — Optional second extent.  If a file
   cannot fit in one contiguous run, a second run is allocated.  A file's
@@ -141,7 +310,7 @@ An entry is **free** (empty) if `type == 0` and the name is all zeros.
 | 4 | `FTYPE_DOC` | Documentation | Browsable with `DOC` and `DESCRIBE` |
 | 5 | `FTYPE_DATA` | Structured data | Application data, saved buffers |
 | 6 | `FTYPE_TUT` | Tutorial | Step-by-step lessons, browsable with `TUTORIAL` |
-| 7 | `FTYPE_BUNDLE` | Pipeline bundle | Declarative config, loadable with `BUNDLE-LOAD` |
+| 7 | `FTYPE_BUNDLE` | Pipeline bundle | Unrestricted Forth-source convention; wrappers do not enforce the type |
 | 8 | `FTYPE_DIR` | Directory | Subdirectory (no data sectors) |
 | 9 | `FTYPE_STREAM` | Stream | Circular ring buffer (see §Stream Files) |
 | 10 | `FTYPE_LINK` | Symbolic link | Target path stored in data (see §Symbolic Links) |
@@ -152,7 +321,7 @@ An entry is **free** (empty) if `type == 0` and the name is all zeros.
 |-----|---------|-------------|
 | 0 | `readonly` | File should not be modified |
 | 1 | `system` | System file (e.g., `kdos.f`) |
-| 2 | `encrypted` | File data is AES-256-GCM encrypted (set by `FENCRYPT`) |
+| 2 | `encrypted` | File data is GCM-encrypted by `FENCRYPT` (intended AES-256; executable mode is ambient) |
 | 3 | `append` | Append-only — writes extend `used_bytes` within existing allocation |
 
 ---
@@ -179,9 +348,12 @@ target for other entries.
 
 ### Path Resolution
 
-Paths use `/` as the separator.  Leading `/` means absolute (from root);
-otherwise the path is relative to the current directory.  `.` refers to
-the current directory and `..` refers to the parent.
+Path interpretation is command-specific. Host `diskutil` paths and KDOS's
+`_RESOLVE-PATH` helper for `LOAD`/`REQUIRE` use `/`-separated traversal;
+leading `/` starts at root and a `..` directory component moves to the parent.
+The public `CD` word below does **not** use that resolver: it recognizes only
+the complete tokens `..` and `/`, and otherwise treats its token as one direct
+child name. `.` has no special meaning in the current KDOS resolver or `CD`.
 
 To resolve `/tools/crypto/aes-test.f`:
 
@@ -198,11 +370,18 @@ so its parent is root.
 
 ### Constraints
 
-- Maximum directory depth is limited only by the 128-entry array.
+- The packed format can link up to 128 entries, but runtime `PWD` displays only
+  the eight components nearest CWD and silently omits higher ancestors.
 - Deleting a directory requires it to be empty (no entries with that
   index as their `parent`).
-- The current directory is tracked at runtime as a single byte (the
-  current directory's index, or `0xFF` for root).
+- The current directory's logical value is one byte (`0..127`, or `0xFF` for
+  root), but runtime `CWD` stores it in a full 64-bit cell.
+
+These are canonical tree constraints. BIOS validation proves only that a
+non-root parent names an occupied directory entry; it accepts self-parenting,
+cycles, directories unreachable from root, and exact duplicate siblings.
+Runtime lookup is first-slot-wins. A parent cycle makes `PWD` loop instead of
+reaching root.
 
 ### Example Directory Structure
 
@@ -227,33 +406,46 @@ This reduces allocation failures caused by bitmap fragmentation while
 keeping the design simple — no block lists, no indirect sectors, no
 extent trees.
 
+BIOS validation requires every sector named by an extent to be allocated, but
+does not reconstruct ownership. Overlapping extents and allocated orphan
+sectors are accepted.
+
 ### Creating a File
 
-When `MKFILE` (or `diskutil inject`) creates a file:
+The host-side `diskutil inject` path can create a two-extent layout. Its exact
+publication order is:
 
-1. **Find a free directory slot** — scan entries for `type == 0`.
-2. **Check for duplicate names** — abort if a file with the same name
-   exists in the same parent directory.
-3. **Try single-extent allocation** — scan the bitmap for a contiguous
-   run of N free sectors.  If found, set `start_sec` and `sec_count`.
-4. **Fall back to two-extent allocation** — if no single run of N
-   sectors is available, find the largest free run (becomes the primary
-   extent), then find a second run for the remainder (becomes the
-   secondary extent at `ext1_start` / `ext1_count`).
-5. **Mark sectors allocated** — set the corresponding bits in the bitmap.
-6. **Write the directory entry** — name, extents, type, parent, mtime.
-7. **Compute CRC32** — if data is provided, feed it through the hardware
-   CRC DMA engine and store the result in `data_crc32`.
-8. **Sync to disk** — write bitmap + directory sectors back to the image.
+1. Validate the formatted image, name, parent path, and duplicate-name rule.
+2. Try one complete free run; if none exists, choose the largest primary run
+   and then a second run for the remainder.
+3. Mark both runs and publish the bitmap to the in-memory image.
+4. Write the content across the primary and secondary runs.
+5. Compute CRC32 with the host implementation.
+6. Find the first directory slot whose `name[0]` is zero, construct the entry,
+   and publish the directory to the image.
 
-If two extents still cannot satisfy the request, allocation fails.
+If two extents cannot satisfy the request, allocation fails. This host path is
+not transactional: because the slot check follows bitmap and content writes,
+a directory-full failure can leave those earlier image changes. Current KDOS
+`MKFILE` does not implement the two-run fallback; it succeeds only when one
+contiguous primary run satisfies the complete request and leaves the secondary
+extent zero.
+
+The admitted KDOS path requires a positive run, nonempty canonical component,
+non-directory valid type, valid current parent, and validator-approved
+geometry. It checks duplicate, free slot, and free run before mutation, then
+marks cached bitmap bits, constructs an entry with `used_bytes = 0`, and calls
+`FS-SYNC`. It does not clear the allocated data sectors. An empty name allocates
+bits but leaves `name[0] = 0`, creating an invisible orphan; type 8 with its
+positive run is validator-invalid. Because `FS-LOAD` retains `CWD`, creation
+after rebinding can also publish a stale parent rejected by the next load.
 
 ### Appending to a File
 
-When the `append` flag (bit 3) is set, writes extend `used_bytes` within
-the existing allocation without re-allocating.  The word `FAPPEND`
-computes the byte offset, determines which extent the write falls in,
-and writes the data.
+The intended append contract extends `used_bytes` within the existing
+allocation without re-allocating when the append flag (bit 3) is set. A future
+`FAPPEND` word would compute the byte offset, select the extent, and write the
+data; current `kdos.f` does not define that word.
 
 If `used_bytes` reaches total capacity (`(sec_count + ext1_count) × 512`),
 the append fails — the file must be recreated with a larger allocation.
@@ -278,6 +470,24 @@ When `RMFILE` (or `diskutil delete`) removes a file:
 2. **Clear bitmap bits** for both extents (primary + secondary if present).
 3. **Zero the directory entry** (all 48 bytes set to 0).
 4. **Sync to disk.**
+
+KDOS performs the cache mutations before `FS-SYNC` and never wipes payload.
+`RMFILE` must not target a directory: its ordinary zero-count primary-extent
+`DO` traverses the modulo-cell range. It also assumes extents are disjoint and
+exclusively owned even though BIOS validation accepts overlaps; otherwise it
+can clear allocation bits still referenced by another entry.
+
+### Renaming a File
+
+`RENAME` compares complete zero-padded 24-byte names, changes only that name
+field, and then syncs. It does not update `mtime`; renaming to the same name is
+reported as taken. An empty replacement makes the entry invisible without
+releasing its sectors.
+
+All three metadata mutations precede the nontransactional bitmap, directory,
+flush sequence. A late failure leaves changed cache and can leave earlier media
+effects; non-stale failure can leave `FS-OK` true, and simply repeating the
+command can short-circuit against the changed cache rather than repair media.
 
 ---
 
@@ -306,16 +516,16 @@ To read a stream's contents in chronological order:
    allocation (oldest data), then from byte 0 to `used_bytes - 1`
    (newest data).
 
-The `data_crc32` field on a stream file covers the *current* buffer
-contents at the time of the last CRC update.  Since streams are
-append-heavy, CRC is only recalculated on explicit `FS-CHECK`.
+The intended `data_crc32` field on a stream file covers the *current* buffer
+contents at the time of the last CRC update. Since streams are append-heavy,
+the design calls for recalculation only during the planned `FS-CHECK` pass.
 
 ### Forth Words
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
-| `STREAM-OPEN` | `( "name" -- fd )` | Open a stream file, return descriptor |
-| `STREAM-WRITE` | `( addr len fd -- )` | Write bytes to stream (wraps on overflow) |
+| `STREAM-OPEN` *(planned)* | `( "name" -- fd )` | Open a stream file; not currently defined in `kdos.f` |
+| `STREAM-WRITE` *(planned)* | `( addr len fd -- )` | Circular write; not currently defined in `kdos.f` |
 
 ---
 
@@ -340,10 +550,12 @@ in its data sector(s).  The target is a NUL-terminated path string
 
 ## CRC32 Data Integrity
 
-Every file's `data_crc32` field stores a CRC32 checksum of its content
-bytes (from byte 0 to `used_bytes - 1`).  This checksum is computed
-by the **hardware CRC DMA engine** (8 bytes/cycle), making it fast
-enough to run on every write without noticeable overhead.
+The format reserves `data_crc32` for a CRC32 checksum of content bytes from
+byte 0 through `used_bytes - 1`. The hardware CRC DMA engine can compute that
+checksum at 8 bytes/cycle. Current KDOS file mutation paths do not yet keep the
+field current on every write; the automatic behavior below is the target
+contract rather than admitted runtime behavior. `MP64FS-VALID?` does not read
+file data or verify this field.
 
 ### When CRC Is Computed
 
@@ -354,9 +566,9 @@ enough to run on every write without noticeable overhead.
 
 ### Verification
 
-The `FS-CHECK` word walks every non-free, non-directory entry, reads its
-data via DMA, computes CRC32, and compares against the stored
-`data_crc32`.  Mismatches are reported with the entry index and name.
+A planned `FS-CHECK` word would walk every non-free, non-directory entry, read
+its data via DMA, compute CRC32, and compare against the stored `data_crc32`.
+`kdos.f` does not currently define it. Intended diagnostics look like:
 
 ```
 > FS-CHECK
@@ -377,8 +589,9 @@ If a mismatch is found:
 ## Defragmentation
 
 Over time, file creation and deletion can leave the bitmap fragmented.
-`FS-COMPACT` consolidates free space by moving file data into contiguous
-regions and collapsing two-extent files into single extents.
+A planned `FS-COMPACT` operation would consolidate free space by moving file
+data into contiguous regions and collapsing two-extent files into single
+extents. `kdos.f` does not currently define it.
 
 ### Algorithm
 
@@ -453,7 +666,7 @@ When injecting a file, use `--type` to set the file type:
 | `doc` | 4 | Documentation topic |
 | `data` | 5 | Structured data |
 | `tutorial` | 6 | Tutorial/lesson |
-| `bundle` | 7 | Pipeline bundle (declarative config) |
+| `bundle` | 7 | Pipeline bundle convention (unrestricted Forth source) |
 | `stream` | 9 | Stream (circular ring buffer) |
 | `link` | 10 | Symbolic link |
 
@@ -554,58 +767,259 @@ present.
 | Word | Description |
 |------|-------------|
 | `DIR` | List files in current directory (name, size, type) + free space summary |
-| `CATALOG` | Detailed listing (extents, bytes, type, parent, mtime, CRC) |
+| `CATALOG` | List name, bytes, primary sector count, numeric type, and flags + free-space summary |
 | `CAT filename` | Print file contents to terminal |
-| `FS-FREE` | Report free space (sectors, bytes, file count) |
+| `FS-LARGEST-FREE` | Return the largest cached contiguous free run; low-level and unguarded |
+| `FS-FREE` | Report cached free sectors/bytes, largest run, and global occupied entries/max |
+
+The qualified hosted `DIR` and `CATALOG` paths inspect occupied direct
+children of `CWD` in the global cache. Their free-space summaries count clear
+bitmap bits over the data-sector range rather than reconstructing ownership
+from directory extents. `CATALOG` reports only the primary sector count, and
+all numeric fields use signed `.` in the current `BASE`. `FS-ENSURE` trusts an
+already-true `FS-OK`, so detached or replaced media can leave stale cache
+output eligible. This listing qualification and the adjacent admitted lookup
+and mutation slices are pathless; none establishes close/reopen durability.
+
+The hosted `CAT` slice is likewise pathless and has no load-time filesystem or
+output effect: loading only zeroes `CAT-SLOT` and installs the word and inline
+strings. At execution it checks for an unavailable filesystem before parsing,
+then a name miss, then zero `DE.USED`. Those branches respectively leave the
+filename token for the outer evaluator, print `Not found`, or print
+`(empty file)`; miss and empty perform no file-data read.
+
+For a nonempty match, `CAT` generation-binds one read of the complete primary
+extent into the unreserved address at `HERE`, without advancing `HERE`, then
+emits exactly `DE.USED` bytes. LF becomes CRLF; every other byte, including CR,
+NUL, and ESC, is emitted raw, and no newline is appended. Safe use requires a
+stable generation, canonical matched non-directory file, one small primary
+extent, no secondary extent, `DE.USED <= DE.COUNT * 512`, and a complete unused
+mapped DMA span at `HERE`. The source neither checks those bounds nor the type.
+It ignores a validator-approved secondary extent, so content beyond primary
+capacity comes from stale unread bytes after the DMA span. A failed read emits
+no file content but can leave a partial scratch prefix. `CAT-SLOT`, parser state,
+diagnostics, and the `HERE` scratch are global and unlocked. Blank line 5437 is
+the leading seam of the admitted free-space reporting slice.
+
+Loading that slice only zeroes `LF-BEST` and `LF-RUN` and installs
+`FS-LARGEST-FREE`, `FS-FREE`, and their inline strings; it performs no ensure,
+cache scan, media/diagnostic access, or output. `FS-LARGEST-FREE` itself has no
+`FS-OK` gate. It resets its global scratch and scans the cached data-sector
+bitmap, retaining the largest run even when it reaches `FS-TOTAL`.
+
+`FS-FREE` ensures and checks the filesystem first. Failure prints
+`No filesystem` without scanning or changing `LF-*`. Success separately scans the
+cache for total clear bits and the largest clear run, then counts all occupied
+directory entries globally by nonzero `name[0]`. The count ignores `CWD`,
+includes directories, and is nevertheless labeled `files`. The report uses
+signed `.` in the current `BASE` for free sectors, `free * 512` bytes, largest
+contiguous sectors, occupied entries, and the 128-entry maximum.
+
+Safe reporting requires validator-approved positive geometry and complete
+cache spans; direct helper use does not establish them. An already-true
+`FS-OK` is not revalidated, so replaced or detached media can leave stale
+results eligible without I/O. The scans and `LF-*` scratch are global,
+unlocked, and not a coherent allocation snapshot. This remains reporting only;
+the planned runtime allocator improvements, `FS-CHECK`/repair, and
+`FS-COMPACT` sections below remain aspirational. Blank line 5472 is the leading
+seam of the admitted Buffer-I/O fixture described below.
 
 ### Directory Navigation
 
 | Word | Description |
 |------|-------------|
-| `CD path` | Change current directory (`CD /tools/crypto`, `CD ..`, `CD /`) |
-| `PWD` | Print working directory path |
-| `MKDIR name` | Create a subdirectory in the current directory |
-| `RMDIR name` | Remove an empty subdirectory |
+| `CD name` | Change to exact `..`, root `/`, or one direct type-8 child; embedded `/` is not a separator |
+| `PWD` | Print root or the retained suffix of at most eight components, with leading/trailing `/` |
+| `MKDIR name` | Create a metadata-only subdirectory in the lowest logically free slot, then sync |
+| `RMDIR name` | Clear one direct empty subdirectory and sync; nonempty rejection leaks its slot on the stack |
+
+`CD`, `MKDIR`, and `RMDIR` ensure/check the filesystem before parsing. With no
+filesystem they print `No filesystem` and leave the would-be name token for the
+outer evaluator. Beyond shared parser scratch, ordinary successful `CD` changes
+only volatile CWD and issues no storage command. The mutation words write the unchanged bitmap, complete
+directory, then flush; they allocate/free no data sectors and do not update the
+parent mtime.
+
+Safe runtime use requires a stable validator-approved cache, a root or live
+directory CWD, sibling-unique nonempty 1–23-byte NUL-terminated simple names,
+an acyclic root-reaching parent chain, and synchronous non-reentrant calls.
+`MKDIR` does not enforce that name domain: an empty token creates an invisible
+metadata-bearing but logically free slot; longer tokens silently truncate to
+23 bytes; and `..` or `/` entries are shadowed by CD's operators. Mutation
+ignores MP64FS policy flags, changes cache before nontransactional sync, and
+does not invalidate saved loader/REQUIRE CWD snapshots when a directory is
+removed. CWD, NAMEBUF/PATHBUF/PN-LEN parser state, `_PWD-STK`, and cache state
+are global and unlocked.
 
 ### Creating & Managing Files
 
 | Word | Description |
 |------|-------------|
-| `n type MKFILE name` | Create a new file with *n* sectors and *type* in current directory |
-| `RMFILE name` | Delete a file from current directory |
-| `RENAME old new` | Rename a file |
-| `FAPPEND` | `( addr len fd -- )` Append data to a file with the `append` flag |
+| `n type MKFILE name` | Reserve one contiguous primary run and create an empty file in the current directory |
+| `RMFILE name` | Clear both extents and the entry without wiping payload; files only, not directories |
+| `RENAME old new` | Replace only the name; `mtime` is retained |
+| `FAPPEND` *(planned)* | `( addr len fd -- )` Append data to a file with the `append` flag; not currently defined in `kdos.f` |
+
+`FIND-BY-NAME` and these commands compare all 24 name bytes, not merely the
+visible prefix. Validator-accepted post-NUL tails can prevent a match, and the
+first exact duplicate shadows later entries. If the filesystem is unavailable,
+the mutation words return before parsing their name tokens, so those tokens
+remain for the outer evaluator. `RENAME` also leaves its proposed new token
+when the old name is absent.
 
 ### Integrity & Maintenance
 
 | Word | Description |
 |------|-------------|
-| `FS-CHECK` | Verify CRC32 of all files against stored checksums (hw-accelerated) |
-| `FS-COMPACT` | Defragment: pack files, collapse two-extent files to single extent |
+| `FS-CHECK` *(planned)* | Verify CRC32 of all files against stored checksums; not currently defined in `kdos.f` |
+| `FS-COMPACT` *(planned)* | Defragment and collapse two-extent files; not currently defined in `kdos.f` |
 
 ### Stream Files
 
 | Word | Description |
 |------|-------------|
-| `STREAM-OPEN name` | Open a stream file, return descriptor |
-| `STREAM-WRITE` | `( addr len fd -- )` Write bytes to stream (circular, wraps on overflow) |
+| `STREAM-OPEN name` *(planned)* | Open a stream file; not currently defined in `kdos.f` |
+| `STREAM-WRITE` *(planned)* | `( addr len fd -- )` Circular write; not currently defined in `kdos.f` |
 
 ### Loading & Saving
 
 | Word | Description |
 |------|-------------|
-| `LOAD filename` | Open a Forth source file and EVALUATE each line |
-| `buf SAVE-BUFFER name` | Save a buffer's data to an existing named file |
+| `LOAD filename` | Resolve an MP64FS Forth source path, concatenate validated primary/secondary extents, and evaluate its physical lines |
+| `buf SAVE-BUFFER name` | Write an existing file's complete primary allocation from `B.DATA`, cache low-u32 `B.LEN` as `used_bytes`, then sync |
+| `buf LOAD-BUFFER name` | Read an existing file's complete primary allocation, including padding, into `B.DATA` without changing the Buffer descriptor |
+
+Both admitted words ensure and check the filesystem before storing the Buffer
+descriptor or parsing the name. With no filesystem they drop the descriptor,
+leave the name token for the outer evaluator, print `No filesystem`, and do not
+change the `SB-*`/`LB-*` scratch. A miss comes after the descriptor and parsed
+name are stored and the slot becomes `-1`, but before Buffer dereference or
+I/O. The save miss additionally suggests creating the file with `MKFILE`.
+
+On a match, the transfer length is the full primary allocation
+(`DE.COUNT * 512`), not `DE.USED`. Neither word follows the optional secondary
+extent. `SAVE-BUFFER` performs its generation-bound payload write first,
+stores the low 32 bits of cell-sized `B.LEN` in the cached directory entry,
+then invokes `FS-SYNC` (bitmap, directory, flush). It retains the entry's name,
+extents, type, flags, parent, `mtime`, and CRC. The current word therefore does
+not implement the automatic CRC-on-save target described later in this
+document and does not timestamp the update. A payload failure can retain a
+partial media prefix without changing cached `used_bytes`; a later sync or
+flush failure can leave payload and metadata partly published and the cache
+changed. This is deliberately documented nontransactionality, not durability.
+
+`LOAD-BUFFER` reads the complete allocation into `B.DATA`, including padding
+after `DE.USED`, and leaves `B.LEN`, every other Buffer field, and all file
+metadata unchanged. A failed generation-bound read can retain a partial
+Buffer prefix. Complete success reports cached `DE.USED`, whereas save reports
+`B.LEN`; both use signed `.` in the ambient `BASE`.
+
+`B.LEN` is an element count, while `B.BYTES` is byte capacity. Because the
+unchanged save word stores and labels `B.LEN` as bytes but transfers whole
+sectors, multi-byte Buffers expose a source-width discrepancy. Safe use with
+ordinary Buffer constructors requires a byte-width Buffer whose
+`B.LEN = B.BYTES = DE.COUNT * 512`, with the full `B.DATA` range mapped and
+readable for save or writable for load; the saved length must represent the
+intended unsigned 32-bit field, and save requires a writable selected volume.
+It also requires a stable mounted generation,
+a canonical matched non-directory file, one positive in-range primary extent,
+and no secondary extent. None of those descriptor, capacity, type, or extent
+conditions or the entry's read-only/system flags is checked here. Scratch
+cells, parser state, cache, and diagnostics
+are global and unlocked. Blank line 5515 leads into the admitted FD-pool slice.
+
+### File Descriptor Pool and Cached Open
+
+The pool has 16 fixed 72-byte slots and is fully zeroed at source load. A
+returned fdesc points eight bytes into its slot:
+
+| Slot offset | fdesc offset | Field |
+|---:|---:|---|
+| `+0` | — | in-use header (`0` free, `-1` allocated) |
+| `+8` | `+0` | primary start sector |
+| `+16` | `+8` | primary maximum sector count |
+| `+24` | `+16` | used bytes |
+| `+32` | `+24` | cursor |
+| `+40` | `+32` | cached directory slot |
+| `+48` | `+40` | secondary start sector |
+| `+56` | `+48` | secondary sector count |
+| `+64` | `+56` | reserved |
+
+`FD-ALLOC` scans lowest slot first, marks the first free header, and returns
+its fdesc; it returns zero at 16-slot exhaustion. It never clears payload.
+`FD-FILL` snapshots the cached directory fields through secondary count and
+sets cursor to zero, but does not touch reserved `+56`. That cell begins zero
+and is retained across fill, close, and reuse, as are all payload cells when a
+slot is merely released and allocated again. The named `(FCLOSE-NOFS)` helper
+remains directly callable: zero is a no-op and nonzero clears only the header,
+always bypassing persistence.
+
+`OPEN` calls `FS-ENSURE` and checks `FS-OK` before parsing. Gate failure prints
+`No filesystem`, returns zero, and leaves the name token and `OP-SLOT`
+unchanged. A miss records `-1`, prints the parsed name, and returns zero before
+allocation. Exhaustion retains the matched slot, prints `No free FD slots`,
+and returns zero. Success selects the lowest free descriptor, snapshots cached
+primary/secondary coordinates, used count, and directory slot, resets cursor,
+and produces no output. With an already-true `FS-OK`, open performs no storage
+or payload I/O; only an initial `FS-ENSURE` load can do metadata I/O.
+
+This snapshot has no binding/generation identity and does not revalidate a
+true `FS-OK`, type, flags, or directory status. It permits multiple opens of
+the same entry and does not coordinate their independent cursor and used
+counts. Directory mutation, cache reload, and storage rebinding can stale an
+open descriptor, while later flush order among duplicates can overwrite a
+newer used count. The copied secondary fields document descriptor layout only;
+they do not qualify multi-extent `FREAD`, `FWRITE`, or other content I/O.
+
+`FFLUSH` checks `FS-OK` before descriptor access. A false marker prints `FS not
+loaded`, drops the descriptor, and does nothing else. With a true marker it
+stores only low-u32 `F.USED` in the cached directory entry selected by
+`F.SLOT`, then calls nontransactional `FS-SYNC`. It never writes file payload
+or changes the name, extents, type, flags, parent, `mtime`, or CRC. It validates
+neither fdesc/directory-slot identity nor used against capacity; `L!` truncates
+the cell to low u32. The cache changes before bitmap/directory writes and flush,
+so failure can retain the new cache value and a partial media prefix.
+
+Final `FCLOSE` treats zero as a no-op. For nonzero input with true `FS-OK`, it
+calls `FFLUSH` and releases only after a successful return; a flush failure
+keeps the header allocated while cache/media effects may remain. With false
+`FS-OK`, it silently discards persistence and releases. Release clears only
+the in-use header, retaining descriptor/reserved cells and leaving file payload
+untouched. No operation validates pool membership, alignment, allocation, or
+directory identity. Lowest-first reuse creates an ABA hazard: a stale fdesc can
+flush or close a new occupant. Pool/header state, `OP-SLOT`, parser/cache state,
+and deferred targets are global and unlocked. The contiguous hosted frontier
+continues through complete §9 screen registry, widget, dispatch, registration,
+handler, and event-loop source, then §10 Data Ports, the §11 placeholder, §12
+Dashboard, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, and §19
+Hash Table Primitives through line 9383, followed by §20 Module System through
+line 9853 and final §14 Startup through EOF line 9894. The
+bundle wrappers still inherit raw `LOAD` semantics
+rather than forming a typed or transactional filesystem layer. Exact
+provenance and the source-literal limits of that later frontier are recorded
+in `docs/kdos-reference.md`. This frontier change performs no rich-terminal
+module, projection, compositor, renderer, or physical-viewer work.
 
 ### Documentation Access
 
 | Word | Description |
 |------|-------------|
-| `TOPICS` | List all doc-type files |
-| `LESSONS` | List all tutorial-type files |
-| `DOC name` | Page through a documentation file |
-| `TUTORIAL name` | Walk through a tutorial file |
-| `DESCRIBE word` | Search docs for info about a word |
+| `TOPICS` | Globally list every occupied type-4 cached name, ignoring CWD/parent |
+| `LESSONS` | Globally list every occupied type-6 cached name, ignoring CWD/parent |
+| `DOC name` | Use ordinary current-directory `OPEN` and page the selected payload |
+| `TUTORIAL name` | Identical to `DOC`; no tutorial-type check is performed |
+| `DESCRIBE word` | Globally select the lowest-slot, case-sensitive type-4 filename match |
+
+These are compatibility descriptions, not stronger safety guarantees.
+`DOC`/`TUTORIAL` do not validate type, encryption, CRC, or directory status;
+`DESCRIBE` does not search the Forth dictionary or file contents. The browser
+emits arbitrary payload control bytes, maps LF to CRLF, pauses after every
+twentieth LF, and starts `SHOW-FILE` at the descriptor's incoming cursor.
+Legacy `FREAD` ignores secondary extents, so browsing a valid split file can
+publish adjacent sectors. Successful high-level display closes through
+`FFLUSH`/`FS-SYNC` and therefore writes and flushes media. Open failure leaves
+a zero on the data stack in `DOC`, `TUTORIAL`, and DESCRIBE's final open path;
+read/input/sync failure can leak the allocated descriptor.
 
 ### Low-Level Access
 
@@ -615,10 +1029,26 @@ present.
 | `FS-LOAD` | Load superblock + bitmap + directory into RAM |
 | `FS-SYNC` | Write RAM cache back to disk |
 | `FS-ENSURE` | Auto-load FS if not yet loaded |
-| `OPEN name` | Open a file, return a file descriptor from the FD pool for FREAD/FWRITE.  `OPEN` is a `DEFER` word (see §1). |
-| `FCLOSE fdesc` | Release a file descriptor back to the FD pool |
+| `FD-ALLOC` | Allocate the lowest free fixed-pool slot, returning its retained fdesc or zero |
+| `OPEN name` | Ensure and find a cached name, allocate an FD, and snapshot its directory fields; deferred to `(OPEN)` |
+| `FFLUSH fdesc` | Cache low-u32 `F.USED` and run `FS-SYNC`; no payload write |
+| `FCLOSE fdesc` | Flush used metadata before release when `FS-OK`; otherwise silently release; deferred to `(FCLOSE)` |
 | `DIRENT n` | Address of directory entry *n* in the RAM cache (48 bytes each) |
-| `FIND-BY-NAME` | Search directory for a name within the current directory |
+| `FIND-BY-NAME` | Return the first occupied current-directory entry whose complete 24-byte name matches zero-padded `NAMEBUF`; it does not check `FS-OK` |
+
+The admitted lifecycle is ordered and nontransactional. `FS-LOAD` clears
+`FS-OK`, destructively rebinds raw storage, validates, then publishes
+superblock geometry, bitmap, and directory; a late read failure can retain
+earlier caches and binding while leaving `FS-OK = 0`, and it never resets
+`CWD`. The validation and cache reads are not one coherent snapshot.
+
+`FS-SYNC` writes bitmap then directory and flushes, never the superblock;
+failure does not undo earlier writes. `FS-ENSURE` trusts a true `FS-OK` without
+checking attachment identity. `FORMAT` writes superblock, active bitmap, and
+directory before flush, and only flush success sets `FS-OK = -1` and root
+`CWD`. Failed format retains constructed caches, geometry, binding, and any
+completed metadata writes. Neither format nor sync erases data sectors, and
+format does not clear the inactive bitmap-cache tail.
 
 ### File Encryption
 
@@ -626,11 +1056,27 @@ present.
 |------|-------------|
 | `FS-KEY!` | `( addr -- )` Set 256-bit encryption key for file operations |
 | `ENCRYPTED?` | `( fdesc -- flag )` Check whether a file's encrypted flag is set |
-| `FENCRYPT` | `( fdesc -- )` Encrypt file in-place using AES-256-GCM, set encrypted flag |
-| `FDECRYPT` | `( fdesc -- )` Decrypt file in-place, verify auth tag, clear encrypted flag |
+| `FENCRYPT` | `( fdesc -- result... )` Encrypt in-place using the ambient AES-GCM key mode; returns 0 on success/no-op, -1 for capacity or first-allocation failure, and malformed `0 -1` on second-allocation failure; storage/sync failures throw |
+| `FDECRYPT` | `( fdesc -- result... )` Authenticate and decrypt in-place; returns 0 on success/no-op, -1 for authentication or first-allocation failure, and malformed `0 -1` on second-allocation failure; storage/sync failures throw |
 
-Encryption operates at the sector level: each sector is encrypted as
-a separate AES-256-GCM block with a unique IV derived from sector
-index.  The authentication tag is stored alongside the ciphertext.
-A file must be `OPEN`ed before encrypting/decrypting.  Remember to
-`FCLOSE` the descriptor when done.
+The current source does **not** encrypt each sector independently. It performs
+one whole-file GCM transaction over `used_bytes` rounded up to 16 bytes, stores
+one 16-byte tag immediately after that ciphertext, then rounds the combined
+span to sectors for disk I/O. The IV is the little-endian directory-slot cell
+followed by four zero bytes; it is not derived from each sector. A file must be
+`OPEN`ed before either operation, must use one contiguous primary extent, and
+must reserve room for the rounded ciphertext plus tag.
+
+This interface is compatibility behavior, not production-safe nonce
+management. Decrypt/change/re-encrypt of one slot, or later reuse of that slot,
+repeats the IV under an unchanged key. File metadata and exact logical length
+are not authenticated as AAD, no key-set marker exists, and the source relies
+on the shared AES engine's ambient key mode rather than forcing AES-256. Bytes
+between `used_bytes` and the 16-byte boundary come from existing disk slack,
+not guaranteed zero padding. Payload and directory flag updates are separate
+writes; failure is nontransactional, and post-allocation aborts leak unwiped
+DMA buffers. `FENCRYPT` also trusts the returned output/tag without checking
+AES status. The wrapper ignores the MP64FS readonly flag, although lower layers
+still enforce device write protection. `FDECRYPT` returns 0 for a file that is
+not encrypted even though its nearby source comment says that case returns -1;
+an encrypted empty file also returns 0 without clearing its flag.

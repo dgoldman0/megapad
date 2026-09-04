@@ -13135,8 +13135,17 @@ static int step_one(
             case 0x6: {  // MOD signed
                 if (b == 0)
                     throw std::runtime_error("TRAP:DIV_ZERO");
-                int64_t q = s64(a) / s64(b);
-                s.regs[rd] = (uint64_t)(s64(a) - q * s64(b));
+                const int64_t dividend = s64(a);
+                const int64_t divisor = s64(b);
+                // C++ signed remainder has the same overflow precondition as
+                // division.  The architectural remainder for this edge is
+                // zero, so handle it without evaluating the undefined host
+                // operation.
+                if (dividend == INT64_MIN && divisor == -1) {
+                    s.regs[rd] = 0;
+                    break;
+                }
+                s.regs[rd] = (uint64_t)(dividend % divisor);
                 break;
             }
             case 0x7: {  // UMOD
@@ -30623,8 +30632,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── Framebuffer render (C++ pixel conversion) ─────────
         //
-        // Converts VRAM pixel data into an RGB888 numpy array suitable
-        // for pygame.surfarray.blit_array().  Returns shape (w, h, 3)
+        // Converts pixel data from mapped VRAM, XMEM, or HBW into an RGB888
+        // numpy array suitable for pygame.surfarray.blit_array().  Returns
+        // shape (w, h, 3)
         // with dtype uint8.  Runs without GIL for maximum throughput.
         //
         // Modes: 0 = 8-bit indexed (palette lookup)

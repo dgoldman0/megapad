@@ -38,7 +38,10 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
     assert "drawing a menu only as" in module
     assert "This profile defines the required first in-place semantic-control" in retained
     assert "`4000`–`4FFF` | Semantic controls reserved for additive profiles." in wire
-    assert "complete GLYPH_RUN-only screen cannot be" in host_port
+    assert re.search(
+        r"complete GLYPH_RUN-only screen\s+cannot substitute",
+        host_port,
+    )
     assert "PT-GLYPH-RUN-DEFINE" in guest
     assert "class MenuBarDraw" in projection
     assert "def _project_menu_bar" in projection
@@ -130,8 +133,8 @@ def test_dual_rate_is_sequenced_after_real_tx_and_real_line_idle() -> None:
 
     architecture = _read(ROOT / "docs" / "architecture.md")
     wire = _read(RICH_DOCS / "APT-1-WIRE.md")
-    python_uart = _read(ROOT / "devices.py")
-    native_uart = _read(ROOT / "accel" / "mp64_uart.h")
+    python_uart = _read(ROOT / "emulator" / "devices.py")
+    native_uart = _read(ROOT / "emulator" / "accel" / "mp64_uart.h")
 
     assert "tx_ready = 1       # always ready in emulator" in python_uart
     assert "self.baud_lo = value" in python_uart
