@@ -2317,16 +2317,17 @@ clear-on-read `RESIZED?`, atomic `TERMSIZE`, clear-on-read
 memory, clock, UART, and session-geometry units are qualification of those
 primitives only. Six append-only source-closure words then provide `BSWAP`,
 the current unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and
-checked deterministic `ENTROPY-FILL`/`ENTROPY-READY?`. Fourteen more source words
+checked deterministic `ENTROPY-FILL`/`ENTROPY-READY?`. Eighteen more source words
 provide bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates,
 cross-line `[IF]`/`[ELSE]`/`[THEN]` skipping, and structured
 `CASE`/`OF`/`ENDOF`/`ENDCASE` compilation, definition-bound `RECURSE`, and the
-BIOS equality-based `+LOOP` contract. The focused
+BIOS equality-based `+LOOP` contract, directional `CMOVE>`, `ON`, and the
+native `2!`/`2@` pair layout. The focused
 live integration below now evaluates the complete authoritative module against
 the exact KDOS exception closure, but does not yet claim normal
 MP64FS/`REQUIRE` composition, Akashic integration, the Desktop lifecycle, or
 physical rendering. Those runs remain deferred by the vertical's resource
-gate. Fresh runtimes therefore contain 350 pseudo-BIOS words before KDOS; the
+gate. Fresh runtimes therefore contain 354 pseudo-BIOS words before KDOS; the
 319-word figure above remains the exact historical-load observation and is not
 silently rewritten as new full-load evidence.
 

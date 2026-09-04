@@ -247,6 +247,18 @@ def test_forward_copy_preserves_low_to_high_overlap_semantics() -> None:
     assert memory.read_bytes(0x20, 6) == b"bcdeff"
 
 
+def test_backward_copy_preserves_high_to_low_overlap_semantics() -> None:
+    memory = SparseAddressSpace(bank0_size=0x100)
+    memory.write_bytes(0x20, b"abcdef")
+
+    memory.copy_backward(0x22, 0x20, 4)
+    assert memory.read_bytes(0x20, 6) == b"efefef"
+
+    memory.write_bytes(0x20, b"abcdef")
+    memory.copy_backward(0x20, 0x21, 5)
+    assert memory.read_bytes(0x20, 6) == b"aabcde"
+
+
 def test_forward_copy_zero_length_and_mmio_use_byte_transaction_semantics() -> None:
     port = RecordingMMIO(values={0: 0x31, 1: 0x32})
     memory = SparseAddressSpace(bank0_size=0x100, mmio=port)

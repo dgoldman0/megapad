@@ -447,6 +447,56 @@ class SparseAddressSpace:
             payload = source_span.region.read(source_span.offset, length)
         destination_span.region.write(destination_span.offset, payload)
 
+    def copy_backward(self, source: int, destination: int, length: int) -> None:
+        """Copy bytes high-to-low with BIOS ``CMOVE>`` overlap semantics."""
+
+        length = _require_nonnegative(length, label="CMOVE> length")
+        if length == 0:
+            return
+
+        try:
+            source_span = self._resolve(
+                source,
+                length,
+                operation="CMOVE> source",
+            )
+            destination_span = self._resolve(
+                destination,
+                length,
+                operation="CMOVE> destination",
+            )
+        except MemoryAccessError:
+            self._copy_backward_bytes(source, destination, length)
+            return
+
+        assert source_span is not None
+        assert destination_span is not None
+        if (
+            source_span.kind is AddressClass.MMIO
+            or destination_span.kind is AddressClass.MMIO
+        ):
+            self._copy_backward_bytes(source, destination, length)
+            return
+        assert source_span.region is not None
+        assert destination_span.region is not None
+
+        payload = source_span.region.read(source_span.offset, length)
+        destructive_overlap = (
+            source_span.region is destination_span.region
+            and destination_span.offset < source_span.offset
+            and source_span.offset < destination_span.offset + length
+        )
+        if destructive_overlap:
+            stride = source_span.offset - destination_span.offset
+            payload = bytes(
+                payload[
+                    offset
+                    + ((length - 1 - offset) // stride) * stride
+                ]
+                for offset in range(length)
+            )
+        destination_span.region.write(destination_span.offset, payload)
+
     def move(self, source: int, destination: int, length: int) -> None:
         """Copy bytes with the overlap-safe ordering of BIOS ``MOVE``."""
 
@@ -500,6 +550,15 @@ class SparseAddressSpace:
         length: int,
     ) -> None:
         for offset in range(length):
+            self.write8(destination + offset, self.read8(source + offset))
+
+    def _copy_backward_bytes(
+        self,
+        source: int,
+        destination: int,
+        length: int,
+    ) -> None:
+        for offset in range(length - 1, -1, -1):
             self.write8(destination + offset, self.read8(source + offset))
 
     def _move_forward_bytes(

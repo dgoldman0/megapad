@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from shared.cells import CELL_BYTES, forth_flag, s64, u64
+from shared.cells import CELL_BYTES, MASK64, forth_flag, s64, u64
 from shared.storage import STORAGE_RESULT_TIMEOUT
 from simulator.aes import (
     AES_AAD_LENGTH,
@@ -460,6 +460,27 @@ def _off(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.memory.write64(address, 0)
 
 
+def _on(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    runtime.memory.write64(address, MASK64)
+
+
+def _two_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.pop()
+    second = context.data.pop()
+    runtime.memory.write64(address, second)
+    first = context.data.pop()
+    runtime.memory.write64(u64(address + CELL_BYTES), first)
+
+
+def _two_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    address = context.data.peek()
+    first = runtime.memory.read64(u64(address + CELL_BYTES))
+    context.data.replace_top(first)
+    second = runtime.memory.read64(address)
+    context.data.push(second)
+
+
 def _c_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
@@ -507,6 +528,13 @@ def _cmove(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     destination = context.data.pop()
     source = context.data.pop()
     runtime.memory.copy_forward(source, destination, length)
+
+
+def _cmove_up(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    length = context.data.pop()
+    destination = context.data.pop()
+    source = context.data.pop()
+    runtime.memory.copy_backward(source, destination, length)
 
 
 def _move(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -2724,5 +2752,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
 
     runtime.define_directive(b"RECURSE", DirectiveKind.RECURSE)
     runtime.define_directive(b"+LOOP", DirectiveKind.PLUS_LOOP)
+    runtime.define_primitive(
+        b"CMOVE>",
+        lambda context: _cmove_up(runtime, context),
+    )
+    runtime.define_primitive(b"ON", lambda context: _on(runtime, context))
+    runtime.define_primitive(b"2!", lambda context: _two_store(runtime, context))
+    runtime.define_primitive(b"2@", lambda context: _two_fetch(runtime, context))
 
 __all__ = ["install_core"]
