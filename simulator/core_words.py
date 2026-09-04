@@ -568,6 +568,15 @@ def _latest(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(runtime.dictionary.latest)
 
 
+def _latest_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    latest = context.data.peek()
+    runtime.set_dictionary_latest(latest, context)
+    context.data.pop()
+
+
 def _dictionary_rollback(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
@@ -2759,5 +2768,11 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.define_primitive(b"ON", lambda context: _on(runtime, context))
     runtime.define_primitive(b"2!", lambda context: _two_store(runtime, context))
     runtime.define_primitive(b"2@", lambda context: _two_fetch(runtime, context))
+    for name in (b"_RELOC-ACTIVE", b"_RELOC-COUNT", b"_RELOC-BUF"):
+        runtime.define_created(name, initial_body=bytes(CELL_BYTES))
+    runtime.define_primitive(
+        b"LATEST!",
+        lambda context: _latest_store(runtime, context),
+    )
 
 __all__ = ["install_core"]

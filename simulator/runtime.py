@@ -1821,6 +1821,21 @@ class MegaForthRuntime:
             self._request_dictionary_fault(context, str(exc))
         self.dictionary_index.rebuild()
 
+    def set_dictionary_latest(
+        self,
+        latest: int,
+        context: ExecutionContext,
+    ) -> None:
+        """Publish one known semantic dictionary ancestor without moving HERE."""
+
+        self._require_session_owner_access("publish the dictionary head")
+        self._require_no_suspension("publish the dictionary head")
+        try:
+            self.dictionary.set_latest(latest)
+        except (TypeError, ValueError, RuntimeError) as exc:
+            self._request_dictionary_fault(context, str(exc))
+        self.dictionary_index.rebuild()
+
     def new_context(self) -> ExecutionContext:
         """Return an unbacked host scratch context.
 

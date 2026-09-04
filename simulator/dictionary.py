@@ -495,6 +495,53 @@ class Dictionary:
 
         self._publish_rollback(depth=target_depth, here=target_here)
 
+    def set_latest(self, latest: int) -> None:
+        """Publish a known semantic ancestor without changing ``HERE``.
+
+        Native ``LATEST!`` can also splice newly copied machine-code headers.
+        Hosted execution has no semantic implementation metadata for such a
+        chain, so this backend accepts only zero or a live semantic ancestor.
+        The retained prefix must still be the exact terminating linked chain
+        visible in guest memory before any binding is removed.
+        """
+
+        self._guard_mutation("publish the dictionary head")
+        target_latest = _address(latest, label="LATEST! target")
+        if target_latest == 0:
+            target_depth = 0
+        else:
+            target_depth = next(
+                (
+                    index + 1
+                    for index, word in enumerate(self._definitions)
+                    if word.header_address == target_latest
+                ),
+                -1,
+            )
+            if target_depth < 0:
+                raise ValueError(
+                    "LATEST! target has no hosted semantic definition"
+                )
+
+        cursor = target_latest
+        for index in range(target_depth - 1, -1, -1):
+            word = self._definitions[index]
+            if cursor != word.header_address:
+                raise ValueError("retained dictionary link history is inconsistent")
+            cursor = (
+                self._memory.read64(cursor)
+                if self._memory is not None
+                else (
+                    0
+                    if index == 0
+                    else self._definitions[index - 1].header_address
+                )
+            )
+        if cursor != 0:
+            raise ValueError("retained dictionary link history is inconsistent")
+
+        self._publish_rollback(depth=target_depth, here=self._here)
+
     def _publish_rollback(
         self,
         *,
