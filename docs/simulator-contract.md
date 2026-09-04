@@ -9,10 +9,62 @@ the hosted source simulator.  The simulator exists to run ordinary
 MegaForth, KDOS, and Akashic source quickly.  It is a second execution backend,
 not a relaxed claim that source execution proves the MP64 machine.
 
-The architectural emulator remains the reference for every machine-level
-claim.  When the two backends disagree about an observable claimed here, the
-simulator is wrong unless the difference is explicitly listed as a nonclaim.
-Performance is a goal and never evidence of compatibility.
+The architectural emulator remains the reference for machine-level claims
+only. Source-visible compatibility is governed first by the locked decision
+set below; an emulator defect cannot override it, and the emulator must be
+corrected when it disagrees. For a claimed source-visible observation not
+covered by a locked decision or documented backend defect, the architectural
+emulator remains the default differential oracle. Performance is a goal and
+never evidence of compatibility.
+
+## Locked Akashic compatibility decisions
+
+Decision set: `AKASHIC-FIRST-1-2026-09-04`
+
+The compatibility boundary is the source-visible surface consumed by Akashic:
+public word names and stack effects, status and throw conventions, persistent
+record layouts, portable byte formats, module identities, and lifecycle
+ordering. Emulator and simulator implementations may differ internally, but
+they must not require Akashic source changes to obtain the behavior fixed
+below. An accidental lower-layer result is not preserved merely because one
+backend once produced it. Mathematical or cryptographic errors, host-language
+undefined behavior, memory corruption, and falsely advertised capability are
+corrected below the Akashic boundary.
+
+These decisions are normative for the emulator and hosted simulator. RTL
+differences remain documented implementation defects; changing or qualifying
+RTL is explicitly deferred from this decision set.
+
+| Area | Locked decision |
+|---|---|
+| Scalar extrema | `MIN` and `MAX` compare their operands as signed two's-complement cells. Unsigned extrema, if needed, receive distinct `UMIN`/`UMAX` words rather than overloading these names. |
+| Halving | `2/` is an arithmetic right shift by one, retaining the sign bit. `RSHIFT` remains the explicitly logical right-shift word. |
+| X25519 | The Montgomery ladder uses `E * (AA + 121665 * E)`. The former Python-emulator use of 121666 with that same formula is an error, not a compatibility result. Published RFC 7748 vectors are authoritative. |
+| Checked SHA-2 | The checked BIOS/KDOS SHA-256 and SHA-512 word ABI is authoritative: its names, stack effects, status namespace, complete-span checks, endian-visible digest bytes, ownership, finalization, and cleanup remain stable. Emulator and simulator implement that ABI; current RTL instruction glue does not qualify it. |
+| Timer | `CYCLES` and Timer COUNT/COMPARE are zero-extended wrapping 32-bit values with little-endian 32-bit accesses. `TIMER!` retains the input's low 32 bits and Timer control remains a low-byte register. Simulator advancement is deterministic semantic time, not a machine-cycle claim. The current RTL low-byte-only data path is deferred. |
+| NTT | The existing ten-word Forth surface and executable byte-window ABI remain stable. It denotes the current generic 256-point cyclic transform, not ML-KEM/ML-DSA negacyclic multiplication. Any future standardized-PQ transform is a distinct, versioned contract. The incompatible RTL slot map is deferred. |
+| ML-KEM | The existing seven-word raw Forth surface and executable byte-window ABI remain stable. Key generation consumes a 64-byte `d || z` input and `KEM-SEED-SIZE` denotes 64 bytes; encapsulation consumes the first 32 bytes as its coin input. The RTL XOR-value block is a non-cryptographic interface stub and must not advertise or qualify ML-KEM. |
+| Source loading | `REQUIRE`, `PROVIDED`, module identity, and existing public loader stack effects remain stable. A nominally successful load must check every evaluator result and call `EVALUATE-FINISH`; only complete source may commit. Each guarded frame checkpoints `HERE`/`LATEST`; an admitted failure delivered as guest `THROW` unwinds evaluator depth, rolls back provisional module IDs and the active dictionary zone, releases its allocation/frame, runs after-release, and restores ambient loader state before rethrowing. Evaluator statuses 1 through 4 throw their same positive values, status 5 rethrows the exact code retained in `EVAL-THROW`, and checked extent-read failure rethrows the exact nonzero code retained in `DISK-IO-IOR`. Successful nested module-ID chains remain provisional by merging into the parent, so a caught parent failure removes their IDs and definitions too. Task-resetting `ABORT`/`ABORT"` and backend faults that do not become guest `THROW` are outside this cleanup guarantee. Non-dictionary source effects are not thereby transactional. These are internal lifecycle repairs, not a new Akashic loader API. |
+| Optional memory | A configured XMEM or HBW capacity of zero means that region is absent: SysInfo reports zero, no guest span is mapped there, and every direct allocation request targeting that region, including a zero-byte request, fails through the ordinary absent-region path. A generic allocator may still take its documented Bank-0 fallback. Zero never means “maximum available capacity.” |
+| Graphics allocation | No hidden fixed-address framebuffer reservation is carved out behind the HBW or XMEM allocator. Graphics using either arena must receive caller-owned storage or obtain it through the ordinary visible allocator, then program the framebuffer base from that allocation; dedicated VRAM remains a separate explicit region. This is shared target-source composition work, not an emulator/simulator semantic difference; implementation remains beyond the present rich-terminal stop line. |
+| Ring layout | The KDOS ring descriptor is the executable six-cell, 48-byte header: element size, capacity, head, tail, count, and lock, followed by data at `+48`. No seventh descriptor cell exists. |
+| Hash-table layout | The KDOS hash-table descriptor remains the existing five-cell, 40-byte header followed by packed data at `+40`. Its field offsets and slot representation are Akashic-visible and are not changed as part of safety hardening. |
+
+The following remain deliberately open: the result-versus-trap contract for
+signed `MOD (INT64_MIN, -1)`; the barrier completion bit and pulse/sticky
+lifecycle; any future standardized-PQ NTT identity beyond the retained generic
+service; boot-time file-type, CRC, encryption, and root-policy enforcement;
+and broad per-task/per-core reentrancy and lock redesign for KDOS global
+scratch. Rich-terminal implementation and acceptance also remain beyond the
+present stop line. None of these open matters licenses an emulator/simulator
+difference inside the locked compatibility surface above.
+
+Later byte-exact qualification ledgers retain hashes and observations for the
+source revision named in each ledger. Where such a historical observation
+conflicts with this decision set—most notably unsigned scalar helpers, the
+32-byte KEM constant, or unchecked nominal loader completion—the decision set
+is controlling. Historical evidence remains useful provenance but is not an
+alternate current contract.
 
 ## 1. Backend and directory ownership
 
@@ -123,18 +175,19 @@ consumes value and address before its first byte and leaves an already-written
 low-byte prefix committed if a later byte faults. `NEGATE` is ordinary
 two's-complement cell negation, including the self-negating sign-bit value.
 
-The current executable BIOS implements scalar `MIN` and `MAX` as unsigned
-comparisons, while the public Forth descriptions call them signed. That remains an
-[open documentation/implementation discrepancy](bios-forth.md), not a hosted
-simulator decision about the eventual public contract. Source qualification
-records which input domain is insensitive to the mismatch and does not silently
-replace the executable behavior.
+Scalar `MIN` and `MAX` compare signed two's-complement cells. This follows the
+public Forth descriptions and Akashic's use of the words for signed geometry,
+clipping, and clamps. The former unsigned BIOS/emulator behavior was an
+implementation defect. `2/` likewise performs an arithmetic right shift by
+one, while `RSHIFT` remains logical. These meanings are source-visible and
+must agree between emulator and simulator.
 
-Signed `MOD` is likewise not qualified for the single operand pair
-`(INT64_MIN, -1)`: the current native C++ path omits signed division's overflow
-guard, while the hosted primitive deterministically produces remainder zero.
-That observation does not choose a permanent result-or-trap contract. The
-qualified positive-divisor domain of KDOS `RAND-RANGE` excludes the edge.
+Signed `MOD` is likewise not publicly settled for the single operand pair
+`(INT64_MIN, -1)`. The current native C++ and hosted Python backends both
+handle it without host-language overflow and provisionally return remainder
+zero. That safe backend convention does not choose a permanent
+result-or-trap contract. The qualified positive-divisor domain of KDOS
+`RAND-RANGE` excludes the edge.
 
 The simulator exposes a sparse 64-bit logical address space with the same
 source-visible address classes as the machine: Bank 0, external memory, HBW,
@@ -523,8 +576,9 @@ vector, mutate `PREEMPT-FLAG`, or authorize/wake `IDL`. Raw Timer MMIO,
 hardware cadence, and wall-clock pacing are not admitted. Emulator/native
 implement the intended 32-bit timer accesses, while the current RTL SoC byte
 peripheral wiring exposes only `COUNT_LO` to `CYCLES` and accepts only
-`COMPARE_LO` from `TIMER!`; that backend discrepancy is not normalized into
-another hosted mode.
+`COMPARE_LO` from `TIMER!`. The full 32-bit behavior is the locked ABI; RTL
+convergence and qualification are deferred rather than normalized into another
+hosted mode.
 
 The admitted one-core legacy tile service binds `TMODE!`, `TCTRL!`,
 `TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TMUL`, `TDOT`, `TSUM`,
@@ -671,8 +725,10 @@ Current RTL instruction glue is not equivalent:
 Native checked tests cover standard digests and padding/split boundaries; the
 present RTL tests exercise an already padded/endian-correct compression leaf
 or ownership only. Simulator success therefore supplies no RTL or physical
-SHA-2 evidence, and this discrepancy record does not choose which hardware or
-public-ISA correction should land.
+SHA-2 evidence. The checked BIOS/KDOS behavior above is the locked public ABI;
+future RTL or instruction-glue work must implement that behavior without
+changing Akashic-facing words. That RTL work and its qualification are deferred
+from the present emulator/simulator change.
 
 The admitted SHA service is one per-runtime shared transaction engine behind
 the virtual-MMIO router at `+0x780..+0x7DF`. Checked BIOS words and direct
@@ -770,16 +826,16 @@ task/core-isolated or automatically wiped. Key generation uses the admitted
 deterministic development TRNG and is reproducible, not cryptographically
 secure.
 
-The hosted result follows RFC 7748, native C++, and the standalone Field-ALU
-RTL by using `A24=121665` with `E*(AA+A24*E)`. The architectural Python
-emulator currently uses `121666` with that same formula and returns the wrong
-published vector. Current integrated RTL is a second discrepancy: the
-full-core crypto dispatch treats units beyond CRC/SHA as no-ops, while the
-microcore's declared Field ports are not connected by the cluster. Hosted
-qualification therefore does not claim Python-interpreter or integrated-RTL
-agreement and does not choose the eventual correction there. It also makes
-no claim about EXT.CRYPTO encodings, CSRs, the nominal 4335-cycle latency,
-stalls, interrupts, constant-time host execution, or host-memory erasure.
+The emulator and hosted result follow RFC 7748, native C++, and the standalone
+Field-ALU RTL by using `A24=121665` with `E*(AA+A24*E)`. The former
+architectural-Python value 121666 with that same formula was an implementation
+error and is not a retained compatibility mode. Current integrated RTL remains
+a separate deferred discrepancy: full-core crypto dispatch treats units
+beyond CRC/SHA as no-ops, while the microcore's declared Field ports are not
+connected by the cluster. Hosted qualification therefore does not claim
+integrated-RTL agreement. It also makes no claim about EXT.CRYPTO encodings,
+CSRs, the nominal 4335-cycle latency, stalls, interrupts, constant-time host
+execution, or host-memory erasure.
 
 The general Field slice admits the same per-core state through all 15 raw BIOS
 words: `GF-A!`, `GF-R@`, `GF-PRIME`, `LOAD-PRIME`, `FADD`, `FSUB`, `FMUL`,
@@ -892,31 +948,39 @@ The shared value model reproduces the Python device's bounded root search and
 ordinary radix-2 forward/inverse transforms. Pointwise addition and
 multiplication are fully reduced. This means
 `INTT(NTT(a)*NTT(b))` computes cyclic convolution modulo `x^256-1`, not the
-negacyclic ring operation required by ML-KEM or ML-DSA. Exact unchanged
-`kdos.f` lines 1517 through 1584 define both named moduli, selectors, two
-global 1024-byte scratch buffers, `NTT-POLYMUL`, and `.NTT-STATUS`; the PQ
-labels do not strengthen that mathematical claim. The KEM emulator uses
+negacyclic ring operation required by ML-KEM or ML-DSA. Exact current `kdos.f`
+lines 1517 through 1584 contain 68 LF records and 2,784 bytes, with SHA-256
+`95769988473110183b3b2adcc90a2eb3bdd812100ab1702f8686d573af1f4194`
+and Git blob `d4f2ce38b6818520b0227f5a2f8c69aef3c408b6`. They define both named
+moduli, selectors, two global 1024-byte scratch buffers, `NTT-POLYMUL`, and
+`.NTT-STATUS`; the PQ labels do not strengthen that mathematical claim. The KEM emulator uses
 separate ML-KEM-specific routines. KDOS scratch aliases and concurrent
 `NTT-POLYMUL` calls are unsafe because there is no ownership protocol.
 
 This frontier is deliberately pseudo-BIOS-only: it does not admit direct
-virtual NTT MMIO. Current RTL uses an incompatible 64-bit-slot map, while the
-working BIOS/Python path uses byte windows STATUS `+00`, Q `+08..0F`, IDX
+virtual NTT MMIO. The working BIOS/Python byte window is the retained
+emulator/simulator ABI: STATUS `+00`, Q `+08..0F`, IDX
 `+10..11`, A `+18..1B`, B `+1C..1F`, RESULT `+20..23`, and CMD `+28`.
 Current RTL also fixes its twiddle tables and inverse scale to q=3329 even when
 Q changes, exposes multi-cycle BUSY/partial work, and produces a different
 forward ordering for its fixed root. BIOS byte accesses cannot drive that RTL
 unit correctly. Simulator success therefore makes no direct-MMIO, RTL,
 standardized-PQ, cycle, bus-width, constant-time, or physical-erasure claim,
-and this discrepancy record does not choose the eventual hardware correction.
+and RTL convergence is deferred. A future standardized-PQ transform must use a
+distinct, versioned identity rather than silently changing this generic cyclic
+service.
 
 The admitted ML-KEM slice is one runtime-global semantic service behind the
 seven authoritative raw BIOS words: `KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`,
-`KEM-KEYGEN`, `KEM-ENCAPS`, `KEM-DECAPS`, and `KEM-STATUS@`. Exact unchanged
-`kdos.f` lines 1586 through 1633 define five buffer IDs, five size constants,
-the three `KYBER-*` wrappers, and `.KEM-STATUS`. The source declares
-`KEM-SEED-SIZE=32`, while `KYBER-KEYGEN` explicitly loads all 64 bytes consumed
-as `d || z`; this is a pinned discrepancy, not an implicit simulator repair.
+`KEM-KEYGEN`, `KEM-ENCAPS`, `KEM-DECAPS`, and `KEM-STATUS@`. Exact current
+`kdos.f` lines 1586 through 1633 contain 48 LF records and 1,510 bytes, with
+SHA-256 `58fab7b6c7a7e722ca1d3bddf77046e700ed196084c0fa1a69608222b800f824`
+and Git blob `5e74d7b947598492bc8ddc82a646687eb0eeaddb`. They define five buffer IDs, five size constants,
+the three `KYBER-*` wrappers, and `.KEM-STATUS`. The pre-decision source
+declared `KEM-SEED-SIZE=32` even though `KYBER-KEYGEN` loads all 64 bytes
+consumed as `d || z`. `AKASHIC-FIRST-1-2026-09-04` resolves that discrepancy:
+the public constant is 64 and both emulator and simulator consume the complete
+64-byte input. Encapsulation continues to consume its first 32 bytes as coins.
 
 Construction creates zero-filled SEED/COIN=64, PK=800, SK=1632, CT=768, and
 SS=32 buffers, selector zero, index zero, and status IDLE=0. All contexts share
@@ -1049,27 +1113,36 @@ validation, concurrency safety, or protected host-secret boundary.
 The admitted HBW slice installs `HBW-BASE` and `HBW-SIZE` as semantic BIOS
 reads of SysInfo `+0x20` and `+0x28`, respectively. They always read the
 currently bound sparse-memory geometry rather than copying host constants into
-the dictionary. Exact unchanged `kdos.f` lines 2044 through 2108 then define
+the dictionary. Exact current `kdos.f` lines 2044 through 2108 contain 65 LF
+records and 2,448 bytes, with SHA-256
+`5fc825c8588b85a499ee34e7fc142b8bba7e74d7efb481bde4183c93476444c9`
+and Git blob `2d9704f542181bbf91eaead01d5b6ea7a1f9cff0`. They define
 `HBW-HERE`, `HBW-LIMIT`, `HBW-INIT`, `HBW-ALLOT`, `HBW-ALLOT?`,
 `HBW-TALIGN`, `HBW-RESET`, `HBW-FREE`, and `.HBW`, and execute `HBW-INIT` at
 load time.
 
 Those two variables are runtime-global guest state shared by all contexts.
 There is no task/core owner, lock, transaction, allocation ledger, floor,
-individual free, or automatic wipe. Allocation returns the old pointer and
-advances by exactly the supplied cell without touching storage; zero and exact
-fit succeed. Ordinary checked overflow returns `(0,-1)`, while the aborting
+individual free, or automatic wipe. With HBW present, allocation returns the
+old pointer and advances by exactly the supplied cell without touching
+storage; zero and exact fit succeed. Ordinary checked overflow returns
+`(0,-1)`, while the aborting
 form emits `HBW overflow` and performs task `ABORT`; both leave the pointer
 unchanged because their store follows the comparison. `HBW-TALIGN` rounds the
 pointer up to 64 bytes. `HBW-RESET` rereads the base but does not clear memory,
 revoke old addresses, or synchronize callers. `.HBW` reads live state and uses
 the current numeric base plus signed `.` formatting.
 
-The allocator reserves none of the advertised span for other subsystems.
-`graphics.f` independently chooses `HBW-BASE + 0x200000` for its framebuffer
-without moving `HBW-HERE`, so an allocation entering the third MiB may overlap
-that framebuffer. Hosted execution preserves this composition requirement and
-does not invent a hidden reservation.
+The allocator reserves none of the advertised span for other subsystems. The
+current `graphics.f` choice of `HBW-BASE + 0x200000` without moving `HBW-HERE`
+can overlap an allocation entering the third MiB and is not the retained
+design. Graphics using HBW or XMEM must instead receive caller-owned storage
+or allocate through the ordinary visible allocator and program the framebuffer
+base from that result; dedicated VRAM remains separate. Both backends will
+load the same target-source composition; no
+simulator-only reservation or emulator device special case is permitted.
+Implementing that source change remains beyond the present rich-terminal stop
+line.
 
 The admitted allocation domain requires the current pointer and a nonwrapping
 request to stay within the mapped HBW span. The source names the request `u`
@@ -1077,9 +1150,11 @@ but adds before applying signed `>` and performs no wrap check, so high-cell
 requests can wrap and succeed. Alignment is also unchecked and can cross a
 configured limit that is not 64-byte aligned. Canonical base
 `0xFFD0_0000`/size 3 MiB is aligned. The hosted factory can explicitly model
-no HBW and then reports `(0,0)`; the emulator's configured-zero edge instead
-retains fixed `HBW_BASE` with size zero. These unqualified edge discrepancies
-are reproduced and recorded without choosing a future contract.
+no HBW and then reports `(0,0)`. Configured zero is now the same absent-region
+case in the emulator: it retains no guest-visible base or mapped span, and all
+HBW allocation requests, including zero bytes, fail. `HBW-ALLOT` reports
+`HBW unavailable`; `HBW-ALLOT?` returns `(0,-1)`. Any RTL zero-parameter
+difference remains deferred rather than becoming another public meaning.
 
 The admitted external-memory slice installs `EXT-MEM-BASE` and
 `EXT-MEM-SIZE` as dynamic semantic BIOS reads of SysInfo `+0x38` and `+0x40`.
@@ -1143,12 +1218,12 @@ public size guard also admits `0x7fff_ffff_ffff_fff0` before adding its
 eight-byte prefix even though subsequent 16-byte normalization cannot remain
 positive; ordinary sub-VRAM geometry rejects that request before the edge can
 mutate state. The hosted and executable-emulator constructors interpret
-configured size zero as
-no external region, while the current RTL parameter interprets zero as the
-maximum window up to VRAM; the normal emulator session profile separately
-defaults to 128 MiB. Every profile must expose its actual SysInfo geometry.
-This discrepancy is recorded without selecting one universal meaning for a
-configuration value that is not itself a guest ABI input.
+configured size zero as no external region. That meaning is now normative for
+every optional XMEM or HBW region: SysInfo reports zero and no guest span is
+mapped there. The normal emulator session profile may still select a nonzero
+default such as 128 MiB explicitly. The current RTL parameter's use of zero
+for the maximum window up to VRAM is an implementation discrepancy whose
+correction is deferred.
 
 The admitted dictionary-index BIOS service preserves the executable
 `DICT-INDEX!` validation and statuses. `0 0` disables with status 0; otherwise
@@ -1172,10 +1247,10 @@ seqlock concurrency, or cycle counts.
 
 Exact unchanged `kdos.f` lines 2390 through 2423 add
 `_DICT-POW2-FLOOR`, `_DICT-INDEX-DONE`, and `_DICT-INDEX-INIT`, then run the
-initializer. `2*` wraps one-cell left shifts. Executable BIOS `2/` is a logical
-right shift even though its assembly comment calls it arithmetic; the sizing
-source supplies positive values, and the discrepancy is pinned rather than
-normalized. Canonical 128 MiB XMEM reserves 65,536 slots (1 MiB) and advances
+initializer. `2*` wraps one-cell left shifts. `2/` is an arithmetic right
+shift; this sizing source supplies positive values and is therefore unchanged
+by correction of the former logical-shift implementation. Canonical 128 MiB
+XMEM reserves 65,536 slots (1 MiB) and advances
 both `XMEM-HERE` and `XMEM-FLOOR`. Absent XMEM and a present bump tail below
 2,048 bytes leave the index disabled. Exactly 2,048 bytes selects one slot,
 installs a saturated fallback, and protects the 16-byte table.
@@ -1284,7 +1359,10 @@ state remain pending; that unsupported `]` form fails during source
 compilation. Persistent one-core compiler state across evaluator calls is now
 part of the semantic BIOS prerequisite above.
 
-Exact unchanged lines 2797 through 2985 execute the Buffer registry,
+Exact current lines 2797 through 2985 contain 189 LF records and 7,084 bytes,
+with SHA-256
+`68826ac284decca406051412e4478710dd9ebd81319109f5dd326a04ca205a93`
+and Git blob `cbf10f550499d59aa5c6721024ee4ba46b8b0acb`. They execute the Buffer registry,
 descriptor accessors, ordinary,
 HBW, XMEM, and Arena constructors, byte fill/inspection, and Arena destruction
 integration against the same guest dictionary and sparse memory used by prior
@@ -1306,11 +1384,11 @@ clip a short buffer. `B.TILES` adds 63 to the wrapped byte count and then uses
 signed `/`, so its ceiling calculation is qualified only for ordinary
 nonnegative sizes that do not overflow either arithmetic step.
 
-Two source defects are explicitly preserved. `XBUFFER` stores aligned
-`XMEM-HERE` in the descriptor before calling `XMEM-ALLOT`, then discards that
-word's returned address. A free-list allocation can therefore consume a
-reclaimed block while the descriptor incorrectly retains the bump frontier.
-Arena destruction unlinks matching descriptors and decrements `BUF-COUNT`,
+`XBUFFER` and `HBW-BUFFER` publish the exact address returned by their
+allocator, including an address reused from the XMEM free list. Construction
+is still not transactional: an allocation failure can leave a partial
+descriptor whose data-address field remains zero. Arena destruction unlinks
+matching descriptors and decrements `BUF-COUNT`,
 but it does not reclaim the dictionary link nodes or undefine constants that
 still contain the destroyed descriptor address. These are recorded source
 behaviors, not reasons for simulator-only repair. `ARENA-RESET` makes Arena
@@ -1470,9 +1548,9 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now reaches EOF at line 9894. Exact unchanged
-lines 4804 through 5003 contain 200 lines and 6,781 bytes (SHA-256
-`b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b`).
+The contiguous source frontier now reaches EOF at line 9894. Exact current
+lines 4804 through 5003 contain 200 lines and 6,799 bytes (SHA-256
+`d76d714ed903db5bcd5a6ba5271288ea31c08e2f5fdec2eabd86dbb0bd0cbc32`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
 display registry, one-sector scratch window, permanent four-cell dictionary
 descriptors, metadata words, head/full/tail file I/O, and UART publishers.
@@ -1499,8 +1577,9 @@ committing descriptor metadata. No file operation flushes.
 The unchanged source does not enforce that domain. `FSEEK` is unchecked;
 `FTRUNCATE` can grow and expose old bytes; file extents can overlap or escape
 the volume; and arithmetic can wrap. `FWRITE` mixes a wrapping end calculation
-with signed `>`, while `FREAD` uses signed `<`; both then depend on the current
-unsigned executable `MIN`/`MAX` behavior. High-bit values are unqualified.
+with signed `>`, while `FREAD` uses signed `<`; both use signed
+two's-complement `MIN`/`MAX`. High-bit values outside valid nonnegative file
+geometry remain unqualified.
 Shared `FDESC`, `FT-N`, `FW-*`, `FR-*`, and `FSCRATCH` make construction and
 I/O non-reentrant, and per-sector locking does not make read-modify-write or
 multi-sector work atomic. Failures can leave earlier destination or media
@@ -1851,15 +1930,17 @@ the new occupant (an ABA hazard), while a double close can race logical reuse.
 Pool headers, fdesc payloads, `OP-SLOT`, parser state, directory cache, and the
 deferred vectors are global and unlocked.
 
-Exact unchanged lines 5611 through 5944 contain 334 LF records and 11,337
-bytes, with SHA-256
-`efad4e40860bc7cdc484b58ac652d9b7286541a7adfdb156d4ae66a3f73ba9fe`
-and Git blob `8fd4577b4ac2128934672eb123ca78bf88468d52`. Their exact 50-definition ledger
-installs four loader globals, constants for a 16 × 56-byte nesting stack,
+Exact current lines 5611 through 5944 contain 334 LF records and 11,980 bytes,
+with SHA-256
+`6a30453c933ac8666c1b798a98a4fb3e6a331afeb4c2d3048299a83a0ea79a7c`
+and Git blob `f2bea50138ca04e235358debd734a4fc234e002a`. Their exact 55-definition
+ledger installs five loader globals, constants for a 16 × 88-byte nesting stack,
 frame/evaluator/transaction accessors, three deferred transaction actions,
 two-extent read helpers, path scratch and traversal, six evaluator-status
 constants, the KDOS checked-evaluator shadow, five whole-source walker cells,
-`SOURCE-EVALUATE-CHECKED`, and final raw filesystem `LOAD`. The transaction
+`SOURCE-EVALUATE-CHECKED`, `_LD-STATUS-THROW`, the checked loader walker,
+dictionary/error guards, and final raw filesystem `LOAD`. Its optional module
+transaction
 actions are all bound to `_LD-TXN-NOOP`; the later module registry owns their
 real commit/rollback meanings. Fixture evaluation allocates dictionary storage
 and explicitly clears `_LD-SP`, but performs no filesystem, storage, clock,
@@ -1871,9 +1952,10 @@ prints ` No filesystem` plus CRLF, returns before consuming the filename, and
 lets the enclosing interpreter process that token. After parsing, a lookup
 miss, zero `DE.USED`, or allocation failure emits its literal diagnostic and
 restores the saved loader frame without payload I/O or transaction actions.
-The fixed nesting stack saves `LD-BUF`, `LD-SZ`, `LD-CUR`, `LD-LEN`, CWD, the
-evaluator-depth checkpoint, and a transaction head; a seventeenth frame aborts
-with the source's `REQUIRE nested too deep` message.
+The current eleven-cell nesting frame saves `LD-BUF`, `LD-SZ`, `LD-CUR`,
+`LD-LEN`, `LD-LINE`, `EVAL-LINE`, CWD, the evaluator-depth checkpoint, a
+transaction head, and the frame's `HERE`/`LATEST` dictionary checkpoint; a seventeenth frame
+aborts with the source's `REQUIRE nested too deep` message.
 
 The admitted successful domain has valid stable mounted metadata; total path
 storage at most 127 bytes; each intermediate and final component at most 23
@@ -1887,15 +1969,17 @@ directory during execution and restore each caller's CWD and walker globals.
 Qualification crosses the 512-byte extent seam inside a definition, then
 loads a sibling module normally.
 
-Normal completion calls transaction commit, frees the allocation, restores
-the frame, and then calls after-release. Nested action order is inner commit,
-inner after-release, outer commit, outer after-release. A guest `THROW` during
-walking is caught, evaluator depth is unwound to the frame checkpoint,
-rollback is called, the allocation/frame are released, after-release runs, and
-the exact exception is rethrown. The loader is reusable afterward. Because all
-three actions are still no-ops, a definition completed before that exception
-remains published. This is the literal pre-module-registry state, not a
-transactional dictionary guarantee.
+Normal completion calls the optional transaction commit hook, frees the
+allocation, restores the frame, and then calls after-release. Nested action
+order is inner commit, inner after-release, outer commit, outer after-release.
+On any admitted guarded failure delivered as guest `THROW`, KDOS unwinds
+evaluator depth, calls the optional rollback hook, rolls the dictionary back to
+the frame's saved `HERE`/`LATEST`, resets evaluator state, releases/restores
+the allocation and frame, calls after-release, and rethrows the exact
+exception. Dictionary
+rollback is intrinsic to every loader frame even while the three module hooks
+remain no-ops, so a definition completed earlier in the failing load does not
+remain published.
 
 Path resolution has two admitted source defects. Intermediate and final copies
 have no component-length bound; oversized paths are excluded, and hosted
@@ -1906,33 +1990,44 @@ with that rejected component in `NAMEBUF`; it may print a second miss or load
 the component itself instead of the requested final file. Focused acceptance
 pins the latter result rather than adding simulator-only control flow.
 
-The data read occurs before `_LD-WALK-GUARDED`. A read `ABORT"` therefore skips
-evaluator unwind, transaction actions, free, and frame restore. The admitted
-failure oracle changes media generation at the second-extent acceptance edge:
-the first sector remains in `LD-BUF`, `FS-OK` and block diagnostics report
-stale, the lock is released, but the allocation is leaked, `_LD-SP` remains 56,
-CWD remains resolved, and `LD-BUF`/`LD-SZ` remain replaced. The affected
-runtime is disposable; the simulator does not conceal this ordering defect.
+At the pinned pre-decision revision the data read occurred before
+`_LD-WALK-GUARDED`, so a read `ABORT"` could strand the transfer allocation,
+loader frame, and resolved CWD. Current `LOAD` places the complete extent read
+and checked walk under the same guard and uses `_DISK-READ?` so an admitted
+media error becomes a catchable `DISK-IO-IOR`. That checked error, translated
+evaluator statuses, and an ordinary source `THROW` after allocation take the
+full dictionary rollback and cleanup lifecycle above; the storage service's
+own already-completed media or diagnostic effects remain governed by its
+separate contract. A task-resetting `ABORT`/`ABORT"`, arbitrary host exception,
+or memory fault that never becomes guest `THROW` bypasses `CATCH`; this repair
+does not claim cleanup or transactionality for those exits.
 
-`_LD-WALK` also calls raw `EVALUATE` without checking `EVAL-STATUS` and never
-calls `EVALUATE-FINISH`. It preserves CR instead of applying the checked
-walker's CRLF rule. Undefined and overlong lines can therefore be skipped,
-later lines can execute and clear the diagnostic, and unfinished compiler
-state can survive a nominally successful load. Acceptance demonstrates the
-undefined-middle-line continuation. `LOAD` additionally performs no file-type
-or flag check. Loader, path, parser, evaluator, cache, diagnostic, and
-transaction scratch is runtime-global and unlocked. These literal KDOS
-behaviors define the current contract; no direct host filesystem loader or
-simulator repair is substituted.
+At the pinned pre-decision revision, `_LD-WALK` called raw `EVALUATE` without
+checking `EVAL-STATUS` or calling `EVALUATE-FINISH`; it also preserved CR
+instead of applying the checked walker's CRLF rule. The historical acceptance
+fixture demonstrates that an undefined middle line could be skipped. That
+nominal-success behavior is no longer conforming: ordinary loader source must
+check each evaluator result, finish the complete source, commit only complete
+input, and take its existing unwind/rollback/release/restore path on each
+admitted checked failure.
+The loader translates checked statuses 1 through 4 into the same positive
+`THROW` values and translates status 5 back to the exact code retained in
+`EVAL-THROW`. An extent read uses the checked `_DISK-READ?` path; failure
+rethrows the exact nonzero code retained in `DISK-IO-IOR`. In every case the
+common dictionary rollback and cleanup complete before the outward throw.
+This is a KDOS lifecycle repair shared by emulator and simulator, not a direct
+host-filesystem substitute. File-type/flag policy and the runtime-global,
+unlocked loader scratch remain separate open matters.
 
-Exact unchanged lines 5945 through 6059 contain 115 LF records and 2,892
-bytes, with SHA-256
-`1c671d6f3677d9fb65e7c5b20a6af1b3d10323b28b5abb10d827cd80a58e5bb2`
-and Git blob `c95aa1a3385d10587ed42292328b0c7c323e702f`. The eleven-definition
-ledger installs `_APP-MPU-ON`, `_APP-MPU-OFF`, `APP-EVAL`, the filesystem
-application walker and `APP-LOAD`, followed by the six canonical ANSI byte
-helpers. Loading the fixture only compiles dictionary entries; it does not
-change MPU state or touch the filesystem, storage service, locks, or UART.
+Exact current lines 5945 through 6059 contain 115 LF records and 4,231 bytes,
+with SHA-256
+`b42f5c10635f43ff41e4dd719987f21ab5bcbb229d3985ad0cc854d2bba7ffc1`
+and Git blob `bf344d51bdea5287d4af87c920d563a33adc1a85`. The 13-definition ledger
+installs `_APP-MPU-ON`, `_APP-MPU-OFF`, `APP-EVAL`, `_APP-LOAD-WALK`,
+`_APP-LOAD-USER`, `_APP-LOAD-RUN`, and `APP-LOAD`, followed by the six
+canonical ANSI byte helpers. Loading the fixture only compiles dictionary
+entries; it does not change MPU state or touch the filesystem, storage service,
+locks, or UART.
 
 `_APP-MPU-ON` overwrites the inert base with zero and selects either the
 exclusive external-memory end or `MEM-SIZE` as its limit. `_APP-MPU-OFF`
@@ -1949,35 +2044,31 @@ the simulator does not insert an implicit guard.
 `APP-LOAD` performs a direct current-directory `FIND-BY-NAME`; unlike `LOAD`,
 it does not call `_RESOLVE-PATH`, so slash syntax has no navigation meaning.
 It does not validate file type or flags. Once a nonempty entry is found it
-uses the existing nested loader frame, sector-rounded allocation, and complete
-primary/secondary-extent reads, then enables the MPU compatibility state and
-passes `DE.USED` as the walker's nominal source length. A normal LF-terminated
-two-extent application can compile across the extent seam and invoke ordinary
-nested `LOAD`; success disables the MPU, calls commit, releases the
-allocation/frame, and calls after-release. A guest `THROW` takes the
-corresponding MPU-off, evaluator-unwind, rollback, release, after-release,
-exact-rethrow path. Before the module registry binds real actions, a definition
-completed before that throw remains published.
+uses the existing nested loader frame, sector-rounded allocation, complete
+primary/secondary-extent reads, and shared checked physical-line walker. It
+enables the MPU compatibility state only around evaluation. Success disables
+the MPU, commits optional transaction state, releases the allocation/frame,
+and calls after-release. A guest `THROW` first tears down the application MPU
+window and then takes the common evaluator unwind, optional registry rollback,
+dictionary rollback, release, after-release, and exact-rethrow path.
 
-The currently admitted ordinary application-source domain is stable valid
-metadata, lines no longer than 255 bytes, no retained CR, complete compiler
-state, a terminal LF, and zero net data-stack effect from every physical line.
-The last condition is source-visible: `_APP-LOAD-WALK` leaves four cursor and
-input cells beneath each raw `EVALUATE`, so a line's retained values displace
-the walker operands. The scanner also builds `(addr rem addr addr index)` and
-compares the index with the buffer address instead of `rem`. Without a final
-LF it can scan beyond `DE.USED` and evaluate sector padding; acceptance uses a
-deterministic padding definition to prove this exact behavior. Raw evaluator
-status is ignored and `EVALUATE-FINISH` is never called, matching `LOAD`'s
-undefined, overlong, and unfinished-state hazards.
+The pinned pre-decision application walker required a terminal LF and zero net
+data-stack effect per line, could scan into sector padding, ignored evaluator
+status, and never called `EVALUATE-FINISH`. Those are historical observations,
+not current requirements. `APP-LOAD` now inherits the common bounded walker:
+it accepts a final line without LF, trims a trailing CR, checks every physical
+line of at most 255 bytes, preserves ordinary source data-stack effects, and
+requires complete final compiler/control state before commit.
 
-Allocation and read still precede the guarded walker and MPU setup. Thus the
-clean no-filesystem, miss, empty-file, slash-literal miss, and allocation-fail
-paths do not alter preexisting MPU state or invoke transaction actions, while
-a read abort inherits `LOAD`'s pre-guard allocation/frame leak and likewise
-never enables the application MPU window. Parser, loader, evaluator, MPU,
-filesystem-cache, diagnostics, and transaction scratch remain runtime-global
-and unlocked.
+The clean no-filesystem, miss, empty-file, slash-literal miss, and
+allocation-fail paths do not alter preexisting MPU state or invoke transaction
+actions. After allocation, checked extent-read errors and checked-walker guest
+`THROW` exits pass through the common loader guard, release the transfer,
+restore the loader frame, and roll back dictionary state. Task-resetting aborts
+and non-guest backend faults retain the same outside-guarantee boundary as
+ordinary `LOAD`. Parser,
+loader, evaluator, MPU, filesystem-cache, diagnostics, and transaction scratch
+remain runtime-global and unlocked.
 
 `ESC`, `CSI`, `SGR`, `RESET-COLOR`, and `DIM` publish literal UART byte
 sequences through ordinary `EMIT`. `.N` emits a leading minus and explicit
@@ -2788,32 +2879,39 @@ The following source-literal limits remain part of the contract:
   arbitrary source can do more. Its `BDL-DRY` cleanup occurs only after a
   normal `LOAD` return, so a guest throw strands dry mode and partial tracking
   as the caught oracle demonstrates.
-- Both wrappers inherit raw `LOAD` behavior. A false filesystem marker prints
-  its diagnostic before consuming the filename, leaving that token to the
-  enclosing evaluator. Mounted loading uses raw `EVALUATE`, ignores
-  `EVAL-STATUS`, and never calls `EVALUATE-FINISH`; an undefined or overlong
-  line can be skipped before later source runs, and unfinished compiler state
-  can escape a nominally successful bundle load.
-- No bundle-level transaction, rollback, unload, ownership record, or
-  idempotence mechanism exists. The current loader transaction actions are
-  still no-ops, so completed definitions and live resources survive a later
-  throw. `BDL-RESET` clears tracking but neither frees objects nor restores an
-  already-applied `TIME-SLICE`/`SCREEN-ID`; repeated live loading can shadow
-  names, duplicate resources, and drive bounded registries into saturation.
+- Both wrappers inherit `LOAD` behavior. The pinned pre-decision revision used
+  raw `EVALUATE`, ignored `EVAL-STATUS`, and omitted `EVALUATE-FINISH`; that
+  historical path could commit after malformed source. Current conformance
+  requires the shared checked-loader lifecycle, so a bundle cannot report
+  nominal success after an undefined, overlong, or unfinished input. The
+  false-filesystem filename-consumption behavior and bundle policy gates are
+  separate matters.
+- No bundle-level transaction, unload, ownership record, or idempotence
+  mechanism exists. Generic `LOAD` nevertheless owns a dictionary transaction:
+  a bundle failure caught as guest `THROW` rolls all definitions and dictionary
+  bodies back to its saved `HERE`/`LATEST`, even before module hooks are
+  installed. That does not make
+  bundle execution atomic. Allocator reservations, registry links/counts,
+  tracking/configuration stores, output, media effects, and other
+  non-dictionary state may survive because no bundle transaction owns them.
+  `BDL-RESET` clears tracking but neither frees those resources nor restores an
+  already-applied `TIME-SLICE`/`SCREEN-ID`; repeated successful loading can
+  shadow names, duplicate resources, and drive bounded registries into
+  saturation.
 - Policy permissions, retention, and export are reporting-only cells. Nothing
   in this slice enforces them. The scheduling flags and screen mask are also
   reporting-only. All bundle state, parser/evaluator state, registries, and
   constructor scratch are global and unlocked, with no nesting, core, or
   concurrent-owner isolation.
 
-Exact unchanged lines 9122 through 9214 add §18 Ring Buffer Primitives in 93
-LF records and 3,017 bytes, with SHA-256
-`1da96005485469573790f5c8e90a4aaa9480f361008b87dd918c3e9c7727866f`
-and Git blob `c52812c6db04665c7ac620613e7a14989743aa69`. The checked fixture includes
-the following separator at line 9215: 94 LF records and 3,089 bytes, with
+Exact current lines 9122 through 9214 add §18 Ring Buffer Primitives in 93
+LF records and 3,031 bytes, with SHA-256
+`3fa7f307956111f555ac07365f6b8fd1b9ad4b42a0f7240c88581118d01f3ec4`
+and Git blob `783d29204b369b0fd05c352b82fac8bdbc46e755`. The checked fixture includes
+the following separator at line 9215: 94 LF records and 3,103 bytes, with
 SHA-256
-`35d6d117f53e8b9cc98729f6989e057d83ffdb344fa381d30c352b0058a1cce2`
-and Git blob `b12f9a37059a1b15ae86056d645c24510b2811d5`. §19 Hash Table Primitives
+`87599dcacd3fbc9a979028d47b9456e63a4be00931ae0994d1348772b0513e89`
+and Git blob `4db5792de3de17318a66eb46696c0382c919ede2`. §19 Hash Table Primitives
 begins at line 9216 and is not part of this slice.
 
 The slice publishes fifteen definitions in source order: the `RING` defining
@@ -2850,9 +2948,9 @@ held.
 
 The unchanged source retains these discrepancies and unsafe domains:
 
-- The layout comment calls the descriptor seven cells and 56 bytes, but
-  `RING` stores only six fixed cells and `RING.DATA` returns `ring + 48`.
-  Payload therefore begins immediately after a 48-byte header. With capacity
+- The descriptor is six cells and 48 bytes: `RING` stores six fixed cells and
+  `RING.DATA` returns `ring + 48`. Payload therefore begins immediately after
+  that header. With capacity
   zero, no payload is allotted and that address aliases the following named
   constant's header rather than ring-owned data.
 - `RING` does not validate element size, capacity, their wrapping product, or
@@ -3020,23 +3118,21 @@ behavior, concurrent ring/hash qualification, rendering, physical viewing,
 and every rich-terminal module/projection/compositor/input seam remain
 deferred.
 
-### Unchanged KDOS §20 module-system contract
+### KDOS §20 module-system contract
 
-Exact unchanged lines 9384 through 9853 contain 470 LF records and 14,215
+Exact current lines 9384 through 9853 contain 470 LF records and 14,414
 bytes, with SHA-256
-`41fcc105a23c047a624cf208d63985df9f526f0c5c25ae5e19679ed8a2f6b02f`
-and Git blob `fbb7e5cf16b59f01c66eac0479ef70c6e3168ded`. The checked fixture adds the
-line-9854 §14 Startup separator: 471 LF records, 14,287 bytes, SHA-256
-`4cbbe9c1e684ef24f2a9a033c3ac3bf671d4bd893ad1ce7c5bd7e7941a00a98c`,
-and Git blob `9ca3dd84f7367a64fc4514925b857aba557bc423`. Line 9855 begins Startup and is
-not admitted by that sentinel. The enclosing `kdos.f` remains Git blob
-`fd017b16dbd3ef4746d0e3467e980c015cf5a664` at revision
-`ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
+`73adf1e903e12f891908750aeeced70d4888dfb6087af6372a99eca1495ecd74`
+and Git blob `231b452a63ad3d70fc635f3e4b40a7033627fc68`. The checked fixture adds the
+line-9854 §14 Startup separator: 471 LF records, 14,486 bytes, SHA-256
+`6213a62e8bbc1ada04565d775a436cebc2ace9b5c9b32f27302b13568d9d92b6`,
+and Git blob `be9ab02eced24379053654034ff4199bef57dbf3`. Line 9855 begins Startup and is
+not admitted by that sentinel.
 
-The slice publishes 68 words: 39 colons, 17 zero-initialized variables, six
+The slice publishes 69 words: 40 colons, 17 zero-initialized variables, six
 ordinary constants, three `CREATE` objects, two `DEFER` objects, and one
-`XBUF`-produced constant. Its 762 name bytes, 329 dictionary-body bytes, and
-1,156 fixed hosted header/semantic-slot bytes produce exactly 2,247 bytes of
+`XBUF`-produced constant. Its 776 name bytes, 329 dictionary-body bytes, and
+1,173 fixed hosted header/semantic-slot bytes produce exactly 2,278 bytes of
 dictionary growth in the canonical XMEM-present composition. Load initializes
 128 zero inline-bucket bytes and the five-cell registry
 `( inline, 16, 0, 0, 5 )`, writes `PROVIDED` plus NUL, binds the private
@@ -3045,17 +3141,21 @@ transaction hooks. `XBUF` reserves the 128-byte `_REQ-CWD-STK`, advances both
 XMEM frontier/floor cells, preserves the old bytes, and, for the canonical
 empty free list, leaves `FL-NEED = 128`, `FL-PREV = FL-CURR = 0`. No registry
 node or grown bucket is allocated. The no-XMEM fallback would instead add the
-128 bytes to dictionary growth for a 2,375-byte total and is not this profile.
+128 bytes to dictionary growth for a 2,406-byte total and is not this profile.
 
 Eight focused tests pin those effects and the ordinary one-core behavior. They
 cover exact case-sensitive FNV-1a identity, duplicate neutrality, useful ID
 bounds, node OOM, stable-node rehash from 16 to 32 buckets, retryable bucket
 OOM, full-frame commit/rollback, prescan boundaries, pre-registration OOM
 cleanup and retry before any source prefix executes, mounted in-memory MP64FS
-self-cycle and duplicate skipping, exact list output, and nested child commit
-surviving parent rollback. The source definitions, MP64FS lookup/transfer,
-loader frames, allocator, and evaluator run unchanged; there is no hosted
-module registry or direct file shortcut.
+  self-cycle and duplicate skipping, exact list output, and nested child
+  success joining the parent's registry and dictionary rollback closure.
+  Successful nested evaluation merges its provisional IDs into the parent
+  frame, so a later parent failure rolls back the child IDs and definitions
+  together.
+  The source definitions, MP64FS lookup/transfer, loader frames, allocator, and
+  evaluator run unchanged; there is no hosted module registry or direct file
+  shortcut.
 
 The admitted public contract is exact byte identity on core 0. Parsed
 `PROVIDED` and `MODULE?` use case-sensitive BL-delimited tokens;
@@ -3064,15 +3164,18 @@ bytes. A duplicate insertion is persistent-allocation-neutral. New nodes own
 their copied ID bytes in the Bank-0 heap and remain stable across bucket growth
 and XMEM resets. Growth is best-effort when entry count exceeds twice bucket
 count; a failed bucket allocation retains a usable pending registry, whereas a
-failed node allocation throws `-4100`. Successful source completion commits
-every frame-owned ID; a source throw removes those provisional IDs, but a
-dependency committed by a completed nested frame survives.
+failed node allocation throws `-4100`. Successful outermost source completion
+commits every frame-owned ID. Successful nested frames merge their provisional
+chains into the parent; a later parent failure therefore removes the nested
+IDs along with every definition added since the parent's dictionary
+checkpoint.
 
 Literal source discrepancies bound that contract:
 
 - Prescan is lexical rather than compiler-aware. It sees only exact uppercase
-  `PROVIDED` in the first byte-32-delimited position of an LF record, retains a
-  CR, ignores tabs as whitespace, and stops at the first match. Lowercase or a
+  `PROVIDED` in the first byte-32-delimited position of an LF record, strips
+  one terminal CR consistently with evaluation, ignores tabs as whitespace,
+  and stops at the first match. Lowercase or a
   different layout can execute later through case-insensitive dictionary
   lookup but loses duplicate suppression and pre-evaluation cycle breaking.
 - A first matching line longer than 255 bytes or without an ID synthesizes an
@@ -3087,15 +3190,22 @@ Literal source discrepancies bound that contract:
   path, allocates and reads the transfer, saves a loader frame, and prescans
   before it skips evaluation. It is persistent-state-neutral, not I/O-neutral;
   module identity is also independent of file path and content.
-- Module loading inherits raw `LOAD`: it applies no file-type/flags gate and
-  does not validate final `EVAL-STATUS` or call `EVALUATE-FINISH`. Undefined,
-  overlong, or unfinished source that does not throw can nominally commit.
-  Read/prescan faults happen before guarded-walk cleanup and can strand the
-  loader allocation/frame.
-- Rollback is limited to provisional registry nodes. Completed definitions,
-  output, object/media effects, and committed child modules survive. There is
-  no public unload/reset for committed nodes; they consume Bank-0 heap for the
-  runtime's life, and old inline bucket bytes remain stale after rehash.
+- Module loading retains the public `REQUIRE`/`PROVIDED` surface and module
+  identity. At the pinned pre-decision revision it inherited raw `LOAD`, did
+  not validate final `EVAL-STATUS` or call `EVALUATE-FINISH`, and could strand
+  the loader allocation/frame after an early read/prescan fault. Those are now
+  nonconforming lifecycle defects: a module commits only after checked final
+  completion, while every admitted failure delivered through guest `THROW`
+  unwinds, rolls back, releases, restores, and runs after-release.
+  Task-resetting aborts and non-guest backend faults remain outside that
+  guarantee. File-type/flags policy remains open.
+- Catchable failure rollback removes the active frame's provisional registry
+  nodes and restores its saved `HERE`/`LATEST`; nested successful IDs have
+  already merged into the parent and roll back with it. Output, allocator/registry side
+  effects outside the module-ID transaction, and object/media effects are not
+  made atomic. There is no public unload/reset for IDs committed by a
+  successful outermost load; those nodes consume Bank-0 heap for the runtime's
+  life, and old inline bucket bytes remain stale after rehash.
 - Registry, loader, path, prescan, growth, and list scratch is global. Lock 5
   is shared with hash-table writers; `MODULES` takes it before UART lock 1 and
   prints bucket/chain order. Reentry, concurrency, pre-held locks, reverse
@@ -3109,16 +3219,17 @@ Bank-0 node storage, production-compatible nonthrowing allocator bindings,
 and no reentry or pre-held shared lock. §20 ends at line 9853; the following
 §14 qualification completes the contiguous frontier through EOF line 9894.
 
-### Unchanged KDOS §14 startup and EOF contract
+### Current KDOS §14 startup and EOF contract
 
-Exact unchanged lines 9854 through 9894, including the section separator,
-contain 41 LF records and 1,410 bytes, with SHA-256
-`468983d02d94ed94b7accc8b98f5f60ef1b28c4e397a167d0be95ad785d5f4ae`
-and Git blob `5a95a4dafdeec003d706381d8ea9b5ec93d0ccd0`. The executable section from
-line 9855 through EOF contains 40 LF records and 1,338 bytes, with SHA-256
-`ea02b8f22cd7ffc9631b5e4663c4b4a923615fc3cbb906e510461b3061005e43`
-and Git blob `a7345a62b57144fa7135938aae4cf94e1679c0f6`. The complete unchanged
-`kdos.f` is 9,894 LF records and 341,355 bytes, with SHA-256
+Exact current lines 9854 through 9894, including the section separator,
+contain 41 LF records and 1,432 bytes, with SHA-256
+`d14948c62ff524ed67fe0743f1f3976d3430c1754809bf339c45ac8bd3569f82`
+and Git blob `64644994439ac09da0bd19db31866c404d380582`. The executable section from
+line 9855 through EOF contains 40 LF records and 1,360 bytes, with SHA-256
+`480ab7b30f349044fdfd2c10257aee4525348819e15938396865ce332efa71fb`
+and Git blob `5f5d1922439468bbd5884505b3c5801e8d295269`. At the historical qualification
+revision, the complete `kdos.f` had 9,894 LF records and 341,355 bytes, with
+SHA-256
 `99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8`
 and Git blob `fd017b16dbd3ef4746d0e3467e980c015cf5a664` at revision
 `ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c`.
@@ -3134,12 +3245,14 @@ dictionary effects: 27 name bytes, 10 created-body bytes, and 34 fixed hosted
 header/code-slot bytes. All four accepted fixtures end there. Neither anonymous
 interpret-`IF` body is published or charged to that ledger.
 
-Four focused startup tests cover no disk, attached invalid media, a valid
-15-sector MP64FS without `autoexec.f`, and a valid mounted `autoexec.f` loaded
-through the unchanged module machinery. They pin exact UART bytes, heap
-geometry, the two-definition header chain, filesystem status and completion,
-media immutability, zero-padded `NAMEBUF`, loader-frame/CWD restoration,
-module registration, duplicate suppression, and released locks. Six separate
+Five focused startup tests cover no disk, attached invalid media, a valid
+15-sector MP64FS without `autoexec.f`, a valid mounted `autoexec.f` loaded
+through the ordinary module machinery, and failure of the checked DMA heap
+probe. They pin exact UART bytes, heap geometry, the two-definition header
+chain, filesystem status and completion, media immutability, zero-padded
+`NAMEBUF`, loader-frame/CWD restoration, module registration, duplicate
+suppression, released locks, and exact probe-error propagation without a fake
+free. Six separate
 semantic-BIOS tests pin ordinary anonymous interpret `IF`: true/false and
 nested branches, calls into ordinary colon definitions, compiled string
 literals, continuation across checked `EVALUATE` calls, survival of a
@@ -3148,18 +3261,20 @@ compile-both-branches lookup, and cleanup after an unfinished source. The
 admitted exactly-one-full-core profile executes only the false
 multicore-banner branch; this is not multicore startup evidence.
 
-One bounded regular-load selector applies the CLI blank/pure-comment filter to
-the pinned 9,894-line, 341,355-byte file and submits the resulting 6,693 lines
-(215,356 payload bytes, or 222,049 CLI UART bytes with terminators; maximum
-line length 99) through the captured core checked evaluator. It uses canonical
-128 MiB XMEM, 3 MiB HBW, 4 MiB VRAM, and valid 15-sector MP64FS media. The
-post-load history consists of 319 pseudo-BIOS words plus 1,452 KDOS
-publications; its authoritative 65,536-slot index contains 1,764 unique
-bindings and seven shadows. That checkpoint pins six buffers, 23 kernels,
-three pipelines, nine screens, intact heap/HBW state, mounted media, zero
-modules, balanced stacks, and released locks. The same runtime then executes a
-checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
-listing.
+The already-run pre-decision bounded regular-load selector applied the CLI
+blank/pure-comment filter to its pinned 9,894-line, 341,355-byte file and
+submitted 6,693 lines (215,356 payload bytes, or 222,049 CLI UART bytes with
+terminators; maximum line length 99) through the captured core checked
+evaluator. It used canonical 128 MiB XMEM, 3 MiB HBW, 4 MiB VRAM, and valid
+15-sector MP64FS media. Its post-load history consisted of 319 pseudo-BIOS
+words plus 1,452 KDOS publications; the authoritative 65,536-slot index held
+1,764 unique bindings and seven shadows. That historical checkpoint pinned six
+buffers, 23 kernels, three pipelines, nine screens, intact heap/HBW state,
+mounted media, zero modules, balanced stacks, and released locks, followed by
+a checked post-boot definition, allocation/free, CRC32, ring FIFO, and module
+listing. Current source-ledger accounting expects 1,460 KDOS publications and
+1,772 unique bindings, but no new full regular-load measurement is claimed;
+rerunning it remains deferred by the rich-terminal gate.
 
 The startup filesystem path is literal. `DISK?` false skips `FS-LOAD` and does
 not clear a stale true `FS-OK`. A successful load copies the exact lowercase,
@@ -3174,13 +3289,16 @@ Source comments at lines 9877–9878 claim that line-by-line evaluation means a
 multiline `IF` cannot gate execution. That contradicts both the immediately
 preceding multiline startup branch and BIOS's persisted temporary-`IF`
 implementation; the unchanged source is recorded rather than silently fixed.
-The heap trigger also drops the allocation status before freeing the returned
-address, so ordinary OOM silently continues with `DMA-FREE 0`, while a
-`HEAP-SETUP` throw escapes. Startup is not transactional: filesystem or module
-throws can retain completed definitions, registry/output/object/media effects,
-and skip `JIT-OFF` plus the final newline. Hosted `JIT-ON` at line 39 and
-`JIT-OFF` at line 9893 are semantic no-ops, not evidence of native-code state
-or performance.
+The heap probe checks its allocation status. Failure rethrows the exact code
+without passing the returned non-address to `DMA-FREE`; success alone frees
+the temporary block. A `HEAP-SETUP` throw also escapes. Startup as a whole is
+not transactional. A
+module-load failure caught by the guard rewinds that frame's definitions and
+provisional IDs, but
+filesystem diagnostics and registry/output/object/media effects outside those
+transactions can remain, and a throw can skip `JIT-OFF` plus the final newline.
+Hosted `JIT-ON` at line 39 and `JIT-OFF` at line 9893 are semantic no-ops, not
+evidence of native-code state or performance.
 
 This qualification completes the monotonically contiguous unchanged-source
 frontier from executable line 39 through EOF line 9894. It is focused semantic

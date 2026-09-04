@@ -155,7 +155,7 @@ device occupies a small range:
 | **WOTS Chain** | `+0x08A0` | 32 bytes | Qualified checked byte-only WOTS chain sequencer with 64-bit read-only Bank 0 context DMA |
 | **NTT Engine** | `+0x08C0` | 64 bytes | Generic 256-point cyclic transform; executable byte ABI and current RTL slots differ |
 | **KEM** | `+0x0900` | 40 executable bytes | Synchronous Python ML-KEM-512 value device; the allocated 64-byte RTL block has an incompatible slot ABI and crypto stub |
-| **Framebuffer** | `+0x0A00` | 64 bytes | Tile-based framebuffer controller |
+| **Framebuffer** | `+0x0A00` | 80 bytes | Tile-based framebuffer controller |
 | **RTC / System Clock** | `+0x0B00` | 32 bytes | 64-bit ms uptime + ms epoch + calendar (sec/min/hour/day/mon/year/dow) + alarm IRQ |
 | **PCM Audio Output** | `+0x0C00` | 32 bytes | One-shot PCM16 DMA contract; emulator capture/playback implemented, physical DMA/I2S bridge pending |
 
@@ -819,6 +819,11 @@ state machine exposes approximately 2304 forward, 2560 inverse, or 256
 pointwise work cycles before bus overhead. The older ~1280-cycle and
 configurable-Dilithium RTL descriptions are not current implementation facts.
 
+The table and the ten BIOS words below are the retained emulator/simulator ABI
+for this generic cyclic service. RTL convergence is deferred. Any future
+standardized ML-KEM/ML-DSA transform receives a distinct, versioned identity;
+it does not silently redefine this NTT.
+
 **BIOS words:** `NTT-SETQ`, `NTT-IDX!`, `NTT-LOAD`, `NTT-STORE`, `NTT-FWD`,
 `NTT-INV`, `NTT-PMUL`, `NTT-PADD`, `NTT-STATUS@`, `NTT-WAIT`.
 **KDOS word (§1.11):** `NTT-POLYMUL` (generic cyclic polynomial multiply via
@@ -854,9 +859,10 @@ there is no lock, task owner, capability bit, complete-span transaction,
 implicit cleanup, or wipe. These shared buffers therefore are not a protected
 secret boundary.
 
-The KDOS source declares `KEM-SEED-SIZE` as 32 while `KYBER-KEYGEN` explicitly
-loads and consumes 64 bytes. That discrepancy remains open rather than being
-silently resolved by the architecture description.
+`KEM-SEED-SIZE` is 64, matching the complete `d || z` input consumed by
+`KYBER-KEYGEN`. `KYBER-ENCAPS` continues to consume the first 32 bytes as its
+coin input. The former 32-byte key-generation constant was an API defect, not
+a second supported size.
 
 A pinned zero-`d || z`/zero-coin valid-key fixture matches OpenSSL 3.5.2
 ML-KEM-512 byte for byte through keygen, encapsulation, and decapsulation. This
@@ -882,8 +888,11 @@ That RTL exposes BUSY during a multi-cycle FSM and produces deterministic XOR
 fill, not ML-KEM. The BIOS byte ABI writes CMD at `+0x01` and reads DOUT at
 `+0x18`, so it cannot operate this RTL contract (the latter read obtains
 BUF_SIZE). RTL overflow/index and invalid-selector details also differ from
-Python execution. The two implementations are separate discrepancy records;
-neither supplies value, register, or timing evidence for the other.
+Python execution. The executable byte window and seven BIOS words are the
+retained emulator/simulator ABI. The RTL block is a non-cryptographic interface
+stub and must not advertise or qualify ML-KEM. RTL convergence is deferred;
+neither implementation supplies value, register, or timing evidence for the
+other.
 
 **BIOS words:** `KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`, `KEM-KEYGEN`,
 `KEM-ENCAPS`, `KEM-DECAPS`, `KEM-STATUS@`.
@@ -930,6 +939,12 @@ bounded partial offset, byte alignment, and low-length/offset agreement.
 `HKDF-SHA256-EXTRACT`, `HKDF-SHA256-EXPAND`.
 Those SHA-256-family KDOS words return the BIOS status unchanged so
 networking and TLS key-schedule callers can fail closed.
+
+This checked BIOS/KDOS SHA-2 surface is the public compatibility ABI. The
+current RTL instruction glue does not yet reproduce its padding, DIN/DOUT,
+endian-load, or SHA-512 behavior and is not qualified by emulator or simulator
+results. Bringing RTL into conformance is deferred; Akashic-facing words and
+statuses do not change to accommodate that implementation lag.
 
 ### Checked Caller-Managed Spans
 

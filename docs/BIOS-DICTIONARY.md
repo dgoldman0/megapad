@@ -249,9 +249,9 @@ or erase the last status and diagnostics.
 | 25 | `1+` | `( n -- n+1 )` | | Increment by 1 |
 | 26 | `1-` | `( n -- n-1 )` | | Decrement by 1 |
 | 27 | `2*` | `( n -- n*2 )` | | Left shift by 1 (multiply by 2) |
-| 28 | `2/` | `( n -- n/2 )` | | Right shift by 1 (divide by 2, logical) |
-| 29 | `MIN` | `( a b -- min )` | | Documented signed minimum; the current executable comparison is unsigned (see the open discrepancy in [bios-forth.md](bios-forth.md)) |
-| 30 | `MAX` | `( a b -- max )` | | Documented signed maximum; the current executable comparison is unsigned (see the open discrepancy in [bios-forth.md](bios-forth.md)) |
+| 28 | `2/` | `( n -- n/2 )` | | Arithmetic right shift by 1, retaining the sign bit |
+| 29 | `MIN` | `( a b -- min )` | | Signed two's-complement minimum |
+| 30 | `MAX` | `( a b -- max )` | | Signed two's-complement maximum |
 | 31 | `CELLS` | `( n -- n*8 )` | | Convert cell count to byte offset (cell = 8 bytes) |
 | 32 | `CELL+` | `( a -- a+8 )` | | Advance address by one cell (8 bytes) |
 
@@ -965,9 +965,10 @@ than shifting every later legacy row locally. The executable device uses a
 40-byte byte-register window at `+0x0900`, completes commands synchronously,
 and retains shared buffers and DONE state without ownership or automatic wipe.
 Current RTL instead exposes an incompatible 64-bit-slot map, BUSY timing, and
-non-cryptographic deterministic stub values. The full transfer/lifecycle,
-valid-key interoperability, secret-boundary qualifications, and unresolved
-KDOS `KEM-SEED-SIZE` 32-versus-64-byte keygen discrepancy are recorded in
+non-cryptographic deterministic stub values and does not qualify ML-KEM. The
+public `KEM-SEED-SIZE` is 64, matching the complete `d || z` key-generation
+input. The full transfer/lifecycle, valid-key interoperability, and
+secret-boundary qualifications are recorded in
 [bios-forth.md](bios-forth.md#kem-engine--ml-kem-512-7-words).
 
 ### Cooperative Multitasking (9 words)

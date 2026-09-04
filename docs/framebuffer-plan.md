@@ -11,7 +11,8 @@ with optional SDL2 display in the emulator.
 ## Design Principles
 
 1. **Headless first** — the framebuffer is just another MMIO device.
-   Software writes pixels to HBW RAM; a scanout device reads them.
+   Software writes pixels to explicit guest storage (dedicated VRAM or
+   caller-owned/allocator-visible HBW or XMEM); a scanout device reads them.
    With no display attached, the device still works (testable,
    benchmarkable).
 2. **Tile-native** — pixel formats align with tile engine element
@@ -35,7 +36,7 @@ with optional SDL2 display in the emulator.
 
 | Register     | Offset  | R/W | Width | Description                          |
 |-------------|---------|-----|-------|--------------------------------------|
-| FB_BASE     | +0x00   | RW  | 64b   | Pixel data start address (in HBW)    |
+| FB_BASE     | +0x00   | RW  | 64b   | Pixel data start address in an admitted guest-memory region |
 | FB_WIDTH    | +0x08   | RW  | 32b   | Active width in pixels               |
 | FB_HEIGHT   | +0x10   | RW  | 32b   | Active height in pixels              |
 | FB_STRIDE   | +0x18   | RW  | 32b   | Bytes per scanline (≥ width × bpp/8) |
@@ -101,7 +102,9 @@ with optional SDL2 display in the emulator.
   - Palette: `FB-PAL!` ( r g b index -- )
   - Status: `FB-STATUS@`
   - Convenience: `FB-SETUP` ( width height mode -- ) sets base/width/
-    height/stride/mode in one call, defaults base to HBW Bank 3
+    height/stride/mode in one call and defaults to dedicated VRAM. A caller
+    selecting HBW/XMEM uses `FB-BASE!` with caller-owned or allocator-visible
+    storage; no fixed allocator-hidden bank is reserved.
 - Tests: BIOS-level framebuffer word tests in `test_system.py`
 
 ### Commit 4: KDOS module system (`REQUIRE`)
@@ -174,8 +177,9 @@ with optional SDL2 display in the emulator.
 
 - `cli.py`: `--display` flag (~120 lines)
   - When set, open a pygame window sized to FB_WIDTH × FB_HEIGHT × scale
-  - Display loop (30 FPS default): read HBW RAM at `fb.base`, apply
-    palette (mode 0) or direct decode (modes 1–3), blit to surface
+  - Display loop (30 FPS default): resolve mapped VRAM, XMEM, or HBW at
+    `fb.base`, apply palette (mode 0) or direct decode (modes 1–3), and blit
+    to the surface
   - Handle window close → clean shutdown
   - `--display-scale N` — integer pixel scaling (default 2×)
   - `--display-fps N` — target frame rate (default 30)

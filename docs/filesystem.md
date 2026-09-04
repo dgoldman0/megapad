@@ -62,11 +62,13 @@ boundary.
 
 The §15 `BUNDLE-LOAD` and `BUNDLE-INFO` words are thin wrappers around this
 same raw `LOAD`. They do not enforce file type 7 or directory flags and inherit
-its LF-record evaluation, unchecked evaluator completion/status, false-`FS-OK`
-name-consumption edge, and nontransactional dictionary/object effects.
-The now-qualified §20 hooks can roll back provisional module IDs declared
-during such a load, but still do not transact definitions, bundle objects,
-media changes, or other source effects.
+its false-`FS-OK` name-consumption edge. The loader now checks each LF-delimited
+record and final evaluator state, and every guarded frame rolls dictionary
+definitions/bodies back to its saved `HERE`/`LATEST` on an admitted failure
+delivered as guest `THROW`. The §20 hooks add provisional module-ID rollback.
+Neither mechanism transacts bundle-owned
+allocator reservations, registry links/counts, media changes, output, or other
+non-dictionary source effects.
 `BUNDLE-INFO` only makes the three `BDL-BUF`/`BDL-KERN`/`BDL-PIPE` wrappers
 skip construction; it is not a general dry-run or validation boundary. Exact
 Pipeline Bundle provenance and discrepancies are recorded in
@@ -82,14 +84,20 @@ contract and source-literal limits.
 The §20 `REQUIRE` path now shadows the bootstrap loader with ordinary MP64FS
 lookup and the existing validated two-extent transfer machinery. It
 prescans the first exact-uppercase, first-token `PROVIDED` identity, installs
-that ID provisionally to break cycles, evaluates through the ordinary raw
-loader, and restores CWD/loader state on its guarded paths. Focused acceptance
-uses mounted pathless in-memory module files for a self-cycle, duplicate skip,
-pre-registration OOM cleanup/retry, and a nested child commit whose parent
-rolls back. The module loader does not enforce file type or directory flags;
-its transaction owns provisional IDs only, not definitions, output, objects,
-or media effects. Duplicate `REQUIRE` still allocates, reads, and prescans the
-file before it skips evaluation, so it is not an I/O-free cache hit.
+that ID provisionally to break cycles, evaluates through the ordinary checked
+loader, and restores CWD/loader state on an admitted catchable failure. Successful nested
+provisional chains merge into their parent; a later parent failure removes
+those IDs and all definitions added since the parent's dictionary checkpoint.
+Evaluator statuses 1 through 4 rethrow unchanged, status 5 rethrows the exact
+`EVAL-THROW`, and checked extent-read failure rethrows the exact nonzero
+`DISK-IO-IOR`, in each case after the shared rollback and cleanup path.
+Task-resetting `ABORT`/`ABORT"` and backend faults that do not become guest
+`THROW` bypass that path and are outside this lifecycle repair.
+The module loader does not enforce file type or directory flags, and output,
+allocator/registry effects outside the provisional-ID chain, objects, and
+media effects remain non-atomic. Duplicate `REQUIRE` still allocates, reads,
+and prescans the file before it skips evaluation, so it is not an I/O-free
+cache hit.
 
 Final §14 Startup conditionally calls `FS-LOAD` only when `DISK?` reports
 attached media. On a valid load it copies the exact lowercase ten bytes

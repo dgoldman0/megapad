@@ -13,11 +13,16 @@ active KDOS boot buffer.  Transfer allocations are reclaimed after normal or
 thrown evaluation.  Its dynamic module registry retains complete,
 case-sensitive IDs in the Bank 0 heap, independent of filename limits and
 XMEM resets; chained entries are limited by available memory rather than a
-fixed module count.  `REQUIRE` pre-registers an ID to break dependency cycles.
-If evaluation throws, evaluator and directory state are restored and every ID
-owned by that loader frame is rolled back, while already successful nested
-dependencies survive.  Entry OOM throws before any source line executes, and
-duplicate registration allocates nothing.  This keeps Ethernet through TLS,
+fixed module count. `REQUIRE` pre-registers an ID to break dependency cycles.
+Successful nested ID chains remain provisional by merging into their parent.
+If evaluation exits through a catchable guest `THROW`, evaluator and directory
+state are restored, every ID owned by that frame (including merged nested IDs)
+is removed, and definitions since its saved `HERE`/`LATEST` are rolled back.
+Task-resetting `ABORT`/`ABORT"` and backend faults outside guest `THROW` bypass
+that transaction guard. Non-dictionary output,
+allocator/registry effects, and media effects remain non-atomic. Entry OOM
+throws before any source line executes, and duplicate registration allocates
+nothing. This keeps Ethernet through TLS,
 sockets, and the UDP-backed data-port transport out of the Bank 0 core.
 
 ---
@@ -152,10 +157,9 @@ BUF_SEL `+08`, DIN `+10`, DOUT `+18`, and uint16-LE BUF_SIZE `+20..+21` in a
 40-byte window. Keygen/encaps/decaps complete synchronously and retain DONE=2.
 This shared state has no requester ownership or automatic wipe.
 
-KDOS declares `KEM-SEED-SIZE=32`, while `KYBER-KEYGEN` explicitly loads the
-64-byte `d || z` input required by the working key-generation path;
-`KYBER-ENCAPS` uses 32 coin bytes from the same buffer. The mismatch is
-documented without choosing which interface should change. Deterministic
+KDOS declares `KEM-SEED-SIZE=64`, matching the complete 64-byte `d || z`
+input loaded by `KYBER-KEYGEN`; `KYBER-ENCAPS` uses the first 32 bytes as
+coins. This is the locked Akashic-facing contract. Deterministic
 generated/well-formed-key vectors match local OpenSSL 3.5.2 ML-KEM-512, but
 the implementation is not FIPS-certified, constant time, a hostile-key
 validator, or a protected host-secret boundary. Current RTL uses an
@@ -589,7 +593,7 @@ accumulation supported via TCTRL (ACC_ACC bit).
 | **WOTS Chain** | Checked 0..15-step sequencer using read-only Bank 0 context DMA and the shared Keccak service |
 | **TRNG** | Hardware CSPRNG (ring-oscillator + SHA-3 conditioner on FPGA) |
 | **Field ALU** | GF(2²⁵⁵−19) arithmetic + raw 256×256→512-bit multiply |
-| **NTT** | 256-point NTT/INTT, configurable modulus (ML-KEM / ML-DSA) |
+| **NTT** | Generic 256-point cyclic NTT/INTT with configurable modulus; not the standardized ML-KEM/ML-DSA negacyclic operation |
 | **KEM** | Synchronous Python ML-KEM-512 value path for generated/well-formed keys; current RTL is an incompatible non-cryptographic stub |
 
 ### 3.4 Memory
@@ -703,11 +707,9 @@ when hexadecimal output is wanted. `B.TILES` adds 63 to the wrapped byte count
 and applies signed `/`, so its ceiling result assumes an ordinary nonnegative,
 nonoverflowing size.
 
-Two implementation discrepancies remain explicit. `XBUFFER` stores
-`XMEM-HERE` before allocation and discards the address returned by
-`XMEM-ALLOT`, so a reclaimed free-list block is consumed while the descriptor
-keeps the wrong bump-frontier address. `ARENA-BUFFER` rounds data only to eight
-bytes, and `ARENA-DESTROY` unlinks its descriptor without reclaiming the
+`XBUFFER` and `HBW-BUFFER` publish the exact address returned by their
+allocator, including XMEM free-list reuse. `ARENA-BUFFER` still rounds data
+only to eight bytes, and `ARENA-DESTROY` unlinks its descriptor without reclaiming the
 dictionary link node or undefining the now-dangling constant. `ARENA-RESET`
 makes the storage reusable without unregistering it, and dictionary rollback
 past published links/names does not repair `BUF-HEAD` or `BUF-COUNT`.

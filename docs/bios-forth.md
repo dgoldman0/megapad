@@ -118,32 +118,28 @@ CPU trap (vector `IVEC_DIV_ZERO`).
 | `/MOD` | `( a b -- rem quot )` | Signed division with remainder. |
 | `NEGATE` | `( n -- -n )` | Two's-complement negation. |
 | `ABS` | `( n -- |n| )` | Absolute value. |
-| `MIN` | `( a b -- min )` | Documented signed minimum; current executable behavior has the unresolved signedness discrepancy below. |
-| `MAX` | `( a b -- max )` | Documented signed maximum; current executable behavior has the unresolved signedness discrepancy below. |
+| `MIN` | `( a b -- min )` | Signed two's-complement minimum. |
+| `MAX` | `( a b -- max )` | Signed two's-complement maximum. |
 | `1+` | `( n -- n+1 )` | Increment by one. |
 | `1-` | `( n -- n-1 )` | Decrement by one. |
-| `2+` | `( n -- n+2 )` | Increment by two. |
-| `2-` | `( n -- n-2 )` | Decrement by two. |
+| `2*` | `( n -- n*2 )` | Left shift by one. |
+| `2/` | `( n -- n/2 )` | Arithmetic right shift by one, retaining the sign bit. |
 | `CELLS` | `( n -- n*8 )` | Convert a cell count to bytes (cells are 8 bytes). |
 | `CELL+` | `( addr -- addr+8 )` | Advance an address by one cell (8 bytes). |
 
-> **Open `MIN`/`MAX` signedness discrepancy.** The public descriptions and
-> BIOS source comments specify signed comparison, but the current `bios.asm`
-> implementations branch on MP64 `G`/`LE`, whose executable ISA and emulator
-> semantics are unsigned. This note records the mismatch; it does not decide
-> whether the API intent or the present implementation should change. The
-> hosted simulator mirrors the current executable behavior for differential
-> work until BIOS, emulator, simulator, tests, and this reference are resolved
-> together.
+`MIN`, `MAX`, and `2/` are signed operations. This choice preserves Akashic's
+geometry, clipping, clamp, and signed-delta usage without source changes.
+`RSHIFT` remains the explicit logical right shift. The former unsigned
+`MIN`/`MAX` branches and logical `2/` implementation were backend defects, not
+alternate public meanings. Unsigned extrema, if introduced, use distinct
+`UMIN`/`UMAX` names.
 
-> **Open signed-`MOD` overflow edge.** The native executable guards signed
-> division for `INT64_MIN / -1`, but its signed-`MOD` path performs that same
-> division in C++ without the overflow guard. That operand pair therefore has
-> no qualified native result. The hosted simulator currently produces the
-> mathematical remainder zero, but this note does not decide whether the
-> eventual architecture should return zero or trap. Current KDOS
-> `RAND-RANGE` qualification requires a positive signed divisor and cannot
-> reach this edge.
+> **Open signed-`MOD` overflow edge.** The current native C++ and hosted Python
+> backends both handle `INT64_MIN % -1` without host-language overflow and
+> provisionally return the mathematical remainder zero. That safe backend
+> behavior does not decide whether the eventual public architecture should
+> return zero or trap. Current KDOS `RAND-RANGE` qualification requires a
+> positive signed divisor and cannot reach this edge.
 
 **Example — computing an average:**
 ```forth
@@ -285,11 +281,11 @@ Raw Timer MMIO, vector delivery, and automatic IDL wake remain unadmitted. This
 Timer is distinct from the hosted 64-bit semantic-work/performance diagnostics
 and is deterministic semantic time, not hardware timing.
 
-The intended executable/emulator Timer accesses are full 32-bit little-endian
-loads and stores. The current RTL SoC integration routes the Timer as a byte
+The executable/emulator Timer ABI uses full 32-bit little-endian COUNT and
+COMPARE accesses. The current RTL SoC integration routes the Timer as a byte
 peripheral: `CYCLES` sees only zero-extended `COUNT_LO`, and `TIMER!` updates
-only `COMPARE_LO`. This is an unresolved backend discrepancy rather than an
-extra hosted compatibility mode.
+only `COMPARE_LO`. That is a deferred RTL implementation defect, not an extra
+hosted compatibility mode or an ambiguity in the public ABI.
 
 **Example — printing a greeting:**
 ```forth
@@ -1209,7 +1205,7 @@ aborts and wipes the active context. A failed `FINAL` publishes no digest and
 does not modify a non-context destination. Streaming contexts are core-local
 and must be updated, finalized, or cleared on their originating core.
 
-> **Open native/RTL SHA-2 instruction discrepancy.** The checked BIOS above
+> **Deferred RTL SHA-2 implementation discrepancy.** The checked BIOS above
 > produces standard SHA-256/SHA-512 through the Python and native executable
 > models, but the current RTL instruction glue is not equivalent. Full-core
 > and cluster RTL make `SHA.PAD`/`SHA.FINAL` data-path no-ops even though BIOS
@@ -1219,9 +1215,10 @@ and must be updated, finalized, or cleared on their originating core.
 > not perform the required little-endian-memory to big-endian-word conversion.
 > The RTL SHA leaf also leaves SHA-384/512 as future work. Existing RTL tests
 > bypass these seams with pre-padded/endian-correct words or test ownership
-> only. This note records the split without choosing the eventual RTL, BIOS,
-> or public-ISA correction; hosted semantic execution follows the working
-> BIOS/native result and is not RTL evidence.
+> only. The checked BIOS/KDOS word ABI, status behavior, span rules, digest
+> bytes, finalization, and cleanup are authoritative. Hosted semantic execution
+> follows that working behavior and is not RTL evidence; bringing the RTL or
+> its instruction adapter into conformance is deferred.
 
 ---
 
@@ -1402,12 +1399,13 @@ time, so a later fault can leave a prefix changed; `GO` reads all point qwords
 before replacing ACC. Ordinary unaligned memory is valid, and output may
 alias an already consumed scalar or point.
 
-The RFC calculation uses `A24=121665` with `E*(AA+A24*E)`. Native C++ and the
-standalone Field-ALU RTL implement that value. The architectural Python
-emulator currently uses `121666` with the same formula and fails the published
-RFC vector. Current SoC RTL also does not connect the standalone Field engine
-to either executing core path. These are open backend discrepancies; hosted
-X25519 qualification is not evidence that those paths work.
+The RFC calculation uses `A24=121665` with `E*(AA+A24*E)`. Native C++, the
+architectural Python emulator, the hosted simulator, and the standalone
+Field-ALU RTL use that value. The former Python-emulator value 121666 with the
+same formula was an implementation error, not a compatibility mode. Current
+SoC RTL still does not connect the standalone Field engine to either executing
+core path; resolving and qualifying that integration is deferred, and hosted
+X25519 qualification is not evidence that it works.
 
 ---
 
@@ -1506,7 +1504,10 @@ commit in the current Python model.
 > `+18`, and B/RESULT `+20`; it also retains q=3329 twiddles and inverse scale
 > when Q changes. BIOS byte accesses therefore cannot operate that RTL path,
 > and its multi-cycle BUSY behavior is not evidence for executable or hosted
-> timing. This record does not choose the eventual hardware/API correction.
+> timing. The executable byte window and ten-word Forth surface are the locked
+> emulator/simulator ABI for this generic cyclic service. RTL convergence is
+> deferred; a future standardized-PQ transform requires a distinct, versioned
+> contract.
 
 ---
 
@@ -1553,11 +1554,11 @@ write has already consumed that device byte. There is no lock, requester
 owner, capability check, transactional rollback, automatic wipe, or Forth
 unwind cleanup; all callers share the buffers and status.
 
-KDOS declares `32 CONSTANT KEM-SEED-SIZE`, but `KYBER-KEYGEN` explicitly
-loads 64 bytes and the executable SEED buffer/key-generation primitive consumes
-64 bytes as `d || z`. `KYBER-ENCAPS` uses 32 bytes from that same buffer as its
-coin input. This is a recorded source/API discrepancy; this document does not
-choose whether the constant or the key-generation interface should change.
+`KEM-SEED-SIZE` is 64. `KYBER-KEYGEN` loads and the executable SEED
+buffer/key-generation primitive consumes all 64 bytes as `d || z`.
+`KYBER-ENCAPS` uses the first 32 bytes from that same buffer as its coin input.
+The former value 32 for the key-generation constant was a source/API error,
+not a second supported interface.
 
 For generated/well-formed keys, the deterministic zero-`d || z`, zero-coin
 fixture produces byte-identical keys, ciphertext, and shared secret to the
@@ -1577,9 +1578,11 @@ this service to protect host secrets.
 > FSM and fills outputs with deterministic XOR test data, not ML-KEM. In
 > particular, the checked-in BIOS reads executable DOUT at `+0x18`, which is
 > BUF_SIZE on RTL. RTL index-overrun and out-of-range-selector behavior also
-> differ. The RTL is interface-stub evidence only; its timing and values do not
-> qualify the executable Python device or hosted simulator, and those paths do
-> not qualify the RTL.
+> differ. The executable byte window and seven-word Forth surface are the
+> retained emulator/simulator ABI. The RTL is interface-stub evidence only;
+> its deterministic XOR output is not ML-KEM and must not advertise or qualify
+> that capability. RTL convergence is deferred, and executable/hosted evidence
+> does not qualify it.
 
 ---
 

@@ -261,16 +261,22 @@ free-list.  In practice, HBW arenas are short-lived tile/SIMD
 scratch buffers, and HBW is large (3 MiB), so abandoned slivers
 are tolerable.
 
-Zero-byte and exact-fit allocations succeed. Allocation returns the old
-pointer, advances by exactly the requested cell, and neither aligns nor clears
-storage. `HBW-RESET` resets only the shared pointer; stale addresses and bytes
-remain usable and may alias later allocations. All callers therefore share one
-cooperatively managed arena with no lock or owner.
+When HBW is present, zero-byte and exact-fit allocations succeed. Allocation
+returns the old pointer, advances by exactly the requested cell, and neither
+aligns nor clears storage. When HBW is absent, every allocation request,
+including zero bytes, fails. `HBW-RESET` resets only the shared pointer; stale
+addresses and bytes remain usable and may alias later allocations. All callers
+therefore share one cooperatively managed arena with no lock or owner.
 
-`graphics.f` independently places its framebuffer at
-`HBW-BASE + 0x200000` without advancing `HBW-HERE`. The allocator does not
-reserve that third-MiB range, so systems using both must coordinate a ceiling
-or otherwise prevent overlap.
+The current `graphics.f` placement at `HBW-BASE + 0x200000` does not advance
+`HBW-HERE` and can overlap an ordinary third-MiB allocation. It is not a hidden
+reservation contract. Graphics using HBW or XMEM must receive caller-owned
+storage or obtain it through the ordinary visible allocator and then program
+the framebuffer base from that allocation; dedicated VRAM remains separate.
+This is one target-source composition
+change shared by emulator and simulator, not a backend semantic divergence;
+implementation remains deferred until work resumes beyond the current
+rich-terminal stop line.
 
 The safe domain is a nonwrapping request no larger than the remaining mapped
 span. The current source adds before a signed `>` bound check even though its

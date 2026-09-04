@@ -191,7 +191,7 @@ All MMIO registers live at base `0xFFFF_FF00_0000_0000`:
 | `+0x08A0` | 32 B | Qualified checked byte-only WOTS chain (64-bit read-only Bank 0 context DMA) |
 | `+0x08C0` | 64 B | NTT Engine (256-point NTT/INTT) |
 | `+0x0900` | 40 B | Executable Python KEM Engine (ML-KEM-512); the 64-byte RTL allocation has an incompatible slot ABI and crypto stub |
-| `+0x0A00` | 64 B | Framebuffer controller |
+| `+0x0A00` | 80 B | Framebuffer controller |
 | `+0x0B00` | 32 B | RTC / System Clock |
 | `+0x0C00` | 32 B | PCM Audio Output (one-shot DMA + deterministic capture) |
 
@@ -628,7 +628,9 @@ Python/native/RTL discrepancies.
 
 These are the 10 raw words in the checked-in dictionary chain. The executable
 BIOS/Python-device contract and current RTL NTT differ in register layout,
-transfer width, configurable-root behavior, and timing; see the
+transfer width, configurable-root behavior, and timing. The retained public
+service is the executable generic cyclic transform, not a standardized
+ML-KEM/ML-DSA negacyclic operation; see the
 [BIOS reference](docs/bios-forth.md#ntt-engine-10-raw-words).
 
 **KEM Engine (ML-KEM-512)**
@@ -647,8 +649,9 @@ XOR stub output. It is not BIOS-compatible ML-KEM execution.
 The valid-key zero-seed/zero-coin fixture agrees byte-for-byte with local
 OpenSSL 3.5.2 ML-KEM-512, but this is not FIPS certification, hostile external
 key validation, constant-time execution, or a protected host-secret boundary.
-KDOS also declares `KEM-SEED-SIZE=32` while `KYBER-KEYGEN` loads 64-byte
-`d || z`; that discrepancy remains intentionally unresolved. See the
+KDOS declares `KEM-SEED-SIZE=64`, matching the complete 64-byte `d || z`
+input loaded by `KYBER-KEYGEN`; `KYBER-ENCAPS` continues to consume the first
+32 bytes as coins. This is the locked Akashic-facing contract. See the
 [BIOS reference](docs/bios-forth.md#kem-engine--ml-kem-512-7-words).
 
 **Disk / Storage**
