@@ -444,6 +444,18 @@ no retained header may lie there. If post-checkpoint definitions cross between
 Bank 0 and userland, rollback rejects the pair before mutation; keep separate
 markers or compiler transactions on the two sides of a zone transition.
 
+The canonical autoexec loader currently violates that rule only on its failure
+path. `_AUTOEXEC-RUN` enters `_MOD-LOAD-BODY` and saves the outer loader's
+checkpoint while `HERE` is still in Bank 0; the repository `autoexec.f` then
+executes `ENTER-USERLAND`. Normal completion is unaffected because it does not
+request a rewind. If later source evaluation fails, `_LD-FAIL` instead tries to
+restore that Bank-0 checkpoint while the external dictionary bounds remain
+active. `DICT-ROLLBACK` rejects the saved address below the active external
+base, and canonical startup then reports the secondary `Userland dictionary
+full` abort rather than the original source failure. This is an open cross-zone
+loader rollback defect, not evidence that the userland dictionary exhausted
+its capacity.
+
 The BIOS owns the write boundary, not just the reporting words. Before each
 atomic emitted span writes, it proves that complete span fits within the
 inclusive base and exclusive limit by subtraction. Exact fit is valid; an

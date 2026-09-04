@@ -988,6 +988,15 @@ after the checkpoint cross between Bank 0 and userland, rollback rejects the
 pair before changing `HERE`, `LATEST`, the cache, or the index. Use separate
 checkpoints on each side of a zone transition.
 
+Canonical autoexec currently leaves one outer checkpoint on the wrong side of
+that transition. `_MOD-LOAD-BODY` saves its loader frame in Bank 0 before the
+repository `autoexec.f` executes `ENTER-USERLAND`. Its successful path is
+unaffected because it never rolls that frame back. After a later source
+failure, however, `_LD-FAIL` attempts the saved Bank-0 restore with the external
+bounds still active. `DICT-ROLLBACK` refuses the below-base address and startup
+emits a secondary `Userland dictionary full` abort, masking the original
+failure. The message does not establish actual dictionary exhaustion.
+
 `XMEM-FREE-BLOCK` accepts only spans wholly below the current XMEM high-water
 mark, then applies the dictionary-overlap check after initialization. This
 prevents a forged pre-init free node from becoming later dictionary storage.
@@ -3386,9 +3395,12 @@ headers, the two-definition chain, zero-padded `NAMEBUF`, ambient
 CWD/loader-frame restoration, module identity, duplicate suppression,
 released locks, and exact probe-error propagation without a fake free. The
 accepted autoexec is
-deliberately small. It does not qualify the repository's standard
-`autoexec.f`, or loading and configuring `networking.f` and `tools.f`; those
-remain later product-journey behavior.
+deliberately small and stays in its initial dictionary zone. It therefore does
+not qualify either failure rollback after `ENTER-USERLAND` or the repository's
+standard `autoexec.f` loading and configuring `networking.f` and `tools.f`;
+those remain later product-journey behavior. The cross-zone failure described
+in §1.15 is now confirmed independently; it does not change this fixture's
+successful same-zone result.
 
 The literal startup path has important limits:
 
@@ -3406,11 +3418,15 @@ The literal startup path has important limits:
 - Neither lookup validates file type, flags, CRC, encryption, or directory
   policy. The `Running autoexec.f...` line is emitted before empty, allocation,
   evaluator, or module-identity failure is known.
-- Startup as a whole is nontransactional. A module failure caught by the guard
-  rewinds its definitions and provisional IDs, but filesystem diagnostics and
-  registry/output/object/media effects outside those transactions can remain;
-  a throw can also skip `JIT-OFF` plus the final newline. Autoexec data-stack
-  results are not normalized.
+- Startup as a whole is nontransactional. A same-zone module failure caught by
+  the guard rewinds its definitions and provisional IDs, but filesystem
+  diagnostics and registry/output/object/media effects outside those
+  transactions can remain; a throw can also skip `JIT-OFF` plus the final
+  newline. The repository autoexec's cross-zone failure path is narrower and
+  defective: its outer Bank-0 dictionary checkpoint cannot be restored while
+  userland bounds are active, so the resulting secondary capacity abort masks
+  the original error. Normal successful autoexec completion does not enter
+  this rollback path. Autoexec data-stack results are not normalized.
 
 `JIT-ON` occurs near the source entry at line 39 and `JIT-OFF` at line 9893.
 Both are hosted semantic no-ops: startup qualification proves token

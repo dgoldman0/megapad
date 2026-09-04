@@ -1345,6 +1345,16 @@ positive store faults before bytes or HERE change. Numeric rollback within
 the active external zone removes bindings and rebuilds the caller-backed
 index exactly as it does in Bank 0.
 
+A checkpoint cannot instead span that transition. The canonical outer
+autoexec loader currently saves its checkpoint in Bank 0 before the repository
+`autoexec.f` executes `ENTER-USERLAND`. Successful loading is unaffected
+because it performs no rollback. If later source evaluation fails, `_LD-FAIL`
+tries to restore the Bank-0 pair while the external bounds remain active;
+`DICT-ROLLBACK` rejects the below-base target, and startup produces the
+secondary `Userland dictionary full` abort instead of preserving the original
+failure. The simulator exposes this source defect literally rather than
+interpreting the message as real capacity exhaustion or repairing the loader.
+
 This lifecycle is runtime-global and unsynchronized, matching the source's
 shared cells rather than inventing task ownership. Ordered transitions are
 not transactional against corrupted public cells or concurrency. Capacity
@@ -3328,8 +3338,11 @@ unterminated ten bytes `autoexec.f` into `NAMEBUF`, zeroes the remaining 14
 bytes, and searches the ambient `CWD`; `_MOD-LOAD-BODY` performs its own second
 lookup. Neither lookup adds a file-type, flags, CRC, encryption, or root-CWD
 gate, and the `Running` line is printed before module-body validation. The tiny
-accepted autoexec proves this startup-to-module seam only. It does not qualify
-the repository's standard `autoexec.f`, `networking.f`, or `tools.f` journey.
+accepted autoexec proves this startup-to-module seam only and stays in the
+initial dictionary zone. It does not qualify failure rollback after
+`ENTER-USERLAND` or the repository's standard `autoexec.f`, `networking.f`, or
+`tools.f` journey. The independently confirmed cross-zone rollback defect does
+not alter this same-zone fixture's successful result.
 
 Source comments at lines 9877–9878 claim that line-by-line evaluation means a
 multiline `IF` cannot gate execution. That contradicts both the immediately
@@ -3338,11 +3351,14 @@ implementation; the unchanged source is recorded rather than silently fixed.
 The heap probe checks its allocation status. Failure rethrows the exact code
 without passing the returned non-address to `DMA-FREE`; success alone frees
 the temporary block. A `HEAP-SETUP` throw also escapes. Startup as a whole is
-not transactional. A
-module-load failure caught by the guard rewinds that frame's definitions and
-provisional IDs, but
-filesystem diagnostics and registry/output/object/media effects outside those
-transactions can remain, and a throw can skip `JIT-OFF` plus the final newline.
+not transactional. A same-zone module-load failure caught by the guard rewinds
+that frame's definitions and provisional IDs, but filesystem diagnostics and
+registry/output/object/media effects outside those transactions can remain,
+and a throw can skip `JIT-OFF` plus the final newline. On the repository
+autoexec's cross-zone failure path, the outer loader's Bank-0 checkpoint cannot
+be restored under active external bounds; the secondary capacity abort masks
+the original failure. Normal successful autoexec completion never requests
+that restore.
 Hosted `JIT-ON` at line 39 and `JIT-OFF` at line 9893 are semantic no-ops, not
 evidence of native-code state or performance.
 
