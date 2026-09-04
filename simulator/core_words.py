@@ -798,6 +798,24 @@ def _tx_flush(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
     runtime.flush_uart_output()
 
 
+def _terminal_size(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    cols, rows = runtime.terminal_size()
+    context.data.push(cols)
+    context.data.push(rows)
+
+
+def _terminal_resize_request(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    rows = context.data.pop()
+    cols = context.data.pop()
+    runtime.request_terminal_resize(cols, rows)
+
+
 def _space(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
     runtime.write_uart_bytes(b" ")
 
@@ -2547,6 +2565,17 @@ def install_core(runtime: MegaForthRuntime) -> None:
             lambda context: context.data.push(
                 forth_flag(runtime.consume_terminal_resized())
             ),
+        ),
+        (b"TERMSIZE", lambda context: _terminal_size(runtime, context)),
+        (
+            b"RESIZE-DENIED?",
+            lambda context: context.data.push(
+                forth_flag(runtime.consume_terminal_resize_denied())
+            ),
+        ),
+        (
+            b"RESIZE-REQUEST",
+            lambda context: _terminal_resize_request(runtime, context),
         ),
     )
     for name, callback in rich_terminal_primitives:

@@ -41,6 +41,19 @@ def _read_geometry(
     return context.data.snapshot()
 
 
+def _run_word(
+    backend: SimulatorSessionBackend,
+    name: str,
+    *cells: int,
+) -> tuple[int, ...]:
+    context = backend.runtime.new_context()
+    for cell in cells:
+        context.data.push(cell)
+    result = backend.run_semantic_batch(entry=name, context=context)
+    assert result.stop_reason is SemanticBatchStop.COMPLETED
+    return context.data.snapshot()
+
+
 def test_unowned_runtime_exposes_fixed_legacy_geometry_and_consumes_resize() -> None:
     runtime = MegaForthRuntime()
     runtime.evaluate(b": READ-GEOMETRY COLS ROWS RESIZED? ;")
@@ -55,6 +68,16 @@ def test_unowned_runtime_exposes_fixed_legacy_geometry_and_consumes_resize() -> 
     runtime.main_context.data.clear()
     runtime.execute("READ-GEOMETRY")
     assert runtime.main_context.data.snapshot() == (132, 43, 0)
+
+
+def test_termsize_pushes_one_coherent_cols_rows_snapshot_in_bios_order() -> None:
+    runtime = MegaForthRuntime()
+    runtime.set_terminal_geometry(132, 43)
+
+    runtime.execute("TERMSIZE")
+
+    # ROWS is the top stack item, matching ( -- cols rows ).
+    assert runtime.main_context.data.snapshot() == (132, 43)
 
 
 def test_session_geometry_is_the_guest_visible_source_and_resize_is_read_once() -> None:
@@ -120,4 +143,91 @@ def test_owned_runtime_rejects_host_geometry_bypass() -> None:
 
     assert backend.geometry.cols == 80
     assert backend.geometry.rows == 24
+    backend.close()
+
+
+def test_guest_resize_request_is_low16_atomic_replaceable_and_generation_safe() -> None:
+    runtime = MegaForthRuntime()
+    backend = SimulatorSessionBackend(
+        runtime,
+        legacy_output_sink=lambda payload: None,
+    )
+
+    assert backend.snapshot_resize_request() is None
+    assert _run_word(
+        backend,
+        "RESIZE-REQUEST",
+        0x1_1234,
+        0x2_5678,
+    ) == ()
+    first = backend.snapshot_resize_request()
+    assert first is not None
+    first_generation, first_cols, first_rows = first
+    assert (first_cols, first_rows) == (0x1234, 0x5678)
+
+    # A second complete word replaces the request atomically. Zero is a valid
+    # low-16-bit request value even though it is not a valid host geometry.
+    assert _run_word(
+        backend,
+        "RESIZE-REQUEST",
+        0x2_0000,
+        0x3_FFFF,
+    ) == ()
+    replacement = backend.snapshot_resize_request()
+    assert replacement is not None
+    generation, cols, rows = replacement
+    assert generation != first_generation
+    assert (cols, rows) == (0, 0xFFFF)
+
+    assert not backend.host_accept_resize_if_pending(
+        first_generation,
+        100,
+        40,
+    )
+    assert not backend.host_deny_resize_if_pending(first_generation)
+    assert backend.snapshot_resize_request() == replacement
+
+    assert backend.host_accept_resize_if_pending(generation, 132, 43)
+    assert backend.snapshot_resize_request() is None
+    assert backend.geometry == HostedTerminalGeometry(132, 43, True, False)
+    assert _run_word(backend, "RESIZED?") == (TRUE,)
+    assert _run_word(backend, "RESIZED?") == (0,)
+    backend.close()
+
+
+def test_resize_and_denied_notifications_are_independent_clear_on_read_flags() -> None:
+    runtime = MegaForthRuntime()
+    backend = SimulatorSessionBackend(
+        runtime,
+        legacy_output_sink=lambda payload: None,
+    )
+
+    assert _run_word(backend, "RESIZE-REQUEST", 90, 30) == ()
+    request = backend.snapshot_resize_request()
+    assert request is not None
+    generation, _, _ = request
+    assert backend.host_deny_resize_if_pending(generation)
+    assert backend.snapshot_resize_request() is None
+    assert backend.geometry == HostedTerminalGeometry(80, 24, False, True)
+
+    # A later request and acceptance set RESIZED without clearing the older
+    # denial notification. Neither a new request nor completion clears STATUS.
+    assert _run_word(backend, "RESIZE-REQUEST", 100, 40) == ()
+    accepted = backend.snapshot_resize_request()
+    assert accepted is not None
+    accepted_generation, _, _ = accepted
+    assert backend.host_accept_resize_if_pending(
+        accepted_generation,
+        100,
+        40,
+    )
+    assert backend.geometry == HostedTerminalGeometry(100, 40, True, True)
+
+    # Clearing one W1C-equivalent status must not consume the other.
+    assert _run_word(backend, "RESIZE-DENIED?") == (TRUE,)
+    assert backend.geometry == HostedTerminalGeometry(100, 40, True, False)
+    assert _run_word(backend, "RESIZE-DENIED?") == (0,)
+    assert _run_word(backend, "RESIZED?") == (TRUE,)
+    assert backend.geometry == HostedTerminalGeometry(100, 40, False, False)
+    assert _run_word(backend, "RESIZED?") == (0,)
     backend.close()

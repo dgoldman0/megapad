@@ -133,9 +133,12 @@ the lifetime of that session: the guest-visible BIOS `COLS` and `ROWS` words
 read it, while `RESIZED?` atomically consumes its sticky notification. Closing
 the backend transfers an immutable value snapshot back to the unowned runtime,
 so no callback into a dead session survives. `HostedTerminalGeometry` remains
-the read-only host diagnostic view of that same state. The aggregate/query and
-guest-request words `TERMSIZE`, `RESIZE-DENIED?`, and `RESIZE-REQUEST` remain
-outside this slice. The shared policy and adapter are still not evidence that
+the read-only host diagnostic view of that same state. `TERMSIZE` reads one
+coherent pair. `RESIZE-REQUEST` publishes the two low-16-bit operands as one
+asynchronous, generation-qualified request, and `RESIZE-DENIED?` consumes only
+its independent sticky denial. Host acceptance and denial require the exact
+still-current generation; the simulator does not invent a display policy or
+automatic response. The shared policy and adapter are still not evidence that
 the complete source module or a live APT session has run.
 
 ## 2. Compatibility claims
@@ -3553,13 +3556,14 @@ Desktop execution remain deferred under the rich-terminal resource gate.
 The rich-terminal integration now synchronizes the authoritative current
 `rich-terminal.f` and appends exactly five source prerequisites to the hosted
 pseudo-BIOS: `UM*`, `WITHIN`, `MOVE`, `MS@`, and `TX-FLUSH`. Three public
-terminal-geometry words follow them: `COLS`, `ROWS`, and `RESIZED?`. Existing
-hosted execution tokens retain their addresses; absolute tokens remain
-nonportable between backends. Fresh runtimes therefore publish 327 pre-KDOS
-words. Focused units qualify widening multiplication, wrapping interval
-comparison, overlap/fault copy order, deterministic latched uptime, immediate
-hosted flush semantics, session-bound dimensions, and clear-on-read resize
-state. Those primitive units alone do not claim a
+terminal-geometry words follow them: `COLS`, `ROWS`, `RESIZED?`, `TERMSIZE`,
+`RESIZE-DENIED?`, and `RESIZE-REQUEST`. Existing hosted execution tokens retain
+their addresses; absolute tokens remain nonportable between backends. Fresh
+runtimes therefore publish 330 pre-KDOS words. Focused units qualify widening
+multiplication, wrapping interval comparison, overlap/fault copy order,
+deterministic latched uptime, immediate hosted flush semantics, session-bound
+dimensions, independent clear-on-read resize status, and stale-safe
+asynchronous resize requests. Those primitive units alone do not claim a
 `rich-terminal.f` source load or APT/session lifecycle; the complete source
 and live-snapshot evidence below establishes the larger boundary now reached.
 

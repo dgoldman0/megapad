@@ -942,12 +942,36 @@ class MegaForthRuntime:
             self._require_session_owner_access("read terminal rows")
             return self._active_terminal_geometry_locked().snapshot().rows
 
+    def terminal_size(self) -> tuple[int, int]:
+        """Return one coherent public BIOS terminal-dimension snapshot."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access("read terminal size")
+            snapshot = self._active_terminal_geometry_locked().snapshot()
+            return snapshot.cols, snapshot.rows
+
     def consume_terminal_resized(self) -> bool:
         """Return and clear the public BIOS resize flag for the active owner."""
 
         with self._session_owner_lock:
             self._require_session_owner_access("read terminal resize state")
             return self._active_terminal_geometry_locked().consume_resized()
+
+    def consume_terminal_resize_denied(self) -> bool:
+        """Return and clear the public BIOS request-denied flag."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access(
+                "read terminal resize-denied state"
+            )
+            return self._active_terminal_geometry_locked().consume_resize_denied()
+
+    def request_terminal_resize(self, cols: int, rows: int) -> None:
+        """Publish one asynchronous guest resize request to the active host."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access("request a terminal resize")
+            self._active_terminal_geometry_locked().request_resize(cols, rows)
 
     def set_terminal_geometry(self, cols: int, rows: int) -> None:
         """Set fixed legacy geometry while no session backend owns the runtime."""

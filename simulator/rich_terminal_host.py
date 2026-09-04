@@ -230,6 +230,39 @@ class SimulatorSessionBackend:
                 )
             self._geometry.apply(cols, rows)
 
+    def snapshot_resize_request(self) -> tuple[int, int, int] | None:
+        """Return the current generation-qualified guest resize request."""
+
+        with self._boundary_lock:
+            self._require_open()
+            self._reject_batch_reentry_locked()
+            return self._geometry.snapshot_resize_request()
+
+    def host_accept_resize_if_pending(
+        self,
+        generation: int,
+        cols: int,
+        rows: int,
+    ) -> bool:
+        """Accept only an unchanged guest resize request."""
+
+        with self._boundary_lock:
+            self._require_open()
+            self._reject_batch_reentry_locked()
+            return self._geometry.host_accept_resize_if_pending(
+                generation,
+                cols,
+                rows,
+            )
+
+    def host_deny_resize_if_pending(self, generation: int) -> bool:
+        """Deny only an unchanged guest resize request."""
+
+        with self._boundary_lock:
+            self._require_open()
+            self._reject_batch_reentry_locked()
+            return self._geometry.host_deny_resize_if_pending(generation)
+
     def run_semantic_batch(
         self,
         entry: bytes | str | int | None = None,
