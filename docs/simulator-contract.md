@@ -3609,16 +3609,21 @@ remains the synchronous hosted primitive it was before and does not acquire
 protocol framing meaning.
 
 The focused simulator integration now loads the unchanged contiguous module
-prefix from `PT-S-OK` through public `PT-SERVICE` and attaches the production
-`RichTerminalDriver` to that host port. Three ordinary guest calls alternate
-with three driver service calls: the source emits PROBE, accepts OFFER and
-emits OPEN, then accepts framed SERVER_READY and emits framed CLIENT_READY.
-The source session and host core both reach `ACTIVE` with the negotiated
-session ID, limits, geometry, credit, sequence state, and empty transport
-queues intact. The observed machine publications are exactly 38, 73, and 72
-bytes. This qualifies the live negotiation/session handshake and semantic-call
-settlement boundary only. It does not load the rest of `rich-terminal.f`, send
-a snapshot, project content, compose a view, or exercise a physical sink.
+prefix from `PT-S-OK` through `_PT-RESOURCE-BEGIN-SCRUB`, immediately before
+the first KDOS-owned `CATCH` use in public `PT-RESOURCE-BEGIN`, and attaches
+the production `RichTerminalDriver` to that host port. Three ordinary guest
+calls alternate with three driver service calls: the source emits PROBE,
+accepts OFFER and emits OPEN, then accepts framed SERVER_READY and emits
+framed CLIENT_READY. The source session and host core both reach `ACTIVE` with
+the negotiated session ID, limits, geometry, credit, sequence state, and
+empty transport queues intact. Empty event and completion polls then preserve
+that state. A guest CLOSE and host CLOSE_ACK finally return both endpoints to
+ANSI, release source ownership, and leave both directional sequences at two.
+The machine publications are exactly 38, 73, 72, and 56 bytes; the final ACK
+is an exact 48-byte ingress record. This qualifies the live negotiation,
+session-close, and semantic-call settlement boundaries only. It does not enter
+a resource writer, send a snapshot, project content, compose a view, or
+exercise a physical sink.
 
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
@@ -3632,11 +3637,11 @@ definitions and the remaining islands should be absorbed into one complete
 The remaining rich-terminal source load and ordinary Desk/Pad/Daybook journey
 remain part of the compatibility contract, but are later implementation
 phases. With the backend synchronized to the current rich-terminal vertical,
-the next source slice starts after `PT-SERVICE` and continues through the
-unchanged module rather than copying terminal semantics into simulator-only
-substitutes. The standalone pseudo-BIOS fixture next reaches KDOS-owned
-exception vocabulary; ordinary composition must obtain that vocabulary from
-KDOS, not from a simulator terminal shim.
+the next source slice starts at public `PT-RESOURCE-BEGIN` and continues
+through the unchanged module rather than copying terminal semantics into
+simulator-only substitutes. The standalone pseudo-BIOS fixture has now reached
+KDOS-owned exception vocabulary at that exact boundary; ordinary composition
+must obtain `CATCH` and `THROW` from KDOS, not from a simulator terminal shim.
 
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
 KDOS load run before the real rich vertical exists. Native/exact-full-core cold

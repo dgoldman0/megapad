@@ -3,8 +3,9 @@
 These tests extract contiguous prefixes from the authoritative module and
 execute its source-defined APT path on the exact emulator and hosted
 simulator. The shared byte oracles remain paired across both backends; the
-simulator selector additionally proves the first real driver handshake through
-the unchanged ``PT-SERVICE`` boundary without claiming a complete module load.
+simulator selector additionally proves the first real driver handshake and
+synchronized close through the unchanged pre-``CATCH`` boundary without
+claiming a complete module load.
 """
 
 from __future__ import annotations
@@ -54,10 +55,8 @@ UART_OFFER_PREFIX_END = (
     b"\n\\ ====================================================================="
     b"\n\\  Input payload validation"
 )
-SERVICE_PREFIX_END = (
-    b"\nVARIABLE _PT-PC-S"
-    b"\nVARIABLE _PT-PC-REASON"
-    b"\n"
+PRE_CATCH_PREFIX_END = (
+    b"\n\\ Stack: owner generation resource format width height flags byte-length"
 )
 
 # These are watchdogs for one BIOS boot and the selected contiguous definition
@@ -208,6 +207,8 @@ CREATE DBL-RX _PT-CONTROL-RESERVE _PT-HDR + 32 + ALLOT
 CREATE DBL-TX _PT-OPEN-BYTES ALLOT
 CREATE DBL-EVENT PT-EVENT-SIZE ALLOT
 CREATE DBL-S-STORAGE PT-SESSION-SIZE 7 + ALLOT
+CREATE DBL-POLL-EVENT PT-EVENT-SIZE ALLOT
+CREATE DBL-POLL-COMPLETION PT-COMPLETION-SIZE ALLOT
 : DBL-S  DBL-S-STORAGE 7 + -8 AND ;
 VARIABLE DBL-INIT-S
 VARIABLE DBL-START-S
@@ -226,6 +227,11 @@ VARIABLE DBL-LOCAL-GRANT
 VARIABLE DBL-MAX-TEXT
 VARIABLE DBL-TX-SEQ
 VARIABLE DBL-RX-SEQ
+VARIABLE DBL-POLL-EVENT-S
+VARIABLE DBL-POLL-EVENT?
+VARIABLE DBL-POLL-COMPLETION-S
+VARIABLE DBL-POLL-COMPLETION?
+VARIABLE DBL-CLOSE-S
 : DBL-BOOT
   DBL-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
   DBL-TX _PT-OPEN-BYTES DBL-EVENT PT-EVENT-SIZE DBL-S
@@ -246,6 +252,18 @@ VARIABLE DBL-RX-SEQ
   DBL-S _PT.S.CLIENT-MAX-PAY @ DBL-CLIENT-MAX-PAY !
   DBL-S _PT.S.LOCAL-GRANT @ DBL-LOCAL-GRANT !
   DBL-S _PT.S.MAX-TEXT @ DBL-MAX-TEXT !
+  DBL-S _PT.S.TX-SEQ @ DBL-TX-SEQ !
+  DBL-S _PT.S.RX-SEQ @ DBL-RX-SEQ ! ;
+: DBL-POLL-EMPTY
+  DBL-POLL-EVENT DBL-S PT-EVENT-POLL
+  DBL-POLL-EVENT? ! DBL-POLL-EVENT-S !
+  DBL-POLL-COMPLETION DBL-S PT-COMPLETION-POLL
+  DBL-POLL-COMPLETION? ! DBL-POLL-COMPLETION-S ! ;
+: DBL-CLOSE
+  7 DBL-S PT-CLOSE DBL-CLOSE-S !
+  DBL-S PT-STATE@ DBL-STATE !
+  DBL-S PT-ACTIVE? DBL-ACTIVE !
+  DBL-S PT-OWNS? DBL-OWNS !
   DBL-S _PT.S.TX-SEQ @ DBL-TX-SEQ !
   DBL-S _PT.S.RX-SEQ @ DBL-RX-SEQ ! ;
 """
@@ -330,20 +348,19 @@ def _rich_terminal_uart_offer_prefix() -> bytes:
     return prefix
 
 
-def _rich_terminal_service_prefix() -> bytes:
-    """Extract the exact current module prefix through ``PT-SERVICE``."""
+def _rich_terminal_pre_catch_prefix() -> bytes:
+    """Extract the exact module prefix to the first missing bare dependency."""
 
     source = RICH_TERMINAL_SOURCE.read_bytes()
     assert source.count(PREFIX_START) == 1
-    assert source.count(SERVICE_PREFIX_END) == 1
+    assert source.count(PRE_CATCH_PREFIX_END) == 1
     start = source.index(PREFIX_START)
-    end = source.index(SERVICE_PREFIX_END, start)
+    end = source.index(PRE_CATCH_PREFIX_END, start)
     prefix = source[start:end]
     assert prefix.endswith(
-        b"            PT-S-SESSION-LOST EXIT\n"
-        b"        THEN\n"
-        b"    THEN\n"
-        b"    DROP PT-S-OK ;\n"
+        b"    0 _PT-RBG-PIXELS !\n"
+        b"    0 _PT-RSA ! 0 _PT-RSU ! 0 _PT-RSS !\n"
+        b"    0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV ! ;\n"
     )
     return prefix
 
@@ -820,17 +837,17 @@ def test_production_uart_offer_reaches_opening_with_exact_open_request(
     )
 
 
-def test_simulator_real_driver_handshake_reaches_active_through_production_service(
+def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
     request: pytest.FixtureRequest,
 ) -> None:
-    prefix = _rich_terminal_service_prefix()
+    prefix = _rich_terminal_pre_catch_prefix()
     prefix_digest = hashlib.sha256(prefix).hexdigest()
     runtime = MegaForthRuntime()
     runtime.evaluate(
         ONE_CORE_UART_LOCK_SHIMS + prefix,
         source_name=(
             "one-core-uart-lock-shims+"
-            f"rich-terminal.f:{prefix_digest}:PT-S-OK..PT-SERVICE"
+            f"rich-terminal.f:{prefix_digest}:PT-S-OK..pre-CATCH"
         ),
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,
     )
@@ -840,7 +857,18 @@ def test_simulator_real_driver_handshake_reaches_active_through_production_servi
     )
 
     assert runtime.find("PT-SERVICE") is not None
-    assert runtime.find("PT-CLOSE") is None
+    assert all(
+        runtime.find(name) is not None
+        for name in (
+            "PT-CLOSE",
+            "PT-EVENT-POLL",
+            "PT-COMPLETION-POLL",
+            "PT-OWNER-OPEN",
+            "PT-OWNER-DROP",
+        )
+    )
+    assert runtime.find("_PT-RESOURCE-BEGIN-SCRUB") is not None
+    assert runtime.find("PT-RESOURCE-BEGIN") is None
     assert runtime.drain_uart_output() == b""
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
@@ -1004,6 +1032,83 @@ def test_simulator_real_driver_handshake_reaches_active_through_production_servi
     assert driver.core.decoder_buffered_bytes == 0
     assert driver.core.max_text_bytes == 20
     assert driver.core.output_view is None
+    assert runtime.uart_input == b""
+    assert runtime.uart_output == b""
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
+    assert driver.pending_outbound_bytes == 0
+    assert driver.pending_outbound_events == 0
+    assert driver.failure_reason is None
+    assert backend.rich_terminal_host.failure_reason is None
+    assert backend.rich_terminal_host.accepted_egress_bytes == 0
+    assert backend.rich_terminal_host.accepted_egress_batches == 0
+    assert backend.rich_terminal_host.pending_ingress_bytes == 0
+    assert backend.rich_terminal_host.pending_ingress_events == 0
+    assert legacy_output == []
+    assert ansi_output == []
+    assert views == []
+
+    polled = backend.run_semantic_batch(entry="DBL-POLL-EMPTY")
+    assert polled.stop_reason is SemanticBatchStop.COMPLETED
+    assert polled.semantic_steps > 0
+    assert polled.external_events_applied == 0
+    assert _stored_cell(runtime, "DBL-POLL-EVENT-S") == 0
+    assert _stored_cell(runtime, "DBL-POLL-EVENT?") == 0
+    assert _stored_cell(runtime, "DBL-POLL-COMPLETION-S") == 0
+    assert _stored_cell(runtime, "DBL-POLL-COMPLETION?") == 0
+    assert backend.rich_terminal_host.accepted_egress_bytes == 0
+    assert backend.rich_terminal_host.accepted_egress_batches == 0
+
+    closing = backend.run_semantic_batch(entry="DBL-CLOSE")
+    assert closing.stop_reason is SemanticBatchStop.COMPLETED
+    assert closing.semantic_steps > 0
+    assert closing.external_events_applied == 0
+    assert _stored_cell(runtime, "DBL-CLOSE-S") == 0
+    assert _stored_cell(runtime, "DBL-STATE") == 5
+    assert _stored_cell(runtime, "DBL-ACTIVE") == 0
+    assert _stored_cell(runtime, "DBL-OWNS") == MASK64
+    assert _stored_cell(runtime, "DBL-TX-SEQ") == 2
+    assert _stored_cell(runtime, "DBL-RX-SEQ") == 1
+    assert driver.core.state is TerminalState.ACTIVE
+    assert backend.rich_terminal_host.accepted_egress_bytes == 56
+    assert backend.rich_terminal_host.accepted_egress_batches == 1
+
+    closed = driver.service()
+    assert closed.status is DriverStatus.PROGRESS
+    assert (
+        closed.machine_batches,
+        closed.outbound_records,
+        closed.ansi_bytes,
+        closed.views,
+    ) == (1, 1, 0, 0)
+    assert driver.core.state is TerminalState.ANSI
+    assert not driver.core.active
+    assert driver.core.session_id is None
+    assert driver.core.machine_publications_received == 4
+    assert driver.core.machine_publication_bytes_received == 239
+    assert driver.core.frames_received == 2
+    assert driver.core.frame_bytes_received == 128
+    assert driver.core.frames_received_by_type == {
+        int(MessageType.CLOSE): 1,
+        int(MessageType.CLIENT_READY): 1,
+    }
+    assert driver.core.output_view is None
+    assert backend.rich_terminal_host.accepted_egress_bytes == 0
+    assert backend.rich_terminal_host.accepted_egress_batches == 0
+    assert backend.rich_terminal_host.pending_ingress_bytes == 48
+    assert backend.rich_terminal_host.pending_ingress_events == 1
+
+    settled = backend.run_semantic_batch(entry="DBL-SERVICE")
+    assert settled.stop_reason is SemanticBatchStop.COMPLETED
+    assert settled.semantic_steps > 0
+    assert settled.external_events_applied == 1
+    assert _stored_cell(runtime, "DBL-SERVICE-S") == 0
+    assert _stored_cell(runtime, "DBL-STATE") == 0
+    assert _stored_cell(runtime, "DBL-ACTIVE") == 0
+    assert _stored_cell(runtime, "DBL-OWNS") == 0
+    assert _stored_cell(runtime, "DBL-TX-SEQ") == 2
+    assert _stored_cell(runtime, "DBL-RX-SEQ") == 2
+    assert driver.core.state is TerminalState.ANSI
     assert runtime.uart_input == b""
     assert runtime.uart_output == b""
     assert runtime.main_context.data.snapshot() == ()

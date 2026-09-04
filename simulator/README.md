@@ -2340,16 +2340,20 @@ the backend to return direct ownership to the runtime. The hosted `TX-FLUSH`
 primitive remains immediate and does not split publications.
 
 The simulator selector now loads the authoritative contiguous
-`rich-terminal.f` source through `PT-SERVICE` and drives it through the real
-`RichTerminalDriver`. Alternating guest semantic calls and driver service
-crosses PROBE/OFFER, OPEN/SERVER_READY, and CLIENT_READY, leaving both the
-source session and host core `ACTIVE` with exact publication sizes and empty
-transport queues. No snapshot or view is produced, so this proves the live
-handshake and host-port settlement boundary without claiming projection,
-composition, rendering, or the rest of the module. Advancing the unchanged
-source beyond `PT-SERVICE` is the next slice; the standalone fixture must use
-the KDOS-owned exception vocabulary it encounters rather than a
-simulator-specific terminal substitute.
+`rich-terminal.f` source through `_PT-RESOURCE-BEGIN-SCRUB`, immediately
+before public `PT-RESOURCE-BEGIN` first requires KDOS-owned `CATCH`, and drives
+it through the real `RichTerminalDriver`. Alternating guest semantic calls and
+driver service crosses PROBE/OFFER, OPEN/SERVER_READY, and CLIENT_READY,
+leaving both the source session and host core `ACTIVE` with exact publication
+sizes and empty transport queues. Empty event/completion polls remain inert;
+then the source publishes CLOSE, the driver returns CLOSE_ACK, and both sides
+return to ANSI with source ownership released and queues empty. No resource
+writer, snapshot, or view is entered, so this proves the live handshake,
+synchronized close, and host-port settlement boundary without claiming
+projection, composition, rendering, or the rest of the module. The next slice
+must supply the exact KDOS exception vocabulary and continue the unchanged
+source at `PT-RESOURCE-BEGIN`, not add a simulator-specific terminal
+substitute.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.
