@@ -3580,10 +3580,10 @@ terminal-geometry words follow them: `COLS`, `ROWS`, `RESIZED?`, `TERMSIZE`,
 their addresses; absolute tokens remain nonportable between backends. Six
 more append-only closure prerequisites provide `BSWAP`, the default
 unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and deterministic
-checked `ENTROPY-FILL`/`ENTROPY-READY?`. Eight following source words provide
-bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates, and persistent
-raw-token `[IF]`/`[ELSE]`/`[THEN]` skipping. Fresh runtimes therefore publish
-344 pre-KDOS words. Focused units qualify widening
+checked `ENTROPY-FILL`/`ENTROPY-READY?`. Twelve following source words provide
+bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates, persistent
+raw-token `[IF]`/`[ELSE]`/`[THEN]` skipping, and structured CASE compilation.
+Fresh runtimes therefore publish 348 pre-KDOS words. Focused units qualify widening
 multiplication, wrapping interval comparison, overlap/fault copy order,
 deterministic latched uptime, immediate hosted flush semantics, session-bound
 dimensions, independent clear-on-read resize status, and stale-safe

@@ -282,6 +282,10 @@ class DirectiveKind(Enum):
     BRACKET_IF = auto()
     BRACKET_ELSE = auto()
     BRACKET_THEN = auto()
+    CASE = auto()
+    OF = auto()
+    ENDOF = auto()
+    ENDCASE = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,7 +351,20 @@ class _WhileFrame:
     branch_index: int
 
 
-_ControlFrame: TypeAlias = _IfFrame | _DoFrame | _BeginFrame | _WhileFrame
+@dataclass(slots=True)
+class _CaseFrame:
+    end_indices: list[int] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class _OfFrame:
+    case: _CaseFrame
+    false_index: int
+
+
+_ControlFrame: TypeAlias = (
+    _IfFrame | _DoFrame | _BeginFrame | _WhileFrame | _CaseFrame | _OfFrame
+)
 
 
 @dataclass(slots=True)
@@ -2684,6 +2701,53 @@ class MegaForthRuntime:
             compiler.controls.pop()
             if compiler.temporary and not compiler.controls:
                 self._execute_temporary_compiler(compiler, state)
+        elif kind is DirectiveKind.CASE:
+            compiler.controls.append(_CaseFrame())
+        elif kind is DirectiveKind.OF:
+            if not compiler.controls or not isinstance(
+                compiler.controls[-1], _CaseFrame
+            ):
+                self._compile_error(state, "OF has no matching CASE")
+            case = compiler.controls[-1]
+            assert isinstance(case, _CaseFrame)
+            for name in (b"OVER", b"="):
+                word = self.dictionary.find(name)
+                if word is None:
+                    raise AssertionError(f"core word {name!r} is unavailable")
+                compiler.operations.append(Call(word.xt))
+            compiler.operations.append(BranchZero(0))
+            false_index = len(compiler.operations) - 1
+            drop = self.dictionary.find(b"DROP")
+            if drop is None:
+                raise AssertionError("core word b'DROP' is unavailable")
+            compiler.operations.append(Call(drop.xt))
+            compiler.controls.append(_OfFrame(case, false_index))
+        elif kind is DirectiveKind.ENDOF:
+            if not compiler.controls or not isinstance(
+                compiler.controls[-1], _OfFrame
+            ):
+                self._compile_error(state, "ENDOF has no matching OF")
+            frame = compiler.controls.pop()
+            assert isinstance(frame, _OfFrame)
+            compiler.operations.append(Branch(0))
+            frame.case.end_indices.append(len(compiler.operations) - 1)
+            compiler.operations[frame.false_index] = BranchZero(
+                len(compiler.operations)
+            )
+        elif kind is DirectiveKind.ENDCASE:
+            if not compiler.controls or not isinstance(
+                compiler.controls[-1], _CaseFrame
+            ):
+                self._compile_error(state, "ENDCASE has no matching CASE")
+            frame = compiler.controls.pop()
+            assert isinstance(frame, _CaseFrame)
+            drop = self.dictionary.find(b"DROP")
+            if drop is None:
+                raise AssertionError("core word b'DROP' is unavailable")
+            compiler.operations.append(Call(drop.xt))
+            exit_target = len(compiler.operations)
+            for end_index in frame.end_indices:
+                compiler.operations[end_index] = Branch(exit_target)
         elif kind is DirectiveKind.BEGIN:
             compiler.controls.append(_BeginFrame(len(compiler.operations)))
         elif kind is DirectiveKind.UNTIL:

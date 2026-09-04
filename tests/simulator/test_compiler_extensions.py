@@ -112,3 +112,62 @@ def test_unterminated_host_conditional_is_a_source_error() -> None:
 
     with pytest.raises(SourceError, match=r"no terminating \[THEN\]"):
         runtime.evaluate(b"0 [IF] ignored")
+
+
+def test_case_selects_a_clause_and_preserves_default_fallthrough() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        b": CLASSIFY CASE "
+        b"1 OF 11 ENDOF "
+        b"2 OF 22 ENDOF "
+        b"99 SWAP ENDCASE ;"
+    )
+
+    for selector, expected in ((1, 11), (2, 22), (3, 99)):
+        context = runtime.new_context()
+        context.data.push(selector)
+        runtime.execute("CLASSIFY", context=context)
+        assert context.data.snapshot() == (expected,)
+
+
+def test_nested_case_and_if_close_their_own_control_frames() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        b": NESTED CASE "
+        b"1 OF CASE 7 OF 70 ENDOF 90 SWAP ENDCASE ENDOF "
+        b"2 OF IF 20 ELSE 21 THEN ENDOF "
+        b"99 SWAP ENDCASE ;"
+    )
+
+    cases = (
+        ((7, 1), (70,)),
+        ((8, 1), (90,)),
+        ((0, 2), (21,)),
+        ((5, 2), (20,)),
+        ((3,), (99,)),
+    )
+    for inputs, expected in cases:
+        context = runtime.new_context()
+        for value in inputs:
+            context.data.push(value)
+        runtime.execute("NESTED", context=context)
+        assert context.data.snapshot() == expected
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    (
+        (b": BAD OF ;", "OF has no matching CASE"),
+        (b": BAD CASE ENDOF ;", "ENDOF has no matching OF"),
+        (b": BAD CASE 1 OF ENDCASE ;", "ENDCASE has no matching CASE"),
+        (b": BAD ENDCASE ;", "ENDCASE has no matching CASE"),
+    ),
+)
+def test_case_control_words_reject_malformed_nesting(
+    source: bytes,
+    message: str,
+) -> None:
+    runtime = MegaForthRuntime()
+
+    with pytest.raises(SourceError, match=message):
+        runtime.evaluate(source)

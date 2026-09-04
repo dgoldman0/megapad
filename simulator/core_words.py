@@ -2714,4 +2714,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
     ):
         runtime.define_directive(name, kind)
 
+    for name, kind in (
+        (b"CASE", DirectiveKind.CASE),
+        (b"OF", DirectiveKind.OF),
+        (b"ENDOF", DirectiveKind.ENDOF),
+        (b"ENDCASE", DirectiveKind.ENDCASE),
+    ):
+        runtime.define_directive(name, kind)
+
 __all__ = ["install_core"]
