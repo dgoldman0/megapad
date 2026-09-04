@@ -2302,15 +2302,16 @@ gate.
 The contiguous unchanged KDOS core now reaches EOF. The integration branch is
 now synchronized with the current `rich-terminal.f` and adds its five missing
 pseudo-BIOS prerequisites as append-only hosted words: `UM*`, `WITHIN`, `MOVE`,
-`MS@`, and `TX-FLUSH`. Their focused scalar, memory, clock, and UART units are
-qualification of those primitives only. The focused live integration below
-now evaluates the complete authoritative module against the exact KDOS
-exception closure, but does not yet claim normal MP64FS/`REQUIRE` composition,
-Akashic integration, the Desktop lifecycle, or physical rendering. Those runs
-remain deferred by the vertical's resource gate. Fresh runtimes therefore
-contain 324 pseudo-BIOS words before KDOS; the 319-word figure above remains
-the exact historical-load observation and is not silently rewritten as new
-full-load evidence.
+`MS@`, and `TX-FLUSH`. Three public geometry words follow them: `COLS`, `ROWS`,
+and clear-on-read `RESIZED?`. Their focused scalar, memory, clock, UART, and
+session-geometry units are qualification of those primitives only. The focused
+live integration below now evaluates the complete authoritative module against
+the exact KDOS exception closure, but does not yet claim normal
+MP64FS/`REQUIRE` composition, Akashic integration, the Desktop lifecycle, or
+physical rendering. Those runs remain deferred by the vertical's resource
+gate. Fresh runtimes therefore contain 327 pseudo-BIOS words before KDOS; the
+319-word figure above remains the exact historical-load observation and is not
+silently rewritten as new full-load evidence.
 
 The synchronized cross-backend slice also executes the current
 production prefix from `PT-S-OK` through `_PT-SEND-CREDIT` on both backends.
@@ -2333,10 +2334,12 @@ atomic resize geometry before its ingress bytes, removes only the
 attachment-owned RX suffix on release, and prevents another call while a
 publication is retained. Output completed before backend acquisition settles
 to the legacy sink before attachment; once the backend owns the runtime,
-public execution and host-side UART mutation bypasses are rejected. Hosted
-geometry is read-only adapter bookkeeping and does not yet implement the guest
-BIOS `COLS`, `ROWS`, or `RESIZED?` surface. Close the enhanced lease and then
-the backend to return direct ownership to the runtime. The hosted `TX-FLUSH`
+public execution and host-side UART mutation bypasses are rejected. The
+backend-owned geometry is the live source for guest BIOS `COLS`, `ROWS`, and
+`RESIZED?`; close transfers a fixed value snapshot back to the unowned runtime
+without retaining a backend callback. `TERMSIZE`, `RESIZE-DENIED?`, and
+`RESIZE-REQUEST` remain to be supplied. Close the enhanced lease and then the
+backend to return direct ownership to the runtime. The hosted `TX-FLUSH`
 primitive remains immediate and does not split publications.
 
 One focused simulator oracle still isolates the first KDOS-owned `CATCH`

@@ -2532,7 +2532,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.bind_numeric_base_address(base_word.body_address)
 
     # Preserve every pre-integration hosted XT by appending the first
-    # rich-terminal prerequisites after the complete older pseudo-BIOS.
+    # rich-terminal and geometry primitives after the complete older pseudo-BIOS.
     # Cross-backend absolute XTs are not portable.
     rich_terminal_primitives = (
         (b"UM*", _unsigned_multiply),
@@ -2540,6 +2540,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
         (b"MOVE", lambda context: _move(runtime, context)),
         (b"MS@", lambda context: _ms_fetch(runtime, context)),
         (b"TX-FLUSH", lambda context: _tx_flush(runtime, context)),
+        (b"COLS", lambda context: context.data.push(runtime.terminal_columns())),
+        (b"ROWS", lambda context: context.data.push(runtime.terminal_rows())),
+        (
+            b"RESIZED?",
+            lambda context: context.data.push(
+                forth_flag(runtime.consume_terminal_resized())
+            ),
+        ),
     )
     for name, callback in rich_terminal_primitives:
         runtime.define_primitive(name, callback)

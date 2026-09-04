@@ -86,6 +86,7 @@ from simulator.source import (
 )
 from simulator.stacks import DataStack, ReturnEntry, ReturnStack
 from simulator.timer import HostedTimerService
+from simulator.terminal_geometry import HostedTerminalGeometryState
 
 
 _BIOS_EVALUATE_MAX_BYTES = 255
@@ -585,6 +586,8 @@ class MegaForthRuntime:
         self._session_owner_lock = threading.RLock()
         self._session_owner_token: object | None = None
         self._session_owner_thread: int | None = None
+        self._legacy_terminal_geometry = HostedTerminalGeometryState()
+        self._session_terminal_geometry: HostedTerminalGeometryState | None = None
         self._next_suspension_sequence = 1
         self._next_wake_sequence = 1
         self._suspended_execution: _SuspendedExecution | None = None
@@ -871,12 +874,24 @@ class MegaForthRuntime:
             self._require_session_owner_token(token)
             return self._drain_uart_output()
 
-    def _claim_session_owner(self, token: object) -> None:
+    def _claim_session_owner(
+        self,
+        token: object,
+        *,
+        terminal_geometry: HostedTerminalGeometryState | None = None,
+    ) -> None:
         """Grant one backend exclusive public UART and dispatch ownership."""
 
         with self._session_owner_lock:
             if token is None:
                 raise TypeError("session owner token must not be None")
+            if terminal_geometry is not None and not isinstance(
+                terminal_geometry,
+                HostedTerminalGeometryState,
+            ):
+                raise TypeError(
+                    "terminal_geometry must be HostedTerminalGeometryState or None"
+                )
             if self._session_owner_token is not None:
                 raise ExecutionError("hosted runtime already has a session owner")
             if (
@@ -888,6 +903,7 @@ class MegaForthRuntime:
                     "cannot acquire session ownership during semantic execution"
                 )
             self._session_owner_token = token
+            self._session_terminal_geometry = terminal_geometry
 
     def _release_session_owner(self, token: object) -> None:
         """Release the exact backend's exclusive runtime ownership."""
@@ -900,7 +916,45 @@ class MegaForthRuntime:
                 raise ExecutionError(
                     "cannot release a suspended semantic dispatch"
                 )
+            terminal_geometry = self._session_terminal_geometry
+            if terminal_geometry is not None:
+                self._legacy_terminal_geometry.restore(
+                    terminal_geometry.snapshot()
+                )
+            self._session_terminal_geometry = None
             self._session_owner_token = None
+
+    def _active_terminal_geometry_locked(self) -> HostedTerminalGeometryState:
+        geometry = self._session_terminal_geometry
+        return self._legacy_terminal_geometry if geometry is None else geometry
+
+    def terminal_columns(self) -> int:
+        """Return the public BIOS column count for the active owner boundary."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access("read terminal columns")
+            return self._active_terminal_geometry_locked().snapshot().cols
+
+    def terminal_rows(self) -> int:
+        """Return the public BIOS row count for the active owner boundary."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access("read terminal rows")
+            return self._active_terminal_geometry_locked().snapshot().rows
+
+    def consume_terminal_resized(self) -> bool:
+        """Return and clear the public BIOS resize flag for the active owner."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access("read terminal resize state")
+            return self._active_terminal_geometry_locked().consume_resized()
+
+    def set_terminal_geometry(self, cols: int, rows: int) -> None:
+        """Set fixed legacy geometry while no session backend owns the runtime."""
+
+        with self._session_owner_lock:
+            self._require_unowned_host_access("set terminal geometry")
+            self._legacy_terminal_geometry.apply(cols, rows)
 
     @contextmanager
     def _session_owner_scope(self, token: object) -> Iterator[None]:

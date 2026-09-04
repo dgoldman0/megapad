@@ -181,7 +181,7 @@ def test_complete_kdos_loads_once_and_runs_representative_subsystems() -> None:
     assert runtime.main_context.data.pop() == 0
 
     loaded_words = runtime.dictionary.words[len(core_words) :]
-    assert len(core_words) == 324
+    assert len(core_words) == 327
     assert len(loaded_words) == 1_460
     assert loaded_words[0].name == b".R"
     assert tuple(word.name for word in loaded_words[-2:]) == (

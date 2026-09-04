@@ -10,7 +10,6 @@ execution and UART mutation are rejected outside the backend's guest call.
 
 from __future__ import annotations
 
-import operator
 import threading
 import weakref
 from contextlib import contextmanager
@@ -27,48 +26,10 @@ from simulator.runtime import (
     IdleWake,
     MegaForthRuntime,
 )
-
-
-def _dimension(name: str, value: int) -> int:
-    if isinstance(value, bool):
-        raise TypeError(f"{name} must be an integer, not bool")
-    try:
-        result = operator.index(value)
-    except TypeError as exc:
-        raise TypeError(f"{name} must be an integer") from exc
-    if not 1 <= result <= (1 << 16) - 1:
-        raise ValueError(f"{name} must be between 1 and 65535")
-    return int(result)
-
-
-@dataclass(frozen=True, slots=True)
-class HostedTerminalGeometry:
-    """Read-only snapshot of adapter-local terminal geometry."""
-
-    cols: int
-    rows: int
-    resized: bool
-
-
-class _HostedTerminalGeometryState:
-    """Boundary-owned dimensions and sticky resize observation."""
-
-    __slots__ = ("cols", "resized", "rows")
-
-    def __init__(self, cols: int = 80, rows: int = 24) -> None:
-        self.cols = _dimension("terminal columns", cols)
-        self.rows = _dimension("terminal rows", rows)
-        self.resized = False
-
-    def apply(self, cols: int, rows: int) -> None:
-        normalized_cols = _dimension("terminal columns", cols)
-        normalized_rows = _dimension("terminal rows", rows)
-        self.cols = normalized_cols
-        self.rows = normalized_rows
-        self.resized = True
-
-    def snapshot(self) -> HostedTerminalGeometry:
-        return HostedTerminalGeometry(self.cols, self.rows, self.resized)
+from simulator.terminal_geometry import (
+    HostedTerminalGeometry,
+    HostedTerminalGeometryState,
+)
 
 
 class SemanticBatchStop(str, Enum):
@@ -138,7 +99,12 @@ class _SimulatorRichTerminalHooks(RichTerminalHostHooks):
 
 
 class SimulatorSessionBackend:
-    """Own one hosted runtime's deterministic terminal/session boundary."""
+    """Own one hosted runtime's deterministic terminal/session boundary.
+
+    Constructor dimensions establish this new host session's baseline and do
+    not themselves report a resize. Later accepted legacy or enhanced updates
+    raise the guest-visible sticky notification.
+    """
 
     def __init__(
         self,
@@ -154,7 +120,7 @@ class SimulatorSessionBackend:
             raise TypeError("legacy_output_sink must be callable")
         self._runtime = runtime
         self._legacy_output_sink = legacy_output_sink
-        self._geometry = _HostedTerminalGeometryState(
+        self._geometry = HostedTerminalGeometryState(
             terminal_cols,
             terminal_rows,
         )
@@ -169,7 +135,10 @@ class SimulatorSessionBackend:
         hooks = _SimulatorRichTerminalHooks(self)
         self._rich_terminal_hooks = hooks
         self._rich_terminal_host = SharedRichTerminalHost(hooks)
-        self._runtime._claim_session_owner(self._owner_token)
+        self._runtime._claim_session_owner(
+            self._owner_token,
+            terminal_geometry=self._geometry,
+        )
 
     @property
     def runtime(self) -> MegaForthRuntime:

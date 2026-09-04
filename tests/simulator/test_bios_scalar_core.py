@@ -11,16 +11,19 @@ from simulator.runtime import MegaForthRuntime
 from simulator.stacks import StackUnderflow
 
 
-def test_rich_terminal_prerequisites_extend_the_existing_core_append_only() -> None:
+def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
     runtime = MegaForthRuntime()
 
-    assert len(runtime.dictionary.words) == 324
-    assert tuple(word.name for word in runtime.dictionary.words[-5:]) == (
+    assert len(runtime.dictionary.words) == 327
+    assert tuple(word.name for word in runtime.dictionary.words[-8:]) == (
         b"UM*",
         b"WITHIN",
         b"MOVE",
         b"MS@",
         b"TX-FLUSH",
+        b"COLS",
+        b"ROWS",
+        b"RESIZED?",
     )
 
 
