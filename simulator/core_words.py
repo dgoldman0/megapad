@@ -550,6 +550,12 @@ def _constant(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.define_constant(name, value)
 
 
+def _value(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    value = context.data.pop()
+    name = runtime.parse_required_input_word(b"VALUE")
+    runtime.define_value(name, value)
+
+
 def _create(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
     name = runtime.parse_required_input_word(b"CREATE")
     runtime.define_created(name)
@@ -2800,5 +2806,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
     for name, callback in extended_tile_primitives:
         runtime.define_primitive(name, callback)
+
+    # VALUE and its state-smart assignment word are kept together at the
+    # append-only source-closure frontier.  TO is represented as a directive
+    # so compilation can bind the exact VALUE body address immediately.
+    runtime.define_primitive(
+        b"VALUE",
+        lambda context: _value(runtime, context),
+    )
+    runtime.define_directive(b"TO", DirectiveKind.TO)
 
 __all__ = ["install_core"]

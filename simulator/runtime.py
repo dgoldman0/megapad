@@ -59,6 +59,7 @@ from simulator.ir import (
     RPopPair,
     RPush,
     RPushPair,
+    StoreValue,
     Return,
     Unloop,
     UartReadAttempt,
@@ -215,6 +216,11 @@ class ConstantDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class ValueDefinition:
+    """Marker for a named mutable cell stored in a word's body."""
+
+
+@dataclass(frozen=True, slots=True)
 class DoesBodyRef:
     """Stable entry point for one CREATE-family word's DOES> behavior."""
 
@@ -290,6 +296,7 @@ class DirectiveKind(Enum):
     ENDCASE = auto()
     RECURSE = auto()
     PLUS_LOOP = auto()
+    TO = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +308,7 @@ WordImplementation: TypeAlias = (
     PrimitiveDefinition
     | ColonDefinition
     | ConstantDefinition
+    | ValueDefinition
     | CreatedDefinition
     | DirectiveDefinition
 )
@@ -1935,6 +1943,19 @@ class MegaForthRuntime:
             self._active_input_states[-1].definitions.append(word)
         return word
 
+    def define_value(self, name: bytes | str, value: int) -> Word:
+        """Publish a named mutable cell whose execution fetches its body."""
+
+        self._require_session_owner_access("define a value")
+        word = self._define_public_dictionary_word(
+            name,
+            ValueDefinition(),
+            initial_body=u64(value).to_bytes(CELL_BYTES, "little"),
+        )
+        if self._active_input_states:
+            self._active_input_states[-1].definitions.append(word)
+        return word
+
     def define_created(
         self,
         name: bytes | str,
@@ -2676,6 +2697,28 @@ class MegaForthRuntime:
             compiler.operations.append(Literal(token[0]))
             return
 
+        if kind is DirectiveKind.TO:
+            name = self._parse_required_word(state, "TO")
+            try:
+                target = self.dictionary.find(name)
+            except ValueError:
+                target = None
+            if target is None:
+                self._compile_error(state, f"TO target {name!r} is undefined")
+            if not isinstance(target.implementation, ValueDefinition):
+                self._compile_error(
+                    state,
+                    f"TO requires a VALUE target, got {target.name!r}",
+                )
+            address = target.body_address
+            if state.compiler is not None and state.compiler.compile_mode:
+                state.compiler.operations.append(StoreValue(address))
+            else:
+                value = state.context.data.peek()
+                self.memory.write64(address, value)
+                state.context.data.pop()
+            return
+
         compiler = state.compiler
         if kind is DirectiveKind.IF and compiler is None:
             compiler = _Compiler(
@@ -3341,6 +3384,10 @@ class MegaForthRuntime:
                 meter.tick()
                 context.data.push(implementation.value)
                 self._abort_returned_dictionary_fault(context)
+            if isinstance(implementation, ValueDefinition):
+                meter.tick()
+                context.data.push(self.memory.read64(target.body_address))
+                self._abort_returned_dictionary_fault(context)
             if isinstance(implementation, CreatedDefinition):
                 meter.tick()
                 context.data.push(target.body_address)
@@ -3405,6 +3452,10 @@ class MegaForthRuntime:
                 if isinstance(implementation, ConstantDefinition):
                     meter.tick()
                     context.data.push(implementation.value)
+                    return
+                if isinstance(implementation, ValueDefinition):
+                    meter.tick()
+                    context.data.push(self.memory.read64(target.body_address))
                     return
                 if isinstance(implementation, CreatedDefinition):
                     meter.tick()
@@ -3493,6 +3544,11 @@ class MegaForthRuntime:
                     ip += 1
                 else:
                     current, ip = entered
+            elif isinstance(operation, StoreValue):
+                value = context.data.peek()
+                self.memory.write64(operation.address, value)
+                context.data.pop()
+                ip += 1
             elif isinstance(operation, Branch):
                 ip = operation.target
             elif isinstance(operation, BranchZero):
@@ -3642,6 +3698,10 @@ class MegaForthRuntime:
             if isinstance(implementation, ConstantDefinition):
                 meter.tick()
                 context.data.push(implementation.value)
+                return None
+            if isinstance(implementation, ValueDefinition):
+                meter.tick()
+                context.data.push(self.memory.read64(target.body_address))
                 return None
             if isinstance(implementation, CreatedDefinition):
                 meter.tick()
@@ -3870,5 +3930,6 @@ __all__ = [
     "PrimitiveCallback",
     "PrimitiveDefinition",
     "RunResult",
+    "ValueDefinition",
     "WordImplementation",
 ]

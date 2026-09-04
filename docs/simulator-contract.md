@@ -3592,11 +3592,14 @@ raw-token `[IF]`/`[ELSE]`/`[THEN]` skipping, structured CASE compilation,
 definition-bound recursion, equality-based `+LOOP`, directional `CMOVE>`,
 `ON`, the native `2!`/`2@` pair layout, the three relocation-control cells,
 and semantic-ancestor `LATEST!` publication without moving `HERE`. Fifteen
-final append-only words expose the extended tile family and `ACC1@` required
-by the exact Desktop source closure, backed by the same runtime-local tile and
-accumulator state. A native copied machine-code chain has no hosted
+following append-only words expose the extended tile family and `ACC1@`
+required by the exact Desktop source closure, backed by the same runtime-local
+tile and accumulator state. The final two append-only words provide
+body-backed `VALUE` definitions and state-smart `TO`; a compiled assignment
+captures its target body address so later name shadowing does not retarget it.
+A native copied machine-code chain has no hosted
 implementation metadata and is rejected rather than presented as
-simulator-executable. Fresh runtimes therefore publish 373 pre-KDOS words.
+simulator-executable. Fresh runtimes therefore publish 375 pre-KDOS words.
 Focused units qualify widening
 multiplication, wrapping interval comparison, overlap/fault copy order,
 deterministic latched uptime, immediate hosted flush semantics, session-bound

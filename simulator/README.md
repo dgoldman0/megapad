@@ -2326,15 +2326,17 @@ BIOS equality-based `+LOOP` contract, directional `CMOVE>`, `ON`, and the
 native `2!`/`2@` pair layout. The final four expose the three native relocation
 control cells and a semantic `LATEST!` which can publish a known hosted
 ancestor without moving `HERE`. Native copied machine-code dictionary splices
-remain deliberately non-executable on this backend. Fifteen final append-only
-words expose the extended tile family and `ACC1@` required by the exact
-Desktop source closure, backed by the same semantic tile register state. The
-focused
+remain deliberately non-executable on this backend. Fifteen following
+append-only words expose the extended tile family and `ACC1@` required by the
+exact Desktop source closure, backed by the same semantic tile register state.
+The final two append-only words provide body-backed `VALUE` definitions and
+state-smart `TO`; compiled assignments bind the exact value body rather than a
+later same-name shadow. The focused
 live integration below now evaluates the complete authoritative module against
 the exact KDOS exception closure, but does not yet claim normal
 MP64FS/`REQUIRE` composition, Akashic integration, the Desktop lifecycle, or
 physical rendering. Those runs remain deferred by the vertical's resource
-gate. Fresh runtimes therefore contain 373 pseudo-BIOS words before KDOS; the
+gate. Fresh runtimes therefore contain 375 pseudo-BIOS words before KDOS; the
 319-word figure above remains the exact historical-load observation and is not
 silently rewritten as new full-load evidence.
 

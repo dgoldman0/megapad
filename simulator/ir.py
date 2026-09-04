@@ -24,6 +24,14 @@ def _xt(value: int) -> int:
     return value
 
 
+def _address(value: int, *, operation: str) -> int:
+    if not isinstance(value, int):
+        raise TypeError(f"{operation} address must be an integer")
+    if not 0 <= value <= MASK64:
+        raise ValueError(f"{operation} address must be a uint64 value")
+    return value
+
+
 def _payload(value: bytes, *, operation: str) -> bytes:
     if not isinstance(value, bytes):
         raise TypeError(f"{operation} payload must be bytes")
@@ -49,6 +57,20 @@ class Call:
 @dataclass(frozen=True, slots=True)
 class CallSelf:
     """Call the colon definition which owns this operation."""
+
+
+@dataclass(frozen=True, slots=True)
+class StoreValue:
+    """Consume one cell into a VALUE body captured at compile time."""
+
+    address: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "address",
+            _address(self.address, operation="VALUE store"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +232,7 @@ Operation: TypeAlias = (
     Literal
     | Call
     | CallSelf
+    | StoreValue
     | Branch
     | BranchZero
     | Return
@@ -259,6 +282,7 @@ __all__ = [
     "RPopPair",
     "RPush",
     "RPushPair",
+    "StoreValue",
     "Unloop",
     "UartReadAttempt",
     "WriteOutput",
