@@ -3658,6 +3658,19 @@ composition and lifecycle integration—sharing the existing presentation,
 physical acknowledgement, and input authority while keeping the simulator's
 run-to-IDL semantic scheduler distinct from emulator instruction batching.
 
+`SimulatorMachineSession` now establishes that scheduler/session composition.
+It reuses the existing `MachineSession` terminal frontend through explicit
+attachment, host-state, legacy-input, and legacy-geometry hooks rather than
+impersonating `MegapadSystem`. One owner boundary services the shared driver,
+runs or resumes the root semantic dispatch, then services the driver and
+display cadence again. Completion and `IDL`, semantic steps, external-event
+admission, host backpressure, and terminal failure retain their own names and
+cannot be reported as instruction or cycle statistics. Focused evidence drives
+the complete module to the same revision-1 CELL snapshot through this session
+and leaves its root continuation quiescent at `IDL`. It does not yet establish
+the JSON shared owner/server, retained physical display offer, or Akashic image
+and root-entry preparation.
+
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
 KDOS load run before the real rich vertical exists. Native/exact-full-core cold
 load, Desktop smoke, sustained cadence, persistence, full renderer, and
