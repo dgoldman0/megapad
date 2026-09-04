@@ -2411,8 +2411,25 @@ steps, owner boundaries, and external events rather than invented cycles or
 instructions. Forth lookup resolves newest hosted bindings and exposes created
 data/value cells, while diagnostic peeks read semantic memory directly.
 Emulator host profiling, phase sampling, and NIC diagnostics remain explicitly
-unavailable. Normal Akashic image/root preparation, a retained physical offer,
-and the actual socket/viewer journey are the next seams.
+unavailable.
+
+`simulator/image_bootstrap.py` now prepares that normal image/root boundary.
+It validates marker-1 MP64FS through the hosted storage service, selects the
+first BIOS-loadable Forth entry, reconstructs both extents, and blanks only
+the standalone final `_AUTOEXEC-RUN` invocation without changing source
+offsets. KDOS preparation runs through the initially captured checked-evaluator
+XTs. A deferred `_SIMULATOR-SESSION-ENTRY` then lets the later ordinary
+autoexec closure bind its guarded Desktop entry before the one resumable root
+dispatch reaches it.
+
+The root `simulator_server.py` entry point exposes this prepared runtime through
+the unchanged shared-session socket and `SimulatorSharedMachine`. It accepts
+only semantic memory, geometry, terminal-policy, pause, and optional semantic
+step-budget arguments; emulator BIOS, core scheduling, TAP, audio, cycle
+batching, and host profiling options are deliberately absent. Akashic can now
+build a distinct simulator image and launch the same viewer/session protocol.
+The next seam is the remaining source vocabulary followed by the retained
+physical offer and actual Desktop socket/viewer journey.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

@@ -3717,7 +3717,7 @@ CPU traversal. Focused dispatch evidence reaches the same revision-1 CELL
 snapshot, applies generation rejection, admits terminal input, and delivers it
 to the suspended guest. Emulator host profiling, phase sampling, and NIC
 diagnostics still fail explicitly. This does not yet establish a retained
-physical display offer, Akashic image/root preparation, or the socket/viewer
+physical display offer or the complete Desktop socket/viewer
 journey.
 
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
