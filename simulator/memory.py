@@ -559,7 +559,8 @@ class SparseAddressSpace:
         length: int,
     ) -> None:
         for offset in range(length - 1, -1, -1):
-            self.write8(destination + offset, self.read8(source + offset))
+            value = self.read8((source + offset) & MASK64)
+            self.write8((destination + offset) & MASK64, value)
 
     def _move_forward_bytes(
         self,

@@ -259,6 +259,30 @@ def test_backward_copy_preserves_high_to_low_overlap_semantics() -> None:
     assert memory.read_bytes(0x20, 6) == b"aabcde"
 
 
+def test_backward_copy_wraps_each_byte_address_as_uint64(monkeypatch) -> None:
+    memory = SparseAddressSpace(bank0_size=0x100)
+    events: list[tuple[str, int, int | None]] = []
+
+    def read8(address: int) -> int:
+        events.append(("read", address, None))
+        return address & 0xFF
+
+    def write8(address: int, value: int) -> None:
+        events.append(("write", address, value))
+
+    monkeypatch.setattr(memory, "read8", read8)
+    monkeypatch.setattr(memory, "write8", write8)
+
+    memory.copy_backward(MASK64, MASK64 - 4, 2)
+
+    assert events == [
+        ("read", 0, None),
+        ("write", MASK64 - 3, 0),
+        ("read", MASK64, None),
+        ("write", MASK64 - 4, 0xFF),
+    ]
+
+
 def test_forward_copy_zero_length_and_mmio_use_byte_transaction_semantics() -> None:
     port = RecordingMMIO(values={0: 0x31, 1: 0x32})
     memory = SparseAddressSpace(bank0_size=0x100, mmio=port)
