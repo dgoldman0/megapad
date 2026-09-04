@@ -520,6 +520,34 @@ class MachineSession:
     ):
         if batch_steps <= 0:
             raise ValueError("batch_steps must be positive")
+        self.system = system
+        self.batch_steps = int(batch_steps)
+        self._initialize_terminal_frontend(cols, rows, rich_terminal)
+        self._old_on_tx = self.system.uart.on_tx
+        self._old_on_tx_batch = self.system.uart.on_tx_batch
+        self.system.uart.on_tx = self._receive_byte
+        self.system.uart.on_tx_batch = self._receive_batch
+        try:
+            if rich_terminal is None:
+                self.resize(cols, rows)
+            else:
+                self._attach_rich_terminal()
+        except BaseException:
+            if self._rich_terminal_driver is not None:
+                self._rich_terminal_driver.close()
+                self._rich_terminal_driver = None
+            self.system.uart.on_tx = self._old_on_tx
+            self.system.uart.on_tx_batch = self._old_on_tx_batch
+            raise
+
+    def _initialize_terminal_frontend(
+        self,
+        cols: int,
+        rows: int,
+        rich_terminal: RichTerminalSessionConfig | None,
+    ) -> None:
+        """Initialize backend-neutral terminal and presentation authority."""
+
         if rich_terminal is not None and not isinstance(
             rich_terminal, RichTerminalSessionConfig
         ):
@@ -531,8 +559,6 @@ class MachineSession:
             raise ValueError(
                 "session geometry must match the rich terminal config"
             )
-        self.system = system
-        self.batch_steps = int(batch_steps)
         self._rich_terminal_config = rich_terminal
         self._rich_terminal_driver: RichTerminalDriver | None = None
         self._output_view: TerminalView | None = None
@@ -566,22 +592,6 @@ class MachineSession:
         self.revision = 0
         self.bios_labels: dict[str, int] = {}
         self._closed = False
-        self._old_on_tx = self.system.uart.on_tx
-        self._old_on_tx_batch = self.system.uart.on_tx_batch
-        self.system.uart.on_tx = self._receive_byte
-        self.system.uart.on_tx_batch = self._receive_batch
-        try:
-            if rich_terminal is None:
-                self.resize(cols, rows)
-            else:
-                self._attach_rich_terminal()
-        except BaseException:
-            if self._rich_terminal_driver is not None:
-                self._rich_terminal_driver.close()
-                self._rich_terminal_driver = None
-            self.system.uart.on_tx = self._old_on_tx
-            self.system.uart.on_tx_batch = self._old_on_tx_batch
-            raise
 
     @classmethod
     def from_bios(
@@ -631,6 +641,26 @@ class MachineSession:
         )
         session.bios_labels = dict(labels)
         return session
+
+    def _terminal_attachment_target(self):
+        """Return the backend exposing the shared rich-terminal host port."""
+
+        return self.system
+
+    def _terminal_host_state(self):
+        """Return the backend-neutral host-port state used for liveness."""
+
+        return self.system.rich_terminal_host
+
+    def _inject_legacy_terminal_input(self, data: bytes) -> None:
+        """Inject bytes while no enhanced terminal owns the stream."""
+
+        self.system.uart.inject_input(data)
+
+    def _set_legacy_terminal_geometry(self, cols: int, rows: int) -> None:
+        """Commit geometry while the ANSI frontend owns the stream."""
+
+        self.system.uart_geom.host_set_size(cols, rows)
 
     def __enter__(self) -> "MachineSession":
         return self
@@ -706,7 +736,7 @@ class MachineSession:
             if driver.failure_reason is not None:
                 self._record_rich_terminal_failure(driver.failure_reason)
                 return self._rich_terminal_failure_reason
-            host = self.system.rich_terminal_host
+            host = self._terminal_host_state()
             if (
                 driver.closed
                 or host.active_attachment_epoch != driver.attachment_epoch
@@ -717,7 +747,7 @@ class MachineSession:
                 )
                 return self._rich_terminal_failure_reason
         if self._rich_terminal_config is not None:
-            host_failure = self.system.rich_terminal_host.failure_reason
+            host_failure = self._terminal_host_state().failure_reason
             if host_failure is not None:
                 self._record_rich_terminal_failure(host_failure)
                 return self._rich_terminal_failure_reason
@@ -893,7 +923,7 @@ class MachineSession:
             rows=self.terminal.rows,
         )
         self._rich_terminal_driver = RichTerminalDriver.attach(
-            self.system,
+            self._terminal_attachment_target(),
             config.host_limits,
             terminal_config,
             config.driver_limits,
@@ -917,7 +947,7 @@ class MachineSession:
             raise RuntimeError(self._rich_terminal_failure_reason)
         driver = self._rich_terminal_driver
         if driver is None:
-            self.system.uart.inject_input(data)
+            self._inject_legacy_terminal_input(data)
             return
         status = driver.send_legacy_input(data)
         if status is not DriverStatus.PROGRESS:
@@ -1386,7 +1416,7 @@ class MachineSession:
             )
         )
         if stats.system_stop_reason == "terminal_failure":
-            reason = self.system.rich_terminal_host.failure_reason
+            reason = self._terminal_host_state().failure_reason
             self._latch_rich_terminal_failure(reason or "rich-terminal host failed")
         self._refresh_output_display_boundary()
         return stats
@@ -1404,7 +1434,7 @@ class MachineSession:
                 "rich-terminal attachment became stale",
                 lost=True,
             )
-        host_failure = self.system.rich_terminal_host.failure_reason
+        host_failure = self._terminal_host_state().failure_reason
         if host_failure is not None:
             self._latch_rich_terminal_failure(host_failure)
 
@@ -1433,7 +1463,7 @@ class MachineSession:
         driver = self._rich_terminal_driver
         if driver is None:
             return False
-        host = self.system.rich_terminal_host
+        host = self._terminal_host_state()
         return bool(
             driver.pending_outbound_events
             or (
@@ -1473,7 +1503,7 @@ class MachineSession:
         driver = self._rich_terminal_driver
         if driver is None or not self._output_view_selected:
             return
-        host = self.system.rich_terminal_host
+        host = self._terminal_host_state()
         if (
             driver.core.state is TerminalState.ANSI
             and driver.pending_outbound_events == 0
@@ -1672,7 +1702,7 @@ class MachineSession:
             return DriverStatus.FAILED
         driver = self._rich_terminal_driver
         if driver is None:
-            self.system.uart.inject_input(payload)
+            self._inject_legacy_terminal_input(payload)
             return None
         if driver.core.state in {TerminalState.ANSI, TerminalState.PROBING}:
             return driver.send_legacy_input(payload)
@@ -1748,7 +1778,7 @@ class MachineSession:
         }:
             payload = self._legacy_key_bytes(key)
             if driver is None:
-                self.system.uart.inject_input(payload)
+                self._inject_legacy_terminal_input(payload)
                 return None
             return driver.send_legacy_input(payload)
         symbol, modifiers = self._rich_terminal_key(key)
@@ -1840,7 +1870,7 @@ class MachineSession:
             return status
         changed = cols != self.terminal.cols or rows != self.terminal.rows
         self.terminal.resize(cols, rows)
-        self.system.uart_geom.host_set_size(cols, rows)
+        self._set_legacy_terminal_geometry(cols, rows)
         if changed:
             self.revision += 1
         return None
