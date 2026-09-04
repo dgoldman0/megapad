@@ -85,7 +85,10 @@
 > OPEN records, and the public transition into probing ownership. The fixture
 > deliberately supplies one-core SPIN-based wrappers for the KDOS-owned UART
 > lock words and is not evidence of a complete module load or live
-> rich-terminal session.
+> rich-terminal session. The next contiguous slice reaches `_PT-READ-BYTE`,
+> injects an independently encoded OFFER through each backend's real UART
+> FIFO, and requires the production scanner to emit the exact OPEN and enter
+> `OPENING`; framed readiness and a live session remain ahead.
 
 **Date:** 2026-03-07  
 **Branch:** `main`  

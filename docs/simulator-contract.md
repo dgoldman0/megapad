@@ -3565,6 +3565,18 @@ the session address and `MS@`. This remains pre-OFFER evidence: it does not
 exercise UART input, accept a negotiation offer, or establish a live APT
 session.
 
+The next contiguous oracle extends the extracted source only through
+`_PT-READ-BYTE`. After public `PT-START`, the host parses the emitted dynamic
+nonce, independently encodes a valid OFFER, and injects those exact bytes
+through each backend's real UART FIFO. The source-defined `KEY?`/`KEY` reader,
+OFFER syntax and validity checks, scanner, buffer compaction, and acceptance
+path must consume it completely. Both backends then emit the independent
+codec's exact OPEN record and agree on `OPENING`, ownership, session ID,
+payload and transaction limits, credits, geometry, text capacity, snapshot
+need, probe count, sequence state, and empty binary/legacy buffers. This is a
+real host-to-guest negotiation boundary, but it still stops before framed
+SERVER_READY handling, CLIENT_READY, ACTIVE state, or a live driver/session.
+
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
 exception unwinding, but they do not move that frontier and are not a

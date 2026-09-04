@@ -262,8 +262,12 @@ then qualify rejected and accepted caller-owned storage, storage-disjointness,
 the exact PROBE and OPEN encodings, and the public transition into probing
 ownership. Because the prefix calls KDOS-owned UART locks, the deliberately
 one-core fixture supplies equivalent uncontended SPIN-based lock wrappers to
-both backends. This is not a complete module-load, OFFER-input, or live-session
-claim.
+both backends. A second contiguous prefix through `_PT-READ-BYTE` crosses the
+actual UART input boundary: the host derives a valid OFFER from the emitted
+dynamic probe, each backend consumes it through `KEY?`/`KEY`, and the
+production scanner must emit the exact OPEN and retain every negotiated field
+in `OPENING`. This is not a complete module-load, framed-readiness, or
+live-session claim.
 
 A minimal hosted-source invocation is:
 
@@ -2315,7 +2319,9 @@ initialization bounds and overlap matrix, exact PROBE and OPEN negotiation
 records, and `PT-START`'s state and ownership transition. The dedicated
 simulator selector stays accelerator-free so later source-level work can use
 it as the fast inner loop; the paired emulator selector remains the
-exact-machine backstop.
+exact-machine backstop. The following slice advances the contiguous source to
+`_PT-READ-BYTE` and proves real FIFO ingestion, OFFER parsing/admission, exact
+OPEN output, and the complete `OPENING` state on both engines.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.
