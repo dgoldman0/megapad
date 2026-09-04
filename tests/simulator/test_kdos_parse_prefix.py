@@ -20,7 +20,7 @@ BASE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-39-69.f"
 PARSE_FIXTURE = FIXTURE_DIRECTORY / "kdos-prefix-71-115.f"
 
 MEGAPAD_REVISION = "ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c"
-KDOS_GIT_BLOB = "fd017b16dbd3ef4746d0e3467e980c015cf5a664"
+KDOS_GIT_BLOB = "4580b4075b3114ef6e5b2c8121b6e4fa1cfb2c70"
 
 BASE_FIRST_LINE = 39
 BASE_LAST_LINE = 69
@@ -314,7 +314,7 @@ def test_zero_greater_equal_uses_signed_test_and_full_width_invert(
     assert context.data.snapshot() == (expected,)
 
 
-def test_bios_min_is_unsigned_while_greater_than_is_signed(
+def test_bios_min_max_and_greater_than_share_signed_ordering(
     loaded_parse_prefix: MegaForthRuntime,
 ) -> None:
     runtime = loaded_parse_prefix
@@ -322,6 +322,12 @@ def test_bios_min_is_unsigned_while_greater_than_is_signed(
     context.data.push(MASK64)
     context.data.push(1)
     runtime.execute("MIN", context=context)
+    assert context.data.snapshot() == (MASK64,)
+
+    context.data.clear()
+    context.data.push(MASK64)
+    context.data.push(1)
+    runtime.execute("MAX", context=context)
     assert context.data.snapshot() == (1,)
 
     context.data.clear()

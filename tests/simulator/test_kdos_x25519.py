@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from emulator.megapad64 import (
+    _x25519_scalar_mul as python_emulator_x25519_scalar_multiply,
+)
 from shared.x25519 import X25519_BYTES, x25519_scalar_multiply
 from simulator.field import HostedFieldALUService
 from simulator.memory import (
@@ -196,6 +199,22 @@ def test_shared_x25519_matches_rfc_7748_vectors(
     expected: bytes,
 ) -> None:
     assert x25519_scalar_multiply(scalar, point) == expected
+
+
+@pytest.mark.parametrize(
+    ("scalar", "point", "expected"),
+    (
+        (RFC_SCALAR_ONE, RFC_POINT_ONE, RFC_RESULT_ONE),
+        (RFC_SCALAR_TWO, RFC_POINT_TWO, RFC_RESULT_TWO),
+    ),
+)
+def test_pure_python_emulator_x25519_matches_rfc_7748_vectors(
+    scalar: bytes,
+    point: bytes,
+    expected: bytes,
+) -> None:
+    result = python_emulator_x25519_scalar_multiply(scalar, point)
+    assert result.to_bytes(X25519_BYTES, "little") == expected
 
 
 def test_shared_x25519_clamps_scalar_and_masks_coordinate_top_bit() -> None:

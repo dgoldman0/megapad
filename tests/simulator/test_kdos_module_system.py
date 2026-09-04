@@ -42,20 +42,20 @@ FIXTURE = (
 FIRST_LINE = 9384
 FIXTURE_LAST_LINE = 9854
 LAST_LINE = 9853
-FIXTURE_BYTES = 14_287
+FIXTURE_BYTES = 14_486
 FIXTURE_SHA256 = (
-    "4cbbe9c1e684ef24f2a9a033c3ac3bf671d4bd893ad1ce7c5bd7e7941a00a98c"
+    "6213a62e8bbc1ada04565d775a436cebc2ace9b5c9b32f27302b13568d9d92b6"
 )
-FIXTURE_GIT_BLOB = "9ca3dd84f7367a64fc4514925b857aba557bc423"
-SLICE_BYTES = 14_215
+FIXTURE_GIT_BLOB = "be9ab02eced24379053654034ff4199bef57dbf3"
+SLICE_BYTES = 14_414
 SLICE_SHA256 = (
-    "41fcc105a23c047a624cf208d63985df9f526f0c5c25ae5e19679ed8a2f6b02f"
+    "73adf1e903e12f891908750aeeced70d4888dfb6087af6372a99eca1495ecd74"
 )
-SLICE_GIT_BLOB = "fbb7e5cf16b59f01c66eac0479ef70c6e3168ded"
+SLICE_GIT_BLOB = "231b452a63ad3d70fc635f3e4b40a7033627fc68"
 
 CELL_BYTES = 8
 HOSTED_WORD_FIXED_BYTES = 17
-HOSTED_DICTIONARY_GROWTH = 2_247
+HOSTED_DICTIONARY_GROWTH = 2_278
 MODULE_LOCK_ID = 5
 INLINE_BUCKETS = 16
 MODULE_NODE_HEADER_BYTES = 32
@@ -121,6 +121,7 @@ SOURCE_LEDGER = (
     (":", b"PROVIDED-SPAN", 0),
     (":", b"PROVIDED", 0),
     (":", b"MODULE?", 0),
+    (":", b"_MOD-READ-WALK", 0),
     (":", b"_MOD-LOAD-BODY", 0),
     ("XBUF", b"_REQ-CWD-STK", 0),
     ("VARIABLE", b"_REQ-SP", CELL_BYTES),
@@ -221,7 +222,14 @@ def _find(runtime: MegaForthRuntime, address: int, length: int) -> int:
 def _loader_globals(runtime: MegaForthRuntime) -> tuple[int, ...]:
     return tuple(
         _variable(runtime, name)
-        for name in ("LD-BUF", "LD-SZ", "LD-CUR", "LD-LEN", "CWD")
+        for name in (
+            "LD-BUF",
+            "LD-SZ",
+            "LD-CUR",
+            "LD-LEN",
+            "LD-LINE",
+            "CWD",
+        )
     )
 
 
@@ -312,8 +320,8 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
 
     runtime = _evaluate_module_system(runtime)
 
-    assert len(SOURCE_LEDGER) == 68
-    assert sum(definer == ":" for definer, _name, _body in SOURCE_LEDGER) == 39
+    assert len(SOURCE_LEDGER) == 69
+    assert sum(definer == ":" for definer, _name, _body in SOURCE_LEDGER) == 40
     assert sum(
         definer == "VARIABLE" for definer, _name, _body in SOURCE_LEDGER
     ) == 17
@@ -323,7 +331,7 @@ def test_module_slice_is_exact_linked_initialized_and_load_effects_are_exact() -
         definer in ("CONSTANT", "XBUF")
         for definer, _name, _body in SOURCE_LEDGER
     ) == 7
-    assert sum(len(name) for _definer, name, _body in SOURCE_LEDGER) == 762
+    assert sum(len(name) for _definer, name, _body in SOURCE_LEDGER) == 776
     assert sum(body for _definer, _name, body in SOURCE_LEDGER) == 329
     assert sum(
         HOSTED_WORD_FIXED_BYTES + len(name) + body
@@ -616,7 +624,7 @@ def test_loader_frame_commit_and_rollback_cover_all_provisional_ids() -> None:
     assert _loader_globals(runtime) == loader_before
     assert _execute(runtime, "HEAP-FREE-BYTES") == heap_before_failure
     assert _execute(runtime, "_MOD-COUNT") == (2,)
-    assert _execute(runtime, "TXN-LEFT-BEHIND") == (77,)
+    assert runtime.find("TXN-LEFT-BEHIND") is None
     for index, module_id in enumerate((b"txn.failed", b"txn.failed-alias")):
         query = _span(runtime, f"TXN-ROLLBACK-QUERY-{index}", module_id)
         assert _find(runtime, query, len(module_id)) == 0
@@ -673,7 +681,7 @@ def test_prescan_uses_exact_uppercase_blank_tokens_and_line_limit() -> None:
     _set_prescan_source(runtime, "PRESCAN-CRLF", crlf)
     cr_address, cr_length, cr_found = _execute(runtime, "_MOD-PRESCAN")
     assert cr_found == TRUE
-    assert runtime.memory.read_bytes(cr_address, cr_length) == b"id\r"
+    assert runtime.memory.read_bytes(cr_address, cr_length) == b"id"
 
 
 def test_require_releases_every_frame_when_prescan_registration_is_out_of_memory() -> None:
@@ -726,11 +734,11 @@ def test_require_releases_every_frame_when_prescan_registration_is_out_of_memory
 
 def test_require_breaks_an_uppercase_self_cycle_and_skips_duplicate_evaluation() -> None:
     module_source = (
-        b"PROVIDED cycle.demo\n"
-        b"VARIABLE CYCLE-LOAD-COUNT 0 CYCLE-LOAD-COUNT !\n"
-        b"1 CYCLE-LOAD-COUNT +!\n"
-        b"REQUIRE cycle.f\n"
-        b"1 CYCLE-LOAD-COUNT +!\n"
+        b"PROVIDED cycle.demo\r\n"
+        b"VARIABLE CYCLE-LOAD-COUNT 0 CYCLE-LOAD-COUNT !\r\n"
+        b"1 CYCLE-LOAD-COUNT +!\r\n"
+        b"REQUIRE cycle.f\r\n"
+        b"1 CYCLE-LOAD-COUNT +!\r\n"
     )
     image = _module_image(((b"cycle.f", module_source),))
     runtime = _load_module_system()
@@ -778,7 +786,7 @@ def test_require_breaks_an_uppercase_self_cycle_and_skips_duplicate_evaluation()
     assert runtime.spinlocks.owner(1) is None
 
 
-def test_nested_dependency_commit_survives_parent_require_rollback() -> None:
+def test_nested_dependency_joins_parent_dictionary_and_registry_rollback() -> None:
     parent_source = (
         b"PROVIDED parent.failed\n"
         b"REQUIRE child.f\n"
@@ -799,17 +807,22 @@ def test_nested_dependency_commit_survives_parent_require_rollback() -> None:
     runtime.storage.attach(image)
     _mount(runtime)
     heap_before = _execute(runtime, "HEAP-FREE-BYTES")
+    dictionary_before = (runtime.dictionary.here, runtime.dictionary.latest)
     media_before = runtime.storage.image_bytes
 
     result = _stack_eval(runtime, b"' REQUIRE CATCH parent.f")
 
     assert result == (u64(-77),)
     assert _stack_eval(runtime, b"MODULE? parent.failed") == (0,)
-    assert _stack_eval(runtime, b"MODULE? child.committed") == (TRUE,)
-    assert _execute(runtime, "_MOD-COUNT") == (1,)
-    assert _execute(runtime, "CHILD-COMMITTED-WORD") == (73,)
-    assert _execute(runtime, "PARENT-LEFT-BEHIND") == (91,)
-    assert _execute(runtime, "HEAP-FREE-BYTES")[0] < heap_before[0]
+    assert _stack_eval(runtime, b"MODULE? child.committed") == (0,)
+    assert _execute(runtime, "_MOD-COUNT") == (0,)
+    assert runtime.find("CHILD-COMMITTED-WORD") is None
+    assert runtime.find("PARENT-LEFT-BEHIND") is None
+    assert _execute(runtime, "HEAP-FREE-BYTES") == heap_before
+    assert (
+        runtime.dictionary.here,
+        runtime.dictionary.latest,
+    ) == dictionary_before
     assert _variable(runtime, "_LD-SP") == 0
     assert _variable(runtime, "_REQ-SP") == 0
     assert _variable(runtime, "EVAL-DEPTH") == 0

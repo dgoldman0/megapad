@@ -38,9 +38,9 @@ FIXTURE = (
 FIRST_LINE = 4804
 LAST_LINE = 5003
 SLICE_SHA256 = (
-    "b022f3514605371f527a1e823b78ea26b5b09dad44198b4936272eaef1bb091b"
+    "d76d714ed903db5bcd5a6ba5271288ea31c08e2f5fdec2eabd86dbb0bd0cbc32"
 )
-SLICE_GIT_BLOB = "1f6546ff06f3db1a983f1eaf11f09172115823db"
+SLICE_GIT_BLOB = "408303c3556838e7070f556043d9f9318edfb563"
 
 DEFINITIONS = (
     b"FILE-COUNT",
@@ -86,7 +86,7 @@ DEFINITIONS = (
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 6_781
+    assert len(source) == 6_799
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -219,7 +219,7 @@ def test_file_defining_word_builds_constants_and_caps_only_the_registry() -> Non
     assert runtime.drain_uart_output() == b""
 
 
-def test_seek_rewind_size_and_unsigned_truncate_metadata() -> None:
+def test_seek_rewind_size_and_truncate_metadata() -> None:
     runtime = _load_file_abstraction()
     descriptor = _make_file(runtime, 4, 2, "META-FILE")
 
@@ -233,8 +233,8 @@ def test_seek_rewind_size_and_unsigned_truncate_metadata() -> None:
     assert _execute(runtime, "FTRUNCATE", 900, descriptor) == ()
     assert _file_fields(runtime, descriptor) == (4, 2, 900, 700)
     assert _execute(runtime, "FSEEK", 1_200, descriptor) == ()
-    # Current executable MIN is unsigned, so -1 clamps to capacity.
-    assert _execute(runtime, "FTRUNCATE", MASK64, descriptor) == ()
+    # A valid length beyond the extent clamps to its capacity.
+    assert _execute(runtime, "FTRUNCATE", 2_000, descriptor) == ()
     assert _file_fields(runtime, descriptor) == (4, 2, 1_024, 1_024)
     assert _execute(runtime, "FREWIND", descriptor) == ()
     assert _execute(runtime, "FSIZE", descriptor) == (1_024,)

@@ -2,38 +2,34 @@
 \ LOAD ( "filename" -- ) open a file by name, read it, EVALUATE it
 \   Reads the entire file into a reclaimable loader allocation, then walks
 \   through it line by line, EVALUATEing each line.
-
 VARIABLE LD-BUF
 VARIABLE LD-SZ
 VARIABLE LD-CUR
 VARIABLE LD-LEN
-
+VARIABLE LD-LINE
 \ Nesting support: save/restore walker state for nested LOAD/REQUIRE.
 \ Includes CWD so relative-path loads restore the working directory.  Each
-\ frame also owns an evaluator-depth checkpoint and a private transaction
-\ pointer used by the module registry.  The loader hooks below are no-ops
-\ until §20 installs that registry's commit and rollback actions.
+\ frame owns evaluator-depth and HERE/LATEST checkpoints plus a private module
+\ transaction pointer.  Only the module-ID hooks are no-ops until §20 binds
+\ them; dictionary rollback is intrinsic to every guarded loader frame.
 \
-\ Frame layout (7 cells, 56 bytes):
+\ Frame layout (11 cells, 88 bytes):
 \   +0  saved LD-BUF       +8  saved LD-SZ
 \   +16 saved LD-CUR       +24 saved LD-LEN
-\   +32 saved CWD          +40 evaluator-depth checkpoint
-\   +48 loader transaction head
-56 CONSTANT _LD-FRAME
+\   +32 saved LD-LINE      +40 saved EVAL-LINE
+\   +48 saved CWD          +56 evaluator depth
+\   +64 transaction head   +72 saved HERE       +80 saved LATEST
+88 CONSTANT _LD-FRAME
 16 CONSTANT _LD-MAXLVL
 CREATE _LD-STK _LD-FRAME _LD-MAXLVL * ALLOT
 VARIABLE _LD-SP
 0 _LD-SP !
-
 : _LD-ACTIVE-FRAME  ( -- addr )
     _LD-SP @ _LD-FRAME - _LD-STK + ;
-
 : _LD-EVAL-CHECKPOINT  ( -- n )
-    _LD-ACTIVE-FRAME 40 + @ ;
-
+    _LD-ACTIVE-FRAME 56 + @ ;
 : _LD-TXN-HEAD  ( -- addr )
-    _LD-ACTIVE-FRAME 48 + ;
-
+    _LD-ACTIVE-FRAME 64 + ;
 : _LD-TXN-NOOP  ( -- ) ;
 DEFER _LD-TXN-COMMIT
 DEFER _LD-TXN-ROLLBACK
@@ -41,7 +37,6 @@ DEFER _LD-TXN-AFTER-RELEASE
 ' _LD-TXN-NOOP IS _LD-TXN-COMMIT
 ' _LD-TXN-NOOP IS _LD-TXN-ROLLBACK
 ' _LD-TXN-NOOP IS _LD-TXN-AFTER-RELEASE
-
 : _LD-SAVE  ( -- )
     _LD-SP @ _LD-FRAME _LD-MAXLVL * >= ABORT" REQUIRE nested too deep"
     _LD-SP @ _LD-STK +
@@ -49,11 +44,14 @@ DEFER _LD-TXN-AFTER-RELEASE
     LD-SZ  @ OVER  8 + !
     LD-CUR @ OVER 16 + !
     LD-LEN @ OVER 24 + !
-    CWD    @ OVER 32 + !
-    EVAL-DEPTH @ OVER 40 + !
-    0 SWAP 48 + !
+    LD-LINE @ OVER 32 + !
+    EVAL-LINE @ OVER 40 + !
+    CWD @ OVER 48 + !
+    EVAL-DEPTH @ OVER 56 + !
+    0 OVER 64 + !
+    HERE OVER 72 + !
+    LATEST SWAP 80 + !
     _LD-FRAME _LD-SP +! ;
-
 : _LD-RESTORE  ( -- )
     _LD-SP @ 0= ABORT" REQUIRE nesting underflow"
     _LD-FRAME NEGATE _LD-SP +!
@@ -62,22 +60,19 @@ DEFER _LD-TXN-AFTER-RELEASE
     DUP  8 + @ LD-SZ  !
     DUP 16 + @ LD-CUR !
     DUP 24 + @ LD-LEN !
-        32 + @ CWD    ! ;
-
+    DUP 32 + @ LD-LINE !  DUP 40 + @ EVAL-LINE !
+        48 + @ CWD    ! ;
 VARIABLE _LD-RUN-SEC
 VARIABLE _LD-RUN-CNT
 VARIABLE _LD-RUN-ADDR
-
 \ _LD-READ-RUN ( sector count addr -- next-addr )
 \ The BIOS checked layer owns hardware-sized splitting and completion.
 : _LD-READ-RUN  ( sector count addr -- next-addr )
     _LD-RUN-ADDR ! _LD-RUN-CNT ! _LD-RUN-SEC !
-    _LD-RUN-ADDR @ _LD-RUN-SEC @ _LD-RUN-CNT @ _DISK-READ
+    _LD-RUN-ADDR @ _LD-RUN-SEC @ _LD-RUN-CNT @ _DISK-READ? 0= IF DISK-IO-IOR @ THROW THEN
     _LD-RUN-ADDR @ _LD-RUN-CNT @ SECTOR * + ;
-
 : _LD-SLOT-BYTES  ( slot -- bytes )
     DIRENT DUP DE.COUNT SWAP DE.EXT1-CNT + SECTOR * ;
-
 \ _LD-READ-SLOT ( slot -- )  Concatenate both validated extents in LD-BUF.
 : _LD-READ-SLOT  ( slot -- )
     DIRENT
@@ -87,7 +82,6 @@ VARIABLE _LD-RUN-ADDR
     ELSE
         DROP 2DROP
     THEN ;
-
 \ ── Relative-path resolution for LOAD / REQUIRE ─────────────────────
 \  Paths like "../markup/html.f" or "lib/util.f" are split on '/'.
 \  Each intermediate component adjusts CWD (".." goes to parent,
@@ -95,11 +89,9 @@ VARIABLE _LD-RUN-ADDR
 \  (the filename) is left in NAMEBUF for FIND-BY-NAME.  CWD is
 \  saved by _LD-SAVE and restored by _LD-RESTORE so that nested
 \  loads always return to the caller's working directory.
-
 CREATE _RP-PATH 128 ALLOT    \ copy of full path from PATHBUF (up to 128 B)
 CREATE _RP-COMP 24 ALLOT     \ current component being processed (≤ 23 chars)
 VARIABLE _RP-I                \ scan position within _RP-PATH
-
 \ _HAS-SLASH? ( -- flag )  True if PATHBUF contains a '/' character.
 : _HAS-SLASH?  ( -- flag )
     FALSE
@@ -107,7 +99,6 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
         PATHBUF I + C@ DUP 0= IF DROP LEAVE THEN
         47 = IF DROP TRUE LEAVE THEN
     LOOP ;
-
 \ _RP-NEXT-SEP ( -- pos )  Index of next '/' or NUL from _RP-I.
 : _RP-NEXT-SEP  ( -- pos )
     _RP-I @
@@ -117,13 +108,11 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
             IF TRUE ELSE 1+ FALSE THEN
         ELSE TRUE THEN
     UNTIL ;
-
 \ _RP-IS-DOTDOT? ( -- flag )  True if _RP-COMP is "..\0".
 : _RP-IS-DOTDOT?  ( -- flag )
     _RP-COMP     C@ 46 =
     _RP-COMP 1+  C@ 46 = AND
     _RP-COMP 2 + C@ 0=  AND ;
-
 \ _RP-CD-COMP ( -- ok? )  CD into directory named in _RP-COMP.
 : _RP-CD-COMP  ( -- ok? )
     NAMEBUF 24 0 FILL
@@ -131,7 +120,6 @@ VARIABLE _RP-I                \ scan position within _RP-PATH
     FIND-BY-NAME DUP -1 = IF DROP FALSE EXIT THEN
     DUP DIRENT DE.TYPE 8 <> IF DROP FALSE EXIT THEN
     CWD ! TRUE ;
-
 \ _RESOLVE-PATH ( -- )
 \   If PATHBUF contains '/', walk directory components adjusting CWD
 \   and leave the final filename in NAMEBUF.  No-op for plain names.
@@ -259,52 +247,66 @@ VARIABLE _SEC-LINE
     _SEC-LINE @ EVAL-LINE !
     EVALUATE-FINISH ;
 
-\ _LD-WALK ( -- ) Walk file buffer line-by-line, EVALUATEing each.
-\   Uses LD-BUF / LD-SZ / LD-CUR / LD-LEN.  The data stack is kept
-\   clean across EVALUATE calls so compile-time control-flow items
-\   (DO..LOOP, IF..THEN, BEGIN..REPEAT etc.) are undisturbed.
+\ Translate checked status back to the loader's THROW surface.  Status 5
+\ represents a caught source THROW, whose exact code is retained separately.
+: _LD-STATUS-THROW  ( status -- )
+    DUP EVAL-S-THROW = IF DROP EVAL-THROW @ THEN THROW ;
+
+\ _LD-WALK checks each bounded physical line independently.  Its private
+\ LD-* cursor is frame-saved because a line may execute nested LOAD/REQUIRE.
 : _LD-WALK  ( -- )
     LD-BUF @ LD-CUR !
+    0 LD-LINE !
     BEGIN LD-SZ @ 0> WHILE
-        \ Find length of current line (up to newline or end)
-        LD-SZ @                          ( rem )
-        0                                ( rem i )
+        1 LD-LINE +!
+        LD-LINE @ EVAL-LINE !
+        LD-SZ @ 0
         BEGIN
             DUP 2 PICK < IF
                 LD-CUR @ OVER + C@ 10 = IF TRUE ELSE 1+ FALSE THEN
             ELSE TRUE THEN
-        UNTIL                            ( rem linelen )
+        UNTIL
         NIP LD-LEN !
-        \ EVALUATE if non-empty
-        LD-LEN @ 0> IF
-            LD-CUR @ LD-LEN @ EVALUATE
+        LD-LEN @ DUP 0> IF
+            LD-CUR @ OVER 1- + C@ 13 = IF 1- THEN
         THEN
-        \ Advance past line + newline
-        LD-LEN @ 1+
-        DUP NEGATE LD-SZ +!
-        LD-CUR +!
-    REPEAT ;
+        DUP 0> IF
+            LD-CUR @ SWAP EVALUATE-CHECKED _LD-STATUS-THROW
+        ELSE DROP THEN
+        LD-LEN @ DUP LD-CUR +! NEGATE LD-SZ +!
+        LD-SZ @ 0> IF 1 LD-CUR +! -1 LD-SZ +! THEN
+    REPEAT
+    EVALUATE-FINISH _LD-STATUS-THROW ;
 
 : _LD-RELEASE  ( -- )
     LD-BUF @ FREE
     _LD-RESTORE ;
+\ Every operation after allocation runs inside this guard.  Roll back module
+\ identities before their defining dictionary entries, reset compiler state,
+\ then release and restore the loader frame before rethrowing the exact code.
+: _LD-FAIL  ( exception -- )
+    >R
+    EVAL-LINE @ >R
+    _LD-EVAL-CHECKPOINT EVALUATOR-UNWIND
+    _LD-TXN-ROLLBACK
+    _LD-ACTIVE-FRAME DUP 72 + @ SWAP 80 + @ DICT-ROLLBACK
+    EVALUATOR-RESET
+    _LD-RELEASE
+    _LD-TXN-AFTER-RELEASE
+    R> EVAL-LINE ! R> THROW ;
 
-\ Run a source walk with the loader allocation and nesting frame owned by
-\ this call.  Cleanup precedes rethrow so a bad module cannot poison the next
-\ LOAD/REQUIRE or strand its sector-rounded source allocation.
-: _LD-WALK-GUARDED  ( -- )
-    ['] _LD-WALK CATCH
-    DUP IF
-        _LD-EVAL-CHECKPOINT EVALUATOR-UNWIND
-        _LD-TXN-ROLLBACK
-        _LD-RELEASE
-        _LD-TXN-AFTER-RELEASE
-        THROW
-    THEN
-    DROP
+: _LD-GUARDED  ( xt -- )
+    CATCH DUP IF _LD-FAIL THEN DROP
     _LD-TXN-COMMIT
     _LD-RELEASE
     _LD-TXN-AFTER-RELEASE ;
+
+: _LD-WALK-GUARDED  ( -- )
+    ['] _LD-WALK _LD-GUARDED ;
+
+: _LD-READ-WALK  ( -- )
+    LD-CUR @ _LD-READ-SLOT
+    _LD-WALK ;
 
 : LOAD  ( "filename" -- )
     FS-ENSURE
@@ -328,7 +330,5 @@ VARIABLE _SEC-LINE
         2DROP ."  File buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF !
-    _LD-READ-SLOT
-    _LD-WALK-GUARDED ;
-
+    LD-BUF ! LD-CUR !
+    ['] _LD-READ-WALK _LD-GUARDED ;

@@ -12,8 +12,8 @@
 \ A loader pre-registers the first PROVIDED identity before evaluating any
 \ source.  This remains the cycle-breaking rule.  Every new identity declared
 \ while that source is active joins the loader frame's provisional list.
-\ Successful evaluation commits the whole list; a throw unlinks and frees the
-\ whole list before the source allocation is released and the error rethrown.
+\ Nested success merges into its parent; outermost success commits the list.
+\ A throw unlinks and frees it before releasing source and rethrowing.
 \
 \ All public module operations are core-0-only.  Registry operations use
 \ HT-LOCK, but never hold it while allocating, freeing, or evaluating source.
@@ -220,7 +220,6 @@ VARIABLE _MU-LINK
     DROP ;
 
 VARIABLE _MRB-NODE
-
 : _MOD-ROLLBACK-FRAME  ( -- )
     _LD-TXN-HEAD @ DUP 0= IF DROP EXIT THEN
     0 _LD-TXN-HEAD !
@@ -235,19 +234,24 @@ VARIABLE _MRB-NODE
         DUP _MN-PROV @ SWAP _MOD-FREE
     REPEAT
     DROP ;
-
 : _MOD-COMMIT-FRAME  ( -- )
     _LD-TXN-HEAD @
     0 _LD-TXN-HEAD !
-    DUP IF
-        1 _MOD-GROW-PENDING !
-        1 _MOD-GROW-READY !
+    DUP 0= IF DROP EXIT THEN
+    _LD-SP @ _LD-FRAME > IF
+        DUP
+        BEGIN DUP _MN-PROV @ WHILE _MN-PROV @ REPEAT
+        _LD-ACTIVE-FRAME _LD-FRAME - 64 + >R
+        R@ @ OVER _MN-PROV !
+        DROP R> !
+        EXIT
     THEN
+    1 _MOD-GROW-PENDING !
+    1 _MOD-GROW-READY !
     BEGIN DUP WHILE
         DUP _MN-PROV @ SWAP _MN-PROV 0 SWAP !
     REPEAT
     DROP ;
-
 : _MOD-AFTER-RELEASE  ( -- )
     _LD-SP @ 0= _MOD-GROW-READY @ AND IF
         0 _MOD-GROW-READY !
@@ -309,7 +313,6 @@ CREATE _PS-TAG  9 ALLOT   \ "PROVIDED" + NUL
 VARIABLE _PS-PTR
 VARIABLE _PS-REM
 VARIABLE _PS-LINE-U
-
 : _PS-LINE-LEN  ( addr rem -- len )
     0
     BEGIN
@@ -324,10 +327,11 @@ VARIABLE _PS-LINE-U
     LD-SZ @ _PS-REM !
     BEGIN _PS-REM @ 0> WHILE
         _PS-PTR @ _PS-REM @ _PS-LINE-LEN DUP _PS-LINE-U !
+        DUP 0> IF _PS-PTR @ OVER 1- + C@ 13 = IF 1- THEN THEN DUP LD-LEN !
         _PS-PTR @ SWAP _PS-SKIP-WS
         2DUP _PS-TOKEN-LEN 8 = IF
             OVER _PS-MATCH8? IF
-                _PS-LINE-U @ _MOD-EVAL-LINE-MAX > IF
+                LD-LEN @ _MOD-EVAL-LINE-MAX > IF
                     2DROP 0 0 TRUE EXIT
                 THEN
                 8 - SWAP 8 + SWAP _PS-SKIP-WS
@@ -370,6 +374,23 @@ VARIABLE _PS-LINE-U
 \   _RESOLVE-PATH when the REQUIRE argument contains '/').
 \   After reading the file, pre-scans for PROVIDED.  If the module
 \   is already loaded, skips execution entirely (zero side effects).
+: _MOD-READ-WALK  ( -- )
+    LD-CUR @ _LD-READ-SLOT
+    \ Pre-register the exact source-buffer slice before executing anything.
+    _MOD-PRESCAN IF
+        _MOD-INSERT                     ( node inserted? ior )
+        DUP IF
+            >R 2DROP R> THROW
+        THEN
+        DROP                            ( node inserted? )
+        DUP 0= IF
+            2DROP EXIT
+        THEN
+        _MOD-ADOPT
+    ELSE
+        2DROP
+    THEN
+    _LD-WALK ;
 : _MOD-LOAD-BODY  ( -- )
     FS-ENSURE
     FS-OK @ 0= IF ."  No filesystem" CR EXIT THEN
@@ -386,29 +407,8 @@ VARIABLE _PS-LINE-U
         2DROP ."  Module buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF !
-    _LD-READ-SLOT
-    \ Pre-register the exact source-buffer slice before executing anything.
-    _MOD-PRESCAN IF
-        _MOD-INSERT                     ( node inserted? ior )
-        DUP IF
-            >R 2DROP
-            _LD-RELEASE
-            _LD-TXN-AFTER-RELEASE
-            R> THROW
-        THEN
-        DROP                            ( node inserted? )
-        DUP 0= IF
-            2DROP
-            _LD-RELEASE
-            _LD-TXN-AFTER-RELEASE
-            EXIT
-        THEN
-        _MOD-ADOPT
-    ELSE
-        2DROP
-    THEN
-    _LD-WALK-GUARDED ;
+    LD-BUF ! LD-CUR !
+    ['] _MOD-READ-WALK _LD-GUARDED ;
 
 \ REQUIRE ( "name" -- )  Load a module file.
 \   The file's own PROVIDED line is the sole guard against duplicate

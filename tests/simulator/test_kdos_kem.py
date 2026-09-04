@@ -48,9 +48,9 @@ FIXTURE = Path(__file__).with_name("fixtures") / "kdos-kem-1586-1633.f"
 FIRST_LINE = 1586
 LAST_LINE = 1633
 SLICE_SHA256 = (
-    "e1c247f7d1c370b225eb2c6d8d0e0691d9670c8243631f51ee9a7265129a681f"
+    "58fab7b6c7a7e722ca1d3bddf77046e700ed196084c0fa1a69608222b800f824"
 )
-SLICE_GIT_BLOB = "47ecf1ca20fd82aed42f0179843945ad9e785d00"
+SLICE_GIT_BLOB = "5e74d7b947598492bc8ddc82a646687eb0eeaddb"
 DEFINITIONS = (
     b"KBUF-SEED",
     b"KBUF-PK",
@@ -162,9 +162,7 @@ def test_kem_slice_is_exact_and_publishes_complete_ledger(
         ("KBUF-SK", KEM_BUFFER_SECRET_KEY),
         ("KBUF-CT", KEM_BUFFER_CIPHERTEXT),
         ("KBUF-SS", KEM_BUFFER_SHARED_SECRET),
-        # The unchanged source names one 32-byte component here even though
-        # KYBER-KEYGEN explicitly transfers the complete 64-byte d || z input.
-        ("KEM-SEED-SIZE", 32),
+        ("KEM-SEED-SIZE", MLKEM512_KEYGEN_SEED_BYTES),
         ("KEM-PK-SIZE", MLKEM512_ENCAPSULATION_KEY_BYTES),
         ("KEM-SK-SIZE", MLKEM512_DECAPSULATION_KEY_BYTES),
         ("KEM-CT-SIZE", MLKEM512_CIPHERTEXT_BYTES),

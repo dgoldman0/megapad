@@ -166,8 +166,8 @@ VARIABLE FR-CHUNK   \ temp: byte count for head copy
 : FREAD  ( addr len fdesc -- actual )
     FR-FD !  FR-LEN !  FR-ADDR !
     \ Guard: cursor already at or past file end → return 0
-    \ (MIN is unsigned; without this guard the subtraction below
-    \  wraps to a huge value and FREAD loops forever.)
+    \ Without this guard the subtraction below can wrap before the
+    \ signed MIN clamp and make FREAD loop or access outside the file.
     FR-FD @ F.CURSOR  FR-FD @ F.USED  < 0= IF 0 EXIT THEN
     \ Clamp len to available bytes (safe: cursor < used)
     FR-FD @ F.USED FR-FD @ F.CURSOR -

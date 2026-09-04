@@ -4,7 +4,7 @@
 \
 \  Lock-aware circular buffer for multi-core producer/consumer patterns.
 \
-\  Ring descriptor layout (7 cells = 56 bytes):
+\  Ring descriptor layout (6 cells = 48 bytes, then payload):
 \    +0   elem-size   bytes per element
 \    +8   capacity    max number of elements
 \    +16  head        index of oldest element (read position)

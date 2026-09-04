@@ -126,6 +126,42 @@ def test_signed_division_reports_architectural_traps(
 
 
 @pytest.mark.parametrize(
+    ("dividend", "divisor", "expected"),
+    (
+        (7, 3, 1),
+        (-7, 3, -1),
+        (7, -3, 1),
+        (-7, -3, -1),
+        ((1 << 63) - 1, -3, 1),
+        (-(1 << 63), -1, 0),
+    ),
+)
+def test_signed_modulo_is_exact_and_truncates_toward_zero(
+    dividend: int,
+    divisor: int,
+    expected: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(dividend)
+    context.data.push(divisor)
+
+    runtime.execute("MOD", context=context)
+
+    assert context.data.snapshot() == (expected & MASK64,)
+
+
+def test_signed_modulo_reports_zero_divisor() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(1)
+    context.data.push(0)
+
+    with pytest.raises(ExecutionError, match="modulo trapped"):
+        runtime.execute("MOD", context=context)
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     (
         (0, 0),
@@ -147,15 +183,54 @@ def test_negate_is_twos_complement_cell_negation(
     assert context.data.snapshot() == (expected,)
 
 
-def test_max_preserves_current_unsigned_executable_bios_behavior() -> None:
+@pytest.mark.parametrize(
+    ("name", "left", "right", "expected"),
+    (
+        ("MIN", -1, 1, MASK64),
+        ("MIN", 1, -1, MASK64),
+        ("MIN", -(1 << 63), (1 << 63) - 1, 1 << 63),
+        ("MAX", -1, 1, 1),
+        ("MAX", 1, -1, 1),
+        ("MAX", -(1 << 63), (1 << 63) - 1, (1 << 63) - 1),
+    ),
+)
+def test_min_and_max_compare_signed_cells(
+    name: str,
+    left: int,
+    right: int,
+    expected: int,
+) -> None:
     runtime = MegaForthRuntime()
     context = runtime.new_context()
-    context.data.push(-1)
-    context.data.push(1)
+    context.data.push(left)
+    context.data.push(right)
 
-    runtime.execute("MAX", context=context)
+    runtime.execute(name, context=context)
 
-    assert context.data.snapshot() == (MASK64,)
+    assert context.data.snapshot() == (expected,)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (10, 5),
+        (1, 0),
+        (-1, MASK64),
+        (-3, MASK64 - 1),
+        (-(1 << 63), 0xC000_0000_0000_0000),
+    ),
+)
+def test_two_divide_is_an_arithmetic_right_shift(
+    value: int,
+    expected: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(value)
+
+    runtime.execute("2/", context=context)
+
+    assert context.data.snapshot() == (expected,)
 
 
 def test_true_false_cr_and_talign_are_real_bios_words() -> None:

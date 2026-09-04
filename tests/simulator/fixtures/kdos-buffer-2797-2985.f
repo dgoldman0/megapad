@@ -60,8 +60,8 @@ VARIABLE BDESC
     BDESC @ B.WIDTH *         \ total data bytes
     0 ,                       \ +24 reserve cell for data_addr
     HBW-TALIGN                \ align HBW pointer
-    HBW-HERE @ BDESC @ 24 + ! \ +24 data_addr = HBW-HERE
-    HBW-ALLOT DROP            \ advance HBW-HERE past data region
+    HBW-ALLOT BDESC @ 24 + !  \ allocate and publish returned address
+
     \ register
     BDESC @ (BUF-REG)
     BDESC @ CONSTANT ;
@@ -78,8 +78,8 @@ VARIABLE BDESC
     BDESC @ B.WIDTH *         \ total data bytes
     0 ,                       \ +24 reserve cell for data_addr
     XMEM-TALIGN               \ align ext mem pointer
-    XMEM-HERE @ BDESC @ 24 + ! \ +24 data_addr = XMEM-HERE
-    XMEM-ALLOT DROP           \ advance XMEM-HERE past data region
+    XMEM-ALLOT BDESC @ 24 + ! \ allocate and publish returned address
+
     \ register
     BDESC @ (BUF-REG)
     BDESC @ CONSTANT ;

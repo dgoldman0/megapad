@@ -365,8 +365,10 @@ def test_absent_xmem_routes_public_allocation_and_xbuf_to_bank0() -> None:
     assert _pointer(runtime, "XMEM-HERE") == 0
     assert _pointer(runtime, "XMEM-LIMIT") == 0
     assert _execute(runtime, "XMEM-ALLOT?", 1) == (0, MASK64)
+    assert _execute(runtime, "XMEM-ALLOT?", 0) == (0, MASK64)
     assert _execute(runtime, "XMEM-FREE") == (0,)
     _expect_abort(runtime, "XMEM-ALLOT", b"No external memory", 1)
+    _expect_abort(runtime, "XMEM-ALLOT", b"No external memory", 0)
 
     allocated, status = _execute(runtime, "ALLOCATE", 24)
     assert status == 0

@@ -30,9 +30,9 @@ FIXTURE = Path(__file__).with_name("fixtures") / "kdos-buffer-2797-2985.f"
 FIRST_LINE = 2797
 LAST_LINE = 2985
 SLICE_SHA256 = (
-    "eb4d6d1bf072f854c667e86f428f49370bde4cd06e4770bd095d5f549906b2f1"
+    "68826ac284decca406051412e4478710dd9ebd81319109f5dd326a04ca205a93"
 )
-SLICE_GIT_BLOB = "302d66b01d699f840e9195853c3d991a9c90c94b"
+SLICE_GIT_BLOB = "cbf10f550499d59aa5c6721024ee4ba46b8b0acb"
 DEFINITIONS = (
     b"BUF-COUNT",
     b"BUF-HEAD",
@@ -63,7 +63,7 @@ DEFINITIONS = (
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 7_191
+    assert len(source) == 7_084
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -226,7 +226,7 @@ def test_hbw_and_xmem_constructors_route_data_but_keep_descriptors_registered() 
     assert runtime.memory.read64(previous + 8) == 0
 
 
-def test_xbuffer_records_the_bump_frontier_even_when_allocation_reuses_a_block(
+def test_xbuffer_records_the_address_returned_by_free_list_reuse(
     loaded_buffer: MegaForthRuntime,
 ) -> None:
     runtime = loaded_buffer
@@ -239,13 +239,10 @@ def test_xbuffer_records_the_bump_frontier_even_when_allocation_reuses_a_block(
     runtime.evaluate(b"0 1 64 XBUFFER RECYCLED-X", source_name="recycled-xbuffer")
     descriptor = _execute(runtime, "RECYCLED-X")[0]
 
-    # Unchanged KDOS stores XMEM-HERE before XMEM-ALLOT, then drops the
-    # allocator's returned address.  A free-list hit therefore leaves this
-    # descriptor pointing at the bump frontier instead of the reused block.
-    assert _descriptor(runtime, descriptor) == (0, 1, 64, bump_frontier)
+    assert _descriptor(runtime, descriptor) == (0, 1, 64, recycled)
     assert _pointer(runtime, "XMEM-HERE") == bump_frontier
     assert _pointer(runtime, "XMEM-FL") == 0
-    assert _execute(runtime, "B.DATA", descriptor) == (bump_frontier,)
+    assert _execute(runtime, "B.DATA", descriptor) == (recycled,)
     assert recycled != bump_frontier
     assert _execute(runtime, "XMEM-ALLOT", 16) == (bump_frontier,)
 
@@ -267,7 +264,7 @@ def test_hbw_constructor_failure_leaves_its_partial_descriptor_published() -> No
 
     assert runtime.drain_uart_output() == b"HBW overflow"
     assert runtime.dictionary.here == descriptor + 32
-    assert _descriptor(runtime, descriptor) == (0, 8, 9, hbw_before)
+    assert _descriptor(runtime, descriptor) == (0, 8, 9, 0)
     assert _pointer(runtime, "BDESC") == descriptor
     assert _pointer(runtime, "HBW-HERE") == hbw_before
     assert _pointer(runtime, "BUF-COUNT") == 0

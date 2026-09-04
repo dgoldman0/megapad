@@ -97,9 +97,9 @@ def _child_report(root: Path, harness: Path) -> dict:
     source_values = {
         "bios_sha256": "e" * 64,
         "kdos_source_sha256": "a" * 64,
-        "kdos_source_bytes": 341_355,
+        "kdos_source_bytes": 343_551,
         "packed_kdos_sha256": "b" * 64,
-        "packed_kdos_bytes": 222_049,
+        "packed_kdos_bytes": 222_311,
         "autoexec_sha256": "c" * 64,
         "image_sha256": "d" * 64,
         "image_bytes": 33_554_432,
@@ -175,7 +175,7 @@ def test_child_report_validation_requires_exact_harness_and_clean_provenance(
 
     assert qualified["wall_time_s"] == 1.25
     assert qualified["repository"]["dirty"] is False
-    assert qualified["sources"]["packed_kdos_bytes"] == 222_049
+    assert qualified["sources"]["packed_kdos_bytes"] == 222_311
     assert qualified["accelerator"]["bytes"] == len(b"deterministic accelerator")
 
     report["repository"]["dirty"] = True

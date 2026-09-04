@@ -5,15 +5,12 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-import pytest
-
 from shared.cells import u64
 from shared.storage import (
     SECTOR_SIZE,
     STORAGE_CMD_READ,
     STORAGE_RESULT_MEDIA_REMOVED,
 )
-from simulator.errors import ForthAbort
 from simulator.runtime import MegaForthRuntime
 from simulator.storage import HostedStorageService
 from tests.simulator.test_bios_mp64fs import _formatted_image, _write_entry
@@ -51,17 +48,19 @@ FIXTURE = (
 
 FIRST_LINE = 5945
 LAST_LINE = 6059
-SLICE_BYTES = 2_892
+SLICE_BYTES = 4_231
 SLICE_SHA256 = (
-    "1c671d6f3677d9fb65e7c5b20a6af1b3d10323b28b5abb10d827cd80a58e5bb2"
+    "b42f5c10635f43ff41e4dd719987f21ab5bcbb229d3985ad0cc854d2bba7ffc1"
 )
-SLICE_GIT_BLOB = "c95aa1a3385d10587ed42292328b0c7c323e702f"
+SLICE_GIT_BLOB = "bf344d51bdea5287d4af87c920d563a33adc1a85"
 
 SOURCE_LEDGER = (
     (":", b"_APP-MPU-ON"),
     (":", b"_APP-MPU-OFF"),
     (":", b"APP-EVAL"),
     (":", b"_APP-LOAD-WALK"),
+    (":", b"_APP-LOAD-USER"),
+    (":", b"_APP-LOAD-RUN"),
     (":", b"APP-LOAD"),
     (":", b"ESC"),
     (":", b"CSI"),
@@ -84,7 +83,9 @@ def _verified_slice() -> bytes:
     complete_kdos = KDOS_SOURCE.read_bytes()
     assert _git_blob_id(complete_kdos) == KDOS_GIT_BLOB
     lines = complete_kdos.splitlines(keepends=True)
-    assert lines[FIRST_LINE - 2] == b"\n"
+    assert lines[FIRST_LINE - 2] == (
+        b"    ['] _LD-READ-WALK _LD-GUARDED ;\n"
+    )
     assert source == b"".join(lines[FIRST_LINE - 1 : LAST_LINE])
     assert lines[LAST_LINE] == b"\\ =====================================================================\n"
     return source
@@ -136,7 +137,7 @@ def test_application_slice_is_exact_and_load_time_pure() -> None:
     completion_before = runtime.storage.completion
     runtime = _evaluate_application_loading(runtime)
 
-    assert len(SOURCE_LEDGER) == 11
+    assert len(SOURCE_LEDGER) == 13
     assert all(definer == ":" for definer, _name in SOURCE_LEDGER)
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert runtime.mpu_base == 0x1111
@@ -482,7 +483,7 @@ def test_app_load_throw_cleans_up_and_the_loader_remains_reusable() -> None:
 
     assert runtime.main_context.data.snapshot() == (u64(-77),)
     runtime.main_context.data.clear()
-    assert runtime.find("BEFORE-APP-THROW") is not None
+    assert runtime.find("BEFORE-APP-THROW") is None
     assert runtime.find("AFTER-APP-THROW") is None
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
     _assert_loader_released(
@@ -509,7 +510,7 @@ def test_app_load_throw_cleans_up_and_the_loader_remains_reusable() -> None:
     assert runtime.drain_uart_output() == b""
 
 
-def test_app_load_ignores_undefined_and_unfinished_evaluator_state() -> None:
+def test_app_load_rejects_undefined_and_unfinished_source_transactionally() -> None:
     unchecked_source = (
         b": BEFORE-APP-UNDEFINED 1 ;\n"
         b"missing-app-load-token\n"
@@ -552,15 +553,23 @@ def test_app_load_ignores_undefined_and_unfinished_evaluator_state() -> None:
     completion_before = runtime.storage.completion
     media_before = runtime.storage.image_bytes
 
+    dictionary_before = (runtime.dictionary.here, runtime.dictionary.latest)
     runtime.evaluate(
-        b"APP-LOAD unchecked.f",
-        source_name="unchecked-app-status",
+        b"' APP-LOAD CATCH unchecked.f",
+        source_name="checked-app-status",
     )
 
-    assert _execute(runtime, "BEFORE-APP-UNDEFINED") == (1,)
-    assert _execute(runtime, "AFTER-APP-UNDEFINED") == (2,)
-    assert _variable(runtime, "EVAL-STATUS") == 0
-    assert _variable(runtime, "LOAD-HOOK-TRACE") == 13
+    assert runtime.main_context.data.snapshot() == (1,)
+    runtime.main_context.data.clear()
+    assert runtime.find("BEFORE-APP-UNDEFINED") is None
+    assert runtime.find("AFTER-APP-UNDEFINED") is None
+    assert (
+        runtime.dictionary.here,
+        runtime.dictionary.latest,
+    ) == dictionary_before
+    assert _variable(runtime, "EVAL-STATUS") == 1
+    assert _variable(runtime, "EVAL-LINE") == 2
+    assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
     _assert_loader_released(
         runtime,
         heap_before=heap_before,
@@ -571,26 +580,32 @@ def test_app_load_ignores_undefined_and_unfinished_evaluator_state() -> None:
     )
 
     runtime.evaluate(
-        b"APP-LOAD unfinished.f",
+        b"' APP-LOAD CATCH unfinished.f",
         source_name="unfinished-app-state",
     )
 
+    assert runtime.main_context.data.snapshot() == (4,)
+    runtime.main_context.data.clear()
     assert runtime.find("APP-LEFT-OPEN") is None
-    assert _variable(runtime, "EVAL-STATUS") == 0
-    assert _variable(runtime, "LOAD-HOOK-TRACE") == 1313
+    assert (
+        runtime.dictionary.here,
+        runtime.dictionary.latest,
+    ) == dictionary_before
+    assert _variable(runtime, "EVAL-STATUS") == 4
+    assert _variable(runtime, "EVAL-LINE") == 1
+    assert _variable(runtime, "LOAD-HOOK-TRACE") == 2323
     _assert_loader_released(
         runtime,
         heap_before=heap_before,
         globals_before=globals_before,
     )
-    assert _execute(runtime, "EVALUATE-FINISH") == (4,)
-    assert _execute(runtime, "EVALUATOR-RESET") == ()
+    assert _execute(runtime, "EVALUATE-FINISH") == (0,)
     assert runtime.storage.completion == completion_before + 2
     assert runtime.storage.image_bytes == media_before
     assert runtime.drain_uart_output() == b""
 
 
-def test_app_load_read_abort_precedes_guard_and_mpu_setup() -> None:
+def test_app_load_read_abort_is_guarded_before_mpu_setup() -> None:
     source = b"\\ p\n" * 125 + b": APP-MUST-NOT-REACH 42 ;\n"
     assert SECTOR_SIZE < len(source) <= 2 * SECTOR_SIZE
     allocation = _sector_allocation(source, 2)
@@ -641,32 +656,27 @@ def test_app_load_read_abort_precedes_guard_and_mpu_setup() -> None:
     mount_before = _mount_snapshot(runtime)
     media_before = storage.image_bytes
     completion_before = storage.completion
-    storage.armed = True
-
-    with pytest.raises(ForthAbort, match='Forth ABORT"'):
-        runtime.evaluate(
-            b"APP-LOAD split.f",
-            source_name="app-second-extent-stale",
-        )
-
-    loaded_buffer = _variable(runtime, "LD-BUF")
-    assert runtime.memory.read_bytes(loaded_buffer, SECTOR_SIZE) == allocation[
-        :SECTOR_SIZE
-    ]
-    assert _variable(runtime, "LD-SZ") == len(source)
-    assert _variable(runtime, "LD-CUR") == globals_before[2]
-    assert _variable(runtime, "LD-LEN") == globals_before[3]
-    assert _variable(runtime, "_LD-SP") == 56
-    assert _variable(runtime, "CWD") == 0xFF
-    assert _variable(runtime, "FS-OK") == 0
-    assert _variable(runtime, "LOAD-HOOK-TRACE") == 0
-    assert _execute(runtime, "HEAP-FREE-BYTES")[0] < heap_before
-    assert (runtime.mpu_base, runtime.mpu_limit) == expected_mpu
     expected_ior = _execute(
         runtime,
         "IOR-FROM-BLOCK-RESULT",
         STORAGE_RESULT_MEDIA_REMOVED,
     )[0]
+    storage.armed = True
+
+    runtime.evaluate(
+        b"' APP-LOAD CATCH split.f",
+        source_name="app-second-extent-stale",
+    )
+
+    assert runtime.main_context.data.snapshot() == (expected_ior,)
+    runtime.main_context.data.clear()
+    assert _loader_globals(runtime) == globals_before
+    assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "CWD") == 0xFF
+    assert _variable(runtime, "FS-OK") == 0
+    assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
+    assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
+    assert (runtime.mpu_base, runtime.mpu_limit) == expected_mpu
     assert _diagnostics(runtime) == (
         STORAGE_RESULT_MEDIA_REMOVED,
         0,
@@ -681,11 +691,11 @@ def test_app_load_read_abort_precedes_guard_and_mpu_setup() -> None:
     assert runtime.find("APP-MUST-NOT-REACH") is None
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
-    assert runtime.drain_uart_output() == b"Disk read failed"
+    assert runtime.drain_uart_output() == b""
     assert runtime.spinlocks.owner(2) is None
 
 
-def test_unterminated_app_source_executes_sector_padding_through_next_lf() -> None:
+def test_unterminated_app_source_stays_bounded_to_used_bytes() -> None:
     used_source = b": APP-REAL 1 ; "
     padding_source = b": APP-PADDING-RAN 2 ;\n"
     allocation = used_source + padding_source
@@ -712,7 +722,7 @@ def test_unterminated_app_source_executes_sector_padding_through_next_lf() -> No
     runtime.evaluate(b"APP-LOAD padded.f", source_name="app-padding-defect")
 
     assert _execute(runtime, "APP-REAL") == (1,)
-    assert _execute(runtime, "APP-PADDING-RAN") == (2,)
+    assert runtime.find("APP-PADDING-RAN") is None
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 13
     _assert_loader_released(
         runtime,

@@ -39,7 +39,7 @@ KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = Path(__file__).with_name("fixtures") / "kdos-diagnostics-856-902.f"
 
 MEGAPAD_REVISION = "ed451faccfddb5f3fbb4e2200eb0dd0fdc314f4c"
-KDOS_GIT_BLOB = "fd017b16dbd3ef4746d0e3467e980c015cf5a664"
+KDOS_GIT_BLOB = "4580b4075b3114ef6e5b2c8121b6e4fa1cfb2c70"
 FIRST_LINE = 856
 LAST_LINE = 902
 SLICE_SHA256 = "df3190d5a704349eb60b673be18cf386f12339f177bfcf6bcde6cb3bbb302e92"

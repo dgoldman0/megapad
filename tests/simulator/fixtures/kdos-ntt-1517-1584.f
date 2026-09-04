@@ -1,8 +1,8 @@
 \ =====================================================================
 \  §1.11  NTT Engine — 256-point Number Theoretic Transform
 \ =====================================================================
-\  Hardware-accelerated NTT for ML-KEM (Kyber) and ML-DSA (Dilithium)
-\  post-quantum lattice-based cryptography.
+\  Generic cyclic NTT service over x^256 - 1; this is not the standardized
+\  negacyclic transform used by ML-KEM or ML-DSA.
 \
 \  BIOS primitives:
 \    NTT-SETQ ( q -- )          Set modulus

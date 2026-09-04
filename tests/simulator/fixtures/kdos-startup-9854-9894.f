@@ -18,7 +18,7 @@ DISK? IF FS-LOAD THEN
 \ DMA-ALLOCATE 16 bytes to trigger lazy HEAP-SETUP, then DMA-FREE.
 \ Must use DMA- variants to target Bank 0 directly (ALLOCATE routes
 \ to xmem when extended memory is present).
-16 DMA-ALLOCATE DROP DMA-FREE
+16 DMA-ALLOCATE DUP IF NIP THROW THEN DROP DMA-FREE
 
 \ -- AUTOEXEC: run autoexec.f if present on disk --
 \ Must use a colon definition because FSLOAD evaluates each line

@@ -228,6 +228,15 @@ ExternalPhyResponsePlan = Callable[
     Optional[ExternalPhyWordResponse],
 ]
 
+
+def _signed_divmod_trunc(dividend: int, divisor: int) -> tuple[int, int]:
+    """Divide signed integers exactly, truncating the quotient toward zero."""
+    quotient = abs(dividend) // abs(divisor)
+    if (dividend < 0) != (divisor < 0):
+        quotient = -quotient
+    return quotient, dividend - quotient * divisor
+
+
 # ---------------------------------------------------------------------------
 #  FP16 / bfloat16 conversion helpers
 # ---------------------------------------------------------------------------
@@ -746,7 +755,7 @@ def _x25519_scalar_mul(scalar_bytes: bytes, u_bytes: bytes) -> int:
         x_3 = pow(DA + CB, 2, p)
         z_3 = (x_1 * pow(DA - CB, 2, p)) % p
         x_2 = (AA * BB) % p
-        a24 = 121666
+        a24 = 121665
         z_2 = (E * (AA + a24 * E)) % p
 
     if swap:
@@ -3873,13 +3882,11 @@ class Megapad64:
             r = a * b
             self.regs[rd] = u64(r >> 64)
         elif sub == 0x4:  # DIV (signed)
-            if b == 0 or (s64(a) == -(1 << 63) and s64(b) == -1):
+            dividend = s64(a)
+            divisor = s64(b)
+            if divisor == 0 or (dividend == -(1 << 63) and divisor == -1):
                 raise TrapError(IVEC_DIV_ZERO, "Divide by zero or overflow")
-            q = int(s64(a) / s64(b))
-            # Python's // rounds toward negative infinity; we want truncation
-            if (s64(a) < 0) != (s64(b) < 0) and q * s64(b) != s64(a):
-                q += 1  # adjust toward zero
-            rem = s64(a) - q * s64(b)
+            q, rem = _signed_divmod_trunc(dividend, divisor)
             self.regs[rd] = u64(q)
             self.regs[0] = u64(rem)
         elif sub == 0x5:  # UDIV
@@ -3888,12 +3895,12 @@ class Megapad64:
             self.regs[0] = a % b
             self.regs[rd] = a // b
         elif sub == 0x6:  # MOD (signed)
-            if b == 0:
+            dividend = s64(a)
+            divisor = s64(b)
+            if divisor == 0:
                 raise TrapError(IVEC_DIV_ZERO, "Divide by zero")
-            q = int(s64(a) / s64(b))
-            if (s64(a) < 0) != (s64(b) < 0) and q * s64(b) != s64(a):
-                q += 1
-            self.regs[rd] = u64(s64(a) - q * s64(b))
+            _, rem = _signed_divmod_trunc(dividend, divisor)
+            self.regs[rd] = u64(rem)
         elif sub == 0x7:  # UMOD
             if b == 0:
                 raise TrapError(IVEC_DIV_ZERO, "Divide by zero")

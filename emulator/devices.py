@@ -2167,12 +2167,12 @@ class SystemInfo(Device):
         # Current integrated SoC reset contract: every configured cluster is
         # released unless software explicitly clears its enable bit.
         self.cluster_en = 0xFFFF_FFFF_FFFF_FFFF
-        self.hbw_base = hbw_base
+        self.hbw_base = hbw_base if hbw_size > 0 else 0
         self.hbw_size = hbw_size
         self.int_mem_total = int_mem_total
-        self.ext_mem_base = ext_mem_base
+        self.ext_mem_base = ext_mem_base if ext_mem_size > 0 else 0
         self.ext_mem_size = ext_mem_size
-        self.vram_base = vram_base
+        self.vram_base = vram_base if vram_size > 0 else 0
         self.vram_size = vram_size
         if crypto_caps < 0 or crypto_caps & ~CRYPTO_CAP_MASK:
             raise ValueError("SystemInfo crypto_caps contains reserved bits")
@@ -3009,7 +3009,7 @@ NTT_OP_PADD = 3
 
 
 class NTTDevice(Device):
-    """256-point NTT accelerator for ML-KEM / ML-DSA lattice crypto."""
+    """Generic 256-point cyclic NTT service, not a standardized PQ NTT."""
 
     NTT_N = 256
 
@@ -3179,11 +3179,11 @@ class NTTDevice(Device):
 # ---------------------------------------------------------------------------
 #  Framebuffer — Memory-Mapped Display Controller
 # ---------------------------------------------------------------------------
-# A dumb framebuffer device that reads pixel data from HBW RAM.
+# A dumb framebuffer device whose pixel base may address VRAM, XMEM, or HBW.
 # The device owns no pixel memory — it simply records configuration
 # (base address, dimensions, pixel format, palette) and exposes a
 # vsync counter.  The emulator display layer (if enabled) reads the
-# HBW RAM region pointed to by FB_BASE each frame.
+# mapped memory region pointed to by FB_BASE each frame.
 #
 # Register map (offsets from FB_BASE = 0x0A00):
 #   0x00..0x07  FB_BASE     (RW)  64-bit pixel data start address
@@ -3212,14 +3212,14 @@ FB_BPP = {0: 1, 1: 2, 2: 2, 3: 4}
 class FramebufferDevice(Device):
     """Memory-mapped framebuffer controller.
 
-    Does not own pixel memory — reads from HBW RAM at the address
-    specified by fb_base.  The emulator display loop reads that RAM
-    region each vsync frame.
+    Does not own pixel memory.  The configured base may address mapped VRAM,
+    XMEM, or HBW, and the emulator display loop reads the resolved region each
+    vsync frame.
     """
 
     def __init__(self):
         super().__init__("Framebuffer", FB_BASE, 0x50)  # 80-byte window
-        self.fb_base: int = 0           # 64-bit address in HBW
+        self.fb_base: int = 0           # 64-bit address in mapped pixel memory
         self.width: int = 320           # default 320×240
         self.height: int = 240
         self.stride: int = 320          # bytes per row (mode 0: 1 bpp)

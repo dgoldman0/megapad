@@ -31,9 +31,9 @@ FIXTURE = Path(__file__).with_name("fixtures") / "kdos-hbw-2044-2108.f"
 FIRST_LINE = 2044
 LAST_LINE = 2108
 SLICE_SHA256 = (
-    "66242d173f96f402a1270b15559374e19847f38f10db21ad2e2e3b0d3da84e58"
+    "5fc825c8588b85a499ee34e7fc142b8bba7e74d7efb481bde4183c93476444c9"
 )
-SLICE_GIT_BLOB = "5fb9c3b1ba984c543289fb9aaab1541ed6ce5202"
+SLICE_GIT_BLOB = "2d9704f542181bbf91eaead01d5b6ea7a1f9cff0"
 DEFINITIONS = (
     b"HBW-HERE",
     b"HBW-LIMIT",
@@ -52,7 +52,7 @@ CANONICAL_HBW_SIZE = 3 * (1 << 20)
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 2_391
+    assert len(source) == 2_448
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -220,7 +220,7 @@ def test_hbw_status_renders_live_source_owned_counters(
     )
 
 
-def test_absent_hbw_profile_and_zero_length_follow_source_semantics() -> None:
+def test_absent_hbw_profile_rejects_every_allocation() -> None:
     runtime = _load_hbw(
         MegaForthRuntime(memory=create_one_core_address_space(hbw_size=0))
     )
@@ -230,7 +230,15 @@ def test_absent_hbw_profile_and_zero_length_follow_source_semantics() -> None:
     assert _pointer(runtime, "HBW-HERE") == 0
     assert _pointer(runtime, "HBW-LIMIT") == 0
     assert _execute(runtime, "HBW-ALLOT?", 1) == (0, MASK64)
-    assert _execute(runtime, "HBW-ALLOT?", 0) == (0, 0)
+    assert _execute(runtime, "HBW-ALLOT?", 0) == (0, MASK64)
+    runtime.main_context.data.push(0)
+    with pytest.raises(ForthAbort, match='Forth ABORT"'):
+        runtime.execute("HBW-ALLOT", step_budget=250_000)
+    assert runtime.drain_uart_output() == b"HBW unavailable"
+    assert _pointer(runtime, "HBW-HERE") == 0
+    assert _pointer(runtime, "HBW-LIMIT") == 0
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
 
 
 def test_hbw_request_wrap_and_unchecked_alignment_discrepancies_are_visible(

@@ -5,15 +5,12 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-import pytest
-
 from shared.cells import TRUE, u64
 from shared.storage import (
     SECTOR_SIZE,
     STORAGE_CMD_READ,
     STORAGE_RESULT_MEDIA_REMOVED,
 )
-from simulator.errors import ForthAbort
 from simulator.runtime import MegaForthRuntime
 from simulator.storage import HostedStorageService
 from tests.simulator.test_bios_mp64fs import (
@@ -53,11 +50,11 @@ FIXTURE = (
 
 FIRST_LINE = 5611
 LAST_LINE = 5944
-SLICE_BYTES = 11_337
+SLICE_BYTES = 11_980
 SLICE_SHA256 = (
-    "efad4e40860bc7cdc484b58ac652d9b7286541a7adfdb156d4ae66a3f73ba9fe"
+    "6a30453c933ac8666c1b798a98a4fb3e6a331afeb4c2d3048299a83a0ea79a7c"
 )
-SLICE_GIT_BLOB = "8fd4577b4ac2128934672eb123ca78bf88468d52"
+SLICE_GIT_BLOB = "f2bea50138ca04e235358debd734a4fc234e002a"
 
 # Exact defining-word/name order in kdos.f.  Keeping the defining word in
 # the ledger makes source-layout changes visible even if a replacement happens
@@ -67,6 +64,7 @@ SOURCE_LEDGER = (
     ("VARIABLE", b"LD-SZ"),
     ("VARIABLE", b"LD-CUR"),
     ("VARIABLE", b"LD-LEN"),
+    ("VARIABLE", b"LD-LINE"),
     ("CONSTANT", b"_LD-FRAME"),
     ("CONSTANT", b"_LD-MAXLVL"),
     ("CREATE", b"_LD-STK"),
@@ -109,16 +107,20 @@ SOURCE_LEDGER = (
     (":", b"_SEC-MEASURE"),
     (":", b"_SEC-ADVANCE"),
     (":", b"SOURCE-EVALUATE-CHECKED"),
+    (":", b"_LD-STATUS-THROW"),
     (":", b"_LD-WALK"),
     (":", b"_LD-RELEASE"),
+    (":", b"_LD-FAIL"),
+    (":", b"_LD-GUARDED"),
     (":", b"_LD-WALK-GUARDED"),
+    (":", b"_LD-READ-WALK"),
     (":", b"LOAD"),
 )
 
 DEFINITIONS = tuple(name for _definer, name in SOURCE_LEDGER)
 
 CONSTANTS = (
-    ("_LD-FRAME", 56),
+    ("_LD-FRAME", 88),
     ("_LD-MAXLVL", 16),
     ("EVAL-S-OK", 0),
     ("EVAL-S-UNDEFINED", 1),
@@ -133,6 +135,7 @@ VARIABLES = (
     "LD-SZ",
     "LD-CUR",
     "LD-LEN",
+    "LD-LINE",
     "_LD-SP",
     "_LD-RUN-SEC",
     "_LD-RUN-CNT",
@@ -228,8 +231,12 @@ def _seed_loader_globals(runtime: MegaForthRuntime) -> tuple[int, ...]:
         0x2222_2222_2222_2222,
         0x3333_3333_3333_3333,
         0x4444_4444_4444_4444,
+        0x5555_5555_5555_5555,
     )
-    for name, value in zip(("LD-BUF", "LD-SZ", "LD-CUR", "LD-LEN"), values):
+    for name, value in zip(
+        ("LD-BUF", "LD-SZ", "LD-CUR", "LD-LEN", "LD-LINE"),
+        values,
+    ):
         _store(runtime, name, value)
     return values
 
@@ -237,7 +244,7 @@ def _seed_loader_globals(runtime: MegaForthRuntime) -> tuple[int, ...]:
 def _loader_globals(runtime: MegaForthRuntime) -> tuple[int, ...]:
     return tuple(
         _variable(runtime, name)
-        for name in ("LD-BUF", "LD-SZ", "LD-CUR", "LD-LEN")
+        for name in ("LD-BUF", "LD-SZ", "LD-CUR", "LD-LEN", "LD-LINE")
     )
 
 
@@ -253,7 +260,7 @@ def _sector_allocation(source: bytes, sectors: int) -> bytes:
 def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     runtime = _load_mp64fs_load()
 
-    assert len(SOURCE_LEDGER) == 50
+    assert len(SOURCE_LEDGER) == 55
     assert all(runtime.find(name) is not None for name in DEFINITIONS)
     assert tuple(_constant(runtime, name) for name, _value in CONSTANTS) == (
         tuple(value for _name, value in CONSTANTS)
@@ -261,7 +268,7 @@ def test_load_slice_is_exact_and_publishes_complete_source_ledger() -> None:
     assert all(_variable(runtime, name) == 0 for name in VARIABLES)
 
     sized_bodies = (
-        ("_LD-STK", "_LD-SP", 56 * 16),
+        ("_LD-STK", "_LD-SP", 88 * 16),
         ("_RP-PATH", "_RP-COMP", 128),
         ("_RP-COMP", "_RP-I", 24),
     )
@@ -522,6 +529,59 @@ def test_load_reads_two_extents_and_restores_nested_loader_state() -> None:
     assert runtime.spinlocks.owner(2) is None
 
 
+def test_nested_load_restores_parent_line_before_later_token_failure() -> None:
+    outer_source = b"LOAD inner.f missing-after-nested-load\n"
+    inner_source = b": INNER-FIRST 1 ;\n: INNER-SECOND 2 ;\n"
+    image = _formatted_image(20)
+    _write_entry(
+        image,
+        6,
+        name=b"outer.f\0",
+        start=14,
+        count=1,
+        used=len(outer_source),
+        entry_type=3,
+    )
+    _write_entry(
+        image,
+        7,
+        name=b"inner.f\0",
+        start=15,
+        count=1,
+        used=len(inner_source),
+        entry_type=3,
+    )
+    image[14 * SECTOR_SIZE : 15 * SECTOR_SIZE] = _sector_allocation(
+        outer_source,
+        1,
+    )
+    image[15 * SECTOR_SIZE : 16 * SECTOR_SIZE] = _sector_allocation(
+        inner_source,
+        1,
+    )
+    runtime = _load_mp64fs_load(image)
+    _mount(runtime)
+    dictionary_before = (runtime.dictionary.here, runtime.dictionary.latest)
+
+    runtime.evaluate(
+        b"' LOAD CATCH outer.f",
+        source_name="nested-load-parent-line-diagnostic",
+    )
+
+    assert runtime.main_context.data.snapshot() == (1,)
+    runtime.main_context.data.clear()
+    assert _variable(runtime, "EVAL-STATUS") == 1
+    assert _variable(runtime, "EVAL-LINE") == 1
+    assert _variable(runtime, "EVAL-COLUMN") == len(b"LOAD inner.f ")
+    assert _eval_token(runtime) == b"missing-after-nested-load"
+    assert runtime.find("INNER-FIRST") is None
+    assert runtime.find("INNER-SECOND") is None
+    assert (runtime.dictionary.here, runtime.dictionary.latest) == dictionary_before
+    assert _variable(runtime, "_LD-SP") == 0
+    assert runtime.main_context.returns.snapshot() == ()
+    assert runtime.spinlocks.owner(2) is None
+
+
 def test_load_clean_guards_misses_empty_and_missing_path_restore_state() -> None:
     runtime = _load_mp64fs_load()
     _install_loader_trace(runtime)
@@ -658,13 +718,13 @@ def test_resolver_failure_reports_then_loads_rejected_component() -> None:
     assert runtime.storage.image_bytes == media_before
 
 
-def test_load_throw_cleans_up_then_allows_reuse_without_transaction_registry() -> None:
+def test_load_throw_rolls_back_dictionary_then_allows_reuse() -> None:
     bad_source = (
-        b": BEFORE-LOAD-THROW 17 ;\n"
-        b"-77 THROW\n"
-        b": AFTER-LOAD-THROW 99 ;\n"
+        b": BEFORE-LOAD-THROW 17 ;\r\n"
+        b"-77 THROW\r\n"
+        b": AFTER-LOAD-THROW 99 ;\r\n"
     )
-    good_source = b": AFTER-LOAD-RECOVERY 55 ;"
+    good_source = b": AFTER-LOAD-RECOVERY 55 ;\r\n"
     image = _formatted_image(16)
     _write_entry(
         image,
@@ -700,13 +760,17 @@ def test_load_throw_cleans_up_then_allows_reuse_without_transaction_registry() -
     mount_before = _mount_snapshot(runtime)
     media_before = runtime.storage.image_bytes
     completion_before = runtime.storage.completion
+    here_before = runtime.dictionary.here
+    latest_before = runtime.dictionary.latest
 
     runtime.evaluate(b"' LOAD CATCH bad.f", source_name="caught-load-throw")
 
     assert runtime.main_context.data.snapshot() == (u64(-77),)
     runtime.main_context.data.clear()
-    assert runtime.find("BEFORE-LOAD-THROW") is not None
+    assert runtime.find("BEFORE-LOAD-THROW") is None
     assert runtime.find("AFTER-LOAD-THROW") is None
+    assert runtime.dictionary.here == here_before
+    assert runtime.dictionary.latest == latest_before
     assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
     assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
     assert _variable(runtime, "_LD-SP") == 0
@@ -732,7 +796,7 @@ def test_load_throw_cleans_up_then_allows_reuse_without_transaction_registry() -
     assert runtime.drain_uart_output() == b""
 
 
-def test_load_ignores_raw_evaluate_status_and_executes_later_lines() -> None:
+def test_load_stops_at_undefined_status_and_rolls_back_definitions() -> None:
     source = (
         b": BEFORE-LOAD-UNDEFINED 1 ;\n"
         b"missing-load-token\n"
@@ -756,14 +820,24 @@ def test_load_ignores_raw_evaluate_status_and_executes_later_lines() -> None:
     heap_before = _execute(runtime, "HEAP-FREE-BYTES")[0]
     completion_before = runtime.storage.completion
     media_before = runtime.storage.image_bytes
+    here_before = runtime.dictionary.here
+    latest_before = runtime.dictionary.latest
 
-    runtime.evaluate(b"LOAD unchecked.f", source_name="unchecked-load-status")
+    runtime.evaluate(
+        b"' LOAD CATCH unchecked.f",
+        source_name="checked-load-status",
+    )
 
-    assert _execute(runtime, "BEFORE-LOAD-UNDEFINED") == (1,)
-    assert _execute(runtime, "AFTER-LOAD-UNDEFINED") == (2,)
-    assert _variable(runtime, "EVAL-STATUS") == 0
-    assert _eval_token(runtime) == b""
-    assert _variable(runtime, "LOAD-HOOK-TRACE") == 13
+    assert runtime.main_context.data.snapshot() == (1,)
+    runtime.main_context.data.clear()
+    assert runtime.find("BEFORE-LOAD-UNDEFINED") is None
+    assert runtime.find("AFTER-LOAD-UNDEFINED") is None
+    assert runtime.dictionary.here == here_before
+    assert runtime.dictionary.latest == latest_before
+    assert _variable(runtime, "EVAL-STATUS") == 1
+    assert _variable(runtime, "EVAL-LINE") == 2
+    assert _eval_token(runtime) == b"missing-load-token"
+    assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
     assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
     assert _variable(runtime, "_LD-SP") == 0
     assert _variable(runtime, "CWD") == 0xFF
@@ -773,7 +847,7 @@ def test_load_ignores_raw_evaluate_status_and_executes_later_lines() -> None:
     assert runtime.drain_uart_output() == b"missing-load-token ? (not found)\n"
 
 
-def test_load_returns_success_with_unfinished_compiler_state() -> None:
+def test_load_rejects_unfinished_compiler_state_and_resets_evaluator() -> None:
     source = b": LOAD-LEFT-OPEN 123\n"
     image = _formatted_image()
     _write_entry(
@@ -792,12 +866,22 @@ def test_load_returns_success_with_unfinished_compiler_state() -> None:
     loader_before = _seed_loader_globals(runtime)
     heap_before = _execute(runtime, "HEAP-FREE-BYTES")[0]
     completion_before = runtime.storage.completion
+    here_before = runtime.dictionary.here
+    latest_before = runtime.dictionary.latest
 
-    runtime.evaluate(b"LOAD unfinished.f", source_name="unfinished-raw-load")
+    runtime.evaluate(
+        b"' LOAD CATCH unfinished.f",
+        source_name="unfinished-checked-load",
+    )
 
+    assert runtime.main_context.data.snapshot() == (4,)
+    runtime.main_context.data.clear()
     assert runtime.find("LOAD-LEFT-OPEN") is None
-    assert _variable(runtime, "EVAL-STATUS") == 0
-    assert _variable(runtime, "LOAD-HOOK-TRACE") == 13
+    assert runtime.dictionary.here == here_before
+    assert runtime.dictionary.latest == latest_before
+    assert _variable(runtime, "EVAL-STATUS") == 4
+    assert _variable(runtime, "EVAL-LINE") == 1
+    assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
     assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
     assert _variable(runtime, "_LD-SP") == 0
     assert _variable(runtime, "EVAL-DEPTH") == 0
@@ -805,12 +889,10 @@ def test_load_returns_success_with_unfinished_compiler_state() -> None:
     assert _loader_globals(runtime) == loader_before
     assert runtime.storage.completion == completion_before + 1
     assert runtime.drain_uart_output() == b""
-    assert _execute(runtime, "EVALUATE-FINISH") == (4,)
-    assert _execute(runtime, "EVALUATOR-RESET") == ()
-    assert _variable(runtime, "EVAL-STATUS") == 4
+    assert _execute(runtime, "EVALUATE-FINISH") == (0,)
 
 
-def test_second_extent_read_failure_leaks_pre_guard_loader_state() -> None:
+def test_second_extent_read_failure_runs_guarded_cleanup() -> None:
     image = _formatted_image(20)
     _write_entry(
         image,
@@ -866,31 +948,26 @@ def test_second_extent_read_failure_leaks_pre_guard_loader_state() -> None:
     mount_before = _mount_snapshot(runtime)
     media_before = storage.image_bytes
     completion_before = storage.completion
-    storage.armed = True
-
-    with pytest.raises(ForthAbort, match='Forth ABORT"'):
-        runtime.evaluate(
-            b"LOAD pkg/split.f",
-            source_name="load-second-extent-stale",
-        )
-
-    loaded_buffer = _variable(runtime, "LD-BUF")
-    assert runtime.memory.read_bytes(loaded_buffer, SECTOR_SIZE) == allocation[
-        :SECTOR_SIZE
-    ]
-    assert _variable(runtime, "LD-SZ") == len(source)
-    assert _variable(runtime, "LD-CUR") == loader_before[2]
-    assert _variable(runtime, "LD-LEN") == loader_before[3]
-    assert _variable(runtime, "_LD-SP") == 56
-    assert _variable(runtime, "CWD") == 7
-    assert _variable(runtime, "FS-OK") == 0
-    assert _variable(runtime, "LOAD-HOOK-TRACE") == 0
-    assert _execute(runtime, "HEAP-FREE-BYTES")[0] < heap_before
     expected_ior = _execute(
         runtime,
         "IOR-FROM-BLOCK-RESULT",
         STORAGE_RESULT_MEDIA_REMOVED,
     )[0]
+    storage.armed = True
+
+    runtime.evaluate(
+        b"' LOAD CATCH pkg/split.f",
+        source_name="load-second-extent-stale",
+    )
+
+    assert runtime.main_context.data.snapshot() == (expected_ior,)
+    runtime.main_context.data.clear()
+    assert _loader_globals(runtime) == loader_before
+    assert _variable(runtime, "_LD-SP") == 0
+    assert _variable(runtime, "CWD") == 0xFF
+    assert _variable(runtime, "FS-OK") == 0
+    assert _variable(runtime, "LOAD-HOOK-TRACE") == 23
+    assert _execute(runtime, "HEAP-FREE-BYTES") == (heap_before,)
     assert _diagnostics(runtime) == (
         STORAGE_RESULT_MEDIA_REMOVED,
         0,
@@ -905,5 +982,5 @@ def test_second_extent_read_failure_leaks_pre_guard_loader_state() -> None:
     assert runtime.find("MUST-NOT-REACH") is None
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
-    assert runtime.drain_uart_output() == b"Disk read failed"
+    assert runtime.drain_uart_output() == b""
     assert runtime.spinlocks.owner(2) is None

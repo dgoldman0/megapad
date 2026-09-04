@@ -1191,7 +1191,8 @@ class MegapadSystem:
         self.num_full_cores = num_cores   # full (major) cores
         self.num_clusters = num_clusters
         self.hbw_size = hbw_size          # Banks 1–3 (HBW math RAM)
-        self.hbw_end = (HBW_BASE + hbw_size) if hbw_size > 0 else 0
+        self.hbw_base = HBW_BASE if hbw_size > 0 else 0
+        self.hbw_end = (self.hbw_base + hbw_size) if hbw_size > 0 else 0
         self.ext_mem_size = ext_mem_size  # External memory (HyperRAM/SDRAM)
         self.vram_size = vram_size        # Dedicated VRAM
 
@@ -1305,7 +1306,7 @@ class MegapadSystem:
             bank0_size=ram_size,
             num_cores=self.num_cores,
             num_full_cores=self.num_full_cores,
-            hbw_base=HBW_BASE,
+            hbw_base=self.hbw_base,
             hbw_size=hbw_size,
             int_mem_total=ram_size + hbw_size,
             has_storage=storage_image is not None,

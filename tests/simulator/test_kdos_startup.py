@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from shared.cells import TRUE
+from shared.cells import TRUE, u64
 from shared.storage import SECTOR_SIZE
 from simulator.dictionary_index import DictionaryIndexState
 from simulator.runtime import ColonDefinition, CreatedDefinition, MegaForthRuntime
@@ -32,14 +32,14 @@ FIXTURE = Path(__file__).with_name("fixtures") / "kdos-startup-9854-9894.f"
 
 FIRST_LINE = 9854
 LAST_LINE = 9894
-FIXTURE_BYTES = 1_410
+FIXTURE_BYTES = 1_432
 FIXTURE_SHA256 = (
-    "468983d02d94ed94b7accc8b98f5f60ef1b28c4e397a167d0be95ad785d5f4ae"
+    "d14948c62ff524ed67fe0743f1f3976d3430c1754809bf339c45ac8bd3569f82"
 )
-FIXTURE_GIT_BLOB = "5a95a4dafdeec003d706381d8ea9b5ec93d0ccd0"
-KDOS_BYTES = 341_355
+FIXTURE_GIT_BLOB = "64644994439ac09da0bd19db31866c404d380582"
+KDOS_BYTES = 343_551
 KDOS_SHA256 = (
-    "99e71114ed141c14522d687a3bef3110ead94de7b0a055ae693c135a94772fb8"
+    "b9e6ab1f3fa6331d14db4c94b7ed6978b78b2acd45c311fdecf566dcce4e00ae"
 )
 
 HOSTED_WORD_FIXED_BYTES = 17
@@ -250,6 +250,41 @@ def test_startup_slice_is_exact_and_no_disk_load_effects_are_exact() -> None:
     assert runtime.timer.counter > counter_before
     _assert_restored_startup_frames(runtime, loader_before)
     assert runtime.drain_uart_output() == STARTUP_BANNER + b"\r\n"
+
+
+def test_startup_rethrows_dma_probe_failure_without_freeing_a_fake_address() -> None:
+    runtime = _load_module_system()
+    allocation_requests: list[int] = []
+    freed_addresses: list[int] = []
+
+    def fail_dma_allocate(context) -> None:
+        allocation_requests.append(context.data.pop())
+        context.data.push(0)
+        context.data.push(u64(-73))
+
+    def record_dma_free(context) -> None:
+        freed_addresses.append(context.data.pop())
+
+    runtime.define_primitive("DMA-ALLOCATE", fail_dma_allocate)
+    runtime.define_primitive("DMA-FREE", record_dma_free)
+
+    def evaluate_startup(_context) -> None:
+        _evaluate_startup(runtime)
+
+    action = runtime.define_primitive("HOST-EVALUATE-STARTUP", evaluate_startup)
+    runtime.main_context.data.push(action.xt)
+    runtime.execute("CATCH")
+
+    assert runtime.main_context.data.snapshot() == (u64(-73),)
+    assert runtime.main_context.data.pop() == u64(-73)
+    assert runtime.main_context.returns.snapshot() == ()
+    assert runtime.main_context.reusable
+    assert allocation_requests == [16]
+    assert freed_addresses == []
+    assert _variable(runtime, "HEAP-INIT") == 0
+    assert runtime.find("_AUTOEXEC-NAME") is None
+    assert runtime.find("_AUTOEXEC-RUN") is None
+    assert runtime.drain_uart_output() == STARTUP_BANNER
 
 
 def test_startup_attached_invalid_media_reports_and_continues() -> None:

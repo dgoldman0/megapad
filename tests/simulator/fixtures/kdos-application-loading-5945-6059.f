@@ -7,7 +7,7 @@
 \  inert since MPU is gated on priv_level which is always 0.
 \
 \  LOAD / FSLOAD remain for OS modules and drivers.
-
+\ Application loader setup and checked execution follow.
 \ _APP-MPU-ON ( -- )  set MPU window to cover Bank 0 + ext mem
 : _APP-MPU-ON  ( -- )
     0 MPU-BASE!
@@ -27,31 +27,17 @@
     _APP-MPU-OFF ;
 
 : _APP-LOAD-WALK  ( -- )
-    LD-BUF @
-    LD-SZ @
-    BEGIN DUP 0> WHILE
-        OVER
-        2 PICK
-        0
-        BEGIN
-            DUP 2 PICK < IF
-                OVER OVER + C@ 10 = IF
-                    TRUE
-                ELSE
-                    1+ FALSE
-                THEN
-            ELSE TRUE THEN
-        UNTIL
-        NIP
-        DUP 0> IF
-            2DUP EVALUATE
-        THEN
-        1+
-        ROT OVER - >R
-        + SWAP DROP
-        R>
-    REPEAT
-    2DROP ;
+    _LD-WALK ;
+
+: _APP-LOAD-USER  ( -- )
+    _APP-MPU-ON ENTER-USER _APP-LOAD-WALK ;
+
+: _APP-LOAD-RUN  ( -- )
+    LD-CUR @ _LD-READ-SLOT
+    ['] _APP-LOAD-USER CATCH
+    SYS-EXIT
+    _APP-MPU-OFF
+    THROW ;
 
 : APP-LOAD  ( "filename" -- )
     FS-ENSURE
@@ -69,26 +55,40 @@
         2DROP ."  File buffer allocation failed" CR
         _LD-RESTORE EXIT
     THEN
-    LD-BUF !
-    _LD-READ-SLOT
-    \ Configure MPU (Bank 0 + ext mem visible) and enter user mode
-    _APP-MPU-ON
-    ENTER-USER
-    ['] _APP-LOAD-WALK CATCH
-    DUP IF
-        SYS-EXIT _APP-MPU-OFF
-        _LD-EVAL-CHECKPOINT EVALUATOR-UNWIND
-        _LD-TXN-ROLLBACK
-        _LD-RELEASE
-        _LD-TXN-AFTER-RELEASE
-        THROW
-    THEN
-    DROP
-    SYS-EXIT
-    _APP-MPU-OFF
-    _LD-TXN-COMMIT
-    _LD-RELEASE
-    _LD-TXN-AFTER-RELEASE ;
+    LD-BUF ! LD-CUR !
+    ['] _APP-LOAD-RUN _LD-GUARDED ;
+
+\ APP-LOAD intentionally uses the same checked physical-line walker and the
+\ same transaction guard as LOAD and REQUIRE.  It does not copy the complete
+\ source into SOURCE-EVALUATE-CHECKED because that helper's _SEC-* cursor is
+\ global and would be overwritten by a nested REQUIRE.
+\
+\ The loader frame instead owns every mutable cursor value needed to resume an
+\ outer application after nested loading.  A nonempty line has one terminal CR
+\ removed, receives EVALUATE-CHECKED, and prevents all later lines from running
+\ when its status is nonzero.  A clean EOF receives EVALUATE-FINISH before the
+\ transaction can commit.
+\
+\ _APP-LOAD-RUN places extent transfer under _LD-GUARDED but delays MPU setup
+\ until that transfer succeeds.  Once user execution starts, normal return or
+\ catchable THROW reaches the inner CATCH, which performs SYS-EXIT and disables
+\ the compatibility MPU window before passing the result to the common guard.
+\
+\ The common failure path restores evaluator depth, provisional module state,
+\ dictionary HERE/LATEST, compiler bookkeeping, the transfer allocation, the
+\ loader frame, and ambient CWD before rethrow.  Source status 5 maps back to
+\ EVAL-THROW; statuses 1 through 4 retain their checked status values.
+\
+\ These are lifecycle guarantees, not application isolation.  Completed UART,
+\ storage, device, or writes to objects that predate the loader checkpoint are
+\ not undone.  APP-LOAD also intentionally retains direct current-directory
+\ lookup and the existing public parsing/stack contract.
+\
+\ A successful nested module remains provisional to every enclosing loader
+\ transaction until the outermost source completes.  This keeps its registry
+\ identity and dictionary definitions in the same rollback closure.
+\ Public LOAD, APP-LOAD, REQUIRE, and PROVIDED stack effects remain unchanged;
+\ the transaction machinery is deliberately private loader infrastructure.
 
 \ -- ANSI helpers (canonical definitions; used by .DOC-CHUNK and §9) --
 : ESC   ( -- )  27 EMIT ;

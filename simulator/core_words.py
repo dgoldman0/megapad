@@ -204,18 +204,13 @@ def _negate(context: ExecutionContext) -> None:
 def _minimum(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
-    # The BIOS documentation calls this signed, but the current MP64 `cmp`
-    # branch uses the architectural unsigned G/LE conditions.  Preserve the
-    # executable BIOS behavior used by unchanged source.
-    context.data.push(left if left <= right else right)
+    context.data.push(left if s64(left) <= s64(right) else right)
 
 
 def _maximum(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
-    # See _minimum: the checked-in BIOS currently compares these cells as
-    # unsigned even though the reference describes signed MIN/MAX.
-    context.data.push(left if left > right else right)
+    context.data.push(left if s64(left) > s64(right) else right)
 
 
 def _one_minus(context: ExecutionContext) -> None:
@@ -231,9 +226,7 @@ def _two_multiply(context: ExecutionContext) -> None:
 
 
 def _two_divide(context: ExecutionContext) -> None:
-    # The executable BIOS uses a logical right shift even though an old source
-    # comment calls 2/ arithmetic.  Preserve that cell-level behavior.
-    context.data.push(context.data.pop() >> 1)
+    context.data.push(s64(context.data.pop()) >> 1)
 
 
 def _and(context: ExecutionContext) -> None:

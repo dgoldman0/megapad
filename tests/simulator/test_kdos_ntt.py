@@ -43,8 +43,8 @@ FIXTURE = Path(__file__).with_name("fixtures") / "kdos-ntt-1517-1584.f"
 
 FIRST_LINE = 1517
 LAST_LINE = 1584
-SLICE_SHA256 = "094749eafb3c51c5ed7e5f9da929e502546c53b9965a948b3056a99775a01e80"
-SLICE_GIT_BLOB = "176adf2b63b6cfd5d64f71cdad6837e305c56607"
+SLICE_SHA256 = "95769988473110183b3b2adcc90a2eb3bdd812100ab1702f8686d573af1f4194"
+SLICE_GIT_BLOB = "d4f2ce38b6818520b0227f5a2f8c69aef3c408b6"
 DEFINITIONS = (
     b"Q-KYBER",
     b"Q-DILITHIUM",
@@ -76,7 +76,7 @@ TEMP_ADDRESS = 0x30_C00
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 2773
+    assert len(source) == 2784
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB

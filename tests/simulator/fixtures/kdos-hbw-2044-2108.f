@@ -29,14 +29,14 @@ VARIABLE HBW-LIMIT   0 HBW-LIMIT !
 
 \ HBW-ALLOT ( u -- addr )  bump-allocate u bytes from HBW
 : HBW-ALLOT  ( u -- addr )
-    HBW-HERE @ SWAP                  \ addr u
+    HBW-SIZE 0= ABORT" HBW unavailable"  HBW-HERE @ SWAP  \ addr u
     OVER + DUP HBW-LIMIT @ > ABORT" HBW overflow"
     HBW-HERE !                        \ update pointer
     ;                                 \ leave addr on stack
 
 \ HBW-ALLOT? ( u -- addr ior )  like HBW-ALLOT but returns ior
 : HBW-ALLOT?  ( u -- addr ior )
-    HBW-HERE @ SWAP
+    HBW-SIZE 0= IF DROP 0 -1 EXIT THEN  HBW-HERE @ SWAP
     OVER + DUP HBW-LIMIT @ > IF
         2DROP 0 -1 EXIT              \ overflow → (0, -1)
     THEN

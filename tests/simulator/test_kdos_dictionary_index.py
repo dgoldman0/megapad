@@ -188,7 +188,8 @@ def test_power_floor_and_double_words_follow_executable_bios_cells(
         assert _execute(runtime, "_DICT-POW2-FLOOR", value) == (expected,)
 
     assert _execute(runtime, "2*", MASK64) == (MASK64 - 1,)
-    assert _execute(runtime, "2/", MASK64) == (0x7FFF_FFFF_FFFF_FFFF,)
+    assert _execute(runtime, "2/", MASK64) == (MASK64,)
+    assert _execute(runtime, "2/", MASK64 - 2) == (MASK64 - 1,)
 
 
 def test_rebuild_indexes_every_latest_binding_with_exact_slot_bytes(
