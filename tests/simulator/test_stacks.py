@@ -182,6 +182,26 @@ def test_loop_wraps_index_and_removes_only_terminated_frame() -> None:
     assert stack.snapshot() == (0xA5,)
 
 
+def test_plus_loop_is_modular_and_exits_only_on_exact_equality() -> None:
+    stack = ReturnStack()
+    stack.push(0xA5)
+    stack.enter_do(limit=0, index=2)
+
+    assert stack.plus_loop(-1) is True
+    assert stack.i() == 1
+    assert stack.plus_loop(MASK64) is False
+    assert stack.snapshot() == (0xA5,)
+
+    stack.enter_do(limit=5, index=4)
+    assert stack.plus_loop(2) is True
+    assert stack.snapshot() == (0xA5, 5, 6)
+    stack.unloop()
+
+    stack.enter_do(limit=1, index=MASK64)
+    assert stack.plus_loop(2) is False
+    assert stack.snapshot() == (0xA5,)
+
+
 def test_loop_shape_failure_does_not_search_or_mutate() -> None:
     stack = ReturnStack()
     stack.enter_do(limit=4, index=1)
@@ -203,6 +223,7 @@ def test_loop_shape_failure_does_not_search_or_mutate() -> None:
         (lambda stack: stack.pop_continuation(), 1),
         (lambda stack: stack.i(), 2),
         (lambda stack: stack.loop(), 2),
+        (lambda stack: stack.plus_loop(1), 2),
         (lambda stack: stack.unloop(), 2),
         (lambda stack: stack.j(), 4),
     ],

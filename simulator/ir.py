@@ -146,6 +146,14 @@ class Loop:
 
 
 @dataclass(frozen=True, slots=True)
+class PlusLoop:
+    target: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "target", _target(self.target))
+
+
+@dataclass(frozen=True, slots=True)
 class Unloop:
     pass
 
@@ -217,6 +225,7 @@ Operation: TypeAlias = (
     | Do
     | QuestionDo
     | Loop
+    | PlusLoop
     | Unloop
     | InstallDoes
     | RestoreDataStackPointer
@@ -238,6 +247,7 @@ __all__ = [
     "Literal",
     "Loop",
     "Operation",
+    "PlusLoop",
     "PushStringLiteral",
     "QuestionDo",
     "RestoreDataStackPointer",

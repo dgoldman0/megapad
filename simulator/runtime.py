@@ -48,6 +48,7 @@ from simulator.ir import (
     Literal,
     Loop,
     Operation,
+    PlusLoop,
     PushStringLiteral,
     QuestionDo,
     RestoreDataStackPointer,
@@ -288,6 +289,7 @@ class DirectiveKind(Enum):
     ENDOF = auto()
     ENDCASE = auto()
     RECURSE = auto()
+    PLUS_LOOP = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1877,7 +1879,10 @@ class MegaForthRuntime:
             raise ValueError("colon operations must end with Return")
         operation_count = len(operations)
         for operation in operations:
-            if isinstance(operation, (Branch, BranchZero, QuestionDo, Loop)):
+            if isinstance(
+                operation,
+                (Branch, BranchZero, QuestionDo, Loop, PlusLoop),
+            ):
                 if operation.target >= operation_count:
                     raise ValueError("colon branch target escapes its definition")
             elif isinstance(operation, InstallDoes):
@@ -2665,7 +2670,8 @@ class MegaForthRuntime:
             )
             state.compiler = compiler
         if compiler is None or not compiler.compile_mode:
-            self._compile_error(state, f"{kind.name} is compile-only")
+            owner = "+LOOP" if kind is DirectiveKind.PLUS_LOOP else kind.name
+            self._compile_error(state, f"{owner} is compile-only")
 
         if kind is DirectiveKind.SEMICOLON:
             if compiler.temporary:
@@ -2807,14 +2813,19 @@ class MegaForthRuntime:
             compiler.controls.append(
                 _DoFrame(len(compiler.operations), question_index)
             )
-        elif kind is DirectiveKind.LOOP:
+        elif kind in (DirectiveKind.LOOP, DirectiveKind.PLUS_LOOP):
+            owner = "LOOP" if kind is DirectiveKind.LOOP else "+LOOP"
             if not compiler.controls or not isinstance(
                 compiler.controls[-1], _DoFrame
             ):
-                self._compile_error(state, "LOOP has no matching DO")
+                self._compile_error(state, f"{owner} has no matching DO")
             frame = compiler.controls.pop()
             assert isinstance(frame, _DoFrame)
-            compiler.operations.append(Loop(frame.body_target))
+            compiler.operations.append(
+                Loop(frame.body_target)
+                if kind is DirectiveKind.LOOP
+                else PlusLoop(frame.body_target)
+            )
             exit_target = len(compiler.operations)
             if frame.question_index is not None:
                 compiler.operations[frame.question_index] = QuestionDo(
@@ -3532,6 +3543,13 @@ class MegaForthRuntime:
                     ip += 1
             elif isinstance(operation, Loop):
                 ip = operation.target if context.returns.loop() else ip + 1
+            elif isinstance(operation, PlusLoop):
+                increment = context.data.pop()
+                ip = (
+                    operation.target
+                    if context.returns.plus_loop(increment)
+                    else ip + 1
+                )
             elif isinstance(operation, Unloop):
                 context.returns.unloop()
                 ip += 1

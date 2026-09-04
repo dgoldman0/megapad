@@ -599,8 +599,21 @@ class ReturnStack:
         index entry is replaced.
         """
 
-        limit, index = self._loop_frame("LOOP", offset=0)
-        next_index = u64(index + 1)
+        return self._advance_loop(1, operation="LOOP")
+
+    def plus_loop(self, increment: int) -> bool:
+        """Advance ``+LOOP`` with the BIOS equality-based contract.
+
+        The caller supplies one cell interpreted modulo 2**64. Crossing the
+        limit does not terminate the loop: only exact equality after the
+        increment removes the frame.
+        """
+
+        return self._advance_loop(increment, operation="+LOOP")
+
+    def _advance_loop(self, increment: int, *, operation: str) -> bool:
+        limit, index = self._loop_frame(operation, offset=0)
+        next_index = u64(index + increment)
         if next_index == limit:
             self._discard_entries(2)
             return False

@@ -196,3 +196,27 @@ def test_recurse_is_compile_only_and_rejects_temporary_interpret_control() -> No
         match="RECURSE requires a named colon definition",
     ):
         runtime.evaluate(b"1 IF RECURSE THEN")
+
+
+def test_plus_loop_uses_runtime_increment_and_resolves_do_exits() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        b": DESCENDING-SUM 0 0 5 DO I + -1 +LOOP ; "
+        b": STRIDE-SUM 0 10 0 DO I + 2 +LOOP ; "
+        b": EMPTY-STRIDE 77 4 4 ?DO 99 1 +LOOP ; "
+        b": LEAVE-STRIDE 0 10 0 DO I 4 = IF LEAVE THEN I + 2 +LOOP ;"
+    )
+
+    assert _execute(runtime, "DESCENDING-SUM") == (15,)
+    assert _execute(runtime, "STRIDE-SUM") == (20,)
+    assert _execute(runtime, "EMPTY-STRIDE") == (77,)
+    assert _execute(runtime, "LEAVE-STRIDE") == (2,)
+
+
+def test_plus_loop_is_compile_only_and_requires_do() -> None:
+    runtime = MegaForthRuntime()
+
+    with pytest.raises(SourceError, match=r"\+LOOP is compile-only"):
+        runtime.evaluate(b"1 +LOOP")
+    with pytest.raises(SourceError, match=r"\+LOOP has no matching DO"):
+        runtime.evaluate(b": BAD +LOOP ;")

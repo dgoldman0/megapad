@@ -2723,5 +2723,6 @@ def install_core(runtime: MegaForthRuntime) -> None:
         runtime.define_directive(name, kind)
 
     runtime.define_directive(b"RECURSE", DirectiveKind.RECURSE)
+    runtime.define_directive(b"+LOOP", DirectiveKind.PLUS_LOOP)
 
 __all__ = ["install_core"]
