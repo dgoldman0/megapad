@@ -389,10 +389,15 @@ This state is runtime-global for the one admitted core and is not a concurrent
 evaluator contract. Ordinary interpret-mode `IF`/`ELSE`/`THEN` uses the native
 anonymous temporary-compilation lifetime: it persists across physical
 `EVALUATE` inputs, executes only at the outer `THEN`, clears its temporary
-bytes, restores `HERE`, and publishes no dictionary word. This is distinct
-from conditional-compilation `[IF]`, which remains unqualified. The admitted
-surface also does not publish or qualify public `SOURCE`, `>IN`, or `STATE`, or
-direct LF-containing guest `EVALUATE` input. Filesystem `LOAD` deliberately has
+bytes, restores `HERE`, and publishes no dictionary word. Bracketed
+conditional compilation is separate evaluator state: `[DEFINED]` and
+`[UNDEFINED]` test the newest dictionary binding, while false `[IF]` arms and
+the taken arm's `[ELSE]` skip raw, case-insensitive tokens with nested depth.
+That skip persists across physical inputs, counts bracket keywords even inside
+otherwise uninterpreted comment or string text, and makes
+`EVALUATE-FINISH` return status 4 until its `[THEN]` arrives. The admitted
+surface still does not publish or qualify public `SOURCE`, `>IN`, or `STATE`,
+or direct LF-containing guest `EVALUATE` input. Filesystem `LOAD` deliberately has
 a narrower raw source domain and different failure behavior, specified below.
 The contiguous KDOS source frontier now reaches EOF at line 9894.
 
@@ -3575,8 +3580,10 @@ terminal-geometry words follow them: `COLS`, `ROWS`, `RESIZED?`, `TERMSIZE`,
 their addresses; absolute tokens remain nonportable between backends. Six
 more append-only closure prerequisites provide `BSWAP`, the default
 unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and deterministic
-checked `ENTROPY-FILL`/`ENTROPY-READY?`. Fresh runtimes therefore publish 336
-pre-KDOS words. Focused units qualify widening
+checked `ENTROPY-FILL`/`ENTROPY-READY?`. Eight following source words provide
+bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates, and persistent
+raw-token `[IF]`/`[ELSE]`/`[THEN]` skipping. Fresh runtimes therefore publish
+344 pre-KDOS words. Focused units qualify widening
 multiplication, wrapping interval comparison, overlap/fault copy order,
 deterministic latched uptime, immediate hosted flush semantics, session-bound
 dimensions, independent clear-on-read resize status, and stale-safe

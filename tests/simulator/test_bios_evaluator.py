@@ -188,6 +188,38 @@ def test_interpret_if_persists_across_checked_evaluate_calls_and_finishes() -> N
     assert runtime.find(b"<interpret-if>") is None
 
 
+def test_conditional_compilation_skip_persists_across_checked_lines() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+
+    assert _evaluate_checked(runtime, b"0 [IF] ignored") == (0,)
+    context.data.clear()
+    assert _evaluate_checked(runtime, b"[IF] nested missing") == (0,)
+    context.data.clear()
+    assert _evaluate_checked(runtime, b"[THEN] [ELSE] 41") == (41, 0)
+    assert context.data.pop() == 0
+    assert _evaluate_checked(runtime, b"[THEN]") == (41, 0)
+    assert context.data.pop() == 0
+
+    runtime.execute("EVALUATE-FINISH")
+    assert context.data.snapshot() == (41, 0)
+
+
+def test_evaluator_finish_and_reset_account_for_open_conditional_skip() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+
+    assert _evaluate_checked(runtime, b"0 [IF]") == (0,)
+    context.data.clear()
+    runtime.execute("EVALUATE-FINISH")
+    assert context.data.snapshot() == (4,)
+
+    context.data.clear()
+    runtime.execute("EVALUATOR-RESET")
+    runtime.execute("EVALUATE-FINISH")
+    assert context.data.snapshot() == (0,)
+
+
 def test_cross_input_interpret_if_retains_definition_before_checkpoint() -> None:
     runtime = MegaForthRuntime()
     context = runtime.main_context
@@ -364,6 +396,20 @@ def test_host_abort_clears_hidden_evaluator_depth_and_compiler_state() -> None:
     runtime.execute("EVALUATE-FINISH")
     assert runtime.main_context.data.snapshot() == (0,)
     assert runtime.find("ABANDONED") is None
+
+
+def test_host_abort_clears_persistent_conditional_skip_state() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+
+    assert _evaluate_checked(runtime, b"0 [IF]") == (0,)
+    context.data.clear()
+
+    with pytest.raises(ForthAbort):
+        runtime.execute("ABORT")
+
+    runtime.execute("EVALUATE-FINISH")
+    assert context.data.snapshot() == (0,)
 
 
 def test_unroutable_guest_transfer_fail_closes_at_outer_run_boundary() -> None:

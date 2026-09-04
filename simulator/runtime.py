@@ -276,6 +276,12 @@ class DirectiveKind(Enum):
     ABORT_QUOTE = auto()
     LEFT_BRACKET = auto()
     RIGHT_BRACKET = auto()
+    BRACKET_CHAR = auto()
+    BRACKET_DEFINED = auto()
+    BRACKET_UNDEFINED = auto()
+    BRACKET_IF = auto()
+    BRACKET_ELSE = auto()
+    BRACKET_THEN = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,9 +367,22 @@ class _Compiler:
 
 @dataclass(slots=True)
 class _CompilerState:
-    """One mutable compiler slot shared only where source semantics require."""
+    """Persistent source-control state shared across BIOS EVALUATE lines."""
 
     compiler: _Compiler | None = None
+    conditional_skip: _ConditionalSkip | None = None
+
+
+class _ConditionalSkipKind(Enum):
+    IF_BRANCH = auto()
+    ELSE_BRANCH = auto()
+
+
+@dataclass(slots=True)
+class _ConditionalSkip:
+    kind: _ConditionalSkipKind
+    depth: int
+    location: SourceLocation
 
 
 @dataclass(slots=True)
@@ -383,6 +402,14 @@ class _EvaluationState:
     @compiler.setter
     def compiler(self, value: _Compiler | None) -> None:
         self._compiler_state.compiler = value
+
+    @property
+    def conditional_skip(self) -> _ConditionalSkip | None:
+        return self._compiler_state.conditional_skip
+
+    @conditional_skip.setter
+    def conditional_skip(self, value: _ConditionalSkip | None) -> None:
+        self._compiler_state.conditional_skip = value
 
 
 @dataclass(frozen=True, slots=True)
@@ -1139,7 +1166,11 @@ class MegaForthRuntime:
             raise TypeError("context must be an ExecutionContext")
         evaluator = self._require_bios_evaluator()
         self._clear_bios_evaluator_diagnostics(evaluator)
-        status = 4 if evaluator.compiler_state.compiler is not None else 0
+        source_state = evaluator.compiler_state
+        status = 4 if (
+            source_state.compiler is not None
+            or source_state.conditional_skip is not None
+        ) else 0
         if status:
             self.memory.write64(evaluator.status_address, status)
         context.data.push(status)
@@ -1151,6 +1182,7 @@ class MegaForthRuntime:
         evaluator = self._require_bios_evaluator()
         compiler = evaluator.compiler_state.compiler
         evaluator.compiler_state.compiler = None
+        evaluator.compiler_state.conditional_skip = None
         if compiler is not None and compiler.temporary:
             self._discard_temporary_compiler(compiler)
 
@@ -1318,6 +1350,7 @@ class MegaForthRuntime:
         evaluator.frames.clear()
         compiler = evaluator.compiler_state.compiler
         evaluator.compiler_state.compiler = None
+        evaluator.compiler_state.conditional_skip = None
         if compiler is not None and compiler.temporary:
             self._discard_temporary_compiler(compiler)
         self.memory.write64(evaluator.depth_address, 0)
@@ -1327,6 +1360,7 @@ class MegaForthRuntime:
         if evaluator is not None and (
             evaluator.frames
             or evaluator.compiler_state.compiler is not None
+            or evaluator.compiler_state.conditional_skip is not None
         ):
             self._fail_closed_bios_evaluator(evaluator)
 
@@ -2042,6 +2076,11 @@ class MegaForthRuntime:
                     f"definition {state.compiler.name!r} has no terminating ;",
                     state.compiler.location,
                 )
+            if state.conditional_skip is not None:
+                raise SourceError(
+                    "conditional compilation has no terminating [THEN]",
+                    state.conditional_skip.location,
+                )
             return EvaluationResult(
                 source_name=source_name,
                 line_count=line_count,
@@ -2359,7 +2398,10 @@ class MegaForthRuntime:
                 if not token:
                     return
                 state.token_count += 1
-                self._evaluate_token(token, state)
+                if state.conditional_skip is None:
+                    self._evaluate_token(token, state)
+                else:
+                    self._skip_conditional_token(token, state)
                 if state.bios_evaluator:
                     evaluator = self._require_bios_evaluator()
                     if self.memory.read64(evaluator.status_address) != 0:
@@ -2368,6 +2410,33 @@ class MegaForthRuntime:
             active = self._active_input_states.pop()
             if active is not state:
                 raise AssertionError("active input cursor stack is corrupted")
+
+    def _skip_conditional_token(
+        self,
+        token: bytes,
+        state: _EvaluationState,
+    ) -> None:
+        """Consume one raw token while bracketed source is being skipped."""
+
+        skip = state.conditional_skip
+        if skip is None:
+            raise AssertionError("conditional skip requires active state")
+        keyword = token.upper()
+        if keyword == b"[IF]":
+            skip.depth += 1
+            return
+        if keyword == b"[ELSE]":
+            if (
+                skip.kind is _ConditionalSkipKind.IF_BRANCH
+                and skip.depth == 1
+            ):
+                state.conditional_skip = None
+            return
+        if keyword != b"[THEN]":
+            return
+        skip.depth -= 1
+        if skip.depth == 0:
+            state.conditional_skip = None
 
     def _evaluate_token(self, token: bytes, state: _EvaluationState) -> None:
         if token.startswith(b"\\"):
@@ -2440,6 +2509,44 @@ class MegaForthRuntime:
             return
         if kind is DirectiveKind.PROVIDED:
             self._provided.add(self._parse_required_word(state, "PROVIDED"))
+            return
+        if kind is DirectiveKind.BRACKET_DEFINED:
+            name = self.parse_input_word()
+            try:
+                found = self.dictionary.find(name) if name else None
+            except ValueError:
+                found = None
+            state.context.data.push(
+                MASK64 if found is not None else 0
+            )
+            return
+        if kind is DirectiveKind.BRACKET_UNDEFINED:
+            name = self.parse_input_word()
+            try:
+                found = self.dictionary.find(name) if name else None
+            except ValueError:
+                found = None
+            state.context.data.push(
+                MASK64 if found is None else 0
+            )
+            return
+        if kind is DirectiveKind.BRACKET_IF:
+            flag = state.context.data.pop()
+            if flag == 0:
+                state.conditional_skip = _ConditionalSkip(
+                    _ConditionalSkipKind.IF_BRANCH,
+                    1,
+                    self._token_location(state),
+                )
+            return
+        if kind is DirectiveKind.BRACKET_ELSE:
+            state.conditional_skip = _ConditionalSkip(
+                _ConditionalSkipKind.ELSE_BRANCH,
+                1,
+                self._token_location(state),
+            )
+            return
+        if kind is DirectiveKind.BRACKET_THEN:
             return
         if kind is DirectiveKind.DOT_QUOTE:
             payload = self._parse_quoted_literal(
@@ -2518,6 +2625,16 @@ class MegaForthRuntime:
             if state.compiler is None:
                 self._compile_error(state, "] requires an open definition")
             state.compiler.compile_mode = True
+            return
+
+        if kind is DirectiveKind.BRACKET_CHAR:
+            token = self.parse_input_word()
+            if not token:
+                return
+            compiler = state.compiler
+            if compiler is None or not compiler.compile_mode:
+                self._compile_error(state, "[CHAR] is compile-only")
+            compiler.operations.append(Literal(token[0]))
             return
 
         compiler = state.compiler

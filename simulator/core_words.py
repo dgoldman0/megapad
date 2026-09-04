@@ -221,6 +221,18 @@ def _signed_modulo(context: ExecutionContext) -> None:
     context.data.push(dividend - quotient * divisor)
 
 
+def _signed_divmod(context: ExecutionContext) -> None:
+    divisor = s64(context.data.pop())
+    dividend = s64(context.data.pop())
+    if divisor == 0 or (dividend == -(1 << 63) and divisor == -1):
+        raise ExecutionError("signed /MOD trapped on zero or overflow")
+    quotient = abs(dividend) // abs(divisor)
+    if (dividend < 0) != (divisor < 0):
+        quotient = -quotient
+    context.data.push(dividend - quotient * divisor)
+    context.data.push(quotient)
+
+
 def _absolute(context: ExecutionContext) -> None:
     value = s64(context.data.pop())
     context.data.push(-value if value < 0 else value)
@@ -666,6 +678,11 @@ def _depth(context: ExecutionContext) -> None:
 def _word(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     delimiter = context.data.pop()
     context.data.push(runtime.parse_word_to_dictionary_tail(delimiter))
+
+
+def _char(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    token = runtime.parse_input_word()
+    context.data.push(0 if not token else token[0])
 
 
 def _stack_pointer_fetch(context: ExecutionContext) -> None:
@@ -2684,5 +2701,17 @@ def install_core(runtime: MegaForthRuntime) -> None:
         b"ENTROPY-READY?",
         lambda context: context.data.push(forth_flag(_entropy_ready(runtime))),
     )
+
+    runtime.define_directive(b"[CHAR]", DirectiveKind.BRACKET_CHAR)
+    runtime.define_primitive(b"CHAR", lambda context: _char(runtime, context))
+    runtime.define_primitive(b"/MOD", _signed_divmod)
+    for name, kind in (
+        (b"[DEFINED]", DirectiveKind.BRACKET_DEFINED),
+        (b"[UNDEFINED]", DirectiveKind.BRACKET_UNDEFINED),
+        (b"[IF]", DirectiveKind.BRACKET_IF),
+        (b"[ELSE]", DirectiveKind.BRACKET_ELSE),
+        (b"[THEN]", DirectiveKind.BRACKET_THEN),
+    ):
+        runtime.define_directive(name, kind)
 
 __all__ = ["install_core"]

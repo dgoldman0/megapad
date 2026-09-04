@@ -152,7 +152,8 @@ The implemented slices provide:
 - the one-core semantic BIOS evaluator: raw guest `EVALUATE` through 255 bytes,
   checked statuses and diagnostics, persistent cross-call compiler/control
   state, ordinary anonymous interpret-mode `IF`/`ELSE`/`THEN`, explicit
-  finish/reset/unwind, and one inherited public step budget;
+  finish/reset/unwind, raw-token bracketed conditional compilation, bytewise
+  `CHAR`/`[CHAR]`, signed `/MOD`, and one inherited public step budget;
 - the retired user-mode compatibility ABI: stack-neutral `ENTER-USER` and
   `SYS-EXIT`, constant-supervisor `PRIV@`, and runtime-local, guest-visible
   `MPU-BASE`/`MPU-LIMIT` registers which retain values but do not enforce
@@ -830,19 +831,23 @@ of input. Caller-owned dictionary rollback followed by `EVALUATOR-RESET`
 removes completed and unfinished work while retaining the failure diagnostic.
 
 The evaluator remains runtime-global and nonconcurrent and makes no claim for
-public `SOURCE`, `>IN`, or `STATE`, direct LF-containing guest `EVALUATE`
-input, or conditional-compilation `[IF]`. Ordinary interpret-mode
-`IF`/`ELSE`/`THEN` is distinct: it persists one anonymous temporary compilation
-across physical inputs, executes at the outer `THEN`, clears its bytes, restores
-`HERE`, and publishes no word. The filesystem loader's narrower raw-source
-domain and literal failure behavior are recorded below. The contiguous KDOS
-frontier now reaches EOF at line 9894.
+public `SOURCE`, `>IN`, or `STATE` or direct LF-containing guest `EVALUATE`
+input. Ordinary interpret-mode `IF`/`ELSE`/`THEN` persists one anonymous
+temporary compilation across physical inputs, executes at the outer `THEN`,
+clears its bytes, restores `HERE`, and publishes no word. Bracketed `[IF]` is
+distinct raw-token skip state: it is case-insensitive, tracks nested bracket
+conditionals across physical inputs, and ignores all non-control tokens without
+interpreting comments, strings, or unknown words. `[DEFINED]`/`[UNDEFINED]`
+select against the live dictionary, and unfinished skip state participates in
+finish/reset/fail-closed evaluator bookkeeping. The filesystem loader's
+narrower raw-source domain and literal failure behavior are recorded below.
+The contiguous KDOS frontier now reaches EOF at line 9894.
 
 ### KDOS source frontier
 
 | Logical lines | Status | Purpose |
 |---|---|---|
-| 39–9894 (EOF) | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the absent-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, §19 Hash Table Primitives, §20 Module System, and final §14 Startup |
+| 39–9894 (EOF) | Contiguous qualified frontier | Ordinary bootstrap through diagnostics, crypto, allocation, dictionary/userland/Arena, semantic `IDLE`, Buffer and compute layers, checked storage and partitioning, legacy files, MP64FS cache/lifecycle/mutation/transfers/FDs, the KDOS checked whole-source compiler, nested two-extent filesystem `LOAD`, Application Loading, ANSI byte helpers, whole-file encryption, parent-byte navigation/mutation, the Documentation Browser, raw linked-header Dictionary Search, the task registry/synchronous executor, Timer Preemption Setup, one-core Multicore Dispatch, §8.2–§8.7 queues/affinity/flags/messages/locks, §8.8–§8.9 cluster-control/MPU failure behavior, the unconfigured-network forward bridge, complete §9 ANSI screens, §10 Data Port structures and bindings, the §11 placeholder, §12 text status/dashboard definitions, §13 Help, §15 Pipeline Bundles, §18 Ring Buffer Primitives, §19 Hash Table Primitives, §20 Module System, and final §14 Startup |
 
 The primary progress measure is the monotonically advancing contiguous
 frontier, not the number of isolated fixtures. A later island is admitted only
@@ -2311,12 +2316,14 @@ clear-on-read `RESIZED?`, atomic `TERMSIZE`, clear-on-read
 memory, clock, UART, and session-geometry units are qualification of those
 primitives only. Six append-only source-closure words then provide `BSWAP`,
 the current unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and
-checked deterministic `ENTROPY-FILL`/`ENTROPY-READY?`. The focused
+checked deterministic `ENTROPY-FILL`/`ENTROPY-READY?`. Eight more source words
+provide bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates, and
+cross-line `[IF]`/`[ELSE]`/`[THEN]` skipping. The focused
 live integration below now evaluates the complete authoritative module against
 the exact KDOS exception closure, but does not yet claim normal
 MP64FS/`REQUIRE` composition, Akashic integration, the Desktop lifecycle, or
 physical rendering. Those runs remain deferred by the vertical's resource
-gate. Fresh runtimes therefore contain 336 pseudo-BIOS words before KDOS; the
+gate. Fresh runtimes therefore contain 344 pseudo-BIOS words before KDOS; the
 319-word figure above remains the exact historical-load observation and is not
 silently rewritten as new full-load evidence.
 

@@ -14,8 +14,8 @@ from simulator.stacks import StackUnderflow
 def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
     runtime = MegaForthRuntime()
 
-    assert len(runtime.dictionary.words) == 336
-    assert tuple(word.name for word in runtime.dictionary.words[-17:]) == (
+    assert len(runtime.dictionary.words) == 344
+    assert tuple(word.name for word in runtime.dictionary.words[-25:]) == (
         b"UM*",
         b"WITHIN",
         b"MOVE",
@@ -33,6 +33,14 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"NET-MAC@",
         b"ENTROPY-FILL",
         b"ENTROPY-READY?",
+        b"[CHAR]",
+        b"CHAR",
+        b"/MOD",
+        b"[DEFINED]",
+        b"[UNDEFINED]",
+        b"[IF]",
+        b"[ELSE]",
+        b"[THEN]",
     )
 
 
