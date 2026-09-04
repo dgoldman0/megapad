@@ -91,3 +91,16 @@ def test_type_wraps_each_increment_and_routes_each_byte_independently(
     assert reads == [MASK64, 0]
     assert context.data.snapshot() == ()
     assert runtime.uart_output == b"ZA"
+
+
+def test_tx_flush_preserves_immediately_published_bytes_and_stack() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(0xA55A)
+    runtime.write_uart_bytes(b"complete frame")
+
+    runtime.execute("TX-FLUSH", context=context)
+
+    assert context.data.snapshot() == (0xA55A,)
+    assert runtime.uart_output == b"complete frame"
+    assert runtime.drain_uart_output() == b"complete frame"

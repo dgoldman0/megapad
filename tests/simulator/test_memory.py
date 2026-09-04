@@ -28,6 +28,7 @@ from simulator.memory import (
 @dataclass
 class RecordingMMIO:
     reject: bool = False
+    fail_write_offset: int | None = None
     values: dict[int, int] = field(default_factory=dict)
     events: list[tuple[object, ...]] = field(default_factory=list)
 
@@ -42,6 +43,8 @@ class RecordingMMIO:
 
     def write8(self, offset: int, value: int) -> None:
         self.events.append(("write", offset, value))
+        if offset == self.fail_write_offset:
+            raise RuntimeError("write failed")
         self.values[offset] = value
 
 
@@ -269,6 +272,55 @@ def test_forward_copy_fault_retains_the_completed_low_byte_prefix() -> None:
         memory.copy_forward(0x10, 0x20, 8)
 
     assert memory.read_bytes(0x20, 4) == b"ABCD"
+
+
+def test_move_preserves_bytes_for_both_overlap_directions() -> None:
+    memory = SparseAddressSpace(bank0_size=0x100)
+    memory.write_bytes(0x20, b"abcdef")
+
+    memory.move(0x20, 0x21, 5)
+    assert memory.read_bytes(0x20, 6) == b"aabcde"
+
+    memory.write_bytes(0x20, b"abcdef")
+    memory.move(0x21, 0x20, 5)
+    assert memory.read_bytes(0x20, 6) == b"bcdeff"
+
+
+def test_move_zero_length_and_equal_addresses_do_not_access_memory() -> None:
+    port = RecordingMMIO(reject=True)
+    memory = SparseAddressSpace(bank0_size=0x100, mmio=port)
+
+    memory.move(MASK64, MASK64, 0)
+    memory.move(MMIO_BASE, MMIO_BASE, 8)
+
+    assert port.events == []
+
+
+def test_move_backward_fault_retains_completed_high_byte_suffix() -> None:
+    port = RecordingMMIO(
+        fail_write_offset=3,
+        values={index: value for index, value in enumerate(b"abcdef")},
+    )
+    memory = SparseAddressSpace(bank0_size=0x100, mmio=port)
+
+    with pytest.raises(MMIOAccessError):
+        memory.move(MMIO_BASE, MMIO_BASE + 1, 5)
+
+    assert bytes(port.values[index] for index in range(6)) == b"abcdde"
+    assert port.events == [
+        ("preflight", 4, 1, False),
+        ("read", 4),
+        ("preflight", 5, 1, True),
+        ("write", 5, ord("e")),
+        ("preflight", 3, 1, False),
+        ("read", 3),
+        ("preflight", 4, 1, True),
+        ("write", 4, ord("d")),
+        ("preflight", 2, 1, False),
+        ("read", 2),
+        ("preflight", 3, 1, True),
+        ("write", 3, ord("c")),
+    ]
 
 
 def test_allocator_is_aligned_deterministic_first_fit_and_fully_coalescing() -> None:

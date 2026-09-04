@@ -786,6 +786,15 @@ class MegaForthRuntime:
             raise TypeError("UART output payload must be bytes")
         self._uart_output.extend(payload)
 
+    def flush_uart_output(self) -> None:
+        """Complete the hosted UART's current output publication.
+
+        Hosted writes enter the runtime-owned byte stream synchronously, so
+        there is no lower FIFO or shifter to wait for. Keeping an explicit
+        operation preserves the source-visible ``TX-FLUSH`` boundary for a
+        later transport adapter without inventing machine timing here.
+        """
+
     def drain_uart_output(self) -> bytes:
         """Return all pending UART bytes and clear the runtime-owned buffer."""
 

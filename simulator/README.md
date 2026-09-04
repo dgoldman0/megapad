@@ -2275,11 +2275,17 @@ ring FIFO, and module-listing checks. Current source-ledger accounting expects
 selector has not been rerun; that work remains deferred by the rich-terminal
 gate.
 
-The contiguous unchanged KDOS core now reaches EOF. This branch stops here,
-before loading or implementing `rich-terminal.f`; later terminal work must
-resynchronize with the then-current rich-terminal vertical. Native/full-core
-cold load, Akashic integration, Desktop smoke, and broader renderer or
-persistence runs remain deferred by that vertical's resource gate.
+The contiguous unchanged KDOS core now reaches EOF. The integration branch is
+now synchronized with the current `rich-terminal.f` and adds its five missing
+pseudo-BIOS prerequisites as append-only hosted words: `UM*`, `WITHIN`, `MOVE`,
+`MS@`, and `TX-FLUSH`. Their focused scalar, memory, clock, and UART units are
+qualification of those primitives only. The simulator still stops before
+loading `rich-terminal.f` or claiming its transport/session lifecycle.
+Native/full-core cold load, Akashic integration, Desktop smoke, and broader
+renderer or persistence runs remain deferred by that vertical's resource gate.
+Fresh runtimes therefore contain 324 pseudo-BIOS words before KDOS; the
+319-word figure above remains the exact historical-load observation and is not
+silently rewritten as new full-load evidence.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

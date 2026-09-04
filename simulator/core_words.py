@@ -33,7 +33,12 @@ from simulator.platform import (
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
 )
-from simulator.rtc import RTC_EPOCH, RTC_EPOCH_SIZE
+from simulator.rtc import (
+    RTC_EPOCH,
+    RTC_EPOCH_SIZE,
+    RTC_UPTIME,
+    RTC_UPTIME_SIZE,
+)
 from simulator.runtime import (
     CreatedDefinition,
     DirectiveKind,
@@ -168,6 +173,14 @@ def _multiply(context: ExecutionContext) -> None:
     right = context.data.pop()
     left = context.data.pop()
     context.data.push(u64(left * right))
+
+
+def _unsigned_multiply(context: ExecutionContext) -> None:
+    right = context.data.pop()
+    left = context.data.pop()
+    product = left * right
+    context.data.push(u64(product))
+    context.data.push(u64(product >> 64))
 
 
 def _signed_divide(context: ExecutionContext) -> None:
@@ -327,6 +340,15 @@ def _signed_greater(context: ExecutionContext) -> None:
     context.data.push(forth_flag(left > right))
 
 
+def _within(context: ExecutionContext) -> None:
+    high = context.data.pop()
+    low = context.data.pop()
+    value = context.data.pop()
+    context.data.push(
+        forth_flag(u64(value - low) < u64(high - low))
+    )
+
+
 def _fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.peek()
     value = runtime.memory.read64(address)
@@ -457,6 +479,13 @@ def _cmove(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     destination = context.data.pop()
     source = context.data.pop()
     runtime.memory.copy_forward(source, destination, length)
+
+
+def _move(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    length = context.data.pop()
+    destination = context.data.pop()
+    source = context.data.pop()
+    runtime.memory.move(source, destination, length)
 
 
 def _constant(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -765,6 +794,10 @@ def _type(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
         address = u64(address + 1)
 
 
+def _tx_flush(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
+    runtime.flush_uart_output()
+
+
 def _space(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
     runtime.write_uart_bytes(b" ")
 
@@ -792,6 +825,15 @@ def _epoch_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     for index in range(RTC_EPOCH_SIZE):
         value |= runtime.memory.read8(
             MMIO_BASE + RTC_EPOCH + index
+        ) << (index * 8)
+    context.data.push(value)
+
+
+def _ms_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    value = 0
+    for index in range(RTC_UPTIME_SIZE):
+        value |= runtime.memory.read8(
+            MMIO_BASE + RTC_UPTIME + index
         ) << (index * 8)
     context.data.push(value)
 
@@ -2488,5 +2530,18 @@ def install_core(runtime: MegaForthRuntime) -> None:
         initial_body=(10).to_bytes(CELL_BYTES, "little"),
     )
     runtime.bind_numeric_base_address(base_word.body_address)
+
+    # Preserve every pre-integration hosted XT by appending the first
+    # rich-terminal prerequisites after the complete older pseudo-BIOS.
+    # Cross-backend absolute XTs are not portable.
+    rich_terminal_primitives = (
+        (b"UM*", _unsigned_multiply),
+        (b"WITHIN", _within),
+        (b"MOVE", lambda context: _move(runtime, context)),
+        (b"MS@", lambda context: _ms_fetch(runtime, context)),
+        (b"TX-FLUSH", lambda context: _tx_flush(runtime, context)),
+    )
+    for name, callback in rich_terminal_primitives:
+        runtime.define_primitive(name, callback)
 
 __all__ = ["install_core"]

@@ -63,9 +63,10 @@ signed `MOD (INT64_MIN, -1)`; the barrier completion bit and pulse/sticky
 lifecycle; any future standardized-PQ NTT identity beyond the retained generic
 service; boot-time file-type, CRC, encryption, and root-policy enforcement;
 and broad per-task/per-core reentrancy and lock redesign for KDOS global
-scratch. Rich-terminal implementation and acceptance also remain beyond the
-present stop line. None of these open matters licenses an emulator/simulator
-difference inside the locked compatibility surface above.
+scratch. Simulator-side rich-terminal source loading, live-session integration,
+and current-head acceptance also remain beyond the present stop line. None of
+these open matters licenses an emulator/simulator difference inside the locked
+compatibility surface above.
 
 Later byte-exact qualification ledgers retain hashes and observations for the
 source revision named in each ledger. Where such a historical observation
@@ -3507,8 +3508,8 @@ complete destination, ACC0--ACC3, and TCTRL after each aligned in-bounds step.
 
 ## 11. Initial implementation sequence
 
-The simulator slices are intentionally vertical.  The current implementation
-branch has an explicit pre-rich-terminal stop line:
+The simulator slices are intentionally vertical. The original simulator
+implementation branch had an explicit pre-rich-terminal stop line:
 
 1. package ownership, dependency guards, cells, source cursor, stacks,
    dictionary, and explicit semantic dispatch;
@@ -3525,11 +3526,21 @@ branch has an explicit pre-rich-terminal stop line:
 
 Steps 1 through 5 are now satisfied by contiguous unchanged-source
 qualification from executable `kdos.f` line 39 through EOF line 9894. The
-branch is at the step-6 stop: no rich-terminal source, projection, compositor,
-viewer, or input lifecycle is part of the completed KDOS slice. The ordinary
-semantic file now also loads through the CLI-like checked line path. Native or
-exact-full-core cold loading, Akashic integration, and Desktop execution remain
-deferred under the rich-terminal resource gate.
+completed simulator branch stopped at step 6: no rich-terminal source,
+projection, compositor, viewer, or input lifecycle was part of that qualified
+KDOS slice. The ordinary semantic file also loaded through the CLI-like checked
+line path. Native or exact-full-core cold loading, Akashic integration, and
+Desktop execution remain deferred under the rich-terminal resource gate.
+
+The rich-terminal integration now synchronizes the authoritative current
+`rich-terminal.f` and appends exactly five source prerequisites to the hosted
+pseudo-BIOS: `UM*`, `WITHIN`, `MOVE`, `MS@`, and `TX-FLUSH`. Existing hosted
+execution tokens retain their addresses; absolute tokens remain nonportable
+between backends. Fresh runtimes therefore publish 324 pre-KDOS words. Focused
+units qualify widening multiplication, wrapping interval comparison,
+overlap/fault copy order, deterministic latched uptime, and immediate hosted
+flush semantics. This does not yet claim a `rich-terminal.f` source load or a
+live APT/session lifecycle.
 
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
@@ -3542,9 +3553,10 @@ definitions and the remaining islands should be absorbed into one complete
 
 Rich-terminal source loading, host transport integration, and the ordinary
 Desk/Pad/Daybook journey remain part of the compatibility contract, but are a
-later implementation phase.  They resume only after synchronizing this backend
-with the then-current rich-terminal vertical, so evolving panels and terminal
-core semantics are not copied prematurely into the simulator branch.
+later implementation phase. With the backend synchronized to the current
+rich-terminal vertical, the next slice must load that unchanged source and
+cross the ordinary UART/transport boundary rather than copy terminal semantics
+into simulator-only substitutes.
 
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
 KDOS load run before the real rich vertical exists. Native/exact-full-core cold

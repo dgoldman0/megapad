@@ -447,6 +447,52 @@ class SparseAddressSpace:
             payload = source_span.region.read(source_span.offset, length)
         destination_span.region.write(destination_span.offset, payload)
 
+    def move(self, source: int, destination: int, length: int) -> None:
+        """Copy bytes with the overlap-safe ordering of BIOS ``MOVE``."""
+
+        length = _require_nonnegative(length, label="MOVE length")
+        if length == 0:
+            return
+
+        source = _require_integer(source, label="MOVE source")
+        destination = _require_integer(destination, label="MOVE destination")
+        if source == destination:
+            return
+
+        source_end = (source + length) & MASK64
+        copy_bytes = self._move_forward_bytes
+        if source < destination < source_end:
+            copy_bytes = self._move_backward_bytes
+
+        try:
+            source_span = self._resolve(
+                source,
+                length,
+                operation="MOVE source",
+            )
+            destination_span = self._resolve(
+                destination,
+                length,
+                operation="MOVE destination",
+            )
+        except MemoryAccessError:
+            copy_bytes(source, destination, length)
+            return
+
+        assert source_span is not None
+        assert destination_span is not None
+        if (
+            source_span.kind is AddressClass.MMIO
+            or destination_span.kind is AddressClass.MMIO
+        ):
+            copy_bytes(source, destination, length)
+            return
+        assert source_span.region is not None
+        assert destination_span.region is not None
+
+        payload = source_span.region.read(source_span.offset, length)
+        destination_span.region.write(destination_span.offset, payload)
+
     def _copy_forward_bytes(
         self,
         source: int,
@@ -455,6 +501,26 @@ class SparseAddressSpace:
     ) -> None:
         for offset in range(length):
             self.write8(destination + offset, self.read8(source + offset))
+
+    def _move_forward_bytes(
+        self,
+        source: int,
+        destination: int,
+        length: int,
+    ) -> None:
+        for offset in range(length):
+            value = self.read8((source + offset) & MASK64)
+            self.write8((destination + offset) & MASK64, value)
+
+    def _move_backward_bytes(
+        self,
+        source: int,
+        destination: int,
+        length: int,
+    ) -> None:
+        for offset in range(length - 1, -1, -1):
+            value = self.read8((source + offset) & MASK64)
+            self.write8((destination + offset) & MASK64, value)
 
     def _read_integer(self, address: int, width: int) -> int:
         if width not in _INTEGER_WIDTHS:

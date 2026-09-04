@@ -11,6 +11,19 @@ from simulator.runtime import MegaForthRuntime
 from simulator.stacks import StackUnderflow
 
 
+def test_rich_terminal_prerequisites_extend_the_existing_core_append_only() -> None:
+    runtime = MegaForthRuntime()
+
+    assert len(runtime.dictionary.words) == 324
+    assert tuple(word.name for word in runtime.dictionary.words[-5:]) == (
+        b"UM*",
+        b"WITHIN",
+        b"MOVE",
+        b"MS@",
+        b"TX-FLUSH",
+    )
+
+
 def test_three_cell_rotations_match_bios_stack_order() -> None:
     runtime = MegaForthRuntime()
     context = runtime.new_context()
@@ -159,6 +172,64 @@ def test_signed_modulo_reports_zero_divisor() -> None:
 
     with pytest.raises(ExecutionError, match="modulo trapped"):
         runtime.execute("MOD", context=context)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    (
+        (0, MASK64),
+        (1, MASK64),
+        (1 << 63, 2),
+        (MASK64, MASK64),
+        (0x0123_4567_89AB_CDEF, 0xFEDC_BA98_7654_3210),
+    ),
+)
+def test_unsigned_multiply_publishes_low_then_high_cells(
+    left: int,
+    right: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(0xA55A)
+    context.data.push(left)
+    context.data.push(right)
+
+    runtime.execute("UM*", context=context)
+
+    product = left * right
+    assert context.data.snapshot() == (
+        0xA55A,
+        product & MASK64,
+        (product >> 64) & MASK64,
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "low", "high", "expected"),
+    (
+        (5, 0, 10, TRUE),
+        (10, 0, 10, 0),
+        (MASK64 - 1, MASK64 - 2, 2, TRUE),
+        (0, MASK64 - 2, 2, TRUE),
+        (2, MASK64 - 2, 2, 0),
+        (7, 9, 9, 0),
+    ),
+)
+def test_within_uses_unsigned_wrapping_interval_semantics(
+    value: int,
+    low: int,
+    high: int,
+    expected: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(value)
+    context.data.push(low)
+    context.data.push(high)
+
+    runtime.execute("WITHIN", context=context)
+
+    assert context.data.snapshot() == (expected,)
 
 
 @pytest.mark.parametrize(

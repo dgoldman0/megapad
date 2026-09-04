@@ -286,6 +286,32 @@ def test_fill_uses_addr_count_low_byte_order_in_the_shared_address_space() -> No
     assert context.data.snapshot() == (0x0000_00A5_A5A5_A5A5,)
 
 
+@pytest.mark.parametrize(
+    ("source", "destination", "expected"),
+    (
+        (0x20, 0x21, b"aabcde"),
+        (0x21, 0x20, b"bcdeff"),
+    ),
+)
+def test_move_word_preserves_overlap_and_consumes_its_arguments(
+    source: int,
+    destination: int,
+    expected: bytes,
+) -> None:
+    runtime = MegaForthRuntime()
+    runtime.memory.write_bytes(0x20, b"abcdef")
+    context = runtime.new_context()
+    context.data.push(0xA55A)
+    context.data.push(source)
+    context.data.push(destination)
+    context.data.push(5)
+
+    runtime.execute("MOVE", context=context)
+
+    assert runtime.memory.read_bytes(0x20, 6) == expected
+    assert context.data.snapshot() == (0xA55A,)
+
+
 def test_memory_fault_in_a_colon_word_restores_internal_return_stack() -> None:
     runtime = MegaForthRuntime()
     context = runtime.new_context()

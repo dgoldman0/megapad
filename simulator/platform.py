@@ -29,8 +29,8 @@ from simulator.memory import (
     SparseAddressSpace,
 )
 from simulator.rtc import (
-    RTC_EPOCH,
     RTC_EPOCH_LIMIT,
+    RTC_UPTIME,
     HostedRTCService,
 )
 from simulator.sha3 import SHA3_LIMIT, SHA3_OFFSET, HostedSHA3Service
@@ -322,7 +322,7 @@ class OneCorePlatformMMIO:
                 return self.sha3
             if TRNG_OFFSET <= offset < TRNG_LIMIT:
                 return self.entropy
-            if RTC_EPOCH <= offset < RTC_EPOCH_LIMIT:
+            if RTC_UPTIME <= offset < RTC_EPOCH_LIMIT:
                 return self.rtc
         raise PlatformMMIOAccessError(
             "access is outside every admitted platform MMIO window",
@@ -343,6 +343,7 @@ def create_one_core_address_space(
     entropy_seed: bytes = DEFAULT_TRNG_SEED,
     entropy_usable: bool = True,
     initial_epoch_ms: int = 0,
+    initial_uptime_ms: int = 0,
 ) -> SparseAddressSpace:
     """Return sparse guest memory with the one-core platform router attached."""
 
@@ -358,7 +359,10 @@ def create_one_core_address_space(
             entropy_seed,
             usable=entropy_usable,
         ),
-        rtc=HostedRTCService(initial_epoch_ms),
+        rtc=HostedRTCService(
+            initial_epoch_ms,
+            initial_uptime_ms=initial_uptime_ms,
+        ),
     )
     memory = SparseAddressSpace(
         bank0_size=bank0_size,
