@@ -14,8 +14,8 @@ from simulator.stacks import StackUnderflow
 def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
     runtime = MegaForthRuntime()
 
-    assert len(runtime.dictionary.words) == 330
-    assert tuple(word.name for word in runtime.dictionary.words[-11:]) == (
+    assert len(runtime.dictionary.words) == 336
+    assert tuple(word.name for word in runtime.dictionary.words[-17:]) == (
         b"UM*",
         b"WITHIN",
         b"MOVE",
@@ -27,7 +27,36 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"TERMSIZE",
         b"RESIZE-DENIED?",
         b"RESIZE-REQUEST",
+        b"BSWAP",
+        b"NET-SEND",
+        b"NET-RECV",
+        b"NET-MAC@",
+        b"ENTROPY-FILL",
+        b"ENTROPY-READY?",
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (0, 0),
+        (0x0102_0304_0506_0708, 0x0807_0605_0403_0201),
+        (0xFF00_0000_0000_0080, 0x8000_0000_0000_00FF),
+    ),
+)
+def test_bswap_reverses_all_eight_cell_bytes(
+    value: int,
+    expected: int,
+) -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+    context.data.push(value)
+
+    runtime.execute("BSWAP", context=context)
+    assert context.data.snapshot() == (expected,)
+
+    runtime.execute("BSWAP", context=context)
+    assert context.data.snapshot() == (value,)
 
 
 def test_three_cell_rotations_match_bios_stack_order() -> None:

@@ -35,9 +35,11 @@ The implemented slices provide:
   barriers and cluster MPU state are unavailable, `SPAD` returns the native
   sentinel without inventing storage, and `MICRO?` retains the BIOS unsigned
   classification rather than validating hosted core membership;
-- a pseudo-BIOS-only absent-NIC status boundary: `NET-STATUS` returns zero,
-  including a clear present bit, while no direct NIC MMIO window, ingress,
-  egress, DMA, MAC address, or link state is claimed;
+- a pseudo-BIOS-only unconfigured-network boundary: until a local host port
+  is selected, `NET-STATUS` returns zero, `NET-SEND` consumes and drops a
+  request, `NET-RECV` reports no frame, and `NET-MAC@` exposes stable all-zero
+  ordinary memory for unchanged startup copying; this default does not decide
+  or qualify the later configured-port transport;
 - fail-closed construction for injected address spaces: their SysInfo
   capability qword must be readable and may advertise only admitted services;
 - BIOS-compatible unaligned `@`, `!`, and `+!` access, low-byte `C!`,
@@ -129,7 +131,8 @@ The implemented slices provide:
   reset-floor protection, and the deferred free-span overlap guard;
 - a per-runtime deterministic TRNG-window model whose reproducible stream is
   derived from an explicit host-injected seed, with the native supplemental
-  seed and latched-unusable lifecycle but no hardware-entropy or
+  seed and latched-unusable lifecycle plus checked `ENTROPY-FILL` and
+  `ENTROPY-READY?` BIOS publication, but no hardware-entropy or
   cryptographic-randomness claim;
 - active-line `WORD` with its transient counted string at `HERE`, plus
   newest-first exact-length counted-string `FIND` over live published
@@ -1803,8 +1806,8 @@ cells and allocates eight tables; it performs no UART, key, filesystem,
 storage, NIC-MMIO, or renderer operation. The bare `CREATE ... ALLOT` table
 bodies retain prior memory bytes until registration writes a logical row.
 
-The absent `NET-STATUS = 0` makes `NET-RX?` return canonical false. The ANSI
-helpers preserve their byte ABI, including the row-before-column `AT-XY`
+The unconfigured-port `NET-STATUS = 0` makes `NET-RX?` return canonical false.
+The ANSI helpers preserve their byte ABI, including the row-before-column `AT-XY`
 sequence and `HBAR`'s 60 raw `0xC4` bytes. Registration returns zero-based IDs,
 initializes the key/action/subscreen-count cells for each admitted row, returns
 `-1` without mutation at 16 screens, and caps each parent's subscreens at
@@ -2306,12 +2309,14 @@ pseudo-BIOS prerequisites as append-only hosted words: `UM*`, `WITHIN`, `MOVE`,
 clear-on-read `RESIZED?`, atomic `TERMSIZE`, clear-on-read
 `RESIZE-DENIED?`, and asynchronous `RESIZE-REQUEST`. Their focused scalar,
 memory, clock, UART, and session-geometry units are qualification of those
-primitives only. The focused
+primitives only. Six append-only source-closure words then provide `BSWAP`,
+the current unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and
+checked deterministic `ENTROPY-FILL`/`ENTROPY-READY?`. The focused
 live integration below now evaluates the complete authoritative module against
 the exact KDOS exception closure, but does not yet claim normal
 MP64FS/`REQUIRE` composition, Akashic integration, the Desktop lifecycle, or
 physical rendering. Those runs remain deferred by the vertical's resource
-gate. Fresh runtimes therefore contain 330 pseudo-BIOS words before KDOS; the
+gate. Fresh runtimes therefore contain 336 pseudo-BIOS words before KDOS; the
 319-word figure above remains the exact historical-load observation and is not
 silently rewritten as new full-load evidence.
 

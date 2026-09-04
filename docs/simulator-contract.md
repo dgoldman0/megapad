@@ -552,13 +552,17 @@ These choices claim source-visible failure and classification behavior only,
 not cluster execution, scratchpad storage, barriers, privilege, or MPU
 enforcement.
 
-The NIC is absent from the admitted hosted profile. Pseudo-BIOS `NET-STATUS`
-returns zero, so TX-busy, RX-available, link, error, DMA-busy, and present are
-all clear. This is sufficient for ordinary feature/status branching but does
-not admit the direct NIC MMIO window, `NET-SEND`, `NET-RECV`, `NET-MAC@`,
-frame queues, DMA, host networking, or interrupt delivery. A direct access to
-the architectural NIC aperture therefore remains an MMIO fault rather than
-an alias of the pseudo-BIOS status.
+No local host-network port is configured in the current simulator profile.
+Pseudo-BIOS `NET-STATUS` therefore returns zero, so TX-busy, RX-available,
+link, error, DMA-busy, and present are all clear. `NET-SEND` consumes its
+address and length without inspecting or delivering bytes, while `NET-RECV`
+consumes its destination and returns zero. `NET-MAC@` returns one stable
+six-byte all-zero Bank-0 span so unchanged `MAC-INIT` can copy it without
+inventing an interface identity. These are the default unconfigured-port
+semantics needed for source loading, not a decision that the simulator cannot
+host a configured network later. The direct NIC MMIO window, frame queues,
+DMA, host networking, and interrupt delivery remain unadmitted and untested;
+a direct access to the architectural NIC aperture is still an MMIO fault.
 
 The currently admitted UART surface is pseudo-BIOS byte I/O, not the physical
 UART window. Output bytes become observable synchronously, making the native
@@ -2601,7 +2605,8 @@ clear the eight registry tables; only `VARIABLE` bodies and cells explicitly
 written by source or registration have defined initial content.
 
 Pseudo-BIOS `NET-STATUS = 0` makes unchanged `NET-RX?` return canonical false
-without claiming a NIC. `.HEXDIG`, `AT-XY`, `PAGE`/`CLS`, color controls, and
+without claiming a configured port. `.HEXDIG`, `AT-XY`, `PAGE`/`CLS`, color
+controls, and
 `HBAR` retain their exact UART byte sequences; `HBAR` emits 60 raw `0xC4`
 bytes rather than a UTF-8 glyph. With `FS-OK = 0`, `SHOW-NTH-DOC` records its
 selector and returns without touching input or storage. Its mounted successful
@@ -3349,6 +3354,15 @@ future-byte mixing, zeroization, and latched-unusable behavior. Guest
 `SEED-RNG` cannot recover an unusable source; only explicit host
 reinitialization can do so.
 
+`ENTROPY-FILL ( addr len -- status )` exposes the checked BIOS boundary over
+that same service. It preflights the complete caller span, ignores the address
+for an empty fill, requires an exactly-ready status before each byte and after
+the last byte, and wipes the complete admitted span if readiness is lost after
+publication starts. `ENTROPY-READY?` returns only canonical Forth true or
+false. Status zero is success, one is unavailable, two is an invalid range,
+and three is a protected Bank-0 span. Deterministic bytes remain development
+data rather than cryptographic entropy.
+
 The exact unchanged KDOS SHA3/random slice ending at `kdos.f` line 1216 is
 qualified only in its current safe source domain. `.SHA3` uses `0 DO`, so its
 length must be positive and nonwrapping; zero or negative lengths can wrap or
@@ -3558,8 +3572,11 @@ The rich-terminal integration now synchronizes the authoritative current
 pseudo-BIOS: `UM*`, `WITHIN`, `MOVE`, `MS@`, and `TX-FLUSH`. Three public
 terminal-geometry words follow them: `COLS`, `ROWS`, `RESIZED?`, `TERMSIZE`,
 `RESIZE-DENIED?`, and `RESIZE-REQUEST`. Existing hosted execution tokens retain
-their addresses; absolute tokens remain nonportable between backends. Fresh
-runtimes therefore publish 330 pre-KDOS words. Focused units qualify widening
+their addresses; absolute tokens remain nonportable between backends. Six
+more append-only closure prerequisites provide `BSWAP`, the default
+unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and deterministic
+checked `ENTROPY-FILL`/`ENTROPY-READY?`. Fresh runtimes therefore publish 336
+pre-KDOS words. Focused units qualify widening
 multiplication, wrapping interval comparison, overlap/fault copy order,
 deterministic latched uptime, immediate hosted flush semantics, session-bound
 dimensions, independent clear-on-read resize status, and stale-safe

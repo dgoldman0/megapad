@@ -20,7 +20,13 @@ from simulator.aes import (
 )
 from simulator.dictionary import MAX_NAME_BYTES
 from simulator.errors import ExecutionError, ForthAbort
-from simulator.entropy import TRNG_RAND8, TRNG_RAND64, TRNG_SEED
+from simulator.entropy import (
+    TRNG_RAND8,
+    TRNG_RAND64,
+    TRNG_SEED,
+    TRNG_STATUS,
+    TRNGUnavailableError,
+)
 from simulator.ir import Branch, BranchZero, Idle, Return, UartReadAttempt
 from simulator.memory import MMIO_BASE, SparseAddressSpace
 from simulator.mp64fs import validate_attached_mp64fs
@@ -51,6 +57,9 @@ from simulator.sha3 import SHA3_CONTROL, SHA3_STATUS
 
 _EVAL_TOKEN_BYTES = 256
 _CLUSTER_SPAD_ADDRESS = 0xFFFF_FE00_0000_0000
+_UNCONFIGURED_NETWORK_MAC_BYTES = 6
+_ENTROPY_OK = 0
+_ENTROPY_UNAVAILABLE = 1
 
 
 def _dup(context: ExecutionContext) -> None:
@@ -181,6 +190,13 @@ def _unsigned_multiply(context: ExecutionContext) -> None:
     product = left * right
     context.data.push(u64(product))
     context.data.push(u64(product >> 64))
+
+
+def _byte_swap(context: ExecutionContext) -> None:
+    value = context.data.pop()
+    context.data.push(
+        int.from_bytes(value.to_bytes(CELL_BYTES, "little"), "big")
+    )
 
 
 def _signed_divide(context: ExecutionContext) -> None:
@@ -1089,6 +1105,20 @@ def _cluster_spad(context: ExecutionContext) -> None:
     context.data.push(_CLUSTER_SPAD_ADDRESS)
 
 
+def _net_send_unconfigured(context: ExecutionContext) -> None:
+    # No local host-network port is configured for this runtime. Preserve the
+    # BIOS stack effect without inspecting memory or fabricating delivery.
+    context.data.pop()
+    context.data.pop()
+
+
+def _net_receive_unconfigured(context: ExecutionContext) -> None:
+    # An unconfigured transport has no queued frame, but the destination is
+    # still consumed exactly as it is by the native BIOS word.
+    context.data.pop()
+    context.data.push(0)
+
+
 def _micro_question(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
@@ -1597,6 +1627,46 @@ def _random(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 
 def _random8(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(runtime.memory.read8(MMIO_BASE + TRNG_RAND8))
+
+
+def _entropy_ready(runtime: MegaForthRuntime) -> bool:
+    return runtime.entropy.read8(TRNG_STATUS) == 1
+
+
+def _entropy_fill(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    length = context.data.pop()
+    address = context.data.pop()
+    span_status = runtime.caller_span_status(context, address, length)
+    if span_status != _ENTROPY_OK:
+        context.data.push(span_status)
+        return
+    if length == 0:
+        context.data.push(_ENTROPY_OK)
+        return
+
+    published = False
+    for offset in range(length):
+        if not _entropy_ready(runtime):
+            break
+        try:
+            value = runtime.entropy.read8(TRNG_RAND8)
+        except TRNGUnavailableError:
+            break
+        runtime.memory.write8(address + offset, value)
+        published = True
+    else:
+        # A successful final RAND8 may itself latch the source unusable.  The
+        # native contract checks once more before publishing success.
+        if _entropy_ready(runtime):
+            context.data.push(_ENTROPY_OK)
+            return
+
+    if published:
+        runtime.memory.fill(address, length, 0)
+    context.data.push(_ENTROPY_UNAVAILABLE)
 
 
 def _seed_rng(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -2580,5 +2650,39 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
     for name, callback in rich_terminal_primitives:
         runtime.define_primitive(name, callback)
+
+    # Continue the same append-only integration frontier. Until a local
+    # host-network port is configured, do not fabricate a queue or status.
+    source_closure_primitives = (
+        (b"BSWAP", _byte_swap),
+        (b"NET-SEND", _net_send_unconfigured),
+        (b"NET-RECV", _net_receive_unconfigured),
+    )
+    for name, callback in source_closure_primitives:
+        runtime.define_primitive(name, callback)
+
+    unconfigured_mac_address: int | None = None
+
+    def net_mac_fetch(context: ExecutionContext) -> None:
+        assert unconfigured_mac_address is not None
+        context.data.push(unconfigured_mac_address)
+
+    unconfigured_mac = runtime.define_primitive(
+        b"NET-MAC@",
+        net_mac_fetch,
+        # All-zero bytes are stable ordinary memory for MAC-INIT's CMOVE, but
+        # do not invent an interface identity before a port is configured.
+        initial_body=bytes(_UNCONFIGURED_NETWORK_MAC_BYTES),
+    )
+    unconfigured_mac_address = unconfigured_mac.body_address
+
+    runtime.define_primitive(
+        b"ENTROPY-FILL",
+        lambda context: _entropy_fill(runtime, context),
+    )
+    runtime.define_primitive(
+        b"ENTROPY-READY?",
+        lambda context: context.data.push(forth_flag(_entropy_ready(runtime))),
+    )
 
 __all__ = ["install_core"]

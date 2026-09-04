@@ -802,11 +802,13 @@ Low-level access to the network interface controller.
 | `NET-RECV` | `( addr -- actual )` | Receive a frame into `addr`; wait for RTL RX DMA completion before publishing the length. Returns 0 if nothing is available. |
 | `NET-MAC@` | `( -- addr )` | Return the MMIO address of the six MAC bytes. |
 
-The current hosted one-core profile admits only a pseudo-BIOS
-`NET-STATUS`, which returns zero to report that no NIC is present. It does not
-route the physical NIC MMIO window or claim send, receive, DMA, link, MAC,
-queue, or interrupt behavior; direct NIC MMIO remains faulting. The remaining
-three words in this table describe the native BIOS and are not yet hosted.
+The current hosted one-core profile has no configured local network port.
+`NET-STATUS` returns zero, `NET-SEND` consumes and drops its request,
+`NET-RECV` reports zero available bytes, and `NET-MAC@` returns stable all-zero
+ordinary memory so unchanged initialization can copy six bytes. This is the
+unconfigured-port source-load behavior, not configured-network qualification.
+The physical NIC MMIO window, frame transport, DMA, link, interface identity,
+queues, and interrupts remain unadmitted; direct NIC MMIO still faults.
 
 ---
 
