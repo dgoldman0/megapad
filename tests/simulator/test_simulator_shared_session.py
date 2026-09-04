@@ -87,12 +87,26 @@ def test_facade_reports_semantic_work_without_hardware_statistics() -> None:
         for absent in ("cpu", "clock", "nic", "host_profile"):
             assert absent not in status
 
-        for diagnostic in (
-            machine.network,
-            lambda: machine.forth(["SIM-IDLE-ROOT"]),
-            lambda: machine.peek(0),
-            machine.phase_profile,
-        ):
+        root = runtime.find("SIM-IDLE-ROOT")
+        assert root is not None
+        named = machine.forth(["sim-idle-root", "missing"])
+        assert named == {
+            "here": runtime.dictionary.here,
+            "words": {
+                "SIM-IDLE-ROOT": {
+                    "name": "SIM-IDLE-ROOT",
+                    "header": root.header_address,
+                    "code": root.xt,
+                }
+            },
+        }
+        assert machine.peek(root.header_address, 1) == {
+            "address": root.header_address,
+            "cell_size": 8,
+            "values": [runtime.memory.read64(root.header_address)],
+        }
+
+        for diagnostic in (machine.network, machine.phase_profile):
             with pytest.raises(RuntimeError, match="without emulator hardware"):
                 diagnostic()
 
@@ -102,6 +116,41 @@ def test_facade_reports_semantic_work_without_hardware_statistics() -> None:
         assert machine.last_error is not None
     finally:
         machine.stop()
+
+
+def test_forth_diagnostics_resolve_newest_created_binding_and_live_value() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        IDLE_ROOT_SOURCE
+        + b" VARIABLE SIM-DIAGNOSTIC 41 SIM-DIAGNOSTIC !"
+        + b" VARIABLE SIM-DIAGNOSTIC 42 SIM-DIAGNOSTIC !",
+        source_name="simulator-diagnostic-binding.f",
+    )
+    newest = runtime.find("SIM-DIAGNOSTIC")
+    assert newest is not None
+    machine = SimulatorSharedMachine(
+        SimulatorMachineSession(runtime, "SIM-IDLE-ROOT")
+    )
+
+    named = machine.forth(["sim-diagnostic", "SIM-DIAGNOSTIC"])
+
+    assert named == {
+        "here": runtime.dictionary.here,
+        "words": {
+            "SIM-DIAGNOSTIC": {
+                "name": "SIM-DIAGNOSTIC",
+                "header": newest.header_address,
+                "code": newest.xt,
+                "data_address": newest.body_address,
+                "value": 42,
+            }
+        },
+    }
+    runtime.memory.write64(newest.body_address, 43)
+    assert machine.forth(["SIM-DIAGNOSTIC"])["words"]["SIM-DIAGNOSTIC"][
+        "value"
+    ] == 43
+    machine.stop()
 
 
 def test_unchanged_server_dispatch_reaches_cell_view_and_input_flow() -> None:

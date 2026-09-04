@@ -2393,7 +2393,9 @@ emulator run loop and hardware status paths. The unchanged `SessionServer`
 dispatch reaches the simulator's CELL view, rejects stale-generation input,
 and wakes the suspended guest for admitted input. Status reports semantic
 steps, owner boundaries, and external events rather than invented cycles or
-instructions; emulator-only profiling and hardware diagnostics are explicitly
+instructions. Forth lookup resolves newest hosted bindings and exposes created
+data/value cells, while diagnostic peeks read semantic memory directly.
+Emulator host profiling, phase sampling, and NIC diagnostics remain explicitly
 unavailable. Normal Akashic image/root preparation, a retained physical offer,
 and the actual socket/viewer journey are the next seams.
 

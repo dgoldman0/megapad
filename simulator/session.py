@@ -15,7 +15,7 @@ from simulator.rich_terminal_host import (
     SemanticBatchStop,
     SimulatorSessionBackend,
 )
-from simulator.runtime import MegaForthRuntime
+from simulator.runtime import CreatedDefinition, MegaForthRuntime
 
 
 @dataclass(frozen=True, slots=True)
@@ -582,10 +582,46 @@ class SimulatorSharedMachine(SharedMachine):
         raise self._unsupported_diagnostic("network diagnostics")
 
     def forth(self, names: list[str]) -> dict:
-        raise self._unsupported_diagnostic("emulator Forth diagnostics")
+        """Resolve newest hosted dictionary bindings without a CPU walk."""
+
+        with self.lock:
+            runtime = self.semantic_session.runtime
+            found: dict[str, dict] = {}
+            for requested in names:
+                key = str(requested).upper()
+                if key in found:
+                    continue
+                word = runtime.find(key)
+                if word is None:
+                    continue
+                record = {
+                    "name": word.name.decode("ascii", errors="replace"),
+                    "header": word.header_address,
+                    "code": word.xt,
+                }
+                if isinstance(word.implementation, CreatedDefinition):
+                    record["data_address"] = word.body_address
+                    record["value"] = runtime.memory.read64(word.body_address)
+                found[key] = record
+            return {"here": runtime.dictionary.here, "words": found}
 
     def peek(self, address: int, count: int = 1) -> dict:
-        raise self._unsupported_diagnostic("emulator memory peek")
+        """Read ordinary semantic memory with the shared diagnostic shape."""
+
+        address = int(address)
+        count = int(count)
+        if address < 0 or not (1 <= count <= 256):
+            raise ValueError("peek requires a non-negative address and 1..256 cells")
+        with self.lock:
+            memory = self.semantic_session.runtime.memory
+            return {
+                "address": address,
+                "cell_size": 8,
+                "values": [
+                    int(memory.read64(address + index * 8))
+                    for index in range(count)
+                ],
+            }
 
     def start_phase_profile(
         self,

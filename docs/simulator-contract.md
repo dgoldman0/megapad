@@ -3686,11 +3686,14 @@ backend-neutral `SharedMachine` presentation and input methods and unchanged
 `SessionServer` dispatch. Its owner thread schedules semantic boundaries rather
 than emulator batches; status names semantic steps, semantic boundaries, and
 external-event admissions explicitly and contains no fabricated cycles, CPU,
-clock, or NIC state. Focused dispatch evidence reaches the same revision-1 CELL
+clock, or NIC state. Forth lookup resolves the newest semantic dictionary
+binding directly, and memory peeks read the hosted address space without a fake
+CPU traversal. Focused dispatch evidence reaches the same revision-1 CELL
 snapshot, applies generation rejection, admits terminal input, and delivers it
-to the suspended guest. Emulator-only host profiling and hardware diagnostic
-routes still fail explicitly. This does not yet establish a retained physical
-display offer, Akashic image/root preparation, or the socket/viewer journey.
+to the suspended guest. Emulator host profiling, phase sampling, and NIC
+diagnostics still fail explicitly. This does not yet establish a retained
+physical display offer, Akashic image/root preparation, or the socket/viewer
+journey.
 
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
 KDOS load run before the real rich vertical exists. Native/exact-full-core cold
