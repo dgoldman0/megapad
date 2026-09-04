@@ -2323,5 +2323,22 @@ exact-machine backstop. The following slice advances the contiguous source to
 `_PT-READ-BYTE` and proves real FIFO ingestion, OFFER parsing/admission, exact
 OPEN output, and the complete `OPENING` state on both engines.
 
+The simulator now also has a production host-port boundary in
+`simulator/rich_terminal_host.py`. `SimulatorSessionBackend` composes one
+runtime with the shared attachment state machine, a caller-provided legacy
+output sink, hosted geometry, and an owned resumable semantic dispatch. It
+lets each outer semantic call contribute one settlement publication, applies
+atomic resize geometry before its ingress bytes, removes only the
+attachment-owned RX suffix on release, and prevents another call while a
+publication is retained. Output completed before backend acquisition settles
+to the legacy sink before attachment; once the backend owns the runtime,
+public execution and host-side UART mutation bypasses are rejected. Hosted
+geometry is read-only adapter bookkeeping and does not yet implement the guest
+BIOS `COLS`, `ROWS`, or `RESIZED?` surface. Close the enhanced lease and then
+the backend to return direct ownership to the runtime. The hosted `TX-FLUSH`
+primitive remains immediate and does not split publications. This is transport
+plumbing rather than a live-session claim: the complete unchanged module and
+`RichTerminalDriver` handshake are still the next slice.
+
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

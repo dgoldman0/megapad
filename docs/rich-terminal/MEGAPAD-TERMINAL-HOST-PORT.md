@@ -1,8 +1,8 @@
 # MegaPad terminal host-port contract
 
-Status: normative for the APT-1 CELL-1 and selected RETAINED-1
-emulator/reference-host implementation. Physical UART delivery and a hardware
-panel sink remain separate open qualification boundaries.
+Status: normative for the APT-1 CELL-1 and selected RETAINED-1 emulator and
+hosted-simulator reference-host implementations. Physical UART delivery and a
+hardware panel sink remain separate open qualification boundaries.
 
 This document defines the boundary between `MegapadSystem` and a terminal
 session. It does not define the APT-1 wire encoding. The wire contract is
@@ -140,6 +140,16 @@ one-publication overshoot. If the primary queue cannot accept that record, the
 slot retains it byte-for-byte and the runner is backpressured before another
 guest batch starts. The slot is cleared only after acceptance or epoch
 retirement.
+
+The hosted simulator uses the same rule at an outer semantic-call boundary.
+Nested source evaluation and `TX-FLUSH` do not publish independently; bytes
+completed before the call blocks, returns, or fails are drained once as that
+boundary's publication. An owned IDL continuation resumes only after admitted
+RX is available, and retained output bars the next semantic call exactly as it
+bars the next emulator execution batch. Runtime output completed before the
+backend acquires ownership retains its earlier legacy boundary and is drained
+before attachment. Once owned, public execution and host-side UART mutation
+must enter through the backend; direct calls are rejected.
 
 A valid in-contract publication must not raise into scheduler settlement.
 Consumer failures are recorded as terminal-session failures and processed

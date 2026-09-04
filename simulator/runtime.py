@@ -8,10 +8,12 @@ compiled calls retain the execution token that was bound at compile time.
 
 from __future__ import annotations
 
+import threading
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Callable, NoReturn, TypeAlias, get_args
+from typing import Callable, Iterator, NoReturn, TypeAlias, get_args
 
 from shared.cells import CELL_BYTES, MASK64, s64, u64
 from shared.crypto_caps import (
@@ -580,6 +582,9 @@ class MegaForthRuntime:
             account_operation=self.diagnostics.account_tile_operation,
         )
         self._runtime_token = object()
+        self._session_owner_lock = threading.RLock()
+        self._session_owner_token: object | None = None
+        self._session_owner_thread: int | None = None
         self._next_suspension_sequence = 1
         self._next_wake_sequence = 1
         self._suspended_execution: _SuspendedExecution | None = None
@@ -691,6 +696,7 @@ class MegaForthRuntime:
         source words with its ordinary registry implementation.
         """
 
+        self._require_session_owner_access("revoke a provided module")
         if not isinstance(module_id, bytes):
             raise TypeError("module ID must be bytes")
         if not module_id:
@@ -759,12 +765,58 @@ class MegaForthRuntime:
 
         return bool(self._uart_input)
 
+    @property
+    def uart_input_pending(self) -> int:
+        """Return the number of bytes waiting in the hosted UART RX FIFO."""
+
+        return len(self._uart_input)
+
     def inject_uart_input(self, payload: bytes) -> None:
         """Append one validated byte string to the hosted UART RX FIFO."""
 
+        with self._session_owner_lock:
+            self._require_unowned_host_access("inject UART input")
+            self._append_uart_input(payload)
+
+    def _append_uart_input(self, payload: bytes) -> None:
         if not isinstance(payload, bytes):
             raise TypeError("UART input payload must be bytes")
         self._uart_input.extend(payload)
+
+    def _session_inject_uart_input(self, token: object, payload: bytes) -> None:
+        """Append UART input for the exact owning session backend."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_token(token)
+            self._append_uart_input(payload)
+
+    def discard_uart_input_tail(self, count: int) -> None:
+        """Discard exactly ``count`` most-recently queued UART RX bytes."""
+
+        with self._session_owner_lock:
+            self._require_unowned_host_access("discard UART input")
+            self._discard_uart_input_tail(count)
+
+    def _discard_uart_input_tail(self, count: int) -> None:
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise TypeError("UART input discard count must be an integer")
+        if count < 0:
+            raise ValueError("UART input discard count must not be negative")
+        if count > len(self._uart_input):
+            raise ValueError("UART input discard count exceeds pending input")
+        for _ in range(count):
+            self._uart_input.pop()
+
+    def _session_discard_uart_input_tail(
+        self,
+        token: object,
+        count: int,
+    ) -> None:
+        """Discard an RX suffix for the exact owning session backend."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_token(token)
+            self._discard_uart_input_tail(count)
 
     def _take_uart_input_byte(self) -> int | None:
         """Consume one queued UART byte, or report that RX remains empty."""
@@ -782,9 +834,11 @@ class MegaForthRuntime:
     def write_uart_bytes(self, payload: bytes) -> None:
         """Append one validated byte string to the hosted UART stream."""
 
-        if not isinstance(payload, bytes):
-            raise TypeError("UART output payload must be bytes")
-        self._uart_output.extend(payload)
+        with self._session_owner_lock:
+            self._require_session_owner_access("write UART output")
+            if not isinstance(payload, bytes):
+                raise TypeError("UART output payload must be bytes")
+            self._uart_output.extend(payload)
 
     def flush_uart_output(self) -> None:
         """Complete the hosted UART's current output publication.
@@ -795,12 +849,104 @@ class MegaForthRuntime:
         later transport adapter without inventing machine timing here.
         """
 
+        with self._session_owner_lock:
+            self._require_session_owner_access("flush UART output")
+
     def drain_uart_output(self) -> bytes:
         """Return all pending UART bytes and clear the runtime-owned buffer."""
 
+        with self._session_owner_lock:
+            self._require_unowned_host_access("drain UART output")
+            return self._drain_uart_output()
+
+    def _drain_uart_output(self) -> bytes:
         payload = bytes(self._uart_output)
         self._uart_output.clear()
         return payload
+
+    def _session_drain_uart_output(self, token: object) -> bytes:
+        """Drain UART output for the exact owning session backend."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_token(token)
+            return self._drain_uart_output()
+
+    def _claim_session_owner(self, token: object) -> None:
+        """Grant one backend exclusive public UART and dispatch ownership."""
+
+        with self._session_owner_lock:
+            if token is None:
+                raise TypeError("session owner token must not be None")
+            if self._session_owner_token is not None:
+                raise ExecutionError("hosted runtime already has a session owner")
+            if (
+                self._active_dispatches
+                or self._active_input_states
+                or self._suspended_execution is not None
+            ):
+                raise ExecutionError(
+                    "cannot acquire session ownership during semantic execution"
+                )
+            self._session_owner_token = token
+
+    def _release_session_owner(self, token: object) -> None:
+        """Release the exact backend's exclusive runtime ownership."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_token(token)
+            if self._session_owner_thread is not None:
+                raise ExecutionError("cannot release an active session boundary")
+            if self._suspended_execution is not None:
+                raise ExecutionError(
+                    "cannot release a suspended semantic dispatch"
+                )
+            self._session_owner_token = None
+
+    @contextmanager
+    def _session_owner_scope(self, token: object) -> Iterator[None]:
+        """Admit public runtime effects for one backend-owned boundary."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_token(token)
+            if self._session_owner_thread is not None:
+                raise ExecutionError("a runtime session boundary is already active")
+            thread_id = threading.get_ident()
+            self._session_owner_thread = thread_id
+        try:
+            yield
+        finally:
+            with self._session_owner_lock:
+                if self._session_owner_thread != thread_id:
+                    raise AssertionError(
+                        "runtime session boundary ownership changed"
+                    )
+                self._session_owner_thread = None
+
+    def _require_session_owner_token(self, token: object) -> None:
+        with self._session_owner_lock:
+            if self._session_owner_token is not token:
+                raise ExecutionError(
+                    "runtime session owner token is stale or foreign"
+                )
+
+    def _require_session_owner_access(self, operation: str) -> None:
+        with self._session_owner_lock:
+            if (
+                self._session_owner_token is not None
+                and self._session_owner_thread != threading.get_ident()
+            ):
+                raise ExecutionError(
+                    f"cannot {operation} outside the owning session boundary"
+                )
+
+    def _require_unowned_host_access(self, operation: str) -> None:
+        """Reject host-side FIFO ownership bypass during an owned session."""
+
+        with self._session_owner_lock:
+            if self._session_owner_token is not None:
+                raise ExecutionError(
+                    f"cannot {operation} outside the owning session boundary"
+                )
 
     def set_numeric_base(self, base: int) -> None:
         """Set the source number base as a wrapped guest cell.
@@ -810,6 +956,7 @@ class MegaForthRuntime:
         semantic BIOS binds this method to the live guest cell.
         """
 
+        self._require_session_owner_access("change the numeric base")
         value = u64(base)
         if self._numeric_base_address is None:
             self._bootstrap_numeric_base = value
@@ -819,16 +966,19 @@ class MegaForthRuntime:
     def set_mpu_base(self, base: int) -> None:
         """Store one wrapped cell in the non-enforcing MPU base register."""
 
+        self._require_session_owner_access("change the MPU base")
         self._mpu_base = u64(base)
 
     def set_mpu_limit(self, limit: int) -> None:
         """Store one wrapped cell in the non-enforcing MPU limit register."""
 
+        self._require_session_owner_access("change the MPU limit")
         self._mpu_limit = u64(limit)
 
     def bind_numeric_base_address(self, address: int) -> None:
         """Bind numeric parsing and printers to the semantic BIOS BASE cell."""
 
+        self._require_session_owner_access("bind the numeric base")
         if self._numeric_base_address is not None:
             raise RuntimeError("numeric BASE is already bound")
         self.memory.write64(address, self._bootstrap_numeric_base)
@@ -846,6 +996,7 @@ class MegaForthRuntime:
     ) -> None:
         """Bind the runtime-owned evaluator to its protected BIOS storage."""
 
+        self._require_session_owner_access("bind the BIOS evaluator")
         if self._bios_evaluator is not None:
             raise RuntimeError("semantic BIOS evaluator is already bound")
         cell_addresses = (
@@ -880,18 +1031,20 @@ class MegaForthRuntime:
     def bios_evaluate(self, context: ExecutionContext) -> None:
         """Execute the legacy guest ``EVALUATE ( addr len -- )`` ABI."""
 
-        if not isinstance(context, ExecutionContext):
-            raise TypeError("context must be an ExecutionContext")
-        evaluator = self._require_bios_evaluator()
-        try:
-            self._bios_evaluate(evaluator, context)
-        except (_GuestControlTransfer, _DictionaryFaultRequest):
-            # Both paths have abandoned the Python input cursor while guest
-            # control is still entitled to reconstruct logical EVALUATE depth.
-            raise
-        except BaseException:
-            self._fail_closed_bios_evaluator(evaluator)
-            raise
+        with self._session_owner_lock:
+            self._require_session_owner_access("run the BIOS evaluator")
+            if not isinstance(context, ExecutionContext):
+                raise TypeError("context must be an ExecutionContext")
+            evaluator = self._require_bios_evaluator()
+            try:
+                self._bios_evaluate(evaluator, context)
+            except (_GuestControlTransfer, _DictionaryFaultRequest):
+                # Both paths have abandoned the Python input cursor while guest
+                # control is still entitled to reconstruct logical EVALUATE depth.
+                raise
+            except BaseException:
+                self._fail_closed_bios_evaluator(evaluator)
+                raise
 
     def bios_evaluate_checked(self, context: ExecutionContext) -> None:
         """Run the early BIOS checked wrapper and append its sticky status."""
@@ -903,6 +1056,7 @@ class MegaForthRuntime:
     def bios_evaluate_finish(self, context: ExecutionContext) -> None:
         """Report whether the persistent guest compiler is completely idle."""
 
+        self._require_session_owner_access("finish BIOS evaluation")
         if not isinstance(context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
         evaluator = self._require_bios_evaluator()
@@ -915,6 +1069,7 @@ class MegaForthRuntime:
     def bios_evaluator_reset(self) -> None:
         """Discard only persistent guest compiler bookkeeping."""
 
+        self._require_session_owner_access("reset the BIOS evaluator")
         evaluator = self._require_bios_evaluator()
         compiler = evaluator.compiler_state.compiler
         evaluator.compiler_state.compiler = None
@@ -924,6 +1079,7 @@ class MegaForthRuntime:
     def bios_evaluator_unwind(self, context: ExecutionContext) -> None:
         """Discard abandoned logical input frames down to one checkpoint."""
 
+        self._require_session_owner_access("unwind BIOS evaluation")
         if not isinstance(context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
         evaluator = self._require_bios_evaluator()
@@ -939,31 +1095,37 @@ class MegaForthRuntime:
     def bios_eval_status(self, context: ExecutionContext) -> None:
         """Push the mutable ``EVAL-STATUS`` diagnostic cell address."""
 
+        self._require_session_owner_access("read BIOS evaluator status")
         context.data.push(self._require_bios_evaluator().status_address)
 
     def bios_eval_line(self, context: ExecutionContext) -> None:
         """Push the caller-owned one-based ``EVAL-LINE`` cell address."""
 
+        self._require_session_owner_access("read BIOS evaluator line")
         context.data.push(self._require_bios_evaluator().line_address)
 
     def bios_eval_column(self, context: ExecutionContext) -> None:
         """Push the zero-based ``EVAL-COLUMN`` diagnostic cell address."""
 
+        self._require_session_owner_access("read BIOS evaluator column")
         context.data.push(self._require_bios_evaluator().column_address)
 
     def bios_eval_depth(self, context: ExecutionContext) -> None:
         """Push the mutable logical ``EVAL-DEPTH`` cell address."""
 
+        self._require_session_owner_access("read BIOS evaluator depth")
         context.data.push(self._require_bios_evaluator().depth_address)
 
     def bios_eval_throw(self, context: ExecutionContext) -> None:
         """Push the KDOS-owned ``EVAL-THROW`` diagnostic cell address."""
 
+        self._require_session_owner_access("read BIOS evaluator throw")
         context.data.push(self._require_bios_evaluator().throw_address)
 
     def bios_eval_token(self, context: ExecutionContext) -> None:
         """Return the stable first-failure token buffer and current length."""
 
+        self._require_session_owner_access("read the BIOS evaluator token")
         evaluator = self._require_bios_evaluator()
         context.data.push(evaluator.token_address)
         context.data.push(evaluator.token_length)
@@ -1155,6 +1317,7 @@ class MegaForthRuntime:
     def set_dictionary_fault_xt(self, xt: int) -> None:
         """Install a raw guest callback, including zero to disable it."""
 
+        self._require_session_owner_access("change the dictionary fault callback")
         self._require_no_suspension("change the dictionary fault callback")
         self._dictionary_fault_xt = u64(xt)
 
@@ -1166,6 +1329,7 @@ class MegaForthRuntime:
     ) -> None:
         """Install one checked inclusive/exclusive external dictionary zone."""
 
+        self._require_session_owner_access("change dictionary bounds")
         self._require_no_suspension("change dictionary bounds")
         base = u64(base)
         limit = u64(limit)
@@ -1219,6 +1383,7 @@ class MegaForthRuntime:
     def disable_dictionary_bounds(self) -> None:
         """Restore guarded Bank-0 dictionary allocation without moving HERE."""
 
+        self._require_session_owner_access("disable dictionary bounds")
         self._require_no_suspension("disable dictionary bounds")
         self._dictionary_limit = 0
         self._dictionary_base = 0
@@ -1226,6 +1391,7 @@ class MegaForthRuntime:
     def configure_dictionary_index(self, base: int, slots: int) -> int:
         """Install, rebuild, or disable the caller-backed BIOS index."""
 
+        self._require_session_owner_access("reconfigure the dictionary index")
         self._require_no_suspension("reconfigure the dictionary index")
         return self.dictionary_index.configure(base, slots)
 
@@ -1446,6 +1612,7 @@ class MegaForthRuntime:
         delta_cell: int,
         context: ExecutionContext,
     ) -> None:
+        self._require_session_owner_access("allot dictionary storage")
         if not isinstance(delta_cell, int):
             self.dictionary.allot(delta_cell)
             return
@@ -1463,6 +1630,7 @@ class MegaForthRuntime:
             self._request_dictionary_fault(context, str(exc))
 
     def comma_dictionary(self, cell: int, context: ExecutionContext) -> None:
+        self._require_session_owner_access("compile a dictionary cell")
         self._preflight_dictionary_growth(CELL_BYTES, context)
         try:
             self.dictionary.comma(cell)
@@ -1470,6 +1638,7 @@ class MegaForthRuntime:
             self._request_dictionary_fault(context, str(exc))
 
     def c_comma_dictionary(self, cell: int, context: ExecutionContext) -> None:
+        self._require_session_owner_access("compile a dictionary byte")
         if self._active_input_states:
             state = self._active_input_states[-1]
             compiler = state.compiler
@@ -1495,6 +1664,7 @@ class MegaForthRuntime:
     def tile_align_dictionary(self, context: ExecutionContext) -> None:
         """Apply BIOS ``TALIGN`` growth semantics to the hosted frontier."""
 
+        self._require_session_owner_access("align the dictionary")
         width = (-self.dictionary.here) & 63
         if width == 0:
             return
@@ -1510,6 +1680,7 @@ class MegaForthRuntime:
         saved_latest: int,
         context: ExecutionContext,
     ) -> None:
+        self._require_session_owner_access("roll back the dictionary")
         self._preflight_dictionary_target(saved_here, context)
         try:
             self.dictionary.rollback_to(saved_here, saved_latest)
@@ -1538,6 +1709,7 @@ class MegaForthRuntime:
         immediate: bool = False,
         initial_body: bytes = b"",
     ) -> Word:
+        self._require_session_owner_access("define a primitive")
         if not callable(callback):
             raise TypeError("primitive callback must be callable")
         return self._define_public_dictionary_word(
@@ -1557,6 +1729,7 @@ class MegaForthRuntime:
     ) -> Word:
         """Publish one trusted, complete hosted-IR colon definition."""
 
+        self._require_session_owner_access("define a colon word")
         if not isinstance(operations, tuple):
             raise TypeError("colon operations must be a tuple")
         if not isinstance(literal_pool, bytes):
@@ -1602,6 +1775,7 @@ class MegaForthRuntime:
         also included in that evaluation's ordered definition ledger.
         """
 
+        self._require_session_owner_access("define a constant")
         word = self._define_public_dictionary_word(
             name,
             ConstantDefinition(value),
@@ -1618,6 +1792,7 @@ class MegaForthRuntime:
     ) -> Word:
         """Atomically publish one CREATE-family child and initial body bytes."""
 
+        self._require_session_owner_access("define a created word")
         word = self._define_public_dictionary_word(
             name,
             CreatedDefinition(),
@@ -1634,6 +1809,7 @@ class MegaForthRuntime:
         *,
         immediate: bool = True,
     ) -> Word:
+        self._require_session_owner_access("define a directive")
         if not isinstance(kind, DirectiveKind):
             raise TypeError("directive kind must be a DirectiveKind")
         if not isinstance(immediate, bool):
@@ -1647,6 +1823,7 @@ class MegaForthRuntime:
     def parse_input_word(self) -> bytes:
         """Parse an optional word from the active physical input line."""
 
+        self._require_session_owner_access("parse the active input")
         if not self._active_input_states:
             raise ExecutionError("cannot parse a word without an active input line")
         return self._active_input_states[-1].cursor.parse_word()
@@ -1654,6 +1831,7 @@ class MegaForthRuntime:
     def parse_word_to_dictionary_tail(self, delimiter: int) -> int:
         """Publish one BIOS ``WORD`` value and then commit its input cursor."""
 
+        self._require_session_owner_access("parse into the dictionary")
         if not self._active_input_states:
             raise ExecutionError(
                 "cannot parse a delimited word without an active input line"
@@ -1681,6 +1859,7 @@ class MegaForthRuntime:
         :meth:`evaluate`.
         """
 
+        self._require_session_owner_access("parse required input")
         if isinstance(owner, bytes):
             try:
                 owner_text = owner.decode("ascii")
@@ -1715,24 +1894,26 @@ class MegaForthRuntime:
         buffer.  It intentionally does not reset at token boundaries.
         """
 
-        try:
-            return self._evaluate_source(
-                source,
-                source_name=source_name,
-                context=context,
-                step_budget=step_budget,
-            )
-        except _GuestControlTransfer as transfer:
-            if not self._has_active_guest_transfer_target(transfer):
+        with self._session_owner_lock:
+            self._require_session_owner_access("evaluate source")
+            try:
+                return self._evaluate_source(
+                    source,
+                    source_name=source_name,
+                    context=context,
+                    step_budget=step_budget,
+                )
+            except _GuestControlTransfer as transfer:
+                if not self._has_active_guest_transfer_target(transfer):
+                    self._fail_closed_active_bios_evaluator()
+                raise
+            except _DictionaryFaultRequest as request:
+                if not self._has_active_dispatch(request.context):
+                    self._fail_closed_active_bios_evaluator()
+                raise
+            except BaseException:
                 self._fail_closed_active_bios_evaluator()
-            raise
-        except _DictionaryFaultRequest as request:
-            if not self._has_active_dispatch(request.context):
-                self._fail_closed_active_bios_evaluator()
-            raise
-        except BaseException:
-            self._fail_closed_active_bios_evaluator()
-            raise
+                raise
 
     def _evaluate_source(
         self,
@@ -1879,6 +2060,7 @@ class MegaForthRuntime:
     ) -> ExecutionResult:
         """Execute one live word to completion or raise ``ExecutionBlocked``."""
 
+        self._require_session_owner_access("execute a semantic word")
         if self._active_dispatches or self._active_input_states:
             active_context = self.main_context if context is None else context
             if not isinstance(active_context, ExecutionContext):
@@ -1908,18 +2090,20 @@ class MegaForthRuntime:
     ) -> RunResult:
         """Run one compiled word until completion or its next IDL boundary."""
 
-        try:
-            return self._run_until_blocked(
-                name_or_xt,
-                context=context,
-                step_budget=step_budget,
-            )
-        except BaseException:
-            # This entry point rejects nested dispatch before execution, so
-            # every exception escaping it is an outer host escape rather than
-            # a guest transfer still travelling toward an older CATCH root.
-            self._fail_closed_active_bios_evaluator()
-            raise
+        with self._session_owner_lock:
+            self._require_session_owner_access("run a semantic dispatch")
+            try:
+                return self._run_until_blocked(
+                    name_or_xt,
+                    context=context,
+                    step_budget=step_budget,
+                )
+            except BaseException:
+                # This entry point rejects nested dispatch before execution, so
+                # every exception escaping it is an outer host escape rather than
+                # a guest transfer still travelling toward an older CATCH root.
+                self._fail_closed_active_bios_evaluator()
+                raise
 
     def _run_until_blocked(
         self,
@@ -1961,6 +2145,15 @@ class MegaForthRuntime:
     ) -> IdleWakeReceipt:
         """Publish one interrupt/DMA wake for an exact blocked dispatch."""
 
+        with self._session_owner_lock:
+            self._require_session_owner_access("wake a semantic dispatch")
+            return self._deliver_idle_wake_locked(suspension, kind)
+
+    def _deliver_idle_wake_locked(
+        self,
+        suspension: ExecutionSuspension,
+        kind: IdleWake,
+    ) -> IdleWakeReceipt:
         blocked = self._require_suspension(suspension)
         if not isinstance(kind, IdleWake):
             raise TypeError("idle wake kind must be an IdleWake")
@@ -1986,6 +2179,15 @@ class MegaForthRuntime:
     ) -> RunResult:
         """Resume one exact IDL suspension after a runtime-issued wake."""
 
+        with self._session_owner_lock:
+            self._require_session_owner_access("resume a semantic dispatch")
+            return self._resume_locked(suspension, wake_receipt)
+
+    def _resume_locked(
+        self,
+        suspension: ExecutionSuspension,
+        wake_receipt: IdleWakeReceipt,
+    ) -> RunResult:
         blocked = self._require_suspension(suspension)
         if not isinstance(wake_receipt, IdleWakeReceipt):
             raise TypeError("wake receipt must be an IdleWakeReceipt")
@@ -2045,6 +2247,14 @@ class MegaForthRuntime:
     def cancel_suspension(self, suspension: ExecutionSuspension) -> None:
         """Unwind internal return state and release one blocked context."""
 
+        with self._session_owner_lock:
+            self._require_session_owner_access("cancel a semantic dispatch")
+            self._cancel_suspension_locked(suspension)
+
+    def _cancel_suspension_locked(
+        self,
+        suspension: ExecutionSuspension,
+    ) -> None:
         blocked = self._require_suspension(suspension)
         blocked.had_pointer_capture = (
             blocked.had_pointer_capture

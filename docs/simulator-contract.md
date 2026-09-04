@@ -126,9 +126,12 @@ backpressure, and retirement are one backend-neutral state machine in
 `shared/rich_terminal_host.py`. Scheduler exclusion, UART drain and FIFO
 mutation, geometry application, and machine-sink ownership remain explicit
 backend hooks. The emulator adapter supplies those hooks without changing its
-machine boundary. A conforming simulator adapter must supply the same effects
-at semantic batch boundaries; the shared policy alone is not evidence that
-such an adapter or a live APT session exists.
+machine boundary. `SimulatorSessionBackend` supplies the same effects at outer
+semantic-call boundaries, including exact UART-tail retirement and resumable
+IDL ownership. Its `HostedTerminalGeometry` value is read-only adapter
+bookkeeping, not an implementation of guest-visible BIOS `COLS`, `ROWS`, or
+`RESIZED?`. The shared policy and adapter are still not evidence that the
+complete source module or a live APT session has run.
 
 ## 2. Compatibility claims
 
@@ -3590,9 +3593,20 @@ SERVER_READY handling, CLIENT_READY, ACTIVE state, or a live driver/session.
 Host-port integration begins by extracting the already-qualified emulator
 attachment policy into the shared state machine described in section 1. The
 emulator keeps thin scheduler, UART, geometry, and ingress hooks, so this move
-does not alter its execution-batch settlement or make a simulator claim. The
-simulator adapter, semantic-batch settlement, and live driver handshake remain
-the next boundary.
+does not alter its execution-batch settlement. The simulator now supplies
+parallel hooks plus one stateful semantic-batch owner. It applies admitted
+geometry before UART ingress, wakes an owned IDL suspension only when RX is
+available, lets each outer guest call contribute at most one settlement
+publication, and blocks later semantic execution behind the shared
+retained-publication rule. Direct execution and host-side UART mutation through
+the owned runtime are rejected. Output completed before backend acquisition
+remains a distinct legacy boundary and is drained before attachment, matching
+the emulator facade safeguard. The backend holds exclusive runtime ownership
+until its enhanced lease is closed and `SimulatorSessionBackend.close()`
+releases the backend; callers must perform both lifecycle steps. `TX-FLUSH`
+remains the synchronous hosted primitive it was before and does not acquire
+protocol framing meaning. Loading the remaining unchanged source and crossing
+a live driver handshake remain the next boundary.
 
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
