@@ -2775,4 +2775,30 @@ def install_core(runtime: MegaForthRuntime) -> None:
         lambda context: _latest_store(runtime, context),
     )
 
+    # Preserve the complete earlier hosted XT ledger while admitting the
+    # extended tile vocabulary reached by the Akashic Desktop source closure.
+    # The order follows the relative order of these words in the native BIOS.
+    extended_tile_primitives = (
+        (b"TAND", lambda _context: runtime.tile.bitwise_and()),
+        (b"TOR", lambda _context: runtime.tile.bitwise_or()),
+        (b"TXOR", lambda _context: runtime.tile.bitwise_xor()),
+        (b"TTRANS", lambda _context: runtime.tile.transpose()),
+        (
+            b"ACC1@",
+            lambda context: context.data.push(runtime.tile.accumulator_word(1)),
+        ),
+        (b"TPOPCNT", lambda _context: runtime.tile.popcount()),
+        (b"TL1", lambda _context: runtime.tile.l1_norm()),
+        (b"TEMIN", lambda _context: runtime.tile.elementwise_minimum()),
+        (b"TEMAX", lambda _context: runtime.tile.elementwise_maximum()),
+        (b"TMINIDX", lambda _context: runtime.tile.minimum_index()),
+        (b"TMAXIDX", lambda _context: runtime.tile.maximum_index()),
+        (b"TWMUL", lambda _context: runtime.tile.widening_multiply()),
+        (b"TMAC", lambda _context: runtime.tile.multiply_accumulate()),
+        (b"TFMA", lambda _context: runtime.tile.fused_multiply_add()),
+        (b"TABS", lambda _context: runtime.tile.absolute()),
+    )
+    for name, callback in extended_tile_primitives:
+        runtime.define_primitive(name, callback)
+
 __all__ = ["install_core"]

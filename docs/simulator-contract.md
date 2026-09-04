@@ -620,8 +620,10 @@ convergence and qualification are deferred rather than normalized into another
 hosted mode.
 
 The admitted one-core legacy tile service binds `TMODE!`, `TCTRL!`,
-`TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TMUL`, `TDOT`, `TSUM`,
-`TMIN`, `TMAX`, `TSUMSQ`, `FP16-MODE`, `BF16-MODE`, and `ACC@`. It retains
+`TSRC0!`, `TSRC1!`, `TDST!`, `TADD`, `TSUB`, `TAND`, `TOR`, `TXOR`,
+`TMUL`, `TDOT`, `TSUM`, `TMIN`, `TMAX`, `TTRANS`, `TPOPCNT`, `TL1`,
+`TEMIN`, `TEMAX`, `TABS`, `TSUMSQ`, `TMINIDX`, `TMAXIDX`, `TWMUL`,
+`TMAC`, `TFMA`, `FP16-MODE`, `BF16-MODE`, `ACC@`, and `ACC1@`. It retains
 low-byte TMODE/TCTRL, full-cell addresses, and ACC0--ACC3;
 ACC, TSRC0, and TDST are the same state observed by the hosted Field-ALU
 surface. TCTRL zero-first is consumed only by a successful reduction or DOT.
@@ -636,8 +638,12 @@ ADD/SUB/MUL plus SUM/MIN/MAX/DOT/SUMSQ. Floating reductions and DOT place raw
 binary32 bits in ACC0 and clear ACC1--ACC3; MIN/MAX skip NaNs and ignore
 ACC_ACC, while SUM/DOT/SUMSQ add the binary32 value already in ACC0 when
 requested. The signed and saturating mode flags are ignored for floating
-formats. Reserved EW 6/7 and all unbound tile/TACC words fail rather than
-silently aliasing another format.
+formats. The extended operations preserve the Python architectural emulator's
+raw-bit, lane-selection, accumulator, two-tile widening, and 8-by-8
+byte-transpose semantics; focused differential vectors define their detailed
+integer, FP16, BF16, NaN, alias, and control behavior. Reserved EW 6/7 and all
+remaining unbound tile/TACC words fail rather than silently aliasing another
+format.
 
 Each used operand is the exact addressed 64-byte span and must fit one ordinary
 mapped region; MMIO and crossing or wrapping spans are rejected before
@@ -3574,7 +3580,7 @@ Desktop execution remain deferred under the rich-terminal resource gate.
 
 The rich-terminal integration now synchronizes the authoritative current
 `rich-terminal.f` and appends exactly five source prerequisites to the hosted
-pseudo-BIOS: `UM*`, `WITHIN`, `MOVE`, `MS@`, and `TX-FLUSH`. Three public
+pseudo-BIOS: `UM*`, `WITHIN`, `MOVE`, `MS@`, and `TX-FLUSH`. Six public
 terminal-geometry words follow them: `COLS`, `ROWS`, `RESIZED?`, `TERMSIZE`,
 `RESIZE-DENIED?`, and `RESIZE-REQUEST`. Existing hosted execution tokens retain
 their addresses; absolute tokens remain nonportable between backends. Six
@@ -3585,10 +3591,13 @@ bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates, persistent
 raw-token `[IF]`/`[ELSE]`/`[THEN]` skipping, structured CASE compilation,
 definition-bound recursion, equality-based `+LOOP`, directional `CMOVE>`,
 `ON`, the native `2!`/`2@` pair layout, the three relocation-control cells,
-and semantic-ancestor `LATEST!` publication without moving `HERE`. A native
-copied machine-code chain has no hosted implementation metadata and is
-rejected rather than presented as simulator-executable. Fresh runtimes
-therefore publish 358 pre-KDOS words. Focused units qualify widening
+and semantic-ancestor `LATEST!` publication without moving `HERE`. Fifteen
+final append-only words expose the extended tile family and `ACC1@` required
+by the exact Desktop source closure, backed by the same runtime-local tile and
+accumulator state. A native copied machine-code chain has no hosted
+implementation metadata and is rejected rather than presented as
+simulator-executable. Fresh runtimes therefore publish 373 pre-KDOS words.
+Focused units qualify widening
 multiplication, wrapping interval comparison, overlap/fault copy order,
 deterministic latched uptime, immediate hosted flush semantics, session-bound
 dimensions, independent clear-on-read resize status, and stale-safe

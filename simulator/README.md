@@ -80,9 +80,10 @@ The implemented slices provide:
   explicit host set/advance controls, low-byte read latching, direct MMIO
   access, and BIOS `EPOCH@`, but no automatic or wall-clock advancement;
 - a retained one-core semantic tile service for four integer lane widths plus
-  FP16/BF16, integer and half-format ADD/SUB/MUL/SUM/MIN/MAX/SUMSQ/DOT,
-  low-byte control registers, completed-operation accounting, and the
-  ACC/TSRC0/TDST state shared with the hosted Field ALU;
+  FP16/BF16, the source-required legacy and extended element, reduction,
+  index, widening, multiply-accumulate, and transpose operations, low-byte
+  control registers, completed-operation accounting, and the ACC/TSRC0/TDST
+  state shared with the hosted Field ALU;
 - a routed per-runtime AES-128/256-GCM service shared by BIOS words and direct
   virtual MMIO, backed by a portable AES/GHASH value model and exact native
   command, status, fault, and incremental guest-transfer semantics;
@@ -2325,12 +2326,15 @@ BIOS equality-based `+LOOP` contract, directional `CMOVE>`, `ON`, and the
 native `2!`/`2@` pair layout. The final four expose the three native relocation
 control cells and a semantic `LATEST!` which can publish a known hosted
 ancestor without moving `HERE`. Native copied machine-code dictionary splices
-remain deliberately non-executable on this backend. The focused
+remain deliberately non-executable on this backend. Fifteen final append-only
+words expose the extended tile family and `ACC1@` required by the exact
+Desktop source closure, backed by the same semantic tile register state. The
+focused
 live integration below now evaluates the complete authoritative module against
 the exact KDOS exception closure, but does not yet claim normal
 MP64FS/`REQUIRE` composition, Akashic integration, the Desktop lifecycle, or
 physical rendering. Those runs remain deferred by the vertical's resource
-gate. Fresh runtimes therefore contain 358 pseudo-BIOS words before KDOS; the
+gate. Fresh runtimes therefore contain 373 pseudo-BIOS words before KDOS; the
 319-word figure above remains the exact historical-load observation and is not
 silently rewritten as new full-load evidence.
 

@@ -14,8 +14,8 @@ from simulator.stacks import StackUnderflow
 def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
     runtime = MegaForthRuntime()
 
-    assert len(runtime.dictionary.words) == 358
-    assert tuple(word.name for word in runtime.dictionary.words[-39:]) == (
+    assert len(runtime.dictionary.words) == 373
+    assert tuple(word.name for word in runtime.dictionary.words[-54:]) == (
         b"UM*",
         b"WITHIN",
         b"MOVE",
@@ -55,7 +55,31 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"_RELOC-COUNT",
         b"_RELOC-BUF",
         b"LATEST!",
+        b"TAND",
+        b"TOR",
+        b"TXOR",
+        b"TTRANS",
+        b"ACC1@",
+        b"TPOPCNT",
+        b"TL1",
+        b"TEMIN",
+        b"TEMAX",
+        b"TMINIDX",
+        b"TMAXIDX",
+        b"TWMUL",
+        b"TMAC",
+        b"TFMA",
+        b"TABS",
     )
+
+
+def test_accumulator_one_word_reads_the_shared_tile_register() -> None:
+    runtime = MegaForthRuntime()
+    runtime.field.replace_accumulator_words(0, (11, 22, 33, 44))
+
+    runtime.execute("ACC1@")
+
+    assert runtime.main_context.data.snapshot() == (22,)
 
 
 @pytest.mark.parametrize(
