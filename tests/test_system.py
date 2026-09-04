@@ -3776,16 +3776,25 @@ class TestBIOS(unittest.TestCase):
         self.assertIn("HELLO", text)
 
     def test_abort_quote_preserves_inline_diagnostic_and_recovery(self):
-        """The preflighted ABORT\" string remains printable at runtime."""
+        """ABORT\" is state-smart and preserves its compiled diagnostic."""
         sys, buf = self._boot_bios()
         text = self._run_forth(sys, buf, [
             "JIT-ON",
+            "VARIABLE TAQ-HERE HERE TAQ-HERE !",
+            '0 ABORT" silent interpreted quote" 40 2 + .',
+            "HERE TAQ-HERE @ = .",
+            'TRUE ABORT" interpreted abort quote"',
+            "20 2 * .",
             ': TAQ TRUE ABORT" stable abort quote" ;',
             "TAQ",
             "40 2 + .",
         ])
+        self.assertEqual(text.count("silent interpreted quote"), 1)
+        self.assertGreaterEqual(text.count("interpreted abort quote"), 2)
         self.assertGreaterEqual(text.count("stable abort quote"), 2)
-        self.assertIn("42 ", text)
+        self.assertGreaterEqual(text.count("42 "), 2)
+        self.assertIn("-1 ", text)
+        self.assertIn("40 ", text)
 
     def test_word_preflight_preserves_exact_token_and_input_tail(self):
         """Native WORD still returns a counted token and advances >IN once."""

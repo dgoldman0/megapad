@@ -10272,12 +10272,75 @@ w_abort:
     call.l r11                ; jump to QUIT (never returns)
     halt
 
-; ABORT" (IMMEDIATE) -- compile: test flag, if true print message and abort
+; ABORT" (IMMEDIATE) -- state-smart conditional diagnostic and abort
+;   In interpret state, parse the message and consume flag immediately.  A
+;   true flag prints the counted TIB payload and enters ABORT; false continues
+;   with the remainder of the input line without changing HERE.
 ;   At compile time, parses up to closing '"' and compiles:
 ;     [ pop flag, test, branch-if-zero past message+abort ]
 ;     [ inline string data ]
 ;     [ load string addr -> R10, call print_str, call w_abort ]
 w_abort_quote:
+    ; Check STATE before emitting anything into the dictionary.  Akashic uses
+    ; top-level ABORT" for load-time ABI and constructor assertions.
+    ldi64 r11, var_state
+    ldn r11, r11
+    cmpi r11, 0
+    lbrne w_abq_compile
+
+    ; ---- Interpret mode: parse a counted TIB payload, then test flag ----
+    ldi64 r11, var_to_in
+    ldn r13, r11              ; R13 = >IN
+    ldi64 r9, tib_buffer
+    ldi64 r11, var_tib_len
+    ldn r7, r11               ; R7 = TIB length
+    mov r12, r13              ; empty payload starts at EOL
+    cmp r13, r7
+    breq w_abq_interp_eol
+    mov r11, r9
+    add r11, r13
+    ld.b r1, r11
+    cmpi r1, 0x20
+    brne w_abq_interp_start
+    inc r13                   ; skip one delimiter space when present
+w_abq_interp_start:
+    mov r12, r13              ; R12 = payload start offset
+w_abq_interp_scan:
+    cmp r13, r7
+    breq w_abq_interp_eol
+    mov r11, r9
+    add r11, r13
+    ld.b r1, r11
+    cmpi r1, 0x22             ; closing '"'
+    breq w_abq_interp_close
+    inc r13
+    br w_abq_interp_scan
+w_abq_interp_close:
+    mov r7, r13               ; R7 = exclusive payload end
+    inc r13                   ; consume closing quote
+    br w_abq_interp_parsed
+w_abq_interp_eol:
+    mov r7, r13               ; unterminated payload extends through EOL
+w_abq_interp_parsed:
+    ldi64 r11, var_to_in
+    str r11, r13
+    ldn r0, r14               ; consume flag in both branches
+    addi r14, 8
+    cmpi r0, 0
+    breq w_abq_interp_done
+    add r9, r12               ; counted payload address
+    mov r13, r7
+    sub r13, r12
+    mov r12, r13              ; print_counted takes R9/R12
+    ldi64 r11, print_counted
+    call.l r11
+    ldi64 r11, w_abort
+    call.l r11                ; never returns
+    halt
+w_abq_interp_done:
+    ret.l
+
+w_abq_compile:
     ; Compile: ldn r1, r14  (pop flag to r1)
     ; ldn rD, rE -> 0x50 0xDE  -> 0x50 0x1E
     ldi r1, 0x50

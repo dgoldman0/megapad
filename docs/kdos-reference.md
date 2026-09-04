@@ -1036,8 +1036,8 @@ source at offsets 0, 8, 16, and 24. `ARENA-NEW` appends that descriptor at the
 active dictionary HERE; `ARENA-NEW-AT` writes the same cells into a
 caller-supplied, writable, cell-aligned 32-byte span without advancing HERE.
 Both return `ior`; callers that immediately define a constant must consume it.
-For example, an application can define an interpretation-safe helper (this is
-not a built-in KDOS word):
+For example, an application can define a reusable checked helper (this is not
+a built-in KDOS word):
 
 ```forth
 : MUST-ARENA  ( size source -- arena )
@@ -1047,8 +1047,9 @@ not a built-in KDOS word):
 
 Writing `ARENA-NEW CONSTANT work-arena` is wrong: `CONSTANT` consumes the
 topmost zero status and leaves the descriptor address on the data stack.
-Putting `ABORT"` directly between those top-level words is also wrong because
-`ABORT"` is compile-only; the checked helper must contain it.
+State-smart `ABORT"` may consume that status directly at top level, so
+`4096 A-XMEM ARENA-NEW ABORT" arena fail" CONSTANT work-arena` is the
+equivalent one-off checked form.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

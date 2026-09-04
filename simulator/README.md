@@ -140,8 +140,8 @@ The implemented slices provide:
   definitions with ASCII case folding and native-valued immediate/ordinary
   result flags; `S"` with distinct NUL-terminated compiled body literals and
   one protected, reused 255-byte interpret buffer; forward `CMOVE`, byte
-  fetch, stack depth, compiled/interpret-state `."`, and the supported
-  compile-state `ABORT"` path;
+  fetch, stack depth, compiled/interpret-state `."`, and state-smart
+  `ABORT"` with matching immediate assertion behavior in both states;
 - a memory-backed canonical foreground data/return stack with exact downward
   cell geometry, retained continuation slots, `SP@`/`SP!` and `RP@`/`RP!`;
 - the unchanged source-defined KDOS Bank-0 heap, including lazy setup,

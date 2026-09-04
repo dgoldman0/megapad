@@ -97,9 +97,10 @@ Allocate a backing region of `size` bytes from the specified memory
 source (0=heap, 1=XMEM, 2=HBW).  Build a descriptor in the dictionary.
 Returns descriptor address and 0 on success, or 0 and -1 on failure.
 
-The examples below use these local checked helpers; they are illustrative and
-are not built-in KDOS words. `ABORT"` belongs inside a colon definition, not
-directly in interpretation state.
+The examples below use local checked helpers so the policy can be reused; they
+are illustrative and are not built-in KDOS words. State-smart `ABORT"` can
+also consume an `ior` directly in interpretation state when a one-off
+top-level arena constant is appropriate.
 
 ```forth
 : MUST-ARENA  ( size source -- arena )

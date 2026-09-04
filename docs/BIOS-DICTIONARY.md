@@ -498,9 +498,14 @@ of compiled code.
 | 148 | `FALSE` | `( -- 0 )` | | Push false flag (0) |
 | 149 | `LATEST` | `( -- entry )` | | Push current LATEST pointer (most recent dictionary entry address) |
 | 150 | `ABORT` | `( -- )` | | Reset DSP and RSP, jump to QUIT |
-| 151 | `ABORT"` | `( flag -- )` | ✓ | Compile: if flag≠0 at runtime, print inline message string and ABORT |
+| 151 | `ABORT"` | interpret: `( flag "msg" -- )`; compile: `( "msg" -- )` | ✓ | State-smart: interpretation parses the message and consumes `flag`; zero is a silent no-op, while nonzero prints the message and executes `ABORT`. Compilation retains the inline message and emits the same conditional print-and-abort behavior for a flag supplied at runtime. |
 | 152 | `TALIGN` | `( -- )` | | Align HERE to next 64-byte boundary (for tile data) |
 | 153 | `FSLOAD` | `( "name" -- )` | | Load named file from MP64FS disk and EVALUATE its contents line-by-line |
+
+The interpretation behavior of `ABORT"` is a deliberate MegaPad extension
+where portable Forth leaves interpretation semantics undefined. The closing
+quote is parsed in either state, including the false interpretation path; only
+the nonzero path emits the parsed message and resets through `ABORT`.
 
 ### Tile Engine (39 words)
 

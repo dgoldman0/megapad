@@ -2653,14 +2653,21 @@ class MegaForthRuntime:
                 )
             return
         if kind is DirectiveKind.ABORT_QUOTE:
-            if state.compiler is None or not state.compiler.compile_mode:
-                self._compile_error(state, 'ABORT" is compile-only')
             payload = self._parse_quoted_literal(
                 state,
                 unconditionally_skip_next=False,
             )
-            assert state.compiler is not None
-            state.compiler.operations.append(AbortIf(payload))
+            if state.compiler is not None and state.compiler.compile_mode:
+                state.compiler.operations.append(AbortIf(payload))
+                return
+            if state.context.data.pop() != 0:
+                self.write_uart_bytes(payload)
+                state.context.data.clear()
+                state.context.returns.clear()
+                raise ForthAbort(
+                    'Forth ABORT"',
+                    origin_context=state.context,
+                )
             return
         if kind is DirectiveKind.COLON:
             if state.compiler is not None:

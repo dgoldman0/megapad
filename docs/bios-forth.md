@@ -821,10 +821,15 @@ queues, and interrupts remain unadmitted; direct NIC MMIO still faults.
 | `FALSE` | `( -- 0 )` | Push the canonical false flag. |
 | `LATEST` | `( -- addr )` | Address of the most recent dictionary entry header. |
 | `ABORT` | `( -- )` | Clear both stacks and restart the outer interpreter. |
-| `ABORT"` | `( flag "msg" -- )` | If flag is true, print the message and abort.  Immediate. |
+| `ABORT"` | interpret: `( flag "msg" -- )`; compile: `( "msg" -- )` | Immediate and state-smart. At the interpreter it always parses the message and consumes `flag`: false is a silent no-op, while true prints the message and executes `ABORT`. During compilation it retains the inline message and compiles that conditional behavior for a flag supplied at runtime. |
 | `TALIGN` | `( -- )` | Align HERE to the next 64-byte boundary. |
 | `FSLOAD` | `( "filename" -- )` | **Disk boot word.**  Reads the MP64FS directory, validates the file extent and RAM span, transfers it in guarded batches, and EVALUATEs each line.  The standard image uses it for the KDOS core; KDOS `REQUIRE` owns later userland modules. |
 | `EXIT` | `( -- )` | Return from the current word immediately. |
+
+Interpreted `ABORT"` is an intentional MegaPad extension where portable Forth
+does not define interpretation semantics. It lets a source file use the same
+assertion spelling at top level and inside compiled definitions without a
+backend-specific wrapper.
 
 ---
 
