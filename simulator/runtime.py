@@ -41,6 +41,7 @@ from simulator.ir import (
     Branch,
     BranchZero,
     Call,
+    CallSelf,
     Do,
     Idle,
     InstallDoes,
@@ -286,6 +287,7 @@ class DirectiveKind(Enum):
     OF = auto()
     ENDOF = auto()
     ENDCASE = auto()
+    RECURSE = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -2748,6 +2750,13 @@ class MegaForthRuntime:
             exit_target = len(compiler.operations)
             for end_index in frame.end_indices:
                 compiler.operations[end_index] = Branch(exit_target)
+        elif kind is DirectiveKind.RECURSE:
+            if compiler.temporary:
+                self._compile_error(
+                    state,
+                    "RECURSE requires a named colon definition",
+                )
+            compiler.operations.append(CallSelf())
         elif kind is DirectiveKind.BEGIN:
             compiler.controls.append(_BeginFrame(len(compiler.operations)))
         elif kind is DirectiveKind.UNTIL:
@@ -3437,6 +3446,18 @@ class MegaForthRuntime:
                 called = self._resolve_dispatch_word(operation.xt)
                 entered = self._call_from_colon(
                     called,
+                    caller=current,
+                    return_ip=ip + 1,
+                    context=context,
+                    meter=meter,
+                )
+                if entered is None:
+                    ip += 1
+                else:
+                    current, ip = entered
+            elif isinstance(operation, CallSelf):
+                entered = self._call_from_colon(
+                    current,
                     caller=current,
                     return_ip=ip + 1,
                     context=context,

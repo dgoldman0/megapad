@@ -47,6 +47,11 @@ class Call:
 
 
 @dataclass(frozen=True, slots=True)
+class CallSelf:
+    """Call the colon definition which owns this operation."""
+
+
+@dataclass(frozen=True, slots=True)
 class Branch:
     target: int
 
@@ -196,6 +201,7 @@ class AbortIf:
 Operation: TypeAlias = (
     Literal
     | Call
+    | CallSelf
     | Branch
     | BranchZero
     | Return
@@ -225,6 +231,7 @@ __all__ = [
     "Branch",
     "BranchZero",
     "Call",
+    "CallSelf",
     "Do",
     "Idle",
     "InstallDoes",

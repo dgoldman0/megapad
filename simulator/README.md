@@ -153,8 +153,8 @@ The implemented slices provide:
   checked statuses and diagnostics, persistent cross-call compiler/control
   state, ordinary anonymous interpret-mode `IF`/`ELSE`/`THEN`, explicit
   finish/reset/unwind, raw-token bracketed conditional compilation, bytewise
-  `CHAR`/`[CHAR]`, signed `/MOD`, structured `CASE`, and one inherited public
-  step budget;
+  `CHAR`/`[CHAR]`, signed `/MOD`, structured `CASE`, definition-bound
+  `RECURSE`, and one inherited public step budget;
 - the retired user-mode compatibility ABI: stack-neutral `ENTER-USER` and
   `SYS-EXIT`, constant-supervisor `PRIV@`, and runtime-local, guest-visible
   `MPU-BASE`/`MPU-LIMIT` registers which retain values but do not enforce
@@ -2317,15 +2317,15 @@ clear-on-read `RESIZED?`, atomic `TERMSIZE`, clear-on-read
 memory, clock, UART, and session-geometry units are qualification of those
 primitives only. Six append-only source-closure words then provide `BSWAP`,
 the current unconfigured-port `NET-SEND`/`NET-RECV`/`NET-MAC@` behavior, and
-checked deterministic `ENTROPY-FILL`/`ENTROPY-READY?`. Twelve more source words
+checked deterministic `ENTROPY-FILL`/`ENTROPY-READY?`. Thirteen more source words
 provide bytewise `CHAR`/`[CHAR]`, signed `/MOD`, dictionary predicates,
 cross-line `[IF]`/`[ELSE]`/`[THEN]` skipping, and structured
-`CASE`/`OF`/`ENDOF`/`ENDCASE` compilation. The focused
+`CASE`/`OF`/`ENDOF`/`ENDCASE` compilation, and definition-bound `RECURSE`. The focused
 live integration below now evaluates the complete authoritative module against
 the exact KDOS exception closure, but does not yet claim normal
 MP64FS/`REQUIRE` composition, Akashic integration, the Desktop lifecycle, or
 physical rendering. Those runs remain deferred by the vertical's resource
-gate. Fresh runtimes therefore contain 348 pseudo-BIOS words before KDOS; the
+gate. Fresh runtimes therefore contain 349 pseudo-BIOS words before KDOS; the
 319-word figure above remains the exact historical-load observation and is not
 silently rewritten as new full-load evidence.
 

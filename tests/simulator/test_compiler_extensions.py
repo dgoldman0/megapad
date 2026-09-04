@@ -171,3 +171,28 @@ def test_case_control_words_reject_malformed_nesting(
 
     with pytest.raises(SourceError, match=message):
         runtime.evaluate(source)
+
+
+def test_recurse_calls_the_definition_being_compiled() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(
+        b": SUM-DOWN DUP 0= IF DROP 0 EXIT THEN DUP 1- RECURSE + ; "
+        b": CALL-ORIGINAL 4 SUM-DOWN ; "
+        b": SUM-DOWN 999 ;"
+    )
+
+    assert _execute(runtime, "CALL-ORIGINAL") == (10,)
+    assert _execute(runtime, "SUM-DOWN") == (999,)
+
+
+def test_recurse_is_compile_only_and_rejects_temporary_interpret_control() -> None:
+    runtime = MegaForthRuntime()
+
+    with pytest.raises(SourceError, match="RECURSE is compile-only"):
+        runtime.evaluate(b"RECURSE")
+
+    with pytest.raises(
+        SourceError,
+        match="RECURSE requires a named colon definition",
+    ):
+        runtime.evaluate(b"1 IF RECURSE THEN")
