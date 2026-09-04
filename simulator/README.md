@@ -2350,10 +2350,21 @@ then the source publishes CLOSE, the driver returns CLOSE_ACK, and both sides
 return to ANSI with source ownership released and queues empty. No resource
 writer, snapshot, or view is entered, so this proves the live handshake,
 synchronized close, and host-port settlement boundary without claiming
-projection, composition, rendering, or the rest of the module. The next slice
-must supply the exact KDOS exception vocabulary and continue the unchanged
-source at `PT-RESOURCE-BEGIN`, not add a simulator-specific terminal
-substitute.
+projection, composition, rendering, or the rest of the module. That left
+`PT-RESOURCE-BEGIN` as the next boundary, requiring the exact KDOS exception
+vocabulary rather than a simulator-specific terminal substitute.
+
+The next focused simulator oracle now performs that crossing. It loads the
+existing exact KDOS exception closure through `CATCH` and `THROW`, then extends
+the authoritative terminal prefix through `PT-RESOURCE-ABORT`. Invalid-session
+calls to all five public resource entry points return `PT-S-INVALID`; the
+`CATCH`-protected BEGIN and CHUNK wrappers clear their temporary argument and
+range state, with balanced stacks and no UART output. This is exception-linkage
+and normal-return failure-path evidence only; `THROW` recovery remains covered
+by its existing KDOS units rather than this oracle. The test does not admit or
+publish a resource and stops before the shared CELL/PRESENT transaction
+builder. That builder is now the next deliberate functional boundary, not a
+newly missing simulator primitive.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

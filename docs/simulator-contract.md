@@ -3625,6 +3625,17 @@ session-close, and semantic-call settlement boundaries only. It does not enter
 a resource writer, send a snapshot, project content, compose a view, or
 exercise a physical sink.
 
+A second simulator-only source oracle loads the already-qualified exact KDOS
+exception closure through `CATCH` and `THROW`, rather than adding those words
+to the pseudo-BIOS, then extends the same authoritative terminal prefix through
+public `PT-RESOURCE-ABORT`. Invalid-session calls execute each public resource
+entry point and return `PT-S-INVALID`; the two `CATCH`-protected entry points
+also clear their temporary argument and range state. This proves genuine KDOS
+exception-word linkage, normal-return wrapper execution, balanced stacks, and
+silent failure before the shared CELL/PRESENT transaction-builder section. The
+oracle does not exercise `THROW` recovery, admit a resource, publish a resource
+frame, or qualify any writer behavior.
+
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
 exception unwinding, but they do not move that frontier and are not a
@@ -3636,12 +3647,13 @@ definitions and the remaining islands should be absorbed into one complete
 
 The remaining rich-terminal source load and ordinary Desk/Pad/Daybook journey
 remain part of the compatibility contract, but are later implementation
-phases. With the backend synchronized to the current rich-terminal vertical,
-the next source slice starts at public `PT-RESOURCE-BEGIN` and continues
-through the unchanged module rather than copying terminal semantics into
-simulator-only substitutes. The standalone pseudo-BIOS fixture has now reached
-KDOS-owned exception vocabulary at that exact boundary; ordinary composition
-must obtain `CATCH` and `THROW` from KDOS, not from a simulator terminal shim.
+phases. The standalone pseudo-BIOS fixture's genuine exception dependency has
+now been crossed with authoritative KDOS source, not a simulator terminal shim.
+The next source boundary is the shared CELL/PRESENT transaction builder after
+`PT-RESOURCE-ABORT`; stopping there is a deliberate functional-scope boundary,
+not another missing simulator primitive. Later work must continue through the
+unchanged module rather than copying terminal semantics into simulator-only
+substitutes.
 
 Only seconds-scale structural, focused unit, and the bounded moderate semantic
 KDOS load run before the real rich vertical exists. Native/exact-full-core cold

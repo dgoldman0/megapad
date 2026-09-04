@@ -5,7 +5,9 @@ execute its source-defined APT path on the exact emulator and hosted
 simulator. The shared byte oracles remain paired across both backends; the
 simulator selector additionally proves the first real driver handshake and
 synchronized close through the unchanged pre-``CATCH`` boundary without
-claiming a complete module load.
+claiming a complete module load. A separate compile-and-invalid-call oracle
+uses the real KDOS exception closure to cross ``CATCH`` through the resource
+entry points, stopping before CELL/PRESENT transaction construction.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from simulator.rich_terminal_host import (
     SimulatorSessionBackend,
 )
 from simulator.runtime import MegaForthRuntime
+from tests.simulator.test_kdos_exceptions import _load_exceptions
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +60,10 @@ UART_OFFER_PREFIX_END = (
 )
 PRE_CATCH_PREFIX_END = (
     b"\n\\ Stack: owner generation resource format width height flags byte-length"
+)
+RESOURCE_WRAPPER_PREFIX_END = (
+    b"\n\\ ====================================================================="
+    b"\n\\  Shared CELL-1/PRESENT transaction builder"
 )
 
 # These are watchdogs for one BIOS boot and the selected contiguous definition
@@ -268,6 +275,28 @@ VARIABLE DBL-CLOSE-S
   DBL-S _PT.S.RX-SEQ @ DBL-RX-SEQ ! ;
 """
 
+RESOURCE_WRAPPER_SCENARIO_SOURCE = b"""
+VARIABLE DBX-BEGIN-S
+VARIABLE DBX-CHUNK-S
+VARIABLE DBX-COMMIT-S
+VARIABLE DBX-DROP-S
+VARIABLE DBX-ABORT-S
+: DBX-POISON-RANGES
+  -1 _PT-RSA ! -1 _PT-RSU ! -1 _PT-RSS !
+  -1 _PT-RA ! -1 _PT-RU ! -1 _PT-RB ! -1 _PT-RV ! ;
+: DBX-BEGIN
+  -1 _PT-RBG-PIXELS ! DBX-POISON-RANGES
+  1 2 3 4 5 6 7 8 9 10 11 PT-RESOURCE-BEGIN DBX-BEGIN-S ! ;
+: DBX-CHUNK
+  -1 _PT-RCH-PAYLOAD-U ! -1 _PT-RCH-FRAME-U ! -1 _PT-RCH-END !
+  -1 _PT-RCH-SENT ! -1 _PT-RCH-WATERMARK ! DBX-POISON-RANGES
+  1 2 3 4 5 6 7 PT-RESOURCE-CHUNK DBX-CHUNK-S ! ;
+: DBX-OTHER
+  1 2 3 5 PT-RESOURCE-COMMIT DBX-COMMIT-S !
+  1 2 3 5 PT-RESOURCE-DROP DBX-DROP-S !
+  1 2 3 0 5 PT-RESOURCE-ABORT DBX-ABORT-S ! ;
+"""
+
 # The production encoder correctly takes KDOS's global UART lock.  This
 # focused fixture intentionally does not load KDOS, so both backends receive
 # the same narrow definitions over BIOS SPIN@/SPIN!.  This retains the real
@@ -361,6 +390,21 @@ def _rich_terminal_pre_catch_prefix() -> bytes:
         b"    0 _PT-RBG-PIXELS !\n"
         b"    0 _PT-RSA ! 0 _PT-RSU ! 0 _PT-RSS !\n"
         b"    0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV ! ;\n"
+    )
+    return prefix
+
+
+def _rich_terminal_resource_wrapper_prefix() -> bytes:
+    """Extract through resource wrappers, before transaction construction."""
+
+    source = RICH_TERMINAL_SOURCE.read_bytes()
+    assert source.count(PREFIX_START) == 1
+    assert source.count(RESOURCE_WRAPPER_PREFIX_END) == 1
+    start = source.index(PREFIX_START)
+    end = source.index(RESOURCE_WRAPPER_PREFIX_END, start)
+    prefix = source[start:end]
+    assert prefix.endswith(
+        b"    _PT-RAB-REASON @ _PT-RAB-S @ _PT-RESOURCE-ABORT-TRACKED ;\n"
     )
     return prefix
 
@@ -835,6 +879,112 @@ def test_production_uart_offer_reaches_opening_with_exact_open_request(
     assert observation.state == (
         b" ".join(str(value).encode("ascii") for value in expected_state) + b" "
     )
+
+
+def test_simulator_real_kdos_catch_loads_resource_wrappers_before_transactions(
+) -> None:
+    prefix = _rich_terminal_resource_wrapper_prefix()
+    prefix_digest = hashlib.sha256(prefix).hexdigest()
+    runtime = _load_exceptions()
+    catch_word = runtime.find("CATCH")
+    assert catch_word is not None
+    result = runtime.evaluate(
+        ONE_CORE_UART_LOCK_SHIMS + prefix,
+        source_name=(
+            "one-core-uart-lock-shims+"
+            f"rich-terminal.f:{prefix_digest}:PT-S-OK..pre-transaction"
+        ),
+        step_budget=SIMULATOR_SOURCE_MAX_STEPS,
+    )
+    runtime.evaluate(
+        RESOURCE_WRAPPER_SCENARIO_SOURCE,
+        source_name="dual-backend-resource-wrapper-boundary.f",
+    )
+
+    assert runtime.find("CATCH") is catch_word
+    assert runtime.find("THROW") is not None
+    assert all(
+        runtime.find(name) is not None
+        for name in (
+            "PT-RESOURCE-BEGIN",
+            "PT-RESOURCE-CHUNK",
+            "PT-RESOURCE-COMMIT",
+            "PT-RESOURCE-DROP",
+            "PT-RESOURCE-ABORT",
+        )
+    )
+    assert result.definitions[-1].name == b"PT-RESOURCE-ABORT"
+    assert runtime.find("_PT-BEGIN-ARGS?") is None
+    assert runtime.find("PT-TX-BEGIN") is None
+    assert runtime.find("PT-SNAPSHOT-BEGIN") is None
+    task_handlers = runtime.find("_TASK-HANDLERS")
+    assert task_handlers is not None
+
+    runtime.execute("DBX-BEGIN")
+    assert _stored_cell(runtime, "DBX-BEGIN-S") == 3
+    assert runtime.memory.read64(task_handlers.body_address) == 0
+    assert all(
+        _stored_cell(runtime, name) == 0
+        for name in (
+            "_PT-RBG-S",
+            "_PT-RBG-OWNER",
+            "_PT-RBG-GENERATION",
+            "_PT-RBG-ITEM",
+            "_PT-RBG-FORMAT",
+            "_PT-RBG-WIDTH",
+            "_PT-RBG-HEIGHT",
+            "_PT-RBG-FLAGS",
+            "_PT-RBG-LENGTH",
+            "_PT-RBG-DIGEST-A",
+            "_PT-RBG-DIGEST-U",
+            "_PT-RBG-PIXELS",
+            "_PT-RSA",
+            "_PT-RSU",
+            "_PT-RSS",
+            "_PT-RA",
+            "_PT-RU",
+            "_PT-RB",
+            "_PT-RV",
+        )
+    )
+
+    runtime.execute("DBX-CHUNK")
+    assert _stored_cell(runtime, "DBX-CHUNK-S") == 3
+    assert runtime.memory.read64(task_handlers.body_address) == 0
+    assert all(
+        _stored_cell(runtime, name) == 0
+        for name in (
+            "_PT-RCH-S",
+            "_PT-RCH-OWNER",
+            "_PT-RCH-GENERATION",
+            "_PT-RCH-ITEM",
+            "_PT-RCH-OFFSET",
+            "_PT-RCH-DATA-A",
+            "_PT-RCH-DATA-U",
+            "_PT-RCH-PAYLOAD-U",
+            "_PT-RCH-FRAME-U",
+            "_PT-RCH-END",
+            "_PT-RCH-SENT",
+            "_PT-RCH-WATERMARK",
+            "_PT-RSA",
+            "_PT-RSU",
+            "_PT-RSS",
+            "_PT-RA",
+            "_PT-RU",
+            "_PT-RB",
+            "_PT-RV",
+        )
+    )
+
+    runtime.execute("DBX-OTHER")
+    assert tuple(
+        _stored_cell(runtime, name)
+        for name in ("DBX-COMMIT-S", "DBX-DROP-S", "DBX-ABORT-S")
+    ) == (3, 3, 3)
+    assert runtime.memory.read64(task_handlers.body_address) == 0
+    assert runtime.drain_uart_output() == b""
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
 
 
 def test_simulator_real_driver_handshake_and_close_reach_pre_catch_frontier(
