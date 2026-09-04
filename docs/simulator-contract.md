@@ -3542,6 +3542,16 @@ overlap/fault copy order, deterministic latched uptime, and immediate hosted
 flush semantics. This does not yet claim a `rich-terminal.f` source load or a
 live APT/session lifecycle.
 
+The first shared-source oracle extracts the current contiguous module prefix
+from `PT-S-OK` through `_PT-SEND-CREDIT` and executes it on both backends. The
+fixture supplies the same one-core SPIN-based definitions for the two
+KDOS-owned UART lock words, initializes caller-owned session storage, and
+requires the complete 48-byte CREDIT output to equal the independent APT-1
+wire encoder byte for byte. It also requires `PT-INIT`, `_PT-SEND-CREDIT`, and
+final data-stack depth to report `0 0 0`. This proves that narrow production
+encoder/CRC boundary only; it does not move the full-module frontier or claim
+KDOS lock, input, session, compositor, or viewer acceptance.
+
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
 exception unwinding, but they do not move that frontier and are not a

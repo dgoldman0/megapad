@@ -11,6 +11,9 @@
 #   make test-sequential K=X   Sequential foreground subset
 #   make test-sanitize         Foreground Phase 3 ASan+UBSan subset
 #   make test-sanitize SANITIZER=thread
+#   make test-rich-terminal-simulator  Fast shared-source simulator oracle
+#   make test-rich-terminal-emulator   Exact-machine shared-source oracle
+#   make test-rich-terminal-dual       Both shared-source backends
 #   make test-status           One-shot progress dashboard
 #   make test-watch            Auto-refresh dashboard every 5s
 #   make test-failures         Show only failures
@@ -74,6 +77,27 @@ test-simulator:
 		env MP64_VIA_MAKE=1 PYTEST_ADDOPTS= \
 			$(VENV_PY) -m pytest $(SIMULATOR_TEST_PATH) \
 			$(PYTEST_CONFIG_ARGS) --tb=long $(if $(K),-k "$(K)",)
+
+# --- Shared rich-terminal production-source oracles ---
+# The simulator selector stays accelerator-free for the tight development
+# loop. The emulator and combined selectors use the ordinary sequential
+# exact-machine target as the acceptance backstop.
+.PHONY: test-rich-terminal-simulator
+test-rich-terminal-simulator:
+	@$(MAKE) test-simulator \
+		SIMULATOR_TEST_PATH=tests/test_rich_terminal_dual_backend.py \
+		K=simulator
+
+.PHONY: test-rich-terminal-emulator
+test-rich-terminal-emulator:
+	@$(MAKE) test-sequential \
+		TEST_PATH=tests/test_rich_terminal_dual_backend.py \
+		K=emulator
+
+.PHONY: test-rich-terminal-dual
+test-rich-terminal-dual:
+	@$(MAKE) test-sequential \
+		TEST_PATH=tests/test_rich_terminal_dual_backend.py
 
 # --- C++ accelerator ---
 .PHONY: accel accel-clean
