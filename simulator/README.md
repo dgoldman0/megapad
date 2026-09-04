@@ -256,11 +256,14 @@ make test-rich-terminal-dual
 ```
 
 At the present checkpoint these selectors compile the same contiguous
-production `rich-terminal.f` prefix through `_PT-SEND-CREDIT`, then compare its
-complete 48-byte CREDIT frame and status against the independent Python APT-1
-wire oracle. Because the prefix calls KDOS-owned UART locks, the deliberately
+production `rich-terminal.f` prefix through `_PT-SEND-CREDIT`. They compare its
+complete 48-byte CREDIT frame against the independent Python APT-1 wire oracle,
+then qualify rejected and accepted caller-owned storage, storage-disjointness,
+the exact PROBE and OPEN encodings, and the public transition into probing
+ownership. Because the prefix calls KDOS-owned UART locks, the deliberately
 one-core fixture supplies equivalent uncontended SPIN-based lock wrappers to
-both backends. This is not a complete module-load or live-session claim.
+both backends. This is not a complete module-load, OFFER-input, or live-session
+claim.
 
 A minimal hosted-source invocation is:
 
@@ -2304,12 +2307,15 @@ Fresh runtimes therefore contain 324 pseudo-BIOS words before KDOS; the
 319-word figure above remains the exact historical-load observation and is not
 silently rewritten as new full-load evidence.
 
-The first synchronized cross-backend slice also executes the current
+The synchronized cross-backend slice also executes the current
 production prefix from `PT-S-OK` through `_PT-SEND-CREDIT` on both backends.
 Both produce the independent oracle's exact CREDIT header, CRC32C, payload,
-success statuses, and balanced stacks. The dedicated simulator selector stays
-accelerator-free so later source-level work can use it as the fast inner loop;
-the paired emulator selector remains the exact-machine backstop.
+success statuses, and balanced stacks. The next shared oracle covers the
+initialization bounds and overlap matrix, exact PROBE and OPEN negotiation
+records, and `PT-START`'s state and ownership transition. The dedicated
+simulator selector stays accelerator-free so later source-level work can use
+it as the fast inner loop; the paired emulator selector remains the
+exact-machine backstop.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

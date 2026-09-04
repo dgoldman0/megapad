@@ -14,7 +14,16 @@ from pathlib import Path
 
 import pytest
 
-from rich_terminal.apt1 import Frame, MessageType, encode_frame
+from rich_terminal.apt1 import (
+    Frame,
+    MessageType,
+    OpenRequest,
+    Probe,
+    encode_frame,
+    encode_open,
+    encode_probe,
+    parse_negotiation,
+)
 from simulator.runtime import MegaForthRuntime
 
 
@@ -42,7 +51,7 @@ SESSION_ID = 0x4142_4344_4546_4748
 PRESENTATION_EPOCH = 9
 LOCAL_GRANT = 0x1122_3344_5566_7788
 
-SCENARIO_SOURCE = b"""
+CREDIT_SCENARIO_SOURCE = b"""
 CREATE DBC-RX _PT-CONTROL-RESERVE _PT-HDR + 32 + ALLOT
 CREATE DBC-TX _PT-OPEN-BYTES ALLOT
 CREATE DBC-EVENT PT-EVENT-SIZE ALLOT
@@ -66,6 +75,50 @@ VARIABLE DBC-CREDIT-S
   28 EMIT TX-FLUSH ;
 """
 
+FIXED_NONCE = 0x0102_0304_0506_0708
+CLIENT_MAX_PAYLOAD = 32
+CLIENT_RECEIVE_CREDIT = 72
+
+NEGOTIATION_SCENARIO_SOURCE = b"""
+CREATE DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 32 + ALLOT
+CREATE DBN-TX _PT-OPEN-BYTES ALLOT
+CREATE DBN-EVENT PT-EVENT-SIZE ALLOT
+CREATE DBN-EXTRA 16 ALLOT
+CREATE DBN-S-STORAGE PT-SESSION-SIZE 7 + ALLOT
+: DBN-S  DBN-S-STORAGE 7 + -8 AND ;
+: DBN-ARGS
+  DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
+  DBN-TX _PT-OPEN-BYTES DBN-EVENT PT-EVENT-SIZE ;
+: DBN-RUN
+  17 EMIT
+  DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 31 +
+    DBN-TX _PT-OPEN-BYTES DBN-EVENT PT-EVENT-SIZE DBN-S PT-INIT .
+  DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
+    DBN-TX _PT-OPEN-BYTES 1- DBN-EVENT PT-EVENT-SIZE DBN-S PT-INIT .
+  DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
+    DBN-TX _PT-OPEN-BYTES DBN-EVENT PT-EVENT-SIZE 1- DBN-S PT-INIT .
+  DBN-ARGS DBN-S 1+ PT-INIT .
+  DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
+    DBN-RX _PT-OPEN-BYTES DBN-EVENT PT-EVENT-SIZE DBN-S PT-INIT .
+  DBN-ARGS DBN-S PT-INIT .
+  DBN-EXTRA 16 DBN-S PT-STORAGE-DISJOINT? .
+  DBN-RX 1 DBN-S PT-STORAGE-DISJOINT? .
+  DEPTH .
+  18 EMIT TX-FLUSH
+  0x0102030405060708 DBN-S _PT.S.NONCE !
+  0x4142434445464748 DBN-S _PT.S.SESSION-ID !
+  32 DBN-S _PT.S.CLIENT-MAX-PAY !
+  72 DBN-S _PT.S.LOCAL-GRANT !
+  19 EMIT TX-FLUSH
+  DBN-S _PT-SEND-PROBE
+  DBN-S _PT-SEND-OPEN
+  20 EMIT TX-FLUSH
+  21 EMIT
+  DBN-S PT-START .
+  DBN-S PT-STATE@ . DBN-S PT-OWNS? . DEPTH .
+  22 EMIT TX-FLUSH ;
+"""
+
 # The production encoder correctly takes KDOS's global UART lock.  This
 # focused fixture intentionally does not load KDOS, so both backends receive
 # the same narrow definitions over BIOS SPIN@/SPIN!.  This retains the real
@@ -82,6 +135,32 @@ ONE_CORE_UART_LOCK_SHIMS = b"""
 class CreditObservation:
     frame: bytes
     status: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class SourceCase:
+    source_name: str
+    harness: bytes
+    entry_word: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRun:
+    output: bytes
+    steps: int
+
+
+CREDIT_CASE = SourceCase(
+    source_name="dual-backend-credit.f",
+    harness=CREDIT_SCENARIO_SOURCE,
+    entry_word=b"DBC-RUN",
+)
+
+NEGOTIATION_CASE = SourceCase(
+    source_name="dual-backend-negotiation.f",
+    harness=NEGOTIATION_SCENARIO_SOURCE,
+    entry_word=b"DBN-RUN",
+)
 
 
 def _rich_terminal_credit_prefix() -> bytes:
@@ -118,23 +197,30 @@ def _observe(raw: bytes) -> CreditObservation:
     )
 
 
-def _run_simulator(prefix: bytes) -> CreditObservation:
+def _run_simulator(prefix: bytes, case: SourceCase) -> SourceRun:
     runtime = MegaForthRuntime()
-    runtime.evaluate(
+    source_result = runtime.evaluate(
         ONE_CORE_UART_LOCK_SHIMS + prefix,
         source_name="rich-terminal.f:PT-S-OK.._PT-SEND-CREDIT",
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,
     )
-    runtime.evaluate(SCENARIO_SOURCE, source_name="dual-backend-credit.f")
+    harness_result = runtime.evaluate(case.harness, source_name=case.source_name)
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
     assert runtime.drain_uart_output() == b""
 
-    runtime.execute("DBC-RUN")
+    execution_result = runtime.execute(case.entry_word)
 
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
-    return _observe(runtime.drain_uart_output())
+    return SourceRun(
+        output=runtime.drain_uart_output(),
+        steps=(
+            source_result.semantic_steps
+            + harness_result.semantic_steps
+            + execution_result.semantic_steps
+        ),
+    )
 
 
 def _boot_emulator():
@@ -170,14 +256,15 @@ def _boot_emulator():
     return system, output
 
 
-def _run_emulator(prefix: bytes) -> CreditObservation:
+def _run_emulator(prefix: bytes, case: SourceCase) -> SourceRun:
     system, output = _boot_emulator()
     payload = (
         ONE_CORE_UART_LOCK_SHIMS
         + prefix
         + b"\n"
-        + SCENARIO_SOURCE
-        + b"DBC-RUN\nBYE\n"
+        + case.harness
+        + case.entry_word
+        + b"\nBYE\n"
     )
     position = 0
     steps = 0
@@ -216,7 +303,7 @@ def _run_emulator(prefix: bytes) -> CreditObservation:
         "*** PRIVILEGE FAULT",
     ):
         assert rejected not in diagnostic
-    return _observe(raw)
+    return SourceRun(output=raw, steps=steps)
 
 
 @pytest.mark.parametrize(
@@ -226,7 +313,7 @@ def _run_emulator(prefix: bytes) -> CreditObservation:
 )
 def test_production_credit_encoder_matches_wire_oracle(run_backend) -> None:
     prefix = _rich_terminal_credit_prefix()
-    observation = run_backend(prefix)
+    observation = _observe(run_backend(prefix, CREDIT_CASE).output)
     expected = CreditObservation(
         frame=encode_frame(
             Frame(
@@ -242,3 +329,38 @@ def test_production_credit_encoder_matches_wire_oracle(run_backend) -> None:
     )
 
     assert observation == expected
+
+
+@pytest.mark.parametrize(
+    "run_backend",
+    (_run_simulator, _run_emulator),
+    ids=("simulator", "emulator"),
+)
+def test_production_initialization_and_negotiation_start_match_oracle(
+    run_backend,
+) -> None:
+    prefix = _rich_terminal_credit_prefix()
+    output = run_backend(prefix, NEGOTIATION_CASE).output
+
+    initialization = _between_unique(output, 17, 18)
+    fixed_records = _between_unique(output, 19, 20)
+    public_start = _between_unique(output, 21, 22)
+
+    assert initialization == b"3 3 3 3 3 0 -1 0 0 "
+    assert fixed_records == (
+        encode_probe(FIXED_NONCE)
+        + encode_open(
+            OpenRequest(
+                nonce=FIXED_NONCE,
+                session_id=SESSION_ID,
+                client_max_payload=CLIENT_MAX_PAYLOAD,
+                client_receive_credit=CLIENT_RECEIVE_CREDIT,
+            )
+        )
+    )
+
+    dynamic_probe = public_start[:38]
+    parsed = parse_negotiation(dynamic_probe)
+    assert isinstance(parsed, Probe)
+    assert parsed.nonce != 0
+    assert public_start[38:] == b"0 1 -1 0 "

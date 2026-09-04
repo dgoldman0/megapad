@@ -3552,6 +3552,19 @@ final data-stack depth to report `0 0 0`. This proves that narrow production
 encoder/CRC boundary only; it does not move the full-module frontier or claim
 KDOS lock, input, session, compositor, or viewer acceptance.
 
+A second oracle over that same exact prefix broadens the shared contract
+without skipping intervening source. It rejects undersized RX, TX, and event
+storage, misaligned session storage, and overlapping spans; admits valid
+caller-owned storage; and checks the read-only disjointness query. With fixed
+session fields it requires the source-defined PROBE and OPEN output to match
+the independent negotiation codec byte for byte. Finally it invokes public
+`PT-START` and requires a well-formed nonzero dynamic nonce, `PROBING` state,
+retained stream ownership, and balanced stacks on each backend. The dynamic
+nonce is deliberately not compared across backends because it incorporates
+the session address and `MS@`. This remains pre-OFFER evidence: it does not
+exercise UART input, accept a negotiation offer, or establish a live APT
+session.
+
 KDOS qualification maintains one monotonically advancing source frontier.
 Later isolated slices may validate a cross-cutting prerequisite such as real
 exception unwinding, but they do not move that frontier and are not a

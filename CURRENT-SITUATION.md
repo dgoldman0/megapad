@@ -77,12 +77,15 @@
 > phase. `bios.rom` is regenerated from the merged `bios.asm`. The checked-in
 > `fpga/bios.hex` remains the rich-terminal branch's pre-integration firmware
 > image and is not evidence for the newly locked emulator/simulator semantic
-> decisions. A first seconds-scale shared-source oracle now compiles the
+> decisions. Seconds-scale shared-source oracles now compile the
 > current `rich-terminal.f` prefix through `_PT-SEND-CREDIT` on both backends
-> and requires its complete CREDIT frame, CRC, statuses, and balanced stacks
-> to match the independent wire codec. It deliberately supplies one-core
-> SPIN-based wrappers for the KDOS-owned UART lock words and is not evidence of
-> a complete module load or live rich-terminal session.
+> and require its complete CREDIT frame, CRC, statuses, and balanced stacks
+> to match the independent wire codec. They also exercise invalid and valid
+> caller-owned initialization, storage-disjointness queries, exact PROBE and
+> OPEN records, and the public transition into probing ownership. The fixture
+> deliberately supplies one-core SPIN-based wrappers for the KDOS-owned UART
+> lock words and is not evidence of a complete module load or live
+> rich-terminal session.
 
 **Date:** 2026-03-07  
 **Branch:** `main`  
