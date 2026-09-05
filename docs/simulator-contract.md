@@ -64,10 +64,11 @@ signed `MOD (INT64_MIN, -1)`; the barrier completion bit and pulse/sticky
 lifecycle; any future standardized-PQ NTT identity beyond the retained generic
 service; boot-time file-type, CRC, encryption, and root-policy enforcement;
 and broad per-task/per-core reentrancy and lock redesign for KDOS global
-scratch. Simulator-side rich-terminal source loading, live-session integration,
-and current-head acceptance also remain beyond the present stop line. None of
-these open matters licenses an emulator/simulator difference inside the locked
-compatibility surface above.
+scratch. Current-head physical rich-terminal composition and acceptance remain
+beyond the present stop line; ordinary simulator-side module/source loading is
+no longer listed as an open substitute boundary. None of these open matters
+licenses an emulator/simulator difference inside the locked compatibility
+surface above.
 
 Later byte-exact qualification ledgers retain hashes and observations for the
 source revision named in each ledger. Where such a historical observation
@@ -385,6 +386,36 @@ not roll the dictionary back: a transaction caller saves `HERE`/`LATEST`,
 invokes `DICT-ROLLBACK` after failure, and then calls `EVALUATOR-RESET`.
 Rollback removes already completed definitions in the transaction; reset
 discards the hidden unfinished compiler while retaining diagnostics.
+
+The hosted backend may accelerate that ordinary path only through an
+identity-bound execution overlay on exact source-compiled colon definitions.
+The current admitted set is `SOURCE-EVALUATE-CHECKED`, `_LD-WALK`, and the
+module pre-scan helper `_PS-LINE-LEN`. Their guest words, XTs, bodies, and
+compiled operations remain unchanged. Installation occurs after checked KDOS
+and session-root evaluation but before ordinary autoexec. Complete normalized
+IR digests gate all three overlays; the checked-source gate additionally pins
+the exact `_SEC-MEASURE` and `_SEC-ADVANCE` bodies that it subsumes. A missing,
+changed, rolled-back, or XT-reused word executes through the normal colon
+dispatcher. A positive source span must also fit wholly inside one ordinary
+guest-memory region; otherwise that call falls back before mutation.
+
+The overlays collapse only LF measurement and the Forth orchestration around
+the existing evaluator. They invoke the exact XTs already bound by the colon
+body for KDOS `EVALUATE-CHECKED`, `EVALUATE-FINISH`, and
+`_LD-STATUS-THROW`; re-read global walker cells after each line; and preserve
+CR stripping, blank-line behavior, first-error status, unfinished-source
+checking, nested-loader perturbation, and source data-stack effects.
+`REQUIRE`, path resolution, MP64FS lookup and extent reads, allocation,
+`PROVIDED` pre-registration and duplicate suppression, provisional-ID merge or
+rollback, dictionary checkpoints, release, and filesystem-visible effects are
+not host substitutes. This is neither a compiled-Forth cache nor a second
+loader API.
+
+One admitted overlay invocation contributes one semantic-work/Timer step, and
+each nested real evaluator dispatch contributes its ordinary steps. The
+removed byte-walker operations deliberately no longer advance hosted semantic
+time. As with the other admitted accelerators, that counter reduction is an
+optimization property, not an MP64 cycle or wall-time equivalence claim.
 
 This state is runtime-global for the one admitted core and is not a concurrent
 evaluator contract. Ordinary interpret-mode `IF`/`ELSE`/`THEN` uses the native

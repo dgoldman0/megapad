@@ -8,9 +8,11 @@ and the first occupied Forth entry is loaded across both validated extents.
 
 Preparation stops before the ordinary autoexec body.  Its one top-level call
 is blanked byte-for-byte in the loaded source, then a deferred session root is
-installed.  Running that root later, under :class:`SimulatorMachineSession`,
-loads the normal autoexec closure inside the resumable semantic dispatch and
-continues through the Akashic-selected session entry.
+installed.  Exact KDOS source-walker overlays are admitted at that boundary
+without replacing their guest definitions.  Running the root later, under
+:class:`SimulatorMachineSession`, loads the normal autoexec closure inside the
+resumable semantic dispatch and continues through the Akashic-selected session
+entry.
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from shared.mp64fs import (
 from shared.storage import SECTOR_SIZE, STORAGE_RESULT_OK, STORAGE_STATUS_PRESENT
 from simulator.memory import SparseAddressSpace
 from simulator.runtime import MegaForthRuntime
+from simulator.source_acceleration import install_kdos_source_accelerators
 from simulator.storage import HostedStorageService
 
 
@@ -62,6 +65,7 @@ class ImageBootstrapPreparation:
     source_bytes: int
     source_lines: int
     preparation_semantic_steps: int
+    source_accelerators: tuple[bytes, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +184,7 @@ def prepare_image_bootstrap(
     entry = runtime.find(_SESSION_ENTRY)
     if root is None or entry is None:
         raise ImageBootstrapError("simulator session root was not published")
+    acceleration = install_kdos_source_accelerators(runtime)
     if runtime.main_context.data.snapshot() or runtime.main_context.returns.snapshot():
         raise ImageBootstrapError("semantic image preparation left dirty stacks")
 
@@ -191,6 +196,7 @@ def prepare_image_bootstrap(
         source_bytes=len(source),
         source_lines=_physical_line_count(source),
         preparation_semantic_steps=semantic_steps,
+        source_accelerators=acceleration.installed,
     )
 
 

@@ -832,6 +832,22 @@ stops at the first nonzero status, and calls `EVALUATE-FINISH` at ordinary end
 of input. Caller-owned dictionary rollback followed by `EVALUATOR-RESET`
 removes completed and unfinished work while retaining the failure diagnostic.
 
+Image-backed sessions install a fail-closed execution overlay for the exact
+source-compiled `SOURCE-EVALUATE-CHECKED`, `_LD-WALK`, and `_PS-LINE-LEN`
+definitions before running autoexec. Normalized complete-IR digests gate each
+word, with the checked-source overlay also pinning the private measure and
+advance bodies it subsumes. The dictionary still contains the original colon
+definitions and XTs. A changed or reclaimed word, a reused XT, or a positive
+span outside one ordinary RAM region takes the unchanged colon path.
+
+These overlays accelerate line measurement and orchestration only. Calls still
+enter the definition-bound KDOS checked evaluator, finish checker, and loader
+status translator. The normal MP64FS extent read, `REQUIRE` path resolution,
+`PROVIDED` registry and provisional transaction, dictionary rollback,
+allocation release, and source-visible filesystem effects are not bypassed.
+Each overlay costs one semantic step plus all nested evaluator work; it makes no
+cycle-equivalence claim and is not a compiled source cache.
+
 The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE` or direct LF-containing guest `EVALUATE`
 input. Ordinary interpret-mode `IF`/`ELSE`/`THEN` persists one anonymous

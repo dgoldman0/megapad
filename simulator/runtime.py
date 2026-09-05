@@ -196,6 +196,14 @@ class IdleWakeReceipt:
 
 PrimitiveCallback: TypeAlias = Callable[[ExecutionContext], Invoke | None]
 
+# A semantic colon accelerator is deliberately an execution overlay, not a
+# replacement dictionary definition.  ``applicable`` must be read-only: a
+# false result resumes the exact colon body without spending a semantic step.
+# A true result lets ``callback`` perform the complete word effect after the
+# dispatcher has charged one admitted semantic operation.
+ColonAcceleratorPredicate: TypeAlias = Callable[[ExecutionContext], bool]
+ColonAcceleratorCallback: TypeAlias = Callable[[ExecutionContext], None]
+
 
 @dataclass(frozen=True, slots=True)
 class PrimitiveDefinition:
@@ -205,6 +213,15 @@ class PrimitiveDefinition:
 @dataclass(frozen=True, slots=True)
 class ColonDefinition:
     operations: tuple[Operation, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ColonAccelerator:
+    """One identity-bound host overlay for an unchanged colon definition."""
+
+    word: Word
+    applicable: ColonAcceleratorPredicate
+    callback: ColonAcceleratorCallback
 
 
 @dataclass(frozen=True, slots=True)
@@ -717,6 +734,7 @@ class MegaForthRuntime:
         self._bios_evaluator: _BiosEvaluatorState | None = None
         self._active_dispatches: list[_DispatchFrame] = []
         self._transient_words: dict[int, Word] = {}
+        self._colon_accelerators: dict[int, _ColonAccelerator] = {}
         self._next_dispatch_root_id = 1
         self._uart_input: deque[int] = deque()
         self._uart_output = bytearray()
@@ -740,6 +758,45 @@ class MegaForthRuntime:
         )
         self.dictionary.protect_current_prefix_from_numeric_rollback()
         self.storage.claim()
+
+    def install_colon_accelerator(
+        self,
+        word: Word,
+        *,
+        applicable: ColonAcceleratorPredicate,
+        callback: ColonAcceleratorCallback,
+    ) -> None:
+        """Overlay one exact live colon word without changing its dictionary.
+
+        This is a simulator-internal optimization seam.  The caller must
+        validate the source definition before installation.  Dispatch retains
+        the exact :class:`Word` identity as well as its XT, so rollback and
+        later XT reuse cannot apply an old accelerator to a new definition.
+        """
+
+        self._require_session_owner_access("install a colon accelerator")
+        self._require_no_suspension("install a colon accelerator")
+        if self._active_dispatches or self._active_input_states:
+            raise ExecutionError(
+                "cannot install a colon accelerator during semantic execution"
+            )
+        if not isinstance(word, Word):
+            raise TypeError("accelerated word must be a Word")
+        if not isinstance(word.implementation, ColonDefinition):
+            raise ValueError("only a colon definition can be accelerated")
+        try:
+            live = self.dictionary.resolve(word.xt)
+        except KeyError:
+            live = None
+        if live is not word:
+            raise ValueError("accelerated word is not the exact live definition")
+        if not callable(applicable) or not callable(callback):
+            raise TypeError("colon accelerator hooks must be callable")
+        self._colon_accelerators[word.xt] = _ColonAccelerator(
+            word=word,
+            applicable=applicable,
+            callback=callback,
+        )
 
     @property
     def provided_modules(self) -> frozenset[bytes]:
@@ -3520,6 +3577,33 @@ class MegaForthRuntime:
                     f"instruction pointer {ip} escaped definition {current.name!r}"
                 )
 
+            if ip == 0 and self._try_colon_accelerator(
+                current,
+                context,
+                meter,
+            ):
+                # An accelerator represents the complete colon body, including
+                # its final Return.  Resume through the same continuation that
+                # the unchanged definition would have consumed.
+                continuation = context.returns.pop_continuation()
+                if continuation.fault_abort:
+                    self._abort_returned_dictionary_fault(context)
+                if continuation.root:
+                    if continuation.dispatch_id != root_id:
+                        raise _GuestControlTransfer(
+                            continuation.dispatch_id,
+                            context,
+                        )
+                    return
+                caller = self._resolve_dispatch_word(continuation.xt)
+                if not isinstance(caller.implementation, ColonDefinition):
+                    raise ExecutionError(
+                        "continuation does not name a colon word"
+                    )
+                current = caller
+                ip = int(continuation.ip)
+                continue
+
             operation = definition.operations[ip]
             meter.tick()
 
@@ -3690,6 +3774,28 @@ class MegaForthRuntime:
                 ip = int(continuation.ip)
             else:
                 raise ExecutionError(f"unknown semantic operation {operation!r}")
+
+    def _try_colon_accelerator(
+        self,
+        word: Word,
+        context: ExecutionContext,
+        meter: _StepMeter,
+    ) -> bool:
+        """Run the identity-bound overlay for ``word`` when it admits this call."""
+
+        accelerator = self._colon_accelerators.get(word.xt)
+        if accelerator is None:
+            return False
+        if accelerator.word is not word:
+            # Numeric rollback can reclaim and later reuse an XT.  Never let
+            # that new word inherit optimization metadata from its predecessor.
+            self._colon_accelerators.pop(word.xt, None)
+            return False
+        if not accelerator.applicable(context):
+            return False
+        meter.tick()
+        accelerator.callback(context)
+        return True
 
     def _call_from_colon(
         self,
@@ -3920,6 +4026,8 @@ class MegaForthRuntime:
 
 __all__ = [
     "BlockedExecution",
+    "ColonAcceleratorCallback",
+    "ColonAcceleratorPredicate",
     "ColonDefinition",
     "ConstantDefinition",
     "CreatedDefinition",

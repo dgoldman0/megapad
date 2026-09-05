@@ -168,6 +168,17 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
         print(
+            "[shared] source acceleration: "
+            + (
+                ", ".join(
+                    name.decode("ascii", errors="replace")
+                    for name in preparation.source_accelerators
+                )
+                or "none (ordinary colon dispatch)"
+            ),
+            flush=True,
+        )
+        print(
             "[shared] terminal: "
             + (
                 (

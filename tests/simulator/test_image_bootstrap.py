@@ -212,6 +212,7 @@ def test_image_bootstrap_reads_both_extents_and_defers_normal_autoexec() -> None
     assert prepared.source_bytes == len(_boot_source())
     assert prepared.source_lines == _boot_source().count(b"\n")
     assert prepared.preparation_semantic_steps > 0
+    assert prepared.source_accelerators == ()
     assert storage.completion == 5
     assert runtime.find(b"THIS-MUST-NOT-RUN") is None
     assert _stored_cell(runtime, b"AUTO-RUNS") == 0
