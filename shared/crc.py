@@ -8,6 +8,7 @@ pure value operations; transaction ownership remains backend-local.
 
 from __future__ import annotations
 
+import zlib
 from types import MappingProxyType
 from typing import Final, Mapping
 
@@ -111,6 +112,28 @@ def crc_feed_cell(mode: int, accumulator: int, cell: int) -> int:
     return result
 
 
+def crc_feed_bytes(
+    mode: int,
+    accumulator: int,
+    payload: bytes | bytearray | memoryview,
+) -> int:
+    """Feed memory-order bytes, retaining the exact selected recurrence."""
+
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise TypeError("CRC payload must be bytes-like")
+    data = bytes(payload)
+    if mode == 4:
+        # zlib exposes the finalized reflected-IEEE state.  Translate the
+        # caller's raw architectural accumulator on entry and exit.
+        seed = (accumulator & 0xFFFF_FFFF) ^ 0xFFFF_FFFF
+        return zlib.crc32(data, seed) ^ 0xFFFF_FFFF
+
+    result = accumulator
+    for byte in data:
+        result = crc_feed_byte(mode, result, byte)
+    return result
+
+
 def crc_raw_value(mode: int, accumulator: int) -> int:
     """Return the mode-width raw accumulator."""
 
@@ -130,6 +153,7 @@ __all__ = [
     "CRC_MODE_PARAMETERS",
     "CRC_REFLECTED_MODE_IDS",
     "crc_feed_byte",
+    "crc_feed_bytes",
     "crc_feed_cell",
     "crc_final_value",
     "crc_raw_value",

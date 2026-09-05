@@ -174,6 +174,7 @@ class DataStack:
         )
         initial_cells = tuple(u64(cell) for cell in cells)
         self._memory = memory
+        self._memory_view = None
         self._cells: list[int] | None
         self._floor: int | None
         self._empty_pointer: int | None
@@ -187,6 +188,11 @@ class DataStack:
 
         self._cells = None
         self._floor, self._empty_pointer = bounds
+        assert memory is not None
+        self._memory_view = memory._qualify_ordinary_span(
+            self._floor,
+            self._empty_pointer - self._floor,
+        )
         self._pointer = self._empty_pointer
         if len(initial_cells) > self.capacity:
             raise StackOverflow("data", floor=self._floor)
@@ -239,7 +245,8 @@ class DataStack:
             self._cells.append(value)
             return
         target = self._push_address()
-        self._memory.write64(target, value)
+        assert self._memory_view is not None
+        self._memory_view.write64(target, value)
         self._pointer = target
 
     def push_pair(self, first: int, second: int) -> None:
@@ -257,7 +264,8 @@ class DataStack:
             assert self._cells is not None
             return self._cells.pop()
         assert self._pointer is not None
-        value = self._memory.read64(self._pointer)
+        assert self._memory_view is not None
+        value = self._memory_view.read64(self._pointer)
         self._pointer += CELL_BYTES
         return value
 
@@ -280,8 +288,8 @@ class DataStack:
             assert self._cells is not None
             return self._cells[-1 - offset]
         assert self._pointer is not None
-        assert self._memory is not None
-        return self._memory.read64(self._pointer + offset * CELL_BYTES)
+        assert self._memory_view is not None
+        return self._memory_view.read64(self._pointer + offset * CELL_BYTES)
 
     def replace_top(self, cell: int) -> None:
         """Replace TOS in place without changing the stack frontier."""
@@ -293,8 +301,8 @@ class DataStack:
             self._cells[-1] = value
             return
         assert self._pointer is not None
-        assert self._memory is not None
-        self._memory.write64(self._pointer, value)
+        assert self._memory_view is not None
+        self._memory_view.write64(self._pointer, value)
 
     def depth(self) -> int:
         if self._memory is None:
@@ -337,9 +345,9 @@ class DataStack:
 
         self._require_backing("restore its pointer from TOS")
         self._require(1, "SP!")
-        assert self._memory is not None
         assert self._pointer is not None
-        target = self._memory.read64(self._pointer)
+        assert self._memory_view is not None
+        target = self._memory_view.read64(self._pointer)
         self._validate_pointer(target)
         self._pointer = target
 
@@ -422,6 +430,7 @@ class ReturnStack:
             stack="return",
         )
         self._memory = memory
+        self._memory_view = None
         self._entries: list[ReturnEntry] | None
         self._continuations: dict[int, tuple[Continuation, int]]
         self._pointer_capture_generation = 0
@@ -439,6 +448,11 @@ class ReturnStack:
             self._entries = None
             self._continuations = {}
             self._floor, self._empty_pointer = bounds
+            assert memory is not None
+            self._memory_view = memory._qualify_ordinary_span(
+                self._floor,
+                self._empty_pointer - self._floor,
+            )
             self._pointer = self._empty_pointer
 
     @property
@@ -489,7 +503,8 @@ class ReturnStack:
             self._entries.append(value)
             return
         target = self._push_address()
-        self._memory.write64(target, value)
+        assert self._memory_view is not None
+        self._memory_view.write64(target, value)
         self._continuations.pop(target, None)
         self._pointer = target
 
@@ -564,8 +579,8 @@ class ReturnStack:
         # ordinary guest memory reads.  In particular, writing the semantic
         # XT into this machine-private slot must not preserve its host type.
         raw = self._next_continuation_cookie(continuation.xt)
-        assert self._memory is not None
-        self._memory.write64(target, raw)
+        assert self._memory_view is not None
+        self._memory_view.write64(target, raw)
         self._continuations[target] = (continuation, raw)
         self._pointer = target
         return continuation
@@ -622,8 +637,8 @@ class ReturnStack:
             self._entries[-1] = next_index
         else:
             assert self._pointer is not None
-            assert self._memory is not None
-            self._memory.write64(self._pointer, next_index)
+            assert self._memory_view is not None
+            self._memory_view.write64(self._pointer, next_index)
         return True
 
     def i(self) -> int:
@@ -776,9 +791,9 @@ class ReturnStack:
             assert self._entries is not None
             return self._entries[-1 - offset]
         assert self._pointer is not None
-        assert self._memory is not None
+        assert self._memory_view is not None
         address = self._pointer + offset * CELL_BYTES
-        raw = self._memory.read64(address)
+        raw = self._memory_view.read64(address)
         typed = self._continuations.get(address)
         if typed is None:
             return raw

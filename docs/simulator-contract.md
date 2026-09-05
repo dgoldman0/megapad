@@ -228,6 +228,14 @@ need not equal emulator addresses, but they are stable for their documented
 lifetime.  Checked spans reject overflow and cannot become valid by wrapping
 through address zero.
 
+An implementation may retain an internal ordinary-region view after proving a
+fixed stack span once, and may read or write a same-page scalar without an
+intermediate host byte string. The sparse guest pages remain authoritative:
+ordinary guest loads, stores, `SP!`, `RP!`, and stack operations observe one
+coherent byte representation. Cross-page, crossing-region, unmapped, and MMIO
+accesses retain their normal complete checks and effects. A qualified view is
+not a host shadow stack and cannot make unchecked guest memory valid.
+
 The data stack and the logical return stack retain ordinary MegaForth
 semantics. Colon continuations, user values moved by `>R` or `2>R`, and `DO`
 loop state share one ordered return stack. A saved `( x1 x2 )` pair has `x1`
@@ -389,22 +397,36 @@ discards the hidden unfinished compiler while retaining diagnostics.
 
 The hosted backend may accelerate that ordinary path only through an
 identity-bound execution overlay on exact source-compiled colon definitions.
-The current admitted set is `SOURCE-EVALUATE-CHECKED`, `_LD-WALK`, and the
-module pre-scan helper `_PS-LINE-LEN`. Their guest words, XTs, bodies, and
-compiled operations remain unchanged. Installation occurs after checked KDOS
-and session-root evaluation but before ordinary autoexec. Complete normalized
-IR digests gate all three overlays; the checked-source gate additionally pins
-the exact `_SEC-MEASURE` and `_SEC-ADVANCE` bodies that it subsumes. A missing,
-changed, rolled-back, or XT-reused word executes through the normal colon
-dispatcher. A positive source span must also fit wholly inside one ordinary
-guest-memory region; otherwise that call falls back before mutation.
+The current admitted set is `EVALUATE-CHECKED`,
+`SOURCE-EVALUATE-CHECKED`, `_LD-STATUS-THROW`, `_CRC-BUF-CHECKED`,
+`_LD-WALK`, and the module pre-scan helper `_PS-LINE-LEN`. Their guest words,
+XTs, bodies, and compiled operations remain unchanged. Installation occurs
+after checked KDOS and session-root evaluation but before ordinary autoexec.
+Complete normalized IR digests gate all six overlays; the checked-source gate
+additionally pins the exact `_SEC-MEASURE` and `_SEC-ADVANCE` bodies that it
+subsumes. A missing, changed, rolled-back, or XT-reused word executes through
+the normal colon dispatcher. A positive source or checksum span must also fit
+wholly inside one ordinary guest-memory region; otherwise that call falls back
+before mutation.
 
-The overlays collapse only LF measurement and the Forth orchestration around
-the existing evaluator. They invoke the exact XTs already bound by the colon
-body for KDOS `EVALUATE-CHECKED`, `EVALUATE-FINISH`, and
-`_LD-STATUS-THROW`; re-read global walker cells after each line; and preserve
-CR stripping, blank-line behavior, first-error status, unfinished-source
-checking, nested-loader perturbation, and source data-stack effects.
+The line walker invokes the exact XTs already bound by its colon body and
+re-reads global walker cells after each line. The checked-line overlay may skip
+the KDOS exception wrapper only after a read-only token classification proves
+that no arbitrary guest word can execute. Comments and compiler-only IR edits
+are admissible; colon opening or finalization additionally requires the exact
+runtime dictionary-growth preflight to prove capacity. A closed set of initial
+stack/arithmetic primitives and passive constant/value/created-word reads is
+also admissible in interpretation. Immediate execution, arbitrary interpreted
+words, conditional skipping, insufficient capacity, and any unknown shape use
+the complete KDOS `CATCH` body. `_LD-STATUS-THROW` is collapsed only for zero,
+so every error still reaches its ordinary exact `THROW` path.
+
+The checksum overlay requires the original primitive bindings and batches
+memory-order bytes through the same owned hosted CRC state. Mode selection,
+seed, accumulator, ownership failure, raw/final release, and returned status
+remain unchanged. Together the overlays preserve CR stripping, blank-line
+behavior, first-error status, unfinished-source checking, nested-loader
+perturbation, checksum value, and source data-stack effects.
 `REQUIRE`, path resolution, MP64FS lookup and extent reads, allocation,
 `PROVIDED` pre-registration and duplicate suppression, provisional-ID merge or
 rollback, dictionary checkpoints, release, and filesystem-visible effects are

@@ -8,6 +8,12 @@ from pathlib import Path
 import pytest
 
 from shared.cells import MASK64, TRUE, u64
+from shared.crc import (
+    CRC_MODE_IDS,
+    crc_feed_byte,
+    crc_feed_bytes,
+    crc_width_mask,
+)
 from simulator.crc import (
     CRC_STATUS_OK,
     CRC_STATUS_RANGE,
@@ -212,6 +218,18 @@ def _oracle_crc(data: bytes, mode: int, *, seed: int | None = None) -> int:
                 )
         accumulator &= mask
     return accumulator ^ mask
+
+
+def test_batched_crc_matches_byte_recurrence_for_every_mode_and_seed() -> None:
+    payload = bytes((index * 73 + 19) & 0xFF for index in range(4111))
+    for mode in CRC_MODE_IDS:
+        mask = crc_width_mask(mode)
+        for seed in (0, mask, 0x0123_4567_89AB_CDEF):
+            expected = seed
+            for byte in payload:
+                expected = crc_feed_byte(mode, expected, byte)
+            assert crc_feed_bytes(mode, seed, payload) == expected
+            assert crc_feed_bytes(mode, seed, memoryview(payload)) == expected
 
 
 def test_crc_slice_is_exact_and_publishes_the_complete_definition_ledger(

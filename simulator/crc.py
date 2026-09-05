@@ -8,6 +8,7 @@ from shared.crc import (
     CRC_MODE_IDS,
     CRC_REFLECTED_MODE_IDS,
     crc_feed_byte,
+    crc_feed_bytes,
     crc_feed_cell,
     crc_final_value,
     crc_raw_value,
@@ -108,6 +109,24 @@ class HostedCRCService:
             self._mode,
             self._accumulator,
             byte,
+        )
+        return CRC_STATUS_OK
+
+    def feed_bytes(
+        self,
+        identity: GuestIdentity,
+        payload: bytes | bytearray | memoryview,
+    ) -> int:
+        """Feed a host batch with the same memory-order byte semantics."""
+
+        if not isinstance(payload, (bytes, bytearray, memoryview)):
+            raise TypeError("CRC payload must be bytes-like")
+        if not self._is_owner(identity):
+            return CRC_STATUS_STATE
+        self._accumulator = crc_feed_bytes(
+            self._mode,
+            self._accumulator,
+            payload,
         )
         return CRC_STATUS_OK
 

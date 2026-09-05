@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from shared.cells import TRUE, u64
-from simulator.runtime import ColonDefinition, MegaForthRuntime
+from simulator.runtime import (
+    ColonDefinition,
+    ConstantDefinition,
+    CreatedDefinition,
+    MegaForthRuntime,
+    ValueDefinition,
+)
 from simulator.source_acceleration import install_kdos_source_accelerators
 from tests.simulator.test_kdos_module_system import (
     _execute,
@@ -16,7 +22,10 @@ from tests.simulator.test_kdos_module_system import (
 
 
 _ACCELERATED_WORDS = (
+    b"EVALUATE-CHECKED",
     b"SOURCE-EVALUATE-CHECKED",
+    b"_LD-STATUS-THROW",
+    b"_CRC-BUF-CHECKED",
     b"_LD-WALK",
     b"_PS-LINE-LEN",
 )
@@ -74,6 +83,21 @@ def _loader_state(runtime: MegaForthRuntime):
     )
 
 
+def _run_crc_feed(runtime: MegaForthRuntime, name: str, payload: bytes):
+    source = runtime.define_created(name, initial_body=payload)
+    identity = runtime.guest_identity(runtime.main_context)
+    assert runtime.crc.select_mode(identity, 4) == 0
+    assert runtime.crc.seed(identity, 0xFFFF_FFFF) == 0
+    runtime.main_context.data.push(source.body_address)
+    runtime.main_context.data.push(len(payload))
+    result = runtime.execute("_CRC-BUF-CHECKED")
+    stack = runtime.main_context.data.snapshot()
+    runtime.main_context.data.clear()
+    accumulator = runtime.crc.accumulator
+    runtime.crc.final(identity)
+    return result.semantic_steps, stack, accumulator
+
+
 def test_exact_kdos_walkers_install_without_replacing_source_words() -> None:
     runtime = _load_module_system()
     words = tuple(runtime.find(name) for name in _ACCELERATED_WORDS)
@@ -126,6 +150,77 @@ def test_checked_source_acceleration_matches_success_and_failure_state() -> None
     assert fast_failure[0] < slow_failure[0]
 
 
+def test_checked_line_acceleration_preserves_safe_interpreted_definitions() -> None:
+    source = (
+        b"11 22 + CONSTANT LOADED-CONSTANT\n"
+        b"VARIABLE LOADED-VARIABLE\n"
+        b"99 VALUE LOADED-VALUE\n"
+        b"LOADED-CONSTANT LOADED-VALUE +\n"
+    )
+    ordinary = _load_module_system()
+    accelerated = _load_module_system()
+    install_kdos_source_accelerators(accelerated)
+
+    slow = _run_checked(ordinary, "INTERPRETED-SOURCE", source)
+    fast = _run_checked(accelerated, "INTERPRETED-SOURCE", source)
+
+    assert fast[1:] == slow[1:]
+    assert fast[1] == (132, 0)
+    assert fast[0] < slow[0]
+    for runtime in (ordinary, accelerated):
+        constant = runtime.find("LOADED-CONSTANT")
+        variable = runtime.find("LOADED-VARIABLE")
+        value = runtime.find("LOADED-VALUE")
+        assert constant is not None
+        assert variable is not None
+        assert value is not None
+        assert isinstance(constant.implementation, ConstantDefinition)
+        assert isinstance(variable.implementation, CreatedDefinition)
+        assert isinstance(value.implementation, ValueDefinition)
+        assert _execute(runtime, "LOADED-CONSTANT") == (33,)
+        assert _execute(runtime, "LOADED-VARIABLE") == (
+            variable.body_address,
+        )
+        assert runtime.memory.read64(variable.body_address) == 0
+        assert _execute(runtime, "LOADED-VALUE") == (99,)
+
+
+def test_source_accelerators_retain_definition_bound_state_after_shadows() -> None:
+    ordinary = _load_module_system()
+    accelerated = _load_module_system()
+    sentinel = 0xA55A_1122_3344_7788
+    initial_body = sentinel.to_bytes(8, "little")
+    for runtime in (ordinary, accelerated):
+        runtime.define_created("EVAL-STATUS", initial_body=initial_body)
+        runtime.define_created("EVAL-LINE", initial_body=initial_body)
+        runtime.define_created("_SEC-CUR", initial_body=initial_body)
+    install_kdos_source_accelerators(accelerated)
+
+    slow = _run_checked(ordinary, "SHADOWED-STATE-SOURCE", b"1 2 +\n")
+    fast = _run_checked(accelerated, "SHADOWED-STATE-SOURCE", b"1 2 +\n")
+
+    assert fast[1:] == slow[1:]
+    assert fast[1] == (3, 0)
+    assert fast[2][0:2] == (sentinel, sentinel)
+    assert fast[2][5] == sentinel
+
+
+def test_loader_crc_acceleration_preserves_cells_tail_and_owner_failure() -> None:
+    payload = bytes((index * 29 + 7) & 0xFF for index in range(4099))
+    ordinary = _load_module_system()
+    accelerated = _load_module_system()
+    install_kdos_source_accelerators(accelerated)
+
+    slow = _run_crc_feed(ordinary, "SLOW-CRC-SOURCE", payload)
+    fast = _run_crc_feed(accelerated, "FAST-CRC-SOURCE", payload)
+
+    assert fast[1:] == slow[1:]
+    assert fast[1] == (0,)
+    assert fast[0] * 10 < slow[0]
+    assert _execute(ordinary, "_CRC-BUF-CHECKED", 0, 1) == (2,)
+    assert _execute(accelerated, "_CRC-BUF-CHECKED", 0, 1) == (2,)
+
+
 def test_accelerated_require_retains_fs_duplicate_and_rollback_semantics() -> None:
     parent_source = (
         b"PROVIDED parent.failed\n"
@@ -149,6 +244,12 @@ def test_accelerated_require_retains_fs_duplicate_and_rollback_semantics() -> No
         )
     )
     runtimes = (_load_module_system(), _load_module_system())
+    sentinel = 0x55AA_8877_6655_4433
+    for runtime in runtimes:
+        runtime.define_created(
+            "LD-CUR",
+            initial_body=sentinel.to_bytes(8, "little"),
+        )
     install_kdos_source_accelerators(runtimes[1])
 
     observations = []
@@ -197,6 +298,36 @@ def test_accelerated_require_retains_fs_duplicate_and_rollback_semantics() -> No
         )
 
     assert observations[1] == observations[0]
+
+
+def test_compile_line_fast_path_retains_immediate_throw_handling() -> None:
+    source = (
+        b": NEVER-PUBLISHED\n"
+        b"DUP COMPILE-TIME-THROW\n"
+        b";\n"
+    )
+    ordinary = _load_module_system()
+    accelerated = _load_module_system()
+    for runtime in (ordinary, accelerated):
+        def compile_time_throw(context, *, owner=runtime) -> None:
+            context.data.push(u64(-77))
+            owner.execute("THROW", context=context)
+
+        runtime.define_primitive(
+            "COMPILE-TIME-THROW",
+            compile_time_throw,
+            immediate=True,
+        )
+    install_kdos_source_accelerators(accelerated)
+
+    slow = _run_checked(ordinary, "SLOW-IMMEDIATE-THROW", source)
+    fast = _run_checked(accelerated, "FAST-IMMEDIATE-THROW", source)
+
+    assert fast[1:] == slow[1:]
+    assert fast[1] == (5,)
+    assert fast[2][4] == u64(-77)
+    assert ordinary.find("NEVER-PUBLISHED") is None
+    assert accelerated.find("NEVER-PUBLISHED") is None
 
 
 def test_changed_word_is_skipped_and_rolled_back_xt_cannot_inherit_overlay() -> None:

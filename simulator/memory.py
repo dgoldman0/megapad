@@ -11,6 +11,7 @@ install KDOS ``ALLOCATE``/``FREE`` words; those remain ordinary target source.
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Protocol
@@ -31,6 +32,7 @@ MMIO_LIMIT = 0xFFFF_FF80_0000_0000
 
 DEFAULT_PAGE_SIZE = 4096
 _INTEGER_WIDTHS = frozenset((1, 2, 4, 8))
+_INTEGER_FORMATS = {1: "<B", 2: "<H", 4: "<I", 8: "<Q"}
 
 
 class AddressClass(Enum):
@@ -203,6 +205,21 @@ class _SparseRegion:
             result_offset += chunk_size
         return bytes(result)
 
+    def read_integer(self, offset: int, width: int) -> int:
+        """Read a qualified scalar without constructing a temporary span."""
+
+        page_index, page_offset = divmod(offset, self.page_size)
+        if page_offset + width <= self.page_size:
+            page = self.pages.get(page_index)
+            if page is None:
+                return 0
+            return struct.unpack_from(
+                _INTEGER_FORMATS[width],
+                page,
+                page_offset,
+            )[0]
+        return int.from_bytes(self.read(offset, width), "little")
+
     def write(self, offset: int, payload: bytes) -> None:
         payload_offset = 0
         length = len(payload)
@@ -219,6 +236,24 @@ class _SparseRegion:
             ]
             payload_offset += chunk_size
 
+    def write_integer(self, offset: int, value: int, width: int) -> None:
+        """Write a qualified scalar without constructing a temporary span."""
+
+        page_index, page_offset = divmod(offset, self.page_size)
+        if page_offset + width <= self.page_size:
+            page = self.pages.get(page_index)
+            if page is None:
+                page = bytearray(self.page_size)
+                self.pages[page_index] = page
+            struct.pack_into(
+                _INTEGER_FORMATS[width],
+                page,
+                page_offset,
+                value,
+            )
+            return
+        self.write(offset, value.to_bytes(width, "little"))
+
     def fill(self, offset: int, length: int, value: int) -> None:
         consumed = 0
         while consumed < length:
@@ -234,6 +269,36 @@ class _SparseRegion:
                 self.pages[page_index] = page
             page[page_offset : page_offset + chunk_size] = bytes((value,)) * chunk_size
             consumed += chunk_size
+
+
+class _QualifiedOrdinarySpan:
+    """Trusted scalar access into one already-qualified ordinary region."""
+
+    __slots__ = ("_base", "_offset", "_region")
+
+    def __init__(
+        self,
+        region: _SparseRegion,
+        *,
+        base: int,
+        offset: int,
+    ) -> None:
+        self._region = region
+        self._base = base
+        self._offset = offset
+
+    def read64(self, address: int) -> int:
+        return self._region.read_integer(
+            self._offset + address - self._base,
+            8,
+        )
+
+    def write64(self, address: int, value: int) -> None:
+        self._region.write_integer(
+            self._offset + address - self._base,
+            value & MASK64,
+            8,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +409,23 @@ class SparseAddressSpace:
 
     def write64(self, address: int, value: int) -> None:
         self._write_integer(address, value, 8)
+
+    def _qualify_ordinary_span(
+        self,
+        address: int,
+        length: int,
+    ) -> _QualifiedOrdinarySpan:
+        """Bind a trusted internal view after one complete-span preflight."""
+
+        resolved = self._resolve(address, length, operation="qualify")
+        if resolved is None or resolved.kind is AddressClass.MMIO:
+            raise ValueError("qualified span must be nonempty ordinary memory")
+        assert resolved.region is not None
+        return _QualifiedOrdinarySpan(
+            resolved.region,
+            base=address,
+            offset=resolved.offset,
+        )
 
     def read_bytes(self, address: int, length: int) -> bytes:
         """Read one complete single-region byte span."""
@@ -585,28 +667,84 @@ class SparseAddressSpace:
     def _read_integer(self, address: int, width: int) -> int:
         if width not in _INTEGER_WIDTHS:
             raise ValueError("integer width must be 1, 2, 4, or 8 bytes")
-        resolved = self._resolve(address, width, operation="read")
-        assert resolved is not None
-        if resolved.kind is AddressClass.MMIO:
+        end = _checked_span(address, width, operation="read")
+        if MMIO_BASE <= address < MMIO_LIMIT:
+            if end > MMIO_LIMIT:
+                raise CrossRegionAccessError(
+                    "read span escapes the MMIO aperture",
+                    operation="read",
+                    address=address,
+                    length=width,
+                )
+            resolved = _ResolvedSpan(
+                AddressClass.MMIO,
+                address,
+                width,
+                None,
+                address - MMIO_BASE,
+            )
             payload = self._mmio_read(resolved)
-        else:
-            assert resolved.region is not None
-            payload = resolved.region.read(resolved.offset, resolved.length)
-        return int.from_bytes(payload, "little")
+            return int.from_bytes(payload, "little")
+
+        region = self._region_at(address)
+        if region is None:
+            raise UnmappedAddressError(
+                "read begins at an unmapped guest address",
+                operation="read",
+                address=address,
+                length=width,
+            )
+        if end > region.spec.limit:
+            raise CrossRegionAccessError(
+                f"read span escapes the {region.spec.kind.name} region",
+                operation="read",
+                address=address,
+                length=width,
+            )
+        return region.read_integer(address - region.spec.base, width)
 
     def _write_integer(self, address: int, value: int, width: int) -> None:
         if width not in _INTEGER_WIDTHS:
             raise ValueError("integer width must be 1, 2, 4, or 8 bytes")
         value = _require_integer(value, label="stored value")
         mask = (1 << (width * 8)) - 1
-        payload = (value & mask).to_bytes(width, "little")
-        resolved = self._resolve(address, width, operation="write")
-        assert resolved is not None
-        if resolved.kind is AddressClass.MMIO:
+        masked = value & mask
+        end = _checked_span(address, width, operation="write")
+        if MMIO_BASE <= address < MMIO_LIMIT:
+            if end > MMIO_LIMIT:
+                raise CrossRegionAccessError(
+                    "write span escapes the MMIO aperture",
+                    operation="write",
+                    address=address,
+                    length=width,
+                )
+            resolved = _ResolvedSpan(
+                AddressClass.MMIO,
+                address,
+                width,
+                None,
+                address - MMIO_BASE,
+            )
+            payload = masked.to_bytes(width, "little")
             self._mmio_write(resolved, payload)
             return
-        assert resolved.region is not None
-        resolved.region.write(resolved.offset, payload)
+
+        region = self._region_at(address)
+        if region is None:
+            raise UnmappedAddressError(
+                "write begins at an unmapped guest address",
+                operation="write",
+                address=address,
+                length=width,
+            )
+        if end > region.spec.limit:
+            raise CrossRegionAccessError(
+                f"write span escapes the {region.spec.kind.name} region",
+                operation="write",
+                address=address,
+                length=width,
+            )
+        region.write_integer(address - region.spec.base, masked, width)
 
     def _region_at(self, address: int) -> _SparseRegion | None:
         for region in self._regions:

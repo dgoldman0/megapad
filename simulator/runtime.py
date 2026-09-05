@@ -1689,12 +1689,23 @@ class MegaForthRuntime:
         context: ExecutionContext,
     ) -> None:
         self._require_no_suspension("mutate the dictionary")
+        rejection = self._dictionary_growth_rejection(width, context)
+        if rejection is not None:
+            self._request_dictionary_fault(context, rejection)
+
+    def _dictionary_growth_rejection(
+        self,
+        width: int,
+        context: ExecutionContext,
+    ) -> str | None:
+        """Return the exact preflight rejection without mutating guest state."""
+
         if not isinstance(width, int) or width < 0:
             raise TypeError("dictionary growth width must be a nonnegative integer")
 
         start = self.dictionary.here
         if start > MASK64 - width:
-            self._request_dictionary_fault(context, "dictionary growth wraps uint64")
+            return "dictionary growth wraps uint64"
         target = start + width
         if self._dictionary_limit:
             if (
@@ -1702,11 +1713,8 @@ class MegaForthRuntime:
                 or start > self._dictionary_limit
                 or target > self._dictionary_limit
             ):
-                self._request_dictionary_fault(
-                    context,
-                    "dictionary growth exceeds the active user interval",
-                )
-            return
+                return "dictionary growth exceeds the active user interval"
+            return None
 
         stack = context.data if context.data.backed else self.main_context.data
         ceiling = stack.pointer - 256
@@ -1716,10 +1724,8 @@ class MegaForthRuntime:
             or target > self._bank0.limit
             or target > ceiling
         ):
-            self._request_dictionary_fault(
-                context,
-                "dictionary growth exceeds the guarded Bank-0 interval",
-            )
+            return "dictionary growth exceeds the guarded Bank-0 interval"
+        return None
 
     def _preflight_dictionary_target(
         self,

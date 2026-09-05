@@ -832,21 +832,36 @@ stops at the first nonzero status, and calls `EVALUATE-FINISH` at ordinary end
 of input. Caller-owned dictionary rollback followed by `EVALUATOR-RESET`
 removes completed and unfinished work while retaining the failure diagnostic.
 
-Image-backed sessions install a fail-closed execution overlay for the exact
-source-compiled `SOURCE-EVALUATE-CHECKED`, `_LD-WALK`, and `_PS-LINE-LEN`
+Image-backed sessions install fail-closed execution overlays for the exact
+source-compiled `EVALUATE-CHECKED`, `SOURCE-EVALUATE-CHECKED`,
+`_LD-STATUS-THROW`, `_CRC-BUF-CHECKED`, `_LD-WALK`, and `_PS-LINE-LEN`
 definitions before running autoexec. Normalized complete-IR digests gate each
 word, with the checked-source overlay also pinning the private measure and
 advance bodies it subsumes. The dictionary still contains the original colon
 definitions and XTs. A changed or reclaimed word, a reused XT, or a positive
 span outside one ordinary RAM region takes the unchanged colon path.
 
-These overlays accelerate line measurement and orchestration only. Calls still
-enter the definition-bound KDOS checked evaluator, finish checker, and loader
-status translator. The normal MP64FS extent read, `REQUIRE` path resolution,
-`PROVIDED` registry and provisional transaction, dictionary rollback,
-allocation release, and source-visible filesystem effects are not bypassed.
-Each overlay costs one semantic step plus all nested evaluator work; it makes no
-cycle-equivalence claim and is not a compiled source cache.
+The checked-line overlay invokes the exact BIOS `EVALUATE` XT directly only
+when a read-only token pass proves that the line cannot enter arbitrary guest
+code. It admits comments and compiler-only IR construction, including a colon
+boundary only after the runtime's ordinary dictionary-capacity preflight proves
+that publication cannot raise the guest dictionary fault. A closed set of
+initial stack/arithmetic primitives and passive constant/value/created-word
+reads is also admissible in interpretation. Immediate words, arbitrary
+interpreted execution, conditional skip state, insufficient capacity, and
+every uncertain shape retain the full KDOS `CATCH` wrapper. The status
+translator is collapsed only for status zero. Nonzero status, source `THROW`,
+unwind, and rollback still follow KDOS unchanged.
+
+The loader checksum overlay is additionally pinned to the original CRC feed
+primitives and processes only one complete ordinary-memory span. It batches
+memory-order bytes through the same owned hosted CRC accumulator; ownership,
+mode, seed, status, and finalization remain observable through the normal BIOS
+surface. The normal MP64FS extent read, `REQUIRE` path resolution, `PROVIDED`
+registry and provisional transaction, dictionary rollback, allocation release,
+and source-visible filesystem effects are not bypassed. Each overlay costs one
+semantic step plus any nested evaluator work; it makes no cycle-equivalence
+claim and is not a compiled source cache.
 
 The evaluator remains runtime-global and nonconcurrent and makes no claim for
 public `SOURCE`, `>IN`, or `STATE` or direct LF-containing guest `EVALUATE`
