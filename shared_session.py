@@ -3747,61 +3747,21 @@ class SessionClient:
     def __exit__(self, exc_type, exc, traceback):
         self.close()
 
-    @staticmethod
-    def _response_timeout_seconds(value: float) -> float:
-        if isinstance(value, bool):
-            raise TypeError("response timeout must be a number, not bool")
-        try:
-            timeout = float(value)
-        except (TypeError, ValueError) as exc:
-            raise TypeError("response timeout must be a number") from exc
-        if not 0.0 < timeout < float("inf"):
-            raise ValueError("response timeout must be positive and finite")
-        return timeout
-
-    def _request_locked(self, method: str, params: dict):
-        self.connect()
-        request_id = self._next_id
-        self._next_id += 1
-        request = {"id": request_id, "method": method, "params": params}
-        payload = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
-        self._socket.sendall(payload.encode("utf-8") + b"\n")
-        line = self._reader.readline()
-        if not line:
-            self.close()
-            raise ConnectionError("shared session closed the connection")
-        response = json.loads(line)
-        if response.get("id") != request_id:
-            raise RuntimeError("shared session response id mismatch")
-        if not response.get("ok"):
-            raise RuntimeError(response.get("error", "shared session request failed"))
-        return response.get("result")
-
     def request(self, method: str, **params):
         with self._lock:
-            return self._request_locked(method, params)
-
-    def request_with_timeout(
-        self,
-        method: str,
-        response_timeout: float,
-        **params,
-    ):
-        """Make one request with a temporary response-read timeout.
-
-        Connection establishment still uses the client's ordinary timeout.
-        The override is installed and restored under the request lock, so it
-        cannot leak into another thread's request or become a wire parameter.
-        """
-
-        timeout = self._response_timeout_seconds(response_timeout)
-        with self._lock:
             self.connect()
-            connection = self._socket
-            previous = connection.gettimeout()
-            connection.settimeout(timeout)
-            try:
-                return self._request_locked(method, params)
-            finally:
-                if self._socket is connection:
-                    connection.settimeout(previous)
+            request_id = self._next_id
+            self._next_id += 1
+            request = {"id": request_id, "method": method, "params": params}
+            payload = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
+            self._socket.sendall(payload.encode("utf-8") + b"\n")
+            line = self._reader.readline()
+            if not line:
+                self.close()
+                raise ConnectionError("shared session closed the connection")
+            response = json.loads(line)
+            if response.get("id") != request_id:
+                raise RuntimeError("shared session response id mismatch")
+            if not response.get("ok"):
+                raise RuntimeError(response.get("error", "shared session request failed"))
+            return response.get("result")
