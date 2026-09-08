@@ -90,6 +90,29 @@
 > FIFO, and requires the production scanner to emit the exact OPEN and enter
 > `OPENING`; framed readiness and a live session remain ahead.
 
+> **Rich-terminal closure checkpoint — 2026-09-08:** The simulator frontier
+> now includes the complete ordinary Desktop source closure, live terminal
+> negotiation, and a physically visible complete CELL Desktop. Commits
+> `65cf61d`, `27858f8`, `90eaad6`, and `da5dd03` add cooperative host quanta,
+> source preparation before socket exposure, explicit live RTC advancement,
+> and preservation of ordinary source stack effects. Focused checks are green.
+>
+> Paired Akashic `75952bd` / MegaPad `65cf61d` passed the existing full rich
+> Desktop journey on the emulator: first rich Desk ACK at 486.098 seconds,
+> the previous Daybook failure checkpoint at 578.061 seconds, and final ACK
+> at 682.191 seconds. The exact invocation and artifact bindings are in
+> Akashic `local_testing/evidence/rich-desktop-emulator-reacceptance-20260908.md`.
+>
+> The simulator run at Akashic `75952bd` / MegaPad `da5dd03` was paused and
+> diagnosed before any rich offer, then stopped at the user's request. Its
+> ordinary source preparation/connect took 80.720 seconds, but bounded samples
+> of the second full CELL publication sent only 484 cells in 7.648 seconds.
+> The current shared Forth path repeats extensive engine-storage checks twice
+> per cell. This is not a demonstrated fast iteration path or a completed
+> simulator rich acceptance. The diagnosis and remaining narrow work are in
+> Akashic `local_testing/evidence/rich-desktop-simulator-checkpoint-20260908.md`.
+> Earlier September 4 frontier statements above are superseded by this record.
+
 **Date:** 2026-03-07  
 **Branch:** `main`  
 **Status:** 1,797 tests passing, 35 skipped.
