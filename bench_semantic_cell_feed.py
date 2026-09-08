@@ -3,8 +3,8 @@
 
 Run from a built MegaPad checkout with --akashic-root pointing at the checkout
 containing local_testing/test_rich_terminal_cell_feed.py. The sibling Akashic
-rich-terminal worktree is the default when present. One Python runtime and then
-one native runtime execute sequentially; geometry and fixture watchdogs are
+checkout is the default, falling back to the paired rich-terminal worktree.
+One Python runtime and then one native runtime execute sequentially; geometry and fixture watchdogs are
 fixed. This measures two CELL rows, not Desktop or physical presentation.
 """
 
@@ -26,7 +26,9 @@ import time
 
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_AKASHIC = ROOT.parent / "akashic-rich-terminal-vertical"
+DEFAULT_AKASHIC = ROOT.parent / "akashic"
+if not DEFAULT_AKASHIC.is_dir():
+    DEFAULT_AKASHIC = ROOT.parent / "akashic-rich-terminal-vertical"
 
 
 def _sha256(path: Path) -> str:
