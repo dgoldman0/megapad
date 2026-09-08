@@ -65,7 +65,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--semantic-step-budget",
         type=_positive_int,
-        help="optional shared budget for each resumable semantic dispatch",
+        help="optional cumulative budget for autoexec preparation and live dispatch",
     )
     parser.add_argument(
         "--rich-terminal-policy",
@@ -118,13 +118,23 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         hbw_size=_CANONICAL_HBW_MIB << 20,
     )
     storage = HostedStorageService(image_path=storage_path)
-    preparation = prepare_image_bootstrap(memory=memory, storage=storage)
+    preparation = prepare_image_bootstrap(
+        memory=memory,
+        storage=storage,
+        terminal_cols=args.cols,
+        terminal_rows=args.rows,
+        semantic_step_budget=args.semantic_step_budget,
+    )
     session = SimulatorMachineSession(
         preparation.runtime,
         preparation.root_xt,
         cols=args.cols,
         rows=args.rows,
-        semantic_step_budget=args.semantic_step_budget,
+        semantic_step_budget=(
+            None
+            if args.semantic_step_budget is None
+            else args.semantic_step_budget - preparation.autoexec_semantic_steps
+        ),
         rich_terminal=rich_terminal,
     )
     machine = SimulatorSharedMachine(session)

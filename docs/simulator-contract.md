@@ -510,6 +510,16 @@ remains runnable. Retained-publication backpressure still prevents further
 guest execution. The shared owner releases its lock between these boundaries
 so presentation, status, and input use the existing session authority.
 
+Prepared-image sessions complete ordinary `_AUTOEXEC-RUN` before exposing the
+shared socket. The image's existing deferred entry binds the live Desktop
+driver after all ordinary source/module loading and construction have run,
+with the requested terminal geometry already installed. The subsequent root
+invokes only that bound entry. Boot diagnostics retain their separate
+pre-attachment legacy boundary, and an explicit semantic watchdog covers
+autoexec plus live execution cumulatively. Preparation remains part of the
+existing overall connection deadline; no per-request timeout exception hides
+a synchronous source-loader callback behind a live session RPC.
+
 Cancellation restores the pre-dispatch return stack. If the canceled path
 observed `RP@`, the context is marked non-reusable because a data-stack copy
 may still name detached continuation storage; cancellation never licenses a

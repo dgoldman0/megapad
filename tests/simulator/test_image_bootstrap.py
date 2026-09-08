@@ -99,14 +99,25 @@ def _write_payload(
     image[start : start + len(secondary)] = secondary
 
 
-def _boot_source() -> bytes:
+def _boot_source(*, autoexec_body: bytes | None = None) -> bytes:
+    if autoexec_body is None:
+        autoexec_body = (
+            b"1 AUTO-RUNS +!\n"
+            b"TERMSIZE AUTO-ROWS ! AUTO-COLS !\n"
+            b"S\" ' SESSION-MARK IS _SIMULATOR-SESSION-ENTRY\" EVALUATE\n"
+        )
     prefix = (
         b": DEFER CREATE ['] ABORT , DOES> @ EXECUTE ;\n"
         b": IS ' >BODY ! ;\n"
         b"VARIABLE AUTO-RUNS\n"
-        b": _AUTOEXEC-RUN 1 AUTO-RUNS +! ;\n"
+        b"VARIABLE AUTO-COLS VARIABLE AUTO-ROWS\n"
+        b"VARIABLE SESSION-RUNS\n"
+        b": SESSION-MARK 1 SESSION-RUNS +! ;\n"
+        b": _AUTOEXEC-RUN\n"
+        + autoexec_body
+        + b";\n"
     )
-    padding = b"\\ filler retained to force the second extent\n" * 11
+    padding = b"\\ filler retained to force the second extent\n" * 8
     assert len(prefix + padding) > SECTOR_SIZE
     return (
         prefix
@@ -118,8 +129,8 @@ def _boot_source() -> bytes:
     )
 
 
-def _boot_image() -> bytearray:
-    source = _boot_source()
+def _boot_image(*, autoexec_body: bytes | None = None) -> bytearray:
+    source = _boot_source(autoexec_body=autoexec_body)
     image = _formatted_image()
     _write_entry(
         image,
@@ -199,11 +210,13 @@ def test_autoexec_transform_preserves_every_offset_and_line_ending() -> None:
         )
 
 
-def test_image_bootstrap_reads_both_extents_and_defers_normal_autoexec() -> None:
+def test_image_bootstrap_prepares_autoexec_once_and_defers_live_entry() -> None:
     storage = HostedStorageService(_boot_image())
     prepared = prepare_image_bootstrap(
         memory=create_one_core_address_space(),
         storage=storage,
+        terminal_cols=96,
+        terminal_rows=32,
     )
     runtime = prepared.runtime
 
@@ -211,25 +224,96 @@ def test_image_bootstrap_reads_both_extents_and_defers_normal_autoexec() -> None
     assert prepared.geometry.total_sectors == 20
     assert prepared.source_bytes == len(_boot_source())
     assert prepared.source_lines == _boot_source().count(b"\n")
-    assert prepared.preparation_semantic_steps > 0
+    assert (
+        prepared.preparation_semantic_steps > prepared.autoexec_semantic_steps > 0
+    )
     assert prepared.source_accelerators == ()
     assert storage.completion == 5
     assert runtime.find(b"THIS-MUST-NOT-RUN") is None
-    assert _stored_cell(runtime, b"AUTO-RUNS") == 0
+    assert _stored_cell(runtime, b"AUTO-RUNS") == 1
+    assert _stored_cell(runtime, b"AUTO-COLS") == 96
+    assert _stored_cell(runtime, b"AUTO-ROWS") == 32
+    assert _stored_cell(runtime, b"SESSION-RUNS") == 0
+    assert runtime.terminal_size() == (96, 32)
+    assert not runtime.consume_terminal_resized()
     runtime.execute(b"SECOND-EXTENT-WORD")
     assert runtime.main_context.data.pop() == 42
 
-    runtime.evaluate(
-        b"VARIABLE SESSION-RUNS "
-        b": SESSION-MARK 1 SESSION-RUNS +! ; "
-        b"' SESSION-MARK IS _SIMULATOR-SESSION-ENTRY",
-        source_name="bind-session-entry.f",
-    )
     runtime.execute(prepared.root_xt)
     assert _stored_cell(runtime, b"AUTO-RUNS") == 1
     assert _stored_cell(runtime, b"SESSION-RUNS") == 1
+    runtime.execute(prepared.root_xt)
+    assert _stored_cell(runtime, b"AUTO-RUNS") == 1
+    assert _stored_cell(runtime, b"SESSION-RUNS") == 2
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
+
+
+@pytest.mark.parametrize(
+    ("autoexec_body", "message"),
+    [
+        (b"1 AUTO-RUNS +!\n", "did not bind"),
+        (
+            b'S" 0 IS _SIMULATOR-SESSION-ENTRY" EVALUATE\n',
+            "invalid simulator session entry",
+        ),
+        (
+            b'S" \' IF IS _SIMULATOR-SESSION-ENTRY" EVALUATE\n',
+            "non-executable simulator session entry",
+        ),
+        (b"ABORT\n", "autoexec preparation failed"),
+    ],
+)
+def test_image_bootstrap_requires_successful_live_entry_binding(
+    autoexec_body: bytes,
+    message: str,
+) -> None:
+    with pytest.raises(ImageBootstrapError, match=message):
+        prepare_image_bootstrap(
+            memory=create_one_core_address_space(),
+            storage=HostedStorageService(_boot_image(autoexec_body=autoexec_body)),
+        )
+
+
+def test_image_bootstrap_does_not_rerun_a_later_autoexec_binding() -> None:
+    source = (
+        b"1 AUTO-RUNS +!\n"
+        b'S" : _AUTOEXEC-RUN 99 AUTO-RUNS ! ;" EVALUATE\n'
+        b'S" \' SESSION-MARK IS _SIMULATOR-SESSION-ENTRY" EVALUATE\n'
+    )
+    prepared = prepare_image_bootstrap(
+        memory=create_one_core_address_space(),
+        storage=HostedStorageService(_boot_image(autoexec_body=source)),
+    )
+
+    prepared.runtime.execute(prepared.root_xt)
+    assert _stored_cell(prepared.runtime, b"AUTO-RUNS") == 1
+    assert _stored_cell(prepared.runtime, b"SESSION-RUNS") == 1
+
+
+def test_image_bootstrap_applies_the_configured_autoexec_budget() -> None:
+    with pytest.raises(ImageBootstrapError, match="1-step budget"):
+        prepare_image_bootstrap(
+            memory=create_one_core_address_space(),
+            storage=HostedStorageService(_boot_image()),
+            semantic_step_budget=1,
+        )
+
+
+def test_image_bootstrap_preserves_bounded_autoexec_failure_diagnostics() -> None:
+    source = b'2100 0 DO 65 EMIT LOOP ." BOOT-FAILURE" ABORT\n'
+    with pytest.raises(
+        ImageBootstrapError, match="autoexec preparation failed"
+    ) as failed:
+        prepare_image_bootstrap(
+            memory=create_one_core_address_space(),
+            storage=HostedStorageService(_boot_image(autoexec_body=source)),
+        )
+
+    message = str(failed.value)
+    assert "EVAL-LINE=" in message
+    assert f"UART tail={((b'A' * 2036) + b'BOOT-FAILURE')!r}" in message
+    assert b"A" * 2100 not in message.encode()
 
 
 def test_image_bootstrap_rejects_invalid_metadata_and_missing_forth_entry() -> None:

@@ -2463,9 +2463,13 @@ It validates marker-1 MP64FS through the hosted storage service, selects the
 first BIOS-loadable Forth entry, reconstructs both extents, and blanks only
 the standalone final `_AUTOEXEC-RUN` invocation without changing source
 offsets. KDOS preparation runs through the initially captured checked-evaluator
-XTs. A deferred `_SIMULATOR-SESSION-ENTRY` then lets the later ordinary
-autoexec closure bind its guarded Desktop entry before the one resumable root
-dispatch reaches it.
+XTs. Preparation installs the source accelerators and a deferred
+`_SIMULATOR-SESSION-ENTRY`, establishes the requested terminal geometry, and
+runs the unchanged `_AUTOEXEC-RUN` exactly once. The ordinary autoexec closure
+loads its modules and binds its guarded Desktop entry. Only after preparation
+has completed does the server expose its socket; the resumable root then
+invokes that deferred entry without loading autoexec a second time. Captured
+boot output remains the distinct pre-attachment legacy output boundary.
 
 The root `simulator_server.py` entry point exposes this prepared runtime through
 the unchanged shared-session socket and `SimulatorSharedMachine`. It accepts
@@ -2473,8 +2477,10 @@ only semantic memory, geometry, terminal-policy, pause, and optional semantic
 step-budget arguments; emulator BIOS, core scheduling, TAP, audio, cycle
 batching, and host profiling options are deliberately absent. Akashic can now
 build a distinct simulator image and launch the same viewer/session protocol.
-The next seam is the remaining source vocabulary followed by the retained
-physical offer and actual Desktop socket/viewer journey.
+The existing overall connection deadline includes ordinary cold preparation;
+individual session RPCs retain their normal watchdog. An explicit semantic
+step budget covers autoexec plus the live entry cumulatively. Physical retained
+offer and complete Desktop acceptance remain separate qualification evidence.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

@@ -6,13 +6,12 @@ path, but retains its observable selection and validation rules: media is read
 through the hosted storage service, marker-1 geometry and metadata are checked,
 and the first occupied Forth entry is loaded across both validated extents.
 
-Preparation stops before the ordinary autoexec body.  Its one top-level call
-is blanked byte-for-byte in the loaded source, then a deferred session root is
-installed.  Exact KDOS source-walker overlays are admitted at that boundary
-without replacing their guest definitions.  Running the root later, under
-:class:`SimulatorMachineSession`, loads the normal autoexec closure inside the
-resumable semantic dispatch and continues through the Akashic-selected session
-entry.
+The standalone autoexec invocation is blanked byte-for-byte while preparing
+KDOS. After installing a deferred session entry and exact source-walker
+overlays, preparation executes the ordinary autoexec closure once. Its final
+binding selects the live entry without running it. Only that entry later runs
+under :class:`SimulatorMachineSession`, so synchronous source preparation does
+not monopolize an already-exposed shared-session socket.
 """
 
 from __future__ import annotations
@@ -30,8 +29,9 @@ from shared.mp64fs import (
     decode_bios_mp64fs_geometry,
 )
 from shared.storage import SECTOR_SIZE, STORAGE_RESULT_OK, STORAGE_STATUS_PRESENT
+from simulator.errors import SimulatorError, StepBudgetExceeded
 from simulator.memory import SparseAddressSpace
-from simulator.runtime import MegaForthRuntime
+from simulator.runtime import CreatedDefinition, DirectiveDefinition, MegaForthRuntime
 from simulator.source_acceleration import install_kdos_source_accelerators
 from simulator.storage import HostedStorageService
 
@@ -45,7 +45,6 @@ _SESSION_ROOT = b"_SIMULATOR-SESSION-ROOT"
 _SESSION_ROOT_SOURCE = (
     b"DEFER _SIMULATOR-SESSION-ENTRY\n"
     b": _SIMULATOR-SESSION-ROOT\n"
-    b"  _AUTOEXEC-RUN\n"
     b"  _SIMULATOR-SESSION-ENTRY ;\n"
 )
 
@@ -65,6 +64,7 @@ class ImageBootstrapPreparation:
     source_bytes: int
     source_lines: int
     preparation_semantic_steps: int
+    autoexec_semantic_steps: int
     source_accelerators: tuple[bytes, ...]
 
 
@@ -139,14 +139,19 @@ def prepare_image_bootstrap(
     *,
     memory: SparseAddressSpace,
     storage: HostedStorageService,
+    terminal_cols: int = 80,
+    terminal_rows: int = 30,
+    semantic_step_budget: int | None = None,
 ) -> ImageBootstrapPreparation:
     """Construct and prepare a runtime from one explicit memory/storage pair.
 
     The caller owns platform geometry and attached-media construction.  This
     seam claims ``storage`` by constructing the runtime, reads the boot file
     through that service, evaluates every physical line through execution
-    tokens captured from the initial semantic BIOS, and returns the exact root
-    XT that a session must dispatch.
+    tokens captured from the initial semantic BIOS, then runs ordinary autoexec
+    source preparation before returning the exact live root XT. The optional
+    budget covers autoexec; callers subtract its reported work from that same
+    budget before dispatching the live entry.
     """
 
     if not isinstance(memory, SparseAddressSpace):
@@ -155,11 +160,25 @@ def prepare_image_bootstrap(
         raise TypeError("storage must be a HostedStorageService")
 
     runtime = MegaForthRuntime(memory=memory, storage=storage)
+    # Establish the caller's baseline before any boot source can query it.
+    # The later session owns its own geometry state at this same baseline;
+    # initial construction does not invent a pending resize notification.
+    runtime.set_terminal_geometry(terminal_cols, terminal_rows)
+    runtime.consume_terminal_resized()
     checked = runtime.find(b"EVALUATE-CHECKED")
     finish = runtime.find(b"EVALUATE-FINISH")
     eval_line = runtime.find(b"EVAL-LINE")
     if checked is None or finish is None or eval_line is None:
         raise ImageBootstrapError("semantic BIOS evaluator vocabulary is incomplete")
+
+    def autoexec_error(message: str) -> ImageBootstrapError:
+        # Read the original public BIOS cell even if source shadowed its name.
+        # Leave failed execution and evaluator state intact while reporting it.
+        line = runtime.memory.read64(eval_line.body_address)
+        return ImageBootstrapError(
+            f"{message}; EVAL-LINE={line}; "
+            f"UART tail={runtime.uart_output[-2048:]!r}"
+        )
 
     geometry, boot_file, source = _read_bios_boot_file(runtime)
     prepared_source = blank_terminal_autoexec_invocation(source)
@@ -171,6 +190,9 @@ def prepare_image_bootstrap(
         finish_xt=finish.xt,
         line_address=eval_line.body_address,
     )
+    autoexec = runtime.find(_AUTOEXEC_INVOCATION)
+    if autoexec is None:
+        raise ImageBootstrapError("KDOS did not publish its autoexec entry")
     semantic_steps += _evaluate_checked_source(
         runtime,
         source=_SESSION_ROOT_SOURCE,
@@ -182,11 +204,44 @@ def prepare_image_bootstrap(
 
     root = runtime.find(_SESSION_ROOT)
     entry = runtime.find(_SESSION_ENTRY)
-    if root is None or entry is None:
+    if (
+        root is None
+        or entry is None
+        or not isinstance(entry.implementation, CreatedDefinition)
+    ):
         raise ImageBootstrapError("simulator session root was not published")
+    unbound_entry_xt = runtime.memory.read64(entry.body_address)
     acceleration = install_kdos_source_accelerators(runtime)
     if runtime.main_context.data.snapshot() or runtime.main_context.returns.snapshot():
         raise ImageBootstrapError("semantic image preparation left dirty stacks")
+
+    try:
+        autoexec_result = runtime.execute(autoexec.xt, step_budget=semantic_step_budget)
+    except SimulatorError as exc:
+        raise autoexec_error(f"autoexec preparation failed: {exc}") from exc
+    autoexec_steps = autoexec_result.semantic_steps
+    semantic_steps += autoexec_steps
+    if semantic_step_budget is not None and autoexec_steps >= semantic_step_budget:
+        raise StepBudgetExceeded(semantic_step_budget)
+
+    if (
+        runtime.find(_SESSION_ENTRY) is not entry
+        or runtime.find(_SESSION_ROOT) is not root
+    ):
+        raise autoexec_error("autoexec replaced the simulator session boundary")
+    selected_xt = runtime.memory.read64(entry.body_address)
+    if selected_xt == unbound_entry_xt:
+        raise autoexec_error("autoexec did not bind the simulator session entry")
+    try:
+        selected = runtime.dictionary.resolve(selected_xt)
+    except KeyError as exc:
+        raise autoexec_error(
+            "autoexec bound an invalid simulator session entry"
+        ) from exc
+    if isinstance(selected.implementation, DirectiveDefinition):
+        raise autoexec_error("autoexec bound a non-executable simulator session entry")
+    if runtime.main_context.data.snapshot() or runtime.main_context.returns.snapshot():
+        raise autoexec_error("autoexec preparation left dirty stacks")
 
     return ImageBootstrapPreparation(
         runtime=runtime,
@@ -196,6 +251,7 @@ def prepare_image_bootstrap(
         source_bytes=len(source),
         source_lines=_physical_line_count(source),
         preparation_semantic_steps=semantic_steps,
+        autoexec_semantic_steps=autoexec_steps,
         source_accelerators=acceleration.installed,
     )
 
