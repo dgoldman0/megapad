@@ -1,6 +1,6 @@
 # Native semantic execution
 
-Native acceleration is being qualified on `simulator-runtime`, starting from
+Native acceleration was developed on `simulator-runtime`, starting from
 rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
@@ -74,14 +74,63 @@ These are one sequential kernel comparison on a shared host, not a full
 Desktop speed claim. Raw output is in paired Akashic
 `local_testing/out/close-20260908-cell-feed/native-first.jsonl`. The first
 native implementation still crosses into Python frequently during the range
-predicates used by unified publication; native return-stack operations are
-the next bounded coverage candidate. Do not merge this execution-engine work
-back solely on this first kernel result: preserve differential correctness
-and require substantial improvements at the ordinary physical Desktop
-checkpoint and complete interaction journey.
+predicates used by unified publication. Return-stack operations are a possible
+future coverage improvement; no further optimization is part of this slice.
+
+The reproducible `bench_semantic_cell_feed.py` helper binds repository/source
+and extension hashes, enforces unchanged fixture bounds, and checks Python/native
+frame, timer, memory-result and semantic-work equivalence. Run it from this
+checkout with the paired Akashic checkout selected explicitly:
+
+```
+python bench_semantic_cell_feed.py --akashic-root ../akashic --output /tmp/semantic-cell-feed.json
+```
+
+Its sequential verification pair measured 4.112512 s versus 1.845714 s for the
+unified feed (2.228x), and 0.380753 s versus 0.042558 s for initial PT rows
+(8.947x). Both pairs are recorded; they establish useful kernel improvement,
+not a full Desktop throughput result.
 
 The prior Python simulator reached the first complete rich Desk ACK at
 897.181846 seconds and timed out at 900 seconds. The accelerated emulator's
 corresponding ACK was 486.098092 seconds and its full journey passed. Detailed
 source bindings and timing boundaries are in paired Akashic
 `local_testing/evidence/rich-desktop-speed-decision-20260908.md`.
+
+## Physical Desktop result and integration limitations
+
+The ordinary source-mode `desktop-apt1` run used Akashic `2a90108` (same Forth
+as `78608e7`) and MegaPad `3ea7bdc`, clean at launch, with the native executor,
+real X11 viewer and the existing 900-second deadline. No cached source or
+expanded watchdog was used.
+
+| Exact physical ACK milestone | Python simulator | Native simulator | Earlier emulator |
+| --- | ---: | ---: | ---: |
+| First complete rich Desk | 897.181846 s | 383.162947 s | 486.098092 s |
+| Pad edited | Not reached | 469.611251 s | 524.156537 s |
+| Daybook task added | Not reached | 597.039410 s | 578.061030 s |
+
+Native reached the first Desk 2.342x sooner than Python. It reached actual Pad
+and Daybook interactions, with revision-authorized input after physical ACKs.
+However, Desk-to-Daybook-task took 213.876463 s versus the emulator's 91.962938 s;
+the emulator caught up during subsequent interactions. The older emulator
+baseline predates the small Akashic CELL validation correction, so this is a
+practical comparison, not a matched-head backend benchmark.
+
+The simulator completed 10 milestones, 18 acknowledged offers and 14 inputs,
+then paused with `MMIOAccessError: MMIO service rejected read preflight` during
+the later ordinary Sound Lab stage. Its graph initialization probes AudioOut,
+which the simulator platform does not expose. A focused AudioOut status read
+at `0xFFFFFF0000000C01` fails identically in Python and native configurations.
+The exact live failing address was not captured; this is a source-supported
+cause candidate, not a replay of the live fault. Diagnostics were saved and
+the failed runner interrupted. Full simulator acceptance did not pass.
+
+The user authorized merging this measured state with its limitations recorded.
+Native remains optional and Python remains the default. The emulator retains
+the successful full-journey baseline; native is useful for startup and focused
+fixtures but is not established as a faster complete Desktop path. AudioOut
+coverage, failure propagation to the acceptance harness, and further native
+coverage remain follow-up work, not requirements silently claimed complete.
+The complete revision/timing/artifact ledger is paired Akashic
+`local_testing/evidence/rich-desktop-native-simulator-checkpoint-20260908.md`.
