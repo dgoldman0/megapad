@@ -240,8 +240,14 @@ def prepare_image_bootstrap(
         ) from exc
     if isinstance(selected.implementation, DirectiveDefinition):
         raise autoexec_error("autoexec bound a non-executable simulator session entry")
-    if runtime.main_context.data.snapshot() or runtime.main_context.returns.snapshot():
-        raise autoexec_error("autoexec preparation left dirty stacks")
+    # Ordinary checked source preserves data-stack effects for following
+    # source and the live entry. Splitting preparation must preserve those
+    # values too, rather than imposing a new empty-data-stack boot ABI.
+    if runtime.main_context.returns.snapshot():
+        raise autoexec_error(
+            "autoexec preparation left an active return stack: "
+            f"returns={runtime.main_context.returns.snapshot()!r}"
+        )
 
     return ImageBootstrapPreparation(
         runtime=runtime,

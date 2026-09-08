@@ -2469,7 +2469,10 @@ XTs. Preparation installs the source accelerators and a deferred
 runs the unchanged `_AUTOEXEC-RUN` exactly once. The ordinary autoexec closure
 loads its modules and binds its guarded Desktop entry. Only after preparation
 has completed does the server expose its socket; the resumable root then
-invokes that deferred entry without loading autoexec a second time. Captured
+invokes that deferred entry without loading autoexec a second time. Source
+data-stack effects remain intact across this split, as in ordinary checked
+evaluation; preparation does not require or manufacture an empty data stack.
+Captured
 boot output remains the distinct pre-attachment legacy output boundary.
 
 The root `simulator_server.py` entry point exposes this prepared runtime through

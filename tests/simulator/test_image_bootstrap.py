@@ -249,6 +249,27 @@ def test_image_bootstrap_prepares_autoexec_once_and_defers_live_entry() -> None:
     assert runtime.main_context.returns.snapshot() == ()
 
 
+def test_image_bootstrap_preserves_source_data_effects_into_live_entry() -> None:
+    prepared = prepare_image_bootstrap(
+        memory=create_one_core_address_space(),
+        storage=HostedStorageService(
+            _boot_image(
+                autoexec_body=(
+                    b'S" 41" EVALUATE\n'
+                    b'S" \' SESSION-MARK IS _SIMULATOR-SESSION-ENTRY" EVALUATE\n'
+                )
+            )
+        ),
+    )
+    runtime = prepared.runtime
+    assert runtime.main_context.data.snapshot() == (41,)
+    assert runtime.main_context.returns.snapshot() == ()
+    runtime.execute(prepared.root_xt)
+    assert _stored_cell(runtime, b"SESSION-RUNS") == 1
+    assert runtime.main_context.data.snapshot() == (41,)
+    assert runtime.main_context.returns.snapshot() == ()
+
+
 @pytest.mark.parametrize(
     ("autoexec_body", "message"),
     [
