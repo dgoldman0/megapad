@@ -8,6 +8,7 @@ compiled calls retain the execution token that was bound at compile time.
 
 from __future__ import annotations
 
+import operator
 import threading
 from collections import deque
 from contextlib import contextmanager
@@ -353,7 +354,15 @@ class BlockedExecution:
     suspension: ExecutionSuspension
 
 
-RunResult: TypeAlias = ExecutionResult | BlockedExecution
+@dataclass(frozen=True, slots=True)
+class YieldedExecution:
+    """A runnable dispatch returned to its host at a semantic quantum."""
+
+    semantic_steps: int
+    suspension: ExecutionSuspension
+
+
+RunResult: TypeAlias = ExecutionResult | BlockedExecution | YieldedExecution
 
 
 @dataclass(slots=True)
@@ -513,10 +522,11 @@ class _DispatchFrame:
 
 @dataclass(frozen=True, slots=True)
 class _DispatchCursor:
-    """Resume location immediately after one semantic IDL operation."""
+    """Resume location at an IDL or ordinary host execution boundary."""
 
     xt: int
     ip: int
+    host_yield: bool = False
 
 
 @dataclass(slots=True)
@@ -534,6 +544,7 @@ class _SuspendedExecution:
     had_pointer_capture: bool
     blocked_data_snapshot: tuple[int, ...]
     blocked_return_snapshot: tuple[ReturnEntry, ...]
+    quantum_steps: int | None = None
     wake_receipt: IdleWakeReceipt | None = None
 
 
@@ -2327,8 +2338,16 @@ class MegaForthRuntime:
         *,
         context: ExecutionContext | None = None,
         step_budget: int | None = None,
+        quantum_steps: int | None = None,
     ) -> RunResult:
-        """Run one compiled word until completion or its next IDL boundary."""
+        """Run to completion, IDL, or an optional host semantic quantum.
+
+        A quantum returns a runnable continuation without changing guest words,
+        delivering an interrupt, or resetting the cumulative ``step_budget``.
+        It is checked only between outer explicit IR operations. Synchronous
+        primitives, accelerators, and nested source evaluation finish before
+        returning to that boundary, so it is not a hard wall-time deadline.
+        """
 
         with self._session_owner_lock:
             self._require_session_owner_access("run a semantic dispatch")
@@ -2337,6 +2356,7 @@ class MegaForthRuntime:
                     name_or_xt,
                     context=context,
                     step_budget=step_budget,
+                    quantum_steps=quantum_steps,
                 )
             except BaseException:
                 # This entry point rejects nested dispatch before execution, so
@@ -2351,10 +2371,22 @@ class MegaForthRuntime:
         *,
         context: ExecutionContext | None,
         step_budget: int | None,
+        quantum_steps: int | None,
     ) -> RunResult:
         """Implement :meth:`run_until_blocked` under its host guard."""
 
         active_context = self.main_context if context is None else context
+        if quantum_steps is not None:
+            if isinstance(quantum_steps, bool):
+                raise TypeError("quantum_steps must be an integer or None")
+            try:
+                quantum_steps = operator.index(quantum_steps)
+            except TypeError as exc:
+                raise TypeError(
+                    "quantum_steps must be an integer or None"
+                ) from exc
+            if quantum_steps <= 0:
+                raise ValueError("quantum_steps must be positive")
         if not isinstance(active_context, ExecutionContext):
             raise TypeError("context must be an ExecutionContext")
         self._require_no_suspension("start another semantic dispatch")
@@ -2372,11 +2404,22 @@ class MegaForthRuntime:
             meter,
             allow_idle=True,
             starting_steps=starting_steps,
+            quantum_steps=quantum_steps,
         )
         semantic_steps = meter.steps - starting_steps
         if suspended is None:
             return ExecutionResult(semantic_steps)
-        return BlockedExecution(semantic_steps, suspended.handle)
+        return self._suspension_result(suspended, semantic_steps)
+
+    @staticmethod
+    def _suspension_result(
+        suspended: _SuspendedExecution,
+        semantic_steps: int,
+    ) -> BlockedExecution | YieldedExecution:
+        result_type = (
+            YieldedExecution if suspended.cursor.host_yield else BlockedExecution
+        )
+        return result_type(semantic_steps, suspended.handle)
 
     def deliver_idle_wake(
         self,
@@ -2395,6 +2438,8 @@ class MegaForthRuntime:
         kind: IdleWake,
     ) -> IdleWakeReceipt:
         blocked = self._require_suspension(suspension)
+        if blocked.cursor.host_yield:
+            raise ExecutionError("host quantum continuation does not accept an IDL wake")
         if not isinstance(kind, IdleWake):
             raise TypeError("idle wake kind must be an IdleWake")
         if blocked.wake_receipt is not None:
@@ -2429,6 +2474,8 @@ class MegaForthRuntime:
         wake_receipt: IdleWakeReceipt,
     ) -> RunResult:
         blocked = self._require_suspension(suspension)
+        if blocked.cursor.host_yield:
+            raise ExecutionError("host quantum continuation requires resume_yielded")
         if not isinstance(wake_receipt, IdleWakeReceipt):
             raise TypeError("wake receipt must be an IdleWakeReceipt")
         if (
@@ -2437,6 +2484,23 @@ class MegaForthRuntime:
             or blocked.wake_receipt is not wake_receipt
         ):
             raise ExecutionError("wake receipt is stale, foreign, or already consumed")
+        return self._continue_suspension_locked(blocked)
+
+    def resume_yielded(self, suspension: ExecutionSuspension) -> RunResult:
+        """Continue one exact host quantum without inventing an IDL wake."""
+
+        with self._session_owner_lock:
+            self._require_session_owner_access("resume a semantic dispatch")
+            blocked = self._require_suspension(suspension)
+            if not blocked.cursor.host_yield:
+                raise ExecutionError("IDL suspension requires a runtime-issued wake")
+            return self._continue_suspension_locked(blocked)
+
+    def _continue_suspension_locked(
+        self,
+        blocked: _SuspendedExecution,
+    ) -> RunResult:
+        suspension = blocked.handle
         if blocked.context.data.snapshot() != blocked.blocked_data_snapshot:
             raise ExecutionError("data stack changed while dispatch was suspended")
         if blocked.context.returns.snapshot() != blocked.blocked_return_snapshot:
@@ -2482,7 +2546,7 @@ class MegaForthRuntime:
             )
             raise
         assert handle is not None
-        return BlockedExecution(semantic_steps, handle)
+        return self._suspension_result(blocked, semantic_steps)
 
     def cancel_suspension(self, suspension: ExecutionSuspension) -> None:
         """Unwind internal return state and release one blocked context."""
@@ -2504,7 +2568,7 @@ class MegaForthRuntime:
         )
         if blocked.had_pointer_capture:
             blocked.context._mark_host_control_fault(
-                ExecutionError("IDL suspension canceled after RP@")
+                ExecutionError("semantic suspension canceled after RP@")
             )
         blocked.context.returns.restore(blocked.return_snapshot)
         blocked.context.returns.restore_pointer_captures(
@@ -3131,6 +3195,7 @@ class MegaForthRuntime:
         *,
         allow_idle: bool = False,
         starting_steps: int = 0,
+        quantum_steps: int | None = None,
     ) -> _SuspendedExecution | None:
         """Execute atomically with respect to internal return-stack state."""
 
@@ -3150,6 +3215,9 @@ class MegaForthRuntime:
                 meter,
                 root_id=root_id,
                 allow_idle=allow_idle,
+                quantum_limit=(
+                    None if quantum_steps is None else meter.steps + quantum_steps
+                ),
             )
             if cursor is None:
                 completed_successfully = True
@@ -3171,6 +3239,7 @@ class MegaForthRuntime:
                     ),
                     blocked_data_snapshot=context.data.snapshot(),
                     blocked_return_snapshot=context.returns.snapshot(),
+                    quantum_steps=quantum_steps,
                 )
                 context._lease_for_suspension(handle.sequence)
                 self._suspended_execution = suspended
@@ -3261,6 +3330,11 @@ class MegaForthRuntime:
                 root_id=suspended.root_id,
                 resume_cursor=suspended.cursor,
                 allow_idle=True,
+                quantum_limit=(
+                    None
+                    if suspended.quantum_steps is None
+                    else suspended.meter.steps + suspended.quantum_steps
+                ),
             )
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
@@ -3494,6 +3568,7 @@ class MegaForthRuntime:
         fault_request: _DictionaryFaultRequest | None = None,
         resume_cursor: _DispatchCursor | None = None,
         allow_idle: bool = False,
+        quantum_limit: int | None = None,
     ) -> _DispatchCursor | None:
         fault_entry = fault_request is not None
         if resume_cursor is not None:
@@ -3582,6 +3657,19 @@ class MegaForthRuntime:
                 raise ExecutionError(
                     f"instruction pointer {ip} escaped definition {current.name!r}"
                 )
+
+            # Only this outer dispatcher owns a detachable Python boundary.
+            # In particular, do not unwind EVALUATE or an accelerator callback:
+            # its parser, checked-loader cleanup, and nested CATCH roots must
+            # complete normally before their caller can retain this cursor.
+            if (
+                allow_idle
+                and quantum_limit is not None
+                and meter.steps >= quantum_limit
+                and len(self._active_dispatches) == 1
+                and not self._active_input_states
+            ):
+                return _DispatchCursor(current.xt, ip, host_yield=True)
 
             if ip == 0 and self._try_colon_accelerator(
                 current,
@@ -4053,4 +4141,5 @@ __all__ = [
     "RunResult",
     "ValueDefinition",
     "WordImplementation",
+    "YieldedExecution",
 ]

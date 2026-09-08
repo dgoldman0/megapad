@@ -20,7 +20,7 @@ from simulator.runtime import CreatedDefinition, MegaForthRuntime
 
 @dataclass(frozen=True, slots=True)
 class SimulatorSessionRun:
-    """One host-visible run-to-completion or run-to-IDL boundary."""
+    """One host-visible completion, IDL, or semantic-quantum boundary."""
 
     semantic_steps: int
     external_events_applied: int
@@ -32,10 +32,9 @@ class SimulatorMachineSession(MachineSession):
     """Bind one hosted Forth runtime to the normal terminal session authority.
 
     The semantic runtime has no instruction/cycle batch. One owner call runs a
-    fresh root entry to completion or its next ``IDL`` suspension, and later
-    calls resume that same suspension only after admitted UART input. Terminal
-    driver service surrounds that exact boundary, matching the architectural
-    session without fabricating hardware statistics or a ``MegapadSystem``.
+    root entry to completion, IDL, or a configurable semantic host quantum.
+    Driver service surrounds that boundary. Host yields resume without an
+    interrupt; genuine IDL still waits for admitted UART input.
     """
 
     def __init__(
@@ -46,6 +45,7 @@ class SimulatorMachineSession(MachineSession):
         cols: int = 80,
         rows: int = 30,
         semantic_step_budget: int | None = None,
+        semantic_quantum_steps: int = 8_192,
         rich_terminal: RichTerminalSessionConfig | None = None,
     ) -> None:
         if not isinstance(runtime, MegaForthRuntime):
@@ -79,6 +79,7 @@ class SimulatorMachineSession(MachineSession):
             legacy_output_sink=self._receive_batch,
             terminal_cols=cols,
             terminal_rows=rows,
+            semantic_quantum_steps=semantic_quantum_steps,
         )
         self._backend = backend
         try:
@@ -115,7 +116,7 @@ class SimulatorMachineSession(MachineSession):
         backend = self.backend
         return bool(
             not self._halted
-            and backend.suspended
+            and backend.waiting_for_interrupt
             and not self.runtime.uart_input_available
             and not self.rich_terminal_work_pending
         )
@@ -176,6 +177,7 @@ class SimulatorMachineSession(MachineSession):
                 if semantic.stop_reason in {
                     SemanticBatchStop.COMPLETED,
                     SemanticBatchStop.IDLE,
+                    SemanticBatchStop.YIELDED,
                 }:
                     self._dispatch_started = True
             else:

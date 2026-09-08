@@ -493,6 +493,23 @@ suspension is detached. Resumption retains the original cumulative step
 budget rather than silently granting a fresh quantum. This is an IDL
 block/wake contract, not BIOS `PAUSE` or KDOS task scheduling.
 
+The session host also has a distinct runnable execution boundary. A caller may
+pass `quantum_steps` to `run_until_blocked`; between safe outer semantic IR
+operations it returns `YieldedExecution` with an opaque continuation.
+`resume_yielded` continues it without an interrupt receipt, extra Timer ticks,
+or a fresh cumulative watchdog budget. Genuine `IDL` continues to require its
+own wake receipt. Synchronous primitives, source evaluation, and colon
+accelerators finish before this boundary, so the quantum is not a hard
+wall-time deadline. This does not change `YIELD?`, task scheduling, or the
+ordinary guest source.
+
+`SimulatorMachineSession` selects a configurable 8,192-step host quantum. It
+settles UART output, services the terminal driver, and admits queued input at
+each boundary, including while ordinary terminal negotiation or UI polling
+remains runnable. Retained-publication backpressure still prevents further
+guest execution. The shared owner releases its lock between these boundaries
+so presentation, status, and input use the existing session authority.
+
 Cancellation restores the pre-dispatch return stack. If the canceled path
 observed `RP@`, the context is marked non-reusable because a data-stack copy
 may still name detached continuation storage; cancellation never licenses a
@@ -3786,7 +3803,7 @@ It reuses the existing `MachineSession` terminal frontend through explicit
 attachment, host-state, legacy-input, and legacy-geometry hooks rather than
 impersonating `MegapadSystem`. One owner boundary services the shared driver,
 runs or resumes the root semantic dispatch, then services the driver and
-display cadence again. Completion and `IDL`, semantic steps, external-event
+display cadence again. Completion, host quantum yields, and `IDL`, semantic steps, external-event
 admission, host backpressure, and terminal failure retain their own names and
 cannot be reported as instruction or cycle statistics. Focused evidence drives
 the complete module to the same revision-1 CELL snapshot through this session

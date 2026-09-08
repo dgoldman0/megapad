@@ -2436,8 +2436,12 @@ machine. `SimulatorMachineSession` reuses `MachineSession`'s
 terminal model, ANSI fallback, CELL/retained selection, cadence, immutable
 display offers, physical-acknowledgement authority, and input gates through
 four explicit host hooks. Each simulator owner boundary services the driver,
-runs or resumes exactly one semantic root dispatch to completion or `IDL`, and
-services the driver again. Its counters remain semantic steps and external
+runs or resumes one semantic root dispatch to completion, `IDL`, or its
+configurable host quantum (8,192 semantic steps by default), and services the
+driver again. Quantum continuations resume without UART input or a fake
+interrupt; actual `IDL` retains its wake requirement. Synchronous primitives
+and source accelerators finish before yielding, so the quantum is not a hard
+wall-time deadline. Its counters remain semantic steps and external
 events; it does not relabel them as instructions or cycles. A focused root-loop
 test reaches the real revision-1 CELL snapshot through this production session
 composition and becomes quiescent with the root continuation suspended at

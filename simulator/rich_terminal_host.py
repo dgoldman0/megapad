@@ -3,7 +3,7 @@
 The adapter owns the simulator effects that cannot live in shared policy:
 scheduler exclusion, UART settlement, terminal geometry, and resumable semantic
 dispatch.  ``TX-FLUSH`` remains a source-visible no-op; one outer semantic call
-contributes at most one publication when it returns or blocks. Bytes completed
+contributes at most one publication when it returns, blocks, or yields. Bytes completed
 before backend ownership remain a distinct earlier boundary. Public runtime
 execution and UART mutation are rejected outside the backend's guest call.
 """
@@ -25,6 +25,7 @@ from simulator.runtime import (
     ExecutionContext,
     IdleWake,
     MegaForthRuntime,
+    YieldedExecution,
 )
 from simulator.terminal_geometry import (
     HostedTerminalGeometry,
@@ -37,6 +38,7 @@ class SemanticBatchStop(str, Enum):
 
     COMPLETED = "completed"
     IDLE = "idle"
+    YIELDED = "yielded"
     HOST_BACKPRESSURE = "host_backpressure"
     TERMINAL_FAILURE = "terminal_failure"
 
@@ -113,11 +115,20 @@ class SimulatorSessionBackend:
         legacy_output_sink: Callable[[bytes], None],
         terminal_cols: int = 80,
         terminal_rows: int = 24,
+        semantic_quantum_steps: int | None = None,
     ) -> None:
         if not isinstance(runtime, MegaForthRuntime):
             raise TypeError("runtime must be a MegaForthRuntime")
         if not callable(legacy_output_sink):
             raise TypeError("legacy_output_sink must be callable")
+        if semantic_quantum_steps is not None:
+            if isinstance(semantic_quantum_steps, bool) or not isinstance(
+                semantic_quantum_steps, int
+            ):
+                raise TypeError("semantic_quantum_steps must be an integer or None")
+            if semantic_quantum_steps <= 0:
+                raise ValueError("semantic_quantum_steps must be positive")
+        self._semantic_quantum_steps = semantic_quantum_steps
         self._runtime = runtime
         self._legacy_output_sink = legacy_output_sink
         self._geometry = HostedTerminalGeometryState(
@@ -130,7 +141,7 @@ class SimulatorSessionBackend:
         self._owner_token = object()
         self._closed = False
         self._machine_sink: SharedRichTerminalHost | None = None
-        self._suspension: BlockedExecution | None = None
+        self._suspension: BlockedExecution | YieldedExecution | None = None
         self._reported_suspension_steps = 0
         hooks = _SimulatorRichTerminalHooks(self)
         self._rich_terminal_hooks = hooks
@@ -157,6 +168,11 @@ class SimulatorSessionBackend:
     def suspended(self) -> bool:
         with self._boundary_lock:
             return self._suspension is not None
+
+    @property
+    def waiting_for_interrupt(self) -> bool:
+        with self._boundary_lock:
+            return isinstance(self._suspension, BlockedExecution)
 
     @property
     def closed(self) -> bool:
@@ -190,7 +206,7 @@ class SimulatorSessionBackend:
             self._closed = True
 
     def cancel_suspension(self) -> bool:
-        """Cancel the backend-owned IDL continuation, if one exists."""
+        """Cancel the backend-owned continuation, if one exists."""
 
         with self._boundary_lock:
             self._require_open()
@@ -272,10 +288,10 @@ class SimulatorSessionBackend:
     ) -> SemanticBatchResult:
         """Run or resume one outer semantic dispatch and settle its UART bytes.
 
-        A fresh dispatch requires ``entry``. Once that dispatch blocks at IDL,
-        the backend owns its opaque suspension and later calls omit all entry
-        arguments. UART availability after event admission supplies the exact
-        interrupt wake; geometry alone leaves the dispatch idle.
+        A fresh dispatch requires ``entry``. At IDL or a host quantum, the
+        backend owns the continuation and later calls omit entry arguments.
+        A host quantum resumes after ordinary event admission; only genuine
+        IDL requires UART availability and an interrupt wake receipt.
         """
 
         with self._boundary_lock:
@@ -303,7 +319,7 @@ class SimulatorSessionBackend:
         *,
         context: ExecutionContext | None,
         step_budget: int | None,
-        suspended: BlockedExecution | None,
+        suspended: BlockedExecution | YieldedExecution | None,
     ) -> SemanticBatchResult:
         """Run below the scheduler and runtime-ownership boundaries."""
 
@@ -325,7 +341,7 @@ class SimulatorSessionBackend:
                         admission.external_events_applied
                     )
                 elif (
-                    suspended is not None
+                    isinstance(suspended, BlockedExecution)
                     and not self._runtime.uart_input_available
                 ):
                     result = SemanticBatchResult(
@@ -343,6 +359,7 @@ class SimulatorSessionBackend:
                                 entry,
                                 context=context,
                                 step_budget=step_budget,
+                                quantum_steps=self._semantic_quantum_steps,
                             )
                         prior_steps = 0
                     else:
@@ -350,14 +367,19 @@ class SimulatorSessionBackend:
                             with self._runtime._session_owner_scope(
                                 self._owner_token
                             ):
-                                wake = self._runtime.deliver_idle_wake(
-                                    suspended.suspension,
-                                    IdleWake.INTERRUPT,
-                                )
-                                execution = self._runtime.resume(
-                                    suspended.suspension,
-                                    wake,
-                                )
+                                if isinstance(suspended, YieldedExecution):
+                                    execution = self._runtime.resume_yielded(
+                                        suspended.suspension,
+                                    )
+                                else:
+                                    wake = self._runtime.deliver_idle_wake(
+                                        suspended.suspension,
+                                        IdleWake.INTERRUPT,
+                                    )
+                                    execution = self._runtime.resume(
+                                        suspended.suspension,
+                                        wake,
+                                    )
                         except BaseException as error:
                             self._cancel_failed_resume(suspended, error)
                             raise
@@ -368,10 +390,14 @@ class SimulatorSessionBackend:
                             "resumed semantic step count moved backwards"
                         )
                     semantic_steps = execution.semantic_steps - prior_steps
-                    if isinstance(execution, BlockedExecution):
+                    if isinstance(execution, (BlockedExecution, YieldedExecution)):
                         self._suspension = execution
                         self._reported_suspension_steps = execution.semantic_steps
-                        stop_reason = SemanticBatchStop.IDLE
+                        stop_reason = (
+                            SemanticBatchStop.IDLE
+                            if isinstance(execution, BlockedExecution)
+                            else SemanticBatchStop.YIELDED
+                        )
                     else:
                         self._suspension = None
                         self._reported_suspension_steps = 0
@@ -398,7 +424,7 @@ class SimulatorSessionBackend:
 
     def _cancel_failed_resume(
         self,
-        suspended: BlockedExecution,
+        suspended: BlockedExecution | YieldedExecution,
         original_error: BaseException,
     ) -> None:
         """Release a continuation still owned after a failed resume."""

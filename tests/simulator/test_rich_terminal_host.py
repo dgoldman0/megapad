@@ -14,6 +14,65 @@ from simulator.rich_terminal_host import (
 from simulator.runtime import MegaForthRuntime
 
 
+def test_host_quantum_publishes_and_resumes_without_an_interrupt() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b': POLL 65 EMIT BEGIN KEY? UNTIL KEY EMIT ;')
+    batches: list[bytes] = []
+    backend = SimulatorSessionBackend(
+        runtime,
+        legacy_output_sink=batches.append,
+        semantic_quantum_steps=64,
+    )
+    try:
+        first = backend.run_semantic_batch(entry="POLL", step_budget=1_000)
+        assert first.stop_reason is SemanticBatchStop.YIELDED
+        assert batches == [b"A"]
+        assert backend.suspended
+        assert not backend.waiting_for_interrupt
+        second = backend.run_semantic_batch()
+        assert second.stop_reason is SemanticBatchStop.YIELDED
+        assert second.semantic_steps > 0
+        assert second.external_events_applied == 0
+        backend.inject_legacy_uart_input(b"B")
+        final = backend.run_semantic_batch()
+        assert final.stop_reason is SemanticBatchStop.COMPLETED
+        assert batches == [b"A", b"B"]
+        assert not backend.suspended
+        assert runtime.main_context.data.snapshot() == ()
+        assert runtime.main_context.returns.snapshot() == ()
+    finally:
+        backend.close()
+
+
+def test_host_quantum_keeps_retained_publication_backpressure() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b': POLL BEGIN 65 EMIT AGAIN ;')
+    backend = SimulatorSessionBackend(
+        runtime,
+        legacy_output_sink=lambda payload: None,
+        semantic_quantum_steps=12,
+    )
+    lease = backend.attach_rich_terminal(_limits(high_batches=1, low_batches=0))
+    try:
+        first = backend.run_semantic_batch(entry="POLL", step_budget=1_000)
+        assert first.stop_reason is SemanticBatchStop.YIELDED
+        before = runtime.timer.counter
+        blocked = backend.run_semantic_batch()
+        assert blocked.stop_reason is SemanticBatchStop.HOST_BACKPRESSURE
+        assert blocked.semantic_steps == 0
+        assert runtime.timer.counter == before
+        delivery = lease.poll_egress().delivery
+        assert delivery is not None
+        assert delivery.batch.payload and set(delivery.batch.payload) == {65}
+        assert delivery.release() is AdmissionStatus.ACCEPTED
+        continued = backend.run_semantic_batch()
+        assert continued.stop_reason is SemanticBatchStop.YIELDED
+        assert continued.external_events_applied == 0
+    finally:
+        lease.close()
+        backend.close()
+
+
 def _limits(
     *,
     high_bytes: int = 16,
