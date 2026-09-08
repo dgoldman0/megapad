@@ -78,6 +78,15 @@ test-simulator:
 			$(VENV_PY) -m pytest $(SIMULATOR_TEST_PATH) \
 			$(PYTEST_CONFIG_ARGS) --tb=long $(if $(K),-k "$(K)",)
 
+# Native semantic execution is independent of the MP64 emulator accelerator.
+.PHONY: simulator-accel test-simulator-native
+simulator-accel:
+	$(VENV_PY) setup_simulator_accel.py build_ext --inplace
+
+test-simulator-native: simulator-accel
+	MEGAFORTH_EXECUTOR=native $(MAKE) test-simulator \
+		SIMULATOR_TEST_PATH="$(SIMULATOR_TEST_PATH)" $(if $(K),K="$(K)",)
+
 # --- Shared rich-terminal production-source oracles ---
 # The simulator selector stays accelerator-free for the tight development
 # loop. The emulator and combined selectors use the ordinary sequential

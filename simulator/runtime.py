@@ -9,6 +9,7 @@ compiled calls retain the execution token that was bound at compile time.
 from __future__ import annotations
 
 import operator
+import os
 import threading
 from collections import deque
 from contextlib import contextmanager
@@ -592,7 +593,15 @@ class MegaForthRuntime:
         timer: HostedTimerService | None = None,
         storage: HostedStorageService | None = None,
         install_core_words: bool = True,
+        execution_backend: str | None = None,
     ) -> None:
+        selected_backend = (
+            os.environ.get("MEGAFORTH_EXECUTOR", "python")
+            if execution_backend is None else execution_backend
+        )
+        if selected_backend not in ("python", "native", "auto"):
+            raise ValueError("execution backend must be python, native, or auto")
+        self._native_execution = None
         if memory is not None and not isinstance(memory, SparseAddressSpace):
             raise TypeError("memory must be a SparseAddressSpace or None")
         if diagnostics is not None and not isinstance(
@@ -768,7 +777,26 @@ class MegaForthRuntime:
             0,
         )
         self.dictionary.protect_current_prefix_from_numeric_rollback()
+        if selected_backend != "python":
+            from simulator.native_execution import NativeExecutor
+
+            self._native_execution = NativeExecutor.create(
+                self, required=selected_backend == "native",
+                admit_core=install_core_words,
+            )
         self.storage.claim()
+
+    @property
+    def execution_backend(self) -> str:
+        return "native" if self._native_execution is not None else "python"
+
+    @property
+    def native_execution_stats(self) -> dict[str, int]:
+        """Report native work without changing semantic diagnostic counters."""
+
+        if self._native_execution is None:
+            return {"entries": 0, "semantic_steps": 0, "plans": 0}
+        return self._native_execution.stats()
 
     def install_colon_accelerator(
         self,
@@ -808,6 +836,8 @@ class MegaForthRuntime:
             applicable=applicable,
             callback=callback,
         )
+        if self._native_execution is not None:
+            self._native_execution.invalidate()
 
     @property
     def provided_modules(self) -> frozenset[bytes]:
@@ -3698,6 +3728,19 @@ class MegaForthRuntime:
                 ip = int(continuation.ip)
                 continue
 
+            if self._native_execution is not None:
+                native_quantum = (
+                    quantum_limit if allow_idle
+                    and len(self._active_dispatches) == 1
+                    and not self._active_input_states else None
+                )
+                progressed = self._native_execution.run(
+                    current, ip, context, meter, native_quantum
+                )
+                if progressed is not None:
+                    current, ip = progressed
+                    continue
+
             operation = definition.operations[ip]
             meter.tick()
 
@@ -3822,6 +3865,8 @@ class MegaForthRuntime:
                     source_xt=current.xt,
                     entry_ip=operation.entry_ip,
                 )
+                if self._native_execution is not None:
+                    self._native_execution.invalidate()
                 ip += 1
             elif isinstance(operation, RestoreDataStackPointer):
                 context.data.restore_from_top()

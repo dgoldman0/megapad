@@ -141,6 +141,13 @@ class Dictionary:
         self._bindings: dict[bytes, list[Word]] = {}
         self._by_xt: dict[int, Word] = {}
         self._owner = object()
+        self._execution_generation = 0
+
+    @property
+    def execution_generation(self) -> int:
+        """Invalidate execution plans after definition publication or removal."""
+
+        return self._execution_generation
 
     @property
     def here(self) -> int:
@@ -260,6 +267,7 @@ class Dictionary:
         self._bindings.setdefault(key, []).append(word)
         self._by_xt[xt] = word
         self._here = allocation_limit
+        self._execution_generation += 1
         return word
 
     def definition_size(
@@ -585,6 +593,7 @@ class Dictionary:
             self._active_floor = active_floor
             self._active_limit = active_limit
         self._here = here
+        self._execution_generation += 1
 
     def _guard_mutation(self, operation: str) -> None:
         """Give the owning runtime one boundary for leasing dictionary state."""

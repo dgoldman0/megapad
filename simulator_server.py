@@ -182,6 +182,10 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
         print(
+            f"[shared] execution: {preparation.runtime.execution_backend} semantic",
+            flush=True,
+        )
+        print(
             "[shared] source acceleration: "
             + (
                 ", ".join(

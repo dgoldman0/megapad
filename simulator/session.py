@@ -412,6 +412,10 @@ class SimulatorSharedMachine(SharedMachine):
 
             result = {
                 "backend": "simulator",
+                "semantic_execution": {
+                    "backend": session.runtime.execution_backend,
+                    **session.runtime.native_execution_stats,
+                },
                 "generation": self._reset_generation,
                 "state": state,
                 "paused": self.paused,
