@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import signal
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,7 +117,9 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         external_size=args.ext_mem_mib << 20,
         vram_size=args.vram_mib << 20,
         hbw_size=_CANONICAL_HBW_MIB << 20,
+        initial_epoch_ms=time.time_ns() // 1_000_000,
     )
+    memory.mmio.rtc.bind_monotonic_clock(time.monotonic_ns)
     storage = HostedStorageService(image_path=storage_path)
     preparation = prepare_image_bootstrap(
         memory=memory,
@@ -166,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         preparation = prepared.preparation
         print(f"[shared] socket:  {server.socket_path}", flush=True)
         print("[shared] backend: simulator", flush=True)
+        print("[shared] clock:   realtime", flush=True)
         print(f"[shared] image:   {args.storage.resolve()}", flush=True)
         print(
             f"[shared] boot:    "

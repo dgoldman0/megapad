@@ -17,7 +17,11 @@ def _region_sizes(prepared) -> dict[AddressClass, int]:
     }
 
 
-def test_server_cli_builds_the_shared_semantic_facade(tmp_path) -> None:
+def test_server_cli_builds_the_shared_semantic_facade(tmp_path, monkeypatch) -> None:
+    now_ns = [7_000_000_000]
+    epoch_ms = 1_788_890_400_000
+    monkeypatch.setattr("simulator_server.time.time_ns", lambda: epoch_ms * 1_000_000)
+    monkeypatch.setattr("simulator_server.time.monotonic_ns", lambda: now_ns[0])
     image = tmp_path / "desktop-simulator.img"
     image.write_bytes(_boot_image())
     args = build_argument_parser().parse_args(
@@ -60,6 +64,9 @@ def test_server_cli_builds_the_shared_semantic_facade(tmp_path) -> None:
             96, 32
         )
         runtime = prepared.preparation.runtime
+        assert (runtime.rtc.uptime_ms, runtime.rtc.epoch_ms) == (0, epoch_ms)
+        now_ns[0] += 50_000_000
+        assert (runtime.rtc.uptime_ms, runtime.rtc.epoch_ms) == (50, epoch_ms + 50)
         for name, expected in (
             (b"AUTO-RUNS", 1),
             (b"AUTO-COLS", 96),

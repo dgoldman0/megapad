@@ -78,7 +78,8 @@ The implemented slices provide:
   latch state but no raw MMIO or interrupt delivery;
 - a runtime-local deterministic RTC epoch subwindow at `+0xB08..+0xB0F`, with
   explicit host set/advance controls, low-byte read latching, direct MMIO
-  access, and BIOS `EPOCH@`, but no automatic or wall-clock advancement;
+  access, and BIOS `EPOCH@`; deterministic by default, with an explicit
+  monotonic clock binding for the live server;
 - a retained one-core semantic tile service for four integer lane widths plus
   FP16/BF16, the source-required legacy and extended element, reduction,
   index, widening, multiply-accumulate, and transpose operations, low-byte
@@ -2479,7 +2480,14 @@ batching, and host profiling options are deliberately absent. Akashic can now
 build a distinct simulator image and launch the same viewer/session protocol.
 The existing overall connection deadline includes ordinary cold preparation;
 individual session RPCs retain their normal watchdog. An explicit semantic
-step budget covers autoexec plus the live entry cumulatively. Physical retained
+step budget covers autoexec plus the live entry cumulatively. Before source
+preparation, this interactive server seeds the RTC epoch from host UTC and
+binds uptime and epoch advancement to elapsed host-monotonic time. Ordinary
+`MS@` deadlines and shell ticks therefore progress during preparation and live
+polling, including time spent awaiting the viewer. Guest epoch writes and
+independent read latches retain their usual semantics. Standalone runtimes
+remain deterministic unless their caller explicitly binds a clock; this does
+not add timer interrupts or change semantic-step accounting. Physical retained
 offer and complete Desktop acceptance remain separate qualification evidence.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the

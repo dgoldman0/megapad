@@ -1,13 +1,16 @@
 """Deterministic hosted model of the admitted RTC clock subwindow.
 
 The read-only uptime and writable epoch registers are independent, latched
-64-bit millisecond clocks.  The service deliberately does not consult host
-wall time or model calendar, alarm, or control registers.  Host callers
-advance or replace either current value explicitly so source execution remains
-reproducible.
+64-bit millisecond clocks.  The default service advances only when its caller
+requests it.  A live server may explicitly bind a monotonic nanosecond source;
+elapsed host time then advances both current values without replacing guest
+epoch writes or changing the independent register latches.  Calendar, alarm,
+and control registers remain outside this service.
 """
 
 from __future__ import annotations
+
+from collections.abc import Callable
 
 from shared.cells import MASK64
 
@@ -47,6 +50,9 @@ class HostedRTCService:
         "_epoch_ms",
         "_uptime_latch",
         "_uptime_ms",
+        "_monotonic_ns",
+        "_last_monotonic_ns",
+        "_remainder_ns",
     )
 
     def __init__(
@@ -65,11 +71,55 @@ class HostedRTCService:
         )
         self._epoch_latch = 0
         self._uptime_latch = 0
+        self._monotonic_ns: Callable[[], int] | None = None
+        self._last_monotonic_ns = 0
+        self._remainder_ns = 0
+
+    def bind_monotonic_clock(self, clock_ns: Callable[[], int]) -> None:
+        """Opt into elapsed host time while preserving both current clocks.
+
+        The caller seeds the epoch before binding.  This source supplies only
+        monotonic elapsed nanoseconds, never a replacement wall-clock epoch.
+        Binding before boot also makes ordinary source-loading clock reads
+        progress, without a dispatcher or timer interrupt dependency.
+        """
+
+        if not callable(clock_ns):
+            raise TypeError("monotonic clock must be callable")
+        self._sync_clock()
+        now = self._require_monotonic_ns(clock_ns())
+        self._monotonic_ns = clock_ns
+        self._last_monotonic_ns = now
+
+    @staticmethod
+    def _require_monotonic_ns(value: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("monotonic nanoseconds must be an integer")
+        if value < 0:
+            raise ValueError("monotonic nanoseconds must be non-negative")
+        return value
+
+    def _sync_clock(self) -> None:
+        source = self._monotonic_ns
+        if source is None:
+            return
+        now = self._require_monotonic_ns(source())
+        if now < self._last_monotonic_ns:
+            raise ValueError("monotonic clock moved backwards")
+        elapsed_ms, remainder_ns = divmod(
+            now - self._last_monotonic_ns + self._remainder_ns,
+            1_000_000,
+        )
+        self._last_monotonic_ns = now
+        self._remainder_ns = remainder_ns
+        self._uptime_ms = (self._uptime_ms + elapsed_ms) & MASK64
+        self._epoch_ms = (self._epoch_ms + elapsed_ms) & MASK64
 
     @property
     def uptime_ms(self) -> int:
         """Return the current host-controlled uptime-millisecond value."""
 
+        self._sync_clock()
         return self._uptime_ms
 
     @property
@@ -82,6 +132,7 @@ class HostedRTCService:
     def epoch_ms(self) -> int:
         """Return the current host-controlled epoch-millisecond value."""
 
+        self._sync_clock()
         return self._epoch_ms
 
     @property
@@ -93,18 +144,22 @@ class HostedRTCService:
     def set_epoch_ms(self, value: int) -> None:
         """Replace the current deterministic epoch without changing the latch."""
 
-        self._epoch_ms = self._require_u64(
+        value = self._require_u64(
             value,
             label="epoch milliseconds",
         )
+        self._sync_clock()
+        self._epoch_ms = value
 
     def set_uptime_ms(self, value: int) -> None:
         """Replace deterministic uptime without changing either clock latch."""
 
-        self._uptime_ms = self._require_u64(
+        value = self._require_u64(
             value,
             label="uptime milliseconds",
         )
+        self._sync_clock()
+        self._uptime_ms = value
 
     def advance_ms(self, delta: int) -> None:
         """Advance the current epoch modulo the 64-bit register width."""
@@ -113,6 +168,7 @@ class HostedRTCService:
             raise TypeError("epoch advance must be a non-negative integer")
         if delta < 0:
             raise ValueError("epoch advance must be a non-negative integer")
+        self._sync_clock()
         self._epoch_ms = (self._epoch_ms + delta) & MASK64
 
     def advance_uptime_ms(self, delta: int) -> None:
@@ -122,6 +178,7 @@ class HostedRTCService:
             raise TypeError("uptime advance must be a non-negative integer")
         if delta < 0:
             raise ValueError("uptime advance must be a non-negative integer")
+        self._sync_clock()
         self._uptime_ms = (self._uptime_ms + delta) & MASK64
 
     def preflight(self, offset: int, width: int, *, write: bool) -> None:
@@ -160,6 +217,8 @@ class HostedRTCService:
         """Read one byte, latching its complete clock at the low byte."""
 
         self._require_byte_offset(offset, write=False)
+        if offset in (RTC_UPTIME, RTC_EPOCH):
+            self._sync_clock()
         if offset == RTC_UPTIME:
             self._uptime_latch = self._uptime_ms
         if offset < RTC_UPTIME_LIMIT:
@@ -185,6 +244,7 @@ class HostedRTCService:
             raise TypeError("RTC byte value must be an integer")
         if not 0 <= value <= 0xFF:
             raise ValueError("RTC byte value must be in range 0..255")
+        self._sync_clock()
         shift = (offset - RTC_EPOCH) * 8
         mask = 0xFF << shift
         self._epoch_ms = (self._epoch_ms & ~mask) | (value << shift)

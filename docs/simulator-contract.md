@@ -550,25 +550,28 @@ remain unimplemented. A future multicore profile must preserve publication
 order, generations, locks, and barriers, but it still does not qualify
 physical races or arbitration.
 
-Two eventual full-clock modes are permitted:
+Two clock policies are supported:
 
 - deterministic virtual uptime and epoch for tests and differential runs; and
-- host-monotonic pacing for interactive use.
+- elapsed host-monotonic uptime and epoch for interactive use.
 
-The currently admitted surface is narrower and implements neither automatic
-mode. One runtime-local deterministic epoch-millisecond register is routed at
-MMIO `+0xB08..+0xB0F`; it defaults to zero and changes only through explicit
-host set/advance operations or admitted direct MMIO writes. Host advance is
-nonnegative and wraps modulo 64 bits. Reading the low byte latches the current
-value, later byte reads use that latch, and `EPOCH@` reads the eight ascending
-little-endian bytes into one `u64`. Supported direct access widths are 1, 2, 4,
-or 8 bytes wholly contained in that subwindow. Writes change current register
-bytes without changing the prior read latch.
+The runtime-local RTC provides read-only uptime at MMIO `+0xB00..+0xB07`
+and writable epoch milliseconds at `+0xB08..+0xB0F`, consumed by `MS@` and
+`EPOCH@`. Both default to zero and explicit host advancement. Reading each
+low byte independently latches that complete clock; later byte reads use its
+latch. Supported direct access widths are 1, 2, 4, or 8 bytes wholly contained
+in one subwindow. Epoch writes change current register bytes without changing
+the prior read latch. Values wrap modulo 64 bits.
 
-This qualification does not admit `MS@`, uptime registers, calendar, alarm,
-control/status, automatic scheduler-driven advancement, realtime pacing, or
-host wall time. Those remain part of the future full-clock modes above.
-Simulator ticks are diagnostics, not MP64 cycles.
+The ordinary interactive server seeds epoch from host UTC and explicitly
+binds `HostedRTCService.bind_monotonic_clock` before source preparation.
+Elapsed whole milliseconds advance both current clocks, retaining fractional
+nanoseconds and guest epoch writes. This includes host stalls and permits
+ordinary source `MS@` polling and shell ticks to progress. Unbound runtimes
+remain deterministic. This clock binding neither injects timer interrupts nor
+derives time from semantic steps. Calendar, alarm, control/status, and physical
+cycle pacing remain outside this surface. Simulator ticks are diagnostics,
+not MP64 cycles.
 
 ## 6. Platform services
 
