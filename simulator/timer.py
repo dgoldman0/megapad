@@ -110,6 +110,40 @@ class HostedTimerService:
         if self._control & TIMER_AUTO_RELOAD:
             self._counter = 0
 
+    def advance_by(self, count: int) -> None:
+        """Advance unobserved ticks without iterating or changing match order.
+
+        The caller must flush the batch before any timer observation or control
+        change. Matching happens after incrementing, including when counter and
+        compare were already equal at the beginning of the batch.
+        """
+
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise TypeError("timer tick count must be a nonnegative integer")
+        if count < 0:
+            raise ValueError("timer tick count must be nonnegative")
+        if count == 0 or not self._control & TIMER_ENABLED:
+            return
+
+        modulus = UINT32_MASK + 1
+        until_match = (self._compare - self._counter) & UINT32_MASK
+        if until_match == 0:
+            until_match = modulus
+        if count < until_match:
+            self._counter = (self._counter + count) & UINT32_MASK
+            return
+
+        self._status |= TIMER_MATCHED
+        if self._control & TIMER_IRQ_ENABLED:
+            self._irq_pending = True
+        if self._control & TIMER_AUTO_RELOAD:
+            # After the first match the counter is zero. A zero compare takes
+            # a full wrap to match again; other compares are the reload period.
+            period = self._compare or modulus
+            self._counter = (count - until_match) % period
+        else:
+            self._counter = (self._counter + count) & UINT32_MASK
+
     def write_compare(self, value: int) -> None:
         """Atomically retain the low 32 bits of one guest cell."""
 

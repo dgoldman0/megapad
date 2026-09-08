@@ -122,6 +122,21 @@ class HostedDiagnosticsService:
         if self._perf_enabled:
             self._perf_cycles = u64(self._perf_cycles + 1)
 
+    def account_work_many(self, count: int) -> None:
+        """Count an unobserved batch with the same wrapping as individual work.
+
+        The caller must flush the batch before observing or changing diagnostic
+        state, including performance-counter resets.
+        """
+
+        if isinstance(count, bool) or not isinstance(count, int):
+            raise TypeError("semantic work count must be a nonnegative integer")
+        if count < 0:
+            raise ValueError("semantic work count must be nonnegative")
+        self._semantic_cycles = u64(self._semantic_cycles + count)
+        if self._perf_enabled:
+            self._perf_cycles = u64(self._perf_cycles + count)
+
     def account_tile_operation(self) -> None:
         """Count one completed hosted tile operation with cell wrapping."""
 
