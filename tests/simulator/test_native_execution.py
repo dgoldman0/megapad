@@ -15,7 +15,9 @@ from simulator.ir import Call, Literal, Return  # noqa: E402
 from simulator.memory import AddressClass  # noqa: E402
 from simulator.platform import create_one_core_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
-from simulator.stacks import Continuation, ReturnStackShapeError  # noqa: E402
+from simulator.stacks import (  # noqa: E402
+    Continuation, DataStack, ReturnStack, ReturnStackShapeError, StackOverflow,
+)
 from simulator.timer import HostedTimerService  # noqa: E402
 
 
@@ -403,7 +405,7 @@ def test_return_stack_user_words_still_reject_exposed_continuations(operation):
 
 def test_native_return_consumes_a_python_created_nonroot_continuation(monkeypatch):
     monkeypatch.setenv("MEGAFORTH_NATIVE_PROFILE", "1")
-    runtimes = _runtimes(b": INNER 1 65 EMIT 2 + ; : RUN INNER 4 + ;")
+    runtimes = _runtimes(b": INNER 1 65 EMIT 2 + ; : RUN ['] INNER EXECUTE 4 + ;")
     result = _compare(runtimes, "RUN")
     assert result["data"] == (7,)
     assert result["uart"] == b"A"
@@ -411,6 +413,27 @@ def test_native_return_consumes_a_python_created_nonroot_continuation(monkeypatc
     # After the EMIT fallback, INNER returns through the preexisting cookie
     # without another Python return. Only RUN's root return leaves native.
     assert exits["progress:Return"] == 1
+
+
+@pytest.mark.parametrize("operation", [b">R", b"R>", b"R@"])
+def test_scalar_return_stack_overflow_keeps_reference_partial_effects(operation):
+    source = b": RUN 17 1+ >R ;" if operation == b">R" else (
+        b": RUN 7 >R 17 " + operation + b" ;"
+    )
+    runtimes = _runtimes(source)
+    for runtime in runtimes:
+        context = runtime.main_context
+        if operation == b">R":
+            empty = context.returns.empty_pointer
+            context.returns = ReturnStack(memory=runtime.memory, floor=empty - 8,
+                                          empty_pointer=empty)
+        else:
+            empty = context.data.empty_pointer
+            context.data = DataStack(memory=runtime.memory, floor=empty - 8,
+                                     empty_pointer=empty)
+    result = _compare(runtimes, "RUN")
+    assert result["error"][0] is StackOverflow
+    assert result["data"] == (() if operation == b">R" else (17,))
 
 
 def test_user_push_equal_to_a_popped_cookie_erases_its_continuation_type():
