@@ -5,6 +5,13 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
+**Current checkpoint — September 12, 2026:** The isolated
+`simulator-improvements` branch passes the full ordinary source-mode rich
+Desktop journey on the native simulator, including Sound Lab. Scalar
+return-stack operations and ordinary preexisting continuations now stay native;
+AudioOut uses the shared PCM model. Native remains opt-in. The September 8
+measurements and failure description below are historical provenance.
+
 ## Build and select
 
 ```
@@ -58,6 +65,35 @@ The extension retains the GIL only for bounded execution intervals. Custom
 clock callbacks, custom semantic service types, or custom stack/memory types
 remain on the reference path so their observable behavior is preserved.
 See `simulator/accel/API.md` for the internal boundary.
+
+## Return-stack slice qualification — September 12, 2026
+
+The existing bounded CELL helper measured 1.696597s before versus 0.262753s
+after, a 6.457x improvement over the previous native executor. The after
+Python/native pair measured 4.545609s / 0.262753s (17.300x), preserving the same
+2,432,950 row-feed steps, 560 cells, committed frames and timer state. Successful
+native entries across the wider exercise fell from 176,413 to 6,185, with
+average intervals increasing from 13.0 to 400.2 steps. The optional profile
+confirms return-stack exits are gone; TRUE, UM*, loop control and CRC-FEED remain
+frequent boundaries. Their counts are not wall-time attribution.
+
+Sequential focused runtime, differential, stack, clock, source-overlay,
+CATCH/THROW, session, dual-backend terminal and audio checks passed. The
+physical run at MegaPad `4ac8c60` / Akashic `9c2977b` then passed all eleven
+milestones, twenty post-flip offer ACKs and fourteen revision-bound inputs.
+Initial/final CELL fallback passed. The first complete Desk ACK was 204.060423s,
+Daybook task-added was 335.927848s, and the final Sound Lab ACK was 497.698337s.
+The runner finished at 509.028191s; outer elapsed time was 511.819576s.
+
+The new Desk-to-Daybook interval is 131.867425s versus the earlier native
+213.876463s and emulator 91.962938s. Interactive execution still has room to
+improve. These historical physical runs are operational comparisons on shared
+hosts and different revisions, not controlled matched-head benchmarks.
+The full run used the unchanged 900s watchdog, ordinary checked cold source,
+and monitored resources: maximum sampled aggregate RSS 370,696 KiB and minimum
+system available memory about 9.8 GiB. No new Forth cache or timing shortcut was
+introduced. The complete artifact/validation ledger is paired Akashic
+`local_testing/evidence/simulator-improvements-20260912.md`.
 
 ## Initial qualification and measurement — September 8, 2026
 

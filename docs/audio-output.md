@@ -83,8 +83,10 @@ mixer, so it cannot accidentally reserve the audio device.
 
 Hosted simulator sessions expose deterministic headless capture. Their status
 probe at `0xFFFFFF0000000C01` now reports presence instead of an unsupported
-MMIO fault. This closes the focused AudioOut cause candidate from the September
-8 Desktop run; a fresh full journey is still required to qualify completion.
+MMIO fault. The September 12 native simulator Desktop acceptance passed the
+ordinary Sound Lab launch and final instrument frame, closing the previous
+failure stage. This is headless capture and software-viewer evidence; audible
+simulator playback remains unqualified. See `docs/simulator-native-execution.md`.
 
 ## Hardware direction
 
