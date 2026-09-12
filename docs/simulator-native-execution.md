@@ -31,7 +31,7 @@ off by default; profiled wall times are diagnostic, not throughput evidence.
 Snapshot counters at identical boundaries: the CELL helper's native counters
 cover begin/cursor/commit as well as the narrower timed row-write interval.
 
-## First admitted interval
+## Admitted native intervals
 
 The native compiler preserves the existing semantic IR indices and execution
 tokens. Native code performs arithmetic, branches, ordinary scalar memory,
@@ -44,9 +44,12 @@ Only identity-bound original BIOS primitives receive native implementations.
 
 Unsupported operations and unsafe or faulting spans return at their original
 IR boundary before any step or effect of that operation. Python then owns its
-normal fault ordering and partial effects. Existing/root/fault continuations,
-return-stack operations, counted loops, dynamic execution, stack-pointer
-operations, and device/service access initially remain in Python. Successful
+normal fault ordering and partial effects. Native now includes `>R`, `R>`, `R@`
+and ordinary continuations from preceding intervals. It checks continuation
+type and raw cookie, preserves type deletion even for equal-cookie user pushes,
+and leaves root/fault/stale continuation handling in Python. Pair return-stack
+operations, counted loops, dynamic execution, stack-pointer operations, and
+device/service access remain in Python. Successful
 native prefixes settle their exact watchdog, diagnostic, and timer counts
 before the next Python operation or host boundary. Native execution does not
 invent IDL, reset a budget, or admit external events between guest boundaries.

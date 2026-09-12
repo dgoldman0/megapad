@@ -19,6 +19,7 @@ enum Opcode : uint32_t {
     OP_STOP,
     OP_LITERAL, OP_BRANCH, OP_BRANCH_ZERO, OP_CALL, OP_RETURN,
     OP_STORE_VALUE, OP_STRING_LITERAL,
+    OP_R_PUSH, OP_R_POP, OP_R_PEEK,
     OP_PUSH_CELL, OP_FETCH_VALUE,
     OP_DUP, OP_DROP, OP_SWAP, OP_OVER, OP_NIP, OP_TUCK, OP_ROT, OP_MINUS_ROT,
     OP_TWO_DUP, OP_TWO_DROP, OP_TWO_OVER, OP_TWO_SWAP, OP_QUESTION_DUP, OP_PICK,
@@ -164,7 +165,7 @@ static Cell magnitude(Cell value) noexcept {
 }
 
 static unsigned cost(uint32_t opcode) noexcept {
-    return opcode >= OP_LITERAL && opcode <= OP_STRING_LITERAL ? 1 : 2;
+    return opcode >= OP_LITERAL && opcode <= OP_R_PEEK ? 1 : 2;
 }
 
 // Preflight all stack operands and all output storage before the operation.
@@ -221,8 +222,9 @@ private:
 
 class NativeProgram {
 public:
-    NativeProgram(const py::iterable& regions, Cell page_size)
-        : page_size_(page_size) {
+    NativeProgram(const py::iterable& regions, Cell page_size,
+                  py::object continuation_type)
+        : page_size_(page_size), continuation_type_(std::move(continuation_type)) {
         if (page_size == 0 || (page_size & (page_size - 1)) != 0)
             throw py::value_error("page size must be a positive power of two");
         for (py::handle item : regions) {
@@ -262,7 +264,8 @@ public:
     void clear() { plans_.clear(); }
 
     py::tuple run(Cell xt, Cell ip, const std::array<Cell, 3>& data_state,
-                  const py::tuple& return_state, Cell remaining_steps) {
+                  const py::tuple& return_state, const py::dict& continuations,
+                  Cell remaining_steps) {
         if (return_state.size() != 4)
             throw py::value_error("return state must contain four cells");
         RunState state{xt, ip, 0,
@@ -292,7 +295,7 @@ public:
                 if (operation.opcode == OP_STOP ||
                     cost(operation.opcode) > remaining_steps - state.steps)
                     break;
-                if (!execute(operation, memory, state))
+                if (!execute(operation, memory, state, continuations))
                     break;
                 state.steps += cost(operation.opcode);
             }
@@ -317,7 +320,41 @@ private:
             state.data.pointer, state.returns.pointer, state.cookie, updates);
     }
 
-    bool execute(const Instruction& operation, MemoryRun& memory, RunState& s) {
+    enum SlotKind { USER_CELL, CONTINUATION, PYTHON_BOUNDARY };
+
+    SlotKind return_slot(Cell slot, Cell raw, const RunState& s,
+                         const py::dict& continuations, ContinuationUpdate& value) {
+        const auto changed = s.changed.find(slot);
+        if (changed != s.changed.end()) {
+            value = changed->second;
+            if (value.caller == 0) return USER_CELL; // >R erased the old type.
+            return value.raw == raw ? CONTINUATION : PYTHON_BOUNDARY;
+        }
+        py::int_ key(slot);
+        PyObject* entry = PyDict_GetItemWithError(continuations.ptr(), key.ptr());
+        if (entry == nullptr) {
+            if (PyErr_Occurred()) throw py::error_already_set();
+            return USER_CELL;
+        }
+        if (!PyTuple_CheckExact(entry) || PyTuple_GET_SIZE(entry) != 2)
+            return PYTHON_BOUNDARY;
+        py::handle continuation(PyTuple_GET_ITEM(entry, 0));
+        if (reinterpret_cast<PyObject*>(Py_TYPE(continuation.ptr())) !=
+                continuation_type_.ptr())
+            return PYTHON_BOUNDARY;
+        // Mismatching bytes must undergo Python's ordinary stale-type removal.
+        // Root and fault returns retain their dispatcher-owned control effects.
+        if (py::cast<Cell>(py::handle(PyTuple_GET_ITEM(entry, 1))) != raw ||
+            continuation.attr("root").cast<bool>() ||
+            continuation.attr("fault_abort").cast<bool>())
+            return PYTHON_BOUNDARY;
+        value = ContinuationUpdate{continuation.attr("xt").cast<Cell>(),
+                                   continuation.attr("ip").cast<Cell>(), raw};
+        return CONTINUATION;
+    }
+
+    bool execute(const Instruction& operation, MemoryRun& memory, RunState& s,
+                 const py::dict& continuations) {
         const auto opcode = operation.opcode;
         StackOperation stack(memory, s.data);
         auto& v = stack.values;
@@ -359,14 +396,42 @@ private:
             return true;
         }
         case OP_RETURN: {
-            const auto found = s.changed.find(s.returns.pointer);
-            if (found == s.changed.end() || s.returns.depth() == 0 ||
+            ContinuationUpdate continuation;
+            if (s.returns.depth() == 0 ||
                 !memory.resolve(s.returns.pointer, 8, false, false, scalar) ||
-                scalar.read(8) != found->second.raw)
+                return_slot(s.returns.pointer, scalar.read(8), s, continuations,
+                            continuation) != CONTINUATION)
                 return false;
+            if (plans_.find(continuation.caller) == plans_.end()) return false;
             s.returns.pointer += 8;
-            s.xt = found->second.caller;
-            s.ip = found->second.ip;
+            s.xt = continuation.caller;
+            s.ip = continuation.ip;
+            return true;
+        }
+        case OP_R_PUSH: {
+            if (!stack.inputs(1) || !stack.outputs(0) ||
+                s.returns.pointer - s.returns.floor < 8) return false;
+            const Cell slot = s.returns.pointer - 8;
+            if (!memory.resolve(slot, 8, true, false, scalar)) return false;
+            // A user push deletes type metadata even when its value happens to
+            // equal the old cookie. Retain that deletion across native exits.
+            s.changed.insert_or_assign(slot, ContinuationUpdate{0, 0, 0});
+            scalar.write(v[0], 8);
+            s.returns.pointer = slot;
+            stack.commit();
+            ++s.ip;
+            return true;
+        }
+        case OP_R_POP: case OP_R_PEEK: {
+            ContinuationUpdate continuation;
+            if (!stack.inputs(0) || !stack.outputs(1) || s.returns.depth() == 0 ||
+                !memory.resolve(s.returns.pointer, 8, false, false, scalar) ||
+                return_slot(s.returns.pointer, scalar.read(8), s, continuations,
+                            continuation) != USER_CELL) return false;
+            out[0] = scalar.read(8);
+            if (opcode == OP_R_POP) s.returns.pointer += 8;
+            stack.commit();
+            ++s.ip;
             return true;
         }
         case OP_LITERAL: case OP_PUSH_CELL:
@@ -547,6 +612,7 @@ private:
     }
 
     Cell page_size_;
+    py::object continuation_type_;
     std::vector<Region> regions_;
     std::unordered_map<Cell, std::vector<Instruction>> plans_;
 };
@@ -555,16 +621,19 @@ private:
 PYBIND11_MODULE(_megaforth_native, module) {
     module.doc() = "Native execution of generic hosted Forth semantic plans";
     py::class_<NativeProgram>(module, "NativeProgram")
-        .def(py::init<const py::iterable&, Cell>(), py::arg("regions"), py::arg("page_size"))
+        .def(py::init<const py::iterable&, Cell, py::object>(), py::arg("regions"),
+             py::arg("page_size"), py::arg("continuation_type"))
         .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"))
         .def("clear", &NativeProgram::clear)
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
-             py::arg("data_state"), py::arg("return_state"), py::arg("remaining_steps"));
+             py::arg("data_state"), py::arg("return_state"),
+             py::arg("continuations"), py::arg("remaining_steps"));
 #define EXPORT_OPCODE(name) module.attr(#name) = py::int_(static_cast<uint32_t>(name))
     EXPORT_OPCODE(OP_STOP);
     EXPORT_OPCODE(OP_LITERAL); EXPORT_OPCODE(OP_BRANCH); EXPORT_OPCODE(OP_BRANCH_ZERO);
     EXPORT_OPCODE(OP_CALL); EXPORT_OPCODE(OP_RETURN); EXPORT_OPCODE(OP_STORE_VALUE);
     EXPORT_OPCODE(OP_STRING_LITERAL); EXPORT_OPCODE(OP_PUSH_CELL); EXPORT_OPCODE(OP_FETCH_VALUE);
+    EXPORT_OPCODE(OP_R_PUSH); EXPORT_OPCODE(OP_R_POP); EXPORT_OPCODE(OP_R_PEEK);
     py::dict primitives;
 #define PRIMITIVE(word, name) EXPORT_OPCODE(name); primitives[py::bytes(word)] = py::int_(static_cast<uint32_t>(name))
     PRIMITIVE("DUP", OP_DUP); PRIMITIVE("DROP", OP_DROP); PRIMITIVE("SWAP", OP_SWAP);

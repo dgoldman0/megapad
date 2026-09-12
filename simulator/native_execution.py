@@ -39,6 +39,7 @@ class NativeExecutor:
             [(region.spec.base, region.spec.size, region.pages)
              for region in runtime.memory._regions],
             runtime.memory.page_size,
+            Continuation,
         )
         # Only original installed BIOS callbacks may become native primitives.
         # Later same-named host callbacks and source definitions keep their XT.
@@ -164,6 +165,12 @@ class NativeExecutor:
                     item = (op.OP_BRANCH_ZERO, instruction.target, 0)
                 elif isinstance(instruction, ir.Return):
                     item = (op.OP_RETURN, 0, 0)
+                elif isinstance(instruction, ir.RPush):
+                    item = (op.OP_R_PUSH, 0, 0)
+                elif isinstance(instruction, ir.RPop):
+                    item = (op.OP_R_POP, 0, 0)
+                elif isinstance(instruction, ir.RPeek):
+                    item = (op.OP_R_PEEK, 0, 0)
                 elif isinstance(instruction, ir.StoreValue):
                     item = (op.OP_STORE_VALUE, instruction.address, 0)
                 elif isinstance(instruction, ir.PushStringLiteral):
@@ -196,6 +203,7 @@ class NativeExecutor:
             (data._floor, data._empty_pointer, data._pointer),
             (returns._floor, returns._empty_pointer, returns._pointer,
              returns._continuation_cookie),
+            returns._continuations,
             allowance,
         )
         xt, resumed_ip, steps, data_pointer, return_pointer, cookie, updates = result
@@ -208,9 +216,12 @@ class NativeExecutor:
         # Native writes include popped slots. Their metadata must survive too:
         # a later RP! may restore a previously captured frontier.
         for slot, caller_xt, return_ip, raw in updates:
-            returns._continuations[slot] = (
-                Continuation(caller_xt, return_ip), raw
-            )
+            if caller_xt == 0:
+                returns._continuations.pop(slot, None)
+            else:
+                returns._continuations[slot] = (
+                    Continuation(caller_xt, return_ip), raw
+                )
         data._pointer = data_pointer
         returns._pointer = return_pointer
         returns._continuation_cookie = cookie

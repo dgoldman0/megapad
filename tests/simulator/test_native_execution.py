@@ -377,6 +377,67 @@ def test_unknown_callback_keeps_partial_memory_stack_and_output_effects():
     assert result["uart"] == b"prefix"
 
 
+def test_return_stack_work_stays_in_one_native_interval():
+    runtimes = _runtimes(
+        b": INNER 11 >R R@ 2 * R> + ; : RUN 7 >R INNER R> + ;"
+    )
+    before = runtimes[1].native_execution_stats["entries"]
+    result = _compare(runtimes, "RUN")
+    assert result["data"] == (40,)
+    assert result["error"] is None
+    assert runtimes[1].native_execution_stats["entries"] - before == 1
+
+
+@pytest.mark.parametrize("budget", range(1, 25))
+def test_each_return_stack_budget_boundary_matches_python_partial_effects(budget):
+    runtimes = _runtimes(b": INNER 7 >R R@ R> + ; : RUN 5 >R INNER R> + ;")
+    _compare(runtimes, "RUN", step_budget=budget, require_native=False)
+
+
+@pytest.mark.parametrize("operation", [b"R@", b"R>"])
+def test_return_stack_user_words_still_reject_exposed_continuations(operation):
+    runtimes = _runtimes(b": RUN 17 1+ " + operation + b" ;")
+    result = _compare(runtimes, "RUN")
+    assert result["error"][0] is ReturnStackShapeError
+
+
+def test_native_return_consumes_a_python_created_nonroot_continuation(monkeypatch):
+    monkeypatch.setenv("MEGAFORTH_NATIVE_PROFILE", "1")
+    runtimes = _runtimes(b": INNER 1 65 EMIT 2 + ; : RUN INNER 4 + ;")
+    result = _compare(runtimes, "RUN")
+    assert result["data"] == (7,)
+    assert result["uart"] == b"A"
+    exits = runtimes[1].native_execution_stats["profile"]["exits"]
+    # After the EMIT fallback, INNER returns through the preexisting cookie
+    # without another Python return. Only RUN's root return leaves native.
+    assert exits["progress:Return"] == 1
+
+
+def test_user_push_equal_to_a_popped_cookie_erases_its_continuation_type():
+    runtimes = _runtimes(
+        b"VARIABLE SLOT : SAVE RP@ SLOT ! ; "
+        b": RUN SAVE SLOT @ @ >R R@ R> = ;"
+    )
+    result = _compare(runtimes, "RUN")
+    assert result["data"] == (TRUE,)
+    assert result["error"] is None
+    for runtime in runtimes:
+        address = runtime.memory.read64(runtime.dictionary.find("SLOT").body_address)
+        assert address not in runtime.main_context.returns._continuations
+
+
+def test_native_allowance_preserves_return_cells_and_continuations():
+    runtimes = _runtimes(
+        b": INNER 7 >R 1500 BEGIN DUP WHILE 1- REPEAT DROP R> ; "
+        b": RUN INNER 3 + ;"
+    )
+    before = runtimes[1].native_execution_stats["entries"]
+    result = _compare(runtimes, "RUN")
+    assert result["data"] == (10,)
+    assert result["error"] is None
+    assert runtimes[1].native_execution_stats["entries"] - before >= 2
+
+
 def test_counted_loop_fallback_keeps_native_callee_continuations():
     runtimes = _runtimes(b": DOUBLE 2 * ; : RUN 0 8 0 DO I DOUBLE + LOOP ;")
     result = _compare(runtimes, "RUN")

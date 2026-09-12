@@ -1,6 +1,6 @@
 # Native semantic execution boundary
 
-`_megaforth_native.NativeProgram(regions, page_size)` retains the ordinary
+`_megaforth_native.NativeProgram(regions, page_size, continuation_type)` retains the ordinary
 regions as `(base, size, pages)` triples. `pages` is the existing sparse
 region's dictionary of page index to fixed-size bytearray. The executor holds
 the GIL and uses those same bytearrays; there is no copied guest address space.
@@ -11,27 +11,34 @@ indices. `clear()` drops all plans. The Python owner invalidates plans for
 dictionary publication/rollback and mutable execution bindings. Opcode
 constants are exported with the `OP_` prefix.
 
-`run(xt, ip, data_state, return_state, remaining_steps)` accepts:
+`run(xt, ip, data_state, return_state, continuations, remaining_steps)` accepts:
 
 - `data_state = (floor, empty_pointer, pointer)`;
 - `return_state = (floor, empty_pointer, pointer, continuation_cookie)`;
+- the return stack's ordinary slot-to-`(Continuation, raw_cookie)` dictionary;
 - a nonnegative allowance in the existing semantic-step units.
 
 It returns `(xt, ip, completed_steps, data_pointer, return_pointer,
 continuation_cookie, continuation_updates)`. Each continuation update is
 `(slot_address, caller_xt, return_ip, raw_cookie)`. The Python owner installs
 these as ordinary non-root, non-fault continuations, preserving updates to
-already-popped slots, and updates the stack pointers and cookie counter.
+already-popped slots, and updates the stack pointers and cookie counter. A zero
+`caller_xt` is a type deletion from a user push, including one that wrote the
+same raw value as the previous cookie. Zero is never a valid colon XT.
 
 Native colon calls write exact opaque continuation cookies into the shared
-return-stack bytes. Native returns consume only continuations created during
-that invocation; preexisting continuations remain owned by the Python
-dispatcher. The first slice excludes return-stack operations, DO/LOOP,
+return-stack bytes. Native returns can also consume preexisting ordinary
+continuations, read lazily from the same dictionary and verified against shared
+bytes and the exact `continuation_type`. Root/fault returns and stale metadata
+return to Python before mutation. `>R`, `R>`, and `R@` use the single ordered
+return stack; exposed continuations are never mistaken for user cells or loop
+indices. Native still excludes pair return-stack operations, DO/LOOP,
 stack-pointer introspection/restoration, dynamic execution, services, and any
 ordinary memory access intersecting the return-stack backing interval.
 
 `OP_LITERAL`, `OP_BRANCH`, `OP_BRANCH_ZERO`, `OP_CALL`, `OP_RETURN`,
-`OP_STORE_VALUE`, and `OP_STRING_LITERAL` cost one semantic step. `OP_PUSH_CELL`
+`OP_STORE_VALUE`, `OP_STRING_LITERAL`, `OP_R_PUSH`, `OP_R_POP`, and `OP_R_PEEK`
+cost one semantic step. `OP_PUSH_CELL`
 (constant or plain created-body address), `OP_FETCH_VALUE`, and admitted
 primitive-call operations cost two. `OP_STOP` is uncharged. `a` holds the
 literal, branch IP, called XT, or data address where applicable;
