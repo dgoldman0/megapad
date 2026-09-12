@@ -329,6 +329,13 @@ class DataStack:
         if self._memory is None:
             assert self._cells is not None
             return tuple(self._cells)
+        if type(self) is DataStack and type(self._memory) is SparseAddressSpace:
+            assert self._memory_view is not None
+            assert self._pointer is not None
+            # All active cells are inside the constructor-qualified backing.
+            # Decode pages in bulk, retaining the exact full snapshot used by
+            # suspension mutation checks. Custom stacks keep their peek path.
+            return self._memory_view.read_cells(self._pointer, self.depth())[::-1]
         return tuple(
             self.peek(offset)
             for offset in range(self.depth() - 1, -1, -1)
@@ -688,6 +695,15 @@ class ReturnStack:
         if self._memory is None:
             assert self._entries is not None
             return tuple(self._entries)
+        if type(self) is ReturnStack and type(self._memory) is SparseAddressSpace:
+            assert self._memory_view is not None
+            assert self._pointer is not None
+            assert self._empty_pointer is not None
+            cells = self._memory_view.read_cells(self._pointer, self.depth())[::-1]
+            return tuple(
+                self._decode_entry(self._empty_pointer - (index + 1) * CELL_BYTES, raw)
+                for index, raw in enumerate(cells)
+            )
         return tuple(
             self._peek_entry(offset, "snapshot")
             for offset in range(self.depth() - 1, -1, -1)
@@ -794,6 +810,9 @@ class ReturnStack:
         assert self._memory_view is not None
         address = self._pointer + offset * CELL_BYTES
         raw = self._memory_view.read64(address)
+        return self._decode_entry(address, raw)
+
+    def _decode_entry(self, address: int, raw: int) -> ReturnEntry:
         typed = self._continuations.get(address)
         if typed is None:
             return raw

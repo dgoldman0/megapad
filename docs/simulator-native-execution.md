@@ -70,6 +70,13 @@ clock callbacks, custom semantic service types, or custom stack/memory types
 remain on the reference path so their observable behavior is preserved.
 See `simulator/accel/API.md` for the internal boundary.
 
+Host suspension snapshots decode the complete active stack span in bulk from
+the already-qualified sparse backing. Return snapshots still validate every
+active continuation cookie and remove stale metadata; resumed execution still
+compares every data and return entry. Stack bounds, host quanta, and raw-memory
+mutation detection are unchanged. This improvement also serves the Python
+executor; custom stack and memory types retain scalar snapshot dispatch.
+
 ## Return-stack slice qualification — September 12, 2026
 
 The existing bounded CELL helper measured 1.696597s before versus 0.262753s

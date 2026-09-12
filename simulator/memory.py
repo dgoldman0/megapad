@@ -274,7 +274,7 @@ class _SparseRegion:
 
 
 class _QualifiedOrdinarySpan:
-    """Trusted scalar access into one already-qualified ordinary region."""
+    """Trusted scalar and cell-span access into an already-qualified region."""
 
     __slots__ = ("_base", "_offset", "_region")
 
@@ -294,6 +294,12 @@ class _QualifiedOrdinarySpan:
             self._offset + address - self._base,
             8,
         )
+
+    def read_cells(self, address: int, count: int) -> tuple[int, ...]:
+        """Decode an internal caller-bounded span in ascending address order."""
+
+        payload = self._region.read(self._offset + address - self._base, count * 8)
+        return struct.unpack(f"<{count}Q", payload)
 
     def write64(self, address: int, value: int) -> None:
         self._region.write_integer(
