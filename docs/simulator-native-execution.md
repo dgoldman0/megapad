@@ -5,8 +5,8 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 12, 2026:** The isolated
-`simulator-improvements` branch passes the full ordinary source-mode rich
+**Current checkpoint — September 12, 2026:** The `simulator-improvements`
+work is merged into local `main` and passes the full ordinary source-mode rich
 Desktop journey on the native simulator, including Sound Lab. The final
 unprofiled run at `08b37d5` completed in 185.862s, versus 511.820s before
 the follow-up. Counted loops and additional scalar primitives stay native,
@@ -14,6 +14,14 @@ stack snapshots decode in bulk, scalar memory resolves each page fragment once,
 and forward dictionary publication avoids quadratic header scans. AudioOut
 uses the shared PCM model. Native remains opt-in. The September 8
 measurements and failure description below are historical provenance.
+
+Both paired simulator worktrees were retired after their committed heads were
+fast-forwarded into main and all ignored artifacts were preserved and verified.
+The native extension was rebuilt in MegaPad main; 207 focused simulator checks
+and 87 Akashic acceptance-runner checks passed sequentially. The full Desktop
+qualification above is inherited from the identical implementation, with its
+raw evidence now under Akashic main's
+`local_testing/out/simulator-improvements-20260912/`.
 
 ## Build and select
 
