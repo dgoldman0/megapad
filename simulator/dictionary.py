@@ -138,6 +138,7 @@ class Dictionary:
         self._here = self._start_address
         self._numeric_rollback_floor = self._start_address
         self._definitions: list[Word] = []
+        self._header_limit = 0
         self._bindings: dict[bytes, list[Word]] = {}
         self._by_xt: dict[int, Word] = {}
         self._owner = object()
@@ -232,14 +233,18 @@ class Dictionary:
             # but keep the execution-token invariant explicit at publication.
             raise OverflowError("dictionary definition produced execution token zero")
 
-        for live_word in self._definitions:
-            if (
-                header_address < live_word.body_address
-                and live_word.header_address < allocation_limit
-            ):
-                raise ValueError(
-                    "dictionary definition would overlap a live header or code slot"
-                )
+        # Normal forward publication is beyond every immutable live header.
+        # Rewinds and switches to lower arenas retain the full overlap proof,
+        # including a new definition's initial body crossing a later header.
+        if header_address < self._header_limit:
+            for live_word in self._definitions:
+                if (
+                    header_address < live_word.body_address
+                    and live_word.header_address < allocation_limit
+                ):
+                    raise ValueError(
+                        "dictionary definition would overlap a live header or code slot"
+                    )
 
         link = self.latest
         flags_length = len(raw_name) | (IMMEDIATE_FLAG if immediate else 0)
@@ -266,6 +271,7 @@ class Dictionary:
         self._definitions.append(word)
         self._bindings.setdefault(key, []).append(word)
         self._by_xt[xt] = word
+        self._header_limit = max(self._header_limit, word.body_address)
         self._here = allocation_limit
         self._execution_generation += 1
         return word
@@ -587,6 +593,10 @@ class Dictionary:
             del self._by_xt[word.xt]
 
         del self._definitions[depth:]
+        if removed:
+            self._header_limit = max(
+                (word.body_address for word in self._definitions), default=0
+            )
         if active_floor is not None:
             if active_limit is None:
                 raise AssertionError("rollback zone limit is missing")

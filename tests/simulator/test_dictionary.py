@@ -321,6 +321,56 @@ def test_definition_after_rewind_cannot_overlap_a_live_header_or_code_slot() -> 
     assert memory.read_bytes(live.header_address, len(header)) == header
 
 
+def test_overlap_protection_uses_all_arenas_when_latest_header_is_lower() -> None:
+    memory = SparseAddressSpace(bank0_size=0x8000)
+    dictionary = Dictionary(start_address=0x1000, memory=memory)
+    dictionary.define("FIRST")
+    dictionary.move_here(0x6000, floor=0x1000, limit=0x8000)
+    high = dictionary.define("HIGH")
+    dictionary.move_here(0x2000, floor=0x1000, limit=0x8000)
+    low = dictionary.define("LOW")
+    dictionary.move_here(high.header_address + 1, floor=0x1000, limit=0x8000)
+    before = memory.read_bytes(high.header_address, high.body_address - high.header_address)
+    with pytest.raises(ValueError, match="overlap a live"):
+        dictionary.define("REJECTED")
+    assert dictionary.latest_word is low
+    assert dictionary.find("REJECTED") is None
+    assert memory.read_bytes(high.header_address, len(before)) == before
+
+
+def test_initial_body_cannot_cross_a_later_live_header_after_rewind() -> None:
+    memory = SparseAddressSpace(bank0_size=0x8000)
+    dictionary = Dictionary(start_address=0x1000, memory=memory)
+    dictionary.define("FIRST")
+    dictionary.move_here(0x1400, floor=0x1000, limit=0x8000)
+    later = dictionary.define("LATER")
+    dictionary.move_here(0x1200, floor=0x1000, limit=0x8000)
+    before = memory.read_bytes(0x1200, 0x300)
+    with pytest.raises(ValueError, match="overlap a live"):
+        dictionary.define("CROSSING", initial_body=bytes(0x250))
+    assert dictionary.latest_word is later
+    assert dictionary.here == 0x1200
+    assert memory.read_bytes(0x1200, 0x300) == before
+
+
+def test_header_bound_follows_rollback_and_latest_reset_across_arenas() -> None:
+    memory = SparseAddressSpace(bank0_size=0x8000)
+    dictionary = Dictionary(start_address=0x1000, memory=memory)
+    first = dictionary.define("FIRST")
+    checkpoint = dictionary.checkpoint()
+    dictionary.move_here(0x6000, floor=0x1000, limit=0x8000)
+    removed = dictionary.define("REMOVED")
+    dictionary.rollback(checkpoint)
+    dictionary.move_here(removed.header_address, floor=0x1000, limit=0x8000)
+    replacement = dictionary.define("REUSED")
+    dictionary.set_latest(first.header_address)
+    dictionary.move_here(replacement.header_address, floor=0x1000, limit=0x8000)
+    assert dictionary.define("AGAIN").header_address == removed.header_address
+    dictionary.move_here(first.header_address, floor=0x1000, limit=0x8000)
+    with pytest.raises(ValueError, match="overlap a live"):
+        dictionary.define("REJECTED")
+
+
 def test_memory_backed_dictionary_rejects_unmapped_start_and_region_overrun() -> None:
     memory = SparseAddressSpace(bank0_size=0x1020)
 

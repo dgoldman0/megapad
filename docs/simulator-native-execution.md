@@ -77,6 +77,13 @@ compares every data and return entry. Stack bounds, host quanta, and raw-memory
 mutation detection are unchanged. This improvement also serves the Python
 executor; custom stack and memory types retain scalar snapshot dispatch.
 
+Dictionary publication maintains the highest live header/code-slot end. A
+new definition starting at or above that bound cannot overlap an existing
+header, so forward source loading avoids a full dictionary scan per word.
+Lower-address publication retains the original complete overlap check,
+including the new initial body, and rollback recomputes the live bound.
+This changes source-preparation cost without caching any compiled Forth.
+
 ## Return-stack slice qualification — September 12, 2026
 
 The existing bounded CELL helper measured 1.696597s before versus 0.262753s
