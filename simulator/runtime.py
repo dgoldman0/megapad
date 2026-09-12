@@ -791,7 +791,7 @@ class MegaForthRuntime:
         return "native" if self._native_execution is not None else "python"
 
     @property
-    def native_execution_stats(self) -> dict[str, int]:
+    def native_execution_stats(self) -> dict[str, object]:
         """Report native work without changing semantic diagnostic counters."""
 
         if self._native_execution is None:

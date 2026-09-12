@@ -6,6 +6,10 @@ metadata, and semantic clocks settled before Python resumes that operation.
 """
 from __future__ import annotations
 
+from collections import Counter
+import os
+from time import perf_counter_ns
+
 from simulator import ir
 from simulator import runtime as rt
 from simulator.diagnostics import HostedDiagnosticsService
@@ -48,6 +52,10 @@ class NativeExecutor:
         self.plans = {}
         self.entries = 0
         self.semantic_steps = 0
+        self.profile_enabled = os.environ.get("MEGAFORTH_NATIVE_PROFILE") == "1"
+        self.exit_counts = Counter()
+        self.native_run_ns = 0
+        self.settlement_ns = 0
 
     def invalidate(self):
         self.program.clear()
@@ -55,8 +63,32 @@ class NativeExecutor:
         self.generation = self.runtime.dictionary.execution_generation
 
     def stats(self):
-        return {"entries": self.entries, "semantic_steps": self.semantic_steps,
-                "plans": len(self.plans)}
+        result = {"entries": self.entries, "semantic_steps": self.semantic_steps,
+                  "plans": len(self.plans)}
+        if self.profile_enabled:
+            result["profile"] = {
+                "exits": dict(self.exit_counts),
+                "native_run_ns": self.native_run_ns,
+                "settlement_ns": self.settlement_ns,
+            }
+        return result
+
+    def _profile_exit(self, xt, ip, steps, allowance):
+        if steps == allowance:
+            reason = "allowance"
+        else:
+            word = self.runtime._resolve_dispatch_word(xt)
+            operations = word.implementation.operations
+            if ip >= len(operations):
+                reason = "end_of_plan"
+            else:
+                instruction = operations[ip]
+                reason = type(instruction).__name__
+                if isinstance(instruction, ir.Call):
+                    target = self.runtime.dictionary._by_xt.get(instruction.xt)
+                    if target is not None:
+                        reason += ":" + target.name.decode("ascii", errors="replace")
+        self.exit_counts[("progress:" if steps else "empty:") + reason] += 1
 
     def _admitted_context(self, context, meter):
         runtime = self.runtime
@@ -158,6 +190,7 @@ class NativeExecutor:
         self._prepare(current)
         data = context.data
         returns = context.returns
+        started = perf_counter_ns() if self.profile_enabled else 0
         result = self.program.run(
             current.xt, ip,
             (data._floor, data._empty_pointer, data._pointer),
@@ -166,6 +199,10 @@ class NativeExecutor:
             allowance,
         )
         xt, resumed_ip, steps, data_pointer, return_pointer, cookie, updates = result
+        if self.profile_enabled:
+            self.native_run_ns += perf_counter_ns() - started
+            self._profile_exit(xt, resumed_ip, steps, allowance)
+            started = perf_counter_ns()
         if not steps:
             return None
         # Native writes include popped slots. Their metadata must survive too:
@@ -182,4 +219,6 @@ class NativeExecutor:
         self.runtime.timer.advance_by(steps)
         self.entries += 1
         self.semantic_steps += steps
+        if self.profile_enabled:
+            self.settlement_ns += perf_counter_ns() - started
         return self.runtime._resolve_dispatch_word(xt), resumed_ip

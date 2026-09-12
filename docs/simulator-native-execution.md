@@ -22,6 +22,15 @@ native work counters; these are separate from semantic diagnostic counters.
 No Forth source cache, terminal-specific replacement, guest timing weakening,
 new applet path, or enlarged watchdog is part of this work.
 
+Set `MEGAFORTH_NATIVE_PROFILE=1` for diagnostic exit counts and elapsed native
+call/settlement nanoseconds in `native_execution_stats["profile"]`. Counts name
+the original unexecuted IR boundary (and target word for calls), including
+zero-progress attempts. An exit at a two-step operation with only one remaining
+step may reflect the allowance rather than unsupported coverage. Profiling is
+off by default; profiled wall times are diagnostic, not throughput evidence.
+Snapshot counters at identical boundaries: the CELL helper's native counters
+cover begin/cursor/commit as well as the narrower timed row-write interval.
+
 ## First admitted interval
 
 The native compiler preserves the existing semantic IR indices and execution

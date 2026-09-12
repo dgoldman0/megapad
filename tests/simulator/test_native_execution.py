@@ -94,6 +94,18 @@ def test_nested_arithmetic_and_branches_preserve_steps_and_backed_stacks():
     assert result["clock"] == (0, 0)
 
 
+def test_opt_in_profile_reports_original_exit_boundaries_without_guest_effects(monkeypatch):
+    monkeypatch.setenv("MEGAFORTH_NATIVE_PROFILE", "1")
+    runtimes = _runtimes(b": RUN 7 >R R@ R> + ;")
+    result = _compare(runtimes, "RUN")
+    assert result["data"] == (14,)
+    profile = runtimes[1].native_execution_stats["profile"]
+    assert sum(profile["exits"].values()) >= 1
+    assert profile["native_run_ns"] > 0
+    assert profile["settlement_ns"] > 0
+    assert any(key.endswith("Return") for key in profile["exits"])
+
+
 @pytest.mark.parametrize("budget", [1, 2, 3])
 def test_call_budget_keeps_separate_ir_and_primitive_ticks(budget):
     runtimes = _runtimes(b": RUN DUP ;")
