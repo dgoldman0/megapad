@@ -461,7 +461,7 @@ def test_native_allowance_preserves_return_cells_and_continuations():
     assert runtimes[1].native_execution_stats["entries"] - before >= 2
 
 
-def test_counted_loop_fallback_keeps_native_callee_continuations():
+def test_counted_loop_keeps_native_callee_continuations():
     runtimes = _runtimes(b": DOUBLE 2 * ; : RUN 0 8 0 DO I DOUBLE + LOOP ;")
     result = _compare(runtimes, "RUN")
     assert result["error"] is None

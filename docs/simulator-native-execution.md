@@ -54,8 +54,12 @@ IR boundary before any step or effect of that operation. Python then owns its
 normal fault ordering and partial effects. Native now includes `>R`, `R>`, `R@`
 and ordinary continuations from preceding intervals. It checks continuation
 type and raw cookie, preserves type deletion even for equal-cookie user pushes,
-and leaves root/fault/stale continuation handling in Python. Pair return-stack
-operations, counted loops, dynamic execution, stack-pointer operations, and
+and leaves root/fault/stale continuation handling in Python. Counted
+`DO`/`?DO`/`LOOP`/`+LOOP`/`UNLOOP` operations and identity-bound `I`/`J`
+now use the same native ordered return stack. `+LOOP` preserves the BIOS
+modular equality rule, including zero increments and limit crossings.
+Identity-bound `TRUE`, `FALSE`, `CELLS`, and `UM*` also stay native.
+Pair return-stack operations, dynamic execution, stack-pointer operations, and
 device/service access remain in Python. Successful
 native prefixes settle their exact watchdog, diagnostic, and timer counts
 before the next Python operation or host boundary. Native execution does not

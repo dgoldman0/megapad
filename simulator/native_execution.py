@@ -171,6 +171,16 @@ class NativeExecutor:
                     item = (op.OP_R_POP, 0, 0)
                 elif isinstance(instruction, ir.RPeek):
                     item = (op.OP_R_PEEK, 0, 0)
+                elif isinstance(instruction, ir.Do):
+                    item = (op.OP_DO, 0, 0)
+                elif isinstance(instruction, ir.QuestionDo):
+                    item = (op.OP_QUESTION_DO, instruction.target, 0)
+                elif isinstance(instruction, ir.Loop):
+                    item = (op.OP_LOOP, instruction.target, 0)
+                elif isinstance(instruction, ir.PlusLoop):
+                    item = (op.OP_PLUS_LOOP, instruction.target, 0)
+                elif isinstance(instruction, ir.Unloop):
+                    item = (op.OP_UNLOOP, 0, 0)
                 elif isinstance(instruction, ir.StoreValue):
                     item = (op.OP_STORE_VALUE, instruction.address, 0)
                 elif isinstance(instruction, ir.PushStringLiteral):

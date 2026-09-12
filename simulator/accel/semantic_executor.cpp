@@ -20,6 +20,7 @@ enum Opcode : uint32_t {
     OP_LITERAL, OP_BRANCH, OP_BRANCH_ZERO, OP_CALL, OP_RETURN,
     OP_STORE_VALUE, OP_STRING_LITERAL,
     OP_R_PUSH, OP_R_POP, OP_R_PEEK,
+    OP_DO, OP_QUESTION_DO, OP_LOOP, OP_PLUS_LOOP, OP_UNLOOP,
     OP_PUSH_CELL, OP_FETCH_VALUE,
     OP_DUP, OP_DROP, OP_SWAP, OP_OVER, OP_NIP, OP_TUCK, OP_ROT, OP_MINUS_ROT,
     OP_TWO_DUP, OP_TWO_DROP, OP_TWO_OVER, OP_TWO_SWAP, OP_QUESTION_DUP, OP_PICK,
@@ -33,6 +34,7 @@ enum Opcode : uint32_t {
     OP_FETCH, OP_C_FETCH, OP_W_FETCH, OP_L_FETCH,
     OP_STORE, OP_C_STORE, OP_W_STORE, OP_L_STORE,
     OP_OFF, OP_ON, OP_PLUS_STORE, OP_COUNT,
+    OP_TRUE, OP_FALSE, OP_CELLS, OP_UMULTIPLY, OP_I, OP_J,
     OP_BSWAP,
 };
 
@@ -165,7 +167,7 @@ static Cell magnitude(Cell value) noexcept {
 }
 
 static unsigned cost(uint32_t opcode) noexcept {
-    return opcode >= OP_LITERAL && opcode <= OP_R_PEEK ? 1 : 2;
+    return opcode >= OP_LITERAL && opcode <= OP_UNLOOP ? 1 : 2;
 }
 
 // Preflight all stack operands and all output storage before the operation.
@@ -353,6 +355,37 @@ private:
         return CONTINUATION;
     }
 
+    bool user_return_cells(MemoryRun& memory, const RunState& s,
+                           const py::dict& continuations, unsigned count,
+                           std::array<Cell, 4>& values) {
+        if (s.returns.depth() < count) return false;
+        for (unsigned i = 0; i < count; ++i) {
+            const Cell slot = s.returns.pointer + i * 8;
+            Scalar scalar;
+            ContinuationUpdate continuation;
+            if (!memory.resolve(slot, 8, false, false, scalar)) return false;
+            values[i] = scalar.read(8);
+            if (return_slot(slot, values[i], s, continuations, continuation)
+                    != USER_CELL) return false;
+        }
+        return true;
+    }
+
+    static void erase_return_pair_types(RunState& s, Cell first, Cell second) {
+        // Allocate both records before deleting either old type. If the second
+        // allocation fails, even the metadata must still match the old prefix.
+        auto inserted = s.changed.try_emplace(first, ContinuationUpdate{});
+        auto* first_value = &inserted.first->second; // stable across rehash
+        try {
+            auto other = s.changed.try_emplace(second, ContinuationUpdate{});
+            *first_value = ContinuationUpdate{};
+            other.first->second = ContinuationUpdate{};
+        } catch (...) {
+            if (inserted.second) s.changed.erase(first);
+            throw;
+        }
+    }
+
     bool execute(const Instruction& operation, MemoryRun& memory, RunState& s,
                  const py::dict& continuations) {
         const auto opcode = operation.opcode;
@@ -434,6 +467,52 @@ private:
             ++s.ip;
             return true;
         }
+        case OP_DO: case OP_QUESTION_DO: {
+            if (!stack.inputs(2) || !stack.outputs(0)) return false;
+            if (opcode == OP_QUESTION_DO && v[0] == v[1]) {
+                stack.commit();
+                s.ip = operation.a;
+                return true;
+            }
+            StackOperation returns(memory, s.returns);
+            if (!returns.inputs(0) || !returns.outputs(2)) return false;
+            returns.result[0] = v[1]; // limit below index, on the same stack
+            returns.result[1] = v[0];
+            erase_return_pair_types(s, s.returns.pointer - 16,
+                                    s.returns.pointer - 8);
+            returns.commit();
+            stack.commit();
+            ++s.ip;
+            return true;
+        }
+        case OP_LOOP: case OP_PLUS_LOOP: case OP_UNLOOP: {
+            const bool plus = opcode == OP_PLUS_LOOP;
+            if (!stack.inputs(plus ? 1 : 0) || !stack.outputs(0)) return false;
+            std::array<Cell, 4> cells{};
+            if (!user_return_cells(memory, s, continuations, 2, cells))
+                return false;
+            const Cell next = cells[0] + (plus ? v[0] : Cell{1});
+            const bool repeat = opcode != OP_UNLOOP && next != cells[1];
+            if (repeat && !memory.resolve(s.returns.pointer, 8, true, false, scalar))
+                return false;
+            stack.commit();
+            if (repeat) scalar.write(next, 8);
+            else s.returns.pointer += 16; // retain the last index bytes
+            s.ip = repeat ? operation.a : s.ip + 1;
+            return true;
+        }
+        case OP_I: case OP_J: {
+            std::array<Cell, 4> cells{};
+            if (!stack.inputs(0) ||
+                !user_return_cells(memory, s, continuations,
+                                   opcode == OP_I ? 2 : 4, cells)) return false;
+            out[0] = cells[opcode == OP_I ? 0 : 2]; produced = 1;
+            break;
+        }
+        case OP_TRUE: case OP_FALSE:
+            if (!stack.inputs(0)) return false;
+            out[0] = opcode == OP_TRUE ? MASK : 0; produced = 1;
+            break;
         case OP_LITERAL: case OP_PUSH_CELL:
             if (!stack.inputs(0)) return false;
             out[0] = operation.a; produced = 1;
@@ -509,7 +588,7 @@ private:
         case OP_NEGATE: case OP_ABS: case OP_ONE_PLUS: case OP_ONE_MINUS:
         case OP_TWO_MULTIPLY: case OP_TWO_DIVIDE: case OP_INVERT:
         case OP_ZERO_EQUAL: case OP_ZERO_NOT_EQUAL: case OP_ZERO_LESS:
-        case OP_ZERO_GREATER: case OP_BSWAP:
+        case OP_ZERO_GREATER: case OP_BSWAP: case OP_CELLS:
             if (!stack.inputs(1)) return false;
             produced = 1;
             switch (opcode) {
@@ -518,6 +597,7 @@ private:
             case OP_ONE_PLUS: out[0] = v[0] + 1; break;
             case OP_ONE_MINUS: out[0] = v[0] - 1; break;
             case OP_TWO_MULTIPLY: out[0] = v[0] << 1; break;
+            case OP_CELLS: out[0] = v[0] << 3; break;
             case OP_TWO_DIVIDE: out[0] = (v[0] >> 1) | (v[0] & SIGN); break;
             case OP_INVERT: out[0] = ~v[0]; break;
             case OP_ZERO_EQUAL: out[0] = flag(v[0] == 0); break;
@@ -531,7 +611,7 @@ private:
             default: return false;
             }
             break;
-        case OP_ADD: case OP_SUBTRACT: case OP_MULTIPLY:
+        case OP_ADD: case OP_SUBTRACT: case OP_MULTIPLY: case OP_UMULTIPLY:
         case OP_DIVIDE: case OP_MODULO: case OP_DIVMOD:
         case OP_MIN: case OP_MAX: case OP_AND: case OP_OR: case OP_XOR:
         case OP_LSHIFT: case OP_RSHIFT: case OP_EQUAL: case OP_NOT_EQUAL:
@@ -543,6 +623,12 @@ private:
             case OP_ADD: out[0] = v[1] + v[0]; break;
             case OP_SUBTRACT: out[0] = v[1] - v[0]; break;
             case OP_MULTIPLY: out[0] = v[1] * v[0]; break;
+            case OP_UMULTIPLY: {
+                const __uint128_t product = static_cast<__uint128_t>(v[1]) * v[0];
+                out[0] = static_cast<Cell>(product);
+                out[1] = static_cast<Cell>(product >> 64); produced = 2;
+                break;
+            }
             case OP_DIVIDE: case OP_MODULO: case OP_DIVMOD: {
                 if (v[0] == 0 || (opcode != OP_MODULO && v[1] == SIGN && v[0] == MASK))
                     return false;
@@ -634,6 +720,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_CALL); EXPORT_OPCODE(OP_RETURN); EXPORT_OPCODE(OP_STORE_VALUE);
     EXPORT_OPCODE(OP_STRING_LITERAL); EXPORT_OPCODE(OP_PUSH_CELL); EXPORT_OPCODE(OP_FETCH_VALUE);
     EXPORT_OPCODE(OP_R_PUSH); EXPORT_OPCODE(OP_R_POP); EXPORT_OPCODE(OP_R_PEEK);
+    EXPORT_OPCODE(OP_DO); EXPORT_OPCODE(OP_QUESTION_DO); EXPORT_OPCODE(OP_LOOP);
+    EXPORT_OPCODE(OP_PLUS_LOOP); EXPORT_OPCODE(OP_UNLOOP);
     py::dict primitives;
 #define PRIMITIVE(word, name) EXPORT_OPCODE(name); primitives[py::bytes(word)] = py::int_(static_cast<uint32_t>(name))
     PRIMITIVE("DUP", OP_DUP); PRIMITIVE("DROP", OP_DROP); PRIMITIVE("SWAP", OP_SWAP);
@@ -663,6 +751,9 @@ PYBIND11_MODULE(_megaforth_native, module) {
     PRIMITIVE("W!", OP_W_STORE); PRIMITIVE("L!", OP_L_STORE);
     PRIMITIVE("OFF", OP_OFF); PRIMITIVE("ON", OP_ON); PRIMITIVE("+!", OP_PLUS_STORE);
     PRIMITIVE("COUNT", OP_COUNT); PRIMITIVE("BSWAP", OP_BSWAP);
+    PRIMITIVE("TRUE", OP_TRUE); PRIMITIVE("FALSE", OP_FALSE);
+    PRIMITIVE("CELLS", OP_CELLS); PRIMITIVE("UM*", OP_UMULTIPLY);
+    PRIMITIVE("I", OP_I); PRIMITIVE("J", OP_J);
     module.attr("PRIMITIVE_OPCODES") = primitives;
 #undef PRIMITIVE
 #undef EXPORT_OPCODE

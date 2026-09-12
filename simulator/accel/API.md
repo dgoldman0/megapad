@@ -32,12 +32,16 @@ continuations, read lazily from the same dictionary and verified against shared
 bytes and the exact `continuation_type`. Root/fault returns and stale metadata
 return to Python before mutation. `>R`, `R>`, and `R@` use the single ordered
 return stack; exposed continuations are never mistaken for user cells or loop
-indices. Native still excludes pair return-stack operations, DO/LOOP,
+indices. Counted loops use fixed-position limit/index pairs and preserve
+modular equality termination, retained bytes, and type deletion on both
+new frame slots. Identity-bound `I` and `J` never search past a continuation.
+Native still excludes pair return-stack operations,
 stack-pointer introspection/restoration, dynamic execution, services, and any
 ordinary memory access intersecting the return-stack backing interval.
 
 `OP_LITERAL`, `OP_BRANCH`, `OP_BRANCH_ZERO`, `OP_CALL`, `OP_RETURN`,
-`OP_STORE_VALUE`, `OP_STRING_LITERAL`, `OP_R_PUSH`, `OP_R_POP`, and `OP_R_PEEK`
+`OP_STORE_VALUE`, `OP_STRING_LITERAL`, `OP_R_PUSH`, `OP_R_POP`, `OP_R_PEEK`,
+`OP_DO`, `OP_QUESTION_DO`, `OP_LOOP`, `OP_PLUS_LOOP`, and `OP_UNLOOP`
 cost one semantic step. `OP_PUSH_CELL`
 (constant or plain created-body address), `OP_FETCH_VALUE`, and admitted
 primitive-call operations cost two. `OP_STOP` is uncharged. `a` holds the
