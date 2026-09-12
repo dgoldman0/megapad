@@ -7,9 +7,12 @@ reference and owns operations outside each admitted native interval.
 
 **Current checkpoint — September 12, 2026:** The isolated
 `simulator-improvements` branch passes the full ordinary source-mode rich
-Desktop journey on the native simulator, including Sound Lab. Scalar
-return-stack operations and ordinary preexisting continuations now stay native;
-AudioOut uses the shared PCM model. Native remains opt-in. The September 8
+Desktop journey on the native simulator, including Sound Lab. The final
+unprofiled run at `08b37d5` completed in 185.862s, versus 511.820s before
+the follow-up. Counted loops and additional scalar primitives stay native,
+stack snapshots decode in bulk, scalar memory resolves each page fragment once,
+and forward dictionary publication avoids quadratic header scans. AudioOut
+uses the shared PCM model. Native remains opt-in. The September 8
 measurements and failure description below are historical provenance.
 
 ## Build and select
@@ -83,6 +86,33 @@ header, so forward source loading avoids a full dictionary scan per word.
 Lower-address publication retains the original complete overlap check,
 including the new initial body, and rollback recomputes the live bound.
 This changes source-preparation cost without caching any compiled Forth.
+
+## Profile-guided follow-up — September 12, 2026
+
+The full ordinary source-mode Desktop journey passes after the loop, snapshot,
+scalar-memory and dictionary-publication improvements. Both source checkouts
+were clean at launch (MegaPad `08b37d5`, Akashic `fb4e5d9`). The same canonical
+journey completed 20 post-flip offer ACKs, 14 authorized inputs, 11 visible
+milestones and both CELL fallback gates. Outer time fell from 511.819576s to
+185.862142s. First complete Desk ACK fell from 204.060423s to 71.895276s;
+Desk-to-Pad editing from 54.811594s to 18.246871s; and Desk-to-Daybook task
+insertion from 131.867425s to 43.034026s. These are unprofiled same-profile
+observations on a shared host, not balanced pinned-host benchmark trials.
+
+The profile guided each slice: frequent loop/primitive exits, repeated scalar
+snapshot reads, redundant native page lookup per byte, then 616 million
+header-end lookups while publishing 35,106 words. After maintaining the live
+header bound, the cold preparation profile recorded 84,641 header-end lookups
+and the same definitions and 11,035,530 preparation steps. Profiled timings
+are diagnostic and excluded from the physical speed comparison.
+
+Focused sequential checks passed, including a separate ASan/UBSan native
+extension with 161 passing memory/execution/loop cases. Final physical sampled
+aggregate RSS peaked at about 402 MiB, with at least 10.36 GiB system memory
+available and peak one-minute load 8.64 on 16 CPUs. Native remains opt-in and
+no feature work was started. The paired Akashic evidence ledger is
+`local_testing/evidence/simulator-native-followup-20260912.md`, with raw profile,
+benchmark, frame, revision, sanitizer and resource bindings.
 
 ## Return-stack slice qualification — September 12, 2026
 
