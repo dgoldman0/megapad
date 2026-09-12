@@ -4,6 +4,12 @@
 regions as `(base, size, pages)` triples. `pages` is the existing sparse
 region's dictionary of page index to fixed-size bytearray. The executor holds
 the GIL and uses those same bytearrays; there is no copied guest address space.
+Scalar preflight resolves each page fragment once. A scalar wholly inside a
+page retains one contiguous byte pointer; cross-page scalars retain per-byte
+pointers for their qualified fragments, including sub-cell page sizes. Loads
+and stores remain explicit little-endian byte operations and require no host
+alignment. Missing read fragments supply zero; missing write pages return to
+Python before any effects. Page pointers are cached only within one native run.
 
 `install(xt, operations)` installs a plan of `(opcode, a, b)` triples, one per
 original IR operation, so branch targets and returned IPs remain original IR

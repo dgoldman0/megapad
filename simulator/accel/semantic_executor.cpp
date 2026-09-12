@@ -50,13 +50,22 @@ struct Region {
     py::dict pages;
 };
 
-// A resolved scalar retains at most two page fragments. The page size may be
-// smaller than a cell, so use eight fragments rather than assuming 4 KiB.
+// Ordinary scalars usually occupy one page. The scatter representation also
+// supports page sizes smaller than a cell, without copying the guest bytes.
 struct Scalar {
-    std::array<uint8_t*, 8> bytes{};
+    uint8_t* contiguous = nullptr;
+    bool fragmented = false;
+    std::array<uint8_t*, 8> bytes;
 
     Cell read(unsigned width) const noexcept {
         Cell value = 0;
+        if (!fragmented) {
+            if (contiguous != nullptr) {
+                for (unsigned i = 0; i < width; ++i)
+                    value |= Cell(contiguous[i]) << (i * 8);
+            }
+            return value;
+        }
         for (unsigned i = 0; i < width; ++i) {
             if (bytes[i] != nullptr)
                 value |= Cell(*bytes[i]) << (i * 8);
@@ -65,6 +74,11 @@ struct Scalar {
     }
 
     void write(Cell value, unsigned width) const noexcept {
+        if (!fragmented) {
+            for (unsigned i = 0; i < width; ++i)
+                contiguous[i] = static_cast<uint8_t>(value >> (i * 8));
+            return;
+        }
         for (unsigned i = 0; i < width; ++i)
             *bytes[i] = static_cast<uint8_t>(value >> (i * 8));
     }
@@ -92,30 +106,28 @@ public:
             const Cell offset = address - region.base;
             if (width > region.size - offset)
                 return false;
-            for (unsigned i = 0; i < width; ++i) {
-                const Cell cell_offset = offset + i;
-                const Cell page_index = cell_offset / page_size_;
-                const Cell page_offset = cell_offset % page_size_;
+            Cell page_index = offset / page_size_;
+            Cell page_offset = offset % page_size_;
+            scalar.fragmented = width > page_size_ - page_offset;
+            unsigned consumed = 0;
+            while (consumed < width) {
                 uint8_t* page = nullptr;
-                auto found = caches_[r].find(page_index);
-                if (found != caches_[r].end()) {
-                    page = found->second;
-                } else {
-                    py::int_ key(page_index);
-                    PyObject* value = PyDict_GetItemWithError(region.pages.ptr(), key.ptr());
-                    if (value == nullptr && PyErr_Occurred())
-                        throw py::error_already_set();
-                    if (value != nullptr) {
-                        if (!PyByteArray_Check(value) ||
-                            static_cast<Cell>(PyByteArray_Size(value)) != page_size_)
-                            return false;
-                        page = reinterpret_cast<uint8_t*>(PyByteArray_AsString(value));
-                    }
-                    caches_[r].emplace(page_index, page);
-                }
+                if (!resolve_page(r, page_index, page)) return false;
                 if (write && page == nullptr)
                     return false;
-                scalar.bytes[i] = page == nullptr ? nullptr : page + page_offset;
+                if (!scalar.fragmented) {
+                    scalar.contiguous = page == nullptr ? nullptr : page + page_offset;
+                    return true;
+                }
+                const unsigned chunk = static_cast<unsigned>(
+                    page_size_ - page_offset < width - consumed
+                        ? page_size_ - page_offset : width - consumed);
+                for (unsigned i = 0; i < chunk; ++i)
+                    scalar.bytes[consumed + i] =
+                        page == nullptr ? nullptr : page + page_offset + i;
+                consumed += chunk;
+                ++page_index;
+                page_offset = 0;
             }
             return true;
         }
@@ -123,6 +135,28 @@ public:
     }
 
 private:
+    bool resolve_page(size_t region_index, Cell page_index, uint8_t*& page) {
+        auto& cache = caches_[region_index];
+        const auto found = cache.find(page_index);
+        if (found != cache.end()) {
+            page = found->second;
+            return true;
+        }
+        py::int_ key(page_index);
+        PyObject* value = PyDict_GetItemWithError(
+            regions_[region_index].pages.ptr(), key.ptr());
+        if (value == nullptr && PyErr_Occurred())
+            throw py::error_already_set();
+        if (value != nullptr) {
+            if (!PyByteArray_Check(value) ||
+                static_cast<Cell>(PyByteArray_Size(value)) != page_size_)
+                return false;
+            page = reinterpret_cast<uint8_t*>(PyByteArray_AsString(value));
+        }
+        cache.emplace(page_index, page);
+        return true;
+    }
+
     std::vector<Region>& regions_;
     Cell page_size_;
     Cell return_floor_;

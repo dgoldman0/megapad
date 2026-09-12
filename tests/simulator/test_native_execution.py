@@ -21,12 +21,14 @@ from simulator.stacks import (  # noqa: E402
 from simulator.timer import HostedTimerService  # noqa: E402
 
 
-def _runtimes(source: bytes = b"", *, external_size: int = 0):
+def _runtimes(source: bytes = b"", *, external_size: int = 0, page_size: int = 4096):
     runtimes = []
     for backend in ("python", "native"):
         runtime = MegaForthRuntime(
             execution_backend=backend,
-            memory=create_one_core_address_space(external_size=external_size),
+            memory=create_one_core_address_space(
+                external_size=external_size, page_size=page_size
+            ),
         )
         if source:
             runtime.evaluate(source, source_name="native-equivalence.f")
