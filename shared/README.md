@@ -16,6 +16,13 @@ mutation, and machine-sink binding to each backend adapter. This keeps one
 host-port policy without pretending the emulator and hosted simulator have the
 same execution machinery.
 
+`audio_output.py` owns the synchronous PCM register model, immutable capture,
+descriptor validation, and optional host-sink lifecycle shared by both backends.
+Its only guest-memory authority is the callbacks installed by a backend. The
+emulator device bus and simulator MMIO adapter retain address translation,
+whole-access preflight, memory-window validation, and reset/session ownership.
+The model has no execution timing or backend dependency.
+
 The crypto capability-bit registry, six-mode CRC parameter table and pure
 byte/cell recurrences, AES/GHASH operations, the 24-round Keccak-f[1600]
 permutation, 256-bit Field arithmetic/raw-product values, and RFC 7748 X25519
@@ -37,7 +44,7 @@ emulator's subnormal carry behavior while that discrepancy is unresolved; it
 is compatibility machinery, not an independent IEEE conformance oracle. The
 ML-KEM implementation is ordinary non-constant-time Python for target-value
 compatibility; it is not a host-secret cryptography API.
-Checked owner records, capability publication, MMIO state machines, entropy
+Checked owner records, capability publication, timed MMIO state machines, entropy
 sources, architectural register state, ISA execution, and semantic BIOS stack
 adapters likewise remain in their respective backends.
 

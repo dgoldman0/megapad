@@ -1,7 +1,8 @@
 # One-shot PCM audio output
 
-**Implementation status:** the Python emulator contract and deterministic
-capture oracle are implemented. The physical DMA/I2S bridge and its RTL are
+**Implementation status:** the emulator and hosted simulator use one shared
+PCM register/capture model (`shared/audio_output.py`) through their own MMIO
+and checked-memory adapters. The physical DMA/I2S bridge and its RTL are
 not; software must use the capability register and must not assume that an
 audible host sink is attached.
 
@@ -35,7 +36,8 @@ All multi-byte registers are little-endian.
 
 A frame contains one signed 16-bit sample per channel. The submitted byte
 count is therefore `frames * channels * 2`. The emulator currently limits one
-capture to 1 MiB and rejects zero frames, unsupported formats, unsupported
+capture to 1 MiB by default, as does the hosted service; the model accepts an
+explicit capture bound. Both reject zero frames, unsupported formats, unsupported
 channel counts, oversized transfers, address overflow, and every DMA span not
 fully contained in exactly one physical RAM window before reading memory.
 
@@ -72,12 +74,17 @@ Host adapters must keep these callbacks short; making host dispatch
 asynchronous with cancellable ownership is a separate streaming-era hardening
 step, not a property this one-shot revision pretends to provide.
 
-Interactive shared sessions may opt into audible playback with
+Interactive emulator sessions may opt into audible playback with
 `session_server.py --audio`. The adapter initializes only `pygame.mixer`,
 requires the exact requested signed-PCM16 format, owns a single replaceable
 voice, and advertises the host-sink capability only after initialization
 succeeds. The separate pygame viewer intentionally does not initialize a
 mixer, so it cannot accidentally reserve the audio device.
+
+Hosted simulator sessions expose deterministic headless capture. Their status
+probe at `0xFFFFFF0000000C01` now reports presence instead of an unsupported
+MMIO fault. This closes the focused AudioOut cause candidate from the September
+8 Desktop run; a fresh full journey is still required to qualify completion.
 
 ## Hardware direction
 

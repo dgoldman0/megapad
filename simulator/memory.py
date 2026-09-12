@@ -87,7 +87,9 @@ class MemoryAccessError(ExecutionError):
         self.operation = operation
         self.address = address
         self.length = length
-        super().__init__(message)
+        super().__init__(
+            f"{message} ({operation}, address={address:#018x}, length={length})"
+        )
 
 
 class AddressOverflowError(MemoryAccessError):

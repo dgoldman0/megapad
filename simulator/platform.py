@@ -10,12 +10,14 @@ defaults.
 from __future__ import annotations
 
 from shared.cells import MASK64
+from shared.audio_output import AUDIO_LIMIT, AUDIO_OFFSET
 from shared.crypto_caps import (
     CRYPTO_CAP_CRC_REFLECT_RAW,
     CRYPTO_CAP_KECCAK_F1600,
     CRYPTO_CAP_SHA3_STREAM,
 )
 from simulator.aes import AES_LIMIT, AES_OFFSET, HostedAESService
+from simulator.audio import HostedAudioService
 from simulator.entropy import (
     DEFAULT_TRNG_SEED,
     TRNG_LIMIT,
@@ -259,7 +261,7 @@ class OneCoreSysInfo:
 class OneCorePlatformMMIO:
     """Route each admitted one-core MMIO window to its sole service state."""
 
-    __slots__ = ("aes", "entropy", "rtc", "sha3", "sysinfo")
+    __slots__ = ("aes", "audio", "entropy", "rtc", "sha3", "sysinfo")
 
     def __init__(
         self,
@@ -269,6 +271,7 @@ class OneCorePlatformMMIO:
         sha3: HostedSHA3Service,
         entropy: HostedTRNGService,
         rtc: HostedRTCService,
+        audio: HostedAudioService | None = None,
     ) -> None:
         if not isinstance(sysinfo, OneCoreSysInfo):
             raise TypeError("platform SysInfo must be a OneCoreSysInfo")
@@ -280,11 +283,14 @@ class OneCorePlatformMMIO:
             raise TypeError("platform entropy must be a HostedTRNGService")
         if not isinstance(rtc, HostedRTCService):
             raise TypeError("platform RTC must be a HostedRTCService")
+        if audio is not None and not isinstance(audio, HostedAudioService):
+            raise TypeError("platform audio must be a HostedAudioService")
         self.sysinfo = sysinfo
         self.aes = aes
         self.sha3 = sha3
         self.entropy = entropy
         self.rtc = rtc
+        self.audio = HostedAudioService() if audio is None else audio
 
     def preflight(self, offset: int, width: int, *, write: bool) -> None:
         self._service(offset, width, write=write).preflight(
@@ -311,6 +317,7 @@ class OneCorePlatformMMIO:
         | HostedSHA3Service
         | HostedTRNGService
         | HostedRTCService
+        | HostedAudioService
     ):
         if isinstance(offset, int):
             if SYSINFO_OFFSET <= offset < SYSINFO_LIMIT:
@@ -324,6 +331,8 @@ class OneCorePlatformMMIO:
                 return self.entropy
             if RTC_UPTIME <= offset < RTC_EPOCH_LIMIT:
                 return self.rtc
+            if AUDIO_OFFSET <= offset < AUDIO_LIMIT:
+                return self.audio
         raise PlatformMMIOAccessError(
             "access is outside every admitted platform MMIO window",
             offset=offset,
@@ -373,6 +382,7 @@ def create_one_core_address_space(
         page_size=page_size,
     )
     sysinfo.bind(memory)
+    platform.audio.bind(memory)
     return memory
 
 
