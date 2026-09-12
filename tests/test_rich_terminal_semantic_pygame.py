@@ -76,6 +76,9 @@ class _GlyphFont:
     def __init__(self, pygame_module):
         self.pygame = pygame_module
 
+    def size(self, text):
+        return len(text), 1
+
     def render(self, text, antialias, color):
         assert antialias and len(text) == 1
         glyph = self.pygame.Surface((1, 1), flags=self.pygame.SRCALPHA)
@@ -182,6 +185,38 @@ def _target(result, control_id):
     )
 
 
+def _popup_underlay_grid():
+    return TextGridDraw(
+        40,
+        VISIBLE | ENABLED,
+        0,
+        1,
+        ObjectBounds(0, 4, 30, 16),
+        SemanticTextContent(
+            content_revision=1,
+            rows=1,
+            columns=1,
+            viewport_row=0,
+            viewport_column=0,
+            viewport_rows=1,
+            viewport_columns=1,
+            flags=SemanticContentFlag.READ_ONLY,
+            primary_key=0,
+            primary_offset=0,
+            anchor_key=0,
+            anchor_offset=0,
+            items=(
+                SemanticTextItem(
+                    1, 0, 0, 1, 1,
+                    SemanticTextRole.CONTENT,
+                    SemanticTextState(0),
+                    "Calendar",
+                ),
+            ),
+        ),
+    )
+
+
 def test_open_menu_uses_modern_layered_pixels_and_enabled_hit_targets_only():
     pygame = pytest.importorskip("pygame")
     bar = _menu_bar()
@@ -253,6 +288,124 @@ def test_hit_geometry_is_deterministic_and_reverse_painter_order_wins():
         (lower_file.rect.top + lower_file.rect.bottom) // 2,
     )
     assert first.hit_test(*point).identity.control_id == 21
+
+    # Deferred popups preserve the same root order as the ordinary bars.
+    lower_item = _target(first, 3).rect
+    popup_point = (lower_item.left + 2, lower_item.top + 2)
+    assert first.hit_test(*popup_point).identity.control_id == 22
+
+
+def test_menu_popup_paints_above_later_text_grid_without_changing_geometry():
+    pygame = pytest.importorskip("pygame")
+    bar = _menu_bar()
+    grid = _popup_underlay_grid()
+    menu_surface, menu_result = _render(pygame, _plane(_region(bar)))
+    grid_surface, _ = _render(pygame, _plane(_region(grid)))
+
+    surface, result = _render(pygame, _plane(_region(bar, grid)))
+
+    assert result.hit_targets == menu_result.hit_targets
+    for target in result.hit_targets:
+        if target.kind != ControlKind.MENU_ITEM:
+            continue
+        rect = target.rect
+        area = pygame.Rect(rect.left, rect.top, rect.width, rect.height)
+        assert pygame.image.tostring(surface.subsurface(area), "RGB") == (
+            pygame.image.tostring(menu_surface.subsurface(area), "RGB")
+        )
+        assert result.hit_test(rect.left + 2, rect.top + 2) == target
+    # The collection still paints its ordinary area outside the popup.
+    assert surface.get_at((290, 190)) == grid_surface.get_at((290, 190))
+    assert surface.get_at((290, 190)) != menu_surface.get_at((290, 190))
+
+
+def test_menu_popup_hit_targets_follow_later_tabset_targets():
+    pygame = pytest.importorskip("pygame")
+    bar = _menu_bar()
+    tabs = TabSetDraw(
+        50,
+        VISIBLE | ENABLED,
+        0,
+        1,
+        ObjectBounds(0, 4, 30, 4),
+        (TabDraw(51, VISIBLE | ENABLED, 0, "Behind", ""),),
+    )
+
+    _, result = _render(pygame, _plane(_region(bar, tabs)))
+
+    item = _target(result, 3)
+    tab = _target(result, 51)
+    point = (
+        max(item.rect.left, tab.rect.left) + 2,
+        max(item.rect.top, tab.rect.top) + 2,
+    )
+    assert item.rect.contains(*point) and tab.rect.contains(*point)
+    assert result.hit_entries.index(tab) < result.hit_entries.index(item)
+    assert result.hit_test(*point) == item
+
+
+def test_popup_disabled_row_separator_and_padding_block_underlying_tab():
+    pygame = pytest.importorskip("pygame")
+    bar = _menu_bar()
+    tabs = TabSetDraw(
+        50,
+        VISIBLE | ENABLED,
+        0,
+        1,
+        ObjectBounds(0, 4, 30, 8),
+        (TabDraw(51, VISIBLE | ENABLED, 0, "Behind", ""),),
+    )
+    menu_surface, menu_result = _render(pygame, _plane(_region(bar)))
+
+    surface, result = _render(pygame, _plane(_region(bar, tabs)))
+
+    item = _target(result, 3).rect
+    tab = _target(result, 51).rect
+    points = {
+        "disabled row": (item.left + 2, item.bottom + 2),
+        "separator": (item.left + 2, item.bottom + item.height + 2),
+        "padding": (min(item.right, tab.right) - 2, item.top - 2),
+    }
+    for description, point in points.items():
+        assert tab.contains(*point), description
+        assert menu_result.hit_test(*point) is None, description
+        assert result.hit_test(*point) is None, description
+        assert surface.get_at(point) == menu_surface.get_at(point), description
+
+
+def test_higher_clipped_region_paints_and_occludes_above_deferred_popup():
+    pygame = pytest.importorskip("pygame")
+    lower = _region(_menu_bar(), _popup_underlay_grid(), region_id=1)
+    upper_color = (190, 30, 80)
+    upper = _region(
+        GlyphRunDraw(
+            90,
+            0,
+            ObjectBounds(0, 0, 30, 20),
+            RGBA(0, 0, 0, 0),
+            RGBA(*upper_color, 255),
+            0,
+            "",
+        ),
+        region_id=2,
+        z_order=1,
+        clip=(0, 4, 10, 10),
+    )
+    lower_surface, lower_result = _render(pygame, _plane(lower))
+
+    surface, result = _render(pygame, _plane(lower, upper))
+
+    item = _target(result, 3)
+    y = (item.rect.top + item.rect.bottom) // 2
+    covered = (item.rect.left + 2, y)
+    exposed = (item.rect.right - 2, y)
+    assert covered[0] < 100 < exposed[0]
+    assert tuple(surface.get_at(covered))[:3] == upper_color
+    assert result.hit_test(*covered) is None
+    assert surface.get_at(exposed) == lower_surface.get_at(exposed)
+    assert result.hit_test(*exposed) == _target(lower_result, 3)
+    barrier = result.hit_entries[-1]
+    assert isinstance(barrier, RegionOcclusion) and barrier.region_id == 2
 
 
 @pytest.mark.parametrize(

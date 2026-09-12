@@ -230,7 +230,7 @@ class ControlHitTarget:
 
 @dataclass(frozen=True, slots=True)
 class RegionOcclusion:
-    """Visible region coverage that blocks controls painted below the region."""
+    """Region or popup coverage that blocks controls painted below it."""
 
     owner_id: int
     owner_generation: int
@@ -290,8 +290,9 @@ class CompositeDrawResult:
     """One completed paint pass and its immutable semantic hit map.
 
     ``hit_entries`` is stored in back-to-front painter order.  A region's
-    occlusion precedes its own controls, so reverse testing lets those controls
-    win and then stops before any lower region.  ``hit_targets`` remains a
+    occlusion precedes its own controls, and each popup's occlusion precedes
+    its items.  Reverse testing lets enabled controls win while blocking input
+    through covered padding or disabled controls.  ``hit_targets`` remains a
     filtered inspection view; barriers are never represented as fake controls.
     """
 
@@ -333,6 +334,18 @@ class _MenuMetrics:
     separator_height: int
     corner_radius: int
     shadow_offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class _MenuPopup:
+    """One open popup deferred until its region's ordinary paint is complete."""
+
+    anchor: _WideRect
+    viewport: object
+    menu: MenuDraw
+    title: _WideRect
+    metrics: _MenuMetrics
+    root_enabled: bool
 
 
 def _integer(name: str, value, *, minimum: int, maximum: int | None = None) -> int:
@@ -989,7 +1002,7 @@ def _paint_popup(
     root_enabled: bool,
     hovered: ControlIdentity | None,
     pressed: ControlIdentity | None,
-) -> list[ControlHitTarget]:
+) -> list[HitMapEntry]:
     width, height = _popup_dimensions(font, menu, metrics)
     popup = _popup_rect(
         pygame_module,
@@ -1029,7 +1042,14 @@ def _paint_popup(
     )
 
     menu_enabled = root_enabled and bool(menu.state & ControlState.ENABLED)
-    targets: list[ControlHitTarget] = []
+    entries: list[HitMapEntry] = [
+        RegionOcclusion(
+            region.owner_id,
+            region.owner_generation,
+            region.region_id,
+            _pixel_rect(visible_popup),
+        )
+    ]
     row_top = popup.top + metrics.popup_padding
     for entry in menu.entries:
         if isinstance(entry, MenuSeparatorDraw):
@@ -1125,7 +1145,7 @@ def _paint_popup(
         finally:
             surface.set_clip(prior_clip)
         if effectively_enabled and visible_row.width > 0 and visible_row.height > 0:
-            targets.append(
+            entries.append(
                 ControlHitTarget(
                     identity,
                     ControlKind.MENU_ITEM,
@@ -1133,7 +1153,7 @@ def _paint_popup(
                 )
             )
         row_top += metrics.row_height
-    return targets
+    return entries
 
 
 def _paint_menu_bar(
@@ -1148,7 +1168,7 @@ def _paint_menu_bar(
     *,
     hovered: ControlIdentity | None,
     pressed: ControlIdentity | None,
-) -> list[ControlHitTarget]:
+) -> tuple[list[ControlHitTarget], list[_MenuPopup]]:
     anchor = _bounds_rect(
         pygame_module,
         region_rect,
@@ -1164,12 +1184,12 @@ def _paint_menu_bar(
     )
     visible_anchor = _bounded_pygame_rect(pygame_module, anchor, viewport)
     if visible_anchor.width <= 0 or visible_anchor.height <= 0:
-        return []
+        return [], []
 
     metrics = _menu_metrics(font, cell_width, cell_height)
     root_enabled = bool(draw.state & ControlState.ENABLED)
     targets: list[ControlHitTarget] = []
-    open_menus: list[tuple[MenuDraw, object]] = []
+    popups: list[_MenuPopup] = []
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(viewport)
@@ -1249,7 +1269,9 @@ def _paint_menu_bar(
                     (title.right - metrics.horizontal_padding - 1, accent_y),
                     width=max(1, metrics.font_height // 10),
                 )
-                open_menus.append((menu, title))
+                popups.append(
+                    _MenuPopup(anchor, viewport, menu, title, metrics, root_enabled)
+                )
             text_color = _TEXT if effectively_enabled else _DISABLED_TEXT
             if visible_title.width > 0 and visible_title.height > 0:
                 text_clip = surface.get_clip()
@@ -1276,29 +1298,9 @@ def _paint_menu_bar(
                     )
             title_left = title.right + metrics.gap
 
-        # Popups are deliberately painted after every title.  Their item hit
-        # targets therefore follow title targets in the same painter order.
-        surface.set_clip(viewport)
-        for menu, title in open_menus:
-            targets.extend(
-                _paint_popup(
-                    pygame_module,
-                    surface,
-                    font,
-                    region,
-                    anchor,
-                    viewport,
-                    menu,
-                    title,
-                    metrics,
-                    root_enabled=root_enabled,
-                    hovered=hovered,
-                    pressed=pressed,
-                )
-            )
     finally:
         surface.set_clip(prior_clip)
-    return targets
+    return targets, popups
 
 
 def _paint_text_area(
@@ -2703,6 +2705,7 @@ def composite_draw_plane_result(
                     ),
                 )
             )
+        region_popups: list[_MenuPopup] = []
         for draw in region.draws:
             if isinstance(draw, GlyphRunDraw):
                 _paint_glyph_run(
@@ -2785,20 +2788,20 @@ def composite_draw_plane_result(
                     ],
                 )
             elif isinstance(draw, MenuBarDraw):
-                hit_entries.extend(
-                    _paint_menu_bar(
-                        pygame_module,
-                        surface,
-                        control_font,
-                        region,
-                        region_rect,
-                        draw,
-                        cell_w,
-                        cell_h,
-                        hovered=hovered,
-                        pressed=pressed,
-                    )
+                targets, popups = _paint_menu_bar(
+                    pygame_module,
+                    surface,
+                    control_font,
+                    region,
+                    region_rect,
+                    draw,
+                    cell_w,
+                    cell_h,
+                    hovered=hovered,
+                    pressed=pressed,
                 )
+                hit_entries.extend(targets)
+                region_popups.extend(popups)
             elif isinstance(draw, TextAreaDraw):
                 _paint_text_area(
                     pygame_module,
@@ -2835,6 +2838,32 @@ def composite_draw_plane_result(
                 )
             else:  # Legitimate newer kinds remain fail-closed until implemented.
                 raise TypeError("unsupported retained draw value")
+        # A popup is a renderer-owned foreground surface above this region's
+        # ordinary controls and objects.  Keep both its pixels and item targets
+        # here so a later collection cannot cover the popup while its old hits
+        # remain active.  Higher regions still paint and occlude afterward.
+        for popup in region_popups:
+            prior_clip = surface.get_clip()
+            try:
+                surface.set_clip(popup.viewport)
+                hit_entries.extend(
+                    _paint_popup(
+                        pygame_module,
+                        surface,
+                        control_font,
+                        region,
+                        popup.anchor,
+                        popup.viewport,
+                        popup.menu,
+                        popup.title,
+                        popup.metrics,
+                        root_enabled=popup.root_enabled,
+                        hovered=hovered,
+                        pressed=pressed,
+                    )
+                )
+            finally:
+                surface.set_clip(prior_clip)
     return CompositeDrawResult(surface, tuple(hit_entries))
 
 
