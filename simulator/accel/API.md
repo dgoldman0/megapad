@@ -54,6 +54,11 @@ primitive-call operations cost two. `OP_STOP` is uncharged. `a` holds the
 literal, branch IP, called XT, or data address where applicable;
 `OP_STRING_LITERAL` uses `(a, b)` for the already-resolved address and length.
 Arithmetic, stack, and scalar-memory primitive operations ignore `a` and `b`.
+`CELL+` adds eight with the same unsigned cell wrapping as the reference
+primitive. The original hosted `COREID` and `TASK-ID` callbacks both push zero
+and share the native false opcode. These remain two-tick primitive calls;
+admission binds to the original installed word objects, so later colon or
+host-callback definitions with those names retain their ordinary behavior.
 
 Every operation is preflighted before its ticks or effects. Unsupported
 operations, missing plans, insufficient allowance, missing destination pages,

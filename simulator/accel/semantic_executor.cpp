@@ -35,7 +35,7 @@ enum Opcode : uint32_t {
     OP_STORE, OP_C_STORE, OP_W_STORE, OP_L_STORE,
     OP_OFF, OP_ON, OP_PLUS_STORE, OP_COUNT,
     OP_TRUE, OP_FALSE, OP_CELLS, OP_UMULTIPLY, OP_I, OP_J,
-    OP_BSWAP,
+    OP_BSWAP, OP_CELL_PLUS,
 };
 
 struct Instruction {
@@ -289,7 +289,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_BSWAP)
+            if (opcode > OP_CELL_PLUS)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -622,7 +622,7 @@ private:
         case OP_NEGATE: case OP_ABS: case OP_ONE_PLUS: case OP_ONE_MINUS:
         case OP_TWO_MULTIPLY: case OP_TWO_DIVIDE: case OP_INVERT:
         case OP_ZERO_EQUAL: case OP_ZERO_NOT_EQUAL: case OP_ZERO_LESS:
-        case OP_ZERO_GREATER: case OP_BSWAP: case OP_CELLS:
+        case OP_ZERO_GREATER: case OP_BSWAP: case OP_CELLS: case OP_CELL_PLUS:
             if (!stack.inputs(1)) return false;
             produced = 1;
             switch (opcode) {
@@ -632,6 +632,7 @@ private:
             case OP_ONE_MINUS: out[0] = v[0] - 1; break;
             case OP_TWO_MULTIPLY: out[0] = v[0] << 1; break;
             case OP_CELLS: out[0] = v[0] << 3; break;
+            case OP_CELL_PLUS: out[0] = v[0] + Cell{8}; break;
             case OP_TWO_DIVIDE: out[0] = (v[0] >> 1) | (v[0] & SIGN); break;
             case OP_INVERT: out[0] = ~v[0]; break;
             case OP_ZERO_EQUAL: out[0] = flag(v[0] == 0); break;
@@ -786,7 +787,11 @@ PYBIND11_MODULE(_megaforth_native, module) {
     PRIMITIVE("OFF", OP_OFF); PRIMITIVE("ON", OP_ON); PRIMITIVE("+!", OP_PLUS_STORE);
     PRIMITIVE("COUNT", OP_COUNT); PRIMITIVE("BSWAP", OP_BSWAP);
     PRIMITIVE("TRUE", OP_TRUE); PRIMITIVE("FALSE", OP_FALSE);
-    PRIMITIVE("CELLS", OP_CELLS); PRIMITIVE("UM*", OP_UMULTIPLY);
+    PRIMITIVE("CELLS", OP_CELLS); PRIMITIVE("CELL+", OP_CELL_PLUS);
+    PRIMITIVE("UM*", OP_UMULTIPLY);
+    // The original hosted BIOS primitives both push zero. Native admission
+    // remains bound to those installed word objects, never a later namesake.
+    PRIMITIVE("COREID", OP_FALSE); PRIMITIVE("TASK-ID", OP_FALSE);
     PRIMITIVE("I", OP_I); PRIMITIVE("J", OP_J);
     module.attr("PRIMITIVE_OPCODES") = primitives;
 #undef PRIMITIVE

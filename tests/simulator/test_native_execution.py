@@ -17,6 +17,7 @@ from simulator.platform import create_one_core_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
 from simulator.stacks import (  # noqa: E402
     Continuation, DataStack, ReturnStack, ReturnStackShapeError, StackOverflow,
+    StackUnderflow,
 )
 from simulator.timer import HostedTimerService  # noqa: E402
 
@@ -469,3 +470,157 @@ def test_counted_loop_keeps_native_callee_continuations():
     assert result["error"] is None
     assert result["data"] == (56,)
     assert result["returns"] == ()
+
+
+@pytest.mark.parametrize("operation,inputs,expected", [
+    (b"COREID", (17,), (17, 0)),
+    (b"TASK-ID", (17,), (17, 0)),
+    (b"CELL+", (17,), (25,)),
+    (b"CELL+", (MASK64 - 7,), (0,)),
+    (b"CELL+", (MASK64,), (7,)),
+    (b"CELL+", (0x7FFFFFFFFFFFFFFF,), (0x8000000000000007,)),
+])
+def test_pure_identity_and_cell_plus_execute_in_native(operation, inputs, expected):
+    # Host-supplied operands leave only this primitive as possible native work.
+    # The root Return belongs to the Python dispatcher, so native progress is
+    # evidence that the primitive itself was admitted and executed.
+    runtimes = _runtimes(b": RUN " + operation + b" ;")
+    before = runtimes[1].native_execution_stats["semantic_steps"]
+    result = _compare(runtimes, "RUN", inputs=inputs)
+    assert result["error"] is None
+    assert result["data"] == expected
+    assert result["returns"] == ()
+    assert result["result_steps"] == result["counted_steps"] == 3
+    assert runtimes[1].native_execution_stats["semantic_steps"] - before == 2
+
+
+@pytest.mark.parametrize("operation,inputs,expected", [
+    (b"COREID", (17,), (17, 0)),
+    (b"TASK-ID", (17,), (17, 0)),
+    (b"CELL+", (MASK64 - 7,), (0,)),
+])
+@pytest.mark.parametrize("budget", [1, 2, 3])
+def test_pure_primitive_call_tick_effect_tick_and_return_boundary(
+    operation, inputs, expected, budget
+):
+    runtimes = _runtimes(b": RUN " + operation + b" ;")
+    result = _compare(runtimes, "RUN", inputs=inputs, step_budget=budget,
+                      require_native=False)
+    assert result["counted_steps"] == budget
+    assert result["data"] == (inputs if budget == 1 else expected)
+    assert result["returns"] == ()
+    if budget < 3:
+        assert result["error"][0] is StepBudgetExceeded
+    else:
+        assert result["error"] is None
+        assert result["result_steps"] == 3
+
+
+def test_cell_plus_empty_stack_preserves_reference_underflow():
+    runtimes = _runtimes(b": RUN CELL+ ;")
+    result = _compare(runtimes, "RUN", require_native=False)
+    assert result["error"] == (
+        StackUnderflow, "data stack underflow during pop: requires 1 entry, has 0"
+    )
+    assert result["counted_steps"] == 2
+    assert result["data"] == ()
+    assert result["returns"] == ()
+
+
+@pytest.mark.parametrize("operation", [b"COREID", b"TASK-ID"])
+@pytest.mark.parametrize("capacity", [1, 4])
+def test_pure_identity_full_backed_stack_preserves_reference_overflow(
+    operation, capacity
+):
+    runtimes = _runtimes(b": RUN " + operation + b" ;")
+    initial = tuple(range(17, 17 + capacity))
+    for runtime in runtimes:
+        context = runtime.main_context
+        empty = context.data.empty_pointer
+        context.data = DataStack(initial, memory=runtime.memory,
+                                 floor=empty - capacity * 8, empty_pointer=empty)
+    result = _compare(runtimes, "RUN", require_native=False)
+    assert result["error"][0] is StackOverflow
+    assert result["counted_steps"] == 2
+    assert result["data"] == initial
+    assert result["returns"] == ()
+    assert result["sp"] == runtimes[0].main_context.data.floor
+
+
+def test_cell_plus_needs_no_extra_slot_on_a_full_one_cell_backed_stack():
+    runtimes = _runtimes(b": RUN CELL+ ;")
+    for runtime in runtimes:
+        context = runtime.main_context
+        empty = context.data.empty_pointer
+        context.data = DataStack((MASK64 - 7,), memory=runtime.memory,
+                                 floor=empty - 8, empty_pointer=empty)
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+    assert result["data"] == (0,)
+    assert result["counted_steps"] == 3
+    assert result["sp"] == runtimes[0].main_context.data.floor
+
+
+@pytest.mark.parametrize("operation", [b"COREID", b"TASK-ID", b"CELL+"])
+@pytest.mark.parametrize("shadow_kind", ["colon", "host-primitive"])
+@pytest.mark.parametrize("prepare_before_shadow", [False, True])
+def test_pure_primitive_admission_and_compiled_binding_survive_shadowing(
+    operation, shadow_kind, prepare_before_shadow
+):
+    runtimes = _runtimes(b": ORIGINAL " + operation + b" ;")
+    originals = [runtime.find(operation) for runtime in runtimes]
+    expected_original = (25,) if operation == b"CELL+" else (17, 0)
+    expected_shadow = (91,) if operation == b"CELL+" else (17, 91)
+    callbacks = [[], []]
+    if prepare_before_shadow:
+        assert _compare(runtimes, "ORIGINAL", inputs=(17,))["data"] == expected_original
+        for runtime in runtimes:
+            runtime.main_context.data.clear()
+
+    for runtime, original, records in zip(runtimes, originals, callbacks):
+        if shadow_kind == "colon":
+            body = b"DROP 91" if operation == b"CELL+" else b"91"
+            runtime.evaluate(b": " + operation + b" " + body + b" ;")
+        else:
+            def shadow(context, *, runtime=runtime, records=records,
+                       unary=operation == b"CELL+"):
+                records.append(context.data.snapshot())
+                if unary:
+                    context.data.pop()
+                context.data.push(91)
+                runtime.write_uart_bytes(b"shadow")
+
+            runtime.define_primitive(operation, shadow)
+        replacement = runtime.find(operation)
+        assert replacement is not original
+        assert replacement.xt != original.xt
+        runtime.evaluate(b": CURRENT " + operation + b" ;")
+        if runtime.execution_backend == "native":
+            # Admission is attached to the original installed Word object/XT,
+            # never to the latest dictionary spelling or the callback's name.
+            admitted = runtime._native_execution.primitives
+            assert admitted[original.xt][0] is original
+            assert replacement.xt not in admitted
+
+    before = runtimes[1].native_execution_stats["semantic_steps"]
+    result = _compare(runtimes, "ORIGINAL", inputs=(17,))
+    assert result["error"] is None
+    assert result["data"] == expected_original
+    assert result["counted_steps"] == 3
+    assert runtimes[1].native_execution_stats["semantic_steps"] - before == 2
+    assert callbacks == [[], []]
+    assert result["uart"] == b""
+    for runtime in runtimes:
+        runtime.main_context.data.clear()
+
+    result = _compare(runtimes, "CURRENT", inputs=(17,),
+                      require_native=shadow_kind == "colon")
+    assert result["error"] is None
+    assert result["data"] == expected_shadow
+    assert result["returns"] == ()
+    if shadow_kind == "host-primitive":
+        assert callbacks == [[(17,)], [(17,)]]
+        assert result["uart"] == b"shadow"
+    else:
+        assert callbacks == [[], []]
+        assert result["uart"] == b""
