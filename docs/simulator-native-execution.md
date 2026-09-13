@@ -5,23 +5,30 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 12, 2026:** The `simulator-improvements`
-work is merged into local `main` and passes the full ordinary source-mode rich
-Desktop journey on the native simulator, including Sound Lab. The final
-unprofiled run at `08b37d5` completed in 185.862s, versus 511.820s before
-the follow-up. Counted loops and additional scalar primitives stay native,
-stack snapshots decode in bulk, scalar memory resolves each page fragment once,
-and forward dictionary publication avoids quadratic header scans. AudioOut
-uses the shared PCM model. Native remains opt-in. The September 8
-measurements and failure description below are historical provenance.
+**Current checkpoint — September 13, 2026:** The `rich-interaction-fixes` work
+is merged into both local mains. Hosted identity reads and cell increments
+remain native, while the shared viewer and paired Akashic projection correct
+menu layering and reduce repeated rich publication work. Native remains opt-in.
+The September 8 measurements and failure description below are historical
+provenance; the complete current Desktop journey passes, including Sound Lab.
 
-Both paired simulator worktrees were retired after their committed heads were
-fast-forwarded into main and all ignored artifacts were preserved and verified.
-The native extension was rebuilt in MegaPad main; 207 focused simulator checks
-and 87 Akashic acceptance-runner checks passed sequentially. The full Desktop
-qualification above is inherited from the identical implementation, with its
-raw evidence now under Akashic main's
-`local_testing/out/simulator-improvements-20260912/`.
+Both C++ extensions were force-rebuilt sequentially in MegaPad main. Native
+parity, popup compositor/input and emulator/simulator shared-source selectors
+passed all 127 checks; paired Akashic passed 395 focused checks. A fresh ordinary
+source-mode physical Desktop run from Akashic `c0cb351` and MegaPad `598ca0c`
+passed on X11, including Pad and Daybook interactions and extra View/Go popup
+checks: 33 physical ACKs, 21 inputs and 18 captured milestones in 224.407s.
+That elapsed time includes the extended journey and is not a matched-workload
+comparison with earlier runs. Peak physical-run RSS was 438.512 MiB; the
+3.5 GiB cap and 900-second watchdog were unchanged.
+
+Both old worktrees were removed after their merged ancestry, clean state,
+preserved artifacts and lack of active process references were rechecked.
+The full integration ledger is paired Akashic
+`local_testing/evidence/rich-main-integration-20260913.md`; fresh physical
+evidence is under its `local_testing/out/rich-main-integration-20260913/`.
+Preservation and build/test records remain in the workspace archive
+`worktree-retirement-archives/2026-09-13-rich-interaction/`.
 
 ## Build and select
 
@@ -69,7 +76,8 @@ and leaves root/fault/stale continuation handling in Python. Counted
 `DO`/`?DO`/`LOOP`/`+LOOP`/`UNLOOP` operations and identity-bound `I`/`J`
 now use the same native ordered return stack. `+LOOP` preserves the BIOS
 modular equality rule, including zero increments and limit crossings.
-Identity-bound `TRUE`, `FALSE`, `CELLS`, and `UM*` also stay native.
+Identity-bound `TRUE`, `FALSE`, `CELLS`, `UM*`, `COREID`, `TASK-ID`, and `CELL+`
+also stay native.
 Pair return-stack operations, dynamic execution, stack-pointer operations, and
 device/service access remain in Python. Successful
 native prefixes settle their exact watchdog, diagnostic, and timer counts
