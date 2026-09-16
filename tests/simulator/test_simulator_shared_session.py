@@ -210,3 +210,77 @@ def test_unchanged_server_dispatch_reaches_cell_view_and_input_flow() -> None:
         assert machine.semantic_session.idle
     finally:
         machine.stop()
+
+
+@pytest.mark.parametrize("progress", [True, False])
+def test_host_handoffs_preserve_each_semantic_boundary_without_per_batch_sleep(monkeypatch, progress):
+    from types import SimpleNamespace
+    import simulator.session as module
+    from simulator.rich_terminal_host import SemanticBatchStop
+    from simulator.session import SimulatorSessionRun
+
+    clock = SimpleNamespace(now=0.0)
+    records = []
+    machine = SimulatorSharedMachine.__new__(SimulatorSharedMachine)
+    machine._stopping = machine.paused = False
+    machine.last_error = None
+    machine.total_steps = machine.total_batches = machine.total_external_events = 0
+    machine.idle_sleep_s = 0.002
+    locked = False
+
+    class Condition:
+        def __enter__(self):
+            nonlocal locked
+            assert not locked
+            locked = True
+
+        def __exit__(self, *args):
+            nonlocal locked
+            locked = False
+
+        def wait(self, *, timeout):
+            assert locked
+            records.append(("wait", timeout))
+            machine._stopping = True
+
+    machine.condition = Condition()
+
+    def boundary():
+        assert locked
+        clock.now += 0.001
+        records.append(("boundary", machine.total_batches + 1))
+        if machine.total_batches == 7:
+            machine._stopping = True
+        return SimulatorSessionRun(
+            semantic_steps=8192 if progress else 0,
+            external_events_applied=1 if progress else 0,
+            stop_reason=SemanticBatchStop.YIELDED,
+            terminal_progress=False,
+        )
+
+    def handoff(delay):
+        assert not locked
+        assert delay == 0
+        records.append(("handoff", machine.total_batches))
+
+    machine.session = SimpleNamespace(
+        rich_terminal_failure=None, rich_terminal_lost=False, halted=False,
+        idle=False, rich_terminal_work_pending=False,
+        last_batch_made_progress=progress, run_boundary=boundary,
+    )
+    monkeypatch.setattr(module, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, sleep=handoff,
+    ))
+    monkeypatch.setattr(module, "sys", SimpleNamespace(getswitchinterval=lambda: 0.005))
+    machine._run_loop()
+    assert machine.last_error is None
+    if progress:
+        assert [r for r in records if r[0] == "boundary"] == [
+            ("boundary", n) for n in range(1, 9)
+        ]
+        assert [r for r in records if r[0] == "handoff"] == [("handoff", 5)]
+        assert machine.total_steps == 8 * 8192
+        assert machine.total_external_events == 8
+    else:
+        assert records == [("boundary", 1), ("wait", 0.002)]
+        assert machine.total_steps == machine.total_external_events == 0

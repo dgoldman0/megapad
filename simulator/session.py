@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -338,6 +339,10 @@ class SimulatorSharedMachine(SharedMachine):
         return None
 
     def _run_loop(self) -> None:
+        # Guest boundaries still run one at a time under the owner lock.
+        # Explicit OS handoffs follow Python's host thread-switch interval;
+        # yielding after every tiny native batch can dominate useful work.
+        next_handoff = time.monotonic() + sys.getswitchinterval()
         while True:
             should_wait = False
             with self.condition:
@@ -375,8 +380,10 @@ class SimulatorSharedMachine(SharedMachine):
             if should_wait:
                 with self.condition:
                     self.condition.wait(timeout=self.idle_sleep_s)
-            else:
+                next_handoff = time.monotonic() + sys.getswitchinterval()
+            elif time.monotonic() >= next_handoff:
                 time.sleep(0)
+                next_handoff = time.monotonic() + sys.getswitchinterval()
 
     def status(self, *, detailed: bool = True) -> dict:
         """Return backend-neutral terminal state plus semantic accounting."""

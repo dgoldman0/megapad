@@ -699,11 +699,24 @@ class ReturnStack:
             assert self._memory_view is not None
             assert self._pointer is not None
             assert self._empty_pointer is not None
-            cells = self._memory_view.read_cells(self._pointer, self.depth())[::-1]
-            return tuple(
-                self._decode_entry(self._empty_pointer - (index + 1) * CELL_BYTES, raw)
-                for index, raw in enumerate(cells)
-            )
+            cells = self._memory_view.read_cells(self._pointer, self.depth())
+            entries = []
+            continuations = self._continuations
+            address = self._pointer
+            for raw in cells:
+                typed = continuations.get(address)
+                if typed is None:
+                    entries.append(raw)
+                elif raw == typed[1]:
+                    entries.append(typed[0])
+                else:
+                    # The same stale-type removal as scalar _decode_entry.
+                    # Inactive slots remain untouched for a later RP!.
+                    del continuations[address]
+                    entries.append(raw)
+                address += CELL_BYTES
+            entries.reverse()
+            return tuple(entries)
         return tuple(
             self._peek_entry(offset, "snapshot")
             for offset in range(self.depth() - 1, -1, -1)

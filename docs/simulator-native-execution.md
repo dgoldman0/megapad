@@ -64,6 +64,16 @@ showed all 19 individually scheduled characters at 5 characters/second; its
 single-character latency was still 2.435 s. The paired Akashic typing ledger
 records physical results as they become available.
 
+The following host-boundary slice retains all semantic owner boundaries and
+full suspension-mutation checks. Return snapshots decode their already-read
+cells in one loop, including stale continuation removal, instead of a Python
+call and generator entry per stack slot. Explicit OS handoffs now follow
+Python's configured thread-switch interval rather than every tiny native
+batch. The owner still releases its lock and checks input/progress at every
+original boundary; guest work counts and virtual timers are unchanged. Idle
+waits continue using the existing condition-variable path. Stack, native,
+shared-session and clock selectors pass 154 checks in 1.68 s.
+
 ## Build and select
 
 ```
