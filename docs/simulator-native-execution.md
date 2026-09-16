@@ -5,7 +5,18 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 13, 2026:** The `rich-interaction-fixes` work
+**Current checkpoint — September 16, 2026:** Native dispatch/memory and host
+boundary changes are physically qualified. With identical Akashic `de6a6aa`
+production sources, isolated typing feedback fell from 2.435 s to 1.413 s
+(42%); all 19 individually scheduled characters at 5 characters/second were
+retained. This remains far above the 100 ms working target. The complete
+ordinary X11 Desk/menu journey at Akashic `a730baa` and MegaPad `efed68a` also
+passed: 18 milestones, 21 inputs, 27 post-flip ACKs, both CELL fallback gates,
+154.121 s total, and 437.512 MiB aggregate peak RSS. See paired Akashic
+`docs/rich-terminal/TYPING-PERFORMANCE-20260916.md` and
+`local_testing/evidence/typing-20260916.md` for matched timings and bindings.
+
+**September 13 integration checkpoint:** The `rich-interaction-fixes` work
 is merged into both local mains. Hosted identity reads and cell increments
 remain native, while the shared viewer and paired Akashic projection correct
 menu layering and reduce repeated rich publication work. Native remains opt-in.
