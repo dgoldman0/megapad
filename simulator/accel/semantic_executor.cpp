@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -36,7 +37,7 @@ enum Opcode : uint32_t {
     OP_STORE, OP_C_STORE, OP_W_STORE, OP_L_STORE,
     OP_OFF, OP_ON, OP_PLUS_STORE, OP_COUNT,
     OP_TRUE, OP_FALSE, OP_CELLS, OP_UMULTIPLY, OP_I, OP_J,
-    OP_BSWAP, OP_CELL_PLUS, OP_EXECUTE,
+    OP_BSWAP, OP_CELL_PLUS, OP_EXECUTE, OP_COMPARE, OP_FILL,
 };
 
 struct Instruction {
@@ -52,6 +53,60 @@ struct Region {
     Cell base;
     Cell size;
     py::dict pages;
+};
+
+struct ByteChunk {
+    uint8_t* bytes;
+    Cell size;
+};
+
+// Common strings fit one page without allocating a chunk list. Longer spans
+// retain every qualified page before any guest mutation is committed.
+class ByteSpan {
+public:
+    void append(uint8_t* bytes, Cell size) {
+        if (first_.size == 0) first_ = ByteChunk{bytes, size};
+        else rest_.push_back(ByteChunk{bytes, size});
+    }
+    size_t chunks() const noexcept { return first_.size == 0 ? 0 : 1 + rest_.size(); }
+    const ByteChunk& operator[](size_t index) const noexcept {
+        return index == 0 ? first_ : rest_[index - 1];
+    }
+    void fill(uint8_t value) const noexcept {
+        for (size_t i = 0; i < chunks(); ++i) {
+            const auto& chunk = (*this)[i];
+            if (chunk.bytes != nullptr)
+                std::memset(chunk.bytes, value, static_cast<size_t>(chunk.size));
+        }
+    }
+    int compare(const ByteSpan& other) const noexcept {
+        size_t left_index = 0, right_index = 0;
+        Cell left_offset = 0, right_offset = 0;
+        while (left_index < chunks()) {
+            const auto& left = (*this)[left_index];
+            const auto& right = other[right_index];
+            const Cell size = std::min(left.size - left_offset, right.size - right_offset);
+            const auto* a = left.bytes == nullptr ? nullptr : left.bytes + left_offset;
+            const auto* b = right.bytes == nullptr ? nullptr : right.bytes + right_offset;
+            if (a != nullptr && b != nullptr) {
+                const int order = std::memcmp(a, b, static_cast<size_t>(size));
+                if (order != 0) return order < 0 ? -1 : 1;
+            } else if (a != b) {
+                const auto* present = a == nullptr ? b : a;
+                for (Cell i = 0; i < size; ++i)
+                    if (present[i] != 0) return a == nullptr ? -1 : 1;
+            }
+            left_offset += size;
+            right_offset += size;
+            if (left_offset == left.size) { ++left_index; left_offset = 0; }
+            if (right_offset == right.size) { ++right_index; right_offset = 0; }
+        }
+        return 0;
+    }
+
+private:
+    ByteChunk first_{nullptr, 0};
+    std::vector<ByteChunk> rest_;
 };
 
 // Ordinary scalars usually occupy one page. The scatter representation also
@@ -178,6 +233,42 @@ public:
             width <= hot.size - (address - hot.base))
             return hot.bytes + (address - hot.base);
         return nullptr;
+    }
+
+    bool resolve_bytes(Cell address, Cell length, bool require_backing, ByteSpan& span) {
+        if (length == 0) return true;
+        if (address > MASK - (length - 1)) return false;
+        const Cell last = address + length - 1;
+        if (address < return_empty_ && last >= return_floor_) return false;
+        const auto& hot = ordinary_page_;
+        if (address >= hot.base && address - hot.base < hot.size &&
+            length <= hot.size - (address - hot.base)) {
+            if (require_backing && hot.bytes == nullptr) return false;
+            span.append(hot.bytes == nullptr ? nullptr : hot.bytes + address - hot.base,
+                        length);
+            return true;
+        }
+        for (size_t r = 0; r < regions_.size(); ++r) {
+            const Region& region = regions_[r];
+            if (address < region.base || address - region.base >= region.size) continue;
+            Cell offset = address - region.base;
+            if (length > region.size - offset) return false;
+            while (length != 0) {
+                uint8_t* page = nullptr;
+                if (!resolve_page(r, offset >> page_shift_, page) ||
+                    (require_backing && page == nullptr)) return false;
+                const Cell page_offset = offset & (page_size_ - 1);
+                const Cell size = std::min(page_size_ - page_offset, length);
+                span.append(page == nullptr ? nullptr : page + page_offset, size);
+                const Cell page_start = offset - page_offset;
+                ordinary_page_ = HotPage{region.base + page_start,
+                    std::min(page_size_, region.size - page_start), page};
+                offset += size;
+                length -= size;
+            }
+            return true;
+        }
+        return false;
     }
 
 private:
@@ -365,7 +456,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_EXECUTE)
+            if (opcode > OP_FILL)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -870,6 +961,31 @@ private:
                 return false;
             out[0] = v[0] + 1; out[1] = scalar.read(1); produced = 2;
             break;
+        case OP_COMPARE: {
+            if (!stack.inputs(4)) return false;
+            ByteSpan left, right;
+            const Cell length = std::min(v[2], v[0]);
+            // Validate both complete prefixes even when their first bytes
+            // differ; reference block reads must still report later faults.
+            if (!memory.resolve_bytes(v[3], length, false, left) ||
+                !memory.resolve_bytes(v[1], length, false, right)) return false;
+            const int order = left.compare(right);
+            out[0] = order < 0 ? MASK : order > 0 ? 1 :
+                v[2] < v[0] ? MASK : v[2] > v[0] ? 1 : 0;
+            produced = 1;
+            break;
+        }
+        case OP_FILL: {
+            if (!stack.inputs(3) || !stack.outputs(0)) return false;
+            ByteSpan destination;
+            const uint8_t value = static_cast<uint8_t>(v[0]);
+            // Zero fills deliberately leave absent sparse pages unallocated.
+            if (!memory.resolve_bytes(v[2], v[1], value != 0, destination)) return false;
+            stack.commit();
+            destination.fill(value);
+            ++s.ip;
+            return true;
+        }
         case OP_STORE: case OP_C_STORE: case OP_W_STORE: case OP_L_STORE:
         case OP_OFF: case OP_ON: case OP_PLUS_STORE: {
             const bool unary = opcode == OP_OFF || opcode == OP_ON;
@@ -950,6 +1066,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     PRIMITIVE("TRUE", OP_TRUE); PRIMITIVE("FALSE", OP_FALSE);
     PRIMITIVE("CELLS", OP_CELLS); PRIMITIVE("CELL+", OP_CELL_PLUS);
     PRIMITIVE("EXECUTE", OP_EXECUTE);
+    PRIMITIVE("COMPARE", OP_COMPARE); PRIMITIVE("FILL", OP_FILL);
     PRIMITIVE("UM*", OP_UMULTIPLY);
     // The original hosted BIOS primitives both push zero. Native admission
     // remains bound to those installed word objects, never a later namesake.

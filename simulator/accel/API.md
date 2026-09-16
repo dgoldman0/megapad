@@ -29,6 +29,15 @@ instruction runs. Intermediate popped bytes are still materialized. Stack
 operations may resolve an entire operand span through a qualified page;
 fragmented, absent and cross-page spans retain scalar handling.
 
+`COMPARE` and `FILL` preflight complete ordinary byte spans, retaining one
+inline chunk for the common single-page case and a caller-sized page list for
+longer spans. Comparisons preserve unsigned byte order and validate both full
+common prefixes before using an early difference. Missing read pages supply
+zero. Zero fills skip absent pages without allocation; nonzero fills needing
+new pages return to Python before any effects. MMIO, region crossings, wrapped
+spans and return-stack overlap keep their reference fault and side effects.
+Both primitives retain their two semantic ticks, including zero-length work.
+
 `run(xt, ip, data_state, return_state, continuations, remaining_steps)` accepts:
 
 - `data_state = (floor, empty_pointer, pointer)`;
