@@ -8,8 +8,13 @@ Scalar preflight resolves each page fragment once. A scalar wholly inside a
 page retains one contiguous byte pointer; cross-page scalars retain per-byte
 pointers for their qualified fragments, including sub-cell page sizes. Loads
 and stores remain explicit little-endian byte operations and require no host
-alignment. Missing read fragments supply zero; missing write pages return to
-Python before any effects. Page pointers are cached only within one native run.
+alignment. On little-endian hosts, contiguous full cells use unaligned-safe
+`memcpy` loads/stores. Missing read fragments supply zero; missing write pages return to
+Python before any effects. Page pointers are cached only within one native run. Exact qualified page
+spans are reused separately for data-stack, return-stack, and ordinary memory
+access. Partial final region pages remain clipped to their region. All caches
+expire before Python can replace or materialize a page, and ordinary access
+to return-stack backing still falls through before the cache lookup.
 
 `install(xt, operations)` installs a plan of `(opcode, a, b)` triples, one per
 original IR operation, so branch targets and returned IPs remain original IR

@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <unordered_map>
 #include <utility>
@@ -53,14 +54,20 @@ struct Region {
 // Ordinary scalars usually occupy one page. The scatter representation also
 // supports page sizes smaller than a cell, without copying the guest bytes.
 struct Scalar {
-    uint8_t* contiguous = nullptr;
-    bool fragmented = false;
+    uint8_t* contiguous;
+    bool fragmented;
     std::array<uint8_t*, 8> bytes;
 
     Cell read(unsigned width) const noexcept {
         Cell value = 0;
         if (!fragmented) {
             if (contiguous != nullptr) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+                if (width == 8) {
+                    std::memcpy(&value, contiguous, sizeof(value));
+                    return value;
+                }
+#endif
                 for (unsigned i = 0; i < width; ++i)
                     value |= Cell(contiguous[i]) << (i * 8);
             }
@@ -75,6 +82,12 @@ struct Scalar {
 
     void write(Cell value, unsigned width) const noexcept {
         if (!fragmented) {
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            if (width == 8) {
+                std::memcpy(contiguous, &value, sizeof(value));
+                return;
+            }
+#endif
             for (unsigned i = 0; i < width; ++i)
                 contiguous[i] = static_cast<uint8_t>(value >> (i * 8));
             return;
@@ -90,7 +103,9 @@ public:
               Cell return_floor, Cell return_empty)
         : regions_(regions), page_size_(page_size),
           return_floor_(return_floor), return_empty_(return_empty),
-          caches_(regions.size()) {}
+          caches_(regions.size()) {
+        for (Cell size = page_size; size > 1; size >>= 1) ++page_shift_;
+    }
 
     bool resolve(Cell address, unsigned width, bool write, bool ordinary,
                  Scalar& scalar) {
@@ -99,6 +114,17 @@ public:
         const Cell last = address + width - 1;
         if (ordinary && address < return_empty_ && last >= return_floor_)
             return false;
+        // Each access role usually stays on one page. Keep exact qualified
+        // spans only for this GIL-held run; stores still hit the shared bytes.
+        HotPage& hot = ordinary ? ordinary_page_ :
+            address >= return_floor_ && address < return_empty_
+                ? return_page_ : data_page_;
+        if (address >= hot.base && last - hot.base < hot.size) {
+            if (write && hot.bytes == nullptr) return false;
+            scalar.fragmented = false;
+            scalar.contiguous = hot.bytes == nullptr ? nullptr : hot.bytes + address - hot.base;
+            return true;
+        }
         for (size_t r = 0; r < regions_.size(); ++r) {
             Region& region = regions_[r];
             if (address < region.base || address - region.base >= region.size)
@@ -106,8 +132,8 @@ public:
             const Cell offset = address - region.base;
             if (width > region.size - offset)
                 return false;
-            Cell page_index = offset / page_size_;
-            Cell page_offset = offset % page_size_;
+            Cell page_index = offset >> page_shift_;
+            Cell page_offset = offset & (page_size_ - 1);
             scalar.fragmented = width > page_size_ - page_offset;
             unsigned consumed = 0;
             while (consumed < width) {
@@ -116,6 +142,10 @@ public:
                 if (write && page == nullptr)
                     return false;
                 if (!scalar.fragmented) {
+                    const Cell page_start = offset - page_offset;
+                    const Cell available = region.size - page_start;
+                    hot = HotPage{region.base + page_start,
+                                  available < page_size_ ? available : page_size_, page};
                     scalar.contiguous = page == nullptr ? nullptr : page + page_offset;
                     return true;
                 }
@@ -135,6 +165,14 @@ public:
     }
 
 private:
+    struct HotPage {
+        Cell base = 0;
+        Cell size = 0;
+        uint8_t* bytes = nullptr;
+    };
+    HotPage data_page_, return_page_, ordinary_page_;
+    unsigned page_shift_ = 0;
+
     bool resolve_page(size_t region_index, Cell page_index, uint8_t*& page) {
         auto& cache = caches_[region_index];
         const auto found = cache.find(page_index);
@@ -244,8 +282,10 @@ public:
         state_.pointer = destination_;
     }
 
-    std::array<Cell, 4> values{};
-    std::array<Cell, 6> result{};
+    // inputs()/execute() initialize every consumed/produced cell. Avoid
+    // clearing scratch and six scatter descriptors at every guest operation.
+    std::array<Cell, 4> values;
+    std::array<Cell, 6> result;
 
 private:
     MemoryRun& memory_;
@@ -253,7 +293,7 @@ private:
     unsigned consumed_ = 0;
     unsigned produced_ = 0;
     Cell destination_ = 0;
-    std::array<Scalar, 6> output_{};
+    std::array<Scalar, 6> output_;
 };
 
 class NativeProgram {
@@ -323,11 +363,17 @@ public:
         MemoryRun memory(regions_, page_size_, state.returns.floor,
                          state.returns.empty);
         try {
+            Cell plan_xt = 0;
+            const std::vector<Instruction>* plan = nullptr;
             while (state.steps < remaining_steps) {
-                auto plan = plans_.find(state.xt);
-                if (plan == plans_.end() || state.ip >= plan->second.size())
-                    break;
-                const Instruction operation = plan->second[state.ip];
+                if (state.xt != plan_xt) {
+                    const auto found = plans_.find(state.xt);
+                    if (found == plans_.end()) break;
+                    plan_xt = state.xt;
+                    plan = &found->second;
+                }
+                if (plan == nullptr || state.ip >= plan->size()) break;
+                const Instruction operation = (*plan)[state.ip];
                 if (operation.opcode == OP_STOP ||
                     cost(operation.opcode) > remaining_steps - state.steps)
                     break;
@@ -640,6 +686,7 @@ private:
             case OP_ZERO_LESS: out[0] = flag((v[0] & SIGN) != 0); break;
             case OP_ZERO_GREATER: out[0] = flag(v[0] != 0 && !(v[0] & SIGN)); break;
             case OP_BSWAP:
+                out[0] = 0;
                 for (unsigned i = 0; i < 8; ++i)
                     out[0] |= ((v[0] >> (i * 8)) & 255) << ((7 - i) * 8);
                 break;

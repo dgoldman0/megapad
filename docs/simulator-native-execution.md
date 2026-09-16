@@ -30,6 +30,40 @@ evidence is under its `local_testing/out/rich-main-integration-20260913/`.
 Preservation and build/test records remain in the workspace archive
 `worktree-retirement-archives/2026-09-13-rich-interaction/`.
 
+## Typing execution follow-up — September 16, 2026
+
+A profiled ordinary Pad character performed 49.6 million native semantic
+steps and spent 1.76 s inside native execution, plus 0.15 s in settlement.
+That observer-enabled run is attribution evidence, not unprofiled latency.
+The simulator is a material bottleneck alongside repeated guest validation.
+
+The executor now reuses exact qualified page spans within each bounded native
+interval, avoids zeroing scratch that is initialized before use, uses
+unaligned-safe full-cell loads/stores on little-endian hosts, and retains the
+current plan pointer until the execution token changes. Memory remains the
+same shared sparse backing. Step counts, timer advancement, fallback faults,
+continuation cookies, and the 8,192-step native interval are unchanged.
+
+The Python/native parity selector passes 96 cases, including sub-cell pages,
+unaligned access, partial final regions, missing-page writes, host page
+replacement between intervals, and observable stack scratch results.
+`bench_native_dispatch.py` runs four bounded kernels sequentially and records
+all trial times, semantic counts, results, and the native binary hash. Initial
+median speedups are 3.05x arithmetic, 2.68x field reads/calls, 2.01x counted
+loop/calls, and 2.82x scattered reads, with identical steps and results.
+These kernels do not establish physical typing latency.
+
+The associated input correction distinguishes temporary model/result waits
+from invalid input. The viewer retains bounded keyboard intentions through
+ordinary frame transitions and binds them only when a complete current frame
+has been physically ACKed. Frame-specific control activations are discarded;
+reset, lease loss, attachment/presentation/geometry change, or revision
+regression clears the keyboard queue. The viewer/driver/core selector passes
+106 cases. A physical ordinary Desktop rerun before this executor change
+showed all 19 individually scheduled characters at 5 characters/second; its
+single-character latency was still 2.435 s. The paired Akashic typing ledger
+records physical results as they become available.
+
 ## Build and select
 
 ```

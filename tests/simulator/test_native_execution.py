@@ -624,3 +624,76 @@ def test_pure_primitive_admission_and_compiled_binding_survive_shadowing(
     else:
         assert callbacks == [[], []]
         assert result["uart"] == b""
+
+
+@pytest.mark.parametrize("page_size", [2, 4, 8, 16, 4096])
+def test_hot_scalar_pages_preserve_unaligned_and_fragmented_access(page_size):
+    runtimes = _runtimes(external_size=8192, page_size=page_size)
+    for runtime in runtimes:
+        external = next(r for r in runtime.memory.regions if r.kind is AddressClass.EXTERNAL)
+        address = external.base + 4093
+        runtime.memory.write_bytes(address - 16, bytes(64))
+        runtime.define_constant("TARGET", address)
+        runtime.evaluate(
+            b": RUN 0x8877665544332211 TARGET ! TARGET @ "
+            b"TARGET 1+ C@ TARGET 2 + W@ TARGET 3 + L@ "
+            b"0xFFEEDDCC TARGET 1+ L! TARGET @ ;"
+        )
+    result = _compare(runtimes, "RUN", spans=((address - 16, 64),))
+    assert result["error"] is None
+    assert result["data"] == (
+        0x8877665544332211, 0x22, 0x4433, 0x77665544, 0x887766FFEEDDCC11,
+    )
+
+
+def test_hot_missing_read_page_yields_before_materializing_a_write():
+    runtimes = _runtimes(external_size=8192)
+    for runtime in runtimes:
+        external = next(r for r in runtime.memory.regions if r.kind is AddressClass.EXTERNAL)
+        runtime.define_constant("TARGET", external.base + 4096)
+        runtime.evaluate(b": RUN TARGET @ 123 TARGET ! TARGET @ ;")
+    result = _compare(runtimes, "RUN", spans=((external.base + 4096, 8),))
+    assert result["error"] is None
+    assert result["data"] == (0, 123)
+
+
+def test_hot_page_cannot_extend_a_partial_final_region_page():
+    runtimes = _runtimes(external_size=4100)
+    for runtime in runtimes:
+        external = next(r for r in runtime.memory.regions if r.kind is AddressClass.EXTERNAL)
+        runtime.memory.write8(external.base + 4096, 7)
+        runtime.define_constant("TARGET", external.base + 4096)
+        runtime.evaluate(b": RUN TARGET C@ TARGET 3 + C@ TARGET @ ;")
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is not None
+    assert result["data"][:2] == (7, 0)
+
+
+def test_hot_page_is_not_retained_across_a_python_callback():
+    runtimes = _runtimes(external_size=8192)
+    for runtime in runtimes:
+        external = next(r for r in runtime.memory._regions
+                        if r.spec.kind is AddressClass.EXTERNAL)
+        runtime.memory.write64(external.spec.base, 11)
+        runtime.define_constant("TARGET", external.spec.base)
+
+        def replace_page(context, *, region=external):
+            replacement = bytearray(region.page_size)
+            replacement[:8] = (91).to_bytes(8, "little")
+            region.pages[0] = replacement
+
+        runtime.define_primitive("REPLACE-PAGE", replace_page)
+        runtime.evaluate(b": RUN TARGET @ REPLACE-PAGE TARGET @ ;")
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+    assert result["data"] == (11, 91)
+
+
+def test_stack_scratch_preserves_all_produced_cells_and_byte_swap():
+    runtimes = _runtimes(
+        b": RUN 1 2 3 4 2OVER 2SWAP ROT -ROT TUCK NIP "
+        b"0x8877665544332211 BSWAP 0 BSWAP ;"
+    )
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+    assert result["data"][-2:] == (0x1122334455667788, 0)
