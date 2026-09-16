@@ -686,6 +686,90 @@ private:
         }
     }
 
+    // Keep byte-span allocation and cleanup outside the scalar dispatch loop.
+    [[gnu::noinline]] static bool execute_bulk(uint32_t opcode, MemoryRun& memory,
+                                               RunState& s, StackOperation& stack) {
+        auto& v = stack.values;
+        auto& out = stack.result;
+        unsigned produced = 0;
+        switch (opcode) {
+        case OP_COMPARE: {
+            if (!stack.inputs(4)) return false;
+            ByteSpan left, right;
+            const Cell length = std::min(v[2], v[0]);
+            // Validate both complete prefixes even when their first bytes
+            // differ; reference block reads must still report later faults.
+            if (!memory.resolve_bytes(v[3], length, false, left) ||
+                !memory.resolve_bytes(v[1], length, false, right)) return false;
+            const int order = left.compare(right);
+            out[0] = order < 0 ? MASK : order > 0 ? 1 :
+                v[2] < v[0] ? MASK : v[2] > v[0] ? 1 : 0;
+            produced = 1;
+            break;
+        }
+        case OP_FILL: {
+            if (!stack.inputs(3) || !stack.outputs(0)) return false;
+            ByteSpan destination;
+            const uint8_t value = static_cast<uint8_t>(v[0]);
+            // Zero fills deliberately leave absent sparse pages unallocated.
+            if (!memory.resolve_bytes(v[2], v[1], value != 0, destination)) return false;
+            stack.commit();
+            destination.fill(value);
+            ++s.ip;
+            return true;
+        }
+        case OP_CMOVE: case OP_CMOVE_UP: case OP_MOVE: {
+            if (!stack.inputs(3) || !stack.outputs(0)) return false;
+            const Cell length = v[0], destination = v[1], source = v[2];
+            if (length != 0 && !(opcode == OP_MOVE && source == destination)) {
+                std::vector<uint8_t> payload;
+                if (length > payload.max_size()) return false;
+                ByteSpan from, to;
+                if (!memory.resolve_bytes(source, length, false, from) ||
+                    !memory.resolve_bytes(destination, length, true, to)) return false;
+                payload.resize(static_cast<size_t>(length));
+                // Reference ordinary copies read before writing, even when
+                // host-installed page objects happen to alias each other.
+                from.read_into(payload.data());
+                if (opcode == OP_CMOVE && source < destination &&
+                    destination - source < length) {
+                    const Cell stride = destination - source;
+                    for (Cell offset = stride; offset < length;) {
+                        const Cell size = std::min(stride, length - offset);
+                        std::memcpy(payload.data() + offset, payload.data(),
+                                    static_cast<size_t>(size));
+                        offset += size;
+                    }
+                } else if (opcode == OP_CMOVE_UP && destination < source &&
+                           source - destination < length) {
+                    const Cell stride = source - destination;
+                    for (Cell end = length - stride; end != 0;) {
+                        const Cell size = std::min(stride, end);
+                        std::memcpy(payload.data() + end - size,
+                                    payload.data() + length - size,
+                                    static_cast<size_t>(size));
+                        end -= size;
+                    }
+                }
+                stack.commit();
+                to.write_from(payload.data());
+            } else {
+                // MOVE also treats identical (even unmapped) addresses as a
+                // no-op. CMOVE/CMOVE> must still validate a nonempty self-copy.
+                stack.commit();
+            }
+            ++s.ip;
+            return true;
+        }
+        default:
+            return false;
+        }
+        if (!stack.outputs(produced)) return false;
+        stack.commit();
+        ++s.ip;
+        return true;
+    }
+
     bool execute(const Instruction& operation, MemoryRun& memory, RunState& s,
                  const py::dict& continuations) {
         const auto opcode = operation.opcode;
@@ -987,74 +1071,8 @@ private:
                 return false;
             out[0] = v[0] + 1; out[1] = scalar.read(1); produced = 2;
             break;
-        case OP_COMPARE: {
-            if (!stack.inputs(4)) return false;
-            ByteSpan left, right;
-            const Cell length = std::min(v[2], v[0]);
-            // Validate both complete prefixes even when their first bytes
-            // differ; reference block reads must still report later faults.
-            if (!memory.resolve_bytes(v[3], length, false, left) ||
-                !memory.resolve_bytes(v[1], length, false, right)) return false;
-            const int order = left.compare(right);
-            out[0] = order < 0 ? MASK : order > 0 ? 1 :
-                v[2] < v[0] ? MASK : v[2] > v[0] ? 1 : 0;
-            produced = 1;
-            break;
-        }
-        case OP_FILL: {
-            if (!stack.inputs(3) || !stack.outputs(0)) return false;
-            ByteSpan destination;
-            const uint8_t value = static_cast<uint8_t>(v[0]);
-            // Zero fills deliberately leave absent sparse pages unallocated.
-            if (!memory.resolve_bytes(v[2], v[1], value != 0, destination)) return false;
-            stack.commit();
-            destination.fill(value);
-            ++s.ip;
-            return true;
-        }
-        case OP_CMOVE: case OP_CMOVE_UP: case OP_MOVE: {
-            if (!stack.inputs(3) || !stack.outputs(0)) return false;
-            const Cell length = v[0], destination = v[1], source = v[2];
-            if (length != 0 && !(opcode == OP_MOVE && source == destination)) {
-                std::vector<uint8_t> payload;
-                if (length > payload.max_size()) return false;
-                ByteSpan from, to;
-                if (!memory.resolve_bytes(source, length, false, from) ||
-                    !memory.resolve_bytes(destination, length, true, to)) return false;
-                payload.resize(static_cast<size_t>(length));
-                // Reference ordinary copies read before writing, even when
-                // host-installed page objects happen to alias each other.
-                from.read_into(payload.data());
-                if (opcode == OP_CMOVE && source < destination &&
-                    destination - source < length) {
-                    const Cell stride = destination - source;
-                    for (Cell offset = stride; offset < length;) {
-                        const Cell size = std::min(stride, length - offset);
-                        std::memcpy(payload.data() + offset, payload.data(),
-                                    static_cast<size_t>(size));
-                        offset += size;
-                    }
-                } else if (opcode == OP_CMOVE_UP && destination < source &&
-                           source - destination < length) {
-                    const Cell stride = source - destination;
-                    for (Cell end = length - stride; end != 0;) {
-                        const Cell size = std::min(stride, end);
-                        std::memcpy(payload.data() + end - size,
-                                    payload.data() + length - size,
-                                    static_cast<size_t>(size));
-                        end -= size;
-                    }
-                }
-                stack.commit();
-                to.write_from(payload.data());
-            } else {
-                // MOVE also treats identical (even unmapped) addresses as a
-                // no-op. CMOVE/CMOVE> must still validate a nonempty self-copy.
-                stack.commit();
-            }
-            ++s.ip;
-            return true;
-        }
+        case OP_COMPARE: case OP_FILL: case OP_CMOVE: case OP_CMOVE_UP: case OP_MOVE:
+            return execute_bulk(opcode, memory, s, stack);
         case OP_STORE: case OP_C_STORE: case OP_W_STORE: case OP_L_STORE:
         case OP_OFF: case OP_ON: case OP_PLUS_STORE: {
             const bool unary = opcode == OP_OFF || opcode == OP_ON;

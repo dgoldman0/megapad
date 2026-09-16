@@ -156,6 +156,13 @@ extension with a different interface must be archived together with its matching
 `simulator` Python package under `--extension-dir`; the output binds both the
 extension and Python boundary hashes.
 
+Bulk byte-span handlers are explicitly kept outside the scalar dispatch loop.
+Moving their allocation and cleanup into one helper reduced the compiled hot
+run body from 10,875 to 8,675 bytes on this build. Five alternating sequential
+process pairs improved the existing scalar kernels by 2.8–14.0% against the
+initial inline bulk implementation, with identical work and results. Full
+before/after kernel and physical measurements follow separately.
+
 ## Build and select
 
 ```

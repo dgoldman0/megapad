@@ -51,6 +51,11 @@ their partial writes and fault order. Zero-length copies do not inspect the
 addresses; `MOVE` also skips nonempty self-copies at any address. No new
 guest capacity or semantic step charge is introduced.
 
+Bulk handlers stay outside the scalar dispatch loop in a non-inlined helper.
+This keeps byte-span allocation and exception cleanup out of the hot loop;
+the ordinary preflight, stack commit and original instruction boundary are
+unchanged.
+
 `run(xt, ip, data_state, return_state, continuations, remaining_steps)` accepts:
 
 - `data_state = (floor, empty_pointer, pointer)`;
