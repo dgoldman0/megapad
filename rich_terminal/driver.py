@@ -17,6 +17,7 @@ from .server import (
     RichTerminalCore,
     TerminalConfig,
     TerminalSessionError,
+    TerminalInputPending,
     TerminalState,
 )
 from .transport import (
@@ -490,6 +491,8 @@ class RichTerminalDriver:
             if outbound is None:
                 return DriverStatus.BACKPRESSURED
             self._retain_outbound((outbound,))
+        except TerminalInputPending:
+            return DriverStatus.BACKPRESSURED
         except (TerminalSessionError, TypeError, ValueError):
             return DriverStatus.INVALID
         return DriverStatus.PROGRESS
@@ -547,6 +550,8 @@ class RichTerminalDriver:
             if outbound is None:
                 return DriverStatus.BACKPRESSURED
             self._retain_outbound((outbound,))
+        except TerminalInputPending:
+            return DriverStatus.BACKPRESSURED
         except (TerminalSessionError, TypeError, ValueError):
             return DriverStatus.INVALID
         return DriverStatus.PROGRESS
@@ -583,6 +588,8 @@ class RichTerminalDriver:
             if outbound is None:
                 return DriverStatus.BACKPRESSURED
             self._retain_outbound((outbound,))
+        except TerminalInputPending:
+            return DriverStatus.BACKPRESSURED
         except (TerminalSessionError, TypeError, ValueError):
             return DriverStatus.INVALID
         return DriverStatus.PROGRESS
@@ -617,6 +624,8 @@ class RichTerminalDriver:
             if outbound is None:
                 return DriverStatus.BACKPRESSURED
             self._retain_outbound((outbound,))
+        except TerminalInputPending:
+            return DriverStatus.BACKPRESSURED
         except (TerminalSessionError, TypeError, ValueError):
             return DriverStatus.INVALID
         return DriverStatus.PROGRESS
@@ -635,6 +644,8 @@ class RichTerminalDriver:
             if outbound is None:
                 return DriverStatus.BACKPRESSURED
             self._retain_outbound((outbound,))
+        except TerminalInputPending:
+            return DriverStatus.BACKPRESSURED
         except (TerminalSessionError, TypeError, ValueError):
             return DriverStatus.INVALID
         return DriverStatus.PROGRESS

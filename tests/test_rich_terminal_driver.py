@@ -901,3 +901,44 @@ def test_resize_intent_waits_for_adapter_retained_machine_egress():
     assert core.geometry_generation == 1
     assert core.state is TerminalState.RESYNCING
     assert host.pending_geometry_events == 1
+
+
+@pytest.mark.parametrize("operation", ["key", "text", "pointer", "focus"])
+def test_busy_model_boundary_backpressures_input_without_advancing_wire(operation):
+    host = FakeTerminalHost()
+    limits = _host_limits()
+    lease = host.attach(limits)
+    core = RichTerminalCore(
+        _terminal_config(), attachment_epoch=lease.attachment_epoch,
+        session_id_factory=lambda: 0x0123456789ABCDEF,
+    )
+    probe = core.feed_machine(encode_probe(1))
+    offer = parse_negotiation(probe.outbound[0].payload)
+    opened_bytes, encoder = _open_bytes(offer, client_credit=512)
+    opened = core.feed_machine(opened_bytes)
+    driver = RichTerminalDriver(lease, core, limits, DriverLimits(4096, 8))
+    operations = {
+        "key": lambda: driver.send_key(ord("g")),
+        "text": lambda: driver.send_text(b"g"),
+        "pointer": lambda: driver.send_pointer(0, 0),
+        "focus": lambda: driver.send_focus(True),
+    }
+    send = operations[operation]
+    sent = core._server_data_sent
+    for _ in range(2):
+        assert send() is DriverStatus.BACKPRESSURED  # result delivery pending
+        assert core._server_data_sent == sent
+    for outbound in opened.outbound:
+        if outbound.result_transaction_id is not None:
+            core.settle_result_delivery(outbound.result_transaction_id)
+    core.feed_machine(encoder.encode(MessageType.TX_BEGIN, BEGIN.pack(2, 1, 2, 2, 0, 0)))
+    assert send() is DriverStatus.BACKPRESSURED  # next transaction open
+    assert core._server_data_sent == sent
+    committed = core.feed_machine(encoder.encode(MessageType.TX_COMMIT, COMMIT.pack(2)))
+    assert send() is DriverStatus.BACKPRESSURED
+    for outbound in committed.outbound:
+        if outbound.result_transaction_id is not None:
+            core.settle_result_delivery(outbound.result_transaction_id)
+    assert send() is DriverStatus.PROGRESS
+    assert core._server_data_sent > sent
+    assert driver.send_text(b"\xff") is DriverStatus.INVALID

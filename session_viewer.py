@@ -718,6 +718,7 @@ class _GuestKeyboardForwarder:
         self._pending_inputs: deque[tuple[str, dict]] = deque()
         self._display_ack: tuple[int, DisplayScope] | None = None
         self._display_transition = False
+        self._keyboard_scope: DisplayScope | None = None
         self.last_error: str | None = None
 
     @property
@@ -744,6 +745,7 @@ class _GuestKeyboardForwarder:
         if normalized != self.generation:
             self._pending_inputs.clear()
             self._display_ack = None
+            self._keyboard_scope = None
             self._display_transition = self.display_required
             self.generation = normalized
             self.last_error = None
@@ -757,6 +759,7 @@ class _GuestKeyboardForwarder:
         self.suppressed_text_keys.clear()
         self._pending_inputs.clear()
         self._display_ack = None
+        self._keyboard_scope = None
         self._display_transition = False
         self.last_error = None
 
@@ -768,13 +771,22 @@ class _GuestKeyboardForwarder:
         self.display_required = required
         self._pending_inputs.clear()
         self._display_ack = None
+        self._keyboard_scope = None
         self._display_transition = required
         self.last_error = None
 
-    def begin_display_offer(self) -> None:
-        """Invalidate old input while a newer frame awaits its sink boundary."""
+    def _retain_keyboard_events(self) -> None:
+        # Keys/text are ordered user intentions, bound when they can be sent.
+        # A control activation is tied to the old frame's exact hit map.
+        self._pending_inputs = deque(
+            (method, params) for method, params in self._pending_inputs
+            if method in {"send_key", "send_text"}
+        )
 
-        self._pending_inputs.clear()
+    def begin_display_offer(self) -> None:
+        """Hold keyboard intentions until the next complete physical ACK."""
+
+        self._retain_keyboard_events()
         self._display_ack = None
         self.display_required = True
         self._display_transition = True
@@ -794,8 +806,22 @@ class _GuestKeyboardForwarder:
             raise TypeError("scope must be DisplayScope")
         token = (int(normalized), scope)
         if token != self._display_ack:
-            self._pending_inputs.clear()
+            self._retain_keyboard_events()
+            prior = self._keyboard_scope
+            if prior is None or any(
+                getattr(prior, name) != getattr(scope, name)
+                for name in ("attachment_epoch", "session_id",
+                             "presentation_epoch", "geometry_generation")
+            ) or any(
+                getattr(prior, name) is not None and (
+                    getattr(scope, name) is None
+                    or getattr(scope, name) < getattr(prior, name)
+                )
+                for name in ("model_revision", "cell_revision", "retained_revision")
+            ):
+                self._pending_inputs.clear()
         self._display_ack = token
+        self._keyboard_scope = scope
         self._display_transition = False
         self.last_error = None
 
@@ -804,6 +830,7 @@ class _GuestKeyboardForwarder:
             raise TypeError("waiting must be bool")
         self._pending_inputs.clear()
         self._display_ack = None
+        self._keyboard_scope = None
         self._display_transition = waiting
         self.last_error = None
 
@@ -817,6 +844,7 @@ class _GuestKeyboardForwarder:
     def _record_rejection(self, method: str, status: str | None) -> None:
         if status in {"stale", "failed", "stale_generation", "stale_display"}:
             self._pending_inputs.clear()
+            self._keyboard_scope = None
         if status == "stale_display":
             self._display_ack = None
             self._display_transition = self.display_required
@@ -832,18 +860,23 @@ class _GuestKeyboardForwarder:
             self._pending_inputs.clear()
             self.last_error = "viewer is view-only; display lease is held elsewhere"
             return
+        params["generation"] = self.generation
         if self._display_transition or (
             self.display_required and self._display_ack is None
         ):
-            self._pending_inputs.clear()
-            self.last_error = "input waiting for current display acknowledgement"
+            if self._keyboard_scope is not None and method in {"send_key", "send_text"}:
+                self._enqueue_input(method, params)
+            else:
+                self.last_error = "input waiting for current display acknowledgement"
             return
-        params["generation"] = self.generation
-        self._bind_display_proof(params)
+        if method not in {"send_key", "send_text"}:
+            self._bind_display_proof(params)
         if self._pending_inputs:
             self._enqueue_input(method, params)
             return
-        result = self.client.request(method, **params)
+        request = dict(params)
+        self._bind_display_proof(request)
+        result = self.client.request(method, **request)
         status = result.get("status")
         if status == "progress":
             return
@@ -853,9 +886,16 @@ class _GuestKeyboardForwarder:
         self._record_rejection(method, status)
 
     def flush_pending(self) -> None:
+        if not self.input_enabled or self._display_transition or (
+            self.display_required and self._display_ack is None
+        ):
+            return
         while self._pending_inputs:
             method, params = self._pending_inputs[0]
-            result = self.client.request(method, **params)
+            request = dict(params)
+            if method in {"send_key", "send_text"}:
+                self._bind_display_proof(request)
+            result = self.client.request(method, **request)
             status = result.get("status")
             if status == "backpressured":
                 return

@@ -206,7 +206,11 @@ class TerminalState(str, Enum):
 
 
 class TerminalSessionError(RuntimeError):
-    """Fatal enhanced-session failure requiring close or outer epoch reset."""
+    """Enhanced-session operation rejected by its current state."""
+
+
+class TerminalInputPending(TerminalSessionError):
+    """Input must wait for a transaction/result boundary without being lost."""
 
 
 def _integer(name: str, value, *, minimum: int, maximum: int) -> int:
@@ -3272,12 +3276,12 @@ class RichTerminalCore:
             or clock.open_transaction is not None
             or clock.outstanding_result is not None
         ):
-            raise TerminalSessionError(
+            raise TerminalInputPending(
                 "normalized input waits for committed model/result boundaries"
             )
         retained = self._retained_model
         if retained is not None and retained.state.hidden is not None:
-            raise TerminalSessionError(
+            raise TerminalInputPending(
                 "normalized input waits for retained hidden-target reveal"
             )
         return model
@@ -3298,5 +3302,6 @@ __all__ = [
     "RichTerminalCore",
     "TerminalConfig",
     "TerminalSessionError",
+    "TerminalInputPending",
     "TerminalState",
 ]

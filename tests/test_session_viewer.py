@@ -6,6 +6,7 @@ import base64
 import hashlib
 import sys
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -820,14 +821,11 @@ def test_status_invalidation_forces_refresh_before_another_flip():
     assert state.retained_plane is None
 
 
-def test_offer_transition_discards_queued_old_display_proof():
+def test_offer_transition_retains_keyboard_order_until_current_physical_ack():
     pygame = _FakePygame()
     client = _RecordingClient(responses=("backpressured", "progress"))
     keyboard = _GuestKeyboardForwarder(
-        pygame,
-        client,
-        generation=5,
-        display_required=True,
+        pygame, client, generation=5, display_required=True,
     )
     old_offer = _display_offer(1)
     new_offer = _display_offer(2)
@@ -836,24 +834,102 @@ def test_offer_transition_discards_queued_old_display_proof():
     assert keyboard.key_down(_key_event(pygame.K_RETURN))
     assert keyboard.pending_events == 1
     keyboard.begin_display_offer()
-    assert keyboard.pending_events == 0
+    assert keyboard.pending_events == 1
     assert keyboard.display_ack is None
 
     requests_before_ack = list(client.requests)
-    assert keyboard.text_input(SimpleNamespace(text="blocked"))
+    assert keyboard.text_input(SimpleNamespace(text="é"))
+    keyboard.flush_pending()
     assert client.requests == requests_before_ack
+    assert keyboard.pending_events == 2
 
     keyboard.acknowledge_display_offer(new_offer.offer_id, new_offer.scope)
     assert keyboard.text_input(SimpleNamespace(text="current"))
-    assert client.requests[-1] == (
-        "send_text",
-        {
-            "text": "current",
-            "generation": 5,
-            "display_offer_id": new_offer.offer_id,
-            "display_scope": display_scope_to_wire(new_offer.scope),
-        },
+    assert client.requests == requests_before_ack
+    keyboard.flush_pending()
+    assert keyboard.pending_events == 0
+    proof = {
+        "generation": 5, "display_offer_id": new_offer.offer_id,
+        "display_scope": display_scope_to_wire(new_offer.scope),
+    }
+    assert client.requests[1:] == [
+        ("send_key", {"key": "enter", **proof}),
+        ("send_text", {"text": "é", **proof}),
+        ("send_text", {"text": "current", **proof}),
+    ]
+
+
+@pytest.mark.parametrize("changed", [
+    {"attachment_epoch": 2}, {"session_id": 3},
+    {"presentation_epoch": 1}, {"geometry_generation": 1},
+    {"model_revision": 0, "cell_revision": 0, "retained_revision": 0},
+    {"cell_revision": 0}, {"retained_revision": 0}, {"retained_revision": None},
+])
+def test_keyboard_retention_cannot_cross_display_context_change(changed):
+    client = _RecordingClient(responses=("backpressured",))
+    keyboard = _GuestKeyboardForwarder(_FakePygame(), client, display_required=True)
+    old = _display_offer(1)
+    keyboard.acknowledge_display_offer(old.offer_id, old.scope)
+    keyboard.text_input(SimpleNamespace(text="old"))
+    keyboard.begin_display_offer()
+    keyboard.text_input(SimpleNamespace(text="also old"))
+    new = _display_offer(2)
+    keyboard.acknowledge_display_offer(new.offer_id, replace(new.scope, **changed))
+    keyboard.flush_pending()
+    assert keyboard.pending_events == 0
+    assert len(client.requests) == 1
+
+
+def test_transition_discards_click_proof_but_keeps_bounded_keyboard_intentions():
+    client = _RecordingClient(responses=("backpressured",))
+    keyboard = _GuestKeyboardForwarder(
+        _FakePygame(), client, display_required=True, max_pending_events=2,
     )
+    old = _display_offer(1)
+    keyboard.acknowledge_display_offer(old.offer_id, old.scope)
+    keyboard._request_input("send_control_event", owner_id=1, owner_generation=1,
+                            control_id=1)
+    keyboard.text_input(SimpleNamespace(text="a"))
+    keyboard.begin_display_offer()
+    assert keyboard.pending_events == 1
+    keyboard.text_input(SimpleNamespace(text="b"))
+    keyboard.text_input(SimpleNamespace(text="overflow"))
+    assert keyboard.pending_events == 2
+    assert "retention full" in keyboard.last_error
+    keyboard._request_input("send_control_event", owner_id=1, owner_generation=1,
+                            control_id=1)
+    keyboard.flush_pending()
+    assert len(client.requests) == 1
+    new = _display_offer(2)
+    keyboard.acknowledge_display_offer(new.offer_id, new.scope)
+    keyboard.flush_pending()
+    assert [params["text"] for _, params in client.requests[1:]] == ["a", "b"]
+
+
+@pytest.mark.parametrize("invalidate", ["generation", "lease", "context", "required"])
+def test_authority_reset_discards_keyboard_waiting_for_a_frame(invalidate):
+    client = _RecordingClient(responses=("backpressured",))
+    keyboard = _GuestKeyboardForwarder(_FakePygame(), client, display_required=True)
+    old = _display_offer(1)
+    keyboard.acknowledge_display_offer(old.offer_id, old.scope)
+    keyboard.text_input(SimpleNamespace(text="old"))
+    keyboard.begin_display_offer()
+    if invalidate == "generation":
+        keyboard.set_generation(1)
+    elif invalidate == "lease":
+        keyboard.set_input_enabled(False)
+        keyboard.set_input_enabled(True)
+    elif invalidate == "context":
+        keyboard.clear_display_context(waiting=True)
+    else:
+        keyboard.set_display_required(False)
+        keyboard.set_display_required(True)
+    keyboard.text_input(SimpleNamespace(text="before first ACK"))
+    assert keyboard.pending_events == 0
+    new = _display_offer(2)
+    keyboard.acknowledge_display_offer(new.offer_id, new.scope)
+    keyboard.flush_pending()
+    assert len(client.requests) == 1
 
 
 def test_stale_display_is_nonfatal_but_invalidates_input_proof():
