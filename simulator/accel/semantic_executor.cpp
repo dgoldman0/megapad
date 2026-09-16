@@ -1091,7 +1091,6 @@ private:
 
 PYBIND11_MODULE(_megaforth_native, module) {
     module.doc() = "Native execution of generic hosted Forth semantic plans";
-    module.attr("ABI_VERSION") = py::int_(2);
     py::class_<NativeProgram>(module, "NativeProgram")
         .def(py::init<const py::iterable&, Cell, py::object>(), py::arg("regions"),
              py::arg("page_size"), py::arg("continuation_type"))

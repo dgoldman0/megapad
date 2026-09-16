@@ -3,7 +3,7 @@ import argparse, hashlib, json, sys, time, statistics
 from pathlib import Path
 root=Path(__file__).resolve().parent
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--extension-dir', type=Path, help='archived extension directory; include its simulator package if the boundary ABI differs')
+parser.add_argument('--extension-dir', type=Path, help='archived extension directory; include its matching simulator package when comparing different boundary implementations')
 parser.add_argument('--output', type=Path)
 args=parser.parse_args()
 sys.path.insert(0,str(root))

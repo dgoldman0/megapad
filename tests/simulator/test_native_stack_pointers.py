@@ -1,27 +1,14 @@
 """Native pointer reads retain return-frontier capture and escape guards."""
 from __future__ import annotations
 
-import sys
-from types import SimpleNamespace
-
 import pytest
 
 pytest.importorskip("_megaforth_native")
 
 from simulator.errors import ExecutionError
-from simulator.native_execution import NativeExecutor
 from simulator.runtime import ExecutionResult, YieldedExecution
 from simulator.stacks import DataStack, StackOverflow
 from tests.simulator.test_native_execution import _compare, _runtimes
-
-
-@pytest.mark.parametrize("abi", [None, 1, 3])
-def test_incompatible_native_boundary_requires_rebuild_or_auto_fallback(monkeypatch, abi):
-    extension = SimpleNamespace() if abi is None else SimpleNamespace(ABI_VERSION=abi)
-    monkeypatch.setitem(sys.modules, "_megaforth_native", extension)
-    assert NativeExecutor.create(None, required=False, admit_core=True) is None
-    with pytest.raises(RuntimeError, match="ABI 2.*rebuild"):
-        NativeExecutor.create(None, required=True, admit_core=True)
 
 
 @pytest.mark.parametrize("operation", [b"SP@", b"RP@"])

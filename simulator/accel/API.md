@@ -1,8 +1,8 @@
 # Native semantic execution boundary
 
-The current extension exports `ABI_VERSION = 2`. Explicit native selection
-rejects stale binaries with a rebuild instruction; automatic selection uses
-the reference backend if the installed boundary is incompatible.
+The extension and its Python owner are built from the same checkout and use
+one current internal interface. Rebuild the extension after changing this
+boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
 
 `_megaforth_native.NativeProgram(regions, page_size, continuation_type)` retains the ordinary
 regions as `(base, size, pages)` triples. `pages` is the existing sparse

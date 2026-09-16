@@ -30,13 +30,6 @@ class NativeExecutor:
                     "run python setup_simulator_accel.py build_ext --inplace"
                 ) from None
             return None
-        if getattr(extension, "ABI_VERSION", None) != 2:
-            if required:
-                raise RuntimeError(
-                    "native semantic execution requires _megaforth_native ABI 2; "
-                    "rebuild with python setup_simulator_accel.py build_ext --inplace --force"
-                )
-            return None
         return cls(runtime, extension, admit_core=admit_core)
 
     def __init__(self, runtime, extension, *, admit_core: bool):

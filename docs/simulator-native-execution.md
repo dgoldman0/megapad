@@ -135,9 +135,7 @@ checks cover every budget boundary, multiple targets in one native interval,
 cold/primitive/invalid targets, return-stack overflow, word shadowing and
 dictionary rollback with XT reuse.
 
-## Build and select
-
-### Bulk primitives and stack frontiers — September 16, 2026
+## Bulk primitives and stack frontiers — September 16, 2026
 
 Native execution now includes ordinary `COMPARE`, `FILL`, `CMOVE`, `CMOVE>`
 and `MOVE`, plus `SP@` and `RP@`. Complete byte-span preflight preserves
@@ -147,16 +145,18 @@ return-stack memory spans retain reference execution and partial effects.
 
 Successful `RP@` operations return a capture delta, settled into Python's
 unbounded capture generation before any callback, fault or host suspension.
-Overflow retains registration before the reference push fault. The boundary
-is now explicitly ABI 2; stale native binaries require a rebuild. No timing,
-step, stack or watchdog limit changed. The native-default sequential
+Overflow retains registration before the reference push fault. The extension
+and Python owner use one current internal interface and are rebuilt together.
+No timing, step, stack or watchdog limit changed. The native-default sequential
 bulk/execution/memory/loop/clock/quantum/CATCH/snapshot/session selector passes
-729 cases in 7.92 s, including cancellation and captures crossing intervals.
+726 cases, including cancellation and captures crossing intervals.
 
 The benchmark adds bounded compare, fill, copy and pointer kernels. An older
-extension with a different ABI must be archived together with its matching
+extension with a different interface must be archived together with its matching
 `simulator` Python package under `--extension-dir`; the output binds both the
 extension and Python boundary hashes.
+
+## Build and select
 
 ```
 make simulator-accel
