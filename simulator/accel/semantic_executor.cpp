@@ -41,6 +41,9 @@ enum Opcode : uint32_t {
 
 struct Instruction {
     uint32_t opcode;
+    // The original instruction and every IR index remain available. A fused
+    // successor is only used when both operations can finish without exiting.
+    uint32_t fused = OP_STOP;
     Cell a;
     Cell b;
 };
@@ -331,8 +334,25 @@ public:
             const auto opcode = operation[0].cast<uint32_t>();
             if (opcode > OP_CELL_PLUS)
                 throw py::value_error("unknown native semantic opcode");
-            plan.push_back(Instruction{opcode, operation[1].cast<Cell>(),
+            plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
+        }
+        for (size_t i = 0; i + 1 < plan.size(); ++i) {
+            auto& first = plan[i];
+            const auto next = plan[i + 1].opcode;
+            if (first.opcode == OP_DUP && next == OP_BRANCH_ZERO) {
+                first.fused = next;
+            } else if (first.opcode == OP_LITERAL || first.opcode == OP_PUSH_CELL) {
+                switch (next) {
+                case OP_ADD: case OP_SUBTRACT: case OP_MULTIPLY:
+                case OP_AND: case OP_OR: case OP_XOR:
+                case OP_LSHIFT: case OP_RSHIFT:
+                case OP_EQUAL: case OP_NOT_EQUAL: case OP_ULESS: case OP_UGREATER:
+                case OP_LESS: case OP_LESS_EQUAL: case OP_GREATER: case OP_GREATER_EQUAL:
+                    first.fused = next;
+                    break;
+                }
+            }
         }
         plans_.insert_or_assign(xt, std::move(plan));
     }
@@ -377,6 +397,13 @@ public:
                 if (operation.opcode == OP_STOP ||
                     cost(operation.opcode) > remaining_steps - state.steps)
                     break;
+                if (operation.fused != OP_STOP &&
+                    cost(operation.opcode) + cost(operation.fused) <=
+                        remaining_steps - state.steps &&
+                    execute_fused(operation, (*plan)[state.ip + 1], memory, state)) {
+                    state.steps += cost(operation.opcode) + cost(operation.fused);
+                    continue;
+                }
                 if (!execute(operation, memory, state, continuations))
                     break;
                 state.steps += cost(operation.opcode);
@@ -392,6 +419,54 @@ public:
     }
 
 private:
+    static bool execute_fused(const Instruction& first, const Instruction& next,
+                              MemoryRun& memory, RunState& s) {
+        StackOperation stack(memory, s.data);
+        if (!stack.inputs(1)) return false;
+        const Cell left = stack.values[0];
+        if (first.opcode == OP_DUP) {
+            if (!stack.outputs(2)) return false;
+            stack.result[0] = left;
+            stack.result[1] = left;
+            stack.commit();
+            s.data.pointer += 8; // BRANCH_ZERO consumes the duplicate.
+            s.ip = left == 0 ? next.a : s.ip + 2;
+            return true;
+        }
+        Scalar pushed;
+        // Even though the literal is consumed immediately, its guest stack
+        // slot must exist and retain its bytes after the fused operation.
+        if (s.data.pointer - s.data.floor < 8 || !stack.outputs(1) ||
+            !memory.resolve(s.data.pointer - 8, 8, true, false, pushed))
+            return false;
+        const Cell right = first.a;
+        Cell value;
+        switch (first.fused) {
+        case OP_ADD: value = left + right; break;
+        case OP_SUBTRACT: value = left - right; break;
+        case OP_MULTIPLY: value = left * right; break;
+        case OP_AND: value = left & right; break;
+        case OP_OR: value = left | right; break;
+        case OP_XOR: value = left ^ right; break;
+        case OP_LSHIFT: value = left << (right & 63); break;
+        case OP_RSHIFT: value = left >> (right & 63); break;
+        case OP_EQUAL: value = flag(left == right); break;
+        case OP_NOT_EQUAL: value = flag(left != right); break;
+        case OP_ULESS: value = flag(left < right); break;
+        case OP_UGREATER: value = flag(left > right); break;
+        case OP_LESS: value = flag(less_signed(left, right)); break;
+        case OP_LESS_EQUAL: value = flag(!less_signed(right, left)); break;
+        case OP_GREATER: value = flag(less_signed(right, left)); break;
+        case OP_GREATER_EQUAL: value = flag(!less_signed(left, right)); break;
+        default: return false;
+        }
+        pushed.write(right, 8);
+        stack.result[0] = value;
+        stack.commit();
+        s.ip += 2;
+        return true;
+    }
+
     static py::tuple result(const RunState& state) {
         py::list updates;
         for (const auto& item : state.changed) {

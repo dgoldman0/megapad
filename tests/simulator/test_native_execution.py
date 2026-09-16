@@ -11,7 +11,7 @@ from shared.cells import MASK64, TRUE  # noqa: E402
 from simulator.diagnostics import HostedDiagnosticsService  # noqa: E402
 from simulator.dictionary import HEADER_FIXED_BYTES  # noqa: E402
 from simulator.errors import ExecutionError, StepBudgetExceeded  # noqa: E402
-from simulator.ir import Call, Literal, Return  # noqa: E402
+from simulator.ir import Branch, BranchZero, Call, Literal, Return  # noqa: E402
 from simulator.memory import AddressClass  # noqa: E402
 from simulator.platform import create_one_core_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
@@ -697,3 +697,76 @@ def test_stack_scratch_preserves_all_produced_cells_and_byte_swap():
     result = _compare(runtimes, "RUN")
     assert result["error"] is None
     assert result["data"][-2:] == (0x1122334455667788, 0)
+
+
+@pytest.mark.parametrize("operation", [
+    b"+", b"-", b"*", b"AND", b"OR", b"XOR", b"LSHIFT", b"RSHIFT",
+    b"=", b"<>", b"U<", b"U>", b"<", b"<=", b">", b">=",
+])
+@pytest.mark.parametrize("operand", [b"65", b"-1", b"0x8000000000000000"])
+def test_literal_superinstructions_preserve_signed_and_popped_values(operation, operand):
+    runtimes = _runtimes(b": RUN " + operand + b" " + operation + b" ;")
+    result = _compare(runtimes, "RUN", inputs=(MASK64 - 7,))
+    assert result["error"] is None
+
+
+@pytest.mark.parametrize("budget", range(1, 15))
+@pytest.mark.parametrize("initial", [0, 1])
+def test_superinstructions_preserve_every_original_budget_boundary(budget, initial):
+    runtimes = _runtimes(
+        b"3 CONSTANT SCALE : RUN DUP IF 5 + SCALE * ELSE 7 - THEN ;"
+    )
+    _compare(runtimes, "RUN", inputs=(initial,), step_budget=budget,
+             require_native=False)
+
+
+@pytest.mark.parametrize("source", [
+    b": RUN 7 + ;", b"7 CONSTANT N : RUN N + ;",
+    b": RUN DUP IF 9 THEN ;",
+])
+@pytest.mark.parametrize("initial", [(), (17,)])
+def test_superinstruction_fallback_keeps_underflow_and_transient_overflow(source, initial):
+    runtimes = _runtimes(source)
+    for runtime in runtimes:
+        context = runtime.main_context
+        empty = context.data.empty_pointer
+        context.data = DataStack(initial, memory=runtime.memory,
+                                 floor=empty - 8, empty_pointer=empty)
+    result = _compare(runtimes, "RUN", require_native=False)
+    assert result["error"][0] in (StackUnderflow, StackOverflow)
+
+
+def test_superinstruction_materializes_missing_transient_stack_page_on_reference_path():
+    runtimes = _runtimes(b": RUN 7 + DUP IF 3 * THEN ;", external_size=8192)
+    for runtime in runtimes:
+        external = next(r for r in runtime.memory._regions
+                        if r.spec.kind is AddressClass.EXTERNAL)
+        runtime.main_context.data = DataStack(
+            (11,), memory=runtime.memory, floor=external.spec.base,
+            empty_pointer=external.spec.base + 4096 + 8,
+        )
+        assert 0 not in external.pages
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+    assert result["data"] == (54,)
+
+
+@pytest.mark.parametrize("page_size", [2, 4, 8, 16])
+def test_superinstructions_keep_fragmented_stack_bytes(page_size):
+    runtimes = _runtimes(b": RUN 7 + DUP IF 3 * THEN ;", page_size=page_size)
+    assert _compare(runtimes, "RUN", inputs=(11,))["data"] == (54,)
+
+
+@pytest.mark.parametrize("conditional", [False, True])
+def test_branch_can_enter_original_second_instruction_of_a_superinstruction(conditional):
+    runtimes = _runtimes()
+    for runtime in runtimes:
+        operations = (
+            (Branch(2), Call(runtime.find("DUP").xt), BranchZero(4), Literal(99), Return())
+            if conditional else
+            (Branch(2), Literal(99), Call(runtime.find("+").xt), Return())
+        )
+        runtime.define_colon("RUN", operations)
+    result = _compare(runtimes, "RUN", inputs=(0,) if conditional else (4, 7))
+    assert result["error"] is None
+    assert result["data"] == (() if conditional else (11,))

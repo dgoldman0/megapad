@@ -87,6 +87,23 @@ shared-session and clock selectors pass 154 checks in 1.68 s.
 
 ## Build and select
 
+### Interpreter superinstructions — September 16, 2026
+
+Plan installation recognizes literal/constant plus simple arithmetic,
+bitwise, shift, or comparison operations, and `DUP` followed by a conditional
+branch. These pairs share one dispatch and operand load. Every original IR
+index remains present, including entry directly into the second operation.
+A pair executes only if its entire semantic allowance and transient stack
+storage are available; otherwise the original first instruction executes.
+Popped literal/duplicate bytes remain in shared memory. No step, clock,
+scheduler, callback, or fault boundary is removed.
+
+The native equivalence selector passes 185 cases, including every budget
+boundary of a branching literal/constant example, signed/shift edges,
+temporary stack overflow, underflow, missing-page allocation, fragmented
+stack cells, and branches entering a pair's original second instruction.
+Kernel timing is recorded separately from physical Desktop qualification.
+
 ```
 make simulator-accel
 MEGAFORTH_EXECUTOR=native make test-simulator SIMULATOR_TEST_PATH=tests/simulator/test_native_execution.py
