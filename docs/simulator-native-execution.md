@@ -85,9 +85,7 @@ original boundary; guest work counts and virtual timers are unchanged. Idle
 waits continue using the existing condition-variable path. Stack, native,
 shared-session and clock selectors pass 154 checks in 1.68 s.
 
-## Build and select
-
-### Interpreter superinstructions — September 16, 2026
+## Interpreter superinstructions — September 16, 2026
 
 Plan installation recognizes literal/constant plus simple arithmetic,
 bitwise, shift, or comparison operations, and `DUP` followed by a conditional
@@ -103,6 +101,15 @@ boundary of a branching literal/constant example, signed/shift edges,
 temporary stack overflow, underflow, missing-page allocation, fragmented
 stack cells, and branches entering a pair's original second instruction.
 Kernel timing is recorded separately from physical Desktop qualification.
+
+Stack operations also reuse a qualified page for the whole input/output
+span, loading cells directly into local operands and writing results directly
+to the same shared bytes. This removes repeated address resolution per cell.
+Cross-page, sparse, and fragmented spans retain scalar handling; cached
+pointers never survive a native interval. The expanded parity selector passes
+194 cases, including multi-cell operations at different page alignments.
+
+## Build and select
 
 ```
 make simulator-accel

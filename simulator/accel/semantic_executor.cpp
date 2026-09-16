@@ -167,6 +167,19 @@ public:
         return false;
     }
 
+    // Stack bounds have already been checked by StackOperation. Reuse a
+    // previously qualified, materialized page for the whole operand span.
+    // A miss retains scalar resolution, including fragmented/sparse pages.
+    uint8_t* stack_span(Cell address, unsigned width) const noexcept {
+        const HotPage& hot = address >= return_floor_ && address < return_empty_
+            ? return_page_ : data_page_;
+        if (hot.bytes != nullptr && address >= hot.base &&
+            address - hot.base < hot.size &&
+            width <= hot.size - (address - hot.base))
+            return hot.bytes + (address - hot.base);
+        return nullptr;
+    }
+
 private:
     struct HotPage {
         Cell base = 0;
@@ -256,6 +269,14 @@ public:
         consumed_ = count;
         if (state_.depth() < count)
             return false;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        if (count == 0) return true;
+        if (auto* bytes = memory_.stack_span(state_.pointer, count * 8)) {
+            for (unsigned i = 0; i < count; ++i)
+                std::memcpy(&values[i], bytes + i * 8, sizeof(Cell));
+            return true;
+        }
+#endif
         for (unsigned i = 0; i < count; ++i) {
             Scalar scalar;
             if (!memory_.resolve(state_.pointer + i * 8, 8, false, false, scalar))
@@ -271,6 +292,11 @@ public:
         if (after_pop - state_.floor < count * 8)
             return false;
         destination_ = after_pop - count * 8;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        if (count == 0) return true;
+        contiguous_output_ = memory_.stack_span(destination_, count * 8);
+        if (contiguous_output_ != nullptr) return true;
+#endif
         for (unsigned i = 0; i < count; ++i) {
             const Cell address = destination_ + (count - 1 - i) * 8;
             if (!memory_.resolve(address, 8, true, false, output_[i]))
@@ -280,8 +306,14 @@ public:
     }
 
     void commit() noexcept {
-        for (unsigned i = 0; i < produced_; ++i)
-            output_[i].write(result[i], 8);
+        if (contiguous_output_ != nullptr) {
+            for (unsigned i = 0; i < produced_; ++i)
+                std::memcpy(contiguous_output_ + (produced_ - 1 - i) * 8,
+                            &result[i], sizeof(Cell));
+        } else {
+            for (unsigned i = 0; i < produced_; ++i)
+                output_[i].write(result[i], 8);
+        }
         state_.pointer = destination_;
     }
 
@@ -296,6 +328,7 @@ private:
     unsigned consumed_ = 0;
     unsigned produced_ = 0;
     Cell destination_ = 0;
+    uint8_t* contiguous_output_ = nullptr;
     std::array<Scalar, 6> output_;
 };
 

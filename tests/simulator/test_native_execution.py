@@ -770,3 +770,13 @@ def test_branch_can_enter_original_second_instruction_of_a_superinstruction(cond
     result = _compare(runtimes, "RUN", inputs=(0,) if conditional else (4, 7))
     assert result["error"] is None
     assert result["data"] == (() if conditional else (11,))
+
+
+@pytest.mark.parametrize("page_size", [16, 32, 64])
+@pytest.mark.parametrize("depth", [4, 5, 6])
+def test_cached_stack_spans_check_the_complete_multi_cell_extent(page_size, depth):
+    runtimes = _runtimes(
+        b": RUN 2OVER 2SWAP ROT -ROT 2DROP 2DUP ;", page_size=page_size
+    )
+    result = _compare(runtimes, "RUN", inputs=tuple(range(1, depth + 1)))
+    assert result["error"] is None
