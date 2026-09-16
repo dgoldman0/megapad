@@ -38,6 +38,15 @@ new pages return to Python before any effects. MMIO, region crossings, wrapped
 spans and return-stack overlap keep their reference fault and side effects.
 Both primitives retain their two semantic ticks, including zero-length work.
 
+`CMOVE`, `CMOVE>` and `MOVE` use the same byte-span preflight and preserve
+their distinct forward, backward and snapshot overlap semantics. Ordinary
+copies snapshot their source before writing, including when host-replaced
+page objects alias. Missing destination pages, MMIO, wrapping and crossing
+spans return to Python before mutation so the reference byte loops retain
+their partial writes and fault order. Zero-length copies do not inspect the
+addresses; `MOVE` also skips nonempty self-copies at any address. No new
+guest capacity or semantic step charge is introduced.
+
 `run(xt, ip, data_state, return_state, continuations, remaining_steps)` accepts:
 
 - `data_state = (floor, empty_pointer, pointer)`;

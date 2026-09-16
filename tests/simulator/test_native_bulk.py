@@ -9,6 +9,7 @@ from shared.cells import MASK64
 from simulator.memory import AddressClass, MMIO_BASE
 from simulator.stacks import StackUnderflow
 from tests.simulator.test_native_execution import _compare, _runtimes
+from tests.simulator.test_memory import RecordingMMIO
 
 
 def _external(runtime):
@@ -203,3 +204,157 @@ def test_bulk_primitive_admission_keeps_original_binding_after_host_shadow(opera
         runtime.main_context.data.clear()
     result = _compare(runtimes, "SHADOW", inputs=inputs, require_native=False)
     assert result["data"] == (99,)
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+@pytest.mark.parametrize("page_size", [1, 4, 16, 4096])
+@pytest.mark.parametrize("source_offset,destination_offset,length", [
+    (0, 2, 13), (2, 0, 13), (0, 3, 13), (3, 0, 13),
+    (0, 0, 13), (0, 16, 13),
+])
+def test_copy_operations_preserve_each_overlap_direction(operation, page_size, source_offset, destination_offset, length):
+    runtimes = _runtimes(b": RUN " + operation + b" ;", external_size=8192, page_size=page_size)
+    before = bytes(range(64))
+    for runtime in runtimes:
+        start = _external(runtime).spec.base + 4093
+        runtime.memory.write_bytes(start, before)
+    result = _compare(runtimes, "RUN", inputs=(start + source_offset, start + destination_offset, length),
+                      spans=((start, len(before)),))
+    assert result["error"] is None
+    expected = bytearray(before)
+    if operation == b"MOVE":
+        expected[destination_offset:destination_offset + length] = before[source_offset:source_offset + length]
+    else:
+        indices = range(length) if operation == b"CMOVE" else range(length - 1, -1, -1)
+        for i in indices:
+            expected[destination_offset + i] = expected[source_offset + i]
+    assert result["memory"] == (bytes(expected),)
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+@pytest.mark.parametrize("destination_materialized", [False, True])
+def test_sparse_copy_reads_zero_and_materializes_destination_like_reference(operation, destination_materialized):
+    runtimes = _runtimes(b": RUN " + operation + b" ;", external_size=16384)
+    for runtime in runtimes:
+        region = _external(runtime)
+        base = region.spec.base
+        runtime.memory.write8(base + 4095, 0x80)
+        if destination_materialized:
+            runtime.memory.write_bytes(base + 12285, b"X" * 23)
+    result = _compare(runtimes, "RUN", inputs=(base + 4093, base + 12285, 23),
+                      spans=((base + 12285, 23),), require_native=destination_materialized)
+    assert result["error"] is None
+    assert result["memory"] == (bytes(2) + b"\x80" + bytes(20),)
+    assert set(_external(runtimes[0]).pages) == set(_external(runtimes[1]).pages)
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+@pytest.mark.parametrize("fault_side", ["source", "destination"])
+def test_copy_crossing_a_region_keeps_reference_partial_writes(operation, fault_side):
+    runtimes = _runtimes(b": RUN " + operation + b" ;", external_size=4100)
+    for runtime in runtimes:
+        base = _external(runtime).spec.base
+        runtime.memory.write_bytes(base, b"abcde")
+        runtime.memory.write_bytes(base + 4098, b"XY")
+    source, destination = (base + 4098, base) if fault_side == "source" else (base, base + 4098)
+    result = _compare(runtimes, "RUN", inputs=(source, destination, 5),
+                      spans=((base, 5), (base + 4098, 2)), require_native=False)
+    assert result["error"] is not None
+    assert result["data"] == ()
+    assert result["counted_steps"] == 2
+    if operation != b"CMOVE>":
+        assert result["memory"] == ((b"XYcde", b"XY") if fault_side == "source" else (b"abcde", b"ab"))
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+@pytest.mark.parametrize("source_offset,destination_offset", [(0, 1), (1, 0)])
+def test_copy_mmio_keeps_order_and_partial_fault_callbacks(operation, source_offset, destination_offset):
+    runtimes = _runtimes(b": RUN " + operation + b" ;")
+    ports = []
+    for runtime in runtimes:
+        port = RecordingMMIO(values={i: i + 65 for i in range(8)}, fail_write_offset=3)
+        runtime.memory._mmio = port
+        ports.append(port)
+    result = _compare(runtimes, "RUN", inputs=(MMIO_BASE + source_offset, MMIO_BASE + destination_offset, 5),
+                      require_native=False)
+    assert result["error"] is not None
+    assert result["data"] == ()
+    assert ports[0].events == ports[1].events
+    assert ports[0].values == ports[1].values
+    assert ports[0].events
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+@pytest.mark.parametrize("same", [False, True])
+@pytest.mark.parametrize("budget", [1, 2, 3])
+def test_copy_zero_length_and_self_copy_keep_access_and_budget_rules(operation, same, budget):
+    length = 7 if same else 0
+    harmless = not same or operation == b"MOVE"
+    result = _compare(_runtimes(b": RUN " + operation + b" ;"), "RUN",
+                      inputs=(MASK64, MASK64, length), step_budget=budget,
+                      require_native=harmless and budget > 1)
+    if not harmless and budget > 1:
+        assert result["error"] is not None
+        assert result["data"] == ()
+        assert result["counted_steps"] == 2
+    else:
+        assert result["counted_steps"] == budget
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+def test_copy_snapshots_source_when_distinct_guest_pages_share_host_backing(operation):
+    runtimes = _runtimes(b": RUN " + operation + b" ;", external_size=128, page_size=16)
+    for runtime in runtimes:
+        region = _external(runtime)
+        base = region.spec.base
+        runtime.memory.write_bytes(base, bytes(range(48)))
+        # A host callback can replace pages between intervals. Preserve the
+        # reference snapshot even when its replacement aliases another page.
+        region.pages[3] = region.pages[1]
+        region.pages[4] = region.pages[2]
+        region.pages[5] = region.pages[0]
+    result = _compare(runtimes, "RUN", inputs=(base, base + 48, 48), spans=((base, 96),))
+    assert result["error"] is None
+    assert result["memory"][0][48:] == bytes(range(48))
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+def test_copy_into_live_data_stack_uses_original_popped_operands(operation):
+    runtimes = _runtimes(b": RUN " + operation + b" ;")
+    empty = runtimes[0].main_context.data.empty_pointer
+    result = _compare(runtimes, "RUN", inputs=(11, empty - 24, empty - 8, 8))
+    assert result["error"] is None
+    assert result["data"] == (empty - 8,)
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+def test_copy_can_span_several_full_pages(operation):
+    runtimes = _runtimes(b": RUN " + operation + b" ;", external_size=32768)
+    pattern = (bytes(range(256)) * 33)[:8207]
+    for runtime in runtimes:
+        base = _external(runtime).spec.base
+        runtime.memory.write_bytes(base + 3, pattern)
+        runtime.memory.write_bytes(base + 16387, bytes(len(pattern)))
+    result = _compare(runtimes, "RUN", inputs=(base + 3, base + 16387, len(pattern)),
+                      spans=((base + 16387, len(pattern)),))
+    assert result["error"] is None
+    assert result["memory"] == (pattern,)
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+@pytest.mark.parametrize("budget", [1, 2, 3])
+def test_copy_bytes_change_only_at_the_primitive_effect_tick(operation, budget):
+    runtimes = _runtimes(b": RUN " + operation + b" ;", external_size=4096)
+    for runtime in runtimes:
+        base = _external(runtime).spec.base
+        runtime.memory.write_bytes(base, b"ABCDE---")
+    result = _compare(runtimes, "RUN", inputs=(base, base + 5, 3),
+                      spans=((base, 8),), step_budget=budget, require_native=budget > 1)
+    assert result["counted_steps"] == budget
+    assert result["memory"] == ((b"ABCDE---",) if budget == 1 else (b"ABCDEABC",))
+
+
+@pytest.mark.parametrize("operation", [b"CMOVE", b"CMOVE>", b"MOVE"])
+def test_copy_of_return_stack_keeps_reference_cookie_fault_handling(operation):
+    result = _compare(_runtimes(b": RUN 0 RP@ 8 " + operation + b" ;"), "RUN")
+    assert result["error"] is not None

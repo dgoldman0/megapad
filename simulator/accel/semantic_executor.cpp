@@ -38,6 +38,7 @@ enum Opcode : uint32_t {
     OP_OFF, OP_ON, OP_PLUS_STORE, OP_COUNT,
     OP_TRUE, OP_FALSE, OP_CELLS, OP_UMULTIPLY, OP_I, OP_J,
     OP_BSWAP, OP_CELL_PLUS, OP_EXECUTE, OP_COMPARE, OP_FILL,
+    OP_CMOVE, OP_CMOVE_UP, OP_MOVE,
 };
 
 struct Instruction {
@@ -77,6 +78,23 @@ public:
             const auto& chunk = (*this)[i];
             if (chunk.bytes != nullptr)
                 std::memset(chunk.bytes, value, static_cast<size_t>(chunk.size));
+        }
+    }
+    void read_into(uint8_t* destination) const noexcept {
+        for (size_t i = 0; i < chunks(); ++i) {
+            const auto& chunk = (*this)[i];
+            const auto size = static_cast<size_t>(chunk.size);
+            if (chunk.bytes == nullptr) std::memset(destination, 0, size);
+            else std::memcpy(destination, chunk.bytes, size);
+            destination += size;
+        }
+    }
+    void write_from(const uint8_t* source) const noexcept {
+        for (size_t i = 0; i < chunks(); ++i) {
+            const auto& chunk = (*this)[i];
+            const auto size = static_cast<size_t>(chunk.size);
+            std::memcpy(chunk.bytes, source, size);
+            source += size;
         }
     }
     int compare(const ByteSpan& other) const noexcept {
@@ -456,7 +474,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_FILL)
+            if (opcode > OP_MOVE)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -986,6 +1004,49 @@ private:
             ++s.ip;
             return true;
         }
+        case OP_CMOVE: case OP_CMOVE_UP: case OP_MOVE: {
+            if (!stack.inputs(3) || !stack.outputs(0)) return false;
+            const Cell length = v[0], destination = v[1], source = v[2];
+            if (length != 0 && !(opcode == OP_MOVE && source == destination)) {
+                std::vector<uint8_t> payload;
+                if (length > payload.max_size()) return false;
+                ByteSpan from, to;
+                if (!memory.resolve_bytes(source, length, false, from) ||
+                    !memory.resolve_bytes(destination, length, true, to)) return false;
+                payload.resize(static_cast<size_t>(length));
+                // Reference ordinary copies read before writing, even when
+                // host-installed page objects happen to alias each other.
+                from.read_into(payload.data());
+                if (opcode == OP_CMOVE && source < destination &&
+                    destination - source < length) {
+                    const Cell stride = destination - source;
+                    for (Cell offset = stride; offset < length;) {
+                        const Cell size = std::min(stride, length - offset);
+                        std::memcpy(payload.data() + offset, payload.data(),
+                                    static_cast<size_t>(size));
+                        offset += size;
+                    }
+                } else if (opcode == OP_CMOVE_UP && destination < source &&
+                           source - destination < length) {
+                    const Cell stride = source - destination;
+                    for (Cell end = length - stride; end != 0;) {
+                        const Cell size = std::min(stride, end);
+                        std::memcpy(payload.data() + end - size,
+                                    payload.data() + length - size,
+                                    static_cast<size_t>(size));
+                        end -= size;
+                    }
+                }
+                stack.commit();
+                to.write_from(payload.data());
+            } else {
+                // MOVE also treats identical (even unmapped) addresses as a
+                // no-op. CMOVE/CMOVE> must still validate a nonempty self-copy.
+                stack.commit();
+            }
+            ++s.ip;
+            return true;
+        }
         case OP_STORE: case OP_C_STORE: case OP_W_STORE: case OP_L_STORE:
         case OP_OFF: case OP_ON: case OP_PLUS_STORE: {
             const bool unary = opcode == OP_OFF || opcode == OP_ON;
@@ -1067,6 +1128,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
     PRIMITIVE("CELLS", OP_CELLS); PRIMITIVE("CELL+", OP_CELL_PLUS);
     PRIMITIVE("EXECUTE", OP_EXECUTE);
     PRIMITIVE("COMPARE", OP_COMPARE); PRIMITIVE("FILL", OP_FILL);
+    PRIMITIVE("CMOVE", OP_CMOVE); PRIMITIVE("CMOVE>", OP_CMOVE_UP);
+    PRIMITIVE("MOVE", OP_MOVE);
     PRIMITIVE("UM*", OP_UMULTIPLY);
     // The original hosted BIOS primitives both push zero. Native admission
     // remains bound to those installed word objects, never a later namesake.
