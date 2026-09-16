@@ -3,12 +3,13 @@ import argparse, hashlib, json, sys, time, statistics
 from pathlib import Path
 root=Path(__file__).resolve().parent
 parser=argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--extension-dir', type=Path, help='directory with an earlier native extension to compare')
+parser.add_argument('--extension-dir', type=Path, help='archived extension directory; include its simulator package if the boundary ABI differs')
 parser.add_argument('--output', type=Path)
 args=parser.parse_args()
 sys.path.insert(0,str(root))
 if args.extension_dir is not None: sys.path.insert(0, str(args.extension_dir.resolve()))
 from simulator.runtime import MegaForthRuntime
+from simulator import native_execution
 import _megaforth_native
 cases={
  'arithmetic': b': RUN 0 20000 BEGIN DUP WHILE SWAP OVER 3 * 1+ + SWAP 1- REPEAT DROP ;',
@@ -20,8 +21,10 @@ cases={
  'fill_bytes': b'CREATE BUFFER 512 ALLOT : RUN 10000 0 DO BUFFER 511 I FILL LOOP BUFFER C@ ;',
  'forward_copy': b'CREATE SOURCE 512 ALLOT CREATE TARGET 512 ALLOT : RUN SOURCE 512 165 FILL TARGET 512 0 FILL 10000 0 DO SOURCE 1+ TARGET 3 + 509 CMOVE LOOP TARGET 3 + C@ ;',
  'move_bytes': b'CREATE SOURCE 512 ALLOT CREATE TARGET 512 ALLOT : RUN SOURCE 512 165 FILL TARGET 512 0 FILL 10000 0 DO SOURCE 1+ TARGET 3 + 509 MOVE LOOP TARGET 3 + C@ ;',
+ 'stack_pointers': b': RUN 0 10000 0 DO SP@ DROP RP@ DROP I + LOOP ;',
 }
-result={'extension_sha256':hashlib.sha256(Path(_megaforth_native.__file__).read_bytes()).hexdigest(), 'cases':{}}
+result={'extension_sha256':hashlib.sha256(Path(_megaforth_native.__file__).read_bytes()).hexdigest(),
+        'native_boundary_sha256':hashlib.sha256(Path(native_execution.__file__).read_bytes()).hexdigest(), 'cases':{}}
 for name,source in cases.items():
  r=MegaForthRuntime(execution_backend='native');r.evaluate(source,step_budget=300000)
  trials=[]

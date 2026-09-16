@@ -30,6 +30,13 @@ class NativeExecutor:
                     "run python setup_simulator_accel.py build_ext --inplace"
                 ) from None
             return None
+        if getattr(extension, "ABI_VERSION", None) != 2:
+            if required:
+                raise RuntimeError(
+                    "native semantic execution requires _megaforth_native ABI 2; "
+                    "rebuild with python setup_simulator_accel.py build_ext --inplace --force"
+                )
+            return None
         return cls(runtime, extension, admit_core=admit_core)
 
     def __init__(self, runtime, extension, *, admit_core: bool):
@@ -232,7 +239,8 @@ class NativeExecutor:
             returns._continuations,
             allowance,
         )
-        xt, resumed_ip, steps, data_pointer, return_pointer, cookie, updates = result
+        (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
+         updates, pointer_captures) = result
         if self.profile_enabled:
             self.native_run_ns += perf_counter_ns() - started
             self._profile_exit(xt, resumed_ip, steps, allowance)
@@ -251,6 +259,8 @@ class NativeExecutor:
         data._pointer = data_pointer
         returns._pointer = return_pointer
         returns._continuation_cookie = cookie
+        if pointer_captures:
+            returns._pointer_capture_generation += pointer_captures
         meter.steps += steps
         self.runtime.diagnostics.account_work_many(steps)
         self.runtime.timer.advance_by(steps)

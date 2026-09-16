@@ -137,6 +137,27 @@ dictionary rollback with XT reuse.
 
 ## Build and select
 
+### Bulk primitives and stack frontiers — September 16, 2026
+
+Native execution now includes ordinary `COMPARE`, `FILL`, `CMOVE`, `CMOVE>`
+and `MOVE`, plus `SP@` and `RP@`. Complete byte-span preflight preserves
+sparse allocation, full-prefix faults, directional overlap and source
+snapshots even when host page objects alias. Device, crossing, wrapping and
+return-stack memory spans retain reference execution and partial effects.
+
+Successful `RP@` operations return a capture delta, settled into Python's
+unbounded capture generation before any callback, fault or host suspension.
+Overflow retains registration before the reference push fault. The boundary
+is now explicitly ABI 2; stale native binaries require a rebuild. No timing,
+step, stack or watchdog limit changed. The native-default sequential
+bulk/execution/memory/loop/clock/quantum/CATCH/snapshot/session selector passes
+729 cases in 7.92 s, including cancellation and captures crossing intervals.
+
+The benchmark adds bounded compare, fill, copy and pointer kernels. An older
+extension with a different ABI must be archived together with its matching
+`simulator` Python package under `--extension-dir`; the output binds both the
+extension and Python boundary hashes.
+
 ```
 make simulator-accel
 MEGAFORTH_EXECUTOR=native make test-simulator SIMULATOR_TEST_PATH=tests/simulator/test_native_execution.py
@@ -184,7 +205,7 @@ modular equality rule, including zero increments and limit crossings.
 Identity-bound `TRUE`, `FALSE`, `CELLS`, `UM*`, `COREID`, `TASK-ID`, and `CELL+`
 also stay native.
 Pair return-stack operations, unprepared/non-colon dynamic execution,
-stack-pointer operations, and device/service access remain in Python. Successful
+stack-pointer restoration, and device/service access remain in Python. Successful
 native prefixes settle their exact watchdog, diagnostic, and timer counts
 before the next Python operation or host boundary. Native execution does not
 invent IDL, reset a budget, or admit external events between guest boundaries.

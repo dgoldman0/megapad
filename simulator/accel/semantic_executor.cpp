@@ -39,6 +39,7 @@ enum Opcode : uint32_t {
     OP_TRUE, OP_FALSE, OP_CELLS, OP_UMULTIPLY, OP_I, OP_J,
     OP_BSWAP, OP_CELL_PLUS, OP_EXECUTE, OP_COMPARE, OP_FILL,
     OP_CMOVE, OP_CMOVE_UP, OP_MOVE,
+    OP_SP_FETCH, OP_RP_FETCH,
 };
 
 struct Instruction {
@@ -353,6 +354,7 @@ struct RunState {
     StackState returns;
     Cell cookie;
     std::unordered_map<Cell, ContinuationUpdate> changed;
+    Cell pointer_captures = 0;
 };
 
 static Cell flag(bool value) noexcept { return value ? MASK : 0; }
@@ -474,7 +476,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_MOVE)
+            if (opcode > OP_RP_FETCH)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -516,7 +518,7 @@ public:
             state.cookie = return_state[3].cast<Cell>();
         } catch (const py::cast_error&) {
             return py::make_tuple(xt, ip, 0, state.data.pointer,
-                state.returns.pointer, return_state[3], py::list());
+                state.returns.pointer, return_state[3], py::list(), 0);
         }
         if (!state.data.valid() || !state.returns.valid() ||
             !(state.data.empty <= state.returns.floor ||
@@ -616,7 +618,8 @@ private:
                                           item.second.ip, item.second.raw));
         }
         return py::make_tuple(state.xt, state.ip, state.steps,
-            state.data.pointer, state.returns.pointer, state.cookie, updates);
+            state.data.pointer, state.returns.pointer, state.cookie, updates,
+            state.pointer_captures);
     }
 
     enum SlotKind { USER_CELL, CONTINUATION, PYTHON_BOUNDARY };
@@ -815,6 +818,11 @@ private:
         case OP_TRUE: case OP_FALSE:
             if (!stack.inputs(0)) return false;
             out[0] = opcode == OP_TRUE ? MASK : 0; produced = 1;
+            break;
+        case OP_SP_FETCH: case OP_RP_FETCH:
+            if (!stack.inputs(0)) return false;
+            out[0] = opcode == OP_SP_FETCH ? s.data.pointer : s.returns.pointer;
+            produced = 1;
             break;
         case OP_LITERAL: case OP_PUSH_CELL:
             if (!stack.inputs(0)) return false;
@@ -1066,6 +1074,10 @@ private:
         }
         if (!stack.outputs(produced)) return false;
         stack.commit();
+        // Export captures before Python observes a fault or suspension. A
+        // failed push takes the reference path, which registers RP@ before
+        // raising its ordinary overflow fault.
+        if (opcode == OP_RP_FETCH) ++s.pointer_captures;
         ++s.ip;
         return true;
     }
@@ -1079,6 +1091,7 @@ private:
 
 PYBIND11_MODULE(_megaforth_native, module) {
     module.doc() = "Native execution of generic hosted Forth semantic plans";
+    module.attr("ABI_VERSION") = py::int_(2);
     py::class_<NativeProgram>(module, "NativeProgram")
         .def(py::init<const py::iterable&, Cell, py::object>(), py::arg("regions"),
              py::arg("page_size"), py::arg("continuation_type"))
@@ -1130,6 +1143,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     PRIMITIVE("COMPARE", OP_COMPARE); PRIMITIVE("FILL", OP_FILL);
     PRIMITIVE("CMOVE", OP_CMOVE); PRIMITIVE("CMOVE>", OP_CMOVE_UP);
     PRIMITIVE("MOVE", OP_MOVE);
+    PRIMITIVE("SP@", OP_SP_FETCH); PRIMITIVE("RP@", OP_RP_FETCH);
     PRIMITIVE("UM*", OP_UMULTIPLY);
     // The original hosted BIOS primitives both push zero. Native admission
     // remains bound to those installed word objects, never a later namesake.

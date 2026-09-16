@@ -1,5 +1,9 @@
 # Native semantic execution boundary
 
+The current extension exports `ABI_VERSION = 2`. Explicit native selection
+rejects stale binaries with a rebuild instruction; automatic selection uses
+the reference backend if the installed boundary is incompatible.
+
 `_megaforth_native.NativeProgram(regions, page_size, continuation_type)` retains the ordinary
 regions as `(base, size, pages)` triples. `pages` is the existing sparse
 region's dictionary of page index to fixed-size bytearray. The executor holds
@@ -55,12 +59,19 @@ guest capacity or semantic step charge is introduced.
 - a nonnegative allowance in the existing semantic-step units.
 
 It returns `(xt, ip, completed_steps, data_pointer, return_pointer,
-continuation_cookie, continuation_updates)`. Each continuation update is
+continuation_cookie, continuation_updates, pointer_captures)`. Each continuation update is
 `(slot_address, caller_xt, return_ip, raw_cookie)`. The Python owner installs
 these as ordinary non-root, non-fault continuations, preserving updates to
 already-popped slots, and updates the stack pointers and cookie counter. A zero
 `caller_xt` is a type deletion from a user push, including one that wrote the
 same raw value as the previous cookie. Zero is never a valid colon XT.
+
+`SP@` and `RP@` push the current pre-push data/return frontier. Each successful
+native `RP@` increments the returned capture delta, which Python adds to the
+unbounded return-stack capture generation before a callback, fault or host
+suspension can observe the state. An overflowing `RP@` push returns to Python,
+where registration still occurs before the push fault. Existing nested
+dispatch, cancellation and escape guards consume the same capture evidence.
 
 Native colon calls write exact opaque continuation cookies into the shared
 return-stack bytes. Native returns can also consume preexisting ordinary
@@ -77,7 +88,7 @@ non-colon target plans fall through before effects; Python owns invalid-token,
 stack-fault, service, and source-accelerator behavior. Dynamic-call target
 availability is invalidated with the other plans.
 Native still excludes pair return-stack operations,
-stack-pointer introspection/restoration, other dynamic execution, services, and any
+stack-pointer restoration, other dynamic execution, services, and any
 ordinary memory access intersecting the return-stack backing interval.
 
 `OP_LITERAL`, `OP_BRANCH`, `OP_BRANCH_ZERO`, `OP_CALL`, `OP_RETURN`,
