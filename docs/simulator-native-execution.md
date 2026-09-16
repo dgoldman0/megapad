@@ -5,15 +5,30 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 16, 2026:** Native bulk primitives and
-stack-pointer reads are physically qualified at MegaPad `fe31e71` / Akashic
-`5bd5ac5` (production Forth unchanged from `de6a6aa`). Isolated typing fell
-from 1.262 s to 1.121 s, and burst median delay from 2.531 s to 1.591 s in the
-latest single-run comparison. All 19 characters remained visible. This is
-still far above the 100 ms target. The full X11 Desk/menu journey passed:
-18 milestones, 21 inputs, 26 post-flip ACKs, both CELL fallback gates,
-127.555 s and 439.965 MiB peak aggregate RSS. The milestone and input sequences
-match the previous run; intermediate offer counts can differ.
+**Current checkpoint — September 16, 2026:** MegaPad `e98c91e` reuses glyph
+rasters within each rich composition and skips proven empty ink. Paired
+Akashic `1c7dd9a` removes repeated whole-document scans during mounted-widget
+association. Isolated typing falls from 1.121 s to 0.948 s, while burst median
+delay remains about 1.58 s. All 19 characters remain visible; the roughly
+100 ms target remains unmet. Physical composition falls from 133–172 ms to
+50–62 ms. Seven saved real frames replay with identical pixels/hit maps and
+2.79–2.99x faster composition. The interpreter binary remains `fe31e71`.
+
+The final sampled first-character interval uses 33.2 million guest steps,
+99.98% native. Residual planning and delta comparison still use about
+15.6 million steps; native dispatch and host boundary/snapshot work remain
+material. The full X11 Desk/menu journey passes 18 milestones, 21 inputs,
+27 post-flip ACKs, and both CELL fallback gates in 139.113 s, peaking at
+442.949 MiB. The milestone/input sequences match the previous journey;
+intermediate offer counts can differ. All physical checks ran sequentially
+under unchanged resource guards. Compositor/viewer checks pass 114 cases.
+See paired Akashic `docs/rich-terminal/RENDERING-PERFORMANCE-20260916.md`
+and `local_testing/evidence/rendering-typing-20260916.json` for attribution,
+method limits, and qualification.
+
+The preceding interpreter-only pass at `fe31e71` / Akashic `5bd5ac5`
+reduced isolated typing from 1.262 s to 1.121 s and burst median delay from
+2.531 s to 1.591 s, with production Forth unchanged from `de6a6aa`.
 Bounded bulk/pointer kernels improved 66–104x by staying native. Existing
 arithmetic/field kernels stayed within 2%, while the other existing kernels
 improved 1.10–1.21x. These are kernel-specific gains. See paired Akashic
