@@ -5,14 +5,18 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 16, 2026:** Native dispatch/memory and host
-boundary changes are physically qualified. With identical Akashic `de6a6aa`
-production sources, isolated typing feedback fell from 2.435 s to 1.413 s
-(42%); all 19 individually scheduled characters at 5 characters/second were
-retained. This remains far above the 100 ms working target. The complete
-ordinary X11 Desk/menu journey at Akashic `a730baa` and MegaPad `efed68a` also
-passed: 18 milestones, 21 inputs, 27 post-flip ACKs, both CELL fallback gates,
-154.121 s total, and 437.512 MiB aggregate peak RSS. See paired Akashic
+**Current checkpoint — September 16, 2026:** Superinstructions, stack-span
+reuse, avoided empty entries and prepared dynamic calls are physically
+qualified at MegaPad `15613d8` / Akashic `8e95c0f` (production Forth unchanged
+from `de6a6aa`). Isolated typing fell from 1.413 s to 1.262 s in the latest
+single-run comparison; burst delay was essentially unchanged at 2.531 s.
+All 19 characters remained visible. This is still far above the 100 ms target.
+The full X11 Desk/menu journey passed: 18 milestones, 21 inputs, 27 post-flip
+ACKs, both CELL fallback gates, 143.037 s and 439.945 MiB peak aggregate RSS.
+Bounded arithmetic/memory kernels improved 1.72–2.25x; a dynamic-call kernel
+improved 47.44x, while ordinary counted calls improved only 1.09x. These are
+kernel-specific gains, not whole-simulator speedups. See paired Akashic
+`docs/rich-terminal/INTERPRETER-PERFORMANCE-20260916.md`,
 `docs/rich-terminal/TYPING-PERFORMANCE-20260916.md` and
 `local_testing/evidence/typing-20260916.md` for matched timings and bindings.
 
@@ -58,7 +62,7 @@ continuation cookies, and the 8,192-step native interval are unchanged.
 The Python/native parity selector passes 96 cases, including sub-cell pages,
 unaligned access, partial final regions, missing-page writes, host page
 replacement between intervals, and observable stack scratch results.
-`bench_native_dispatch.py` runs four bounded kernels sequentially and records
+`bench_native_dispatch.py` runs bounded kernels sequentially and records
 all trial times, semantic counts, results, and the native binary hash. Initial
 median speedups are 3.05x arithmetic, 2.68x field reads/calls, 2.01x counted
 loop/calls, and 2.82x scattered reads, with identical steps and results.
