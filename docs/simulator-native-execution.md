@@ -5,18 +5,19 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 16, 2026:** Superinstructions, stack-span
-reuse, avoided empty entries and prepared dynamic calls are physically
-qualified at MegaPad `15613d8` / Akashic `8e95c0f` (production Forth unchanged
-from `de6a6aa`). Isolated typing fell from 1.413 s to 1.262 s in the latest
-single-run comparison; burst delay was essentially unchanged at 2.531 s.
-All 19 characters remained visible. This is still far above the 100 ms target.
-The full X11 Desk/menu journey passed: 18 milestones, 21 inputs, 27 post-flip
-ACKs, both CELL fallback gates, 143.037 s and 439.945 MiB peak aggregate RSS.
-Bounded arithmetic/memory kernels improved 1.72–2.25x; a dynamic-call kernel
-improved 47.44x, while ordinary counted calls improved only 1.09x. These are
-kernel-specific gains, not whole-simulator speedups. See paired Akashic
-`docs/rich-terminal/INTERPRETER-PERFORMANCE-20260916.md`,
+**Current checkpoint — September 16, 2026:** Native bulk primitives and
+stack-pointer reads are physically qualified at MegaPad `fe31e71` / Akashic
+`5bd5ac5` (production Forth unchanged from `de6a6aa`). Isolated typing fell
+from 1.262 s to 1.121 s, and burst median delay from 2.531 s to 1.591 s in the
+latest single-run comparison. All 19 characters remained visible. This is
+still far above the 100 ms target. The full X11 Desk/menu journey passed:
+18 milestones, 21 inputs, 26 post-flip ACKs, both CELL fallback gates,
+127.555 s and 439.965 MiB peak aggregate RSS. The milestone and input sequences
+match the previous run; intermediate offer counts can differ.
+Bounded bulk/pointer kernels improved 66–104x by staying native. Existing
+arithmetic/field kernels stayed within 2%, while the other existing kernels
+improved 1.10–1.21x. These are kernel-specific gains. See paired Akashic
+`docs/rich-terminal/INTERPRETER-BULK-PERFORMANCE-20260916.md`,
 `docs/rich-terminal/TYPING-PERFORMANCE-20260916.md` and
 `local_testing/evidence/typing-20260916.md` for matched timings and bindings.
 
@@ -149,7 +150,7 @@ Overflow retains registration before the reference push fault. The extension
 and Python owner use one current internal interface and are rebuilt together.
 No timing, step, stack or watchdog limit changed. The native-default sequential
 bulk/execution/memory/loop/clock/quantum/CATCH/snapshot/session selector passes
-726 cases, including cancellation and captures crossing intervals.
+726 cases in 7.72 s, including cancellation and captures crossing intervals.
 
 The benchmark adds bounded compare, fill, copy and pointer kernels. An older
 extension with a different interface must be archived together with its matching
@@ -159,9 +160,10 @@ extension and Python boundary hashes.
 Bulk byte-span handlers are explicitly kept outside the scalar dispatch loop.
 Moving their allocation and cleanup into one helper reduced the compiled hot
 run body from 10,875 to 8,675 bytes on this build. Five alternating sequential
-process pairs improved the existing scalar kernels by 2.8–14.0% against the
-initial inline bulk implementation, with identical work and results. Full
-before/after kernel and physical measurements follow separately.
+process pairs increased throughput of the existing scalar kernels by
+2.8–14.0% against the initial inline bulk implementation, with identical work
+and results. Paired Akashic's bulk performance report preserves the full
+before/after kernel measurements and physical qualification.
 
 ## Build and select
 
