@@ -53,6 +53,12 @@ class _PixelFont:
         self.italic = bool(value)
         self.italic_changes.append(self.italic)
 
+    def size(self, text):
+        return len(text), 1
+
+    def get_linesize(self):
+        return 1
+
     def render(self, text, antialias, color):
         assert antialias and len(text) == 1
         self.rendered.append((text, color))
@@ -176,6 +182,74 @@ def test_transparent_foreground_suppresses_glyph_but_preserves_background_and_cl
     assert surface.get_clip() == pygame.Rect(4, 0, 4, 5)
 
 
+@pytest.mark.parametrize("attributes", [0, 1, 8, 0x40, 0x49])
+@pytest.mark.parametrize("alpha", [128, 255])
+def test_empty_glyph_rasters_keep_background_decorations_and_slot_positions(attributes, alpha):
+    pygame = pytest.importorskip("pygame")
+
+    class SpaceFont(_PixelFont):
+        def render(self, text, antialias, color):
+            glyph = super().render(text, antialias, color)
+            if text == " ":
+                glyph.fill((0, 0, 0, 0))
+            return glyph
+
+    font = SpaceFont(pygame)
+    surface = pygame.Surface((16, 5))
+    draw = _run(1, 0, (220, 100, 40, alpha), (20, 40, 60, 255), "A  A", attributes=attributes)
+    composite_draw_plane(pygame, surface, _plane(_region(draw)), font, 8, 5)
+
+    # Repeated ink and transparent space each rasterize once. Their original
+    # positions, alpha and decorative lines remain independent of that reuse.
+    assert [item[0] for item in font.rendered] == ["A", " "]
+    painted = (220, 100, 40) if alpha == 255 else (120, 70, 50)
+    for x in (0, 12):
+        assert tuple(surface.get_at((x, 0)))[:3] == pytest.approx(painted, abs=1)
+    assert tuple(surface.get_at((8, 0)))[:3] == (20, 40, 60)
+    assert tuple(surface.get_at((8, 4)))[:3] == pytest.approx(
+        painted if attributes & 8 else (20, 40, 60), abs=1)
+    assert tuple(surface.get_at((8, 2)))[:3] == pytest.approx(
+        painted if attributes & 0x40 else (20, 40, 60), abs=1)
+
+
+def test_visible_space_rasters_are_not_assumed_empty():
+    pygame = pytest.importorskip("pygame")
+    font = _PixelFont(pygame)
+    surface = pygame.Surface((8, 5))
+    draw = _run(1, 0, (220, 30, 40, 255), (10, 20, 30, 255), "  ")
+    composite_draw_plane(pygame, surface, _plane(_region(draw)), font, 4, 5)
+    assert [item[0] for item in font.rendered] == [" "]
+    assert tuple(surface.get_at((0, 0)))[:3] == (220, 30, 40)
+    assert tuple(surface.get_at((4, 0)))[:3] == (220, 30, 40)
+
+
+def test_glyph_reuse_respects_italic_opacity_and_composition_lifetime():
+    pygame = pytest.importorskip("pygame")
+    font = _PixelFont(pygame)
+    opaque = _run(1, 0, (200, 100, 40, 255), (10, 20, 30, 255), "AA")
+    translucent = _run(2, 1, (200, 100, 40, 128), (10, 20, 30, 255), "AA")
+    italic = _run(3, 2, (200, 100, 40, 255), (10, 20, 30, 255), "AA", attributes=4)
+    restored = _run(4, 3, (200, 100, 40, 255), (10, 20, 30, 255), "AA")
+    plane = _plane(_region(opaque, translucent, italic, restored))
+    for expected_renders in (3, 6):
+        surface = pygame.Surface((8, 5))
+        composite_draw_plane(pygame, surface, plane, font, 4, 5)
+        assert len(font.rendered) == expected_renders
+        assert font.italic is False
+        assert tuple(surface.get_at((4, 0)))[:3] == (200, 100, 40)
+
+
+def test_hidden_and_zero_width_glyph_slots_do_not_rasterize():
+    pygame = pytest.importorskip("pygame")
+    font = _PixelFont(pygame)
+    surface = pygame.Surface((2, 5))
+    surface.set_clip(pygame.Rect(1, 0, 1, 5))
+    draw = _run(1, 0, (220, 30, 40, 255), (10, 20, 30, 255), "ABCD")
+    composite_draw_plane(pygame, surface, _plane(_region(draw)), font, 1, 5)
+    assert [item[0] for item in font.rendered] == ["D"]
+    assert surface.get_clip() == pygame.Rect(1, 0, 1, 5)
+
+
 def test_polyline_uses_iterative_group_geometry_without_crossing_parent_bounds():
     pygame = pytest.importorskip("pygame")
     surface = pygame.Surface((10, 10))
@@ -197,7 +271,8 @@ def test_polyline_uses_iterative_group_geometry_without_crossing_parent_bounds()
 
     composite_draw_plane(pygame, surface, _plane(region), font, 10, 10)
 
-    assert tuple(surface.get_at((4, 5)))[:3] == (20, 210, 70)
+    # Object/group bounds use logical cells; the one-cell parent spans 10px.
+    assert tuple(surface.get_at((9, 5)))[:3] == (20, 210, 70)
     assert tuple(surface.get_at((5, 5)))[:3] == (2, 4, 6)
 
 
@@ -660,24 +735,25 @@ def test_cover_centers_oversized_raster_and_crops_at_the_object_bounds():
     assert tuple(destination.get_at((3, 2)))[:3] == (20, 210, 70)
 
 
-def test_cover_crops_extreme_aspect_source_before_bounded_scale(monkeypatch):
+def test_cover_samples_extreme_aspect_source_with_bounded_temporary_storage(monkeypatch):
     pygame = pytest.importorskip("pygame")
     destination = pygame.Surface((20, 10))
     source = pygame.Surface((256, 1), flags=pygame.SRCALPHA)
     source.fill((80, 120, 200, 255))
+    source.set_at((128, 0), (210, 90, 30, 255))
     manifest = _image_manifest(1, 256, 1)
     plane = _image_plane(
         (_image_draw(1, ImageFit.COVER),),
         (manifest,),
     )
-    original_scale = pygame.transform.scale
-    scales = []
+    original_surface = pygame.Surface
+    allocations = []
 
-    def recording_scale(cropped, size):
-        scales.append((tuple(cropped.get_size()), tuple(size)))
-        return original_scale(cropped, size)
+    def recording_surface(size, *args, **kwargs):
+        allocations.append(tuple(size))
+        return original_surface(size, *args, **kwargs)
 
-    monkeypatch.setattr(pygame.transform, "scale", recording_scale)
+    monkeypatch.setattr(pygame, "Surface", recording_surface)
     composite_draw_plane(
         pygame,
         destination,
@@ -688,7 +764,9 @@ def test_cover_crops_extreme_aspect_source_before_bounded_scale(monkeypatch):
         resource_surfaces={manifest.key: source},
     )
 
-    assert scales == [((2, 1), (20, 10))]
+    assert allocations and all(0 < w <= 20 and 0 < h <= 10 for w, h in allocations)
+    assert tuple(destination.get_at((0, 0)))[:3] == (80, 120, 200)
+    assert tuple(destination.get_at((19, 9)))[:3] == (210, 90, 30)
 
 
 def test_image_opacity_uses_a_temporary_and_preserves_cache_surface_and_clip():

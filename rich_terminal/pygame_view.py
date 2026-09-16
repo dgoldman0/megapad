@@ -2323,7 +2323,7 @@ def _paint_waveform(
         surface.set_clip(prior_clip)
 
 
-def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
+def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw, glyphs):
     object_rect = _object_rect(pygame_module, region, region_rect, draw)
     clip = _bounded_pygame_rect(
         pygame_module,
@@ -2369,6 +2369,30 @@ def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
             for index, codepoint in enumerate(draw.text):
                 left = object_rect.left + (index * object_rect.width) // count
                 right = object_rect.left + ((index + 1) * object_rect.width) // count
+                if left >= right or right <= clip.left or left >= clip.right:
+                    continue
+                # The cache belongs to this composition and its one glyph font.
+                # Italic is the only font state this painter changes, and each
+                # run restores it. Opacity belongs in the key because cached
+                # surfaces must remain immutable after rasterization.
+                key = (codepoint, color, foreground.alpha, italic)
+                raster = glyphs.get(key)
+                if raster is None:
+                    glyph = font.render(codepoint, True, color)
+                    if foreground.alpha != 0xFF:
+                        glyph = glyph.copy()
+                        glyph.fill(
+                            (255, 255, 255, foreground.alpha),
+                            special_flags=pygame_module.BLEND_RGBA_MULT,
+                        )
+                    ink = glyph.get_bounding_rect()
+                    raster = (glyph, ink.width > 0 and ink.height > 0)
+                    glyphs[key] = raster
+                glyph, has_ink = raster
+                # Empty ink still occupies its slot and can have decorations.
+                # Inspect the actual raster: a custom font may paint spaces.
+                if not has_ink and not draw.attributes & (ATTR_UNDERLINE | ATTR_STRIKE):
+                    continue
                 slot = _WideRect(
                     left,
                     object_rect.top,
@@ -2383,33 +2407,27 @@ def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw):
                 if slot_clip.width <= 0 or slot_clip.height <= 0:
                     continue
                 surface.set_clip(slot_clip)
-                glyph = font.render(codepoint, True, color)
-                if foreground.alpha != 0xFF:
-                    glyph = glyph.copy()
-                    glyph.fill(
-                        (255, 255, 255, foreground.alpha),
-                        special_flags=pygame_module.BLEND_RGBA_MULT,
-                    )
                 # A glyph run uses the same cell origin as the mandatory CELL
                 # renderer.  Every glyph and decoration is clipped to its own
                 # equal slot, so font overhang cannot alter an adjacent cell.
-                _blit_bounded_surface(
-                    pygame_module,
-                    surface,
-                    glyph,
-                    slot.left,
-                    slot.top,
-                    slot_clip,
-                )
-                if draw.attributes & ATTR_BOLD:
+                if has_ink:
                     _blit_bounded_surface(
                         pygame_module,
                         surface,
                         glyph,
-                        slot.left + 1,
+                        slot.left,
                         slot.top,
                         slot_clip,
                     )
+                    if draw.attributes & ATTR_BOLD:
+                        _blit_bounded_surface(
+                            pygame_module,
+                            surface,
+                            glyph,
+                            slot.left + 1,
+                            slot.top,
+                            slot_clip,
+                        )
                 if draw.attributes & ATTR_UNDERLINE:
                     _draw_decoration(
                         pygame_module,
@@ -2679,6 +2697,7 @@ def composite_draw_plane_result(
     )
     series_by_key = {history.key: history.samples for history in plane.series}
     hit_entries: list[HitMapEntry] = []
+    glyphs = {}
     for region in plane.regions:
         region_rect = _WideRect(
             region.logical_x * cell_w,
@@ -2715,6 +2734,7 @@ def composite_draw_plane_result(
                     region,
                     region_rect,
                     draw,
+                    glyphs,
                 )
             elif isinstance(draw, PolylineDraw):
                 _paint_polyline(
