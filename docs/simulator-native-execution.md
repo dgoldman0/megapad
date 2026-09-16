@@ -116,6 +116,21 @@ with the native plan, and cached plans no longer allocate a preparation work
 list on each entry. Profiling distinguishes these `skipped:` boundaries from
 actual `empty:` native calls. The focused selector passes 195 cases.
 
+Identity-bound `EXECUTE` now enters an already prepared colon target in C++,
+using the same continuation cookie and original return IP as a static call.
+Cold targets, primitives, source accelerators, invalid tokens and transient
+failures retain reference dispatch. Dynamic calls remain two semantic ticks;
+dictionary invalidation also discards their available target plans. This is
+an interpreter call fast path, not machine-code generation or a source cache.
+`bench_native_dispatch.py` includes a bounded dynamic-call kernel in addition
+to the original four workloads.
+
+The sequential native execution/loop/memory/clock, stack snapshot, session
+clock and shared-session selector passes 462 cases in 4.38 s. Dynamic-call
+checks cover every budget boundary, multiple targets in one native interval,
+cold/primitive/invalid targets, return-stack overflow, word shadowing and
+dictionary rollback with XT reuse.
+
 ## Build and select
 
 ```
@@ -164,8 +179,8 @@ now use the same native ordered return stack. `+LOOP` preserves the BIOS
 modular equality rule, including zero increments and limit crossings.
 Identity-bound `TRUE`, `FALSE`, `CELLS`, `UM*`, `COREID`, `TASK-ID`, and `CELL+`
 also stay native.
-Pair return-stack operations, dynamic execution, stack-pointer operations, and
-device/service access remain in Python. Successful
+Pair return-stack operations, unprepared/non-colon dynamic execution,
+stack-pointer operations, and device/service access remain in Python. Successful
 native prefixes settle their exact watchdog, diagnostic, and timer counts
 before the next Python operation or host boundary. Native execution does not
 invent IDL, reset a budget, or admit external events between guest boundaries.

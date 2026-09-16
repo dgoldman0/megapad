@@ -22,6 +22,13 @@ indices. `clear()` drops all plans. The Python owner invalidates plans for
 dictionary publication/rollback and mutable execution bindings. Opcode
 constants are exported with the `OP_` prefix.
 
+Installation also recognizes literal/constant arithmetic and `DUP` conditional
+branch superinstructions without removing either original index. A whole pair
+must fit the allowance and pass preflight; otherwise its original first
+instruction runs. Intermediate popped bytes are still materialized. Stack
+operations may resolve an entire operand span through a qualified page;
+fragmented, absent and cross-page spans retain scalar handling.
+
 `run(xt, ip, data_state, return_state, continuations, remaining_steps)` accepts:
 
 - `data_state = (floor, empty_pointer, pointer)`;
@@ -46,8 +53,13 @@ return stack; exposed continuations are never mistaken for user cells or loop
 indices. Counted loops use fixed-position limit/index pairs and preserve
 modular equality termination, retained bytes, and type deletion on both
 new frame slots. Identity-bound `I` and `J` never search past a continuation.
+Identity-bound `EXECUTE` can enter an already installed colon plan, consuming
+its XT and creating the same continuation as reference dispatch. Missing or
+non-colon target plans fall through before effects; Python owns invalid-token,
+stack-fault, service, and source-accelerator behavior. Dynamic-call target
+availability is invalidated with the other plans.
 Native still excludes pair return-stack operations,
-stack-pointer introspection/restoration, dynamic execution, services, and any
+stack-pointer introspection/restoration, other dynamic execution, services, and any
 ordinary memory access intersecting the return-stack backing interval.
 
 `OP_LITERAL`, `OP_BRANCH`, `OP_BRANCH_ZERO`, `OP_CALL`, `OP_RETURN`,

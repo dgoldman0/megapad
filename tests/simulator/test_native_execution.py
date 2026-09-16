@@ -814,3 +814,93 @@ def test_known_python_boundaries_do_not_make_empty_native_round_trips(monkeypatc
     assert (word.xt, 3) not in entries
     assert (word.xt, 0) in entries and (word.xt, 4) in entries
     assert executor.stats()["profile"]["exits"]["skipped:Call:HOST"] == 1
+
+
+def test_prepared_dynamic_colon_calls_stay_in_one_native_interval():
+    runtimes = _runtimes(
+        b": ADD3 3 + ; : DOUBLE 2 * ; "
+        b": RUN 1 20 0 DO ['] ADD3 EXECUTE ['] DOUBLE EXECUTE LOOP ;"
+    )
+    for runtime in runtimes:
+        for word in ("ADD3", "DOUBLE"):
+            runtime.main_context.data.push(1)
+            runtime.execute(word)
+            runtime.main_context.data.clear()
+    before = runtimes[1].native_execution_stats["entries"]
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+    assert result["data"] == (7340026,)
+    assert runtimes[1].native_execution_stats["entries"] - before == 1
+
+
+@pytest.mark.parametrize("budget", range(1, 14))
+def test_dynamic_colon_calls_preserve_each_budget_and_cookie_boundary(budget):
+    runtimes = _runtimes(b": ADD2 2 + ; : RUN ['] ADD2 EXECUTE 3 * ;")
+    for runtime in runtimes:
+        runtime.main_context.data.push(1)
+        runtime.execute("ADD2")
+        runtime.main_context.data.clear()
+    _compare(runtimes, "RUN", inputs=(11,), step_budget=budget, require_native=False)
+
+
+@pytest.mark.parametrize("source", [
+    b": RUN 8 ['] 1+ EXECUTE ;",
+    b"11 CONSTANT N : RUN ['] N EXECUTE ;",
+    b": COLD 7 + ; : RUN 8 ['] COLD EXECUTE ;",
+    b": RUN 17 0 EXECUTE ;",
+    b": RUN 17 -1 EXECUTE ;",
+    b": RUN EXECUTE ;",
+])
+def test_dynamic_unprepared_noncolon_and_invalid_targets_keep_reference_effects(source):
+    _compare(_runtimes(source), "RUN", require_native=False)
+
+
+def test_dynamic_call_return_stack_overflow_keeps_consumed_execution_token():
+    runtimes = _runtimes(b": TARGET 7 ; : RUN ['] TARGET EXECUTE 9 ;")
+    for runtime in runtimes:
+        runtime.execute("TARGET")
+        runtime.main_context.data.clear()
+        context = runtime.main_context
+        empty = context.returns.empty_pointer
+        context.returns = ReturnStack(memory=runtime.memory,
+                                     floor=empty - 8, empty_pointer=empty)
+    result = _compare(runtimes, "RUN")
+    assert result["error"][0] is StackOverflow
+    assert result["data"] == ()
+
+
+def test_dynamic_call_observes_dictionary_rollback_and_reused_target_token():
+    runtimes = _runtimes(b": RUN EXECUTE ;")
+    checkpoints = [runtime.dictionary.checkpoint() for runtime in runtimes]
+    tokens = []
+    for runtime in runtimes:
+        runtime.evaluate(b": ITEM 10 ;")
+        runtime.execute("ITEM")
+        runtime.main_context.data.clear()
+        tokens.append(runtime.find("ITEM").xt)
+    assert tokens[0] == tokens[1]
+    assert _compare(runtimes, "RUN", inputs=(tokens[0],))["data"] == (10,)
+    for runtime, checkpoint in zip(runtimes, checkpoints):
+        runtime.main_context.data.clear()
+        runtime.dictionary.rollback(checkpoint)
+        runtime.evaluate(b": ITEM 20 ;")
+        assert runtime.find("ITEM").xt == tokens[0]
+    assert _compare(runtimes, "RUN", inputs=(tokens[0],),
+                    require_native=False)["data"] == (20,)
+
+
+def test_dynamic_execute_admission_keeps_original_word_binding_after_shadowing():
+    runtimes = _runtimes(b": TARGET 7 ; : ORIGINAL EXECUTE ;")
+    for runtime in runtimes:
+        runtime.execute("TARGET")
+        runtime.main_context.data.clear()
+        runtime.evaluate(b": EXECUTE DROP 99 ; : SHADOW EXECUTE ;")
+    token = runtimes[0].find("TARGET").xt
+    # New dictionary publication requires plan preparation again.
+    for runtime in runtimes:
+        runtime.execute("TARGET")
+        runtime.main_context.data.clear()
+    assert _compare(runtimes, "ORIGINAL", inputs=(token,))["data"] == (7,)
+    for runtime in runtimes:
+        runtime.main_context.data.clear()
+    assert _compare(runtimes, "SHADOW", inputs=(token,))["data"] == (99,)

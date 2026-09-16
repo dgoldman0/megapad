@@ -36,7 +36,7 @@ enum Opcode : uint32_t {
     OP_STORE, OP_C_STORE, OP_W_STORE, OP_L_STORE,
     OP_OFF, OP_ON, OP_PLUS_STORE, OP_COUNT,
     OP_TRUE, OP_FALSE, OP_CELLS, OP_UMULTIPLY, OP_I, OP_J,
-    OP_BSWAP, OP_CELL_PLUS,
+    OP_BSWAP, OP_CELL_PLUS, OP_EXECUTE,
 };
 
 struct Instruction {
@@ -365,7 +365,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_CELL_PLUS)
+            if (opcode > OP_EXECUTE)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -592,8 +592,13 @@ private:
             stack.commit();
             s.ip = v[0] == 0 ? operation.a : s.ip + 1;
             return true;
-        case OP_CALL: {
-            auto target = plans_.find(operation.a);
+        case OP_CALL: case OP_EXECUTE: {
+            Cell target_xt = operation.a;
+            if (opcode == OP_EXECUTE) {
+                if (!stack.inputs(1) || !stack.outputs(0)) return false;
+                target_xt = v[0];
+            }
+            auto target = plans_.find(target_xt);
             if (target == plans_.end() || target->second.empty() ||
                 s.returns.pointer - s.returns.floor < 8)
                 return false;
@@ -609,10 +614,11 @@ private:
             // Allocate the retained side record before committing any effect.
             s.changed.insert_or_assign(slot,
                 ContinuationUpdate{s.xt, s.ip + 1, raw});
+            if (opcode == OP_EXECUTE) stack.commit();
             scalar.write(raw, 8);
             s.cookie = cookie;
             s.returns.pointer = slot;
-            s.xt = operation.a;
+            s.xt = target_xt;
             s.ip = 0;
             return true;
         }
@@ -943,6 +949,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     PRIMITIVE("COUNT", OP_COUNT); PRIMITIVE("BSWAP", OP_BSWAP);
     PRIMITIVE("TRUE", OP_TRUE); PRIMITIVE("FALSE", OP_FALSE);
     PRIMITIVE("CELLS", OP_CELLS); PRIMITIVE("CELL+", OP_CELL_PLUS);
+    PRIMITIVE("EXECUTE", OP_EXECUTE);
     PRIMITIVE("UM*", OP_UMULTIPLY);
     // The original hosted BIOS primitives both push zero. Native admission
     // remains bound to those installed word objects, never a later namesake.
