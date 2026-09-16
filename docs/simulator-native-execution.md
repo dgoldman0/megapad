@@ -109,6 +109,13 @@ Cross-page, sparse, and fragmented spans retain scalar handling; cached
 pointers never survive a native interval. The expanded parity selector passes
 194 cases, including multi-cell operations at different page alignments.
 
+Prepared plans record Python-owned instruction positions. Reaching one now
+continues directly in Python instead of making a zero-progress C++ call with
+the same stack metadata. This map shares dictionary-generation invalidation
+with the native plan, and cached plans no longer allocate a preparation work
+list on each entry. Profiling distinguishes these `skipped:` boundaries from
+actual `empty:` native calls. The focused selector passes 195 cases.
+
 ## Build and select
 
 ```

@@ -780,3 +780,37 @@ def test_cached_stack_spans_check_the_complete_multi_cell_extent(page_size, dept
     )
     result = _compare(runtimes, "RUN", inputs=tuple(range(1, depth + 1)))
     assert result["error"] is None
+
+
+def test_known_python_boundaries_do_not_make_empty_native_round_trips(monkeypatch):
+    monkeypatch.setenv("MEGAFORTH_NATIVE_PROFILE", "1")
+    runtimes = _runtimes()
+    records = [[], []]
+    for runtime, calls in zip(runtimes, records):
+        def callback(context, *, calls=calls):
+            calls.append(context.data.snapshot())
+            context.data.push(11)
+        runtime.define_primitive("HOST", callback)
+        runtime.evaluate(b": RUN 2 3 + HOST 5 6 + ;")
+    executor = runtimes[1]._native_execution
+    program = executor.program
+    entries = []
+
+    class ObservedProgram:
+        install = program.install
+        clear = program.clear
+
+        @staticmethod
+        def run(xt, ip, *args):
+            entries.append((xt, ip))
+            return program.run(xt, ip, *args)
+
+    executor.program = ObservedProgram()
+    result = _compare(runtimes, "RUN")
+    assert result["error"] is None
+    assert result["data"] == (5, 11, 11)
+    assert records == [[(5,)], [(5,)]]
+    word = runtimes[1].find("RUN")
+    assert (word.xt, 3) not in entries
+    assert (word.xt, 0) in entries and (word.xt, 4) in entries
+    assert executor.stats()["profile"]["exits"]["skipped:Call:HOST"] == 1
