@@ -565,6 +565,7 @@ public:
                 case OP_LSHIFT: case OP_RSHIFT:
                 case OP_EQUAL: case OP_NOT_EQUAL: case OP_ULESS: case OP_UGREATER:
                 case OP_LESS: case OP_LESS_EQUAL: case OP_GREATER: case OP_GREATER_EQUAL:
+                case OP_FETCH: case OP_C_FETCH: case OP_W_FETCH: case OP_L_FETCH:
                     first.fused = next;
                     break;
                 }
@@ -685,6 +686,23 @@ private:
     static bool execute_fused(const Instruction& first, const Instruction& next,
                               MemoryRun& memory, RunState& s) {
         StackOperation stack(memory, s.data);
+        if (first.fused >= OP_FETCH && first.fused <= OP_L_FETCH) {
+            const unsigned width = first.fused == OP_FETCH ? 8 :
+                1U << (first.fused - OP_C_FETCH);
+            Scalar source;
+            if (!stack.inputs(0) || !stack.outputs(1) ||
+                !memory.resolve(first.a, width, false, true, source))
+                return false;
+            // A guest read can alias the address just pushed onto its stack.
+            // Perform that write before reading, after both operations have
+            // passed preflight. A miss leaves the original first op intact.
+            stack.result[0] = first.a;
+            stack.commit();
+            stack.result[0] = source.read(width);
+            stack.commit();
+            s.ip += 2;
+            return true;
+        }
         if (!stack.inputs(1)) return false;
         const Cell left = stack.values[0];
         if (first.opcode == OP_DUP) {
