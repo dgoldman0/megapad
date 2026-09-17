@@ -354,6 +354,68 @@ struct ContinuationUpdate {
     Cell raw;
 };
 
+// During one native interval RP moves only through checked pushes/pops.
+// Index changed slots relative to its entry position, growing separately in
+// each direction. This avoids hashing every call/return and never allocates
+// storage for the unused portion of a caller-provided return stack.
+class ContinuationChanges {
+public:
+    explicit ContinuationChanges(Cell anchor) : anchor_(anchor) {}
+
+    const ContinuationUpdate* find(Cell slot) const noexcept {
+        const auto& side = slot < anchor_ ? below_ : above_;
+        const Cell index = index_of(slot);
+        if (index >= side.size() || !side[index].touched) return nullptr;
+        return &side[index].value;
+    }
+
+    void set(Cell slot, ContinuationUpdate value) {
+        prepare(slot);
+        assign(slot, value);
+    }
+
+    void erase_pair(Cell first, Cell second) {
+        // Complete both possible allocations before changing either type.
+        // Failed growth can leave only untouched scratch entries behind.
+        prepare(first);
+        prepare(second);
+        assign(first, ContinuationUpdate{});
+        assign(second, ContinuationUpdate{});
+    }
+
+    void append_to(py::list& updates) const {
+        auto append = [&](Cell slot, const Change& change) {
+            if (change.touched)
+                updates.append(py::make_tuple(slot, change.value.caller,
+                                              change.value.ip, change.value.raw));
+        };
+        for (size_t i = 0; i < below_.size(); ++i)
+            append(anchor_ - (i + 1) * 8, below_[i]);
+        for (size_t i = 0; i < above_.size(); ++i)
+            append(anchor_ + i * 8, above_[i]);
+    }
+
+private:
+    struct Change {
+        bool touched = false;
+        ContinuationUpdate value{};
+    };
+    Cell index_of(Cell slot) const noexcept {
+        return slot < anchor_ ? (anchor_ - slot) / 8 - 1 : (slot - anchor_) / 8;
+    }
+    void prepare(Cell slot) {
+        auto& side = slot < anchor_ ? below_ : above_;
+        const Cell index = index_of(slot);
+        if (index >= side.size()) side.resize(index + 1);
+    }
+    void assign(Cell slot, ContinuationUpdate value) noexcept {
+        auto& side = slot < anchor_ ? below_ : above_;
+        side[index_of(slot)] = Change{true, value};
+    }
+    Cell anchor_;
+    std::vector<Change> below_, above_;
+};
+
 struct RunState {
     Cell xt;
     Cell ip;
@@ -361,7 +423,7 @@ struct RunState {
     StackState data;
     StackState returns;
     Cell cookie;
-    std::unordered_map<Cell, ContinuationUpdate> changed;
+    ContinuationChanges changed{returns.pointer};
     Cell pointer_captures = 0;
 };
 
@@ -574,7 +636,7 @@ public:
         RunState state{xt, ip, 0,
             StackState{data_state[0], data_state[1], data_state[2]},
             StackState{return_state[0].cast<Cell>(), return_state[1].cast<Cell>(),
-                       return_state[2].cast<Cell>()}, 0, {}};
+                       return_state[2].cast<Cell>()}, 0};
         // Python's continuation sequence is deliberately unbounded. Decline
         // very large sequences rather than wrap or truncate their identity.
         try {
@@ -670,10 +732,7 @@ private:
 
     static py::tuple result(const RunState& state) {
         py::list updates;
-        for (const auto& item : state.changed) {
-            updates.append(py::make_tuple(item.first, item.second.caller,
-                                          item.second.ip, item.second.raw));
-        }
+        state.changed.append_to(updates);
         return py::make_tuple(state.xt, state.ip, state.steps,
             state.data.pointer, state.returns.pointer, state.cookie, updates,
             state.pointer_captures);
@@ -683,9 +742,8 @@ private:
 
     SlotKind return_slot(Cell slot, Cell raw, const RunState& s,
                          const py::dict& continuations, ContinuationUpdate& value) {
-        const auto changed = s.changed.find(slot);
-        if (changed != s.changed.end()) {
-            value = changed->second;
+        if (const auto* changed = s.changed.find(slot)) {
+            value = *changed;
             if (value.caller == 0) return USER_CELL; // >R erased the old type.
             return value.raw == raw ? CONTINUATION : PYTHON_BOUNDARY;
         }
@@ -729,18 +787,7 @@ private:
     }
 
     static void erase_return_pair_types(RunState& s, Cell first, Cell second) {
-        // Allocate both records before deleting either old type. If the second
-        // allocation fails, even the metadata must still match the old prefix.
-        auto inserted = s.changed.try_emplace(first, ContinuationUpdate{});
-        auto* first_value = &inserted.first->second; // stable across rehash
-        try {
-            auto other = s.changed.try_emplace(second, ContinuationUpdate{});
-            *first_value = ContinuationUpdate{};
-            other.first->second = ContinuationUpdate{};
-        } catch (...) {
-            if (inserted.second) s.changed.erase(first);
-            throw;
-        }
+        s.changed.erase_pair(first, second);
     }
 
     // Keep byte-span allocation and cleanup outside the scalar dispatch loop.
@@ -872,7 +919,7 @@ private:
                 raw = 0xC07ECAFE00000000ULL ^ cookie;
             } while (raw == s.xt);
             // Allocate the retained side record before committing any effect.
-            s.changed.insert_or_assign(slot,
+            s.changed.set(slot,
                 ContinuationUpdate{s.xt, s.ip + 1, raw});
             if (opcode == OP_EXECUTE) stack.commit();
             scalar.write(raw, 8);
@@ -905,7 +952,7 @@ private:
             if (!memory.resolve(slot, 8, true, false, scalar)) return false;
             // A user push deletes type metadata even when its value happens to
             // equal the old cookie. Retain that deletion across native exits.
-            s.changed.insert_or_assign(slot, ContinuationUpdate{0, 0, 0});
+            s.changed.set(slot, ContinuationUpdate{0, 0, 0});
             scalar.write(v[0], 8);
             s.returns.pointer = slot;
             stack.commit();

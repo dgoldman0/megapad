@@ -913,6 +913,38 @@ def test_native_call_target_survives_plan_replacement_rehash_and_clear():
     assert value() == 44
 
 
+@pytest.mark.parametrize("quantum", [7, 53, 8192])
+def test_nested_returns_preserve_slots_on_both_sides_of_native_entry(quantum):
+    from simulator.runtime import YieldedExecution
+
+    runtimes = _runtimes(
+        b": TOUCH 19 >R R> DROP ; "
+        b": DESCEND DUP IF 1- RECURSE THEN TOUCH ; : RUN 80 DESCEND ;"
+    )
+    traces = []
+    for runtime in runtimes:
+        context = runtime.main_context
+        result = runtime.run_until_blocked("RUN", quantum_steps=quantum, step_budget=5000)
+        trace = []
+        for _ in range(1000):
+            trace.append((
+                type(result), result.semantic_steps,
+                context.data.snapshot(), context.returns.snapshot(),
+                context.returns._continuation_cookie,
+                dict(context.returns._continuations),
+                runtime.memory.read_bytes(context.returns.empty_pointer - 2048, 2048),
+            ))
+            if not isinstance(result, YieldedExecution):
+                break
+            result = runtime.resume_yielded(result.suspension)
+        else:
+            pytest.fail("bounded recursive fixture did not complete")
+        assert context.data.snapshot() == (0,)
+        assert context.returns.snapshot() == ()
+        traces.append(trace)
+    assert traces[0] == traces[1]
+
+
 @pytest.mark.parametrize("budget", range(1, 14))
 def test_dynamic_colon_calls_preserve_each_budget_and_cookie_boundary(budget):
     runtimes = _runtimes(b": ADD2 2 + ; : RUN ['] ADD2 EXECUTE 3 * ;")
