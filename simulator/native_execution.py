@@ -51,7 +51,7 @@ class NativeExecutor:
         }
         self.generation = runtime.dictionary.execution_generation
         self.plans = {}
-        self.python_boundaries = {}
+        self.entry_costs = {}
         self.continuation_frames = {}
         self.entries = 0
         self.semantic_steps = 0
@@ -63,7 +63,7 @@ class NativeExecutor:
     def invalidate(self):
         self.program.clear()
         self.plans.clear()
-        self.python_boundaries.clear()
+        self.entry_costs.clear()
         self.continuation_frames.clear()
         self.generation = self.runtime.dictionary.execution_generation
 
@@ -210,9 +210,13 @@ class NativeExecutor:
                             instruction.length)
                 operations.append(item)
             self.program.install(word.xt, operations)
-            self.python_boundaries[word.xt] = frozenset(
-                i for i, operation in enumerate(operations)
-                if operation[0] == op.OP_STOP
+            # Zero marks a Python-owned operation. Other entries match the
+            # native cost(): an IR operation costs one tick, while a compiled
+            # primitive/constant call also includes its execution tick.
+            self.entry_costs[word.xt] = bytes(
+                0 if operation[0] == op.OP_STOP else
+                1 if op.OP_LITERAL <= operation[0] <= op.OP_UNLOOP else 2
+                for operation in operations
             )
 
     def run(self, current, ip, context, meter, quantum_limit):
@@ -230,13 +234,16 @@ class NativeExecutor:
         if context.returns._continuation_cookie > (1 << 64) - 1 - 2 * allowance:
             return None
         self._prepare(current)
-        # A successful native prefix commonly stops immediately before a
-        # Python-owned operation. Do not marshal the stacks and re-enter C++
-        # just to rediscover that same static boundary with zero progress.
-        if ip in self.python_boundaries.get(current.xt, ()):
-            if self.profile_enabled:
-                self._profile_exit(current.xt, ip, 0, allowance, skipped=True)
-            return None
+        # Decline known stops and operations that cannot fit this allowance
+        # before marshalling state. Python retains the exact partial-budget
+        # effects and the existing outer-IR quantum boundary.
+        costs = self.entry_costs.get(current.xt)
+        if costs is not None and 0 <= ip < len(costs):
+            required = costs[ip]
+            if required == 0 or required > allowance:
+                if self.profile_enabled:
+                    self._profile_exit(current.xt, ip, 0, allowance, skipped=True)
+                return None
         data = context.data
         returns = context.returns
         started = perf_counter_ns() if self.profile_enabled else 0

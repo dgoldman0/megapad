@@ -816,6 +816,34 @@ def test_known_python_boundaries_do_not_make_empty_native_round_trips(monkeypatc
     assert executor.stats()["profile"]["exits"]["skipped:Call:HOST"] == 1
 
 
+@pytest.mark.parametrize("definition,operation", [
+    (b"", b"DUP"),
+    (b"11 CONSTANT ITEM ", b"ITEM"),
+    (b"11 VALUE ITEM ", b"ITEM"),
+    (b"CREATE ITEM 8 ALLOT ", b"ITEM"),
+])
+def test_insufficient_primitive_allowance_skips_native_marshalling(definition, operation):
+    runtimes = _runtimes(definition + b": RUN 7 " + operation + b" ;")
+    executor = runtimes[1]._native_execution
+    program = executor.program
+    entries = []
+
+    class ObservedProgram:
+        def __getattr__(self, name):
+            return getattr(program, name)
+
+        def run(self, xt, ip, *args):
+            entries.append((xt, ip, args[-1]))
+            return program.run(xt, ip, *args)
+
+    executor.program = ObservedProgram()
+    result = _compare(runtimes, "RUN", step_budget=2, require_native=False)
+    assert result["error"][0] is StepBudgetExceeded
+    assert result["counted_steps"] == 2
+    assert result["data"] == (7,)
+    assert (runtimes[1].find("RUN").xt, 1, 1) not in entries
+
+
 def test_prepared_dynamic_colon_calls_stay_in_one_native_interval():
     runtimes = _runtimes(
         b": ADD3 3 + ; : DOUBLE 2 * ; "
