@@ -2526,14 +2526,23 @@ class MegaForthRuntime:
                 raise ExecutionError("IDL suspension requires a runtime-issued wake")
             return self._continue_suspension_locked(blocked)
 
+    def _stack_snapshot(self, stack):
+        """Preserve full suspension evidence through the selected executor."""
+
+        if self._native_execution is not None:
+            snapshot = self._native_execution.snapshot_stack(stack)
+            if snapshot is not None:
+                return snapshot
+        return stack.snapshot()
+
     def _continue_suspension_locked(
         self,
         blocked: _SuspendedExecution,
     ) -> RunResult:
         suspension = blocked.handle
-        if blocked.context.data.snapshot() != blocked.blocked_data_snapshot:
+        if self._stack_snapshot(blocked.context.data) != blocked.blocked_data_snapshot:
             raise ExecutionError("data stack changed while dispatch was suspended")
-        if blocked.context.returns.snapshot() != blocked.blocked_return_snapshot:
+        if self._stack_snapshot(blocked.context.returns) != blocked.blocked_return_snapshot:
             raise ExecutionError("return stack changed while dispatch was suspended")
 
         blocked.had_pointer_capture = (
@@ -2559,8 +2568,8 @@ class MegaForthRuntime:
             handle = self._allocate_suspension_handle()
             blocked.handle = handle
             blocked.cursor = cursor
-            blocked.blocked_data_snapshot = blocked.context.data.snapshot()
-            blocked.blocked_return_snapshot = blocked.context.returns.snapshot()
+            blocked.blocked_data_snapshot = self._stack_snapshot(blocked.context.data)
+            blocked.blocked_return_snapshot = self._stack_snapshot(blocked.context.returns)
             blocked.context._lease_for_suspension(handle.sequence)
             lease_installed = True
             self._suspended_execution = blocked
@@ -3267,8 +3276,8 @@ class MegaForthRuntime:
                             capture_checkpoint
                         )
                     ),
-                    blocked_data_snapshot=context.data.snapshot(),
-                    blocked_return_snapshot=context.returns.snapshot(),
+                    blocked_data_snapshot=self._stack_snapshot(context.data),
+                    blocked_return_snapshot=self._stack_snapshot(context.returns),
                     quantum_steps=quantum_steps,
                 )
                 context._lease_for_suspension(handle.sequence)

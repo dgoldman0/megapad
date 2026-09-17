@@ -52,6 +52,7 @@ class NativeExecutor:
         self.generation = runtime.dictionary.execution_generation
         self.plans = {}
         self.python_boundaries = {}
+        self.continuation_frames = {}
         self.entries = 0
         self.semantic_steps = 0
         self.profile_enabled = os.environ.get("MEGAFORTH_NATIVE_PROFILE") == "1"
@@ -63,6 +64,7 @@ class NativeExecutor:
         self.program.clear()
         self.plans.clear()
         self.python_boundaries.clear()
+        self.continuation_frames.clear()
         self.generation = self.runtime.dictionary.execution_generation
 
     def stats(self):
@@ -75,6 +77,20 @@ class NativeExecutor:
                 "settlement_ns": self.settlement_ns,
             }
         return result
+
+    def snapshot_stack(self, stack):
+        """Read a complete canonical stack without Python per-cell dispatch."""
+
+        if (
+            type(self.runtime.memory) is not SparseAddressSpace
+            or type(stack) not in (DataStack, ReturnStack)
+            or stack._memory is not self.runtime.memory
+        ):
+            return None
+        return self.program.snapshot_stack(
+            (stack._floor, stack._empty_pointer, stack._pointer),
+            stack._continuations if type(stack) is ReturnStack else None,
+        )
 
     def _profile_exit(self, xt, ip, steps, allowance, *, skipped=False):
         if steps == allowance:
@@ -246,8 +262,16 @@ class NativeExecutor:
             if caller_xt == 0:
                 returns._continuations.pop(slot, None)
             else:
+                # Ordinary continuation values are immutable and determined
+                # by their original call site. The per-slot raw cookie still
+                # changes on every call and remains the authority for RP!.
+                key = (caller_xt, return_ip)
+                continuation = self.continuation_frames.get(key)
+                if continuation is None:
+                    continuation = Continuation(caller_xt, return_ip)
+                    self.continuation_frames[key] = continuation
                 returns._continuations[slot] = (
-                    Continuation(caller_xt, return_ip), raw
+                    continuation, raw
                 )
         data._pointer = data_pointer
         returns._pointer = return_pointer

@@ -503,6 +503,59 @@ public:
 
     void clear() { plans_.clear(); }
 
+    py::object snapshot_stack(const std::array<Cell, 3>& bounds,
+                              const py::object& continuations) {
+        const StackState stack{bounds[0], bounds[1], bounds[2]};
+        if (!stack.valid()) return py::none();
+        const bool typed = !continuations.is_none();
+        if (typed && !PyDict_CheckExact(continuations.ptr())) return py::none();
+        MemoryRun memory(regions_, page_size_, stack.floor, stack.empty);
+        py::tuple snapshot(stack.depth());
+        std::vector<Cell> stale;
+        for (Cell index = 0, address = stack.pointer; address < stack.empty;
+             ++index, address += sizeof(Cell)) {
+            Scalar scalar;
+            if (!memory.resolve(address, sizeof(Cell), false, false, scalar))
+                return py::none();
+            const Cell raw = scalar.read(sizeof(Cell));
+            PyObject* entry = nullptr;
+            if (typed) {
+                py::int_ key(address);
+                PyObject* found = PyDict_GetItemWithError(continuations.ptr(), key.ptr());
+                if (found == nullptr && PyErr_Occurred()) throw py::error_already_set();
+                if (found != nullptr) {
+                    // Custom metadata retains the reference snapshot path.
+                    // Exact continuation objects are immutable and can be
+                    // retained directly, including roots and fault frames.
+                    if (!PyTuple_CheckExact(found) || PyTuple_GET_SIZE(found) != 2)
+                        return py::none();
+                    PyObject* frame = PyTuple_GET_ITEM(found, 0);
+                    PyObject* cookie = PyTuple_GET_ITEM(found, 1);
+                    if (reinterpret_cast<PyObject*>(Py_TYPE(frame)) != continuation_type_.ptr() ||
+                        !PyLong_CheckExact(cookie)) return py::none();
+                    const Cell expected = PyLong_AsUnsignedLongLong(cookie);
+                    if (PyErr_Occurred()) {
+                        PyErr_Clear();
+                        return py::none();
+                    }
+                    if (raw == expected) entry = Py_NewRef(frame);
+                    else stale.push_back(address);
+                }
+            }
+            if (entry == nullptr) entry = PyLong_FromUnsignedLongLong(raw);
+            if (entry == nullptr) throw py::error_already_set();
+            PyTuple_SET_ITEM(snapshot.ptr(), stack.depth() - index - 1, entry);
+        }
+        // Preflight the entire snapshot before removing stale active types.
+        // Inactive retained slots remain untouched for a later RP!.
+        for (Cell address : stale) {
+            py::int_ key(address);
+            if (PyDict_DelItem(continuations.ptr(), key.ptr()) != 0)
+                throw py::error_already_set();
+        }
+        return snapshot;
+    }
+
     py::tuple run(Cell xt, Cell ip, const std::array<Cell, 3>& data_state,
                   const py::tuple& return_state, const py::dict& continuations,
                   Cell remaining_steps) {
@@ -1114,6 +1167,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
              py::arg("page_size"), py::arg("continuation_type"))
         .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"))
         .def("clear", &NativeProgram::clear)
+        .def("snapshot_stack", &NativeProgram::snapshot_stack,
+             py::arg("bounds"), py::arg("continuations") = py::none())
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
              py::arg("data_state"), py::arg("return_state"),
              py::arg("continuations"), py::arg("remaining_steps"));
