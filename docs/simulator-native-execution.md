@@ -5,7 +5,40 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 16, 2026:** MegaPad `9b4041f` reads complete
+**Current checkpoint — September 17, 2026:** MegaPad `4693d4f` adds prepared
+call-target caching, direct plan carry across calls/returns, return-slot-indexed
+continuation changes, and address/fetch superinstructions. A Python entry
+guard skips native marshalling when the next operation cannot fit its existing
+semantic allowance. The interface, 24-byte instruction records, fresh return
+cookies, original IR entry points, shared stack bytes, clocks and 8,192-step
+owner boundaries are preserved. Akashic production is unchanged at `eb97390`.
+
+Three alternating physical typing pairs record median native time of
+217.745 → 196.896 ms, about 10% lower, and zero-progress native calls of
+814 → 31. Observed isolated feedback medians are 0.678 → 0.651 s and burst
+medians 0.978 → 0.902 s. Results vary substantially; one burst is slower,
+another effectively unchanged, and final-character drain medians are slightly
+worse. These are modest interpreter gains, not a precise causal estimate of
+visible latency improvement. Roughly 16 million guest steps per update remain.
+
+The combined bounded kernels preserve exact work/results across five process
+pairs. Direct reads improve 1.114×, while other kernels range 0.944–1.064×.
+Earlier isolated slice gains do not consistently compound. A follow-up that
+copied each instruction into a local was slower in most kernels and discarded.
+All trials, including slower ones, remain in the paired evidence.
+
+The native-selected selector passes 912 checks in 12.92 s. The full ordinary
+Desktop journey passes 18 visible milestones, 21 interactions, 27 physical
+ACKs and both CELL fallback gates in 137.064 s, peaking at 443.207 MiB.
+All 114 paired typing characters appear with identical milestone pixels.
+A final unprofiled run shows all 19 characters, 0.624 s isolated feedback and
+0.880 s burst median; typing remains far from fluid. Every build, selector and
+physical run is sequential under unchanged resource guards. Paired Akashic
+`docs/rich-terminal/SIMULATOR-CALLS-PERFORMANCE-20260917.md` and
+`local_testing/evidence/simulator-calls-20260917.json` preserve source/binary
+bindings, all measurements, qualification and interpretation limits.
+
+**Suspension checkpoint — September 16, 2026:** MegaPad `9b4041f` reads complete
 suspension snapshots through the native memory resolver and interns immutable
 ordinary continuation values until native-plan invalidation. Fresh raw
 cookies, inactive retained slots, full mutation comparisons, semantic clocks
@@ -154,12 +187,13 @@ Cross-page, sparse, and fragmented spans retain scalar handling; cached
 pointers never survive a native interval. The expanded parity selector passes
 194 cases, including multi-cell operations at different page alignments.
 
-Prepared plans record Python-owned instruction positions. Reaching one now
-continues directly in Python instead of making a zero-progress C++ call with
-the same stack metadata. This map shares dictionary-generation invalidation
-with the native plan, and cached plans no longer allocate a preparation work
-list on each entry. Profiling distinguishes these `skipped:` boundaries from
-actual `empty:` native calls. The focused selector passes 195 cases.
+Prepared plans record compact per-instruction entry costs, including zero for
+Python-owned positions. Reaching a known stop or an operation that cannot fit
+the remaining semantic allowance continues directly in Python instead of
+making a zero-progress C++ call with the same stack metadata. These costs share
+dictionary-generation invalidation with the native plan, and cached plans do
+not allocate a preparation work list on each entry. Profiling distinguishes
+these `skipped:` boundaries from actual `empty:` native calls.
 
 Identity-bound `EXECUTE` now enters an already prepared colon target in C++,
 using the same continuation cookie and original return IP as a static call.

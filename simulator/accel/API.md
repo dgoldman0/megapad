@@ -26,12 +26,19 @@ indices. `clear()` drops all plans. The Python owner invalidates plans for
 dictionary publication/rollback and mutable execution bindings. Opcode
 constants are exported with the `OP_` prefix.
 
-Installation also recognizes literal/constant arithmetic and `DUP` conditional
-branch superinstructions without removing either original index. A whole pair
+Installation also recognizes literal/constant arithmetic, address pushes
+followed by scalar fetches, and `DUP` conditional branch superinstructions
+without removing either original index. A whole pair
 must fit the allowance and pass preflight; otherwise its original first
 instruction runs. Intermediate popped bytes are still materialized. Stack
 operations may resolve an entire operand span through a qualified page;
 fragmented, absent and cross-page spans retain scalar handling.
+
+Address/fetch pairs cover literal and plain created/constant addresses followed
+by `@`, `C@`, `W@` or `L@`. Both operations pass preflight before either commits.
+The pushed address is written before the read, preserving partial aliases
+between the source bytes and that stack slot. Direct entry into the original
+fetch still executes the ordinary instruction.
 
 `COMPARE` and `FILL` preflight complete ordinary byte spans, retaining one
 inline chunk for the common single-page case and a caller-sized page list for
@@ -110,6 +117,22 @@ its XT and creating the same continuation as reference dispatch. Missing or
 non-colon target plans fall through before effects; Python owns invalid-token,
 stack-fault, service, and source-accelerator behavior. Dynamic-call target
 availability is invalidated with the other plans.
+
+Static call instructions retain their resolved plan object in the unused call
+operand. `EXECUTE` reuses a cached plan only when the current XT matches.
+These objects remain stable through map rehash and body replacement; an empty
+replacement still falls through, and `clear()` destroys every cached target
+with its containing plan. The dispatch loop carries the current plan directly
+across calls and returns. Instruction records remain 24 bytes on the current
+64-bit build, and the public install/run interface is unchanged.
+
+Within a native interval, continuation changes use growable arrays indexed
+relative to the entry return pointer, separately above and below it. They
+allocate only the span reached by actual stack movement, not the unused return
+stack capacity. Untouched slots remain distinct from explicit type deletions;
+all changed inactive slots are exported for subsequent `RP!`. Allocation for
+paired loop slots finishes before either type changes.
+
 Native still excludes pair return-stack operations,
 stack-pointer restoration, other dynamic execution, services, and any
 ordinary memory access intersecting the return-stack backing interval.
@@ -137,6 +160,12 @@ including its normal partial fault effects. In particular, an allowance of
 one does not admit a two-tick primitive call. Successful stack operations
 write their ordinary shared bytes immediately, including retained bytes below
 a popped frontier. Reads from missing ordinary pages return zero.
+
+The Python owner stores compact entry costs with each prepared plan and
+declines known stops or insufficient allowances before marshalling stacks.
+These costs share plan-generation invalidation. The reference dispatcher
+retains its partial-budget effects and original outer-IR quantum boundary;
+the guard does not extend the native allowance or move a host boundary.
 
 The Python owner settles the completed step count into the cumulative meter,
 diagnostics, and exact timer state before executing a fallback operation or
