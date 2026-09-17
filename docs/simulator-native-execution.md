@@ -5,7 +5,32 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 16, 2026:** MegaPad `e98c91e` reuses glyph
+**Current checkpoint — September 16, 2026:** MegaPad `9b4041f` reads complete
+suspension snapshots through the native memory resolver and interns immutable
+ordinary continuation values until native-plan invalidation. Fresh raw
+cookies, inactive retained slots, full mutation comparisons, semantic clocks
+and 8,192-step owner boundaries are preserved. Custom stacks and memory retain
+the reference path. Akashic production remains at `b68b801`.
+
+Three alternating current/previous physical typing pairs reduce median
+settlement from 39.86 to 19.52 ms. Observed isolated feedback medians are
+0.856 → 0.736 s and burst medians 1.298 → 1.067 s, with substantial host
+variation; the complete observed difference is not a proven causal speedup.
+All 114 characters appear, and all initial/isolated/final milestone pixels
+match exactly across the six runs. A final unprofiled current run records
+0.697 s isolated feedback and a 1.035 s burst median. Typing remains far from
+the roughly 100 ms target, with about 18 million guest steps per update.
+
+The full ordinary Desktop journey passes 18 milestones, 21 interactions,
+27 physical ACKs and both CELL fallback gates, peaking at 444.078 MiB.
+Focused selectors pass 276, 501 and 35 checks respectively (overlapping sets),
+including native quantum/exception/shared-session behavior. All tests run
+sequentially under unchanged resource and step guards. Paired Akashic
+`docs/rich-terminal/TYPING-OWNER-PERFORMANCE-20260916.md` and
+`local_testing/evidence/typing-owner-20260916.json` record complete timings,
+bindings, pixel comparisons, qualification and limits of the interpretation.
+
+**Earlier composition checkpoint — September 16, 2026:** MegaPad `e98c91e` reuses glyph
 rasters within each rich composition and skips proven empty ink. Paired
 Akashic `1c7dd9a` removes repeated whole-document scans during mounted-widget
 association. Isolated typing falls from 1.121 s to 0.948 s, while burst median
@@ -245,6 +270,13 @@ active continuation cookie and remove stale metadata; resumed execution still
 compares every data and return entry. Stack bounds, host quanta, and raw-memory
 mutation detection are unchanged. This improvement also serves the Python
 executor; custom stack and memory types retain scalar snapshot dispatch.
+
+The native executor now also assembles these complete tuples without Python
+per-cell dispatch. Its resolver retains exact continuation objects and checks
+raw cookies, with the same stale active-type cleanup. Reference snapshotting
+still serves the Python executor and unsupported native contexts. Ordinary
+native continuation values are reused by original call site, while raw slot
+cookies remain unique and dictionary invalidation clears the value cache.
 
 Dictionary publication maintains the highest live header/code-slot end. A
 new definition starting at or above that bound cannot overlap an existing

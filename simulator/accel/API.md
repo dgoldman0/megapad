@@ -71,6 +71,24 @@ already-popped slots, and updates the stack pointers and cookie counter. A zero
 `caller_xt` is a type deletion from a user push, including one that wrote the
 same raw value as the previous cookie. Zero is never a valid colon XT.
 
+The Python owner interns immutable ordinary continuation values by original
+`(caller_xt, return_ip)` until native-plan invalidation. This does not intern
+raw cookies: each call still writes a fresh cookie, and each retained slot
+keeps that cookie beside its frame. Root and fault frames are not interned.
+
+`snapshot_stack((floor, empty_pointer, pointer), continuations=None)` reads
+every active cell into an immutable bottom-to-top tuple. Passing the return
+stack's exact metadata dictionary restores matching continuation objects,
+including root and fault frames. Stale active types are removed only after
+the complete snapshot has passed preflight; inactive types remain available
+to `RP!`. Sparse holes read as zero without allocating backing. Page caches
+are fresh for this call and support the same fragmented cells as execution.
+Unsupported bounds, backing or metadata return `None` for reference fallback.
+The owner admits only canonical stacks backed by its exact sparse memory;
+custom stack/memory behavior remains in Python. Snapshotting advances no
+guest steps or clocks. Resumption still compares every data and return entry,
+and data-mutation rejection precedes return snapshot cleanup.
+
 `SP@` and `RP@` push the current pre-push data/return frontier. Each successful
 native `RP@` increments the returned capture delta, which Python adds to the
 unbounded return-stack capture generation before a callback, fault or host
