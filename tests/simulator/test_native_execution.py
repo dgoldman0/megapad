@@ -861,6 +861,58 @@ def test_prepared_dynamic_colon_calls_stay_in_one_native_interval():
     assert runtimes[1].native_execution_stats["entries"] - before == 1
 
 
+def test_one_dynamic_callsite_switches_between_prepared_targets():
+    runtimes = _runtimes(
+        b": ADD1 1+ ; : DOUBLE 2* ; : APPLY EXECUTE ; "
+        b": RUN 1 6 0 DO I 1 AND IF ['] ADD1 ELSE ['] DOUBLE THEN APPLY LOOP ;"
+    )
+    for runtime in runtimes:
+        for name in ("ADD1", "DOUBLE"):
+            runtime.main_context.data.push(1)
+            runtime.execute(name)
+            runtime.main_context.data.clear()
+    observed = _compare(runtimes, "RUN")
+    assert observed["error"] is None
+    assert observed["data"] == (15,)
+
+
+def test_native_call_target_survives_plan_replacement_rehash_and_clear():
+    import _megaforth_native as native
+
+    page = bytearray(4096)
+    program = native.NativeProgram([(0, 4096, {0: page})], 4096, Continuation)
+    caller = [(native.OP_CALL, 2, 0), (native.OP_STOP, 0, 0)]
+    def install_target(value):
+        program.install(2, [(native.OP_LITERAL, value, 0), (native.OP_RETURN, 0, 0)])
+    def run():
+        return program.run(1, 0, (0, 2048, 2048), (3072, 4096, 4096, 0), {}, 20)
+    def value():
+        return int.from_bytes(page[2040:2048], "little")
+
+    program.install(1, caller)
+    install_target(11)
+    assert run()[:3] == (1, 1, 3)
+    assert value() == 11
+    # Replacing the target vector and rehashing the map must not leave a
+    # pointer into the old instruction buffer or bucket storage.
+    for xt in range(3, 259):
+        program.install(xt, [(native.OP_STOP, 0, 0)])
+    install_target(22)
+    assert run()[:3] == (1, 1, 3)
+    assert value() == 22
+    program.install(2, [])
+    assert run()[:3] == (1, 0, 0)
+    install_target(33)
+    assert run()[:3] == (1, 1, 3)
+    assert value() == 33
+    program.clear()
+    program.install(1, caller)
+    assert run()[:3] == (1, 0, 0)
+    install_target(44)
+    assert run()[:3] == (1, 1, 3)
+    assert value() == 44
+
+
 @pytest.mark.parametrize("budget", range(1, 14))
 def test_dynamic_colon_calls_preserve_each_budget_and_cookie_boundary(budget):
     runtimes = _runtimes(b": ADD2 2 + ; : RUN ['] ADD2 EXECUTE 3 * ;")

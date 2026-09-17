@@ -42,13 +42,21 @@ enum Opcode : uint32_t {
     OP_SP_FETCH, OP_RP_FETCH,
 };
 
+struct Instruction;
+using Plan = std::vector<Instruction>;
+
 struct Instruction {
     uint32_t opcode;
     // The original instruction and every IR index remain available. A fused
     // successor is only used when both operations can finish without exiting.
     uint32_t fused = OP_STOP;
     Cell a;
-    Cell b;
+    union {
+        Cell b;
+        // Calls do not use operand b. Plan objects remain at stable map-node
+        // addresses across installation/rehash; clear discards every caller.
+        Plan* target;
+    };
 };
 
 struct Region {
@@ -480,6 +488,8 @@ public:
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
+            if (opcode == OP_CALL || opcode == OP_EXECUTE)
+                plan.back().target = nullptr;
         }
         for (size_t i = 0; i + 1 < plan.size(); ++i) {
             auto& first = plan[i];
@@ -580,17 +590,11 @@ public:
         MemoryRun memory(regions_, page_size_, state.returns.floor,
                          state.returns.empty);
         try {
-            Cell plan_xt = 0;
-            const std::vector<Instruction>* plan = nullptr;
+            const auto initial = plans_.find(state.xt);
+            Plan* plan = initial == plans_.end() ? nullptr : &initial->second;
             while (state.steps < remaining_steps) {
-                if (state.xt != plan_xt) {
-                    const auto found = plans_.find(state.xt);
-                    if (found == plans_.end()) break;
-                    plan_xt = state.xt;
-                    plan = &found->second;
-                }
                 if (plan == nullptr || state.ip >= plan->size()) break;
-                const Instruction operation = (*plan)[state.ip];
+                Instruction& operation = (*plan)[state.ip];
                 if (operation.opcode == OP_STOP ||
                     cost(operation.opcode) > remaining_steps - state.steps)
                     break;
@@ -601,7 +605,7 @@ public:
                     state.steps += cost(operation.opcode) + cost(operation.fused);
                     continue;
                 }
-                if (!execute(operation, memory, state, continuations))
+                if (!execute(operation, memory, state, continuations, plan))
                     break;
                 state.steps += cost(operation.opcode);
             }
@@ -823,8 +827,8 @@ private:
         return true;
     }
 
-    bool execute(const Instruction& operation, MemoryRun& memory, RunState& s,
-                 const py::dict& continuations) {
+    bool execute(Instruction& operation, MemoryRun& memory, RunState& s,
+                 const py::dict& continuations, Plan*& plan) {
         const auto opcode = operation.opcode;
         StackOperation stack(memory, s.data);
         auto& v = stack.values;
@@ -847,8 +851,15 @@ private:
                 if (!stack.inputs(1) || !stack.outputs(0)) return false;
                 target_xt = v[0];
             }
-            auto target = plans_.find(target_xt);
-            if (target == plans_.end() || target->second.empty() ||
+            Plan* target = operation.target;
+            if (target == nullptr || operation.a != target_xt) {
+                const auto found = plans_.find(target_xt);
+                if (found == plans_.end()) return false;
+                target = &found->second;
+                operation.a = target_xt;
+                operation.target = target;
+            }
+            if (target->empty() ||
                 s.returns.pointer - s.returns.floor < 8)
                 return false;
             const Cell slot = s.returns.pointer - 8;
@@ -869,6 +880,7 @@ private:
             s.returns.pointer = slot;
             s.xt = target_xt;
             s.ip = 0;
+            plan = target;
             return true;
         }
         case OP_RETURN: {
@@ -878,10 +890,12 @@ private:
                 return_slot(s.returns.pointer, scalar.read(8), s, continuations,
                             continuation) != CONTINUATION)
                 return false;
-            if (plans_.find(continuation.caller) == plans_.end()) return false;
+            const auto caller = plans_.find(continuation.caller);
+            if (caller == plans_.end()) return false;
             s.returns.pointer += 8;
             s.xt = continuation.caller;
             s.ip = continuation.ip;
+            plan = &caller->second;
             return true;
         }
         case OP_R_PUSH: {
@@ -1156,7 +1170,7 @@ private:
     Cell page_size_;
     py::object continuation_type_;
     std::vector<Region> regions_;
-    std::unordered_map<Cell, std::vector<Instruction>> plans_;
+    std::unordered_map<Cell, Plan> plans_;
 };
 }  // namespace
 
