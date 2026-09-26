@@ -301,7 +301,11 @@ The coherent protocol slice is owned by:
 - `rich_terminal/pygame_view.py` and `session_viewer.py`: generic collection
   rasterization, same-pass immutable TAB hit geometry, complete CELL/cursor
   composition order, an explicit damage-sink capture helper, and synchronous
-  SDL reference-sink promotion after successful flip; and
+  SDL reference-sink promotion after successful flip. CELL skips a cell whose
+  whole box an opaque GLYPH_RUN fill later repaints, unless its glyph
+  overhangs the cell, and undecorated glyph runs blit each glyph cropped to
+  its slot in one batch; `tests/test_rich_terminal_compositor_replay.py`
+  holds both to the per-cell, per-slot reference pixel for pixel; and
 - `rich_terminal/final_raster.py`: sink-local final-pixel damage, pinned
   raster/damage/hit-map offers, and acknowledgement-only baseline promotion.
 

@@ -130,6 +130,12 @@ intervals. `Ctrl+F5` toggles pause, `Ctrl+F10` pauses and executes one
 instruction, `Ctrl+R` resets the guest, and `Ctrl+Q` closes only the viewer.
 Bare function keys reach the guest.
 
+The viewer polls the session at `--fps` (30 by default) but redraws only
+when something it draws changes: a new display offer, the screen revision,
+hover or press, a visible cursor's blink, the window, or the status line.
+An unchanged window is neither recomposed nor flipped, so an idle viewer
+uses little CPU. A status-only change reuses the last composed frame.
+
 Control or inspect that same machine from another process:
 
 ```bash
