@@ -123,6 +123,11 @@ class Theme:
 # ── Virtual Terminal ──────────────────────────────────────────────────
 
 
+# Glyph-cache entry holding, per cell size, whether each character's raster
+# fits inside one cell.  Distinct from the (character, colour) glyph keys.
+_GLYPH_FITS_KEY = object()
+
+
 class VirtualTerminal:
     """VT100-compatible text terminal backed by a character grid.
 
@@ -804,8 +809,17 @@ class VirtualTerminal:
 
     def render(self, pygame_module, font, cell_w: int, cell_h: int,
                show_cursor: bool = True,
-               _cache: dict | None = None) -> 'pygame.Surface':
-        """Render the terminal grid to a pygame surface."""
+               _cache: dict | None = None,
+               covered: bytes | bytearray | None = None) -> 'pygame.Surface':
+        """Render the terminal grid to a pygame surface.
+
+        ``covered`` optionally holds one byte per cell, row-major, set where a
+        later opaque paint replaces the whole cell box.  Such a cell is
+        skipped unless its glyph raster is wider or taller than the cell, in
+        which case it is drawn in full so its overhang into a neighbour
+        stays exact.  Coverage for other geometry is ignored: drawing every
+        cell is always exact.
+        """
         with self._lock:
             surf_w = self.cols * cell_w
             surf_h = self.rows * cell_h
@@ -813,11 +827,26 @@ class VirtualTerminal:
             surface.fill(self._DEFAULT_BG)
 
             cache = _cache if _cache is not None else {}
+            if covered is not None and len(covered) != self.cols * self.rows:
+                covered = None
+            fits = cache.setdefault((_GLYPH_FITS_KEY, cell_w, cell_h), {})
 
             for y in range(self.rows):
+                row_start = y * self.cols
                 for x in range(self.cols):
                     cell = self.grid[y][x]
                     ch = cell[0]
+                    if covered is not None and covered[row_start + x]:
+                        if not ch or ch == ' ':
+                            continue
+                        fit = fits.get(ch)
+                        if fit is None:
+                            width, height = font.render(
+                                ch, True, (255, 255, 255)).get_size()
+                            fit = width <= cell_w and height <= cell_h
+                            fits[ch] = fit
+                        if fit:
+                            continue
                     fg_rgb = cell[1]
                     bg_rgb = cell[2]
                     attrs = cell[3] if len(cell) > 3 else 0

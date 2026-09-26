@@ -1047,7 +1047,10 @@ def test_terminal_composition_orders_cell_draw_plane_then_cursor(monkeypatch):
             *,
             show_cursor,
             _cache,
+            covered,
         ):
+            # This plane has no opaque GLYPH_RUN, so CELL covers every cell.
+            assert covered == bytearray(self.cols * self.rows)
             events.append(("cell", show_cursor))
             return surface
 

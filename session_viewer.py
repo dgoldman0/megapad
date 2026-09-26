@@ -26,6 +26,7 @@ from rich_terminal.pygame_view import (
     composite_draw_plane,
     composite_draw_plane_result,
     hit_test_hit_map,
+    opaque_cell_coverage,
 )
 from rich_terminal.retained_model import ResourceFormat
 from rich_terminal.retained_view import (
@@ -1270,6 +1271,18 @@ def _paint_terminal_cursor(
         )
 
 
+def _cell_coverage(pygame_module, terminal, retained_plane, cell_width, cell_height):
+    """Cells the retained plane repaints opaquely, which CELL may skip."""
+
+    if retained_plane is None:
+        return None
+    with terminal._lock:
+        cols, rows = terminal.cols, terminal.rows
+    return opaque_cell_coverage(
+        pygame_module, retained_plane, cols, rows, cell_width, cell_height
+    )
+
+
 def compose_terminal_frame(
     pygame_module,
     terminal: VirtualTerminal,
@@ -1291,6 +1304,9 @@ def compose_terminal_frame(
         cell_height,
         show_cursor=False,
         _cache=glyph_cache,
+        covered=_cell_coverage(
+            pygame_module, terminal, retained_plane, cell_width, cell_height
+        ),
     )
     if retained_plane is not None:
         if resource_surfaces is None:
@@ -1347,6 +1363,9 @@ def compose_terminal_frame_result(
         cell_height,
         show_cursor=False,
         _cache=glyph_cache,
+        covered=_cell_coverage(
+            pygame_module, terminal, retained_plane, cell_width, cell_height
+        ),
     )
     hit_entries: tuple[HitMapEntry, ...] = ()
     if retained_plane is not None:

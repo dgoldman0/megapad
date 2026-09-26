@@ -2323,6 +2323,82 @@ def _paint_waveform(
         surface.set_clip(prior_clip)
 
 
+def _glyph_raster(pygame_module, font, codepoint: str, color, alpha: int):
+    """Rasterize one glyph: (surface, has_ink, width, height)."""
+
+    glyph = font.render(codepoint, True, color)
+    if alpha != 0xFF:
+        glyph = glyph.copy()
+        glyph.fill(
+            (255, 255, 255, alpha),
+            special_flags=pygame_module.BLEND_RGBA_MULT,
+        )
+    ink = glyph.get_bounding_rect()
+    return (glyph, ink.width > 0 and ink.height > 0, *glyph.get_size())
+
+
+def _batched_glyph_blits(
+    pygame_module, font, text: str, rasters: dict, color, alpha: int,
+    object_rect, clip, bold: bool,
+):
+    """Blit entries for one undecorated run, each cropped to its own slot.
+
+    Every entry is the source crop and position that _blit_bounded_surface
+    uses for that glyph under its slot's clip, so blitting them together
+    paints the same pixels as the per-slot path.  Slots partition the run,
+    so their order cannot matter.
+    """
+    count = len(text)
+    run_left = object_rect.left
+    run_width = object_rect.width
+    top = object_rect.top
+    clip_left = clip.left
+    clip_right = clip.right
+    crop_top = max(top, clip.top)
+    crop_bottom = min(top + object_rect.height, clip.bottom)
+    blits = []
+    if crop_top >= crop_bottom:
+        return blits
+    offsets = (0, 1) if bold else (0,)
+    # A raster without ink paints nothing here.  Once this run's space proves
+    # inkless, later spaces are skipped before any slot arithmetic.  Glyphs
+    # are still rasterized in text order, exactly as the per-slot path does.
+    inkless_space = False
+    for index, codepoint in enumerate(text):
+        if inkless_space and codepoint == " ":
+            continue
+        left = run_left + (index * run_width) // count
+        right = run_left + ((index + 1) * run_width) // count
+        if left >= right or right <= clip_left or left >= clip_right:
+            continue
+        raster = rasters.get(codepoint)
+        if raster is None:
+            raster = _glyph_raster(pygame_module, font, codepoint, color, alpha)
+            rasters[codepoint] = raster
+        glyph, has_ink, width, height = raster
+        if not has_ink:
+            if codepoint == " ":
+                inkless_space = True
+            continue
+        paint_bottom = min(top + height, crop_bottom)
+        if crop_top >= paint_bottom:
+            continue
+        crop_left = max(left, clip_left)
+        crop_right = min(right, clip_right)
+        for offset in offsets:
+            x = left + offset
+            paint_left = max(x, crop_left)
+            paint_right = min(x + width, crop_right)
+            if paint_left < paint_right:
+                blits.append((
+                    glyph,
+                    (paint_left, crop_top),
+                    (paint_left - x, crop_top - top,
+                     paint_right - paint_left, paint_bottom - crop_top),
+                ))
+    return blits
+
+
 def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw, glyphs):
     object_rect = _object_rect(pygame_module, region, region_rect, draw)
     clip = _bounded_pygame_rect(
@@ -2365,33 +2441,45 @@ def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw, gl
                 raise TypeError("font must support italic GLYPH_RUN rendering")
             prior_italic = bool(get_italic())
             set_italic(True)
+        # The cache belongs to this composition and its one glyph font.
+        # Italic is the only font state this painter changes, and each run
+        # restores it. Opacity belongs in the key because cached surfaces must
+        # remain immutable after rasterization.
+        rasters = glyphs.setdefault((color, foreground.alpha, italic), {})
+        decorated = draw.attributes & (ATTR_UNDERLINE | ATTR_STRIKE)
         try:
+            batched = None
+            if not decorated:
+                batched = _batched_glyph_blits(
+                    pygame_module,
+                    font,
+                    draw.text,
+                    rasters,
+                    color,
+                    foreground.alpha,
+                    object_rect,
+                    clip,
+                    bool(draw.attributes & ATTR_BOLD),
+                )
+            if batched is not None:
+                if batched:
+                    surface.blits(batched, doreturn=False)
+                return
             for index, codepoint in enumerate(draw.text):
                 left = object_rect.left + (index * object_rect.width) // count
                 right = object_rect.left + ((index + 1) * object_rect.width) // count
                 if left >= right or right <= clip.left or left >= clip.right:
                     continue
-                # The cache belongs to this composition and its one glyph font.
-                # Italic is the only font state this painter changes, and each
-                # run restores it. Opacity belongs in the key because cached
-                # surfaces must remain immutable after rasterization.
-                key = (codepoint, color, foreground.alpha, italic)
-                raster = glyphs.get(key)
+                raster = rasters.get(codepoint)
                 if raster is None:
-                    glyph = font.render(codepoint, True, color)
-                    if foreground.alpha != 0xFF:
-                        glyph = glyph.copy()
-                        glyph.fill(
-                            (255, 255, 255, foreground.alpha),
-                            special_flags=pygame_module.BLEND_RGBA_MULT,
-                        )
-                    ink = glyph.get_bounding_rect()
-                    raster = (glyph, ink.width > 0 and ink.height > 0)
-                    glyphs[key] = raster
-                glyph, has_ink = raster
+                    raster = _glyph_raster(
+                        pygame_module, font, codepoint, color, foreground.alpha
+                    )
+                    rasters[codepoint] = raster
+                glyph, has_ink, _width, _height = raster
                 # Empty ink still occupies its slot and can have decorations.
                 # Inspect the actual raster: a custom font may paint spaces.
-                if not has_ink and not draw.attributes & (ATTR_UNDERLINE | ATTR_STRIKE):
+                if not has_ink and not decorated:
                     continue
                 slot = _WideRect(
                     left,
@@ -2664,6 +2752,86 @@ def _paint_image(
     surface.blit(image, visible)
 
 
+class _FullSurfaceBounds:
+    """The full-surface rect and clip a fresh composition starts from."""
+
+    def __init__(self, pygame_module, width: int, height: int) -> None:
+        self._rect = pygame_module.Rect(0, 0, width, height)
+
+    def get_rect(self):
+        return self._rect.copy()
+
+    def get_clip(self):
+        return self._rect.copy()
+
+
+def opaque_cell_coverage(
+    pygame_module,
+    plane: RetainedDrawPlane,
+    cols: int,
+    rows: int,
+    cell_width: int,
+    cell_height: int,
+) -> bytearray:
+    """Mark each CELL cell whose pixels a GLYPH_RUN fill will overwrite.
+
+    Returns one byte per cell, row-major, set when the complete cell box lies
+    inside the opaque background fill of a GLYPH_RUN in PLANE.  That painter
+    fills its whole clipped rectangle before drawing any glyph and restores
+    the surface clip afterwards, so every earlier pixel inside the fill,
+    including all CELL pixels, is replaced.  The rectangle is computed with
+    the painter's own object, viewport and clip rules on the full-surface
+    clip that composition starts with.  Translucent, partial and other draws
+    never count, so CELL still paints everything they may reveal.
+    """
+    if not isinstance(plane, RetainedDrawPlane):
+        raise TypeError("plane must be RetainedDrawPlane")
+    cols = _integer("cols", cols, minimum=0)
+    rows = _integer("rows", rows, minimum=0)
+    cell_w = _integer("cell_width", cell_width, minimum=1)
+    cell_h = _integer("cell_height", cell_height, minimum=1)
+    covered = bytearray(cols * rows)
+    bounds = None
+    for region in plane.regions:
+        region_rect = _WideRect(
+            region.logical_x * cell_w,
+            region.logical_y * cell_h,
+            region.logical_cols * cell_w,
+            region.logical_rows * cell_h,
+        )
+        viewport = None
+        for draw in region.draws:
+            if not isinstance(draw, GlyphRunDraw):
+                continue
+            background = (
+                draw.foreground if draw.attributes & ATTR_REVERSE else draw.background
+            )
+            if background.alpha != 0xFF:
+                continue
+            if viewport is None:
+                if bounds is None:
+                    bounds = _FullSurfaceBounds(
+                        pygame_module, cols * cell_w, rows * cell_h
+                    )
+                viewport = _region_viewport(pygame_module, bounds, region, region_rect)
+            fill = _bounded_pygame_rect(
+                pygame_module,
+                _object_rect(pygame_module, region, region_rect, draw),
+                viewport,
+            )
+            first_col = -(-fill.left // cell_w)
+            end_col = min(cols, fill.right // cell_w)
+            first_row = -(-fill.top // cell_h)
+            end_row = min(rows, fill.bottom // cell_h)
+            if first_col >= end_col or first_row >= end_row:
+                continue
+            span = b"\x01" * (end_col - first_col)
+            for row in range(first_row, end_row):
+                start = row * cols + first_col
+                covered[start : start + len(span)] = span
+    return covered
+
+
 def composite_draw_plane_result(
     pygame_module,
     surface,
@@ -2926,6 +3094,7 @@ __all__ = [
     "composite_draw_plane",
     "composite_draw_plane_result",
     "hit_test_hit_map",
+    "opaque_cell_coverage",
     "unorm_high_edge",
     "unorm_low_edge",
 ]
