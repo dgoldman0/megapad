@@ -417,7 +417,7 @@ def test_semantic_content_capability_is_additive_and_caller_bounded() -> None:
         4096,
         0,
     )
-    formats = RetainedFormats(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1024)
+    formats = RetainedFormats(2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1024)
     policy = caps.policy(
         formats,
         client_to_terminal_max_payload=512,

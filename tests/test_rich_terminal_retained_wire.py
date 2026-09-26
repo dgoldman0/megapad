@@ -241,7 +241,7 @@ def test_query_caps_and_formats_reject_tag_reserved_feature_and_format_aliases()
 
     formats = bytearray(_oracle_payloads(RetainedMessageType.RET_FORMATS)[0])
     formats[0:4] = (0).to_bytes(4, "little")
-    with pytest.raises(RetainedWireError, match="UNORM32"):
+    with pytest.raises(RetainedWireError, match="CELL_RECT32"):
         decode_ret_formats(formats)
 
 
