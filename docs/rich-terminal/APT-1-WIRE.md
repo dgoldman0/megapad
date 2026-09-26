@@ -463,6 +463,22 @@ press, 3 release, and 4 wheel. Wheel fields are zero for other kinds; for kind
 carry magnitude. Out-of-bounds positions may report pointer exit but cannot
 directly target an application object.
 
+While RETAINED-1 is active, `POINTER` addresses only CELL and residual content,
+never a control the renderer lays out itself. The terminal starts a pointer
+gesture only at a position where the exact current, physically presented and
+acknowledged composite shows no such control: outside the visible root bounds
+of every `MENU_BAR`, `TABSET`, `TEXT_AREA`, and `TEXT_GRID`, and outside every
+open menu popup. Once a press starts a gesture there, the terminal reports that
+gesture's moves and its release at the cells under the pointer, even where the
+pointer crosses a control, until no button is held. A wheel event follows the
+same position rule on its own. A terminal need not report motion while no
+button is held. `model_revision` follows the same presentation and
+acknowledgement rule as `CONTROL_EVENT`. A press, move, or wheel event that
+cannot name the current acknowledged revision is discarded; a release is
+retained until it can, so every gesture the client sees also ends. The client
+routes the event through its ordinary mouse handling at that cell, where the
+residual pixels were drawn.
+
 `RESIZE` (`0203`) payload (`<IIQ`) contains positive cols, positive rows, and
 a monotonically increasing terminal geometry generation. During `ACTIVE`,
 this is the authoritative geometry event and legacy MMIO notification is
@@ -479,27 +495,48 @@ SNAPSHOT_BEGIN after its discovery.
 model_revision`. `focused` is zero or one.
 
 `CONTROL_EVENT` (`0205`) is defined only when the additive RETAINED-1 profile
-has been successfully discovered with feature bit 8 `RET_CONTROLS`. Its exact
-40-byte payload is `<QQQHHIQ>`:
+has been successfully discovered with feature bit 8 `RET_CONTROLS`. Its payload
+is a 40-byte `<QQQHHIQ>` prefix followed by a tail that depends on the event
+kind:
 
 ```text
 u64 owner_id
 u64 owner_generation
 u64 control_id
-u16 event_kind             (1 = ACTIVATE)
+u16 event_kind
 u16 modifiers
 u32 reserved               = 0
 u64 model_revision
+kind-specific tail
 ```
 
-All other event-kind values are invalid in the first control slice. Modifier
-bits are Shift 0, Ctrl 1, Alt 2, Super 3, Caps Lock 4, and Num Lock 5; all
-other bits are zero. The identity is normalized routing and freshness data,
-not application authority. The terminal may emit ACTIVATE only for an exact
-current active CONTROL record whose kind is activatable and whose complete
-ancestor chain is visible and enabled under the canonical RETAINED-1 control
-graph rules. `MENU`, `MENU_ITEM`, and (when feature bit 9 is enabled) `TAB` are
-the activatable kinds in this slice.
+| Kind | Name | Tail | Exact payload | Target kinds |
+| ---: | --- | --- | ---: | --- |
+| 1 | `ACTIVATE` | none | 40 bytes | `MENU`, `MENU_ITEM`, `TAB` |
+| 2 | `PLACE` | position | 64 bytes | `TEXT_AREA`, `TEXT_GRID` |
+| 3 | `EXTEND` | position | 64 bytes | `TEXT_AREA` |
+| 4 | `SCROLL` | scroll | 48 bytes | `TEXT_AREA`, `TEXT_GRID` |
+
+The position tail is `<QQII>`:
+
+```text
+u64 content_revision
+u64 item_key
+u32 scalar_offset
+u32 reserved               = 0
+```
+
+The scroll tail is `<hhI>`: signed horizontal wheel detents, signed vertical
+wheel detents, and a zero u32. At least one detent count is nonzero; positive
+X is right and positive Y is down, as in `POINTER`. `TAB`, `PLACE`, `EXTEND`,
+and `SCROLL` require feature bit 9 `RET_CONTROL_COLLECTIONS`, and
+SEMANTIC-CONTENT-1 defines what their positions mean. All other event-kind
+values are invalid. Modifier bits are Shift 0, Ctrl 1, Alt 2, Super 3, Caps
+Lock 4, and Num Lock 5; all other bits are zero. The identity is normalized
+routing and freshness data, not application authority. The terminal may emit
+an event only for an exact current active CONTROL record of a target kind
+listed for that event, whose complete ancestor chain is visible and enabled
+under the canonical RETAINED-1 control graph rules.
 
 `model_revision` must be the exact current global revision of the complete
 composite containing the renderer-hit-tested control, after that same revision
@@ -508,8 +545,8 @@ invisible, or not-yet-acknowledged control cannot produce this event. If a
 newer logical revision awaits display, the terminal retains/backpressures
 bounded raw intent until that exact current revision is presented or the intent
 becomes stale. The terminal does not mutate control state when it emits the
-event; the client revalidates the tuple and revision and routes activation to
-its authoritative UI model.
+event; the client revalidates the tuple, revision, and any position and routes
+the event to its authoritative UI model.
 
 ## 13. Reset and close
 
@@ -666,7 +703,8 @@ remain outside the CELL-1 implementation gate. The optional additive contract
 `8000`–`8002` only after its deterministic discovery succeeds. Feature bit 8
 `RET_CONTROLS` gates `CONTROL_DEFINE`, `CONTROL_REPLACE`, `CONTROL_DROP`, and
 `CONTROL_EVENT`; feature bit 9 `RET_CONTROL_COLLECTIONS` gates the additive
-TEXT_AREA/TEXT_GRID/TABSET/TAB kinds and their STX1 content body. `4003`–`4FFF`
+TEXT_AREA/TEXT_GRID/TABSET/TAB kinds, their STX1 content body, and the
+`PLACE`, `EXTEND`, and `SCROLL` event kinds. `4003`–`4FFF`
 remains reserved. Every other reserved ID keeps
 the behavior defined here; in particular, a sender may not infer a payload
 from its range. CELL-1 alone still defines no semantic controls. A complete

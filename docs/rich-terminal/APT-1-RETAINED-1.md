@@ -92,7 +92,7 @@ use the APT-1 control reserve under Section 17.
 | `000a` | `RET_RESULT` | T -> C | reserve | 48 bytes |
 | `000b` | `OWNER_DROP` | C -> T | reserve | 32 bytes |
 | `000c` | `RESOURCE_ABORT` | C -> T | reserve | 32 bytes |
-| `0205` | `CONTROL_EVENT` | T -> C | ordinary | 40 bytes |
+| `0205` | `CONTROL_EVENT` | T -> C | ordinary | 40, 48, or 64 bytes by kind |
 | `1000` | `RESOURCE_BEGIN` | C -> T | ordinary | 80 bytes |
 | `1001` | `RESOURCE_CHUNK` | C -> T | ordinary | 32-byte prefix + bytes |
 | `1002` | `RESOURCE_COMMIT` | C -> T | ordinary | 24 bytes |
@@ -339,7 +339,8 @@ arithmetic is checked. CONTROLS requires at least 80 inbound payload bytes for
 the fixed prefix, at least 40 terminal-to-client payload bytes for
 `CONTROL_EVENT`, and a retained transaction maximum of at least 280 bytes.
 `RET_CONTROL_COLLECTIONS` requires at least 152 inbound payload bytes so one
-CONTROL prefix and the smallest STX1 body fit, and a retained transaction
+CONTROL prefix and the smallest STX1 body fit, at least 64 terminal-to-client
+payload bytes for a positioned `CONTROL_EVENT`, and a retained transaction
 maximum of at least 352 bytes. A client must treat an inconsistent reply pair
 as the deterministic unsupported-profile outcome.
 
@@ -876,13 +877,21 @@ order.
 The selected renderer's immutable hit map follows that same painter order.
 Each visible region contributes an occlusion barrier for its logical rectangle
 intersected with its physical clip and the selected surface, followed by that
-region's independently activatable control targets. Reverse hit-testing first
-selects a control in the top region or stops at its barrier, so an empty region
-or one containing only non-control draws cannot click through to a lower
-region. Non-control draws remain pointer-transparent relative to controls in
-the same region: the current generic OBJECT vocabulary carries neither object
-input policy nor per-pixel opacity semantics, and changing that rule requires
-an explicit renderer-neutral semantic extension rather than pixel inference.
+region's control targets. Reverse hit-testing first selects a control in the
+top region or stops at its barrier, so an empty region or one containing only
+non-control draws cannot click through to a lower region. Non-control draws
+remain pointer-transparent relative to controls in the same region: the
+current generic OBJECT vocabulary carries neither object input policy nor
+per-pixel opacity semantics, and changing that rule requires an explicit
+renderer-neutral semantic extension rather than pixel inference.
+
+A region barrier point that no control surface covers shows CELL or residual
+content, so a pointer gesture may start there and reach the client as raw
+`POINTER` at that cell (APT-1 Section 12). The visible root bounds of every
+`MENU_BAR`, `TABSET`, `TEXT_AREA`, and `TEXT_GRID`, and every open menu
+popup, are control surfaces laid out by the renderer: a point on one never
+starts a raw gesture. It resolves to an activatable target, to a
+`TEXT_AREA`/`TEXT_GRID` position under SEMANTIC-CONTENT-1, or to nothing.
 
 Regions are stamped with PRESENT_BEGIN `geometry_generation`. A resize makes
 the active retained plane hidden and layout-rebuild-required. A layout reveal
@@ -1023,8 +1032,8 @@ does not mutate `OPEN`, `SELECTED`, or application activation state as a side
 effect of local interaction. It reports intent and the client publishes any
 resulting authoritative state in a later transaction.
 
-`CONTROL_EVENT` (`0205`) is an ordinary terminal-to-client input frame with
-exact payload `<QQQHHIQ>` (40 bytes):
+`CONTROL_EVENT` (`0205`) is an ordinary terminal-to-client input frame. Its
+40-byte `<QQQHHIQ>` prefix is followed by a tail chosen by `event_kind`:
 
 | Offset | Field | Type |
 |---:|---|---|
@@ -1035,15 +1044,27 @@ exact payload `<QQQHHIQ>` (40 bytes):
 | 26 | `modifiers` | u16 |
 | 28 | `reserved` = 0 | u32 |
 | 32 | `model_revision` | u64 |
+| 40 | kind-specific tail | see below |
 
-Event kind 1 is `ACTIVATE`; all other values are invalid in this slice.
-Modifier bits are the APT-1 KEY modifier bits and all other bits are zero. Only
-`MENU`, `MENU_ITEM`, and `TAB` are activatable. The terminal may emit the event
-only for the exact active owner generation and control ID when the complete
-current control and all of its ancestors are effectively visible and enabled.
-`MENU_BAR`, `MENU_SEPARATOR`, `TABSET`, `TEXT_AREA`, and `TEXT_GRID` never emit
-`ACTIVATE` in this slice; item-addressed text/grid input requires its own
-explicit extension.
+| Kind | Name | Exact payload | Target kinds | Feature |
+|---:|---|---:|---|---|
+| 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB` | 8; `TAB` also 9 |
+| 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
+| 3 | `EXTEND` | 64 bytes | `TEXT_AREA` | 8 and 9 |
+| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
+
+`PLACE` and `EXTEND` end with the position tail `<QQII>`: u64
+`content_revision`, u64 `item_key`, u32 `scalar_offset`, and u32 `reserved` =
+0. `SCROLL` ends with `<hhI>`: i16 horizontal wheel detents, i16 vertical wheel
+detents, and u32 `reserved` = 0, with at least one nonzero detent count. All
+other kind values, lengths, and nonzero reserved fields are invalid. Modifier
+bits are the APT-1 KEY modifier bits and all other bits are zero.
+SEMANTIC-CONTENT-1 defines how a position names STX1 content.
+
+The terminal may emit an event only for the exact active owner generation and
+control ID of a target kind listed for it, when the complete current control
+and all of its ancestors are effectively visible and enabled. `MENU_BAR`,
+`MENU_SEPARATOR`, and `TABSET` never emit `CONTROL_EVENT`.
 
 The event's `model_revision` is exactly the current global revision of the
 complete composite containing the hit-tested control, after that same revision
@@ -1052,8 +1073,8 @@ hidden target, an unacknowledged view, a superseded control record, or a newer
 logical revision pending display cannot produce `CONTROL_EVENT`; bounded raw
 intent is retained/backpressured until an exact current view is eligible or is
 discarded as stale. The client revalidates owner, generation, control identity,
-kind, state, and revision before routing `ACTIVATE` through its authoritative
-UIDL/widget action path.
+kind, state, revision, and any position before routing the event through its
+authoritative UIDL/widget action path.
 
 ## 10. Generic objects
 

@@ -6,9 +6,9 @@ implemented. The reference Pygame sink now rasterizes every collection kind and
 publishes immutable TAB hit targets from the exact paint pass. The paired
 Akashic `desktop-apt1` producer now advertises the capability, projects ordinary
 UIDL/canonical-widget values, and has exercised all four kinds plus
-acknowledgement-bound TAB activation through that sink. Text/grid item-addressed
-input remains deliberately unimplemented because the current event shape cannot
-name an item revision, key, and scalar offset. A physical renderer must not
+acknowledgement-bound TAB activation through that sink. Positioned text and grid
+input (`PLACE`, `EXTEND`, and `SCROLL`) is specified below but not yet
+implemented. A physical renderer must not
 advertise `RET_CONTROL_COLLECTIONS` until its compositor and acknowledgement
 path can render every visible kind.
 
@@ -185,10 +185,51 @@ atomically against the owner's existing aggregate reservation.
 
 `CONTROL_EVENT` activation is sufficient for `TAB` and remains revision-bound.
 Existing revision-bound KEY/TEXT input remains usable by the authoritative
-focused UI. Renderer-owned text-area pointer placement and text-grid item
-activation require an item-key/content-revision input extension; this slice
-intentionally does not guess that event contract. Until it exists, the two
-kinds do not claim item-addressed native pointer input.
+focused UI. Pointer input on text areas and grids uses the positioned kinds
+below.
+
+## Positioned input
+
+`CONTROL_EVENT` kinds 2 to 4 let a pointer act on text areas and grids without
+the terminal guessing application state. They require feature bit 9. Their
+position tail names the exact acknowledged content: `content_revision` is the
+control's STX1 content revision in the composite named by `model_revision`,
+`item_key` names an item carried in that content, and `scalar_offset` is a
+Unicode-scalar boundary within that item. The terminal computes a position
+from its own presentation of the content and emits an event only for a
+visible, effectively enabled root. `READ_ONLY` content admits all three kinds,
+because they move the caret, selection, or viewport, never the text.
+
+`PLACE` puts the caret in a text area or selects a grid item:
+
+- On a TEXT_AREA, a point on a carried row names that row and the scalar
+  boundary at or before the point in the terminal's presentation of the row,
+  clamped to the row's scalar length. A U+0009 tab is one scalar. A point on a
+  viewport row with no carried item names the nearest carried row above it at
+  its scalar length or, when none is above, the nearest carried row below it
+  at offset zero. With no carried row in the viewport the terminal emits
+  nothing.
+- On a TEXT_GRID, the point names the item whose rectangle contains it, with
+  offset zero. Only a `CONTENT` item without `UNAVAILABLE` may be named; any
+  other point emits nothing.
+
+`EXTEND` names a TEXT_AREA position exactly as `PLACE` does and moves the caret
+there while keeping the selection anchor; when no selection exists, the prior
+caret becomes the anchor. A terminal sends it for a press with Shift held and
+for motion with the primary button held after a `PLACE` on the same root. It
+needs no preceding `PLACE`. During such motion a point outside the root is
+first clamped to the root's nearest edge.
+
+`SCROLL` carries wheel detents over a TEXT_AREA or TEXT_GRID root. The client
+decides how far one detent moves the viewport and whether the caret follows.
+
+The client revalidates the owner, generation, control identity, kind, event
+revision, and content revision, and resolves the item key in the content it
+published. It then routes the position to the ordinary widget that produced
+that content, which applies it to its current state and clamps it if that
+state has since moved on. A stale or unknown position is discarded. The
+terminal never changes the caret, selection, or viewport itself; the client
+publishes the result in a later transaction.
 
 ## Cost boundary
 
