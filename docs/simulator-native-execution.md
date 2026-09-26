@@ -5,7 +5,24 @@ rich-terminal vertical `c10058b`. It is independent of the MP64 emulator's
 C++/DBT extension. The Python semantic dispatcher remains the correctness
 reference and owns operations outside each admitted native interval.
 
-**Current checkpoint — September 17, 2026:** MegaPad `4693d4f` adds prepared
+**Current checkpoint — September 26, 2026:** MegaPad `182ee52` makes the
+session's host quantum configurable and lets a native entry run to the
+quantum boundary instead of stopping every 8,192 steps inside it. MegaPad
+`a649f32` then defaults native sessions to 65,536 steps; the Python reference
+keeps 8,192. Guest work per keystroke is unchanged, so this helps only the
+simulator. Through the ordinary Desktop, median isolated feedback falls from
+0.649 s to 0.416 s and the burst median from 1.076 s to 0.561 s (three
+alternating runs per size). The gain is in the input-to-frame stage.
+Beyond 32,768 steps the fixed per-boundary host cost is mostly gone; the
+remaining host time is per-frame output processing, and 131,072 steps shows
+no further gain because the guest polls longer while it waits for each
+boundary. All 22 typing runs show identical milestone pixels, and the full
+Desktop journey passes. Paired Akashic
+`docs/rich-terminal/SIMULATOR-QUANTUM-PERFORMANCE-20260926.md` and
+`local_testing/evidence/simulator-quantum-20260926.json` hold all runs,
+profiles, bindings, and limitations.
+
+**Call and fetch checkpoint — September 17, 2026:** MegaPad `4693d4f` adds prepared
 call-target caching, direct plan carry across calls/returns, return-slot-indexed
 continuation changes, and address/fetch superinstructions. A Python entry
 guard skips native marshalling when the next operation cannot fit its existing

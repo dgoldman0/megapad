@@ -25,8 +25,9 @@ from simulator.runtime import CreatedDefinition, MegaForthRuntime
 # settles UART output, services the terminal driver, and admits queued input.
 # Native boundaries last about a millisecond at 65,536 steps; at 8,192 their
 # fixed host cost dominated Desktop typing latency. The Python reference runs
-# about 0.75 million steps per second, so it keeps 8,192-step boundaries
-# (about 10 ms) rather than holding the owner lock for about 90 ms.
+# roughly 0.6 to 0.8 million steps per second, so it keeps 8,192-step
+# boundaries (10 to 14 ms) rather than holding the owner lock for 90 to
+# 110 ms.
 DEFAULT_SEMANTIC_QUANTUM_STEPS = {"native": 65_536, "python": 8_192}
 SEMANTIC_QUANTUM_ENVIRONMENT = "MEGAFORTH_QUANTUM_STEPS"
 
