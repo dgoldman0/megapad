@@ -21,14 +21,22 @@ from rich_terminal.pygame_view import (
     CompositeDrawResult,
     ControlHitTarget,
     ControlIdentity,
+    ControlSurface,
     HitMapEntry,
+    PointerTarget,
     RegionOcclusion,
+    ResidualPoint,
+    TextHitTarget,
+    TextPosition,
     composite_draw_plane,
     composite_draw_plane_result,
     hit_test_hit_map,
     opaque_cell_coverage,
+    resolve_pointer,
 )
 from rich_terminal.retained_model import ResourceFormat
+from rich_terminal.retained_scene import ControlKind
+from rich_terminal.retained_wire import ControlEventKind
 from rich_terminal.retained_view import (
     DisplayScope,
     ImageResourceManifest,
@@ -531,12 +539,15 @@ class _RetainedDisplayState:
     def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
         entries = tuple(hit_entries)
         if any(
-            not isinstance(entry, (ControlHitTarget, RegionOcclusion))
+            not isinstance(
+                entry,
+                (ControlHitTarget, RegionOcclusion, ControlSurface, TextHitTarget),
+            )
             for entry in entries
         ):
             raise TypeError(
-                "hit_entries must contain only ControlHitTarget or "
-                "RegionOcclusion values"
+                "hit_entries must contain only ControlHitTarget, "
+                "RegionOcclusion, ControlSurface, or TextHitTarget values"
             )
         return entries
 
@@ -648,6 +659,42 @@ class _RetainedDisplayState:
         if display_token is None or display_token != self._hit_map_token:
             return None
         return hit_test_hit_map(self._hit_entries, x, y)
+
+    def resolve_pointer(
+        self,
+        x: int,
+        y: int,
+        *,
+        display_token: tuple[int, DisplayScope] | None,
+        cell_width: int,
+        cell_height: int,
+    ) -> PointerTarget | None:
+        """Resolve one point only when the input proof and map token agree."""
+
+        if display_token is None or display_token != self._hit_map_token:
+            return None
+        return resolve_pointer(
+            self._hit_entries,
+            x,
+            y,
+            cell_width=cell_width,
+            cell_height=cell_height,
+        )
+
+    def text_target(
+        self,
+        identity: ControlIdentity,
+        *,
+        display_token: tuple[int, DisplayScope] | None,
+    ) -> TextHitTarget | None:
+        """Return the acknowledged text root with this identity, if any."""
+
+        if display_token is None or display_token != self._hit_map_token:
+            return None
+        for entry in self._hit_entries:
+            if isinstance(entry, TextHitTarget) and entry.identity == identity:
+                return entry
+        return None
 
     def finish_presentation(self, response) -> int | None:
         offer = self.pending_offer
@@ -856,6 +903,92 @@ class _GuestKeyboardForwarder:
             f"input rejected ({method}: {status or 'missing status'})"
         )
 
+    def _request_now(self, method: str, **params) -> bool:
+        """Send one frame-bound request now, or report that it was not sent.
+
+        Pointer and text-position input names a place in the current
+        acknowledged frame, so it is never queued behind other input or
+        carried into a later frame.
+        """
+
+        if not self.input_enabled:
+            self.last_error = "viewer is view-only; display lease is held elsewhere"
+            return False
+        if (
+            self._display_transition
+            or self._display_ack is None
+            or self._pending_inputs
+        ):
+            return False
+        request = dict(params)
+        request["generation"] = self.generation
+        self._bind_display_proof(request)
+        result = self.client.request(method, **request)
+        status = result.get("status")
+        if status == "progress":
+            return True
+        if status != "backpressured":
+            self._record_rejection(method, status)
+        return False
+
+    def send_pointer(
+        self,
+        column: int,
+        row: int,
+        *,
+        buttons: int,
+        modifiers: int,
+        kind: int,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> bool:
+        """Send one raw pointer event at a residual-content cell."""
+
+        return self._request_now(
+            "send_pointer",
+            x=column,
+            y=row,
+            buttons=buttons,
+            modifiers=modifiers,
+            kind=kind,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
+        )
+
+    def send_text_event(
+        self,
+        target: TextHitTarget,
+        kind: ControlEventKind,
+        *,
+        modifiers: int,
+        position: TextPosition | None = None,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> bool:
+        """Send one PLACE, EXTEND, or SCROLL intent for an acknowledged root."""
+
+        if not isinstance(target, TextHitTarget):
+            raise TypeError("target must be TextHitTarget")
+        identity = target.identity
+        params = {
+            "owner_id": identity.owner_id,
+            "owner_generation": identity.owner_generation,
+            "control_id": identity.control_id,
+            "event_kind": int(kind),
+            "modifiers": modifiers,
+        }
+        if kind is ControlEventKind.SCROLL:
+            params.update(wheel_x=wheel_x, wheel_y=wheel_y)
+        else:
+            if not isinstance(position, TextPosition):
+                raise TypeError("PLACE and EXTEND require a TextPosition")
+            params.update(
+                content_revision=target.content_revision,
+                item_key=position.item_key,
+                scalar_offset=position.scalar_offset,
+            )
+        return self._request_now("send_text_event", **params)
+
     def _request_input(self, method: str, **params) -> None:
         if not self.input_enabled:
             self._pending_inputs.clear()
@@ -971,13 +1104,41 @@ class _GuestKeyboardForwarder:
         self.last_error = str(message)
 
 
-class _SemanticPointerInteractor:
-    """Resolve clicks exclusively through one sink-acknowledged semantic map."""
+# pygame buttons 1..3 are left, middle, and right: APT-1 button bits 0..2.
+_POINTER_BUTTON_BITS = {1: 0x01, 2: 0x02, 3: 0x04}
+_LEFT_BUTTON = 0x01
+_APT_SHIFT = 0x01
+_WHEEL_LIMIT = (1 << 15) - 1
+
+
+def _wheel_steps(value) -> int:
+    steps = _host_integer(value, "wheel steps")
+    return max(-_WHEEL_LIMIT, min(_WHEEL_LIMIT, steps))
+
+
+class _PointerRouter:
+    """Route pointer input through one sink-acknowledged hit map.
+
+    A menu, menu item, or tab activates on a matching release in the same
+    acknowledged frame.  A press on an enabled text root sends PLACE (EXTEND
+    with Shift), and dragging from it sends EXTEND at the position under the
+    pointer, clamped to the root.  A press on CELL or residual content starts
+    a raw gesture: its moves and release reach the guest at the cell under the
+    pointer until no button is held.  Wheel input scrolls a text root or
+    reaches residual content as raw wheel steps.
+
+    Nothing is sent unless the acknowledged display is current.  A raw
+    release that cannot be sent is owed and delivered once it can, so the
+    guest always sees a gesture it saw start also end.
+    """
 
     def __init__(
         self,
         display_state: _RetainedDisplayState,
         keyboard: _GuestKeyboardForwarder,
+        *,
+        cell_width: int,
+        cell_height: int,
     ) -> None:
         if not isinstance(display_state, _RetainedDisplayState):
             raise TypeError("display_state must be _RetainedDisplayState")
@@ -985,10 +1146,19 @@ class _SemanticPointerInteractor:
             raise TypeError("keyboard must be _GuestKeyboardForwarder")
         self.display_state = display_state
         self.keyboard = keyboard
+        self.cell_width = _nonnegative_wire_integer(cell_width, "cell width")
+        self.cell_height = _nonnegative_wire_integer(cell_height, "cell height")
+        if not self.cell_width or not self.cell_height:
+            raise ValueError("cell geometry must be positive")
         self._observed_token: tuple[int, DisplayScope] | None = None
         self._hovered: ControlIdentity | None = None
         self._pressed_target: ControlHitTarget | None = None
         self._pressed_token: tuple[int, DisplayScope] | None = None
+        self._raw_buttons = 0
+        self._raw_cell: tuple[int, int] | None = None
+        self._owed_release: tuple[tuple[int, int], int] | None = None
+        self._text_identity: ControlIdentity | None = None
+        self._text_position: TextPosition | None = None
 
     def _authority_token(self) -> tuple[int, DisplayScope] | None:
         display_ack = self.keyboard.display_ack
@@ -1017,13 +1187,42 @@ class _SemanticPointerInteractor:
             return None
         return self._pressed_target.identity
 
+    @property
+    def raw_buttons(self) -> int:
+        """Buttons the guest was told are held in the current raw gesture."""
+
+        return self._raw_buttons
+
+    @property
+    def release_owed(self) -> bool:
+        return self._owed_release is not None
+
     def clear(self) -> None:
-        """Drop renderer-local focus state without altering guest semantics."""
+        """Drop renderer-local hover and press state for a changed frame.
+
+        A raw gesture or text drag continues across frames; a menu or tab
+        press does not, because activation needs one exact frame.
+        """
 
         self._hovered = None
         self._pressed_target = None
         self._pressed_token = None
         self._observed_token = self._authority_token()
+
+    def cancel(self) -> None:
+        """End every gesture, as when the window loses focus or resizes."""
+
+        self.clear()
+        if self._raw_buttons:
+            self._owed_release = (
+                self._raw_cell or (0, 0),
+                self.keyboard.generation,
+            )
+        self._raw_buttons = 0
+        self._raw_cell = None
+        self._text_identity = None
+        self._text_position = None
+        self.flush()
 
     @staticmethod
     def _point_and_extent(position, terminal_size) -> tuple[int, int, int, int]:
@@ -1041,45 +1240,212 @@ class _SemanticPointerInteractor:
         height = _nonnegative_wire_integer(height_value, "terminal height")
         return x, y, width, height
 
-    def _target_at(self, position, terminal_size) -> ControlHitTarget | None:
+    def _cell(self, position, terminal_size) -> tuple[int, int]:
+        """The cell under the pointer, clamped into the terminal grid."""
+
+        x, y, width, height = self._point_and_extent(position, terminal_size)
+        columns = max(1, width // self.cell_width)
+        rows = max(1, height // self.cell_height)
+        return (
+            min(max(x // self.cell_width, 0), columns - 1),
+            min(max(y // self.cell_height, 0), rows - 1),
+        )
+
+    def _resolve(self, position, terminal_size) -> PointerTarget | None:
         token = self._synchronize()
         x, y, width, height = self._point_and_extent(position, terminal_size)
-        if x < 0 or y < 0 or x >= width or y >= height:
+        if token is None or x < 0 or y < 0 or x >= width or y >= height:
             return None
-        return self.display_state.hit_test(
+        return self.display_state.resolve_pointer(
             x,
             y,
             display_token=token,
+            cell_width=self.cell_width,
+            cell_height=self.cell_height,
         )
 
-    def move(self, position, terminal_size) -> ControlHitTarget | None:
-        target = self._target_at(position, terminal_size)
-        self._hovered = None if target is None else target.identity
+    def _send_raw(
+        self,
+        cell: tuple[int, int],
+        *,
+        kind: int,
+        buttons: int,
+        modifiers: int,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> bool:
+        if self._authority_token() is None:
+            return False
+        return self.keyboard.send_pointer(
+            cell[0],
+            cell[1],
+            buttons=buttons,
+            modifiers=modifiers,
+            kind=kind,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
+        )
+
+    def flush(self) -> None:
+        """Deliver an owed raw release once the displayed frame is current."""
+
+        owed = self._owed_release
+        if owed is None:
+            return
+        cell, generation = owed
+        if generation != self.keyboard.generation:
+            self._owed_release = None
+            return
+        if self._send_raw(cell, kind=3, buttons=0, modifiers=0):
+            self._owed_release = None
+
+    def move(self, position, terminal_size, *, modifiers: int = 0):
+        target = self._resolve(position, terminal_size)
+        self._hovered = (
+            target.identity if isinstance(target, ControlHitTarget) else None
+        )
+        if self._raw_buttons:
+            cell = self._cell(position, terminal_size)
+            if cell != self._raw_cell and self._send_raw(
+                cell,
+                kind=1,
+                buttons=self._raw_buttons,
+                modifiers=modifiers,
+            ):
+                self._raw_cell = cell
+        elif self._text_identity is not None:
+            self._extend_text(position, terminal_size, modifiers)
         return target
 
-    def left_down(self, position, terminal_size) -> bool:
-        target = self._target_at(position, terminal_size)
-        self._hovered = None if target is None else target.identity
-        self._pressed_target = target
-        self._pressed_token = self._authority_token() if target is not None else None
-        return target is not None
+    def _extend_text(self, position, terminal_size, modifiers: int) -> None:
+        token = self._authority_token()
+        if token is None:
+            return
+        target = self.display_state.text_target(
+            self._text_identity,
+            display_token=token,
+        )
+        if target is None or target.kind is not ControlKind.TEXT_AREA:
+            self._text_identity = None
+            self._text_position = None
+            return
+        x, y, _width, _height = self._point_and_extent(position, terminal_size)
+        text_position = target.position_at(x, y, clamp=True)
+        if text_position is None or text_position == self._text_position:
+            return
+        if self.keyboard.send_text_event(
+            target,
+            ControlEventKind.EXTEND,
+            modifiers=modifiers,
+            position=text_position,
+        ):
+            self._text_position = text_position
 
-    def left_up(
+    def button_down(
         self,
+        button: int,
         position,
         terminal_size,
         *,
-        modifiers: int,
+        modifiers: int = 0,
     ) -> bool:
-        target = self._target_at(position, terminal_size)
+        bit = _POINTER_BUTTON_BITS.get(button)
+        if bit is None:
+            return False
+        self.flush()
+        if self._owed_release is not None:
+            return False
+        if self._raw_buttons:
+            if self._raw_buttons & bit:
+                return False
+            buttons = self._raw_buttons | bit
+            cell = self._cell(position, terminal_size)
+            if self._send_raw(cell, kind=2, buttons=buttons, modifiers=modifiers):
+                self._raw_buttons = buttons
+                self._raw_cell = cell
+                return True
+            return False
+        if self._text_identity is not None or self._pressed_target is not None:
+            return False
+        target = self._resolve(position, terminal_size)
+        if isinstance(target, ControlHitTarget):
+            if bit != _LEFT_BUTTON:
+                return False
+            self._hovered = target.identity
+            self._pressed_target = target
+            self._pressed_token = self._authority_token()
+            return True
+        if isinstance(target, TextHitTarget):
+            if bit != _LEFT_BUTTON:
+                return False
+            x, y, _width, _height = self._point_and_extent(position, terminal_size)
+            text_position = target.position_at(x, y)
+            if text_position is None:
+                return False
+            kind = (
+                ControlEventKind.EXTEND
+                if modifiers & _APT_SHIFT and target.kind is ControlKind.TEXT_AREA
+                else ControlEventKind.PLACE
+            )
+            if not self.keyboard.send_text_event(
+                target,
+                kind,
+                modifiers=modifiers,
+                position=text_position,
+            ):
+                return False
+            if target.kind is ControlKind.TEXT_AREA:
+                self._text_identity = target.identity
+                self._text_position = text_position
+            return True
+        if isinstance(target, ResidualPoint):
+            cell = (target.column, target.row)
+            if self._send_raw(cell, kind=2, buttons=bit, modifiers=modifiers):
+                self._raw_buttons = bit
+                self._raw_cell = cell
+                return True
+        return False
+
+    def button_up(
+        self,
+        button: int,
+        position,
+        terminal_size,
+        *,
+        modifiers: int = 0,
+    ) -> bool:
+        bit = _POINTER_BUTTON_BITS.get(button)
+        if bit is None:
+            return False
+        if self._raw_buttons & bit:
+            remaining = self._raw_buttons & ~bit
+            cell = self._cell(position, terminal_size)
+            if self._send_raw(cell, kind=3, buttons=remaining, modifiers=modifiers):
+                self._raw_buttons = remaining
+                self._raw_cell = cell if remaining else None
+                return True
+            # The guest saw the gesture start; make sure it also sees it end.
+            self._owed_release = (cell, self.keyboard.generation)
+            self._raw_buttons = 0
+            self._raw_cell = None
+            return False
+        if bit != _LEFT_BUTTON:
+            return False
+        if self._text_identity is not None:
+            self._text_identity = None
+            self._text_position = None
+            return False
+        target = self._resolve(position, terminal_size)
         pressed = self._pressed_target
         pressed_token = self._pressed_token
         current_token = self._authority_token()
         self._pressed_target = None
         self._pressed_token = None
-        self._hovered = None if target is None else target.identity
+        self._hovered = (
+            target.identity if isinstance(target, ControlHitTarget) else None
+        )
         if (
-            target is None
+            not isinstance(target, ControlHitTarget)
             or pressed is None
             or target != pressed
             or pressed_token != current_token
@@ -1087,6 +1453,41 @@ class _SemanticPointerInteractor:
             return False
         self.keyboard.activate_control(target, modifiers=modifiers)
         return True
+
+    def wheel(
+        self,
+        steps_x,
+        steps_y,
+        position,
+        terminal_size,
+        *,
+        modifiers: int = 0,
+    ) -> bool:
+        """Send host wheel steps (positive Y is up) as APT detents (down)."""
+
+        wheel_x = _wheel_steps(steps_x)
+        wheel_y = -_wheel_steps(steps_y)
+        if not wheel_x and not wheel_y:
+            return False
+        target = self._resolve(position, terminal_size)
+        if isinstance(target, TextHitTarget):
+            return self.keyboard.send_text_event(
+                target,
+                ControlEventKind.SCROLL,
+                modifiers=modifiers,
+                wheel_x=wheel_x,
+                wheel_y=wheel_y,
+            )
+        if isinstance(target, ResidualPoint):
+            return self._send_raw(
+                (target.column, target.row),
+                kind=4,
+                buttons=self._raw_buttons,
+                modifiers=modifiers,
+                wheel_x=wheel_x,
+                wheel_y=wheel_y,
+            )
+        return False
 
 
 def _retry_display_claim(
@@ -1633,9 +2034,11 @@ def main() -> int:
 
     glyph_cache = {}
     running = True
-    semantic_pointer = _SemanticPointerInteractor(
+    pointer = _PointerRouter(
         display_state,
         guest_keyboard,
+        cell_width=cell_w,
+        cell_height=cell_h,
     )
 
     def interaction_context():
@@ -1660,8 +2063,10 @@ def main() -> int:
             revision=revision,
             resource_cache=resource_cache,
         )
-        if resized or interaction_context() != prior_context:
-            semantic_pointer.clear()
+        if resized:
+            pointer.cancel()
+        elif interaction_context() != prior_context:
+            pointer.clear()
         return resized
 
     def make_window():
@@ -1691,7 +2096,7 @@ def main() -> int:
             screen_refresh_required or refresh_required
         )
         if interaction_context() != prior_context:
-            semantic_pointer.clear()
+            pointer.clear()
         status = latest
 
     def request_control(method: str, **params):
@@ -1771,24 +2176,31 @@ def main() -> int:
                     keys_down.discard(event.key)
                     guest_keyboard.key_up(event)
                 elif event.type == getattr(pygame, "MOUSEMOTION", -1):
-                    semantic_pointer.move(
+                    pointer.move(
                         event.pos,
                         (terminal.cols * cell_w, terminal.rows * cell_h),
+                        modifiers=_pygame_apt_modifiers(pygame, event),
                     )
-                elif (
-                    event.type == getattr(pygame, "MOUSEBUTTONDOWN", -1)
-                    and event.button == 1
-                ):
-                    semantic_pointer.left_down(
+                elif event.type == getattr(pygame, "MOUSEBUTTONDOWN", -1):
+                    pointer.button_down(
+                        event.button,
                         event.pos,
                         (terminal.cols * cell_w, terminal.rows * cell_h),
+                        modifiers=_pygame_apt_modifiers(pygame, event),
                     )
-                elif (
-                    event.type == getattr(pygame, "MOUSEBUTTONUP", -1)
-                    and event.button == 1
-                ):
-                    semantic_pointer.left_up(
+                elif event.type == getattr(pygame, "MOUSEBUTTONUP", -1):
+                    pointer.button_up(
+                        event.button,
                         event.pos,
+                        (terminal.cols * cell_w, terminal.rows * cell_h),
+                        modifiers=_pygame_apt_modifiers(pygame, event),
+                    )
+                elif event.type == getattr(pygame, "MOUSEWHEEL", -1):
+                    flip = -1 if getattr(event, "flipped", False) else 1
+                    pointer.wheel(
+                        flip * event.x,
+                        flip * event.y,
+                        pygame.mouse.get_pos(),
                         (terminal.cols * cell_w, terminal.rows * cell_h),
                         modifiers=_pygame_apt_modifiers(pygame, event),
                     )
@@ -1796,7 +2208,7 @@ def main() -> int:
                     getattr(pygame, "WINDOWFOCUSLOST", -1),
                     getattr(pygame, "WINDOWFOCUSGAINED", -2),
                 }:
-                    semantic_pointer.clear()
+                    pointer.cancel()
                     if event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
                         keys_down.clear()
                         guest_keyboard.reset()
@@ -1806,6 +2218,7 @@ def main() -> int:
             if not running:
                 break
             guest_keyboard.flush_pending()
+            pointer.flush()
 
             now = time.monotonic()
             if (
@@ -1824,7 +2237,7 @@ def main() -> int:
                 )
                 last_claim_attempt = now
                 if display_holder != prior_holder:
-                    semantic_pointer.clear()
+                    pointer.cancel()
                 if display_holder:
                     screen_refresh_required = (
                         screen_refresh_required or refresh_required
@@ -1872,7 +2285,7 @@ def main() -> int:
                         resource_cache.clear()
                         revision = -1
                         screen_refresh_required = True
-                        semantic_pointer.clear()
+                        pointer.cancel()
                         guest_keyboard.clear_display_context(
                             waiting=guest_keyboard.display_required
                         )
@@ -1915,8 +2328,8 @@ def main() -> int:
                 frame_plane,
                 (
                     revision,
-                    semantic_pointer.hovered,
-                    semantic_pointer.pressed,
+                    pointer.hovered,
+                    pointer.pressed,
                     cursor_state,
                     frozenset(resource_surfaces.items()),
                     screen.get_size(),
@@ -1941,8 +2354,8 @@ def main() -> int:
                         show_cursor=cursor_blink,
                         glyph_cache=glyph_cache,
                         control_font=status_font,
-                        hovered=semantic_pointer.hovered,
-                        pressed=semantic_pointer.pressed,
+                        hovered=pointer.hovered,
+                        pressed=pointer.pressed,
                         resource_surfaces=resource_surfaces,
                     )
                     rendered_hit_entries = composed_frame.hit_entries
@@ -1983,7 +2396,7 @@ def main() -> int:
                     resource_cache.clear()
                     revision = -1
                     screen_refresh_required = True
-                    semantic_pointer.clear()
+                    pointer.cancel()
                     guest_keyboard.clear_display_context(
                         waiting=guest_keyboard.display_required
                     )

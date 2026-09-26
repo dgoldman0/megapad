@@ -17,6 +17,7 @@ from rich_terminal.retained_model import (
 )
 from rich_terminal.retained_scene import ControlKind, ControlState, ObjectBounds
 from rich_terminal.retained_wire import (
+    CONTROL_EVENT_MAX_PAYLOAD,
     ControlEvent,
     ControlEventKind,
     ControlWireDefinition,
@@ -36,6 +37,7 @@ from rich_terminal.retained_wire import (
     encode_control_event,
     encode_control_replace,
     encode_ret_caps,
+    control_event_payload_size,
 )
 
 
@@ -144,6 +146,9 @@ def test_control_message_ids_are_exact_and_event_is_base_input_only() -> None:
     assert RetainedMessageType.CONTROL_DROP == 0x4002
     assert not hasattr(RetainedMessageType, "CONTROL_EVENT")
     assert ControlEventKind.ACTIVATE == 1
+    assert ControlEventKind.PLACE == 2
+    assert ControlEventKind.EXTEND == 3
+    assert ControlEventKind.SCROLL == 4
 
 
 def test_menu_bar_definition_has_the_exact_eighty_byte_prefix() -> None:
@@ -353,7 +358,89 @@ def test_control_drop_and_revision_bound_activation_have_exact_payloads() -> Non
     assert modifier_bits.value.code is RetainedWireErrorCode.RESERVED
 
     kind = bytearray(expected)
-    kind[24:26] = (2).to_bytes(2, "little")
+    kind[24:26] = (5).to_bytes(2, "little")
     with pytest.raises(RetainedWireError) as event_kind:
         decode_control_event(kind)
     assert event_kind.value.code is RetainedWireErrorCode.ENUM
+
+    # A positioned kind needs its tail; the ACTIVATE length is not enough.
+    short = bytearray(expected)
+    short[24:26] = (2).to_bytes(2, "little")
+    with pytest.raises(RetainedWireError) as short_tail:
+        decode_control_event(short)
+    assert short_tail.value.code is RetainedWireErrorCode.PAYLOAD
+    with pytest.raises(RetainedWireError) as long_activate:
+        decode_control_event(expected + bytes(8))
+    assert long_activate.value.code is RetainedWireErrorCode.PAYLOAD
+
+
+def test_positioned_and_scroll_control_events_have_exact_tails() -> None:
+    assert control_event_payload_size(ControlEventKind.ACTIVATE) == 40
+    assert control_event_payload_size(ControlEventKind.PLACE) == 64
+    assert control_event_payload_size(ControlEventKind.EXTEND) == 64
+    assert control_event_payload_size(ControlEventKind.SCROLL) == 48
+    assert CONTROL_EVENT_MAX_PAYLOAD == 64
+
+    place = ControlEvent(
+        7,
+        3,
+        11,
+        ControlEventKind.PLACE,
+        0x01,
+        99,
+        content_revision=0x0102030405060708,
+        item_key=0x1112131415161718,
+        scalar_offset=UINT32_MAX,
+    )
+    prefix = struct.pack("<QQQHHIQ", 7, 3, 11, 2, 0x01, 0, 99)
+    expected = prefix + struct.pack(
+        "<QQII", 0x0102030405060708, 0x1112131415161718, UINT32_MAX, 0
+    )
+    assert encode_control_event(place) == expected
+    assert decode_control_event(expected) == place
+    assert place.positioned
+
+    extend = ControlEvent(
+        7, 3, 11, ControlEventKind.EXTEND, 0, 99,
+        content_revision=5, item_key=6, scalar_offset=0,
+    )
+    assert decode_control_event(encode_control_event(extend)) == extend
+
+    scroll = ControlEvent(
+        7, 3, 11, ControlEventKind.SCROLL, 0, 99, wheel_x=-1, wheel_y=-32768
+    )
+    scroll_bytes = struct.pack("<QQQHHIQ", 7, 3, 11, 4, 0, 0, 99) + struct.pack(
+        "<hhI", -1, -32768, 0
+    )
+    assert encode_control_event(scroll) == scroll_bytes
+    assert decode_control_event(scroll_bytes) == scroll
+    assert not scroll.positioned
+
+    reserved = bytearray(expected)
+    reserved[60:64] = (1).to_bytes(4, "little")
+    with pytest.raises(RetainedWireError) as tail_reserved:
+        decode_control_event(reserved)
+    assert tail_reserved.value.code is RetainedWireErrorCode.RESERVED
+
+    zero_revision = bytearray(expected)
+    zero_revision[40:48] = bytes(8)
+    with pytest.raises(RetainedWireError) as missing_revision:
+        decode_control_event(zero_revision)
+    assert missing_revision.value.code is RetainedWireErrorCode.SCALAR
+
+    still = bytearray(scroll_bytes)
+    still[40:44] = bytes(4)
+    with pytest.raises(RetainedWireError) as no_detents:
+        decode_control_event(still)
+    assert no_detents.value.code is RetainedWireErrorCode.SCALAR
+
+    # Each field belongs to exactly one form; a stray field is not canonical.
+    for kind, fields in (
+        (ControlEventKind.ACTIVATE, {"item_key": 1}),
+        (ControlEventKind.ACTIVATE, {"wheel_y": 1}),
+        (ControlEventKind.PLACE, {"content_revision": 1, "item_key": 1, "wheel_y": 1}),
+        (ControlEventKind.SCROLL, {"wheel_y": 1, "scalar_offset": 1}),
+        (ControlEventKind.EXTEND, {"content_revision": 1}),
+    ):
+        with pytest.raises(ValueError):
+            ControlEvent(7, 3, 11, kind, 0, 99, **fields)

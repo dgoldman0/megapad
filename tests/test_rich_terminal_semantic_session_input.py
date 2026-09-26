@@ -12,6 +12,7 @@ from rich_terminal.cell_model import BLANK_CELL, Cursor, TerminalView
 from rich_terminal.output_coordinator import CompositeTerminalView
 from rich_terminal.retained_scene import RetainedScene, SceneModelState
 from rich_terminal.retained_view import DisplayScope
+from rich_terminal.retained_wire import ControlEventKind
 from rich_terminal.update_authority import TerminalGeometry
 from session import MachineSession
 
@@ -38,6 +39,8 @@ class _RecordingDriver:
         )
         self.status = status
         self.control_events: list[tuple[int, int, int, int, int]] = []
+        self.event_tails: list[tuple[ControlEventKind, dict[str, int]]] = []
+        self.pointer_events: list[tuple[int, int, dict[str, int]]] = []
 
     def send_control_event(
         self,
@@ -47,6 +50,8 @@ class _RecordingDriver:
         *,
         modifiers: int,
         model_revision: int,
+        event_kind: ControlEventKind = ControlEventKind.ACTIVATE,
+        **tail: int,
     ) -> DriverStatus:
         self.control_events.append(
             (
@@ -57,6 +62,11 @@ class _RecordingDriver:
                 model_revision,
             )
         )
+        self.event_tails.append((event_kind, dict(tail)))
+        return self.status
+
+    def send_pointer(self, x: int, y: int, **fields: int) -> DriverStatus:
+        self.pointer_events.append((x, y, dict(fields)))
         return self.status
 
 
@@ -158,6 +168,93 @@ def test_control_event_uses_only_the_exact_acknowledged_display_scope():
     assert scope.model_revision != session.revision
     with pytest.raises(TypeError, match="model_revision"):
         session.send_control_event(7, 2, 11, model_revision=session.revision)
+
+
+def test_positioned_control_events_are_bound_to_the_acknowledged_scope():
+    session, driver, _, scope = _ready_session()
+
+    assert (
+        session.send_control_event(
+            7,
+            2,
+            11,
+            event_kind=ControlEventKind.PLACE,
+            modifiers=1,
+            content_revision=5,
+            item_key=3,
+            scalar_offset=9,
+        )
+        is DriverStatus.PROGRESS
+    )
+    assert (
+        session.send_control_event(
+            7,
+            2,
+            11,
+            event_kind=ControlEventKind.SCROLL,
+            wheel_y=-2,
+        )
+        is DriverStatus.PROGRESS
+    )
+    assert driver.control_events == [
+        (7, 2, 11, 1, scope.model_revision),
+        (7, 2, 11, 0, scope.model_revision),
+    ]
+    assert driver.event_tails == [
+        (
+            ControlEventKind.PLACE,
+            {
+                "content_revision": 5,
+                "item_key": 3,
+                "scalar_offset": 9,
+                "wheel_x": 0,
+                "wheel_y": 0,
+            },
+        ),
+        (
+            ControlEventKind.SCROLL,
+            {
+                "content_revision": 0,
+                "item_key": 0,
+                "scalar_offset": 0,
+                "wheel_x": 0,
+                "wheel_y": -2,
+            },
+        ),
+    ]
+
+
+def test_raw_pointer_waits_for_the_acknowledged_current_display():
+    session, driver, view, _ = _ready_session()
+
+    assert (
+        session.send_pointer(2, 1, buttons=1, kind=2)
+        is DriverStatus.PROGRESS
+    )
+    assert driver.pointer_events == [
+        (
+            2,
+            1,
+            {
+                "buttons": 1,
+                "modifiers": 0,
+                "kind": 2,
+                "wheel_x": 0,
+                "wheel_y": 0,
+            },
+        )
+    ]
+
+    newer = replace(view, revision=view.revision + 1)
+    session._logical_composite_output = newer
+    driver.core.output_view = newer
+    driver.core.model_revision = newer.revision
+    session._display_cadence.pending_revision = newer.revision
+    assert (
+        session.send_pointer(2, 1, buttons=0, kind=3)
+        is DriverStatus.BACKPRESSURED
+    )
+    assert len(driver.pointer_events) == 1
 
 
 def test_control_event_does_not_delegate_before_physical_ack():

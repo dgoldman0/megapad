@@ -10,7 +10,7 @@ from typing import Callable, Protocol
 
 from .apt1 import CONTROL_RESERVE_BYTES, HEADER_BYTES, UINT64_MAX
 from .retained_model import RetainedPolicy
-from .retained_wire import ControlEventKind
+from .retained_wire import ControlEventKind, control_event_payload_size
 from .server import (
     OutboundBytes,
     TerminalOutputView,
@@ -32,7 +32,6 @@ _MIN_VALID_RESULT_EVENTS = 3
 _KEY_FRAME_BYTES = HEADER_BYTES + 16
 _TEXT_FRAME_OVERHEAD = HEADER_BYTES + 12
 _POINTER_FRAME_BYTES = HEADER_BYTES + 28
-_CONTROL_EVENT_FRAME_BYTES = HEADER_BYTES + 40
 _FOCUS_FRAME_BYTES = HEADER_BYTES + 16
 _RESIZE_FRAME_BYTES = HEADER_BYTES + 16
 _RETAINED_DISCOVERY_FRAME_BYTES = HEADER_BYTES + 64
@@ -603,14 +602,23 @@ class RichTerminalDriver:
         model_revision: int,
         event_kind: ControlEventKind = ControlEventKind.ACTIVATE,
         modifiers: int = 0,
+        content_revision: int = 0,
+        item_key: int = 0,
+        scalar_offset: int = 0,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
     ) -> DriverStatus:
-        """Queue one revision-bound semantic-control activation."""
+        """Queue one revision-bound semantic-control intent."""
 
         if self._closed:
             return DriverStatus.STALE
         if self._failure_reason is not None:
             return DriverStatus.FAILED
-        if not self._can_retain(_CONTROL_EVENT_FRAME_BYTES, 1):
+        try:
+            frame_bytes = HEADER_BYTES + control_event_payload_size(event_kind)
+        except (TypeError, ValueError):
+            return DriverStatus.INVALID
+        if not self._can_retain(frame_bytes, 1):
             return DriverStatus.BACKPRESSURED
         try:
             outbound = self._core.send_control_event(
@@ -620,6 +628,11 @@ class RichTerminalDriver:
                 model_revision=model_revision,
                 event_kind=event_kind,
                 modifiers=modifiers,
+                content_revision=content_revision,
+                item_key=item_key,
+                scalar_offset=scalar_offset,
+                wheel_x=wheel_x,
+                wheel_y=wheel_y,
             )
             if outbound is None:
                 return DriverStatus.BACKPRESSURED

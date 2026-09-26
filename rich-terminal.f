@@ -46,8 +46,10 @@ PROVIDED rich-terminal.f
 \          (revision is zero).
 \ FOCUS:   revision=model, value0=focused.
 \ CONTROL: revision=model, value0=owner, value1=owner generation,
-\          value2=control ID, value3=event kind|modifiers<<16.
-\ TEXT data remains valid until the next PT-SERVICE for the session.
+\          value2=control ID, value3=event kind|modifiers<<16,
+\          data=the kind's position or scroll tail (empty for ACTIVATE).
+\ TEXT and CONTROL data remain valid until the next PT-SERVICE for the
+\ session.
 64  CONSTANT /PT-EVENT
 80  CONSTANT /PT-COMPLETION
 952 CONSTANT /PT-SESSION
@@ -81,6 +83,9 @@ PROVIDED rich-terminal.f
 0x10 CONSTANT PT-CONTROL-CHECKED
 
 1 CONSTANT PT-CONTROL-ACTIVATE
+2 CONSTANT PT-CONTROL-PLACE
+3 CONSTANT PT-CONTROL-EXTEND
+4 CONSTANT PT-CONTROL-SCROLL
 
 \ RETAINED-1 semantic values accepted by the typed resource API.
 1 CONSTANT PT-RESOURCE-RGBA8
@@ -651,6 +656,28 @@ VARIABLE _PT-U64-A
 
 : _PT-I16@  ( a -- n )
     W@ DUP 0x8000 AND IF 0xFFFFFFFFFFFF0000 OR THEN ;
+
+\ Positioned (PLACE/EXTEND) and SCROLL CONTROL_EVENT tails are read through
+\ the descriptor's data span.  A reader on an event without that exact tail
+\ returns zero, so a caller never interprets another kind's bytes.
+: _PT-CONTROL-TAIL  ( event bytes -- a | 0 )
+    OVER 56 + @ <> IF DROP 0 EXIT THEN
+    48 + @ ;
+
+: PT-CONTROL-EVENT-CONTENT-REVISION@  ( event -- u )
+    24 _PT-CONTROL-TAIL DUP IF _PT-U64@ THEN ;
+
+: PT-CONTROL-EVENT-ITEM-KEY@  ( event -- u )
+    24 _PT-CONTROL-TAIL DUP IF 8 + _PT-U64@ THEN ;
+
+: PT-CONTROL-EVENT-OFFSET@  ( event -- u )
+    24 _PT-CONTROL-TAIL DUP IF 16 + L@ THEN ;
+
+: PT-CONTROL-EVENT-WHEEL-X@  ( event -- n )
+    8 _PT-CONTROL-TAIL DUP IF _PT-I16@ THEN ;
+
+: PT-CONTROL-EVENT-WHEEL-Y@  ( event -- n )
+    8 _PT-CONTROL-TAIL DUP IF 2 + _PT-I16@ THEN ;
 
 : _PT-RANGE-VALID?  ( a u -- flag )
     OVER 0<> OVER 0<> AND 0= IF 2DROP FALSE EXIT THEN
@@ -2430,28 +2457,55 @@ VARIABLE _PT-RSZ-BASE
     THEN
     _PT-ACCEPT-EVENT ;
 
+\ Exact payload bytes for one CONTROL_EVENT kind, or zero when unknown.
+: _PT-CONTROL-EVENT-BYTES  ( kind -- bytes )
+    DUP PT-CONTROL-ACTIVATE = IF DROP 40 EXIT THEN
+    DUP PT-CONTROL-PLACE = OVER PT-CONTROL-EXTEND = OR IF DROP 64 EXIT THEN
+    PT-CONTROL-SCROLL = IF 48 EXIT THEN
+    0 ;
+
+: _PT-CONTROL-TAIL-VALID?  ( kind -- flag )
+    DUP PT-CONTROL-ACTIVATE = IF DROP TRUE EXIT THEN
+    PT-CONTROL-SCROLL = IF
+        _PT-RX-P @ 44 + L@ 0=
+        _PT-RX-P @ 40 + W@ _PT-RX-P @ 42 + W@ OR 0<> AND EXIT
+    THEN
+    _PT-RX-P @ 40 + _PT-U64@ 0<>
+    _PT-RX-P @ 48 + _PT-U64@ 0<> AND
+    _PT-RX-P @ 60 + L@ 0= AND ;
+
 : _PT-DISPATCH-CONTROL-EVENT  ( s -- status )
     DUP _PT-INPUT-STATE? 0= IF
         6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
     THEN
+    _PT-RX-LEN @ 40 U< IF
+        6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
     \ A crossed input is discarded once close has become irrevocable.  Before
     \ that boundary, only a positively discovered RET_CONTROLS session may
-    \ admit this additive event family.
+    \ admit this additive event family, and only RET_CONTROL_COLLECTIONS may
+    \ admit the positioned and scroll kinds.
     DUP _PT.S.STATE @ PT-ST-CLOSING <>
     OVER _PT.S.CLOSE-PENDING? @ 0= AND IF
         DUP _PT-RET-CONTROLS? 0= IF
             6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
         THEN
+        _PT-RX-P @ 24 + W@ PT-CONTROL-ACTIVATE <> IF
+            DUP _PT-RET-CONTROL-COLLECTIONS? 0= IF
+                6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+            THEN
+        THEN
     THEN
-    _PT-RX-LEN @ 40 <> IF
+    _PT-RX-P @ 24 + W@ _PT-CONTROL-EVENT-BYTES DUP 0=
+    SWAP _PT-RX-LEN @ <> OR IF
         6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
     THEN
     _PT-RX-P @ _PT-U64@ 0=
     _PT-RX-P @ 8 + _PT-U64@ 0= OR
     _PT-RX-P @ 16 + _PT-U64@ 0= OR
-    _PT-RX-P @ 24 + W@ PT-CONTROL-ACTIVATE <> OR
     _PT-RX-P @ 26 + W@ 0x3F INVERT AND 0<> OR
     _PT-RX-P @ 28 + L@ 0<> OR
+    _PT-RX-P @ 24 + W@ _PT-CONTROL-TAIL-VALID? 0= OR
     _PT-RX-P @ 32 + _PT-U64@ _PT-RX-S @ _PT.S.REVISION @ <> OR IF
         6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
     THEN
@@ -2927,6 +2981,12 @@ VARIABLE _PT-EP-TYPE
         _PT-EP-P @ 16 + _PT-U64@ _PT-EP-DST @ 32 + !
         _PT-EP-P @ 24 + W@
         _PT-EP-P @ 26 + W@ 16 LSHIFT OR _PT-EP-DST @ 40 + !
+        _PT-EP-S @ _PT.S.EVENT-LEN @ 40 - DUP IF
+            _PT-EP-P @ 40 + _PT-EP-DST @ 48 + !
+            _PT-EP-DST @ 56 + !
+        ELSE
+            DROP
+        THEN
     THEN ;
 
 : PT-EVENT-POLL  ( event session -- status has-event )

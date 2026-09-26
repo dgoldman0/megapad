@@ -40,7 +40,12 @@ from .retained_model import (
     RetainedFeature,
 )
 from .retained_resources import ResourceStoreState, RetainedResourceStore
-from .semantic_content import SemanticTextContent
+from .semantic_content import (
+    SemanticTextContent,
+    SemanticTextItem,
+    SemanticTextRole,
+    SemanticTextState,
+)
 
 
 INT32_MIN = -(1 << 31)
@@ -1178,12 +1183,8 @@ class RetainedSceneModel:
                 return True
         return False
 
-    def require_interactable_control(
-        self,
-        owner: OwnerIdentity,
-        control_id: int,
-    ) -> ControlDefinition:
-        """Resolve one exact active semantic target without mutating guest state."""
+    def _active_control(self, owner: OwnerIdentity, control_id: int):
+        """Return one exact live control and its owner scene, or refuse."""
 
         try:
             self._owners.require_live(owner)
@@ -1206,6 +1207,96 @@ class RetainedSceneModel:
         region = owner_scene.regions.get(definition.region_id)
         if region is None or not region.visible:
             raise SceneModelError(SceneErrorCode.BOUNDS, "control region is not visible")
+        return owner_scene, definition
+
+    def require_text_control(
+        self,
+        owner: OwnerIdentity,
+        control_id: int,
+        *,
+        grid_allowed: bool,
+    ) -> ControlDefinition:
+        """Resolve one visible, enabled TEXT_AREA (or TEXT_GRID) root."""
+
+        _owner_scene, definition = self._active_control(owner, control_id)
+        kinds = (
+            (ControlKind.TEXT_AREA, ControlKind.TEXT_GRID)
+            if grid_allowed
+            else (ControlKind.TEXT_AREA,)
+        )
+        if definition.kind not in kinds or definition.content is None:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "control kind does not accept this positioned event",
+            )
+        if not definition.visible or not definition.enabled:
+            raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+        return definition
+
+    def require_text_position(
+        self,
+        owner: OwnerIdentity,
+        control_id: int,
+        *,
+        grid_allowed: bool,
+        content_revision: int,
+        item_key: int,
+        scalar_offset: int,
+    ) -> SemanticTextItem:
+        """Resolve one exact STX1 position in the active content.
+
+        The position must name the control's current content revision and an
+        item carried in it.  A TEXT_AREA offset is a scalar boundary within
+        its row; a TEXT_GRID position names a selectable CONTENT item at
+        offset zero.  Nothing here moves the guest's caret or selection.
+        """
+
+        definition = self.require_text_control(
+            owner,
+            control_id,
+            grid_allowed=grid_allowed,
+        )
+        content = definition.content
+        if content_revision != content.content_revision:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "position names a superseded content revision",
+            )
+        item = next(
+            (entry for entry in content.items if entry.item_key == item_key),
+            None,
+        )
+        if item is None:
+            raise SceneModelError(
+                SceneErrorCode.MISSING_ID,
+                "position names an item that is not carried",
+            )
+        if definition.kind is ControlKind.TEXT_AREA:
+            if scalar_offset > len(item.text):
+                raise SceneModelError(
+                    SceneErrorCode.BOUNDS,
+                    "position offset is outside its row",
+                )
+            return item
+        if (
+            scalar_offset != 0
+            or item.role is not SemanticTextRole.CONTENT
+            or item.state & SemanticTextState.UNAVAILABLE
+        ):
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "grid position does not name a selectable content item",
+            )
+        return item
+
+    def require_interactable_control(
+        self,
+        owner: OwnerIdentity,
+        control_id: int,
+    ) -> ControlDefinition:
+        """Resolve one exact active semantic target without mutating guest state."""
+
+        owner_scene, definition = self._active_control(owner, control_id)
         if definition.kind is ControlKind.TAB:
             parent = owner_scene.controls.get(definition.parent_control_id)
             if (

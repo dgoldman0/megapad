@@ -6,9 +6,10 @@ implemented. The reference Pygame sink now rasterizes every collection kind and
 publishes immutable TAB hit targets from the exact paint pass. The paired
 Akashic `desktop-apt1` producer now advertises the capability, projects ordinary
 UIDL/canonical-widget values, and has exercised all four kinds plus
-acknowledgement-bound TAB activation through that sink. Positioned text and grid
-input (`PLACE`, `EXTEND`, and `SCROLL`) is specified below but not yet
-implemented. A physical renderer must not
+acknowledgement-bound TAB activation through that sink. MegaPad's terminal
+core, guest module, shared host, and reference viewer also implement the
+positioned `PLACE`, `EXTEND`, and `SCROLL` input specified below. A physical
+renderer must not
 advertise `RET_CONTROL_COLLECTIONS` until its compositor and acknowledgement
 path can render every visible kind.
 
@@ -300,8 +301,20 @@ row, column, and span values. It paints role, primary, `CURRENT`, and
 rows-by-columns matrix. TABSET uses renderer-owned sans-serif metrics: natural
 tab widths when they fit and deterministic equal partitioning when they do not.
 Only physically visible, effectively enabled TAB children enter the immutable
-hit map. TEXT_AREA and TEXT_GRID emit no hit target because `CONTROL_EVENT`
-cannot name an STX1 item or scalar position.
+hit map as activation targets. An enabled TEXT_AREA or TEXT_GRID root enters it
+as a text target that keeps the exact partition its paint pass used, so a
+point maps to the item and scalar slot drawn there (a point on a slot names
+the boundary before it). A disabled text root, and every menu bar, tabset, and
+open popup, enters as a control surface: it blocks lower controls and never
+starts a raw pointer gesture. A point covered only by a region barrier, or by
+nothing, shows CELL or residual content and may start one.
+
+The reference viewer routes a left press on a text target as `PLACE` (as
+`EXTEND` with Shift on a text area), a drag that began there as `EXTEND` at the
+clamped position, and wheel input there as `SCROLL`. Presses, drags, releases,
+and wheel steps on residual content become raw `POINTER` input at the cell
+under the pointer, with a release that cannot yet be sent kept until the
+acknowledged display is current.
 
 Raster code consumes the already validated immutable draw/content values. It
 does not encode or decode STX1, rerun family/UTF-8/overlap proofs, or render an

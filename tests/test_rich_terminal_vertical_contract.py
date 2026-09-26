@@ -63,7 +63,7 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
     assert "def stage_frame_hit_map" in viewer
     assert "def capture_final_terminal_raster" in viewer
     assert "def finish_presentation" in viewer
-    assert "class _SemanticPointerInteractor" in viewer
+    assert "class _PointerRouter" in viewer
     assert "class FinalRasterDisplayState" in final_raster
     assert "def derive_raster_damage" in final_raster
     assert "def _acknowledged_output_scope" in session

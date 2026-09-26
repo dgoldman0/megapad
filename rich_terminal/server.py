@@ -1040,13 +1040,19 @@ class RichTerminalCore:
         model_revision: int,
         event_kind: ControlEventKind = ControlEventKind.ACTIVATE,
         modifiers: int = 0,
+        content_revision: int = 0,
+        item_key: int = 0,
+        scalar_offset: int = 0,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
     ) -> OutboundBytes | None:
         """Encode one revision-attested semantic-control intent.
 
         The caller proves physical presentation before reaching this method.
         This boundary independently requires that proof to name the exact
-        current model revision and that the target remains interactable.  It
-        never speculates about or mutates guest-owned control state.
+        current model revision and that the target, and any STX1 position,
+        still exists in the active scene.  It never speculates about or
+        mutates guest-owned control state.
         """
 
         self._require_active_model()
@@ -1084,18 +1090,44 @@ class RichTerminalCore:
             event_kind=event_kind,
             modifiers=modifiers,
             model_revision=revision,
+            content_revision=content_revision,
+            item_key=item_key,
+            scalar_offset=scalar_offset,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
         )
+        if (
+            event.event_kind is not ControlEventKind.ACTIVATE
+            and not policy.features & RetainedFeature.CONTROL_COLLECTIONS
+        ):
+            raise TerminalSessionError(
+                "positioned control input requires active RET_CONTROL_COLLECTIONS"
+            )
         owner = OwnerIdentity(
             session_id=session_id,
             presentation_epoch=clock.presentation_epoch,
             owner_id=event.owner_id,
             owner_generation=event.owner_generation,
         )
+        scene = self._require_retained_model()
         try:
-            self._require_retained_model().require_interactable_control(
-                owner,
-                event.control_id,
-            )
+            if event.event_kind is ControlEventKind.ACTIVATE:
+                scene.require_interactable_control(owner, event.control_id)
+            elif event.event_kind is ControlEventKind.SCROLL:
+                scene.require_text_control(
+                    owner,
+                    event.control_id,
+                    grid_allowed=True,
+                )
+            else:
+                scene.require_text_position(
+                    owner,
+                    event.control_id,
+                    grid_allowed=event.event_kind is ControlEventKind.PLACE,
+                    content_revision=event.content_revision,
+                    item_key=event.item_key,
+                    scalar_offset=event.scalar_offset,
+                )
         except SceneModelError as exc:
             raise TerminalSessionError(
                 f"semantic control target is not interactable: {exc}"

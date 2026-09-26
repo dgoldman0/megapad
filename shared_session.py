@@ -63,6 +63,7 @@ from rich_terminal.semantic_content import (
     encode_semantic_text_content,
 )
 from rich_terminal.update_authority import TerminalUpdateError
+from rich_terminal.retained_wire import ControlEventKind
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
 from session import (
     MachineSession,
@@ -118,6 +119,35 @@ def _wire_object(data, name: str, fields: tuple[str, ...]) -> Mapping[str, Any]:
             f"{name} fields are not exact; missing={missing}, unknown={unknown}"
         )
     return data
+
+
+
+_DISPLAY_INPUT_FIELDS = ("generation", "display_offer_id", "display_scope")
+_CONTROL_TARGET_FIELDS = ("owner_id", "owner_generation", "control_id", "modifiers")
+_CONTROL_INPUT_FIELDS = _DISPLAY_INPUT_FIELDS + _CONTROL_TARGET_FIELDS
+# One exact field set per positioned CONTROL_EVENT kind, mirroring its tail.
+_TEXT_EVENT_FIELDS = {
+    int(ControlEventKind.PLACE): _CONTROL_INPUT_FIELDS
+    + ("event_kind", "content_revision", "item_key", "scalar_offset"),
+    int(ControlEventKind.EXTEND): _CONTROL_INPUT_FIELDS
+    + ("event_kind", "content_revision", "item_key", "scalar_offset"),
+    int(ControlEventKind.SCROLL): _CONTROL_INPUT_FIELDS
+    + ("event_kind", "wheel_x", "wheel_y"),
+}
+_POINTER_INPUT_FIELDS = _DISPLAY_INPUT_FIELDS + (
+    "x",
+    "y",
+    "buttons",
+    "modifiers",
+    "kind",
+    "wheel_x",
+    "wheel_y",
+)
+# Pointer and control input name positions in one acknowledged frame, so the
+# request must carry that frame's display proof; keys and text need not.
+_DISPLAY_BOUND_INPUT_METHODS = frozenset(
+    ("send_control_event", "send_text_event", "send_pointer")
+)
 
 
 def _wire_integer(
@@ -2710,13 +2740,24 @@ class SharedMachine:
         owner_generation: int,
         control_id: int,
         *,
+        event_kind: int = int(ControlEventKind.ACTIVATE),
         modifiers: int = 0,
+        content_revision: int = 0,
+        item_key: int = 0,
+        scalar_offset: int = 0,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
         generation: int | None = None,
         display_authorized: bool = False,
         display_lease_ack: tuple[int, DisplayScope] | None = None,
         display_request_ack: tuple[int, DisplayScope] | None = None,
     ) -> dict:
-        """Forward one owner-qualified activation under the display lease."""
+        """Forward one owner-qualified control intent under the display lease.
+
+        ACTIVATE names a control; PLACE and EXTEND also name one STX1 position
+        and SCROLL carries wheel detents.  The terminal core checks that the
+        fields match the kind and that the position is still carried.
+        """
 
         normalized_owner = _wire_integer(
             owner_id,
@@ -2742,6 +2783,46 @@ class SharedMachine:
             minimum=0,
             maximum=0x3F,
         )
+        normalized_kind = ControlEventKind(
+            _wire_integer(
+                event_kind,
+                "semantic control event_kind",
+                minimum=1,
+                maximum=max(ControlEventKind),
+            )
+        )
+        tail = {
+            "content_revision": _wire_integer(
+                content_revision,
+                "semantic control content_revision",
+                minimum=0,
+                maximum=UINT64_MAX,
+            ),
+            "item_key": _wire_integer(
+                item_key,
+                "semantic control item_key",
+                minimum=0,
+                maximum=UINT64_MAX,
+            ),
+            "scalar_offset": _wire_integer(
+                scalar_offset,
+                "semantic control scalar_offset",
+                minimum=0,
+                maximum=UINT32_MAX,
+            ),
+            "wheel_x": _wire_integer(
+                wheel_x,
+                "semantic control wheel_x",
+                minimum=-(1 << 15),
+                maximum=(1 << 15) - 1,
+            ),
+            "wheel_y": _wire_integer(
+                wheel_y,
+                "semantic control wheel_y",
+                minimum=-(1 << 15),
+                maximum=(1 << 15) - 1,
+            ),
+        }
         with self.condition:
             if not self._generation_current(generation):
                 return {"status": "stale_generation", "accepted_events": 0}
@@ -2757,7 +2838,73 @@ class SharedMachine:
                     normalized_owner,
                     normalized_owner_generation,
                     normalized_control,
+                    event_kind=normalized_kind,
                     modifiers=normalized_modifiers,
+                    **tail,
+                )
+            )
+            self.condition.notify_all()
+            return {
+                "status": status.value,
+                "accepted_events": 1 if status is DriverStatus.PROGRESS else 0,
+            }
+
+    def send_pointer(
+        self,
+        x: int,
+        y: int,
+        *,
+        buttons: int,
+        modifiers: int,
+        kind: int,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+        generation: int | None = None,
+        display_authorized: bool = False,
+        display_lease_ack: tuple[int, DisplayScope] | None = None,
+        display_request_ack: tuple[int, DisplayScope] | None = None,
+    ) -> dict:
+        """Forward one cell-position pointer event on residual content.
+
+        The viewer decides from the exact acknowledged hit map that the cell
+        shows CELL or residual content; this host only proves the request
+        still names that acknowledged display.
+        """
+
+        values = {
+            "x": _wire_integer(x, "pointer x", minimum=-(1 << 31), maximum=(1 << 31) - 1),
+            "y": _wire_integer(y, "pointer y", minimum=-(1 << 31), maximum=(1 << 31) - 1),
+            "buttons": _wire_integer(buttons, "pointer buttons", minimum=0, maximum=0x1F),
+            "modifiers": _wire_integer(
+                modifiers, "pointer modifiers", minimum=0, maximum=0x3F
+            ),
+            "kind": _wire_integer(kind, "pointer kind", minimum=1, maximum=4),
+            "wheel_x": _wire_integer(
+                wheel_x, "pointer wheel_x", minimum=-(1 << 15), maximum=(1 << 15) - 1
+            ),
+            "wheel_y": _wire_integer(
+                wheel_y, "pointer wheel_y", minimum=-(1 << 15), maximum=(1 << 15) - 1
+            ),
+        }
+        with self.condition:
+            if not self._generation_current(generation):
+                return {"status": "stale_generation", "accepted_events": 0}
+            refusal = self._display_input_refusal(
+                display_authorized=display_authorized,
+                display_lease_ack=display_lease_ack,
+                display_request_ack=display_request_ack,
+            )
+            if refusal is not None:
+                return {"status": refusal, "accepted_events": 0}
+            status = self._terminal_mutation_status(
+                self.session.send_pointer(
+                    values["x"],
+                    values["y"],
+                    buttons=values["buttons"],
+                    modifiers=values["modifiers"],
+                    kind=values["kind"],
+                    wheel_x=values["wheel_x"],
+                    wheel_y=values["wheel_y"],
                 )
             )
             self.condition.notify_all()
@@ -3563,20 +3710,20 @@ class SessionServer:
             params = _wire_object(
                 params,
                 "semantic control input",
-                (
-                    "generation",
-                    "display_offer_id",
-                    "display_scope",
-                    "owner_id",
-                    "owner_generation",
-                    "control_id",
-                    "modifiers",
-                ),
+                _CONTROL_INPUT_FIELDS,
             )
+        elif method == "send_text_event":
+            kind = params.get("event_kind") if isinstance(params, Mapping) else None
+            fields = _TEXT_EVENT_FIELDS.get(kind)
+            if fields is None:
+                raise ValueError("text event_kind must be 2 PLACE, 3 EXTEND, or 4 SCROLL")
+            params = _wire_object(params, "text control input", fields)
+        elif method == "send_pointer":
+            params = _wire_object(params, "pointer input", _POINTER_INPUT_FIELDS)
         generation = self._required_generation(params)
         request_ack = (
             self._required_display_pair(params)
-            if method == "send_control_event"
+            if method in _DISPLAY_BOUND_INPUT_METHODS
             else self._optional_display_pair(params)
         )
         with self._display_lock:
@@ -3600,6 +3747,38 @@ class SessionServer:
                     params["owner_generation"],
                     params["control_id"],
                     modifiers=params["modifiers"],
+                    **common,
+                )
+            if method == "send_text_event":
+                tail = {
+                    name: params[name]
+                    for name in (
+                        "content_revision",
+                        "item_key",
+                        "scalar_offset",
+                        "wheel_x",
+                        "wheel_y",
+                    )
+                    if name in params
+                }
+                return self.machine.send_control_event(
+                    params["owner_id"],
+                    params["owner_generation"],
+                    params["control_id"],
+                    event_kind=params["event_kind"],
+                    modifiers=params["modifiers"],
+                    **tail,
+                    **common,
+                )
+            if method == "send_pointer":
+                return self.machine.send_pointer(
+                    params["x"],
+                    params["y"],
+                    buttons=params["buttons"],
+                    modifiers=params["modifiers"],
+                    kind=params["kind"],
+                    wheel_x=params["wheel_x"],
+                    wheel_y=params["wheel_y"],
                     **common,
                 )
             assert method == "resize"
@@ -3669,7 +3848,14 @@ class SessionServer:
                 params,
                 connection_id,
             )
-        if method in {"send_text", "send_key", "send_control_event", "resize"}:
+        if method in {
+            "send_text",
+            "send_key",
+            "send_control_event",
+            "send_text_event",
+            "send_pointer",
+            "resize",
+        }:
             return self._dispatch_terminal_input(method, params, connection_id)
         if method == "screen":
             return self._screen_for_connection(params, connection_id)

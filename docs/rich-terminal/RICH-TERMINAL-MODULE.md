@@ -86,7 +86,11 @@ an independently discoverable scene or mutation API.
 
 The module admits in-place RETAINED-1 feature bit 8 `RET_CONTROLS`, supplies
 typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers, and decodes
-revision-bound `CONTROL_EVENT ACTIVATE`. This completes only the MegaPad guest
+revision-bound `CONTROL_EVENT ACTIVATE`. With bit 9 `RET_CONTROL_COLLECTIONS`
+it also decodes the positioned `PLACE` and `EXTEND` kinds and `SCROLL`, each
+at its one exact length. Their tails stay in the session event buffer, like
+TEXT data, until the next `PT-SERVICE`; the typed readers above return zero on
+an event without that tail. This completes only the MegaPad guest
 transport boundary. Independent CONTROL high-water validation, shared
 object/UTF-8 quota accounting, semantic routing, and the physical-display
 acknowledgement gate remain above or across that boundary. A terminal may offer
@@ -272,6 +276,11 @@ PT-CONTROL-EVENT-GENERATION@ ( event -- generation )
 PT-CONTROL-EVENT-ID@         ( event -- control )
 PT-CONTROL-EVENT-KIND@       ( event -- kind )
 PT-CONTROL-EVENT-MODIFIERS@  ( event -- modifiers )
+PT-CONTROL-EVENT-CONTENT-REVISION@ ( event -- revision )
+PT-CONTROL-EVENT-ITEM-KEY@   ( event -- key )
+PT-CONTROL-EVENT-OFFSET@     ( event -- scalar-offset )
+PT-CONTROL-EVENT-WHEEL-X@    ( event -- detents )
+PT-CONTROL-EVENT-WHEEL-Y@    ( event -- detents )
 PT-LEGACY-POLL      ( session -- byte has-byte )
 PT-CLOSE            ( reason session -- status )
 ```

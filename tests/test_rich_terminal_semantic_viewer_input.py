@@ -12,8 +12,11 @@ from rich_terminal.pygame_view import (
     CompositeDrawResult,
     ControlHitTarget,
     ControlIdentity,
+    ControlSurface,
     PixelRect,
     RegionOcclusion,
+    ResidualPoint,
+    TextHitTarget,
 )
 from rich_terminal.retained_scene import ControlKind
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
@@ -21,7 +24,7 @@ from session import TerminalCell, TerminalDisplayOffer, TerminalSnapshot
 from session_viewer import (
     _GuestKeyboardForwarder,
     _RetainedDisplayState,
-    _SemanticPointerInteractor,
+    _PointerRouter,
     _accept_status_update,
     _pygame_apt_modifiers,
     capture_final_terminal_raster,
@@ -133,7 +136,7 @@ def test_pending_hit_map_is_not_authority_until_accepted_sink_present():
         display_required=True,
     )
     state = _RetainedDisplayState()
-    pointer = _SemanticPointerInteractor(state, keyboard)
+    pointer = _PointerRouter(state, keyboard, cell_width=10, cell_height=10)
     offer = _offer(1)
     target = _target()
 
@@ -143,8 +146,8 @@ def test_pending_hit_map_is_not_authority_until_accepted_sink_present():
     keyboard.acknowledge_display_offer(offer.offer_id, offer.scope)
     assert state.hit_targets == ()
     assert state.hit_map_token is None
-    assert not pointer.left_down((20, 20), (100, 80))
-    assert not pointer.left_up((20, 20), (100, 80), modifiers=0)
+    assert not pointer.button_down(1, (20, 20), (100, 80))
+    assert not pointer.button_up(1, (20, 20), (100, 80), modifiers=0)
     assert client.requests == []
 
     assert state.finish_presentation(
@@ -164,7 +167,7 @@ def test_unified_barrier_map_promotes_only_on_ack_and_clears_on_stale_offer():
         display_required=True,
     )
     state = _RetainedDisplayState()
-    pointer = _SemanticPointerInteractor(state, keyboard)
+    pointer = _PointerRouter(state, keyboard, cell_width=10, cell_height=10)
     first = _offer(1)
     lower = _target(rect=(10, 10, 60, 32))
     barrier = _occlusion(rect=(10, 10, 30, 32))
@@ -181,7 +184,10 @@ def test_unified_barrier_map_promotes_only_on_ack_and_clears_on_stale_offer():
     ) == 1
     assert state.hit_entries == entries
     assert state.hit_targets == (lower,)
-    assert pointer.move((20, 20), (100, 80)) is None
+    # The upper region's barrier shows that region's own content, so the
+    # point is a raw cell there and never the lower control.
+    assert pointer.move((20, 20), (100, 80)) == ResidualPoint(2, 2)
+    assert pointer.hovered is None
     assert pointer.move((40, 20), (100, 80)) == lower
 
     second = _offer(2)
@@ -291,10 +297,10 @@ def test_generation_transition_clears_promoted_hits_and_pointer_state():
         display_required=True,
     )
     state = _RetainedDisplayState()
-    pointer = _SemanticPointerInteractor(state, keyboard)
+    pointer = _PointerRouter(state, keyboard, cell_width=10, cell_height=10)
     _promote(state, keyboard, _offer(1), (_target(),))
     assert pointer.move((20, 20), (100, 80)) is not None
-    assert pointer.left_down((20, 20), (100, 80))
+    assert pointer.button_down(1, (20, 20), (100, 80))
 
     revision, refresh = _accept_status_update(
         {"generation": 5, "rich_terminal": {"display_required": True}},
@@ -319,7 +325,7 @@ def test_tab_press_release_reuses_exact_proof_and_backpressure_path():
         display_required=True,
     )
     state = _RetainedDisplayState()
-    pointer = _SemanticPointerInteractor(state, keyboard)
+    pointer = _PointerRouter(state, keyboard, cell_width=10, cell_height=10)
     offer = _offer(4, revision=12)
     target = _target(kind=ControlKind.TAB)
     _promote(state, keyboard, offer, (target,))
@@ -328,8 +334,8 @@ def test_tab_press_release_reuses_exact_proof_and_backpressure_path():
         SimpleNamespace(mod=pygame.KMOD_SHIFT | pygame.KMOD_ALT),
     )
 
-    assert pointer.left_down((20, 20), (100, 80))
-    assert pointer.left_up((20, 20), (100, 80), modifiers=modifiers)
+    assert pointer.button_down(1, (20, 20), (100, 80))
+    assert pointer.button_up(1, (20, 20), (100, 80), modifiers=modifiers)
     assert keyboard.pending_events == 1
     expected = (
         "send_control_event",
@@ -350,7 +356,7 @@ def test_tab_press_release_reuses_exact_proof_and_backpressure_path():
     assert client.requests == [expected, expected]
 
 
-def test_mismatched_release_status_area_and_unmapped_rows_are_noops():
+def test_mismatched_release_status_area_and_popup_padding_are_noops():
     client = _RecordingClient()
     keyboard = _GuestKeyboardForwarder(
         _Pygame(),
@@ -359,22 +365,23 @@ def test_mismatched_release_status_area_and_unmapped_rows_are_noops():
         display_required=True,
     )
     state = _RetainedDisplayState()
-    pointer = _SemanticPointerInteractor(state, keyboard)
+    pointer = _PointerRouter(state, keyboard, cell_width=10, cell_height=10)
     first = _target(3, rect=(10, 10, 50, 30))
     second = _target(4, rect=(55, 10, 95, 30), kind=ControlKind.MENU)
-    _promote(state, keyboard, _offer(1), (first, second))
+    # An open popup is a renderer-laid-out surface: its padding, separators,
+    # and disabled rows swallow the pointer instead of reaching CELL.
+    popup = ControlSurface(7, 2, 5, PixelRect(0, 0, 100, 60))
+    _promote(state, keyboard, _offer(1), (popup, first, second))
 
-    assert pointer.left_down((20, 20), (100, 80))
-    assert not pointer.left_up((60, 20), (100, 80), modifiers=0)
-    assert not pointer.left_down((5, 40), (100, 80))
-    assert not pointer.left_up((5, 40), (100, 80), modifiers=0)
+    assert pointer.button_down(1, (20, 20), (100, 80))
+    assert not pointer.button_up(1, (60, 20), (100, 80), modifiers=0)
+    assert not pointer.button_down(1, (5, 40), (100, 80))
+    assert not pointer.button_up(1, (5, 40), (100, 80), modifiers=0)
     # Y=90 is the caller-owned status strip, below the 80-pixel terminal.
-    assert not pointer.left_down((20, 90), (100, 80))
-    assert not pointer.left_up((20, 90), (100, 80), modifiers=0)
-    # Disabled items and separators have no ControlHitTarget, so their painted
-    # rows are indistinguishable from any other deliberate gap here.
-    assert not pointer.left_down((20, 50), (100, 80))
-    assert not pointer.left_up((20, 50), (100, 80), modifiers=0)
+    assert not pointer.button_down(1, (20, 90), (100, 80))
+    assert not pointer.button_up(1, (20, 90), (100, 80), modifiers=0)
+    assert not pointer.button_down(1, (20, 50), (100, 80))
+    assert not pointer.button_up(1, (20, 50), (100, 80), modifiers=0)
     assert client.requests == []
 
 
@@ -386,10 +393,10 @@ def test_offer_and_focus_transitions_clear_renderer_local_hover_and_press():
         display_required=True,
     )
     state = _RetainedDisplayState()
-    pointer = _SemanticPointerInteractor(state, keyboard)
+    pointer = _PointerRouter(state, keyboard, cell_width=10, cell_height=10)
     _promote(state, keyboard, _offer(1), (_target(),))
     pointer.move((20, 20), (100, 80))
-    pointer.left_down((20, 20), (100, 80))
+    pointer.button_down(1, (20, 20), (100, 80))
     assert pointer.hovered is not None and pointer.pressed is not None
 
     state.stage(_offer(2), 3)
@@ -398,7 +405,7 @@ def test_offer_and_focus_transitions_clear_renderer_local_hover_and_press():
     assert pointer.pressed is None
 
     state.reset()
-    pointer.clear()  # Main invokes this for both focus-lost and focus-gained.
+    pointer.cancel()  # Main invokes this for both focus-lost and focus-gained.
     assert pointer.hovered is None
     assert pointer.pressed is None
 
@@ -526,3 +533,209 @@ def test_explicit_final_raster_capture_freezes_post_composition_surface(monkeypa
     assert events == ["cell", "rich", "cursor", "capture"]
     assert raster.pixel_format == "RGB888"
     assert raster.pixels == b"\x01\x02\x03\x04\x05\x06"
+
+
+def _router(client, *, generation=5):
+    keyboard = _GuestKeyboardForwarder(
+        _Pygame(),
+        client,
+        generation=generation,
+        display_required=True,
+    )
+    state = _RetainedDisplayState()
+    pointer = _PointerRouter(state, keyboard, cell_width=10, cell_height=10)
+    return keyboard, state, pointer
+
+
+def _text_target(*, content_revision=6, rect=(0, 0, 40, 20)):
+    return TextHitTarget(
+        ControlIdentity(7, 2, 30),
+        ControlKind.TEXT_AREA,
+        PixelRect(*rect),
+        anchor_left=rect[0],
+        anchor_top=rect[1],
+        anchor_width=rect[2] - rect[0],
+        anchor_height=rect[3] - rect[1],
+        content_revision=content_revision,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=2,
+        viewport_columns=4,
+        rows=((0, 1, 3), (1, 2, 4)),
+    )
+
+
+def _pointer_request(
+    offer, *, x, y, buttons, kind, generation=5, wheel_y=0, modifiers=0
+):
+    return (
+        "send_pointer",
+        {
+            "x": x,
+            "y": y,
+            "buttons": buttons,
+            "modifiers": modifiers,
+            "kind": kind,
+            "wheel_x": 0,
+            "wheel_y": wheel_y,
+            "generation": generation,
+            "display_offer_id": offer.offer_id,
+            "display_scope": display_scope_to_wire(offer.scope),
+        },
+    )
+
+
+def test_residual_press_drag_and_release_reach_the_guest_as_raw_cells():
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    offer = _offer(3)
+    _promote(state, keyboard, offer, (_occlusion(rect=(0, 0, 100, 80)),))
+
+    assert pointer.button_down(1, (15, 25), (100, 80))
+    pointer.move((18, 28), (100, 80))  # same cell: nothing new to report
+    pointer.move((35, 25), (100, 80))
+    # A right press joins the gesture; its release leaves the left held.
+    assert pointer.button_down(3, (35, 25), (100, 80))
+    assert pointer.button_up(3, (35, 25), (100, 80))
+    assert pointer.button_up(1, (45, 25), (100, 80))
+    assert pointer.raw_buttons == 0
+
+    assert client.requests == [
+        _pointer_request(offer, x=1, y=2, buttons=1, kind=2),
+        _pointer_request(offer, x=3, y=2, buttons=1, kind=1),
+        _pointer_request(offer, x=3, y=2, buttons=5, kind=2),
+        _pointer_request(offer, x=3, y=2, buttons=1, kind=3),
+        _pointer_request(offer, x=4, y=2, buttons=0, kind=3),
+    ]
+
+
+def test_a_release_the_display_cannot_carry_is_owed_until_it_can():
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    first = _offer(3)
+    barrier = _occlusion(rect=(0, 0, 100, 80))
+    _promote(state, keyboard, first, (barrier,))
+    assert pointer.button_down(1, (15, 25), (100, 80))
+
+    # A new frame is on its way: moves are dropped, the release is owed.
+    second = _offer(4)
+    state.stage(second, keyboard.generation)
+    keyboard.begin_display_offer()
+    pointer.move((55, 25), (100, 80))
+    assert not pointer.button_up(1, (65, 45), (100, 80))
+    assert pointer.release_owed
+    pointer.flush()
+    assert len(client.requests) == 1
+
+    state.stage_frame_hit_map(second, (barrier,))
+    state.finish_presentation(
+        {"status": "presented", "presented": True, "revision": 4}
+    )
+    keyboard.acknowledge_display_offer(second.offer_id, second.scope)
+    pointer.flush()
+    assert not pointer.release_owed
+    assert client.requests[-1] == _pointer_request(
+        second, x=6, y=4, buttons=0, kind=3
+    )
+    # With nothing owed a new gesture may start.
+    assert pointer.button_down(1, (5, 5), (100, 80))
+
+
+def test_focus_loss_ends_a_raw_gesture_with_an_owed_release():
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    offer = _offer(3)
+    _promote(state, keyboard, offer, (_occlusion(rect=(0, 0, 100, 80)),))
+    assert pointer.button_down(2, (15, 25), (100, 80))
+
+    pointer.cancel()
+
+    assert client.requests[-1] == _pointer_request(
+        offer, x=1, y=2, buttons=0, kind=3
+    )
+    assert pointer.raw_buttons == 0 and not pointer.release_owed
+
+
+def test_text_press_places_and_a_drag_extends_through_positions():
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    offer = _offer(3)
+    _promote(
+        state,
+        keyboard,
+        offer,
+        (_occlusion(rect=(0, 0, 100, 80)), _text_target()),
+    )
+
+    def text_request(kind, key, offset, modifiers=0):
+        return (
+            "send_text_event",
+            {
+                "owner_id": 7,
+                "owner_generation": 2,
+                "control_id": 30,
+                "event_kind": kind,
+                "modifiers": modifiers,
+                "content_revision": 6,
+                "item_key": key,
+                "scalar_offset": offset,
+                "generation": 5,
+                "display_offer_id": offer.offer_id,
+                "display_scope": display_scope_to_wire(offer.scope),
+            },
+        )
+
+    assert pointer.button_down(1, (25, 5), (100, 80))
+    pointer.move((25, 8), (100, 80))  # same position: no repeat
+    pointer.move((35, 15), (100, 80))
+    # Dragging out of the root clamps to its nearest edge.
+    pointer.move((90, 70), (100, 80))
+    assert not pointer.button_up(1, (90, 70), (100, 80))
+    assert pointer.button_down(1, (5, 5), (100, 80), modifiers=1)
+    assert not pointer.button_up(1, (5, 5), (100, 80), modifiers=1)
+
+    # PLACE at row 0 column 2; one EXTEND per new position (the clamped
+    # out-of-root point repeats the last one); Shift-press extends directly.
+    assert client.requests == [
+        text_request(2, 1, 2),
+        text_request(3, 2, 3),
+        text_request(3, 1, 0, modifiers=1),
+    ]
+
+
+def test_wheel_scrolls_text_roots_and_reaches_residual_cells_as_raw_steps():
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    offer = _offer(3)
+    surface = ControlSurface(7, 2, 40, PixelRect(50, 0, 100, 20))
+    _promote(
+        state,
+        keyboard,
+        offer,
+        (_occlusion(rect=(0, 0, 100, 80)), _text_target(), surface),
+    )
+
+    # Host wheel steps are positive upward; APT detents are positive down.
+    assert pointer.wheel(0, 1, (5, 5), (100, 80))
+    assert pointer.wheel(0, -2, (75, 45), (100, 80))
+    assert not pointer.wheel(0, 1, (75, 5), (100, 80))  # tab strip or menu bar
+    assert not pointer.wheel(0, 0, (75, 45), (100, 80))
+
+    assert client.requests == [
+        (
+            "send_text_event",
+            {
+                "owner_id": 7,
+                "owner_generation": 2,
+                "control_id": 30,
+                "event_kind": 4,
+                "modifiers": 0,
+                "wheel_x": 0,
+                "wheel_y": -1,
+                "generation": 5,
+                "display_offer_id": offer.offer_id,
+                "display_scope": display_scope_to_wire(offer.scope),
+            },
+        ),
+        _pointer_request(offer, x=7, y=4, buttons=0, kind=4, wheel_y=2),
+    ]

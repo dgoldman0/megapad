@@ -34,6 +34,7 @@ from rich_terminal.retained_view import (
 )
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_model import RetainedPolicy
+from rich_terminal.retained_wire import ControlEventKind
 from system import MegapadSystem, SystemRunStats
 
 if TYPE_CHECKING:
@@ -1792,9 +1793,15 @@ class MachineSession:
         owner_generation: int,
         control_id: int,
         *,
+        event_kind: ControlEventKind = ControlEventKind.ACTIVATE,
         modifiers: int = 0,
+        content_revision: int = 0,
+        item_key: int = 0,
+        scalar_offset: int = 0,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
     ) -> DriverStatus:
-        """Activate one semantic control in the exact acknowledged display scope."""
+        """Send one semantic control intent in the exact acknowledged scope."""
 
         if self._rich_terminal_mutation_blocked():
             return DriverStatus.FAILED
@@ -1808,8 +1815,14 @@ class MachineSession:
             owner_id,
             owner_generation,
             control_id,
+            event_kind=event_kind,
             modifiers=modifiers,
             model_revision=scope.model_revision,
+            content_revision=content_revision,
+            item_key=item_key,
+            scalar_offset=scalar_offset,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
         )
 
     def send_pointer(

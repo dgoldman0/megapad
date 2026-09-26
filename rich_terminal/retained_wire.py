@@ -90,6 +90,8 @@ _EXPLICIT_SAMPLE = struct.Struct("<Qq")
 _UNIFORM_SAMPLE = struct.Struct("<q")
 _CONTROL_PREFIX = struct.Struct("<QQQHHiQQIiiIIIII")
 _CONTROL_EVENT = struct.Struct("<QQQHHIQ")
+_CONTROL_EVENT_POSITION = struct.Struct("<QQII")
+_CONTROL_EVENT_SCROLL = struct.Struct("<hhI")
 
 
 class RetainedMessageType(IntEnum):
@@ -162,6 +164,30 @@ class PresentDisposition(IntEnum):
 
 class ControlEventKind(IntEnum):
     ACTIVATE = 1
+    PLACE = 2
+    EXTEND = 3
+    SCROLL = 4
+
+
+_POSITIONED_CONTROL_EVENTS = frozenset(
+    (ControlEventKind.PLACE, ControlEventKind.EXTEND)
+)
+
+
+def control_event_payload_size(kind: ControlEventKind) -> int:
+    """Return the exact CONTROL_EVENT payload length for one event kind."""
+
+    normalized = _enum("event_kind", ControlEventKind, kind)
+    if normalized in _POSITIONED_CONTROL_EVENTS:
+        return _CONTROL_EVENT.size + _CONTROL_EVENT_POSITION.size
+    if normalized is ControlEventKind.SCROLL:
+        return _CONTROL_EVENT.size + _CONTROL_EVENT_SCROLL.size
+    return _CONTROL_EVENT.size
+
+
+# The largest CONTROL_EVENT any kind can produce; transports size retention
+# and inbound frames from this rather than from the ACTIVATE prefix alone.
+CONTROL_EVENT_MAX_PAYLOAD = _CONTROL_EVENT.size + _CONTROL_EVENT_POSITION.size
 
 
 class RetainedWireErrorCode(str, Enum):
@@ -984,7 +1010,12 @@ class ControlWireDefinition:
 
 @dataclass(frozen=True, slots=True)
 class ControlEvent:
-    """Revision-bound semantic activation emitted by the terminal."""
+    """Revision-bound semantic intent emitted by the terminal.
+
+    ``PLACE`` and ``EXTEND`` name one STX1 position by content revision, item
+    key, and scalar offset; ``SCROLL`` carries signed wheel detents.  Fields a
+    kind does not carry must be zero, so every value has one wire form.
+    """
 
     owner_id: int
     owner_generation: int
@@ -992,6 +1023,11 @@ class ControlEvent:
     event_kind: ControlEventKind
     modifiers: int
     model_revision: int
+    content_revision: int = 0
+    item_key: int = 0
+    scalar_offset: int = 0
+    wheel_x: int = 0
+    wheel_y: int = 0
 
     def __post_init__(self) -> None:
         for name in ("owner_id", "owner_generation", "control_id"):
@@ -1000,11 +1036,8 @@ class ControlEvent:
                 name,
                 _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
             )
-        object.__setattr__(
-            self,
-            "event_kind",
-            _enum("event_kind", ControlEventKind, self.event_kind),
-        )
+        kind = _enum("event_kind", ControlEventKind, self.event_kind)
+        object.__setattr__(self, "event_kind", kind)
         object.__setattr__(
             self,
             "modifiers",
@@ -1020,6 +1053,49 @@ class ControlEvent:
                 maximum=UINT64_MAX,
             ),
         )
+        positioned = kind in _POSITIONED_CONTROL_EVENTS
+        scroll = kind is ControlEventKind.SCROLL
+        for name, maximum in (
+            ("content_revision", UINT64_MAX),
+            ("item_key", UINT64_MAX),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=1 if positioned else 0,
+                    maximum=maximum if positioned else 0,
+                ),
+            )
+        object.__setattr__(
+            self,
+            "scalar_offset",
+            _integer(
+                "scalar_offset",
+                self.scalar_offset,
+                minimum=0,
+                maximum=UINT32_MAX if positioned else 0,
+            ),
+        )
+        for name in ("wheel_x", "wheel_y"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=-(1 << 15) if scroll else 0,
+                    maximum=(1 << 15) - 1 if scroll else 0,
+                ),
+            )
+        if scroll and not (self.wheel_x or self.wheel_y):
+            raise ValueError("SCROLL requires a nonzero wheel detent count")
+
+    @property
+    def positioned(self) -> bool:
+        return self.event_kind in _POSITIONED_CONTROL_EVENTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -2127,7 +2203,7 @@ def decode_control_drop(payload) -> RetainedItemReference:
 def encode_control_event(event: ControlEvent) -> bytes:
     if not isinstance(event, ControlEvent):
         raise TypeError("event must be ControlEvent")
-    return _CONTROL_EVENT.pack(
+    prefix = _CONTROL_EVENT.pack(
         event.owner_id,
         event.owner_generation,
         event.control_id,
@@ -2136,12 +2212,26 @@ def encode_control_event(event: ControlEvent) -> bytes:
         0,
         event.model_revision,
     )
+    if event.positioned:
+        return prefix + _CONTROL_EVENT_POSITION.pack(
+            event.content_revision,
+            event.item_key,
+            event.scalar_offset,
+            0,
+        )
+    if event.event_kind is ControlEventKind.SCROLL:
+        return prefix + _CONTROL_EVENT_SCROLL.pack(
+            event.wheel_x,
+            event.wheel_y,
+            0,
+        )
+    return prefix
 
 
 def decode_control_event(payload) -> ControlEvent:
-    raw = _payload(payload, _CONTROL_EVENT.size, "CONTROL_EVENT")
+    raw = _variable_payload(payload, _CONTROL_EVENT.size, "CONTROL_EVENT")
     owner_id, generation, control_id, event_kind, modifiers, reserved, revision = (
-        _CONTROL_EVENT.unpack(raw)
+        _CONTROL_EVENT.unpack_from(raw)
     )
     if reserved:
         raise RetainedWireError(
@@ -2160,6 +2250,36 @@ def decode_control_event(payload) -> ControlEvent:
             RetainedWireErrorCode.ENUM,
             f"CONTROL_EVENT kind {event_kind} is not canonical",
         ) from exc
+    expected = control_event_payload_size(kind)
+    if len(raw) != expected:
+        raise RetainedWireError(
+            RetainedWireErrorCode.PAYLOAD,
+            f"CONTROL_EVENT {kind.name} payload is {len(raw)} bytes, "
+            f"expected {expected}",
+        )
+    tail = {}
+    if kind in _POSITIONED_CONTROL_EVENTS:
+        content_revision, item_key, scalar_offset, tail_reserved = (
+            _CONTROL_EVENT_POSITION.unpack_from(raw, _CONTROL_EVENT.size)
+        )
+        tail = {
+            "content_revision": content_revision,
+            "item_key": item_key,
+            "scalar_offset": scalar_offset,
+        }
+    elif kind is ControlEventKind.SCROLL:
+        wheel_x, wheel_y, tail_reserved = _CONTROL_EVENT_SCROLL.unpack_from(
+            raw,
+            _CONTROL_EVENT.size,
+        )
+        tail = {"wheel_x": wheel_x, "wheel_y": wheel_y}
+    else:
+        tail_reserved = 0
+    if tail_reserved:
+        raise RetainedWireError(
+            RetainedWireErrorCode.RESERVED,
+            "CONTROL_EVENT tail reserved field is nonzero",
+        )
     try:
         return ControlEvent(
             owner_id,
@@ -2168,6 +2288,7 @@ def decode_control_event(payload) -> ControlEvent:
             kind,
             modifiers,
             revision,
+            **tail,
         )
     except (TypeError, ValueError) as exc:
         raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
@@ -2324,7 +2445,8 @@ def decode_series_drop(payload) -> RetainedItemReference:
 
 
 __all__ = [
-    "CellMode", "ControlEvent", "ControlEventKind", "ControlKind", "ControlState",
+    "CONTROL_EVENT_MAX_PAYLOAD", "CellMode", "ControlEvent", "ControlEventKind",
+    "ControlKind", "ControlState", "control_event_payload_size",
     "ControlWireDefinition", "ImageBody", "ImageFit", "ObjectSetValue",
     "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",

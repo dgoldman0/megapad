@@ -253,18 +253,187 @@ class RegionOcclusion:
             raise TypeError("rect must be PixelRect")
 
 
-HitMapEntry = ControlHitTarget | RegionOcclusion
+@dataclass(frozen=True, slots=True)
+class ControlSurface:
+    """Renderer-laid-out control area that is not itself a target.
+
+    A menu bar, tabset, disabled text root, or open popup blocks lower
+    controls and never starts a raw pointer gesture: its pixels were laid out
+    by the renderer, so the cell under them is not what the client drew.
+    """
+
+    owner_id: int
+    owner_generation: int
+    control_id: int
+    rect: PixelRect
+
+    def __post_init__(self) -> None:
+        for name in ("owner_id", "owner_generation", "control_id"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(
+                    name,
+                    getattr(self, name),
+                    minimum=1,
+                    maximum=UINT64_MAX,
+                ),
+            )
+        if not isinstance(self.rect, PixelRect):
+            raise TypeError("rect must be PixelRect")
+
+
+@dataclass(frozen=True, slots=True)
+class TextPosition:
+    """One STX1 position: a carried item key and a scalar boundary."""
+
+    item_key: int
+    scalar_offset: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "item_key",
+            _integer("item_key", self.item_key, minimum=1, maximum=UINT64_MAX),
+        )
+        object.__setattr__(
+            self,
+            "scalar_offset",
+            _integer(
+                "scalar_offset",
+                self.scalar_offset,
+                minimum=0,
+                maximum=UINT32_MAX,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TextHitTarget:
+    """One enabled TEXT_AREA or TEXT_GRID root and the layout it was painted with.
+
+    ``rect`` is the visible root.  The anchor fields keep the unclipped root
+    geometry because rows and columns are partitioned from it exactly as the
+    paint pass partitioned them.  TEXT_AREA ``rows`` holds ``(row, item_key,
+    scalar_length)`` for every carried row; TEXT_GRID ``cells`` holds ``(row,
+    column, row_span, column_span, item_key, selectable)`` for every carried
+    item that intersects the viewport.
+    """
+
+    identity: ControlIdentity
+    kind: ControlKind
+    rect: PixelRect
+    anchor_left: int
+    anchor_top: int
+    anchor_width: int
+    anchor_height: int
+    content_revision: int
+    viewport_row: int
+    viewport_column: int
+    viewport_rows: int
+    viewport_columns: int
+    rows: tuple[tuple[int, int, int], ...] = ()
+    cells: tuple[tuple[int, int, int, int, int, bool], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, ControlIdentity):
+            raise TypeError("identity must be ControlIdentity")
+        if isinstance(self.kind, bool):
+            raise TypeError("kind must not be bool")
+        kind = ControlKind(self.kind)
+        if kind not in (ControlKind.TEXT_AREA, ControlKind.TEXT_GRID):
+            raise ValueError("only TEXT_AREA and TEXT_GRID are text targets")
+        object.__setattr__(self, "kind", kind)
+        if not isinstance(self.rect, PixelRect):
+            raise TypeError("rect must be PixelRect")
+        for name in ("anchor_width", "anchor_height", "viewport_rows", "viewport_columns"):
+            _integer(name, getattr(self, name), minimum=1)
+        for name in ("content_revision",):
+            _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX)
+        object.__setattr__(self, "rows", tuple(sorted(self.rows)))
+        object.__setattr__(self, "cells", tuple(self.cells))
+
+    def _index(self, origin: int, extent: int, count: int, value: int) -> int:
+        """Invert ``_partition_edge``: the logical index whose span holds value."""
+
+        index = ((value - origin) * count) // extent
+        index = min(max(index, 0), count - 1)
+        while index > 0 and _partition_edge(origin, extent, index, count) > value:
+            index -= 1
+        while (
+            index + 1 < count
+            and _partition_edge(origin, extent, index + 1, count) <= value
+        ):
+            index += 1
+        return index
+
+    def position_at(self, x: int, y: int, *, clamp: bool = False) -> TextPosition | None:
+        """Map one physical point to the position this root painted there.
+
+        With ``clamp`` a point outside the visible root is first moved to its
+        nearest edge, as a drag that leaves the root does.
+        """
+
+        rect = self.rect
+        if clamp:
+            x = min(max(x, rect.left), rect.right - 1)
+            y = min(max(y, rect.top), rect.bottom - 1)
+        elif not rect.contains(x, y):
+            return None
+        row = self.viewport_row + self._index(
+            self.anchor_top, self.anchor_height, self.viewport_rows, y
+        )
+        column = self.viewport_column + self._index(
+            self.anchor_left, self.anchor_width, self.viewport_columns, x
+        )
+        if self.kind is ControlKind.TEXT_GRID:
+            for item_row, item_column, row_span, column_span, key, selectable in self.cells:
+                if (
+                    item_row <= row < item_row + row_span
+                    and item_column <= column < item_column + column_span
+                ):
+                    return TextPosition(key, 0) if selectable else None
+            return None
+        above = None
+        below = None
+        for item_row, key, length in self.rows:
+            if item_row == row:
+                return TextPosition(key, min(column, length))
+            if item_row < row:
+                above = (key, length)
+            elif below is None:
+                below = key
+        if above is not None:
+            return TextPosition(above[0], above[1])
+        if below is not None:
+            return TextPosition(below, 0)
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class ResidualPoint:
+    """A point showing CELL or residual content, named by its cell."""
+
+    column: int
+    row: int
+
+
+HitMapEntry = ControlHitTarget | RegionOcclusion | ControlSurface | TextHitTarget
+PointerTarget = ControlHitTarget | TextHitTarget | ResidualPoint
 
 
 def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
     entries = tuple(hit_entries)
     if any(
-        not isinstance(entry, (ControlHitTarget, RegionOcclusion))
+        not isinstance(
+            entry,
+            (ControlHitTarget, RegionOcclusion, ControlSurface, TextHitTarget),
+        )
         for entry in entries
     ):
         raise TypeError(
-            "hit_entries must contain only ControlHitTarget or "
-            "RegionOcclusion values"
+            "hit_entries must contain only ControlHitTarget, RegionOcclusion, "
+            "ControlSurface, or TextHitTarget values"
         )
     return entries
 
@@ -285,15 +454,47 @@ def hit_test_hit_map(
     return None
 
 
+def resolve_pointer(
+    hit_entries: tuple[HitMapEntry, ...],
+    x: int,
+    y: int,
+    *,
+    cell_width: int,
+    cell_height: int,
+) -> PointerTarget | None:
+    """Resolve where one point on the composed terminal surface may go.
+
+    An activatable control or a text root wins in reverse painter order.  A
+    control surface (menu bar, tabset, popup, disabled text root) swallows the
+    point.  A region barrier, or no entry at all, means the point shows CELL
+    or residual content, so a raw pointer gesture may name its cell.
+    """
+
+    cell_w = _integer("cell_width", cell_width, minimum=1)
+    cell_h = _integer("cell_height", cell_height, minimum=1)
+    for entry in reversed(hit_entries):
+        if not entry.rect.contains(x, y):
+            continue
+        if isinstance(entry, (ControlHitTarget, TextHitTarget)):
+            return entry
+        if isinstance(entry, ControlSurface):
+            return None
+        break
+    if x < 0 or y < 0:
+        return None
+    return ResidualPoint(x // cell_w, y // cell_h)
+
+
 @dataclass(frozen=True, slots=True)
 class CompositeDrawResult:
     """One completed paint pass and its immutable semantic hit map.
 
     ``hit_entries`` is stored in back-to-front painter order.  A region's
-    occlusion precedes its own controls, and each popup's occlusion precedes
-    its items.  Reverse testing lets enabled controls win while blocking input
-    through covered padding or disabled controls.  ``hit_targets`` remains a
-    filtered inspection view; barriers are never represented as fake controls.
+    barrier precedes its own controls, and each menu bar, tabset, or popup
+    surface precedes its targets; an enabled text root is its own target.
+    Reverse testing lets enabled controls win while blocking input through
+    covered padding or disabled controls.  ``hit_targets`` remains a filtered
+    inspection view; barriers are never represented as fake controls.
     """
 
     surface: object
@@ -1043,10 +1244,10 @@ def _paint_popup(
 
     menu_enabled = root_enabled and bool(menu.state & ControlState.ENABLED)
     entries: list[HitMapEntry] = [
-        RegionOcclusion(
+        ControlSurface(
             region.owner_id,
             region.owner_generation,
-            region.region_id,
+            menu.control_id,
             _pixel_rect(visible_popup),
         )
     ]
@@ -1168,7 +1369,7 @@ def _paint_menu_bar(
     *,
     hovered: ControlIdentity | None,
     pressed: ControlIdentity | None,
-) -> tuple[list[ControlHitTarget], list[_MenuPopup]]:
+) -> tuple[list[HitMapEntry], list[_MenuPopup]]:
     anchor = _bounds_rect(
         pygame_module,
         region_rect,
@@ -1188,7 +1389,14 @@ def _paint_menu_bar(
 
     metrics = _menu_metrics(font, cell_width, cell_height)
     root_enabled = bool(draw.state & ControlState.ENABLED)
-    targets: list[ControlHitTarget] = []
+    targets: list[HitMapEntry] = [
+        ControlSurface(
+            region.owner_id,
+            region.owner_generation,
+            draw.control_id,
+            _pixel_rect(visible_anchor),
+        )
+    ]
     popups: list[_MenuPopup] = []
     prior_clip = surface.get_clip()
     try:
@@ -1303,6 +1511,77 @@ def _paint_menu_bar(
     return targets, popups
 
 
+def _text_root_entries(region, draw, anchor, visible_anchor) -> list[HitMapEntry]:
+    """Return one painted text root's hit entry from its exact paint geometry.
+
+    An enabled root becomes a text target carrying the layout it was painted
+    with; a disabled one still blocks lower controls and raw pointer input.
+    """
+
+    rect = _pixel_rect(visible_anchor)
+    if not draw.state & ControlState.ENABLED:
+        return [
+            ControlSurface(
+                region.owner_id,
+                region.owner_generation,
+                draw.control_id,
+                rect,
+            )
+        ]
+    content = draw.content
+    layout = {
+        "anchor_left": anchor.left,
+        "anchor_top": anchor.top,
+        "anchor_width": anchor.width,
+        "anchor_height": anchor.height,
+        "content_revision": content.content_revision,
+        "viewport_row": content.viewport_row,
+        "viewport_column": content.viewport_column,
+        "viewport_rows": content.viewport_rows,
+        "viewport_columns": content.viewport_columns,
+    }
+    identity = _identity(region, draw.control_id)
+    if isinstance(draw, TextAreaDraw):
+        return [
+            TextHitTarget(
+                identity,
+                ControlKind.TEXT_AREA,
+                rect,
+                rows=tuple(
+                    (item.row, item.item_key, len(item.text))
+                    for item in content.items
+                ),
+                **layout,
+            )
+        ]
+    row_end = content.viewport_row + content.viewport_rows
+    column_end = content.viewport_column + content.viewport_columns
+    return [
+        TextHitTarget(
+            identity,
+            ControlKind.TEXT_GRID,
+            rect,
+            cells=tuple(
+                (
+                    item.row,
+                    item.column,
+                    item.row_span,
+                    item.column_span,
+                    item.item_key,
+                    item.role is SemanticTextRole.CONTENT
+                    and not item.state & SemanticTextState.UNAVAILABLE,
+                )
+                for item in content.items
+                if item.row + item.row_span > content.viewport_row
+                and item.row < row_end
+                and item.column + item.column_span > content.viewport_column
+                and item.column < column_end
+            ),
+            **layout,
+        )
+    ]
+
+
 def _paint_text_area(
     pygame_module,
     surface,
@@ -1310,7 +1589,7 @@ def _paint_text_area(
     region,
     region_rect,
     draw: TextAreaDraw,
-) -> None:
+) -> list[HitMapEntry]:
     """Paint one exact logical text viewport with persistent selection state."""
 
     anchor, visible_anchor = _semantic_root_rects(
@@ -1321,7 +1600,7 @@ def _paint_text_area(
         draw.bounds,
     )
     if visible_anchor.width <= 0 or visible_anchor.height <= 0:
-        return
+        return []
     content = draw.content
     row_start = content.viewport_row
     row_end = row_start + content.viewport_rows
@@ -1521,6 +1800,7 @@ def _paint_text_area(
                 surface.fill(_ACCENT[:3] if enabled else _DISABLED_TEXT, caret)
     finally:
         surface.set_clip(prior_clip)
+    return _text_root_entries(region, draw, anchor, visible_anchor)
 
 
 def _paint_text_grid(
@@ -1531,7 +1811,7 @@ def _paint_text_grid(
     region_rect,
     draw: TextGridDraw,
     cell_width: int,
-) -> None:
+) -> list[HitMapEntry]:
     """Paint logical grid spans directly, without materializing a cell matrix."""
 
     anchor, visible_anchor = _semantic_root_rects(
@@ -1542,7 +1822,7 @@ def _paint_text_grid(
         draw.bounds,
     )
     if visible_anchor.width <= 0 or visible_anchor.height <= 0:
-        return
+        return []
     content = draw.content
     row_start = content.viewport_row
     row_end = row_start + content.viewport_rows
@@ -1688,6 +1968,7 @@ def _paint_text_grid(
         )
     finally:
         surface.set_clip(prior_clip)
+    return _text_root_entries(region, draw, anchor, visible_anchor)
 
 
 def _tab_width(
@@ -1722,8 +2003,8 @@ def _paint_tabset(
     *,
     hovered: ControlIdentity | None,
     pressed: ControlIdentity | None,
-) -> list[ControlHitTarget]:
-    """Lay out generic tabs and return only enabled TAB activation targets."""
+) -> list[HitMapEntry]:
+    """Lay out generic tabs: the root surface, then enabled TAB targets."""
 
     anchor, visible_anchor = _semantic_root_rects(
         pygame_module,
@@ -1745,7 +2026,14 @@ def _paint_tabset(
         total_width += metrics.gap * (len(widths) - 1)
     natural_layout = total_width <= anchor.width
     root_enabled = bool(draw.state & ControlState.ENABLED)
-    targets: list[ControlHitTarget] = []
+    targets: list[HitMapEntry] = [
+        ControlSurface(
+            region.owner_id,
+            region.owner_generation,
+            draw.control_id,
+            _pixel_rect(visible_anchor),
+        )
+    ]
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(visible_anchor)
@@ -2991,23 +3279,27 @@ def composite_draw_plane_result(
                 hit_entries.extend(targets)
                 region_popups.extend(popups)
             elif isinstance(draw, TextAreaDraw):
-                _paint_text_area(
-                    pygame_module,
-                    surface,
-                    font,
-                    region,
-                    region_rect,
-                    draw,
+                hit_entries.extend(
+                    _paint_text_area(
+                        pygame_module,
+                        surface,
+                        font,
+                        region,
+                        region_rect,
+                        draw,
+                    )
                 )
             elif isinstance(draw, TextGridDraw):
-                _paint_text_grid(
-                    pygame_module,
-                    surface,
-                    control_font,
-                    region,
-                    region_rect,
-                    draw,
-                    cell_w,
+                hit_entries.extend(
+                    _paint_text_grid(
+                        pygame_module,
+                        surface,
+                        control_font,
+                        region,
+                        region_rect,
+                        draw,
+                        cell_w,
+                    )
                 )
             elif isinstance(draw, TabSetDraw):
                 hit_entries.extend(
@@ -3087,13 +3379,19 @@ __all__ = [
     "CompositeDrawResult",
     "ControlHitTarget",
     "ControlIdentity",
+    "ControlSurface",
     "HitMapEntry",
     "ImageSurfaceKey",
     "PixelRect",
+    "PointerTarget",
     "RegionOcclusion",
+    "ResidualPoint",
+    "TextHitTarget",
+    "TextPosition",
     "composite_draw_plane",
     "composite_draw_plane_result",
     "hit_test_hit_map",
+    "resolve_pointer",
     "opaque_cell_coverage",
     "unorm_high_edge",
     "unorm_low_edge",

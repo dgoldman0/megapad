@@ -656,14 +656,31 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
     assert "0x0205 CONSTANT PT-EVENT-CONTROL" in source
     assert "_PT-M-CONTROL-EVENT =" in input_types
     assert "_PT-M-CONTROL-EVENT" in route
+    bytes_for_kind = _definition(source, "_PT-CONTROL-EVENT-BYTES")
+    tail_valid = _definition(source, "_PT-CONTROL-TAIL-VALID?")
+
     assert "_PT-RET-CONTROLS? 0=" in dispatch
-    assert "_PT-RX-LEN @ 40 <>" in dispatch
+    # Only the ACTIVATE kind is admitted without the collections feature.
+    assert "W@ PT-CONTROL-ACTIVATE <> IF" in dispatch
+    assert "_PT-RET-CONTROL-COLLECTIONS? 0=" in dispatch
+    assert "_PT-RX-LEN @ 40 U<" in dispatch
+    assert "_PT-CONTROL-EVENT-BYTES DUP 0=" in dispatch
+    assert "SWAP _PT-RX-LEN @ <> OR" in dispatch
     assert dispatch.count("_PT-U64@ 0=") == 3
-    assert "W@ PT-CONTROL-ACTIVATE <>" in dispatch
     assert "W@ 0x3F INVERT AND 0<>" in dispatch
     assert "_PT-RX-P @ 28 + L@ 0<>" in dispatch
+    assert "W@ _PT-CONTROL-TAIL-VALID? 0= OR" in dispatch
     assert "_PT.S.REVISION @ <>" in dispatch
     assert "_PT-ACCEPT-EVENT" in dispatch
+    assert "PT-CONTROL-ACTIVATE = IF DROP 40 EXIT THEN" in bytes_for_kind
+    assert "IF DROP 64 EXIT THEN" in bytes_for_kind
+    assert "PT-CONTROL-SCROLL = IF 48 EXIT THEN" in bytes_for_kind
+    # Positions need a content revision and item key; scroll needs detents.
+    assert "_PT-RX-P @ 40 + _PT-U64@ 0<>" in tail_valid
+    assert "_PT-RX-P @ 48 + _PT-U64@ 0<> AND" in tail_valid
+    assert "_PT-RX-P @ 60 + L@ 0= AND" in tail_valid
+    assert "_PT-RX-P @ 44 + L@ 0=" in tail_valid
+    assert "W@ OR 0<> AND" in tail_valid
 
     for mapping in (
         "_PT-EP-P @ 32 + _PT-U64@ _PT-EP-DST @ 8 + !",
@@ -671,6 +688,8 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
         "_PT-EP-P @ 8 + _PT-U64@ _PT-EP-DST @ 24 + !",
         "_PT-EP-P @ 16 + _PT-U64@ _PT-EP-DST @ 32 + !",
         "_PT-EP-P @ 26 + W@ 16 LSHIFT OR _PT-EP-DST @ 40 + !",
+        "_PT.S.EVENT-LEN @ 40 - DUP IF",
+        "_PT-EP-P @ 40 + _PT-EP-DST @ 48 + !",
     ):
         assert mapping in describe
 
@@ -680,8 +699,20 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
         "PT-CONTROL-EVENT-ID@",
         "PT-CONTROL-EVENT-KIND@",
         "PT-CONTROL-EVENT-MODIFIERS@",
+        "PT-CONTROL-EVENT-CONTENT-REVISION@",
+        "PT-CONTROL-EVENT-ITEM-KEY@",
+        "PT-CONTROL-EVENT-OFFSET@",
+        "PT-CONTROL-EVENT-WHEEL-X@",
+        "PT-CONTROL-EVENT-WHEEL-Y@",
     ):
         assert _definition(source, accessor)
+    for kind, value in (
+        ("PT-CONTROL-ACTIVATE", 1),
+        ("PT-CONTROL-PLACE", 2),
+        ("PT-CONTROL-EXTEND", 3),
+        ("PT-CONTROL-SCROLL", 4),
+    ):
+        assert f"{value} CONSTANT {kind}" in source
 
 
 def test_retained_completion_is_bounded_without_weakening_legacy_cell() -> None:

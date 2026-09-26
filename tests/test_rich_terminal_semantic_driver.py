@@ -36,6 +36,13 @@ from rich_terminal.retained_scene import (
     SceneUsage,
 )
 from rich_terminal.retained_resources import RetainedResourceStore
+from rich_terminal.semantic_content import (
+    SemanticContentFlag,
+    SemanticTextContent,
+    SemanticTextItem,
+    SemanticTextRole,
+    SemanticTextState,
+)
 from rich_terminal.retained_wire import (
     ControlEvent,
     ControlEventKind,
@@ -74,13 +81,14 @@ def _config() -> TerminalConfig:
     )
 
 
-def _policy(*, controls: bool) -> RetainedPolicy:
+def _policy(*, controls: bool, collections: bool = False) -> RetainedPolicy:
+    features = RetainedFeature.CORE
+    if controls:
+        features |= RetainedFeature.CONTROLS
+    if collections:
+        features |= RetainedFeature.CONTROL_COLLECTIONS
     return RetainedPolicy(
-        features=(
-            RetainedFeature.CORE | RetainedFeature.CONTROLS
-            if controls
-            else RetainedFeature.CORE
-        ),
+        features=features,
         max_owner_records=2,
         max_live_owners=1,
         max_regions=2,
@@ -306,6 +314,181 @@ def test_driver_retains_one_exact_control_event_without_mutating_scene() -> None
         MODEL_REVISION,
     )
     assert core.retained_state is before
+
+
+TEXT_AREA_ID = 4
+TEXT_GRID_ID = 5
+TEXT_REVISION = 5
+
+
+def _text_item(key, row, column, span, role, text):
+    return SemanticTextItem(
+        key, row, column, 1, span, role, SemanticTextState(0), text
+    )
+
+
+def _text_controls(owner) -> dict[int, ControlDefinition]:
+    content = SemanticTextRole.CONTENT
+    area = SemanticTextContent(
+        TEXT_REVISION, 2, 8, 0, 0, 2, 8, SemanticContentFlag(0), 2, 1, 0, 0,
+        (
+            _text_item(1, 0, 0, 8, content, "ab"),
+            _text_item(2, 1, 0, 8, content, "cdef"),
+        ),
+    )
+    grid = SemanticTextContent(
+        TEXT_REVISION, 1, 2, 0, 0, 1, 2, SemanticContentFlag.READ_ONLY, 7, 0, 0, 0,
+        (
+            _text_item(7, 0, 0, 1, content, "x"),
+            _text_item(8, 0, 1, 1, SemanticTextRole.ROW_HEADER, "h"),
+        ),
+    )
+    visible_enabled = ControlState.VISIBLE | ControlState.ENABLED
+    return {
+        TEXT_AREA_ID: ControlDefinition(
+            owner, TEXT_AREA_ID, ControlKind.TEXT_AREA, visible_enabled, 0, 1, 0,
+            0, ObjectBounds(0, 0, 2, 1), "", "", area,
+        ),
+        TEXT_GRID_ID: ControlDefinition(
+            owner, TEXT_GRID_ID, ControlKind.TEXT_GRID, visible_enabled, 0, 1, 0,
+            0, ObjectBounds(0, 1, 2, 1), "", "", grid,
+        ),
+    }
+
+
+def _text_core(*, collections: bool = True) -> RichTerminalCore:
+    core = _active_core()
+    policy = _policy(controls=True, collections=collections)
+    owner = OwnerIdentity(SESSION_ID, 0, OWNER_ID, OWNER_GENERATION)
+    state = core._retained_model._state
+    owner_scene = state.active.owners[OWNER_ID]
+    controls = dict(owner_scene.controls)
+    controls.update(_text_controls(owner))
+    patched = OwnerScene(
+        owner=owner_scene.owner,
+        regions=owner_scene.regions,
+        objects=owner_scene.objects,
+        series=owner_scene.series,
+        usage=owner_scene.usage,
+        controls=MappingProxyType(controls),
+    )
+    core._retained_model._state = SceneModelState(
+        revision=state.revision,
+        geometry=state.geometry,
+        active=RetainedScene(MappingProxyType({OWNER_ID: patched})),
+        hidden=None,
+        hidden_kind=None,
+        requirement=None,
+        retained_visible=True,
+        retained_initialized=True,
+    )
+    core._session_retained_policy = policy
+    return core
+
+
+def _send_text(driver, control_id, kind, **fields):
+    return driver.send_control_event(
+        OWNER_ID,
+        OWNER_GENERATION,
+        control_id,
+        model_revision=MODEL_REVISION,
+        event_kind=kind,
+        **fields,
+    )
+
+
+def _sent_events(driver) -> list[ControlEvent]:
+    """Decode every retained frame in order with one sequence-checking decoder."""
+
+    decoder = IncrementalFrameDecoder(SESSION_ID, max_payload=512)
+    events = []
+    for pending in driver._pending:
+        frames = decoder.feed(pending.record.payload)
+        assert len(frames) == 1
+        assert frames[0].message_type == MessageType.CONTROL_EVENT
+        events.append(decode_control_event(frames[0].payload))
+    return events
+
+
+def test_driver_emits_positioned_events_only_for_carried_positions() -> None:
+    core = _text_core()
+    driver = _driver(core)
+    before = core.retained_state
+    position = {"content_revision": TEXT_REVISION, "item_key": 2, "scalar_offset": 4}
+
+    assert (
+        _send_text(driver, TEXT_AREA_ID, ControlEventKind.PLACE, modifiers=1, **position)
+        is DriverStatus.PROGRESS
+    )
+    assert driver.pending_outbound_bytes == 40 + 64
+    assert (
+        _send_text(driver, TEXT_GRID_ID, ControlEventKind.SCROLL, wheel_y=2)
+        is DriverStatus.PROGRESS
+    )
+    assert driver.pending_outbound_bytes == 40 + 64 + 40 + 48
+    place, scroll = _sent_events(driver)
+    assert place == ControlEvent(
+        OWNER_ID,
+        OWNER_GENERATION,
+        TEXT_AREA_ID,
+        ControlEventKind.PLACE,
+        1,
+        MODEL_REVISION,
+        **position,
+    )
+    assert (scroll.control_id, scroll.event_kind, scroll.wheel_y) == (
+        TEXT_GRID_ID,
+        ControlEventKind.SCROLL,
+        2,
+    )
+    assert core.retained_state is before
+
+
+@pytest.mark.parametrize(
+    ("control_id", "kind", "fields"),
+    (
+        # The offset must lie within the named row.
+        (TEXT_AREA_ID, ControlEventKind.PLACE,
+         {"content_revision": TEXT_REVISION, "item_key": 2, "scalar_offset": 5}),
+        # A superseded content revision names nothing current.
+        (TEXT_AREA_ID, ControlEventKind.EXTEND,
+         {"content_revision": TEXT_REVISION - 1, "item_key": 2, "scalar_offset": 0}),
+        # Grids select whole CONTENT items and never extend.
+        (TEXT_GRID_ID, ControlEventKind.PLACE,
+         {"content_revision": TEXT_REVISION, "item_key": 8, "scalar_offset": 0}),
+        (TEXT_GRID_ID, ControlEventKind.EXTEND,
+         {"content_revision": TEXT_REVISION, "item_key": 7, "scalar_offset": 0}),
+        # Text roots are not activatable and menus take no positions.
+        (TEXT_AREA_ID, ControlEventKind.ACTIVATE, {}),
+        (3, ControlEventKind.PLACE,
+         {"content_revision": TEXT_REVISION, "item_key": 1, "scalar_offset": 0}),
+        (2, ControlEventKind.SCROLL, {"wheel_y": 1}),
+    ),
+)
+def test_driver_refuses_positions_the_scene_does_not_carry(control_id, kind, fields):
+    core = _text_core()
+    driver = _driver(core)
+
+    assert _send_text(driver, control_id, kind, **fields) is DriverStatus.INVALID
+    assert driver.pending_outbound_events == 0
+
+
+def test_positioned_events_require_the_collections_feature() -> None:
+    core = _text_core(collections=False)
+    driver = _driver(core)
+    with pytest.raises(TerminalSessionError, match="RET_CONTROL_COLLECTIONS"):
+        core.send_control_event(
+            OWNER_ID,
+            OWNER_GENERATION,
+            TEXT_GRID_ID,
+            model_revision=MODEL_REVISION,
+            event_kind=ControlEventKind.SCROLL,
+            wheel_y=1,
+        )
+    assert (
+        _send_text(driver, TEXT_GRID_ID, ControlEventKind.SCROLL, wheel_y=1)
+        is DriverStatus.INVALID
+    )
 
 
 def test_driver_preflights_the_full_control_event_before_encoding(monkeypatch) -> None:

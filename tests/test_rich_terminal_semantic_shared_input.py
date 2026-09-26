@@ -6,6 +6,7 @@ import pytest
 
 from rich_terminal import DriverStatus
 from rich_terminal.retained_view import DisplayScope
+from rich_terminal.retained_wire import ControlEventKind
 from shared_session import SessionServer, SharedMachine, display_scope_to_wire
 
 
@@ -23,6 +24,8 @@ class _Session:
     def __init__(self, status: DriverStatus = DriverStatus.PROGRESS) -> None:
         self.status = status
         self.events: list[tuple[int, int, int, int]] = []
+        self.tails: list[tuple[ControlEventKind, dict[str, int]]] = []
+        self.pointers: list[tuple[int, int, dict[str, int]]] = []
 
     def send_control_event(
         self,
@@ -31,10 +34,17 @@ class _Session:
         control_id: int,
         *,
         modifiers: int = 0,
+        event_kind: ControlEventKind = ControlEventKind.ACTIVATE,
+        **tail: int,
     ) -> DriverStatus:
         self.events.append(
             (owner_id, owner_generation, control_id, modifiers)
         )
+        self.tails.append((event_kind, dict(tail)))
+        return self.status
+
+    def send_pointer(self, x: int, y: int, **fields: int) -> DriverStatus:
+        self.pointers.append((x, y, dict(fields)))
         return self.status
 
 
@@ -208,3 +218,163 @@ def test_shared_rpc_has_one_exact_authority_shape(mutate, match):
             connection_id=CONNECTION,
         )
     assert session.events == []
+
+
+def _text_params(kind: int, **changes) -> dict:
+    params = _params(modifiers=1, event_kind=kind)
+    if kind == int(ControlEventKind.SCROLL):
+        params.update(wheel_x=0, wheel_y=-3)
+    else:
+        params.update(content_revision=41, item_key=5, scalar_offset=12)
+    params.update(changes)
+    return params
+
+
+def _pointer_params(**changes) -> dict:
+    params = {
+        "generation": GENERATION,
+        "display_offer_id": DISPLAY_PROOF[0],
+        "display_scope": display_scope_to_wire(SCOPE),
+        "x": 4,
+        "y": 2,
+        "buttons": 1,
+        "modifiers": 0,
+        "kind": 2,
+        "wheel_x": 0,
+        "wheel_y": 0,
+    }
+    params.update(changes)
+    return params
+
+
+def test_text_event_rpc_forwards_each_kind_with_its_exact_tail():
+    server, session = _server()
+
+    for kind in (ControlEventKind.PLACE, ControlEventKind.EXTEND):
+        assert server.dispatch(
+            "send_text_event",
+            _text_params(int(kind)),
+            connection_id=CONNECTION,
+        ) == {"status": "progress", "accepted_events": 1}
+    assert server.dispatch(
+        "send_text_event",
+        _text_params(int(ControlEventKind.SCROLL)),
+        connection_id=CONNECTION,
+    ) == {"status": "progress", "accepted_events": 1}
+
+    assert session.events == [(7, 3, 11, 1)] * 3
+    position = {
+        "content_revision": 41,
+        "item_key": 5,
+        "scalar_offset": 12,
+        "wheel_x": 0,
+        "wheel_y": 0,
+    }
+    assert session.tails == [
+        (ControlEventKind.PLACE, position),
+        (ControlEventKind.EXTEND, position),
+        (
+            ControlEventKind.SCROLL,
+            {
+                "content_revision": 0,
+                "item_key": 0,
+                "scalar_offset": 0,
+                "wheel_x": 0,
+                "wheel_y": -3,
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("params", "match"),
+    (
+        (_text_params(1), "event_kind must be"),
+        (_text_params(5), "event_kind must be"),
+        (_text_params(2, wheel_y=1), "fields are not exact"),
+        (_text_params(4, item_key=5), "fields are not exact"),
+        (
+            {
+                key: value
+                for key, value in _text_params(2).items()
+                if key != "display_scope"
+            },
+            "fields are not exact",
+        ),
+    ),
+)
+def test_text_event_rpc_has_one_exact_shape_per_kind(params, match):
+    server, session = _server()
+
+    with pytest.raises(ValueError, match=match):
+        server.dispatch("send_text_event", params, connection_id=CONNECTION)
+    assert session.events == []
+
+
+def test_text_event_rpc_requires_the_current_display_proof():
+    server, session = _server()
+
+    assert server.dispatch(
+        "send_text_event",
+        _text_params(2, display_offer_id=DISPLAY_PROOF[0] + 1),
+        connection_id=CONNECTION,
+    ) == {"status": "stale_display", "accepted_events": 0}
+    assert server.dispatch(
+        "send_text_event",
+        _text_params(2),
+        connection_id=CONNECTION + 1,
+    ) == {"status": "stale_display", "accepted_events": 0}
+    assert session.events == []
+
+
+def test_pointer_rpc_forwards_exact_fields_under_the_display_proof():
+    server, session = _server()
+
+    assert server.dispatch(
+        "send_pointer",
+        _pointer_params(),
+        connection_id=CONNECTION,
+    ) == {"status": "progress", "accepted_events": 1}
+    assert server.dispatch(
+        "send_pointer",
+        _pointer_params(buttons=0, kind=4, wheel_y=2),
+        connection_id=CONNECTION,
+    ) == {"status": "progress", "accepted_events": 1}
+    assert session.pointers == [
+        (4, 2, {"buttons": 1, "modifiers": 0, "kind": 2, "wheel_x": 0, "wheel_y": 0}),
+        (4, 2, {"buttons": 0, "modifiers": 0, "kind": 4, "wheel_x": 0, "wheel_y": 2}),
+    ]
+
+    assert server.dispatch(
+        "send_pointer",
+        _pointer_params(display_offer_id=DISPLAY_PROOF[0] + 1),
+        connection_id=CONNECTION,
+    ) == {"status": "stale_display", "accepted_events": 0}
+    assert len(session.pointers) == 2
+
+
+@pytest.mark.parametrize(
+    "changes",
+    (
+        {"buttons": 0x20},
+        {"kind": 0},
+        {"kind": 5},
+        {"modifiers": 0x40},
+        {"wheel_y": 1 << 15},
+        {"x": True},
+    ),
+)
+def test_pointer_rpc_rejects_noncanonical_fields(changes):
+    server, session = _server()
+
+    with pytest.raises((TypeError, ValueError)):
+        server.dispatch(
+            "send_pointer",
+            _pointer_params(**changes),
+            connection_id=CONNECTION,
+        )
+    params = _pointer_params()
+    params.pop("wheel_x")
+    with pytest.raises(ValueError, match="fields are not exact"):
+        server.dispatch("send_pointer", params, connection_id=CONNECTION)
+    assert session.pointers == []

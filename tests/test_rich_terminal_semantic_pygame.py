@@ -9,10 +9,15 @@ import pytest
 from rich_terminal.apt1 import UINT32_MAX
 from rich_terminal.pygame_view import (
     ControlIdentity,
+    ControlSurface,
     PixelRect,
     RegionOcclusion,
+    ResidualPoint,
+    TextHitTarget,
+    TextPosition,
     composite_draw_plane,
     composite_draw_plane_result,
+    resolve_pointer,
 )
 from rich_terminal.retained_scene import (
     ControlKind,
@@ -1001,3 +1006,162 @@ def test_grid_clips_extreme_u32_spans_before_constructing_pygame_rects():
         surface.get_at((20, 5))
     )[:3]
     assert tuple(surface.get_at((10, 5)))[:3] != (184, 190, 201)
+
+
+def _area_content(*, revision=1):
+    return SemanticTextContent(
+        content_revision=revision,
+        rows=3,
+        columns=5,
+        viewport_row=1,
+        viewport_column=1,
+        viewport_rows=2,
+        viewport_columns=4,
+        flags=SemanticContentFlag(0),
+        primary_key=2,
+        primary_offset=4,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1, 0, 0, 1, 5,
+                SemanticTextRole.CONTENT, SemanticTextState(0), "OFF",
+            ),
+            SemanticTextItem(
+                2, 1, 0, 1, 5,
+                SemanticTextRole.CONTENT, SemanticTextState(0), "ABCDE",
+            ),
+        ),
+    )
+
+
+def _resolve(result, x, y):
+    return resolve_pointer(result.hit_entries, x, y, cell_width=10, cell_height=10)
+
+
+def test_text_area_target_maps_points_with_the_painted_partition():
+    pygame = pytest.importorskip("pygame")
+    area = TextAreaDraw(
+        30, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 6, 4), _area_content(revision=9)
+    )
+    _, result = _render(pygame, _plane(_region(area, cols=8, rows=4)), size=(80, 40))
+
+    targets = [entry for entry in result.hit_entries if isinstance(entry, TextHitTarget)]
+    assert len(targets) == 1
+    target = targets[0]
+    assert target.identity == ControlIdentity(11, 7, 30)
+    assert target.kind is ControlKind.TEXT_AREA
+    assert target.content_revision == 9
+    assert target.rect == PixelRect(0, 0, 60, 40)
+    # Text roots are not activation targets and stay out of that view.
+    assert result.hit_targets == ()
+
+    # Two logical rows over 40 pixels and four scalar columns over 60 pixels,
+    # starting at logical row 1 and column 1, exactly as painted.
+    assert target.position_at(5, 5) == TextPosition(2, 1)
+    assert target.position_at(50, 5) == TextPosition(2, 4)
+    # Past the document end the caret goes to the end of the last row.
+    assert target.position_at(5, 25) == TextPosition(2, 5)
+    assert target.position_at(70, 5) is None
+    assert target.position_at(70, 5, clamp=True) == TextPosition(2, 4)
+    assert target.position_at(-4, -9, clamp=True) == TextPosition(2, 1)
+
+    assert _resolve(result, 5, 5) is target
+    # Region pixels beside the root show CELL content: a raw cell.
+    assert _resolve(result, 70, 5) == ResidualPoint(7, 0)
+    assert _resolve(result, 75, 35) == ResidualPoint(7, 3)
+
+
+def test_disabled_text_root_blocks_raw_input_without_a_text_target():
+    pygame = pytest.importorskip("pygame")
+    area = TextAreaDraw(
+        30, VISIBLE, 0, 0, ObjectBounds(0, 0, 6, 4), _area_content()
+    )
+    _, result = _render(pygame, _plane(_region(area, cols=8, rows=4)), size=(80, 40))
+
+    surfaces = [entry for entry in result.hit_entries if isinstance(entry, ControlSurface)]
+    assert [surface.control_id for surface in surfaces] == [30]
+    assert not any(isinstance(entry, TextHitTarget) for entry in result.hit_entries)
+    assert _resolve(result, 5, 5) is None
+    assert _resolve(result, 70, 5) == ResidualPoint(7, 0)
+
+
+def test_text_grid_target_names_only_selectable_content_items():
+    pygame = pytest.importorskip("pygame")
+    content = SemanticTextContent(
+        content_revision=4,
+        rows=4,
+        columns=4,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=4,
+        viewport_columns=4,
+        flags=SemanticContentFlag.READ_ONLY,
+        primary_key=4,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1, 0, 0, 1, 4,
+                SemanticTextRole.COLUMN_HEADER, SemanticTextState(0), "Week",
+            ),
+            SemanticTextItem(
+                3, 1, 2, 1, 2,
+                SemanticTextRole.CONTENT, SemanticTextState.UNAVAILABLE, "Busy",
+            ),
+            SemanticTextItem(
+                4, 2, 1, 1, 2,
+                SemanticTextRole.CONTENT, SemanticTextState(0), "Selected",
+            ),
+        ),
+    )
+    grid = TextGridDraw(40, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 12, 8), content)
+    _, result = _render(pygame, _plane(_region(grid, cols=12, rows=8)), size=(120, 80))
+
+    target = _resolve(result, 35, 43)
+    assert isinstance(target, TextHitTarget)
+    assert target.kind is ControlKind.TEXT_GRID
+    assert target.position_at(35, 43) == TextPosition(4, 0)
+    assert target.position_at(65, 43) == TextPosition(4, 0)
+    assert target.position_at(65, 23) is None  # unavailable
+    assert target.position_at(5, 3) is None  # header
+    assert target.position_at(5, 65) is None  # no item
+
+
+def test_renderer_laid_out_controls_are_surfaces_that_swallow_raw_points():
+    pygame = pytest.importorskip("pygame")
+    tabset = TabSetDraw(
+        50,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        ObjectBounds(0, 6, 30, 2),
+        (TabDraw(51, VISIBLE | ENABLED | ControlState.SELECTED, 0, "Pad", ""),),
+    )
+    plane = _plane(_region(_menu_bar(bounds=ObjectBounds(0, 0, 30, 2)), tabset))
+    _, result = _render(pygame, plane)
+
+    surface_ids = [
+        entry.control_id
+        for entry in result.hit_entries
+        if isinstance(entry, ControlSurface)
+    ]
+    # The menu bar, its open File popup, and the tabset are all surfaces.
+    assert 1 in surface_ids and 2 in surface_ids and 50 in surface_ids
+    # A surface precedes its own targets, so targets still win.
+    bar_surface = next(
+        entry for entry in result.hit_entries
+        if isinstance(entry, ControlSurface) and entry.control_id == 1
+    )
+    file_title = _target(result, 2)
+    assert result.hit_entries.index(bar_surface) < result.hit_entries.index(file_title)
+    title_point = (file_title.rect.left + 1, file_title.rect.top + 1)
+    assert _resolve(result, *title_point) == file_title
+
+    # Empty menu bar and tab strip pixels are laid out by the renderer, so they
+    # never become raw cells; plain region pixels do.
+    assert _resolve(result, 295, 5) is None
+    tab = _target(result, 51)
+    assert _resolve(result, tab.rect.right + 5, tab.rect.top + 1) is None
+    assert _resolve(result, 295, 195) == ResidualPoint(29, 19)

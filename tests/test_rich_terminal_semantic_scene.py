@@ -498,6 +498,139 @@ def test_text_content_replacement_requires_a_newer_content_revision() -> None:
     assert hidden.owners[owner.owner_id].controls[1].content == newer
 
 
+def _text_grid(owner) -> ControlDefinition:
+    content = SemanticTextContent(
+        9,
+        2,
+        2,
+        0,
+        0,
+        2,
+        2,
+        SemanticContentFlag.READ_ONLY,
+        2,
+        0,
+        0,
+        0,
+        (
+            SemanticTextItem(
+                1, 0, 0, 1, 2,
+                SemanticTextRole.COLUMN_HEADER,
+                SemanticTextState(0),
+                "Mo Tu",
+            ),
+            SemanticTextItem(
+                2, 1, 0, 1, 1,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                "1",
+            ),
+            SemanticTextItem(
+                3, 1, 1, 1, 1,
+                SemanticTextRole.CONTENT,
+                SemanticTextState.UNAVAILABLE,
+                "2",
+            ),
+        ),
+    )
+    return ControlDefinition(
+        owner,
+        1,
+        ControlKind.TEXT_GRID,
+        ControlState.VISIBLE | ControlState.ENABLED,
+        20,
+        1,
+        0,
+        0,
+        FULL_BOUNDS,
+        "",
+        "",
+        content,
+    )
+
+
+def _revealed(control_factory):
+    clock, _, owner, scene = _domain(control_collections=True)
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    scene.define_control(control_factory(owner))
+    _install(clock, scene, CommitDisposition.COMMIT)
+    _begin(clock, scene, 3, RetainedMode.REPLACE_CONTINUE)
+    _install(clock, scene, CommitDisposition.COMMIT_AND_REVEAL)
+    return clock, owner, scene
+
+
+def _position(scene, owner, **changes):
+    values = {
+        "grid_allowed": True,
+        "content_revision": 7,
+        "item_key": 2,
+        "scalar_offset": 6,
+    }
+    values.update(changes)
+    return scene.require_text_position(owner, 1, **values)
+
+
+def test_text_area_positions_name_exact_carried_content() -> None:
+    _, owner, scene = _revealed(lambda owner: _text_area(owner, _text_area_content(7)))
+
+    assert _position(scene, owner).text == "second"
+    assert _position(scene, owner, grid_allowed=False, scalar_offset=0).text == "second"
+    assert scene.require_text_control(owner, 1, grid_allowed=False).kind is (
+        ControlKind.TEXT_AREA
+    )
+
+    for changes, code, match in (
+        ({"scalar_offset": 7}, SceneErrorCode.BOUNDS, "outside its row"),
+        ({"content_revision": 6}, SceneErrorCode.STATE, "superseded"),
+        ({"item_key": 3}, SceneErrorCode.MISSING_ID, "not carried"),
+    ):
+        with pytest.raises(SceneModelError, match=match) as refused:
+            _position(scene, owner, **changes)
+        assert refused.value.code is code
+
+
+def test_text_positions_require_a_revealed_enabled_text_root() -> None:
+    clock, _, owner, scene = _domain(control_collections=True)
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    scene.define_control(_text_area(owner, _text_area_content(7)))
+    _install(clock, scene, CommitDisposition.COMMIT)
+    with pytest.raises(SceneModelError, match="not visible"):
+        _position(scene, owner)
+
+    disabled = replace(
+        _text_area(owner, _text_area_content(7)),
+        state=ControlState.VISIBLE,
+    )
+    _, owner, hidden_scene = _revealed(lambda _owner: replace(disabled, owner=_owner))
+    with pytest.raises(SceneModelError, match="hidden or disabled"):
+        _position(hidden_scene, owner)
+    with pytest.raises(SceneModelError, match="hidden or disabled"):
+        hidden_scene.require_text_control(owner, 1, grid_allowed=True)
+
+
+def test_grid_positions_name_only_selectable_content_items() -> None:
+    _, owner, scene = _revealed(_text_grid)
+    grid = {"content_revision": 9, "scalar_offset": 0}
+
+    assert _position(scene, owner, **grid).text == "1"
+    assert scene.require_text_control(owner, 1, grid_allowed=True).kind is (
+        ControlKind.TEXT_GRID
+    )
+    with pytest.raises(SceneModelError, match="does not accept"):
+        scene.require_text_control(owner, 1, grid_allowed=False)
+    with pytest.raises(SceneModelError, match="does not accept"):
+        _position(scene, owner, grid_allowed=False, **grid)
+    for changes in (
+        {"scalar_offset": 1},
+        {"item_key": 1},
+        {"item_key": 3},
+    ):
+        with pytest.raises(SceneModelError, match="selectable content item"):
+            _position(scene, owner, **{**grid, **changes})
+
+
 def test_control_values_enforce_renderer_owned_child_geometry_and_clean_text():
     owner = OwnerIdentity(SESSION_ID, EPOCH, 7, 2)
     with pytest.raises(ValueError, match="renderer-owned geometry"):
