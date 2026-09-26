@@ -7,7 +7,7 @@ elements are versioned there
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
-**Isolated worktree:** `.worktrees/megapad-concurrency`
+**Isolated worktree:** `.worktrees/megapad-concurrency` (retired; the concurrency work is merged into `main`)
 
 **Phase 3 handoff:** `docs/megapad-concurrency-phase3-handoff.md`
 

@@ -6,7 +6,7 @@
 
 **Branch:** `feature/megapad-deterministic-concurrency`
 
-**Isolated worktree:** `.worktrees/megapad-concurrency`
+**Isolated worktree:** `.worktrees/megapad-concurrency` (retired; the concurrency work is merged into `main`)
 
 **Phase 4 base:** `7aebccf395a430b9af9ee1a5e34d5b91d47ee8e3`
 
