@@ -42,9 +42,9 @@ SUBMITTED_LINES = 6_681
 SUBMITTED_PAYLOAD_BYTES = 215_630
 PACKED_KDOS_BYTES = 222_311
 MAX_SUBMITTED_LINE = 99
-CORE_WORDS = 319
+CORE_WORDS = 375
 KDOS_WORDS = 1_460
-UNIQUE_BINDINGS = 1_772
+UNIQUE_BINDINGS = 1_828
 
 STARTUP_BANNER = (
     b"\r\n"
@@ -268,6 +268,17 @@ def run_benchmark(args: argparse.Namespace) -> dict:
         runtime_construction_elapsed_s = (
             time.perf_counter() - runtime_construction_started
         )
+        # MEGAFORTH_EXECUTOR selects the executor, so record the one that ran.
+        executor = {"backend": runtime.execution_backend, "extension": None}
+        if runtime.execution_backend == "native":
+            import _megaforth_native
+
+            extension_path = Path(_megaforth_native.__file__).resolve()
+            executor["extension"] = {
+                "path": str(extension_path),
+                "sha256": bios_bench._sha256_file(extension_path),
+                "bytes": extension_path.stat().st_size,
+            }
         backend_preparation_started = time.perf_counter()
         core_words = runtime.dictionary.words
         checked_evaluator = runtime.find("EVALUATE-CHECKED")
@@ -402,6 +413,7 @@ def run_benchmark(args: argparse.Namespace) -> dict:
                 "schema_version": SCHEMA_VERSION,
                 "repository": bios_bench._repository_provenance(ROOT),
             },
+            "executor": executor,
             "host": {
                 "platform": platform.platform(),
                 "python": platform.python_version(),

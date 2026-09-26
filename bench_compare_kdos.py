@@ -425,6 +425,50 @@ def _validate_child_report(
             "bytes": accelerator_bytes,
         }
 
+    executor = None
+    if backend == SIMULATOR:
+        executor_report = _require_mapping(
+            report.get("executor"), label=f"{label} executor"
+        )
+        executor_backend = executor_report.get("backend")
+        if executor_backend not in ("python", "native"):
+            raise ComparisonError(f"{label} executor backend is not reported")
+        extension = None
+        if executor_backend == "native":
+            extension_report = _require_mapping(
+                executor_report.get("extension"),
+                label=f"{label} native extension",
+            )
+            extension_path = extension_report.get("path")
+            if not isinstance(extension_path, str):
+                raise ComparisonError(f"{label} native extension path is missing")
+            resolved_extension = Path(extension_path).resolve()
+            if not resolved_extension.is_file() or not _path_within(
+                resolved_extension, runtime_root
+            ):
+                raise ComparisonError(
+                    f"{label} native extension is unavailable or outside the "
+                    "runtime root"
+                )
+            extension_sha256 = _sha256_file(resolved_extension)
+            if extension_report.get("sha256") != extension_sha256:
+                raise ComparisonError(
+                    f"{label} native extension hash does not match its file"
+                )
+            extension_bytes = resolved_extension.stat().st_size
+            if extension_report.get("bytes") != extension_bytes:
+                raise ComparisonError(
+                    f"{label} native extension size does not match its file"
+                )
+            extension = {
+                "path": str(resolved_extension),
+                "sha256": extension_sha256,
+                "bytes": extension_bytes,
+            }
+        elif executor_report.get("extension") is not None:
+            raise ComparisonError(f"{label} python executor reports an extension")
+        executor = {"backend": executor_backend, "extension": extension}
+
     return {
         "backend": backend,
         "wall_time_s": wall_time_s,
@@ -440,6 +484,7 @@ def _validate_child_report(
         "configuration": portable_configuration,
         "measurement_semantics": measurement_semantics,
         "accelerator": accelerator,
+        "executor": executor,
     }
 
 
@@ -581,6 +626,14 @@ def _validate_cross_sample_provenance(
             item["accelerator"]
             for item in qualified
             if item["backend"] == EMULATOR
+        ],
+    )
+    _assert_same(
+        "simulator executor provenance",
+        [
+            item["executor"]
+            for item in qualified
+            if item["backend"] == SIMULATOR
         ],
     )
     return {
@@ -813,6 +866,7 @@ def _run_comparison(args: argparse.Namespace, reports_dir: Path) -> dict[str, An
             "harness": item["harness"],
             "measurement_semantics": item["measurement_semantics"],
             "accelerator": item["accelerator"],
+            "executor": item["executor"],
         }
 
     return {

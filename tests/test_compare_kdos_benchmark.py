@@ -196,3 +196,60 @@ def test_child_report_validation_requires_exact_harness_and_clean_provenance(
             runtime_root=root.resolve(),
             harness=harness.resolve(),
         )
+
+
+def _simulator_child_report(root: Path, harness: Path) -> dict:
+    report = _child_report(root, harness)
+    report.pop("accelerator")
+    schema = comparison.EXPECTED_SCHEMAS[comparison.SIMULATOR]
+    version = comparison.EXPECTED_SCHEMA_VERSIONS[comparison.SIMULATOR]
+    report["schema"] = schema
+    report["schema_version"] = version
+    report["harness"]["schema"] = schema
+    report["harness"]["schema_version"] = version
+    report["executor"] = {"backend": "python", "extension": None}
+    return report
+
+
+def test_simulator_report_binds_the_executor_that_ran(tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    harness = root / "bench_simulator_kdos_load.py"
+    harness.write_text("# deterministic harness\n", encoding="utf-8")
+    report = _simulator_child_report(root, harness)
+
+    def validate() -> dict:
+        return comparison._validate_child_report(
+            report,
+            backend=comparison.SIMULATOR,
+            runtime_root=root.resolve(),
+            harness=harness.resolve(),
+        )
+
+    assert validate()["executor"] == {"backend": "python", "extension": None}
+
+    extension = root / "_megaforth_native-test.so"
+    extension.write_bytes(b"deterministic native executor")
+    report["executor"] = {
+        "backend": "native",
+        "extension": {
+            "path": str(extension),
+            "sha256": hashlib.sha256(extension.read_bytes()).hexdigest(),
+            "bytes": extension.stat().st_size,
+        },
+    }
+    assert validate()["executor"]["extension"]["bytes"] == len(
+        b"deterministic native executor"
+    )
+
+    report["executor"]["extension"]["sha256"] = "0" * 64
+    with pytest.raises(comparison.ComparisonError, match="native extension hash"):
+        validate()
+
+    report["executor"] = {"backend": "python", "extension": {"path": str(extension)}}
+    with pytest.raises(comparison.ComparisonError, match="reports an extension"):
+        validate()
+
+    del report["executor"]
+    with pytest.raises(comparison.ComparisonError, match="executor"):
+        validate()
