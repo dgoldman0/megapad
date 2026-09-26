@@ -1457,6 +1457,85 @@ def draw_flip_and_present(
     )
 
 
+class _RedrawGate:
+    """Decide when the viewer must compose, and when it must flip at all.
+
+    A pending display offer always composes, because only a physical flip may
+    acknowledge it.  Otherwise the terminal frame is recomposed only when an
+    input it is drawn from changes or the window system asks for it, and the
+    window is flipped only when that frame or the status line changes.  An
+    unchanged window is neither recomposed nor flipped.
+    """
+
+    def __init__(self) -> None:
+        self._plane = None
+        self._frame_key = None
+        self._status_key = None
+        self._forced = True
+
+    def force(self) -> None:
+        self._forced = True
+
+    def decide(
+        self, plane, frame_key, status_key, *, pending_offer: bool
+    ) -> tuple[bool, bool]:
+        """Return (compose, flip) for this loop iteration.
+
+        PLANE is compared by identity; holding it keeps a replacement plane
+        from ever passing for the old one.
+        """
+
+        compose = (
+            pending_offer
+            or self._forced
+            or plane is not self._plane
+            or frame_key != self._frame_key
+        )
+        flip = compose or status_key != self._status_key
+        self._forced = False
+        self._plane = plane
+        self._frame_key = frame_key
+        self._status_key = status_key
+        return compose, flip
+
+
+# Window-system events after which SDL may have discarded window contents.
+_WINDOW_REPAINT_EVENTS = (
+    "VIDEOEXPOSE",
+    "VIDEORESIZE",
+    "WINDOWEXPOSED",
+    "WINDOWSHOWN",
+    "WINDOWRESTORED",
+    "WINDOWMAXIMIZED",
+    "WINDOWRESIZED",
+    "WINDOWSIZECHANGED",
+)
+
+
+def _status_line(status: dict, keyboard, display_holder: bool):
+    """The viewer status bar's (text, colour)."""
+
+    if (
+        status["state"] in ("lost", "terminal_failed", "error")
+        or keyboard.last_error is not None
+    ):
+        state_color = (245, 95, 95)
+    elif status["state"] in ("running", "idle"):
+        state_color = (100, 220, 140)
+    else:
+        state_color = (245, 190, 80)
+    status_text = (
+        f"{status['state'].upper()}  steps {status['steps']:,}  "
+        f"rev {status['revision']}  "
+        f"clients {status.get('clients', 0)}"
+    )
+    if not display_holder:
+        status_text += "  VIEW ONLY"
+    if keyboard.last_error is not None:
+        status_text += f"  {keyboard.last_error}"
+    return status_text, state_color
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Watch a shared MegaPad session")
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
@@ -1635,6 +1714,12 @@ def main() -> int:
     keys_down: set[int] = set()
     viewer_started = time.monotonic()
     last_claim_attempt = viewer_started
+    redraw = _RedrawGate()
+    repaint_events = {
+        getattr(pygame, name) for name in _WINDOW_REPAINT_EVENTS
+        if hasattr(pygame, name)
+    }
+    composed_frame = None
 
     try:
         while running:
@@ -1715,6 +1800,8 @@ def main() -> int:
                     if event.type == getattr(pygame, "WINDOWFOCUSLOST", -1):
                         keys_down.clear()
                         guest_keyboard.reset()
+                elif event.type in repaint_events:
+                    redraw.force()
 
             if not running:
                 break
@@ -1756,6 +1843,7 @@ def main() -> int:
                 )
                 if accept_screen_update(update):
                     screen = make_window()
+                    redraw.force()
                 screen_refresh_required = False
                 last_poll = now
 
@@ -1814,49 +1902,57 @@ def main() -> int:
             else:
                 resource_surfaces = resource_cache.acknowledged_surfaces
 
+            status_text, state_color = _status_line(
+                status, guest_keyboard, display_holder
+            )
+            with terminal._lock:
+                cursor_state = (
+                    cursor_blink,
+                    terminal.cx,
+                    terminal.cy,
+                ) if terminal.cursor_visible else None
+            compose, flip = redraw.decide(
+                frame_plane,
+                (
+                    revision,
+                    semantic_pointer.hovered,
+                    semantic_pointer.pressed,
+                    cursor_state,
+                    frozenset(resource_surfaces.items()),
+                    screen.get_size(),
+                ),
+                (status_text, state_color),
+                pending_offer=frame_offer is not None,
+            )
+            if composed_frame is None:
+                compose = flip = True
+
             def draw_frame() -> None:
-                nonlocal rendered_hit_entries
+                nonlocal rendered_hit_entries, composed_frame
                 screen.fill((0, 0, 0))
-                frame_result = compose_terminal_frame_result(
-                    pygame,
-                    terminal,
-                    font,
-                    cell_w,
-                    cell_h,
-                    retained_plane=frame_plane,
-                    show_cursor=cursor_blink,
-                    glyph_cache=glyph_cache,
-                    control_font=status_font,
-                    hovered=semantic_pointer.hovered,
-                    pressed=semantic_pointer.pressed,
-                    resource_surfaces=resource_surfaces,
-                )
-                rendered_hit_entries = frame_result.hit_entries
-                screen.blit(frame_result.surface, (0, 0))
+                if compose:
+                    composed_frame = compose_terminal_frame_result(
+                        pygame,
+                        terminal,
+                        font,
+                        cell_w,
+                        cell_h,
+                        retained_plane=frame_plane,
+                        show_cursor=cursor_blink,
+                        glyph_cache=glyph_cache,
+                        control_font=status_font,
+                        hovered=semantic_pointer.hovered,
+                        pressed=semantic_pointer.pressed,
+                        resource_surfaces=resource_surfaces,
+                    )
+                    rendered_hit_entries = composed_frame.hit_entries
+                screen.blit(composed_frame.surface, (0, 0))
                 y = terminal.rows * cell_h
                 pygame.draw.rect(
                     screen,
                     (28, 30, 34),
                     (0, y, screen.get_width(), status_h),
                 )
-                if (
-                    status["state"] in ("lost", "terminal_failed", "error")
-                    or guest_keyboard.last_error is not None
-                ):
-                    state_color = (245, 95, 95)
-                elif status["state"] in ("running", "idle"):
-                    state_color = (100, 220, 140)
-                else:
-                    state_color = (245, 190, 80)
-                status_text = (
-                    f"{status['state'].upper()}  steps {status['steps']:,}  "
-                    f"rev {status['revision']}  "
-                    f"clients {status.get('clients', 0)}"
-                )
-                if not display_holder:
-                    status_text += "  VIEW ONLY"
-                if guest_keyboard.last_error is not None:
-                    status_text += f"  {guest_keyboard.last_error}"
                 label = status_font.render(status_text, True, state_color)
                 screen.blit(label, (8, y + (status_h - label.get_height()) // 2))
                 if frame_offer is not None:
@@ -1870,7 +1966,7 @@ def main() -> int:
                 draw_frame,
                 offer=frame_offer,
                 generation=frame_generation,
-                active=running,
+                active=running and flip,
             )
             if frame_offer is not None:
                 accepted_revision = display_state.finish_presentation(presentation)

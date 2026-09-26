@@ -35,7 +35,9 @@ from session_viewer import (
     _accepted_presentation_revision,
     _configure_keyboard,
     _pygame_guest_key,
+    _RedrawGate,
     _retry_display_claim,
+    _status_line,
     compose_terminal_frame,
     draw_flip_and_present,
 )
@@ -1307,3 +1309,121 @@ def test_pygame_initialization_failure_closes_client_and_pygame(monkeypatch):
     assert len(clients) == 1
     assert clients[0].closed
     assert calls == ["display.init", "font.init", "pygame.quit"]
+
+
+def test_redraw_gate_composes_on_frame_inputs_and_flips_on_status():
+    gate = _RedrawGate()
+    plane = object()
+    frame = (0, None, None, None, frozenset(), (4, 4))
+    assert gate.decide(plane, frame, ("IDLE", 1), pending_offer=False) == (True, True)
+    assert gate.decide(plane, frame, ("IDLE", 1), pending_offer=False) == (False, False)
+    # Only the status line changed: reuse the composed frame, but flip.
+    assert gate.decide(plane, frame, ("IDLE", 2), pending_offer=False) == (False, True)
+    moved = (0, None, None, (True, 1, 0), frozenset(), (4, 4))
+    assert gate.decide(plane, moved, ("IDLE", 2), pending_offer=False) == (True, True)
+    # A replacement plane composes even when it is equal in value.
+    assert gate.decide(object(), moved, ("IDLE", 2), pending_offer=False) == (True, True)
+    replacement = object()
+    gate.decide(replacement, moved, ("IDLE", 2), pending_offer=False)
+    # Only a physical flip may acknowledge a pending offer.
+    assert gate.decide(
+        replacement, moved, ("IDLE", 2), pending_offer=True
+    ) == (True, True)
+    assert gate.decide(
+        replacement, moved, ("IDLE", 2), pending_offer=False
+    ) == (False, False)
+    gate.force()
+    assert gate.decide(
+        replacement, moved, ("IDLE", 2), pending_offer=False
+    ) == (True, True)
+
+
+def test_status_line_reports_state_errors_and_view_only():
+    keyboard = SimpleNamespace(last_error=None)
+    status = {"state": "idle", "steps": 1234567, "revision": 5, "clients": 2}
+    assert _status_line(status, keyboard, True) == (
+        "IDLE  steps 1,234,567  rev 5  clients 2",
+        (100, 220, 140),
+    )
+    keyboard.last_error = "stale"
+    text, color = _status_line(dict(status, state="paused"), keyboard, False)
+    assert text.endswith("  VIEW ONLY  stale")
+    assert color == (245, 95, 95)
+
+
+def test_idle_viewer_neither_recomposes_nor_flips_an_unchanged_window(monkeypatch):
+    pygame = pytest.importorskip("pygame")
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+    snapshot = TerminalSnapshot(
+        cols=4,
+        rows=2,
+        cells=tuple(
+            tuple(TerminalCell("A", (200, 200, 200), (0, 0, 0), 0) for _ in range(4))
+            for _ in range(2)
+        ),
+        cursor_col=0,
+        cursor_row=0,
+        cursor_visible=False,
+        alternate_screen=False,
+    )
+    screens = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def connect(self):
+            pass
+
+        def request(self, method, **params):
+            if method == "claim_display":
+                return {"status": "claimed", "claimed": True}
+            if method == "status":
+                return {
+                    "generation": 1,
+                    "state": "idle",
+                    "steps": 7,
+                    "revision": 0,
+                    "rich_terminal": {"display_required": False},
+                }
+            if method == "screen":
+                screens.append(params)
+                if len(screens) == 1:
+                    return {
+                        "changed": True,
+                        "generation": 1,
+                        "revision": 0,
+                        "snapshot": snapshot_to_wire(snapshot),
+                    }
+                return {"changed": False, "generation": 1, "revision": 0}
+            raise AssertionError(method)
+
+        def close(self):
+            pass
+
+    compositions = []
+    flips = []
+    compose = session_viewer.compose_terminal_frame_result
+    flip = pygame.display.flip
+
+    def counting_compose(*args, **kwargs):
+        compositions.append(True)
+        return compose(*args, **kwargs)
+
+    def counting_flip():
+        flips.append(True)
+        return flip()
+
+    monkeypatch.setattr(session_viewer, "SessionClient", Client)
+    monkeypatch.setattr(session_viewer, "compose_terminal_frame_result", counting_compose)
+    monkeypatch.setattr(pygame.display, "flip", counting_flip)
+    monkeypatch.setattr(
+        sys, "argv", ["session_viewer.py", "--exit-after", "0.6", "--fps", "30"]
+    )
+
+    assert session_viewer.main() == 0
+    # The loop kept polling at its frame rate, but the unchanged window was
+    # composed and flipped once instead of once per iteration.
+    assert len(screens) >= 5
+    assert len(compositions) == 1
+    assert len(flips) == 1
