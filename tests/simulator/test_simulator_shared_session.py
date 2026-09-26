@@ -6,7 +6,12 @@ import pytest
 
 from shared_session import SessionServer, SharedMachine, snapshot_from_wire
 from simulator.runtime import MegaForthRuntime
-from simulator.session import SimulatorMachineSession, SimulatorSharedMachine
+from simulator.session import (
+    DEFAULT_SEMANTIC_QUANTUM_STEPS,
+    SEMANTIC_QUANTUM_ENVIRONMENT,
+    SimulatorMachineSession,
+    SimulatorSharedMachine,
+)
 from tests.simulator.test_kdos_exceptions import _load_exceptions
 from tests.simulator.test_simulator_session import (
     SESSION_ROOT_SOURCE,
@@ -116,6 +121,40 @@ def test_facade_reports_semantic_work_without_hardware_statistics() -> None:
         assert machine.last_error is not None
     finally:
         machine.stop()
+
+
+def test_semantic_quantum_prefers_caller_then_environment_then_default(
+    monkeypatch,
+) -> None:
+    def idle_session(**options) -> SimulatorMachineSession:
+        runtime = MegaForthRuntime()
+        runtime.evaluate(IDLE_ROOT_SOURCE, source_name="simulator-idle-root.f")
+        return SimulatorMachineSession(runtime, "SIM-IDLE-ROOT", **options)
+
+    monkeypatch.delenv(SEMANTIC_QUANTUM_ENVIRONMENT, raising=False)
+    with idle_session() as session:
+        assert session.semantic_quantum_steps == DEFAULT_SEMANTIC_QUANTUM_STEPS
+        assert session.backend._semantic_quantum_steps == (
+            DEFAULT_SEMANTIC_QUANTUM_STEPS
+        )
+
+    monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, "40000")
+    with idle_session() as session:
+        assert session.semantic_quantum_steps == 40_000
+        assert session.backend._semantic_quantum_steps == 40_000
+
+    machine = SimulatorSharedMachine(idle_session(semantic_quantum_steps=96))
+    try:
+        assert machine.semantic_session.backend._semantic_quantum_steps == 96
+        semantic = machine.status()["semantic_execution"]
+        assert semantic["quantum_steps"] == 96
+    finally:
+        machine.stop()
+
+    for invalid in ("0", "-5", "fast", ""):
+        monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, invalid)
+        with pytest.raises(ValueError, match=SEMANTIC_QUANTUM_ENVIRONMENT):
+            idle_session()
 
 
 def test_forth_diagnostics_resolve_newest_created_binding_and_live_value() -> None:

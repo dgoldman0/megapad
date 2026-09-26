@@ -105,10 +105,12 @@ MEGAFORTH_EXECUTOR=native python3 megapad/simulator_server.py \
 
 It takes `--storage` (required), `--socket`, the memory sizes (`--ram-kib`,
 `--ext-mem-mib`, `--vram-mib`), and the geometry (`--cols`, `--rows`). It also
-takes `--semantic-step-budget`, `--paused`, and the complete caller-owned
-`--rich-terminal-policy` and `--retained-terminal-policy` JSON. It has no NIC
-or audible audio option. `MEGAFORTH_EXECUTOR` selects the executor: `python`
-(the default reference), `native`, or `auto`. The viewer and `session_ctl.py`
+takes `--semantic-step-budget`, `--semantic-quantum-steps`, `--paused`, and
+the complete caller-owned `--rich-terminal-policy` and
+`--retained-terminal-policy` JSON. It has no NIC or audible audio option.
+`MEGAFORTH_EXECUTOR` selects the executor: `python` (the default reference),
+`native`, or `auto`. `MEGAFORTH_QUANTUM_STEPS` sets the semantic steps between
+host owner boundaries when the option is absent; the default is 8,192. The viewer and `session_ctl.py`
 attach exactly as they do to the emulator owner. Akashic's
 `local_testing/akashic_tui.py serve|accept --backend simulator` builds the
 image and supplies the policies for the ordinary Desktop.

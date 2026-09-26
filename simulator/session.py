@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+import os
 import sys
 import threading
 import time
@@ -17,6 +18,32 @@ from simulator.rich_terminal_host import (
     SimulatorSessionBackend,
 )
 from simulator.runtime import CreatedDefinition, MegaForthRuntime
+
+
+# Semantic steps between host owner boundaries when neither the caller nor the
+# environment selects a quantum. Each boundary settles UART output, services
+# the terminal driver, and admits queued input.
+DEFAULT_SEMANTIC_QUANTUM_STEPS = 8_192
+SEMANTIC_QUANTUM_ENVIRONMENT = "MEGAFORTH_QUANTUM_STEPS"
+
+
+def selected_semantic_quantum_steps(value: int | None) -> int:
+    """Return the caller's quantum, else the environment's, else the default."""
+
+    if value is not None:
+        return value
+    configured = os.environ.get(SEMANTIC_QUANTUM_ENVIRONMENT)
+    if configured is None:
+        return DEFAULT_SEMANTIC_QUANTUM_STEPS
+    try:
+        steps = int(configured)
+    except ValueError:
+        steps = 0
+    if steps <= 0:
+        raise ValueError(
+            f"{SEMANTIC_QUANTUM_ENVIRONMENT} must be a positive integer"
+        )
+    return steps
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +73,7 @@ class SimulatorMachineSession(MachineSession):
         cols: int = 80,
         rows: int = 30,
         semantic_step_budget: int | None = None,
-        semantic_quantum_steps: int = 8_192,
+        semantic_quantum_steps: int | None = None,
         rich_terminal: RichTerminalSessionConfig | None = None,
     ) -> None:
         if not isinstance(runtime, MegaForthRuntime):
@@ -64,10 +91,14 @@ class SimulatorMachineSession(MachineSession):
                 ) from exc
             if semantic_step_budget <= 0:
                 raise ValueError("semantic_step_budget must be positive")
+        semantic_quantum_steps = selected_semantic_quantum_steps(
+            semantic_quantum_steps
+        )
 
         self.runtime = runtime
         self.entry = entry
         self.semantic_step_budget = semantic_step_budget
+        self._semantic_quantum_steps = semantic_quantum_steps
         self._backend: SimulatorSessionBackend | None = None
         self._booted = False
         self._dispatch_started = False
@@ -103,6 +134,10 @@ class SimulatorMachineSession(MachineSession):
         if backend is None:
             raise RuntimeError("the simulator session is closed")
         return backend
+
+    @property
+    def semantic_quantum_steps(self) -> int:
+        return self._semantic_quantum_steps
 
     @property
     def booted(self) -> bool:
@@ -421,6 +456,7 @@ class SimulatorSharedMachine(SharedMachine):
                 "backend": "simulator",
                 "semantic_execution": {
                     "backend": session.runtime.execution_backend,
+                    "quantum_steps": session.semantic_quantum_steps,
                     **session.runtime.native_execution_stats,
                 },
                 "generation": self._reset_generation,

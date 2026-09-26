@@ -6,6 +6,7 @@ import pytest
 
 from simulator.image_bootstrap import ImageBootstrapError
 from simulator.memory import AddressClass
+from simulator.session import SEMANTIC_QUANTUM_ENVIRONMENT
 from simulator_server import build_argument_parser, prepare_server
 from tests.simulator.test_image_bootstrap import _boot_image
 
@@ -22,6 +23,8 @@ def test_server_cli_builds_the_shared_semantic_facade(tmp_path, monkeypatch) -> 
     epoch_ms = 1_788_890_400_000
     monkeypatch.setattr("simulator_server.time.time_ns", lambda: epoch_ms * 1_000_000)
     monkeypatch.setattr("simulator_server.time.monotonic_ns", lambda: now_ns[0])
+    # The explicit option wins over the environment.
+    monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, "40000")
     image = tmp_path / "desktop-simulator.img"
     image.write_bytes(_boot_image())
     args = build_argument_parser().parse_args(
@@ -42,6 +45,8 @@ def test_server_cli_builds_the_shared_semantic_facade(tmp_path, monkeypatch) -> 
             "32",
             "--semantic-step-budget",
             "10000",
+            "--semantic-quantum-steps",
+            "32768",
             "--paused",
         ]
     )
@@ -63,6 +68,7 @@ def test_server_cli_builds_the_shared_semantic_facade(tmp_path, monkeypatch) -> 
         assert (session.backend.geometry.cols, session.backend.geometry.rows) == (
             96, 32
         )
+        assert session.semantic_quantum_steps == 32768
         runtime = prepared.preparation.runtime
         assert (runtime.rtc.uptime_ms, runtime.rtc.epoch_ms) == (0, epoch_ms)
         now_ns[0] += 50_000_000
@@ -112,4 +118,30 @@ def test_server_cli_rejects_emulator_only_arguments_and_missing_images(
         ["--storage", str(tmp_path / "missing.img")]
     )
     with pytest.raises(ValueError, match="storage image does not exist"):
+        prepare_server(args)
+
+
+def test_server_cli_rejects_invalid_quanta_before_preparing_the_image(
+    tmp_path, monkeypatch
+) -> None:
+    image = tmp_path / "desktop-simulator.img"
+    image.write_bytes(_boot_image())
+    parser = build_argument_parser()
+    for value in ("0", "-1", "fast"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                ["--storage", str(image), "--semantic-quantum-steps", value]
+            )
+
+    def prepare_image_bootstrap(**_options):
+        pytest.fail("an invalid quantum must fail before autoexec runs")
+
+    monkeypatch.setattr(
+        "simulator_server.prepare_image_bootstrap", prepare_image_bootstrap
+    )
+    monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, "0")
+    args = parser.parse_args(
+        ["--storage", str(image), "--socket", str(tmp_path / "simulator.sock")]
+    )
+    with pytest.raises(ValueError, match=SEMANTIC_QUANTUM_ENVIRONMENT):
         prepare_server(args)

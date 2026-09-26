@@ -18,6 +18,11 @@ from simulator.stacks import Continuation, DataStack, ReturnStack
 from simulator.timer import HostedTimerService
 
 
+# Without a host quantum, native work still returns to the same dispatcher at
+# this interval. It bounds one native entry, not a guest-visible boundary.
+UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
+
+
 class NativeExecutor:
     @classmethod
     def create(cls, runtime, *, required: bool, admit_core: bool):
@@ -223,12 +228,14 @@ class NativeExecutor:
         if not self._admitted_context(context, meter):
             return None
         # This is an internal return to the same dispatcher, never a guest
-        # watchdog or a new host-service/IDL boundary.
-        allowance = 8192
+        # watchdog or a new host-service/IDL boundary. A host quantum already
+        # bounds the interval, so native work may run up to that boundary.
+        allowance = (
+            UNQUANTIZED_NATIVE_INTERVAL_STEPS if quantum_limit is None
+            else quantum_limit - meter.steps
+        )
         if meter.budget is not None:
             allowance = min(allowance, meter.budget - meter.steps)
-        if quantum_limit is not None:
-            allowance = min(allowance, quantum_limit - meter.steps)
         if allowance <= 0:
             return None
         if context.returns._continuation_cookie > (1 << 64) - 1 - 2 * allowance:

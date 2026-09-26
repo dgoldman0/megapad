@@ -945,6 +945,31 @@ def test_nested_returns_preserve_slots_on_both_sides_of_native_entry(quantum):
     assert traces[0] == traces[1]
 
 
+def test_host_quantum_bounds_native_intervals_above_the_unquantized_interval():
+    from simulator.native_execution import UNQUANTIZED_NATIVE_INTERVAL_STEPS
+    from simulator.runtime import YieldedExecution
+
+    # About 54,000 steps span two yields and completion. Yield points match
+    # the reference, and one native entry covers each whole quantum.
+    quantum = 3 * UNQUANTIZED_NATIVE_INTERVAL_STEPS
+    traces = []
+    for runtime in _runtimes(b": RUN 9000 BEGIN DUP WHILE 1- REPEAT DROP ;"):
+        context = runtime.main_context
+        before = runtime.native_execution_stats["entries"]
+        result = runtime.run_until_blocked("RUN", quantum_steps=quantum)
+        trace = []
+        while isinstance(result, YieldedExecution):
+            trace.append((result.semantic_steps, context.data.snapshot()))
+            result = runtime.resume_yielded(result.suspension)
+        trace.append((result.semantic_steps, context.data.snapshot()))
+        traces.append((trace, runtime.native_execution_stats["entries"] - before))
+    (reference, _), (native, entries) = traces
+    assert native == reference
+    assert len(reference) == 3
+    assert reference[-1][1] == ()
+    assert entries == len(reference)
+
+
 @pytest.mark.parametrize("budget", range(1, 14))
 def test_dynamic_colon_calls_preserve_each_budget_and_cookie_boundary(budget):
     runtimes = _runtimes(b": ADD2 2 + ; : RUN ['] ADD2 EXECUTE 3 * ;")

@@ -254,6 +254,12 @@ and fails clearly when it is missing. `auto` uses the extension when installed
 and otherwise uses Python. Runtime status exposes the actual executor and
 native work counters; these are separate from semantic diagnostic counters.
 
+A native entry runs until the next Python-owned operation, the step budget, or
+the dispatcher's host quantum boundary, whichever comes first. Without a host
+quantum (for example, inside nested dispatch), each entry is limited to the
+8,192-step `UNQUANTIZED_NATIVE_INTERVAL_STEPS`. These are internal returns to
+the same dispatcher, not guest-visible boundaries.
+
 No Forth source cache, terminal-specific replacement, guest timing weakening,
 new applet path, or enlarged watchdog is part of this work.
 

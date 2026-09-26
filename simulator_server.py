@@ -16,7 +16,13 @@ from simulator.image_bootstrap import (
     prepare_image_bootstrap,
 )
 from simulator.platform import create_one_core_address_space
-from simulator.session import SimulatorMachineSession, SimulatorSharedMachine
+from simulator.session import (
+    DEFAULT_SEMANTIC_QUANTUM_STEPS,
+    SEMANTIC_QUANTUM_ENVIRONMENT,
+    SimulatorMachineSession,
+    SimulatorSharedMachine,
+    selected_semantic_quantum_steps,
+)
 from simulator.storage import HostedStorageService
 
 
@@ -69,6 +75,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="optional cumulative budget for autoexec preparation and live dispatch",
     )
     parser.add_argument(
+        "--semantic-quantum-steps",
+        type=_positive_int,
+        help=(
+            "semantic steps between host owner boundaries; defaults to "
+            f"{SEMANTIC_QUANTUM_ENVIRONMENT}, else "
+            f"{DEFAULT_SEMANTIC_QUANTUM_STEPS}"
+        ),
+    )
+    parser.add_argument(
         "--rich-terminal-policy",
         type=_rich_terminal_policy,
         metavar="JSON",
@@ -103,6 +118,9 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
     storage_path = args.storage.resolve()
     if not storage_path.is_file():
         raise ValueError(f"storage image does not exist: {storage_path}")
+    # Resolve the environment before image preparation so a bad value fails
+    # without first running autoexec.
+    quantum_steps = selected_semantic_quantum_steps(args.semantic_quantum_steps)
 
     rich_terminal = None
     if args.rich_terminal_policy is not None:
@@ -138,6 +156,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
             if args.semantic_step_budget is None
             else args.semantic_step_budget - preparation.autoexec_semantic_steps
         ),
+        semantic_quantum_steps=quantum_steps,
         rich_terminal=rich_terminal,
     )
     machine = SimulatorSharedMachine(session)
@@ -183,6 +202,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             f"[shared] execution: {preparation.runtime.execution_backend} semantic",
+            flush=True,
+        )
+        print(
+            "[shared] quantum: "
+            f"{prepared.machine.semantic_session.semantic_quantum_steps} "
+            "semantic steps",
             flush=True,
         )
         print(

@@ -503,10 +503,14 @@ accelerators finish before this boundary, so the quantum is not a hard
 wall-time deadline. This does not change `YIELD?`, task scheduling, or the
 ordinary guest source.
 
-`SimulatorMachineSession` selects a configurable 8,192-step host quantum. It
-settles UART output, services the terminal driver, and admits queued input at
-each boundary, including while ordinary terminal negotiation or UI polling
-remains runnable. Retained-publication backpressure still prevents further
+`SimulatorMachineSession` selects a configurable host quantum. The
+constructor's `semantic_quantum_steps` wins; otherwise the
+`MEGAFORTH_QUANTUM_STEPS` environment variable applies, and otherwise the
+8,192-step default. `simulator_server.py --semantic-quantum-steps` passes an
+explicit value, and server status reports the selected value as
+`semantic_execution.quantum_steps`. The session settles UART output, services
+the terminal driver, and admits queued input at each boundary, including while
+ordinary terminal negotiation or UI polling remains runnable. Retained-publication backpressure still prevents further
 guest execution. The shared owner releases its lock between these boundaries
 so presentation, status, and input use the existing session authority.
 
