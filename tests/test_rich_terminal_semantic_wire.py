@@ -59,7 +59,7 @@ def _control_caps(*, features=None, max_objects: int = 8) -> RetainedCaps:
 
 def _control_formats(*, total_utf8_bytes: int = 1024) -> RetainedFormats:
     return RetainedFormats(
-        1,
+        2,
         1,
         0,
         0,
