@@ -269,10 +269,11 @@ Advertising a payload maximum that cannot be used in one valid transaction is
 inconsistent discovery.
 
 A PRESENT CELL_REPLACE with RET_NONE at geometry `(cols,rows)` requires exact
-checked bytes `216 + rows * (52 + 8 * cols)`. Mixed retained operations add
-their complete `40 + payload_length` frame bytes to that baseline. RETAINED-1
-discovery is valid only if the
-current geometry fits `max_retained_transaction_bytes`; the terminal must also
+checked bytes `216 + rows * (52 + 8 * cols)` plus four bytes per cluster word
+(`APT-1-WIRE.md` Section 9). Mixed retained operations add their complete
+`40 + payload_length` frame bytes to that baseline. RETAINED-1 discovery is
+valid only if the cluster-free baseline at the current geometry fits
+`max_retained_transaction_bytes`; the terminal must also
 reject/defer any later RESIZE before publication unless the requested geometry
 fits that maximum, the base transaction maximum, payload bounds, and available
 credit. It may not publish an accepted resize that can be rebuilt only by the
@@ -463,8 +464,10 @@ NONE, then exactly `retained_operation_count` retained mutation frames, then
 PRESENT_COMMIT. CELL_DELTA spans use the existing payload and scalar rules.
 CELL_REPLACE uses only the canonical full-width row spans above; alternative
 gapless splitting is invalid. With RET_NONE its complete transaction byte count
-is exactly `216 + rows * (52 + 8 * cols)`; a mixed transaction adds every
-retained operation's complete frame bytes. No other frame may intervene. Exact
+is exactly `216 + rows * (52 + 8 * cols)` plus four bytes per cluster word; a
+mixed transaction adds every retained operation's complete frame bytes. A
+CELL_DELTA or CELL_REPLACE body whose cluster tails would not fit is sent with
+its cluster cells degraded, as `APT-1-WIRE.md` Section 11.1 requires. No other frame may intervene. Exact
 count, cell coverage, operation, byte, reference, quota, and graph validation
 occurs before atomic commit.
 
@@ -927,8 +930,9 @@ bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
 The checked sum `80 + label_bytes + shortcut_bytes + content_bytes` is the
 exact payload length and must fit the negotiated inbound payload maximum. The
 label and shortcut are well-formed UTF-8 scalar text and contain no C0 control
-scalar or DEL. There is no control-specific label, shortcut, content-item, or
-payload capacity. The complete variable record must fit this frame and the
+scalar or DEL. They are logical text: the renderer lays each one out as one
+AUTO paragraph under `APT-1-TEXT.md` Section 10. There is no control-specific
+label, shortcut, content-item, or payload capacity. The complete variable record must fit this frame and the
 retained transaction maximum; all carried semantic text counts against the
 owner's existing aggregate UTF-8 reservation.
 
@@ -1191,10 +1195,20 @@ u8  text[text_bytes]
 Text is well-formed UTF-8 scalar text, contains no CR, LF, or NUL, and is at
 most `max_glyph_run_bytes`. A zero maximum disables GLYPH_RUN objects entirely;
 when the maximum is positive, empty text is valid and may paint only the run
-background. Each scalar occupies one equal slot across the object's bounds.
+background.
+
+The text is display text in visual order, as taken from cells
+(`APT-1-TEXT.md` Section 10). The renderer segments it into characters and
+gives each character as many slots as its width, left to right; the object's
+bounds are divided into as many equal slots as the text's total width. The
+renderer applies no bidi reordering, mirroring, or joining to it. A producer
+puts two adjacent cells in one run only when segmenting their joined scalars
+breaks between them, so segmenting a run always reproduces its cells. A
+character of width 0 takes no slot.
+
 The renderer composites the background, resolves bold, dim, italic, underline,
 reverse, and strike attributes, and rasterizes the glyphs with its authoritative
-terminal font. CELL blink bit 4 is not admitted because GLYPH_RUN carries no
+terminal fonts. CELL blink bit 4 is not admitted because GLYPH_RUN carries no
 presentation-phase cadence; a sender requesting it is rejected rather than
 acknowledged with missing styling. No font identifier or host-measured glyph
 metric crosses the wire. Font choice does not affect accounting: the exact text

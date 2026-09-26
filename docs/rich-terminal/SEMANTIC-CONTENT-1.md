@@ -47,10 +47,11 @@ This is one extensible semantic record with one shared text-collection body:
 | `TAB` | 8 | renderer-laid-out `TABSET` child using the existing label/shortcut fields |
 
 The design is renderer-neutral. It carries logical rows, columns, spans,
-stable item keys, text, a generic viewport origin, authoritative state, and
-selection/caret positions. It does not carry a retained-cell capacity, font,
-padding, pixel rectangle, refresh waveform, e-paper cadence, or physical hit
-box.
+stable item keys, logical-order text with a paragraph direction, a generic
+viewport origin, authoritative state, and selection/caret positions. It does
+not carry a retained-cell capacity, font, padding, pixel rectangle, refresh
+waveform, e-paper cadence, or physical hit box. Characters, widths, ordering,
+mirroring, and joining follow the shared text rules in `APT-1-TEXT.md`.
 
 ## CONTROL envelope
 
@@ -110,7 +111,9 @@ All integers are little-endian. The 72-byte header is
 | 64 | primary Unicode-scalar offset | u32 |
 | 68 | anchor Unicode-scalar offset | u32 |
 
-Content flag bit 0 is `READ_ONLY`; all other bits are zero.
+Content flag bit 0 is `READ_ONLY`. Bits 1 and 2 hold the paragraph
+direction of every row or item (`APT-1-TEXT.md` Section 7.1): 0 `AUTO`,
+1 `LTR`, 2 `RTL`; 3 is invalid. All other bits are zero.
 
 Exactly `item_count` variable records follow. Each begins with the 32-byte
 header `<QIIIIHHI>`, followed immediately by its UTF-8 text:
@@ -128,19 +131,20 @@ header `<QIIIIHHI>`, followed immediately by its UTF-8 text:
 
 Roles are 1 `CONTENT`, 2 `ROW_HEADER`, and 3 `COLUMN_HEADER`. State bit 0 is
 `CURRENT`; bit 1 is `UNAVAILABLE`; other bits are zero and an unavailable item
-cannot be current. Text is well-formed Unicode scalar UTF-8 and contains no C0
-control scalar other than U+0009 HORIZONTAL TAB, and no DEL. A tab remains one
-scalar for primary/anchor offsets; its visual expansion belongs to the
-renderer, like font metrics and wrapping. Offsets count Unicode scalar values,
-not UTF-8 bytes or grapheme clusters.
+cannot be current. Text is well-formed Unicode scalar UTF-8 in logical order
+and contains no C0 control scalar other than U+0009 HORIZONTAL TAB, and no
+DEL. A tab is one character one cell wide. Offsets count Unicode scalar
+values, not UTF-8 bytes or characters. The client places them on character
+boundaries; a renderer treats an offset inside a character as that
+character's start.
 
 Rows and columns on every item are absolute document/grid coordinates. The
 origin and positive extents define the exact half-open logical viewport
 rectangle. The selected renderer maps only that rectangle into the root bounds
 and must not expose additional logical rows or columns merely because its font
-leaves spare pixels. For TEXT_AREA the column coordinates count Unicode
-scalars before visual tab expansion; for TEXT_GRID they are logical grid
-columns.
+leaves spare pixels. For TEXT_AREA the column coordinates count cells: a row's
+width is the sum of its characters' widths (`APT-1-TEXT.md` Section 4). For
+TEXT_GRID they are logical grid columns.
 
 The producer carries every source semantic item intersecting that rectangle;
 an omitted coordinate inside it asserts empty/absent content. Items wholly
@@ -159,9 +163,21 @@ versions/roles, reserved bits, and noncanonical geometry are rejected.
 `TEXT_AREA` restricts every item to a `CONTENT` value with `state = 0` spanning one
 complete logical document row. Sparse rows outside the carried viewport are
 ordinary omission; a missing row inside the explicit viewport renders empty. A
-carried line has at most `columns` Unicode scalars, so the
-horizontal origin and selection offsets share one exact logical coordinate.
-Primary and anchor name the caret and optional selection endpoint. `TEXT_GRID`
+carried row is at most `columns` cells wide. Primary and anchor name the caret
+and optional selection endpoint.
+
+Each TEXT_AREA row is one paragraph with the content's direction. Its
+characters take their cells in visual order (`APT-1-TEXT.md` Sections 6 to
+8). A row whose paragraph resolves to LTR starts at the viewport's left edge,
+and the column origin counts cells from the left. A row that resolves to RTL
+is mirrored: it starts at the viewport's right edge, and the column origin
+counts cells from the right. Horizontal scrolling therefore moves both kinds
+of row away from their own start edge. Carets and selections are shown as
+`APT-1-TEXT.md` Section 9.2 says.
+
+Each TEXT_GRID item's text is one paragraph with the content's direction,
+ordered, mirrored, and joined in the same way. Where it sits inside the
+item's rectangle is the renderer's choice. `TEXT_GRID`
 permits all three roles and rectangle spans; its positions name whole items and
 therefore use zero offsets and no anchor. At most one `CURRENT` grid item
 exists. The primary item is the authoritative selection and may differ from
@@ -203,13 +219,13 @@ because they move the caret, selection, or viewport, never the text.
 
 `PLACE` puts the caret in a text area or selects a grid item:
 
-- On a TEXT_AREA, a point on a carried row names that row and the scalar
-  boundary at or before the point in the terminal's presentation of the row,
-  clamped to the row's scalar length. A U+0009 tab is one scalar. A point on a
-  viewport row with no carried item names the nearest carried row above it at
-  its scalar length or, when none is above, the nearest carried row below it
-  at offset zero. With no carried row in the viewport the terminal emits
-  nothing.
+- On a TEXT_AREA, a point on a carried row names that row and the position
+  `APT-1-TEXT.md` Section 9.1 gives in the terminal's layout of the row: the
+  start of the character drawn under the point, or the row's end for a point
+  past the row's content on its end side. A point on a viewport row with no
+  carried item names the nearest carried row above it at its scalar length
+  or, when none is above, the nearest carried row below it at offset zero.
+  With no carried row in the viewport the terminal emits nothing.
 - On a TEXT_GRID, the point names the item whose rectangle contains it, with
   offset zero. Only a `CONTENT` item without `UNAVAILABLE` may be named; any
   other point emits nothing.

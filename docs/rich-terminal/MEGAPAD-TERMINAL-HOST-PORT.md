@@ -538,10 +538,10 @@ hit-testing. Thus a small visible fragment of a legal multi-billion-cell or
 offscreen object remains a small bounded operation.
 
 POLYLINE points and stroke width remain normalized within that full logical
-object. The terminal font is authoritative. Each GLYPH_RUN fills its bounded
-visible background and assigns one equal slot to each scalar, clips glyph
-overhang and decorations to that slot, and applies their alpha by source-over
-composition. Bold, dim, italic, underline, reverse, and strike are exact;
+object. The terminal's font set is authoritative. Each GLYPH_RUN fills its
+bounded visible background, gives each character as many equal slots as its
+width under `APT-1-TEXT.md`, clips glyph overhang and decorations to those
+slots, and applies their alpha by source-over composition. Bold, dim, italic, underline, reverse, and strike are exact;
 blink is rejected because this draw value has no presentation-phase cadence.
 The ordinary TUI projection resolves existing clips, lines, boxes, selection,
 and caret writes into these runs so substantive UI pixels are rasterized here

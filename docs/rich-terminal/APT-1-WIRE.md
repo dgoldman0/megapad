@@ -90,7 +90,8 @@ snapshot-bytes = 176 + rows * (52 + 8 * cols)
 
 `max-transaction` MUST be at least `snapshot-bytes`, and
 `terminal-rx-credit` MUST be at least `max-transaction`. All arithmetic is
-checked before accepting the offer. `cols` and `rows` are the terminal's
+checked before accepting the offer. Both minimums are cluster-free; Section
+11.1 says how the client fits cluster tails within them. `cols` and `rows` are the terminal's
 current selected geometry and are positive. Offers with invalid or unsupported
 values are ignored as if no offer arrived.
 
@@ -332,13 +333,14 @@ u32 cell_count
 equal the current model geometry. Declared counts are exact. Spans are
 row-major, non-overlapping, and inside the geometry.
 
-`CELL_SPAN` (`0101`, client to terminal) payload begins:
+`CELL_SPAN` (`0101`, client to terminal) payload is:
 
 ```
 u32 row
 u32 column
 u32 count
 CELL cells[count]
+u32 cluster_tail[cluster_words]
 ```
 
 `count` is positive, `column + count` uses checked arithmetic, and the result
@@ -351,6 +353,14 @@ u8  xterm-256 background index
 u16 attributes
 ```
 
+The cluster tail holds the extra scalars of the span's cluster cells
+(Section 11). For each cell whose `CLUSTER` attribute is set, in cell order,
+it holds one `u32 extra_count`, which is positive, followed by that many u32
+scalars. `cluster_words` is therefore the number of cluster cells plus the sum
+of their extra counts, and the payload length is exactly
+`12 + 8 * count + 4 * cluster_words`. A span without cluster cells has an
+empty tail. Trailing or missing tail words invalidate the transaction.
+
 `CURSOR` (`0102`, client to terminal) payload is:
 
 ```
@@ -362,6 +372,13 @@ u8  reserved[7] = 0
 
 Exactly one cursor message occurs in every transaction. `visible` is zero or
 one. A visible cursor is in bounds.
+
+A transaction's exact size is
+`176 + 52 * span_count + 8 * cell_count + 4 * cluster_words`, where
+`cluster_words` is summed over all of its spans. `TX_BEGIN` does not declare
+the cluster words. The client includes them in its credit and
+`max-transaction` preflight. The terminal rejects the transaction as soon as a
+span would take its running size past `max-transaction`.
 
 `TX_COMMIT` (`0103`, client to terminal) contains its `u64 transaction_id`.
 The terminal verifies the ID and exact declared counts, then atomically applies
@@ -403,10 +420,10 @@ Coordinates are zero-based. Invalid bounds reject the whole transaction;
 there is no clipping. Rectangle endpoint semantics are not needed by mandatory
 CELL-1 messages.
 
-The scalar MUST be a Unicode scalar value and MUST NOT be a surrogate.
-Akashic applies its `CW-CELL-CP` width-one projection before encoding. Native
-codepoint zero is encoded as U+0020. A terminal renders exactly one physical
-cell per atom and clips glyph drawing to that cell.
+Cells carry display text in visual order under the text rules of
+`APT-1-TEXT.md` (contract `APT-1-TEXT-1-2026-09-26`). The client segments,
+orders, mirrors, and joins text before encoding; the terminal only draws what
+the cells say.
 
 Attribute bits are independent of either implementation's native cell bits:
 
@@ -419,10 +436,50 @@ Attribute bits are independent of either implementation's native cell bits:
 | 4 | Blink. |
 | 5 | Reverse. |
 | 6 | Strike. |
+| 7 | `WIDE`: the cell leads a character two cells wide. |
+| 8 | `CONTINUATION`: the cell is the right half of the character to its left. |
+| 9 | `CLUSTER`: the cell's character has extra scalars in the span's cluster tail. |
 
-Bits 7 through 15 are zero. Wide, continuation, hidden, and implementation
-private flags are not transmitted. Colors use the xterm 256-color palette;
-foreground 7 and background 0 are the canonical blank defaults.
+Bits 10 through 15 are zero. Hidden and implementation-private flags are not
+transmitted. Colors use the xterm 256-color palette; foreground 7 and
+background 0 are the canonical blank defaults.
+
+Every cell is either a lead cell or a continuation cell:
+
+- A **lead cell** shows one character. Its scalar is the character's first
+  display scalar: a Unicode scalar value that is not a surrogate, not U+0000,
+  and not one that `APT-1-TEXT.md` Section 5 replaces. Native codepoint zero
+  is encoded as U+0020. With `CLUSTER` set, the character's other display
+  scalars follow in the cluster tail; each is a Unicode scalar value that is
+  neither a surrogate nor U+0000. With `WIDE` set, the character takes this
+  cell and the next one.
+- A **continuation cell** has `CONTINUATION` set, `WIDE` and `CLUSTER`
+  clear, and scalar zero. Its colors and attribute bits 0 to 6 equal those
+  of its lead.
+
+After every commit, each row of the model satisfies these rules: a `WIDE`
+cell is not in the last column and the cell to its right is a continuation
+cell; a continuation cell is not in column zero and the cell to its left is
+`WIDE`. A delta need not resend an unchanged half of a pair, but a change that
+breaks a pair rewrites its other half. The terminal checks the cells a
+transaction writes, and their neighbours, before commit; any violation
+invalidates the transaction.
+
+The terminal does not check a character's width against `APT-1-TEXT.md`
+Section 4; producing the right width is the client's duty. A terminal draws a
+character's display scalars as one glyph cluster fitted to its one cell, or
+to both cells of a wide pair. It SHOULD draw a visible box for a glyph that
+its fonts cannot show.
+
+### 11.1 Cluster budget
+
+The minimums in Section 3 assume no cluster tails. When the tails of a
+transaction would take a span past the peer's maximum payload, or the
+transaction past `max-transaction`, the client sends that transaction with
+every cluster cell degraded: its lead carries U+FFFD without `CLUSTER`, and
+its `WIDE` bit and continuation cell are kept. A degraded cell stays so until
+the client next changes it. Tails therefore never make a transaction fail
+that would fit without them.
 
 ## 12. Input messages
 
