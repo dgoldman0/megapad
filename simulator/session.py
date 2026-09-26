@@ -20,21 +20,25 @@ from simulator.rich_terminal_host import (
 from simulator.runtime import CreatedDefinition, MegaForthRuntime
 
 
-# Semantic steps between host owner boundaries when neither the caller nor the
-# environment selects a quantum. Each boundary settles UART output, services
-# the terminal driver, and admits queued input.
-DEFAULT_SEMANTIC_QUANTUM_STEPS = 8_192
+# Semantic steps between host owner boundaries, by the executor that runs,
+# when neither the caller nor the environment selects a quantum. Each boundary
+# settles UART output, services the terminal driver, and admits queued input.
+# Native boundaries last about a millisecond at 65,536 steps; at 8,192 their
+# fixed host cost dominated Desktop typing latency. The Python reference runs
+# about 0.75 million steps per second, so it keeps 8,192-step boundaries
+# (about 10 ms) rather than holding the owner lock for about 90 ms.
+DEFAULT_SEMANTIC_QUANTUM_STEPS = {"native": 65_536, "python": 8_192}
 SEMANTIC_QUANTUM_ENVIRONMENT = "MEGAFORTH_QUANTUM_STEPS"
 
 
-def selected_semantic_quantum_steps(value: int | None) -> int:
-    """Return the caller's quantum, else the environment's, else the default."""
+def configured_semantic_quantum_steps(value: int | None) -> int | None:
+    """Return the caller's quantum, else the environment's, else None."""
 
     if value is not None:
         return value
     configured = os.environ.get(SEMANTIC_QUANTUM_ENVIRONMENT)
     if configured is None:
-        return DEFAULT_SEMANTIC_QUANTUM_STEPS
+        return None
     try:
         steps = int(configured)
     except ValueError:
@@ -91,9 +95,13 @@ class SimulatorMachineSession(MachineSession):
                 ) from exc
             if semantic_step_budget <= 0:
                 raise ValueError("semantic_step_budget must be positive")
-        semantic_quantum_steps = selected_semantic_quantum_steps(
+        semantic_quantum_steps = configured_semantic_quantum_steps(
             semantic_quantum_steps
         )
+        if semantic_quantum_steps is None:
+            semantic_quantum_steps = DEFAULT_SEMANTIC_QUANTUM_STEPS[
+                runtime.execution_backend
+            ]
 
         self.runtime = runtime
         self.entry = entry

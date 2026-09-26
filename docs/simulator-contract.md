@@ -505,10 +505,15 @@ ordinary guest source.
 
 `SimulatorMachineSession` selects a configurable host quantum. The
 constructor's `semantic_quantum_steps` wins; otherwise the
-`MEGAFORTH_QUANTUM_STEPS` environment variable applies, and otherwise the
-8,192-step default. `simulator_server.py --semantic-quantum-steps` passes an
-explicit value, and server status reports the selected value as
-`semantic_execution.quantum_steps`. The session settles UART output, services
+`MEGAFORTH_QUANTUM_STEPS` environment variable applies; otherwise the default
+follows the executor that runs: 65,536 steps for native execution and 8,192
+for the Python reference. A native boundary then lasts about a millisecond,
+while the Python reference (about 0.75 million steps per second) keeps
+boundaries near 10 ms instead of holding the owner lock for about 90 ms.
+`simulator_server.py --semantic-quantum-steps` passes an explicit value, and
+server status reports the selected value as `semantic_execution.quantum_steps`.
+The quantum changes only where the host services the session; step budgets,
+guest results, and yield determinism for a given quantum are unchanged. The session settles UART output, services
 the terminal driver, and admits queued input at each boundary, including while
 ordinary terminal negotiation or UI polling remains runnable. Retained-publication backpressure still prevents further
 guest execution. The shared owner releases its lock between these boundaries

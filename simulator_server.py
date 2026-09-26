@@ -21,7 +21,7 @@ from simulator.session import (
     SEMANTIC_QUANTUM_ENVIRONMENT,
     SimulatorMachineSession,
     SimulatorSharedMachine,
-    selected_semantic_quantum_steps,
+    configured_semantic_quantum_steps,
 )
 from simulator.storage import HostedStorageService
 
@@ -80,7 +80,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help=(
             "semantic steps between host owner boundaries; defaults to "
             f"{SEMANTIC_QUANTUM_ENVIRONMENT}, else "
-            f"{DEFAULT_SEMANTIC_QUANTUM_STEPS}"
+            f"{DEFAULT_SEMANTIC_QUANTUM_STEPS['native']} with the native "
+            f"executor and {DEFAULT_SEMANTIC_QUANTUM_STEPS['python']} with "
+            "the Python reference"
         ),
     )
     parser.add_argument(
@@ -119,8 +121,10 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
     if not storage_path.is_file():
         raise ValueError(f"storage image does not exist: {storage_path}")
     # Resolve the environment before image preparation so a bad value fails
-    # without first running autoexec.
-    quantum_steps = selected_semantic_quantum_steps(args.semantic_quantum_steps)
+    # without first running autoexec. None selects the executor's default.
+    quantum_steps = configured_semantic_quantum_steps(
+        args.semantic_quantum_steps
+    )
 
     rich_terminal = None
     if args.rich_terminal_policy is not None:

@@ -110,7 +110,8 @@ the complete caller-owned `--rich-terminal-policy` and
 `--retained-terminal-policy` JSON. It has no NIC or audible audio option.
 `MEGAFORTH_EXECUTOR` selects the executor: `python` (the default reference),
 `native`, or `auto`. `MEGAFORTH_QUANTUM_STEPS` sets the semantic steps between
-host owner boundaries when the option is absent; the default is 8,192. The viewer and `session_ctl.py`
+host owner boundaries when the option is absent. The default is 65,536 with
+the native executor and 8,192 with the Python reference. The viewer and `session_ctl.py`
 attach exactly as they do to the emulator owner. Akashic's
 `local_testing/akashic_tui.py serve|accept --backend simulator` builds the
 image and supplies the policies for the ordinary Desktop.

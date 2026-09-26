@@ -2460,8 +2460,9 @@ terminal model, ANSI fallback, CELL/retained selection, cadence, immutable
 display offers, physical-acknowledgement authority, and input gates through
 four explicit host hooks. Each simulator owner boundary services the driver,
 runs or resumes one semantic root dispatch to completion, `IDL`, or its
-configurable host quantum (8,192 semantic steps by default), and services the
-driver again. Quantum continuations resume without UART input or a fake
+configurable host quantum (by default 65,536 semantic steps with the native
+executor and 8,192 with the Python reference), and services the driver
+again. Quantum continuations resume without UART input or a fake
 interrupt; actual `IDL` retains its wake requirement. Synchronous primitives
 and source accelerators finish before yielding, so the quantum is not a hard
 wall-time deadline. Its counters remain semantic steps and external

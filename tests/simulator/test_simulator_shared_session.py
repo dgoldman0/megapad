@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 import pytest
 
 from shared_session import SessionServer, SharedMachine, snapshot_from_wire
@@ -123,30 +125,40 @@ def test_facade_reports_semantic_work_without_hardware_statistics() -> None:
         machine.stop()
 
 
-def test_semantic_quantum_prefers_caller_then_environment_then_default(
+def test_semantic_quantum_prefers_caller_then_environment_then_executor(
     monkeypatch,
 ) -> None:
-    def idle_session(**options) -> SimulatorMachineSession:
-        runtime = MegaForthRuntime()
+    def idle_session(backend: str, **options) -> SimulatorMachineSession:
+        runtime = MegaForthRuntime(execution_backend=backend)
         runtime.evaluate(IDLE_ROOT_SOURCE, source_name="simulator-idle-root.f")
         return SimulatorMachineSession(runtime, "SIM-IDLE-ROOT", **options)
 
+    backends = ["python"]
+    if importlib.util.find_spec("_megaforth_native") is not None:
+        backends.append("native")
+    assert DEFAULT_SEMANTIC_QUANTUM_STEPS == {"native": 65_536, "python": 8_192}
+
     monkeypatch.delenv(SEMANTIC_QUANTUM_ENVIRONMENT, raising=False)
-    with idle_session() as session:
-        assert session.semantic_quantum_steps == DEFAULT_SEMANTIC_QUANTUM_STEPS
-        assert session.backend._semantic_quantum_steps == (
-            DEFAULT_SEMANTIC_QUANTUM_STEPS
-        )
+    for backend in backends:
+        with idle_session(backend) as session:
+            assert session.runtime.execution_backend == backend
+            expected = DEFAULT_SEMANTIC_QUANTUM_STEPS[backend]
+            assert session.semantic_quantum_steps == expected
+            assert session.backend._semantic_quantum_steps == expected
 
     monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, "40000")
-    with idle_session() as session:
-        assert session.semantic_quantum_steps == 40_000
-        assert session.backend._semantic_quantum_steps == 40_000
+    for backend in backends:
+        with idle_session(backend) as session:
+            assert session.semantic_quantum_steps == 40_000
+            assert session.backend._semantic_quantum_steps == 40_000
 
-    machine = SimulatorSharedMachine(idle_session(semantic_quantum_steps=96))
+    machine = SimulatorSharedMachine(
+        idle_session(backends[-1], semantic_quantum_steps=96)
+    )
     try:
         assert machine.semantic_session.backend._semantic_quantum_steps == 96
         semantic = machine.status()["semantic_execution"]
+        assert semantic["backend"] == backends[-1]
         assert semantic["quantum_steps"] == 96
     finally:
         machine.stop()
@@ -154,7 +166,7 @@ def test_semantic_quantum_prefers_caller_then_environment_then_default(
     for invalid in ("0", "-5", "fast", ""):
         monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, invalid)
         with pytest.raises(ValueError, match=SEMANTIC_QUANTUM_ENVIRONMENT):
-            idle_session()
+            idle_session("python")
 
 
 def test_forth_diagnostics_resolve_newest_created_binding_and_live_value() -> None:
