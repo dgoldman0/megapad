@@ -3513,9 +3513,12 @@ only declared freshness fields after independently validating each frame's
 length and CRC.  It may not normalize payload, sequence, revision, credit,
 transaction, result, acknowledgement, or lifecycle differences.
 
-Simulator presentation is host-path evidence.  It is not physical UART,
-physical viewer, or exact machine-timing evidence; those remain emulator and
-hardware acceptance concerns.
+Simulator presentation is host-path evidence. Through the shared session and
+viewer it produces the same host display-API evidence as the emulator:
+complete composition, `pygame.display.flip()`, and exact post-flip
+acknowledgement before revision-bound input. It is not physical UART, panel,
+or exact machine-timing evidence; those remain emulator and hardware
+acceptance concerns.
 
 ## 8. Storage and persistence
 
@@ -3675,8 +3678,10 @@ qualification from executable `kdos.f` line 39 through EOF line 9894. The
 completed simulator branch stopped at step 6: no rich-terminal source,
 projection, compositor, viewer, or input lifecycle was part of that qualified
 KDOS slice. The ordinary semantic file also loaded through the CLI-like checked
-line path. Native or exact-full-core cold loading, Akashic integration, and
-Desktop execution remain deferred under the rich-terminal resource gate.
+line path. At that stop line, native or exact-full-core cold loading, Akashic
+integration, and Desktop execution were deferred under the rich-terminal
+resource gate. The rich-terminal integration below and the September physical
+Desktop runs have since completed them.
 
 The rich-terminal integration now synchronizes the authoritative current
 `rich-terminal.f` and appends exactly five source prerequisites to the hosted
@@ -3805,10 +3810,11 @@ definitions and the remaining islands should be absorbed into one complete
 The ordinary Desk/Pad/Daybook journey remains part of the compatibility
 contract. The source frontier is no longer the blocker: the complete terminal
 module and its genuine KDOS exception dependency have crossed the simulator
-without terminal-specific semantic substitutes. The next boundary is
-composition and lifecycle integration—sharing the existing presentation,
+without terminal-specific semantic substitutes. The boundary that followed was
+composition and lifecycle integration: sharing the existing presentation,
 physical acknowledgement, and input authority while keeping the simulator's
 run-to-IDL semantic scheduler distinct from emulator instruction batching.
+That integration is complete, as described below.
 
 `SimulatorMachineSession` in `simulator/session.py` now establishes that
 scheduler/session composition.
@@ -3832,15 +3838,16 @@ binding directly, and memory peeks read the hosted address space without a fake
 CPU traversal. Focused dispatch evidence reaches the same revision-1 CELL
 snapshot, applies generation rejection, admits terminal input, and delivers it
 to the suspended guest. Emulator host profiling, phase sampling, and NIC
-diagnostics still fail explicitly. This does not yet establish a retained
-physical display offer or the complete Desktop socket/viewer
-journey.
+diagnostics still fail explicitly. Retained physical display offers and the
+complete Desktop socket/viewer journey were established afterward. The native
+simulator passes the full physical Desktop journey; see
+[`simulator-native-execution.md`](simulator-native-execution.md).
 
-Only seconds-scale structural, focused unit, and the bounded moderate semantic
-KDOS load run before the real rich vertical exists. Native/exact-full-core cold
-load, Desktop smoke, sustained cadence, persistence, full renderer, and
-physical-viewer qualification remain deferred to vertical acceptance under
-the project's resource rules.
+The rich vertical was accepted on 2026-09-02, and the physical Desktop journey
+is now routine regression evidence. Heavy runs (cold source loads, the
+physical Desktop journey, typing cadence) run one at a time under the project's
+resource rules. Sustained cadence, persistence, reset/resize, and physical
+UART or panel qualification remain separate open qualifications.
 
 ## 12. Performance evaluation boundary
 
@@ -3870,5 +3877,8 @@ shakedown occurred while unrelated work kept the 16 logical CPUs about 87%
 busy and left the selected CPU about 3% idle. Its child state and provenance
 all passed, but its wall ratios are rejected as performance evidence and are
 not a simulator speed claim. No qualified emulator/simulator speed result is
-recorded yet. The one authorized shakedown does not lift the preceding general
-rich-vertical resource gate for further cold-load qualification.
+recorded yet. The physical Desktop timings in
+[`simulator-native-execution.md`](simulator-native-execution.md) are
+operational observations on a shared host, not matched-head benchmarks.
+Any future qualified comparison still requires the idle, pinned-CPU
+conditions above.

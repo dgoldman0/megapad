@@ -4,7 +4,9 @@
 
 Megapad-64 is a computer system built from scratch — CPU, BIOS,
 operating system, filesystem, SIMD tile engine, and interactive dashboard
-— all running inside a Python emulator and covered by a broad automated suite.
+— all running inside a Python emulator (with an optional C++ accelerator) or,
+for source-level work, a hosted semantic simulator, and covered by a broad
+automated suite.
 
 The core idea: put a large, fast scratchpad memory directly on the
 processor die and give the CPU a dedicated engine that runs SIMD
@@ -34,6 +36,8 @@ Feel free top drop by and discuss this project in the Tinkerers Guild channel of
 | **KDOS** | Bank 0 core in `kdos.f`; loadable networking in userland `networking.f` |
 | **Emulator** | 16-core SoC (4 full + 3×4 micro-clusters) with HBW math RAM |
 | **C++ Accelerator** | Optional pybind11 CPU fast path |
+| **Hosted simulator** | Semantic source backend with an optional native executor; runs the complete Akashic Desktop ([simulator/README.md](simulator/README.md), [docs/simulator-contract.md](docs/simulator-contract.md)) |
+| **Rich terminal** | Optional boot-loaded `rich-terminal.f` APT-1 module with a retained host compositor and viewer ([docs/rich-terminal/](docs/rich-terminal/)) |
 | **Tests** | Host, guest, RTL, multicore, and live-network coverage; resource and environment gates are reported separately |
 | **Filesystem** | MP64FS — capacity-derived marker-1 geometry through 32 MiB, 128 entries, two extents |
 | **Tooling** | CLI/debugger, two-pass assembler (with listing output), disk utility |
@@ -210,14 +214,14 @@ is implemented in the emulator; its physical DMA/I2S bridge remains pending.
 │  Scheduler · Filesystem · TUI   │    module loading, multicore, PQC
 ├─────────────────────────────────┤
 │         BIOS (bios.asm)         │  ← Subroutine-threaded Forth,
-│  360 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
+│  481 words · EVALUATE · FSLOAD  │    compiler, I/O, tile, multicore
 ├─────────────────────────────────┤
 │         Hardware / Emulator     │  ← emulator/megapad64.py + emulator/devices.py
 └─────────────────────────────────┘
 ```
 
 **BIOS** — A subroutine-threaded Forth interpreter/compiler in assembly.
-360 dictionary words covering arithmetic, logic, stack manipulation,
+481 dictionary words covering arithmetic, logic, stack manipulation,
 memory access, control flow (IF/ELSE, BEGIN/UNTIL/WHILE, DO/LOOP),
 strings, compilation, I/O, disk, timer, tile engine, NIC, **multicore**
 (COREID, NCORES, IPI-SEND, SPIN@/SPIN!, WAKE-CORE, CORE-STATUS),
@@ -432,7 +436,7 @@ The `docs/` directory contains comprehensive reference material:
 | Document | Contents |
 |----------|----------|
 | [docs/getting-started.md](docs/getting-started.md) | Quick-start guide — booting, REPL, first buffer, first kernel, first pipeline |
-| [docs/bios-forth.md](docs/bios-forth.md) | Complete BIOS Forth word reference (all 360 entries by category) |
+| [docs/bios-forth.md](docs/bios-forth.md) | BIOS Forth word reference by category; [docs/BIOS-DICTIONARY.md](docs/BIOS-DICTIONARY.md) records the 481-entry dictionary |
 | [docs/kdos-reference.md](docs/kdos-reference.md) | KDOS core and loadable networking word reference, organized by source section |
 | [docs/isa-reference.md](docs/isa-reference.md) | CPU instruction set — all 16 families, encodings, condition codes, CSRs |
 | [docs/architecture.md](docs/architecture.md) | System architecture — memory map, MMIO registers, boot sequence, interrupts |
@@ -454,8 +458,8 @@ The `docs/` directory contains comprehensive reference material:
 Forth might seem like an unusual choice for a modern system, but it's
 remarkably well-suited to this architecture:
 
-**Compactness** — The entire BIOS interpreter, compiler, and 291 built-in
-words fit in roughly 24 KB of machine code.  Forth is one of the most
+**Compactness** — The entire BIOS interpreter, compiler, and 481 built-in
+words fit in an ~83 KiB ROM image (`bios.rom`).  Forth is one of the most
 space-efficient programming environments ever created.
 
 **Interactivity** — Type a word, it executes immediately.  Development is

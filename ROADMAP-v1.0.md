@@ -253,7 +253,8 @@ uses checked reflected hardware CRC, the authoritative diagnostics are live,
 fresh final artifacts reproduced exactly, the ordered focused matrix passed,
 the full serial RTL sweep passed, and the approved Python regression completed
 with 3,425 passed and three conditional live-network skips. Akashic adoption
-is separately scoped and requires a user-selected worktree.
+was carried out separately on the `akashic-crypto-adoption` branch, which is
+merged into Akashic `main` (tip `d2e9551`, 2026-08-11).
 
 Per `docs/SoC-hardening.md`:
 

@@ -1,5 +1,25 @@
 # Megapad-64 — Current Situation
 
+> **Current state — 2026-09-26.** The dated notes below are a history, and
+> the body is the March 7 snapshot. The current state is:
+> - **Simulator (`simulator/`):** the hosted source simulator and its optional
+>   native semantic executor pass the complete physical Akashic Desktop
+>   journey (Desk, Pad, Daybook, launcher, Sound Lab), and are the current
+>   iteration path. The latest checkpoint and typing measurements are in
+>   [`docs/simulator-native-execution.md`](docs/simulator-native-execution.md).
+> - **Emulator (`emulator/`):** the exact MP64 emulator's single-core
+>   execution kernel is consolidated. Its open finding, EK-F10, is tracked in
+>   [`docs/single-core-execution-kernel-plan.md`](docs/single-core-execution-kernel-plan.md).
+> - **Backend boundary:** it is fixed by
+>   [`docs/simulator-contract.md`](docs/simulator-contract.md).
+> - **Rich terminal:** the ownership and wire contracts are under
+>   [`docs/rich-terminal/`](docs/rich-terminal/). Development happens directly
+>   on `main` in the sibling `megapad/` and `akashic/` checkouts; the feature
+>   worktrees named in older notes are retired.
+>
+> The September 8 simulator limitations recorded below (the AudioOut MMIO stop
+> and "not a demonstrated fast iteration path") were resolved on September 12.
+
 > Historical snapshot: this document records the project as of 2026-03-07,
 > including the since-retired WOTS prototype. Current crypto behavior and
 > checkpoint status are defined by

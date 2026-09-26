@@ -195,7 +195,13 @@ The implemented slices provide:
   and §19 Hash Table primitives, followed by the §20 Module System and final
   §14 Startup through EOF line 9894, without claiming networking transport,
   real bundle-file integration, concurrent collection execution, scheduling,
-  rendering, or rich-terminal output.
+  rendering, or rich-terminal output;
+- the unchanged `rich-terminal.f` module with a live APT-1 session through
+  the shared driver, session server, and viewer, and the ordinary Akashic
+  `desktop-apt1` journey: Desk, Pad, Daybook, launcher, and Sound Lab,
+  including AudioOut through the shared PCM model;
+- the optional native semantic executor (`_megaforth_native`), documented in
+  [`../docs/simulator-native-execution.md`](../docs/simulator-native-execution.md).
 
 This is deliberately not yet a complete MegaForth environment. Additional
 private task contexts and genuine cooperative scheduling remain pending. The
@@ -203,14 +209,14 @@ loaded KDOS words execute task XTs inline on the caller's stacks; the IDL seam
 blocks and resumes one compiled-word dispatch and cannot turn that registry
 into `PAUSE`, task round-robin, interrupt-vector delivery, DMA timing, or a
 device scheduler.
-Public `SOURCE`, `>IN`, and `STATE`, conditional-compilation `[IF]`, `MS@` and
-the remaining RTC/calendar service, raw UART MMIO, TX-ring capacity and timing,
-terminal geometry, and raw storage-controller access still remain. Exact
+Public `SOURCE`, `>IN`, and `STATE`, the remaining RTC calendar/alarm service,
+raw UART MMIO, TX-ring capacity and timing, and raw storage-controller access
+still remain; `[IF]`/`[ELSE]`/`[THEN]`, `MS@`, and the terminal-geometry words
+are implemented. Exact
 unchanged KDOS coverage is now contiguous from executable line 39 through EOF.
 A moderate CLI-like semantic load also feeds the complete file through the
-persistent checked pseudo-BIOS evaluator on one fresh runtime. The deferred
-boundary is the native/exact-full-core cold load and Akashic/Desktop
-integration, not ordinary KDOS source composition. The simulator does not
+persistent checked pseudo-BIOS evaluator on one fresh runtime. The complete
+Akashic Desktop journey now also runs on this backend. The simulator does not
 execute ROMs, MP64
 binaries, or MF64 native dictionaries, and it makes no machine-timing,
 snapshot, RTL, or hardware claim. Those remain the architectural emulator's
@@ -252,6 +258,21 @@ emulator accelerator:
 make test-simulator
 ```
 
+The optional native semantic executor is a separate extension. Build it and
+rerun the suite on it:
+
+```sh
+make simulator-accel
+make test-simulator-native
+```
+
+`MEGAFORTH_EXECUTOR` accepts `python`, `native`, or `auto` for any runtime.
+`python` remains the code default; current physical acceptance and typing
+runs select `native`. `simulator_server.py` serves a prepared image through
+the shared session protocol. Akashic's
+`local_testing/akashic_tui.py serve|accept --backend simulator` drives the
+ordinary Desktop through it.
+
 The current rich-terminal cross-backend oracle has separate tight-loop and
 exact-machine selectors plus one combined selector. The simulator command does
 not import or build the accelerator:
@@ -262,8 +283,8 @@ make test-rich-terminal-emulator
 make test-rich-terminal-dual
 ```
 
-At the present checkpoint these selectors compile the same contiguous
-production `rich-terminal.f` prefix through `_PT-SEND-CREDIT`. They compare its
+The paired byte oracles compile the same contiguous production
+`rich-terminal.f` prefix through `_PT-SEND-CREDIT` on both backends. They compare its
 complete 48-byte CREDIT frame against the independent Python APT-1 wire oracle,
 then qualify rejected and accepted caller-owned storage, storage-disjointness,
 the exact PROBE and OPEN encodings, and the public transition into probing
@@ -273,8 +294,9 @@ both backends. A second contiguous prefix through `_PT-READ-BYTE` crosses the
 actual UART input boundary: the host derives a valid OFFER from the emitted
 dynamic probe, each backend consumes it through `KEY?`/`KEY`, and the
 production scanner must emit the exact OPEN and retain every negotiated field
-in `OPENING`. This is not a complete module-load, framed-readiness, or
-live-session claim.
+in `OPENING`. The simulator selector additionally drives the unchanged
+complete module through a real driver handshake, an atomic CELL snapshot,
+result settlement, and a synchronized close.
 
 A minimal hosted-source invocation is:
 

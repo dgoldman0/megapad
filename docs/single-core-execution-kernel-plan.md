@@ -2,11 +2,15 @@
 
 **Started:** 2026-08-27
 
-**Status:** Engine performance correction active after failed Desktop acceptance
+**Status:** Engine consolidation complete. The post-cutoff performance
+correction closed after the external-RAM admission fix passed Desktop
+acceptance (see Element 8). EK-F10, two-block native regions, remains
+provisional pending a representative source-mode A/B.
 
-**Branch:** `single-core-dbt-throughput`
+**Branch:** `single-core-dbt-throughput`, merged into `main`
 
-**Isolated worktree:** `.worktrees/megapad-single-core-dbt-throughput`
+**Isolated worktree:** `.worktrees/megapad-single-core-dbt-throughput`, since
+retired; work continues on `main`
 
 **Old DBT comparison baseline:**
 `72e1122adaac3de2bc23d235e58063cd179d43ce`
@@ -1278,8 +1282,10 @@ candidate rather than reject the mechanism as happened with the old chaining
 loop. It is not yet production-retention evidence: these motifs isolate hot
 region behavior and BIOS-shaped admission but do not include a real source-mode
 BIOS+KDOS load or the complete Desktop mix. EK-F10 therefore remains open until
-the active vertical and resource gates permit that representative same-binary
-exact-equivalent A/B.
+a representative same-binary exact-equivalent source-mode A/B is run. The
+rich-terminal vertical gate that originally deferred it was satisfied on
+2026-09-02. The A/B is now an ordinary sequential heavyweight run under the
+project's resource rules.
 
 The region arena, descriptors, identities, and toggle are host-emulator
 implementation. They change no MP64 instruction, guest-visible dictionary or

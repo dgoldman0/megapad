@@ -396,7 +396,7 @@ suites. Live TAP/internet qualification uses `make test-net`.
 
 | Topic | Document |
 |-------|----------|
-| All 360 BIOS Forth words | [docs/bios-forth.md](bios-forth.md) |
+| BIOS Forth words (481-entry dictionary) | [docs/bios-forth.md](bios-forth.md) |
 | All 430+ KDOS definitions | [docs/kdos-reference.md](kdos-reference.md) |
 | CPU instruction set | [docs/isa-reference.md](isa-reference.md) |
 | System architecture & memory map | [docs/architecture.md](architecture.md) |

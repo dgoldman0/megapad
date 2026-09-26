@@ -357,8 +357,9 @@ between disk reads. `.CRC-DIAG` now exercises all six standard finalized
 vectors plus reflected raw finalization. Fresh native and BIOS builds were
 reproduced byte-for-byte; the ordered focused gates, full serial RTL sweep,
 and approved Python regression completed with 3,425 passed and three
-environment-conditional live-network skips. The MegaPad gate is complete;
-Akashic adoption is a separate task in a user-selected Akashic worktree.
+environment-conditional live-network skips. The MegaPad gate is complete.
+Akashic adoption was carried out separately on the `akashic-crypto-adoption`
+branch, which is merged into Akashic `main` (tip `d2e9551`, 2026-08-11).
 
 ---
 

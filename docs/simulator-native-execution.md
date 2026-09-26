@@ -248,7 +248,8 @@ MEGAFORTH_EXECUTOR=native make test-simulator SIMULATOR_TEST_PATH=tests/simulato
 
 `MegaForthRuntime(execution_backend="python" | "native" | "auto")` selects the
 executor explicitly. When omitted, `MEGAFORTH_EXECUTOR` supplies the selection;
-the current qualification default is `python`. `native` requires the extension
+the code default is `python` (the correctness reference). Current physical
+acceptance and typing qualification select `native`. `native` requires the extension
 and fails clearly when it is missing. `auto` uses the extension when installed
 and otherwise uses Python. Runtime status exposes the actual executor and
 native work counters; these are separate from semantic diagnostic counters.
@@ -425,7 +426,7 @@ corresponding ACK was 486.098092 seconds and its full journey passed. Detailed
 source bindings and timing boundaries are in paired Akashic
 `local_testing/evidence/rich-desktop-speed-decision-20260908.md`.
 
-## Physical Desktop result and integration limitations
+## Physical Desktop result and integration limitations — September 8, 2026 (historical)
 
 The ordinary source-mode `desktop-apt1` run used Akashic `2a90108` (same Forth
 as `78608e7`) and MegaPad `3ea7bdc`, clean at launch, with the native executor,
