@@ -596,6 +596,43 @@ def test_real_negotiation_snapshot_result_credit_view_and_normalized_input():
         core.send_focus(1)
 
 
+def test_text_events_encode_together_or_not_at_all():
+    core, offer, request, encoder, client_ready = _negotiate()
+    result = core.feed_machine(
+        encode_open(request) + client_ready + _snapshot_frames(encoder)
+    )
+    _settle_results(core, result)
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    for outbound in result.outbound:
+        decoder.feed(outbound.payload)
+
+    # Consecutive events share the flags and model revision.
+    events = core.send_text_events((b"one ", "t\u00e9".encode()), paste=True)
+    assert events is not None and len(events) == 2
+    frames = decoder.feed(b"".join(event.payload for event in events))
+    assert [frame.message_type for frame in frames] == [MessageType.TEXT] * 2
+    assert [TEXT_PREFIX.unpack(frame.payload[:12]) for frame in frames] == [
+        (1, 0, 1),
+        (1, 0, 1),
+    ]
+    assert [frame.payload[12:] for frame in frames] == [b"one ", "t\u00e9".encode()]
+
+    # When the peer's data grant cannot take every event, none is encoded.
+    room = core._server_data_grant - core._server_data_sent
+    chunk = b"x" * core.max_text_bytes
+    frame = 40 + 12 + len(chunk)
+    count = room // frame + 1
+    sent = core._server_data_sent
+    assert core.send_text_events((chunk,) * count) is None
+    assert core._server_data_sent == sent
+    # Every chunk is checked before any is encoded.
+    with pytest.raises(ValueError, match="negotiated client limit"):
+        core.send_text_events((b"ok", chunk + b"x"))
+    with pytest.raises(ValueError, match="must not be empty"):
+        core.send_text_events(())
+    assert core._server_data_sent == sent
+
+
 def test_retained_query_emits_exact_adjacent_replies_before_covering_credit():
     policy = _retained_policy()
     core, offer, request, encoder, client_ready = _negotiate(

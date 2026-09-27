@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Protocol
 
+from . import text_rules
 from .apt1 import CONTROL_RESERVE_BYTES, HEADER_BYTES, UINT64_MAX
 from .retained_model import RetainedPolicy
 from .retained_wire import ControlEventKind, control_event_payload_size
@@ -80,6 +81,41 @@ def _validate_retained_driver_capacity(
             "driver retention cannot admit the complete RETAINED-1 "
             "discovery reply tuple"
         )
+
+
+def _text_event_chunks(raw: bytes, limit: int) -> tuple[bytes, ...] | None:
+    """RAW split into TEXT payloads of at most LIMIT bytes (APT-1-WIRE
+    Section 12): between characters, or between scalars inside a character
+    longer than LIMIT.  None when RAW is empty or not well-formed UTF-8, or
+    holds a scalar longer than LIMIT."""
+
+    if not raw or limit <= 0:
+        return None
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+    if len(raw) <= limit:
+        return (raw,)
+    chunks: list[bytes] = []
+    current = bytearray()
+    for start, length in text_rules.segment([ord(scalar) for scalar in text]):
+        character = text[start:start + length]
+        encoded = character.encode("utf-8")
+        pieces = (
+            (encoded,)
+            if len(encoded) <= limit
+            else tuple(scalar.encode("utf-8") for scalar in character)
+        )
+        for piece in pieces:
+            if len(piece) > limit:
+                return None
+            if len(current) + len(piece) > limit:
+                chunks.append(bytes(current))
+                current.clear()
+            current += piece
+    chunks.append(bytes(current))
+    return tuple(chunks)
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,7 +563,13 @@ class RichTerminalDriver:
         return DriverStatus.PROGRESS
 
     def send_text(self, data, *, paste: bool = False) -> DriverStatus:
-        """Queue one nonempty normalized UTF-8 TEXT event."""
+        """Queue nonempty UTF-8 text as TEXT events.
+
+        Text longer than one event allows goes as consecutive events split
+        between characters (APT-1-WIRE Section 12), queued all together or
+        not at all.  Text whose events could not fit even an empty queue is
+        invalid here.
+        """
 
         if self._closed:
             return DriverStatus.STALE
@@ -539,16 +581,22 @@ class RichTerminalDriver:
             raw = memoryview(data).tobytes()
         except (TypeError, ValueError):
             return DriverStatus.INVALID
-        frame_bytes = _TEXT_FRAME_OVERHEAD + len(raw)
-        if not raw or len(raw) > self.max_text_bytes:
+        chunks = _text_event_chunks(raw, self.max_text_bytes)
+        if chunks is None:
             return DriverStatus.INVALID
-        if not self._can_retain(frame_bytes, 1):
+        frame_bytes = sum(_TEXT_FRAME_OVERHEAD + len(chunk) for chunk in chunks)
+        if (
+            len(chunks) > self._limits.pending_outbound_events
+            or frame_bytes > self._limits.pending_outbound_bytes
+        ):
+            return DriverStatus.INVALID
+        if not self._can_retain(frame_bytes, len(chunks)):
             return DriverStatus.BACKPRESSURED
         try:
-            outbound = self._core.send_text(raw, paste=paste)
+            outbound = self._core.send_text_events(chunks, paste=paste)
             if outbound is None:
                 return DriverStatus.BACKPRESSURED
-            self._retain_outbound((outbound,))
+            self._retain_outbound(outbound)
         except TerminalInputPending:
             return DriverStatus.BACKPRESSURED
         except (TerminalSessionError, TypeError, ValueError):

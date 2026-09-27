@@ -510,6 +510,12 @@ through `0011002B`.
 model_revision`; the remainder is nonempty, well-formed UTF-8. Flag bit zero
 means bracketed paste. Other bits are zero.
 
+The remainder is at most `max_text_event_bytes`. The terminal sends longer
+text, such as a long input-method commit, as consecutive `TEXT` events queued
+together, so all carry the same flags and `model_revision`. Each split falls
+between characters (APT-1-TEXT Section 3), or between scalars inside a
+character that alone is longer than the limit.
+
 `POINTER` (`0202`) payload (`<iiHHHHhhQ`): signed cell `x`, signed cell `y`,
 current buttons, changed buttons, modifiers, kind, signed horizontal wheel
 steps, signed vertical wheel steps, and model revision. Button bits are left

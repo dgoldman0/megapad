@@ -957,26 +957,49 @@ class RichTerminalCore:
     def send_text(self, data, *, paste: bool = False) -> OutboundBytes | None:
         """Encode one bounded, well-formed UTF-8 TEXT event."""
 
+        events = self.send_text_events((data,), paste=paste)
+        return None if events is None else events[0]
+
+    def send_text_events(
+        self, chunks, *, paste: bool = False
+    ) -> tuple[OutboundBytes, ...] | None:
+        """Encode consecutive TEXT events, one per chunk, all or none.
+
+        Each chunk is bounded, well-formed UTF-8, as a caller splitting
+        longer text between characters gives them (APT-1-WIRE Section 12).
+        All carry the same flags and model revision.  None means the peer's
+        data grant cannot take every event now, and nothing was encoded.
+        """
+
         self._require_active_model()
         revision = self._require_clock().revision
-        if isinstance(data, str):
-            raise TypeError("data must be bytes-like, not str")
-        try:
-            raw = memoryview(data).tobytes()
-        except (TypeError, ValueError) as exc:
-            raise TypeError("data must be bytes-like") from exc
-        if not raw:
-            raise ValueError("text data must not be empty")
-        try:
-            raw.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as exc:
-            raise ValueError("text data must be well-formed UTF-8") from exc
-        if len(raw) > self._client_max_text:
-            raise ValueError("text data exceeds the negotiated client limit")
         if not isinstance(paste, bool):
             raise TypeError("paste must be bool")
-        payload = _TEXT_PREFIX.pack(int(paste), 0, revision) + raw
-        return self._encode_data(MessageType.TEXT, payload)
+        payloads = []
+        for data in chunks:
+            if isinstance(data, str):
+                raise TypeError("data must be bytes-like, not str")
+            try:
+                raw = memoryview(data).tobytes()
+            except (TypeError, ValueError) as exc:
+                raise TypeError("data must be bytes-like") from exc
+            if not raw:
+                raise ValueError("text data must not be empty")
+            try:
+                raw.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise ValueError("text data must be well-formed UTF-8") from exc
+            if len(raw) > self._client_max_text:
+                raise ValueError("text data exceeds the negotiated client limit")
+            payloads.append(_TEXT_PREFIX.pack(int(paste), 0, revision) + raw)
+        if not payloads:
+            raise ValueError("text data must not be empty")
+        needed = sum(HEADER_BYTES + len(payload) for payload in payloads)
+        if needed > self._server_data_grant - self._server_data_sent:
+            return None
+        return tuple(
+            self._encode_data(MessageType.TEXT, payload) for payload in payloads
+        )
 
     def send_pointer(
         self,

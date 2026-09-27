@@ -23,6 +23,7 @@ from rich_terminal.apt1 import (
     encode_probe,
     parse_negotiation,
 )
+from rich_terminal import text_rules
 from rich_terminal.driver import (
     DriverLimits,
     DriverStatus,
@@ -58,6 +59,7 @@ from system import MegapadSystem
 
 
 READY = struct.Struct("<IIIIIIQ")
+TEXT_PREFIX = struct.Struct("<HHQ")
 BEGIN = struct.Struct("<QQIIII")
 SPAN = struct.Struct("<III")
 CELL = struct.Struct("<IBBH")
@@ -416,6 +418,103 @@ def test_driver_keeps_ansi_default_then_runs_a_real_cell_snapshot():
     assert driver.close().value == "accepted"
     _write_native_uart(system, b"legacy")
     assert legacy_batches == [b"legacy"]
+
+
+def _active_driver(limits: DriverLimits):
+    """A driver whose session is ACTIVE on its first snapshot, and a decoder
+    for the frames it sends the machine."""
+
+    system = MegapadSystem(ram_size=64 * 1024, terminal_cols=2, terminal_rows=2)
+    system.uart.on_tx = None
+    system.uart.on_tx_batch = lambda _batch: None
+    driver = RichTerminalDriver.attach(
+        system,
+        _host_limits(),
+        _terminal_config(),
+        limits,
+        ansi_sink=lambda _batch: None,
+        view_sink=lambda _view: None,
+        session_id_factory=lambda: 0x0123456789ABCDEF,
+    )
+    _write_native_uart(system, encode_probe(0xFEDCBA9876543210))
+    driver.service()
+    system.cpu.halted = True
+    system.run_batch_stats(1)
+    offer = parse_negotiation(_drain_uart_rx(system))
+    open_and_snapshot, _encoder = _open_bytes(offer, client_credit=4_096)
+    _write_native_uart(system, open_and_snapshot)
+    assert driver.service().status is DriverStatus.PROGRESS
+    system.run_batch_stats(1)
+    decoder = IncrementalFrameDecoder(offer.session_id, max_payload=256)
+    decoder.feed(_drain_uart_rx(system))
+    return system, driver, decoder
+
+
+def _sent_texts(system, driver, decoder) -> list[tuple[tuple[int, int, int], bytes]]:
+    """The TEXT events the driver has queued, as (prefix, UTF-8) pairs."""
+
+    driver.service()
+    system.run_batch_stats(1)
+    frames = decoder.feed(_drain_uart_rx(system))
+    assert {frame.message_type for frame in frames} == {MessageType.TEXT}
+    return [
+        (TEXT_PREFIX.unpack(frame.payload[:12]), frame.payload[12:])
+        for frame in frames
+    ]
+
+
+def test_driver_splits_long_text_into_events_between_characters():
+    system, driver, decoder = _active_driver(DriverLimits(4_096, 3))
+    assert driver.max_text_bytes == 64
+    text = (
+        "Hi \u4e2d\u6587 e\u0301 \U0001F468\u200d\U0001F469\u200d\U0001F467 "
+        "\U0001F1EF\U0001F1F5 "
+    ) * 2
+    raw = text.encode()
+    assert 64 < len(raw) <= 128
+
+    assert driver.send_text(raw, paste=True) is DriverStatus.PROGRESS
+    sent = _sent_texts(system, driver, decoder)
+    # Two events queued together: the same paste flag and model revision.
+    assert [prefix for prefix, _data in sent] == [(1, 0, 1), (1, 0, 1)]
+    assert b"".join(data for _prefix, data in sent) == raw
+    assert all(len(data) <= 64 for _prefix, data in sent)
+    # The first event ends between characters, as full as it can be.
+    starts = [start for start, _length in text_rules.segment(list(map(ord, text)))]
+    split = len(sent[0][1].decode())
+    assert split in starts
+    following = starts[starts.index(split) + 1]
+    assert len(text[:following].encode()) > 64
+
+    # A character longer than one event is split between its scalars.
+    character = "e" + "\u0301" * 40
+    assert driver.send_text(character.encode()) is DriverStatus.PROGRESS
+    sent = _sent_texts(system, driver, decoder)
+    assert [len(data) for _prefix, data in sent] == [63, 18]
+    assert b"".join(data for _prefix, data in sent) == character.encode()
+
+
+def test_driver_queues_long_text_whole_or_not_at_all():
+    system, driver, decoder = _active_driver(DriverLimits(4_096, 3))
+    core = driver._core
+
+    # Four events could never fit this three-event queue.
+    assert driver.send_text(b"x" * (3 * 64 + 1)) is DriverStatus.INVALID
+    # One queued event leaves room for two more, not three: nothing of the
+    # text is encoded until all of it fits.
+    assert driver.send_text(b"a") is DriverStatus.PROGRESS
+    sent = core._server_data_sent
+    assert driver.send_text(b"y" * (2 * 64 + 1)) is DriverStatus.BACKPRESSURED
+    assert core._server_data_sent == sent
+    assert [data for _prefix, data in _sent_texts(system, driver, decoder)] == [b"a"]
+    assert driver.send_text(b"y" * (2 * 64 + 1)) is DriverStatus.PROGRESS
+    assert [len(data) for _prefix, data in _sent_texts(system, driver, decoder)] == [
+        64,
+        64,
+        1,
+    ]
+    # Text that is not well-formed UTF-8 is refused, however long.
+    assert driver.send_text(b"z" * 70 + b"\xff") is DriverStatus.INVALID
 
 
 def test_driver_admits_retained_discovery_pair_then_covering_credit_in_order():
