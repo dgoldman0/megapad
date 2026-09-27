@@ -29,6 +29,17 @@ def test_parenthetical_comments_close_on_their_physical_source_line() -> None:
     assert unterminated == []
 
 
+def test_each_constant_is_defined_once() -> None:
+    # A second CONSTANT of the same name silently shadows the first for all
+    # later code, as the OPEN event kind once shadowed the OPEN state bit.
+    source = SOURCE.read_text(encoding="utf-8")
+    names = re.findall(r"(?m)^\S+\s+CONSTANT\s+(\S+)", source)
+    assert names
+    assert sorted({name for name in names if names.count(name) > 1}) == []
+    assert "0x04 CONSTANT PT-CONTROL-F-OPEN" in source
+    assert "7 CONSTANT PT-CONTROL-OPEN" in source
+
+
 def test_header_ready_and_caps_reserved_fields_are_zero() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     frame_begin = _definition(source, "_PT-FRAME-BEGIN")
@@ -602,7 +613,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     assert "_PT-CT-Y @ _PT-CT-ROWS @ _PT-I32-EXTENT?" in root_bounds
     assert "_PT.S.PEER-MAX-PAY @ U>" in fields
     assert "_PT-CT-STATE @ 0x1F INVERT AND" in fields
-    assert "PT-CONTROL-OPEN PT-CONTROL-SELECTED OR AND" in fields
+    assert "PT-CONTROL-F-OPEN PT-CONTROL-F-SELECTED OR AND" in fields
     for kind in (
         "PT-CONTROL-MENU-BAR",
         "PT-CONTROL-MENU",
