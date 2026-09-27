@@ -13,6 +13,7 @@ owner UTF-8 reservation, and caller-provided terminal limits are the bounds.
 
 from __future__ import annotations
 
+import bisect
 import operator
 import struct
 from dataclasses import dataclass, field
@@ -26,7 +27,8 @@ SEMANTIC_TEXT_TAG = 0x31585453  # little-endian ``STX1``
 SEMANTIC_TEXT_VERSION = 1
 
 _CONTENT_HEADER = struct.Struct("<IHHQIIIIIIIIQQII")
-_ITEM_HEADER = struct.Struct("<QIIIIHHI")
+_ITEM_HEADER = struct.Struct("<QIIIIHHII")
+_STYLE_RUN = struct.Struct("<IIHH")
 
 
 class SemanticContentErrorCode(str, Enum):
@@ -77,6 +79,53 @@ class SemanticTextState(IntFlag):
 
 
 SEMANTIC_TEXT_STATE_MASK = SemanticTextState.CURRENT | SemanticTextState.UNAVAILABLE
+
+
+class TextStyle(IntEnum):
+    """What a style run's text means.  A renderer's theme chooses how each
+    meaning looks; the wire carries no colour, font, or size."""
+
+    KEYWORD = 1
+    COMMENT = 2
+    STRING = 3
+    NUMBER = 4
+    HEADING = 5
+    EMPHASIS = 6
+    STRONG = 7
+    CODE = 8
+    LINK = 9
+    ERROR = 10
+
+
+@dataclass(frozen=True, slots=True)
+class StyleRun:
+    """One meaning over ``length`` scalars of an item's text from scalar
+    offset ``start``."""
+
+    start: int
+    length: int
+    meaning: TextStyle
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "start", _integer("start", self.start, minimum=0, maximum=UINT32_MAX)
+        )
+        object.__setattr__(
+            self,
+            "length",
+            _integer("length", self.length, minimum=1, maximum=UINT32_MAX),
+        )
+        if isinstance(self.meaning, bool):
+            raise TypeError("meaning must not be bool")
+        try:
+            meaning = TextStyle(self.meaning)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("meaning is not a text style") from exc
+        object.__setattr__(self, "meaning", meaning)
+
+    @property
+    def end(self) -> int:
+        return self.start + self.length
 
 
 def _integer(name: str, value, *, minimum: int, maximum: int) -> int:
@@ -231,7 +280,13 @@ def _rectangles_overlap(items: tuple[SemanticTextItem, ...]) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class SemanticTextItem:
-    """One stable-keyed text item in logical row/column geometry."""
+    """One stable-keyed text item in logical row/column geometry.
+
+    ``runs`` say what parts of the text mean: in start order, within the
+    text, not overlapping, and never touching another run with the same
+    meaning.  A character takes the meaning of the run over its first
+    scalar (``meaning_at``).
+    """
 
     item_key: int
     row: int
@@ -241,7 +296,9 @@ class SemanticTextItem:
     role: SemanticTextRole
     state: SemanticTextState
     text: str
+    runs: tuple[StyleRun, ...] = ()
     _utf8_bytes: int = field(init=False, repr=False, compare=False)
+    _run_starts: tuple[int, ...] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         for name, minimum, maximum in (
@@ -279,10 +336,40 @@ class SemanticTextItem:
         object.__setattr__(self, "state", state)
         text = _clean_text("text", self.text)
         object.__setattr__(self, "_utf8_bytes", len(text))
+        runs = tuple(self.runs)
+        if any(not isinstance(run, StyleRun) for run in runs):
+            raise TypeError("runs must contain only StyleRun values")
+        if len(runs) > UINT32_MAX:
+            raise ValueError("style run count exceeds u32")
+        prior: StyleRun | None = None
+        for run in runs:
+            if run.end > len(self.text):
+                raise ValueError("a style run reaches past the item's text")
+            if prior is not None:
+                if run.start < prior.end:
+                    raise ValueError("style runs are out of order or overlap")
+                if run.start == prior.end and run.meaning is prior.meaning:
+                    raise ValueError("two style runs with the same meaning touch")
+            prior = run
+        object.__setattr__(self, "runs", runs)
+        object.__setattr__(self, "_run_starts", tuple(run.start for run in runs))
 
     @property
     def utf8_bytes(self) -> int:
         return self._utf8_bytes
+
+    @property
+    def wire_bytes(self) -> int:
+        return _ITEM_HEADER.size + self._utf8_bytes + _STYLE_RUN.size * len(self.runs)
+
+    def meaning_at(self, offset: int) -> TextStyle | None:
+        """The meaning of the scalar at OFFSET, or None when it is plain."""
+
+        index = bisect.bisect_right(self._run_starts, offset) - 1
+        if index < 0:
+            return None
+        run = self.runs[index]
+        return run.meaning if offset < run.end else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +401,7 @@ class SemanticTextContent:
     items: tuple[SemanticTextItem, ...]
     text_area_compatible: bool = field(init=False, repr=False, compare=False)
     current_item_count: int = field(init=False, repr=False, compare=False)
+    style_run_count: int = field(init=False, repr=False, compare=False)
     _utf8_bytes: int = field(init=False, repr=False, compare=False)
     _wire_bytes: int = field(init=False, repr=False, compare=False)
 
@@ -367,8 +455,10 @@ class SemanticTextContent:
         prior_order: tuple[int, int, int] | None = None
         text_area_compatible = True
         current_item_count = 0
+        style_run_count = 0
         for item in items:
-            item_bytes = _ITEM_HEADER.size + item.utf8_bytes
+            item_bytes = item.wire_bytes
+            style_run_count += len(item.runs)
             if item_bytes > UINT32_MAX - wire_bytes:
                 raise ValueError("semantic text content exceeds u32 wire bytes")
             wire_bytes += item_bytes
@@ -409,6 +499,7 @@ class SemanticTextContent:
         object.__setattr__(self, "items", items)
         object.__setattr__(self, "text_area_compatible", text_area_compatible)
         object.__setattr__(self, "current_item_count", current_item_count)
+        object.__setattr__(self, "style_run_count", style_run_count)
         object.__setattr__(self, "_utf8_bytes", utf8_bytes)
         object.__setattr__(self, "_wire_bytes", wire_bytes)
 
@@ -487,10 +578,16 @@ def encode_semantic_text_content(content: SemanticTextContent) -> bytes:
             int(item.role),
             int(item.state),
             text_bytes,
+            len(item.runs),
         )
         offset += _ITEM_HEADER.size
         result[offset : offset + text_bytes] = text
         offset += text_bytes
+        for run in item.runs:
+            _STYLE_RUN.pack_into(
+                result, offset, run.start, run.length, int(run.meaning), 0
+            )
+            offset += _STYLE_RUN.size
     return bytes(result)
 
 
@@ -575,6 +672,34 @@ def decode_semantic_text_content(payload) -> SemanticTextContent:
             )
         text_raw = raw[offset : offset + text_bytes]
         offset += text_bytes
+        run_count = values[8]
+        if run_count > (len(raw) - offset) // _STYLE_RUN.size:
+            raise SemanticContentError(
+                SemanticContentErrorCode.PAYLOAD,
+                "semantic text style runs are truncated",
+            )
+        runs = []
+        for _ in range(run_count):
+            start, length, meaning, reserved = _STYLE_RUN.unpack_from(raw, offset)
+            offset += _STYLE_RUN.size
+            if reserved:
+                raise SemanticContentError(
+                    SemanticContentErrorCode.RESERVED,
+                    "a style run's reserved field is nonzero",
+                )
+            try:
+                style = TextStyle(meaning)
+            except ValueError as exc:
+                raise SemanticContentError(
+                    SemanticContentErrorCode.ENUM,
+                    f"style meaning {meaning} is not canonical",
+                ) from exc
+            if not length:
+                raise SemanticContentError(
+                    SemanticContentErrorCode.CONSISTENCY,
+                    "a style run is empty",
+                )
+            runs.append(StyleRun(start, length, style))
         try:
             text = text_raw.decode("utf-8", "strict")
         except UnicodeDecodeError as exc:
@@ -610,6 +735,7 @@ def decode_semantic_text_content(payload) -> SemanticTextContent:
                     role=role,
                     state=SemanticTextState(values[6]),
                     text=text,
+                    runs=tuple(runs),
                 )
             )
         except (TypeError, ValueError) as exc:
@@ -657,6 +783,8 @@ __all__ = [
     "SemanticTextItem",
     "SemanticTextRole",
     "SemanticTextState",
+    "StyleRun",
+    "TextStyle",
     "decode_semantic_text_content",
     "encode_semantic_text_content",
 ]

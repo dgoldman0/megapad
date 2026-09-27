@@ -17,6 +17,7 @@ from rich_terminal.pygame_view import (
     RegionOcclusion,
     ResidualPoint,
     TextHitTarget,
+    TextPosition,
 )
 from rich_terminal.retained_scene import ControlKind
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
@@ -547,7 +548,9 @@ def _router(client, *, generation=5):
     return keyboard, state, pointer
 
 
-def _text_target(*, content_revision=6, rect=(0, 0, 40, 20)):
+def _text_target(
+    *, content_revision=6, rect=(0, 0, 40, 20), links=(), read_only=False
+):
     return TextHitTarget(
         ControlIdentity(7, 2, 30),
         ControlKind.TEXT_AREA,
@@ -562,6 +565,8 @@ def _text_target(*, content_revision=6, rect=(0, 0, 40, 20)):
         viewport_rows=2,
         viewport_columns=4,
         rows=((0, 1, "abc"), (1, 2, "abcd")),
+        links=links,
+        read_only=read_only,
     )
 
 
@@ -738,4 +743,77 @@ def test_wheel_scrolls_text_roots_and_reaches_residual_cells_as_raw_steps():
             },
         ),
         _pointer_request(offer, x=7, y=4, buttons=0, kind=4, wheel_y=2),
+    ]
+
+
+def _text_request(offer, kind, key, offset, modifiers=0):
+    return (
+        "send_text_event",
+        {
+            "owner_id": 7,
+            "owner_generation": 2,
+            "control_id": 30,
+            "event_kind": kind,
+            "modifiers": modifiers,
+            "content_revision": 6,
+            "item_key": key,
+            "scalar_offset": offset,
+            "generation": 5,
+            "display_offer_id": offer.offer_id,
+            "display_scope": display_scope_to_wire(offer.scope),
+        },
+    )
+
+
+def test_ctrl_press_on_a_link_follows_it_and_a_plain_press_still_places():
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    offer = _offer(3)
+    # Row 1 ("abcd", key 2) has a link over "bc", scalars 1 and 2.
+    target = _text_target(links=((2, 1, 3),))
+    _promote(state, keyboard, offer, (_occlusion(rect=(0, 0, 100, 80)), target))
+    ctrl = 2
+
+    assert target.link_at(25, 15) == TextPosition(2, 2)
+    assert target.link_at(5, 15) is None       # "a", before the link
+    assert target.link_at(35, 15) is None      # "d", after it
+    assert target.link_at(25, 5) is None       # row 0 has no link
+
+    # Ctrl and a press on the link follows it; no drag extends from it.
+    assert pointer.button_down(1, (25, 15), (100, 80), modifiers=ctrl)
+    pointer.move((35, 15), (100, 80))
+    assert not pointer.button_up(1, (35, 15), (100, 80))
+    # A plain press on the link places the caret.
+    assert pointer.button_down(1, (15, 15), (100, 80))
+    assert not pointer.button_up(1, (15, 15), (100, 80))
+    # Ctrl and a press off any link places too.
+    assert pointer.button_down(1, (5, 15), (100, 80), modifiers=ctrl)
+    assert not pointer.button_up(1, (5, 15), (100, 80), modifiers=ctrl)
+
+    assert client.requests == [
+        _text_request(offer, 5, 2, 2, modifiers=ctrl),
+        _text_request(offer, 2, 2, 1),
+        _text_request(offer, 2, 2, 0, modifiers=ctrl),
+    ]
+
+
+def test_a_plain_press_follows_a_link_in_read_only_text():
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    offer = _offer(3)
+    target = _text_target(links=((2, 1, 3),), read_only=True)
+    _promote(state, keyboard, offer, (_occlusion(rect=(0, 0, 100, 80)), target))
+
+    assert pointer.button_down(1, (15, 15), (100, 80))
+    assert not pointer.button_up(1, (15, 15), (100, 80))
+    # Shift still extends, and a press off the link places.
+    assert pointer.button_down(1, (25, 15), (100, 80), modifiers=1)
+    assert not pointer.button_up(1, (25, 15), (100, 80), modifiers=1)
+    assert pointer.button_down(1, (5, 15), (100, 80))
+    assert not pointer.button_up(1, (5, 15), (100, 80))
+
+    assert client.requests == [
+        _text_request(offer, 5, 2, 1),
+        _text_request(offer, 3, 2, 2, modifiers=1),
+        _text_request(offer, 2, 2, 0),
     ]

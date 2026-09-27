@@ -167,10 +167,11 @@ class ControlEventKind(IntEnum):
     PLACE = 2
     EXTEND = 3
     SCROLL = 4
+    FOLLOW = 5
 
 
 _POSITIONED_CONTROL_EVENTS = frozenset(
-    (ControlEventKind.PLACE, ControlEventKind.EXTEND)
+    (ControlEventKind.PLACE, ControlEventKind.EXTEND, ControlEventKind.FOLLOW)
 )
 
 

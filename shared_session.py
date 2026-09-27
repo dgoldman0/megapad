@@ -132,6 +132,8 @@ _TEXT_EVENT_FIELDS = {
     + ("event_kind", "content_revision", "item_key", "scalar_offset"),
     int(ControlEventKind.EXTEND): _CONTROL_INPUT_FIELDS
     + ("event_kind", "content_revision", "item_key", "scalar_offset"),
+    int(ControlEventKind.FOLLOW): _CONTROL_INPUT_FIELDS
+    + ("event_kind", "content_revision", "item_key", "scalar_offset"),
     int(ControlEventKind.SCROLL): _CONTROL_INPUT_FIELDS
     + ("event_kind", "wheel_x", "wheel_y"),
 }
@@ -3735,7 +3737,9 @@ class SessionServer:
             kind = params.get("event_kind") if isinstance(params, Mapping) else None
             fields = _TEXT_EVENT_FIELDS.get(kind)
             if fields is None:
-                raise ValueError("text event_kind must be 2 PLACE, 3 EXTEND, or 4 SCROLL")
+                raise ValueError(
+                    "text event_kind must be 2 PLACE, 3 EXTEND, 4 SCROLL, or 5 FOLLOW"
+                )
             params = _wire_object(params, "text control input", fields)
         elif method == "send_pointer":
             params = _wire_object(params, "pointer input", _POINTER_INPUT_FIELDS)

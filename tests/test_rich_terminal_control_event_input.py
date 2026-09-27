@@ -187,6 +187,25 @@ def test_place_extend_and_scroll_round_trip_through_the_guest_parser(runtime):
     assert (extend["dispatch"], extend["kind"]) == (0, 3)
     assert (extend["item_key"], extend["offset"]) == (6, 0)
 
+    follow = _dispatch(
+        runtime,
+        encode_control_event(
+            _event(
+                ControlEventKind.FOLLOW,
+                content_revision=41,
+                item_key=7,
+                scalar_offset=3,
+            )
+        ),
+        features=both,
+    )
+    assert (follow["dispatch"], follow["kind"]) == (0, 5)
+    assert (follow["content_revision"], follow["item_key"], follow["offset"]) == (
+        41,
+        7,
+        3,
+    )
+
     scroll = _dispatch(
         runtime,
         encode_control_event(_event(ControlEventKind.SCROLL, wheel_x=-1, wheel_y=3)),
@@ -258,8 +277,13 @@ def _with(payload: bytes, offset: int, replacement: bytes) -> bytes:
         ),
         # Unknown kinds remain invalid.
         (
-            _with(_place_bytes(), 24, (5).to_bytes(2, "little")),
+            _with(_place_bytes(), 24, (6).to_bytes(2, "little")),
             CONTROLS | CONTROL_COLLECTIONS,
+        ),
+        # FOLLOW needs RET_CONTROL_COLLECTIONS, like the other positions.
+        (
+            _with(_place_bytes(), 24, (5).to_bytes(2, "little")),
+            CONTROLS,
         ),
     ),
 )

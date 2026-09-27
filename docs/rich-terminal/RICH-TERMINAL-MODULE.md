@@ -87,8 +87,8 @@ an independently discoverable scene or mutation API.
 The module admits in-place RETAINED-1 feature bit 8 `RET_CONTROLS`, supplies
 typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers, and decodes
 revision-bound `CONTROL_EVENT ACTIVATE`. With bit 9 `RET_CONTROL_COLLECTIONS`
-it also decodes the positioned `PLACE` and `EXTEND` kinds and `SCROLL`, each
-at its one exact length. Their tails stay in the session event buffer, like
+it also decodes the positioned `PLACE`, `EXTEND`, and `FOLLOW` kinds and
+`SCROLL`, each at its one exact length. Their tails stay in the session event buffer, like
 TEXT data, until the next `PT-SERVICE`; the typed readers above return zero on
 an event without that tail. This completes only the MegaPad guest
 transport boundary. Independent CONTROL high-water validation, shared

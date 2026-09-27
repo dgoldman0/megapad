@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from rich_terminal import font_set
-from rich_terminal.font_set import FontSet, discover_fallback_fonts
+from rich_terminal.font_set import (
+    FontSet,
+    discover_fallback_fonts,
+    discover_style_fonts,
+)
 
 
 def test_discovery_keeps_only_the_families_fontconfig_has(monkeypatch, tmp_path):
@@ -81,7 +85,7 @@ _NOTO = discover_fallback_fonts(("Noto Sans Mono CJK SC", "Noto Color Emoji"))
 @pytest.mark.skipif(len(_NOTO) < 2, reason="Noto CJK and color emoji fonts are not installed")
 def test_fallback_faces_draw_what_the_primary_lacks_fitted_to_their_cells():
     pygame = _pygame()
-    fonts = FontSet(pygame, _default_font(pygame), 18, _NOTO)
+    fonts = FontSet(pygame, _default_font(pygame), 18, _NOTO, styles={})
     han = fonts.render("\u4e2d", True, (255, 255, 255))
     assert fonts.face_for("\u4e2d").path == _NOTO[0]
     assert han.get_size() == (2 * fonts.cell_width, fonts.cell_height)
@@ -107,4 +111,62 @@ def test_fallback_faces_draw_what_the_primary_lacks_fitted_to_their_cells():
     assert [path for path, _ in fonts.files()] == [
         str(_default_font(pygame)),
         *map(str, _NOTO),
+    ]
+
+
+def test_style_discovery_keeps_only_real_faces_of_the_same_family(
+    monkeypatch, tmp_path
+):
+    primary = tmp_path / "Mono.ttf"
+    bold = tmp_path / "Mono-Bold.ttf"
+    italic = tmp_path / "Mono-Italic.ttf"
+    for path in (primary, bold, italic):
+        path.write_bytes(b"font")
+
+    def run(command, **_kwargs):
+        if command[0] == "fc-query":
+            return subprocess.CompletedProcess(command, 0, "Mono\n", "")
+        pattern = command[-1]
+        answers = {
+            "Mono:weight=bold": f"{bold}\nMono\n200\n0",
+            "Mono:slant=italic": f"{italic}\nMono\n80\n100",
+            # Only another family answers: left out.
+            "Mono:weight=bold:slant=italic": f"{bold}\nOther\n200\n100",
+        }
+        return subprocess.CompletedProcess(command, 0, answers[pattern], "")
+
+    monkeypatch.setattr(font_set.subprocess, "run", run)
+    assert discover_style_fonts(primary) == {"bold": bold, "italic": italic}
+
+
+def test_style_discovery_without_fontconfig_finds_nothing(monkeypatch):
+    def run(command, **_kwargs):
+        raise FileNotFoundError(command[0])
+
+    monkeypatch.setattr(font_set.subprocess, "run", run)
+    assert discover_style_fonts("Mono.ttf") == {}
+
+
+_DEJAVU_MONO = discover_fallback_fonts(("DejaVu Sans Mono",))
+
+
+@pytest.mark.skipif(not _DEJAVU_MONO, reason="DejaVu Sans Mono is not installed")
+def test_bold_and_italic_use_the_family_s_real_faces():
+    pygame = _pygame()
+    styles = discover_style_fonts(_DEJAVU_MONO[0])
+    if "bold" not in styles:
+        pytest.skip("DejaVu Sans Mono Bold is not installed")
+    fonts = FontSet(pygame, _DEJAVU_MONO[0], 18, styles=styles)
+    white = (255, 255, 255)
+    real_bold = pygame.font.Font(str(styles["bold"]), 18).render("W", True, white)
+    fonts.set_bold(True)
+    drawn = fonts.render("W", True, white)
+    fonts.set_bold(False)
+    regular = fonts.render("W", True, white)
+    # The real face draws bold glyphs, and the regular face is left plain.
+    assert pygame.image.tobytes(drawn, "RGBA") == pygame.image.tobytes(real_bold, "RGBA")
+    assert pygame.image.tobytes(regular, "RGBA") != pygame.image.tobytes(drawn, "RGBA")
+    assert not fonts.faces[0].font.get_bold()
+    assert [path for path, _ in fonts.files()][1:] == [
+        str(styles[name]) for name in ("italic", "bold", "bold_italic") if name in styles
     ]

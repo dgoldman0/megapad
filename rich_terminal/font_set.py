@@ -10,7 +10,10 @@ covers shows a box.
 
 ``FontSet`` offers the parts of the pygame font interface the painters use
 (``render``, ``size``, ``get_linesize``, ``get_height``, and the italic and
-bold switches), so it replaces one pygame font wherever that is passed.  In
+bold switches), so it replaces one pygame font wherever that is passed.
+Bold and italic use the primary family's real bold, italic, and bold italic
+faces when the host has them (``discover_style_fonts``), and are otherwise
+synthesized from the regular face, as they are for fallback faces.  In
 cell mode each character is fitted to its cells, as the CELL grid, glyph
 runs, and text areas need; otherwise each character keeps its face's
 advance, as renderer-laid-out labels do.  Glyphs from the primary face are
@@ -68,6 +71,70 @@ def discover_fallback_fonts(families=DEFAULT_FALLBACK_FAMILIES) -> tuple[Path, .
     return tuple(found)
 
 
+# fontconfig patterns for the styled faces of one family.
+_STYLE_PATTERNS = (
+    ("bold", ":weight=bold", True, False),
+    ("italic", ":slant=italic", False, True),
+    ("bold_italic", ":weight=bold:slant=italic", True, True),
+)
+
+
+def discover_style_fonts(primary: str | Path) -> dict[str, Path]:
+    """The bold, italic, and bold italic faces of PRIMARY's family, as
+    fontconfig resolves them.
+
+    A style fontconfig can only answer with another family, or with a face
+    that is not actually bold or slanted, is left out, as is every style
+    when fontconfig is unavailable.
+    """
+
+    try:
+        query = subprocess.run(
+            ["fc-query", "-f", "%{family[0]}\n", str(primary)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    family = query.stdout.split("\n", 1)[0].strip()
+    if query.returncode != 0 or not family:
+        return {}
+    found: dict[str, Path] = {}
+    for name, pattern, bold, italic in _STYLE_PATTERNS:
+        try:
+            result = subprocess.run(
+                ["fc-match", "-f", "%{file}\n%{family[0]}\n%{weight}\n%{slant}",
+                 family + pattern],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return found
+        fields = result.stdout.split("\n")
+        if result.returncode != 0 or len(fields) < 4:
+            continue
+        path_text, resolved, weight, slant = (field.strip() for field in fields[:4])
+        try:
+            heavy = float(weight) >= 180
+            slanted = float(slant) > 0
+        except ValueError:
+            continue
+        path = Path(path_text)
+        if (
+            resolved == family
+            and heavy == bold
+            and slanted == italic
+            and path.is_file()
+            and path.resolve() != Path(primary).resolve()
+        ):
+            found[name] = path
+    return found
+
+
 def font_sha256(path: str | Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -97,6 +164,7 @@ class FontSet:
         fallbacks=(),
         *,
         cells: bool = True,
+        styles=None,
     ) -> None:
         import pygame.freetype as freetype
 
@@ -123,6 +191,20 @@ class FontSet:
             face = self._fallback_face(Path(path), size)
             if face is not None:
                 self.faces.append(face)
+        # The primary family's real styled faces, by (bold, italic).
+        if styles is None:
+            styles = discover_style_fonts(primary_path)
+        self.style_paths: dict[tuple[bool, bool], Path] = {}
+        self._styled: dict[tuple[bool, bool], object] = {}
+        for name, _pattern, bold, italic in _STYLE_PATTERNS:
+            path = styles.get(name)
+            if path is None:
+                continue
+            try:
+                self._styled[(bold, italic)] = pygame_module.font.Font(str(path), size)
+            except (OSError, pygame_module.error):
+                continue
+            self.style_paths[(bold, italic)] = Path(path)
         self._choice: dict[str, _Face | None] = {}
         self._italic = False
         self._bold = False
@@ -162,18 +244,26 @@ class FontSet:
 
     def set_italic(self, value: bool) -> None:
         self._italic = bool(value)
-        for face in self.faces:
-            if not face.bitmap:
-                face.font.set_italic(self._italic)
+        self._apply_style()
 
     def get_bold(self) -> bool:
         return self._bold
 
     def set_bold(self, value: bool) -> None:
         self._bold = bool(value)
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        """Synthesize the style on every scalable face except a primary face
+        whose real styled face will draw it."""
+
+        real = (self._bold, self._italic) in self._styled
         for face in self.faces:
-            if not face.bitmap:
-                face.font.set_bold(self._bold)
+            if face.bitmap:
+                continue
+            synthetic = not (face.primary and real)
+            face.font.set_bold(self._bold and synthetic)
+            face.font.set_italic(self._italic and synthetic)
 
     def size(self, text: str) -> tuple[int, int]:
         width = sum(self._advance(character) for character in self._characters(text))
@@ -197,9 +287,13 @@ class FontSet:
         return line
 
     def files(self) -> tuple[tuple[str, str], ...]:
-        """Each face's file and its SHA-256, primary first, for evidence."""
+        """Each face's file and its SHA-256, primary first and its styled
+        faces after the fallbacks, for evidence."""
 
-        return tuple((str(face.path), font_sha256(face.path)) for face in self.faces)
+        paths = [face.path for face in self.faces] + [
+            self.style_paths[key] for key in sorted(self.style_paths)
+        ]
+        return tuple((str(path), font_sha256(path)) for path in paths)
 
     # -- faces and glyphs -------------------------------------------------
 
@@ -261,7 +355,10 @@ class FontSet:
         if face is None:
             return self._missing_box(box_width, color)
         rgb = tuple(color)[:3]
-        glyph = face.font.render(character, antialias, rgb)
+        font = face.font
+        if face.primary and (self._bold or self._italic):
+            font = self._styled.get((self._bold, self._italic), font)
+        glyph = font.render(character, antialias, rgb)
         if face.primary and (not self.cells or glyph.get_width() <= box_width):
             return glyph
         return self._fit(glyph, box_width)

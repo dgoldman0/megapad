@@ -795,6 +795,8 @@ def validate_control_shape(
                 )
             if content.current_item_count > 1:
                 raise ValueError("TEXT_GRID has more than one current item")
+            if content.style_run_count:
+                raise ValueError("TEXT_GRID items carry no style runs")
     else:
         if parent_control_id == 0 or bounds is not None or z_order != 0:
             raise ValueError(

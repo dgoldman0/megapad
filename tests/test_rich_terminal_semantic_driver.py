@@ -42,6 +42,8 @@ from rich_terminal.semantic_content import (
     SemanticTextItem,
     SemanticTextRole,
     SemanticTextState,
+    StyleRun,
+    TextStyle,
 )
 from rich_terminal.retained_wire import (
     ControlEvent,
@@ -321,9 +323,9 @@ TEXT_GRID_ID = 5
 TEXT_REVISION = 5
 
 
-def _text_item(key, row, column, span, role, text):
+def _text_item(key, row, column, span, role, text, runs=()):
     return SemanticTextItem(
-        key, row, column, 1, span, role, SemanticTextState(0), text
+        key, row, column, 1, span, role, SemanticTextState(0), text, runs
     )
 
 
@@ -333,7 +335,10 @@ def _text_controls(owner) -> dict[int, ControlDefinition]:
         TEXT_REVISION, 2, 8, 0, 0, 2, 8, SemanticContentFlag(0), 2, 1, 0, 0,
         (
             _text_item(1, 0, 0, 8, content, "ab"),
-            _text_item(2, 1, 0, 8, content, "cdef"),
+            # "de" is a link.
+            _text_item(
+                2, 1, 0, 8, content, "cdef", (StyleRun(1, 2, TextStyle.LINK),)
+            ),
         ),
     )
     grid = SemanticTextContent(
@@ -463,6 +468,15 @@ def test_driver_emits_positioned_events_only_for_carried_positions() -> None:
         (3, ControlEventKind.PLACE,
          {"content_revision": TEXT_REVISION, "item_key": 1, "scalar_offset": 0}),
         (2, ControlEventKind.SCROLL, {"wheel_y": 1}),
+        # FOLLOW names a character a link covers, and only in a text area.
+        (TEXT_AREA_ID, ControlEventKind.FOLLOW,
+         {"content_revision": TEXT_REVISION, "item_key": 2, "scalar_offset": 0}),
+        (TEXT_AREA_ID, ControlEventKind.FOLLOW,
+         {"content_revision": TEXT_REVISION, "item_key": 2, "scalar_offset": 3}),
+        (TEXT_AREA_ID, ControlEventKind.FOLLOW,
+         {"content_revision": TEXT_REVISION, "item_key": 1, "scalar_offset": 1}),
+        (TEXT_GRID_ID, ControlEventKind.FOLLOW,
+         {"content_revision": TEXT_REVISION, "item_key": 7, "scalar_offset": 0}),
     ),
 )
 def test_driver_refuses_positions_the_scene_does_not_carry(control_id, kind, fields):
@@ -471,6 +485,28 @@ def test_driver_refuses_positions_the_scene_does_not_carry(control_id, kind, fie
 
     assert _send_text(driver, control_id, kind, **fields) is DriverStatus.INVALID
     assert driver.pending_outbound_events == 0
+
+
+def test_driver_follows_a_link_the_scene_carries() -> None:
+    core = _text_core()
+    driver = _driver(core)
+    position = {"content_revision": TEXT_REVISION, "item_key": 2, "scalar_offset": 2}
+
+    assert (
+        _send_text(driver, TEXT_AREA_ID, ControlEventKind.FOLLOW, modifiers=2, **position)
+        is DriverStatus.PROGRESS
+    )
+    assert driver.pending_outbound_bytes == 40 + 64
+    (follow,) = _sent_events(driver)
+    assert follow == ControlEvent(
+        OWNER_ID,
+        OWNER_GENERATION,
+        TEXT_AREA_ID,
+        ControlEventKind.FOLLOW,
+        2,
+        MODEL_REVISION,
+        **position,
+    )
 
 
 def test_positioned_events_require_the_collections_feature() -> None:

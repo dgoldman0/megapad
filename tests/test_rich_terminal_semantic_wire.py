@@ -149,6 +149,7 @@ def test_control_message_ids_are_exact_and_event_is_base_input_only() -> None:
     assert ControlEventKind.PLACE == 2
     assert ControlEventKind.EXTEND == 3
     assert ControlEventKind.SCROLL == 4
+    assert ControlEventKind.FOLLOW == 5
 
 
 def test_menu_bar_definition_has_the_exact_eighty_byte_prefix() -> None:
@@ -358,7 +359,7 @@ def test_control_drop_and_revision_bound_activation_have_exact_payloads() -> Non
     assert modifier_bits.value.code is RetainedWireErrorCode.RESERVED
 
     kind = bytearray(expected)
-    kind[24:26] = (5).to_bytes(2, "little")
+    kind[24:26] = (6).to_bytes(2, "little")
     with pytest.raises(RetainedWireError) as event_kind:
         decode_control_event(kind)
     assert event_kind.value.code is RetainedWireErrorCode.ENUM
@@ -378,6 +379,7 @@ def test_positioned_and_scroll_control_events_have_exact_tails() -> None:
     assert control_event_payload_size(ControlEventKind.ACTIVATE) == 40
     assert control_event_payload_size(ControlEventKind.PLACE) == 64
     assert control_event_payload_size(ControlEventKind.EXTEND) == 64
+    assert control_event_payload_size(ControlEventKind.FOLLOW) == 64
     assert control_event_payload_size(ControlEventKind.SCROLL) == 48
     assert CONTROL_EVENT_MAX_PAYLOAD == 64
 

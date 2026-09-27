@@ -34,7 +34,12 @@ from .retained_view import (
     TextGridDraw,
     WaveformDraw,
 )
-from .semantic_content import SemanticTextRole, SemanticTextState
+from .semantic_content import (
+    SemanticContentFlag,
+    SemanticTextRole,
+    SemanticTextState,
+    TextStyle,
+)
 
 ATTR_BOLD = 0x01
 ATTR_DIM = 0x02
@@ -125,6 +130,35 @@ _GRID_CELL = (26, 32, 42)
 _GRID_HEADER = (34, 43, 57)
 _GRID_UNAVAILABLE = (23, 28, 36)
 _GRID_PRIMARY = (39, 69, 112)
+
+
+@dataclass(frozen=True, slots=True)
+class TextLook:
+    """How a theme shows one meaning of text: a colour (None keeps the
+    text's own), the bold and italic faces, and an underline colour."""
+
+    color: tuple[int, int, int] | None = None
+    bold: bool = False
+    italic: bool = False
+    underline: tuple[int, int, int] | None = None
+
+
+# The reference theme (SEMANTIC-CONTENT-1): a colour for every meaning, the
+# bold face for keywords, headings, and strong text, the italic face for
+# comments and emphasis, an underline for links, and a red one for errors.
+# A look never moves a character out of its slots.
+REFERENCE_TEXT_THEME: dict[TextStyle, TextLook] = {
+    TextStyle.KEYWORD: TextLook((110, 180, 250), bold=True),
+    TextStyle.COMMENT: TextLook((135, 146, 160), italic=True),
+    TextStyle.STRING: TextLook((222, 196, 132)),
+    TextStyle.NUMBER: TextLook((196, 160, 250)),
+    TextStyle.HEADING: TextLook((250, 170, 95), bold=True),
+    TextStyle.EMPHASIS: TextLook((244, 214, 186), italic=True),
+    TextStyle.STRONG: TextLook((255, 255, 255), bold=True),
+    TextStyle.CODE: TextLook((140, 210, 140)),
+    TextStyle.LINK: TextLook((100, 170, 250), underline=(100, 170, 250)),
+    TextStyle.ERROR: TextLook((250, 125, 125), underline=(235, 75, 75)),
+}
 
 
 # Public renderer-cache handoff key.  It is exactly
@@ -320,7 +354,10 @@ class TextHitTarget:
     text)`` for every carried row, laid out in ``direction`` exactly as the
     paint pass laid it out; TEXT_GRID ``cells`` holds ``(row, column,
     row_span, column_span, item_key, selectable)`` for every carried item
-    that intersects the viewport.
+    that intersects the viewport.  ``links`` holds ``(item_key, start, end)``
+    for each TEXT_AREA style run whose meaning is LINK, and ``read_only``
+    whether the content is READ_ONLY, which decide when a press follows a
+    link (SEMANTIC-CONTENT-1).
     """
 
     identity: ControlIdentity
@@ -338,6 +375,8 @@ class TextHitTarget:
     rows: tuple[tuple[int, int, str], ...] = ()
     cells: tuple[tuple[int, int, int, int, int, bool], ...] = ()
     direction: int = text_rules.DIRECTION_AUTO
+    links: tuple[tuple[int, int, int], ...] = ()
+    read_only: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, ControlIdentity):
@@ -357,6 +396,8 @@ class TextHitTarget:
         _integer("direction", self.direction, minimum=0, maximum=2)
         object.__setattr__(self, "rows", tuple(sorted(self.rows)))
         object.__setattr__(self, "cells", tuple(self.cells))
+        object.__setattr__(self, "links", tuple(self.links))
+        object.__setattr__(self, "read_only", bool(self.read_only))
 
     def _index(self, origin: int, extent: int, count: int, value: int) -> int:
         """Invert ``_partition_edge``: the logical index whose span holds value."""
@@ -415,6 +456,32 @@ class TextHitTarget:
             return TextPosition(above[0], above[1])
         if below is not None:
             return TextPosition(below, 0)
+        return None
+
+    def link_at(self, x: int, y: int) -> TextPosition | None:
+        """The start of the TEXT_AREA character painted at one physical
+        point, when a LINK run covers that character's first scalar."""
+
+        if self.kind is not ControlKind.TEXT_AREA or not self.links:
+            return None
+        if not self.rect.contains(x, y):
+            return None
+        row = self.viewport_row + self._index(
+            self.anchor_top, self.anchor_height, self.viewport_rows, y
+        )
+        slot = self._index(self.anchor_left, self.anchor_width, self.viewport_columns, x)
+        for item_row, key, text in self.rows:
+            if item_row != row:
+                continue
+            layout = text_rules.cached_row(text, self.direction, True)
+            shift = _text_area_shift(layout, self.viewport_column, self.viewport_columns)
+            placed = layout.character_at_column(slot - shift)
+            if placed is None:
+                return None
+            for link_key, start, end in self.links:
+                if link_key == key and start <= placed.start < end:
+                    return TextPosition(key, placed.start)
+            return None
         return None
 
 
@@ -1582,6 +1649,13 @@ def _text_root_entries(region, draw, anchor, visible_anchor) -> list[HitMapEntry
                     for item in content.items
                 ),
                 direction=content.direction,
+                links=tuple(
+                    (item.item_key, run.start, run.end)
+                    for item in content.items
+                    for run in item.runs
+                    if run.meaning is TextStyle.LINK
+                ),
+                read_only=bool(content.flags & SemanticContentFlag.READ_ONLY),
                 **layout,
             )
         ]
@@ -1628,14 +1702,40 @@ def _text_area_shift(layout, column_start: int, columns: int) -> int:
 
 
 def _paint_cluster(
-    pygame_module, surface, font, text: str, color, clip, *, left: int, top: int, bottom: int
+    pygame_module,
+    surface,
+    font,
+    text: str,
+    color,
+    clip,
+    *,
+    left: int,
+    top: int,
+    bottom: int,
+    bold: bool = False,
+    italic: bool = False,
 ) -> None:
     """Paint one character's display scalars as one glyph cluster from
-    LEFT, centred between TOP and BOTTOM and clipped to CLIP."""
+    LEFT, centred between TOP and BOTTOM and clipped to CLIP, in the bold
+    or italic face when asked."""
 
-    glyph, has_ink, _width, height = _glyph_raster(
-        pygame_module, font, text, color, 0xFF
+    styled = (
+        (bold or italic)
+        and callable(getattr(font, "set_bold", None))
+        and callable(getattr(font, "set_italic", None))
     )
+    if styled:
+        prior = font.get_bold(), font.get_italic()
+        font.set_bold(bold)
+        font.set_italic(italic)
+    try:
+        glyph, has_ink, _width, height = _glyph_raster(
+            pygame_module, font, text, color, 0xFF
+        )
+    finally:
+        if styled:
+            font.set_bold(prior[0])
+            font.set_italic(prior[1])
     if has_ink:
         glyph_top = top + (bottom - top) // 2 - height // 2
         _blit_bounded_surface(pygame_module, surface, glyph, left, glyph_top, clip)
@@ -1655,7 +1755,8 @@ def _paint_text_area(
     shared text rules (APT-1-TEXT Sections 3 to 8): its characters take
     their cells in visual order, a right-to-left row is mirrored, and a
     selection covers exactly the characters between its endpoints, whose
-    cells need not be contiguous.
+    cells need not be contiguous.  A character takes the reference theme's
+    look for the meaning of the style run over its first scalar.
     """
 
     anchor, visible_anchor = _semantic_root_rects(
@@ -1743,17 +1844,41 @@ def _paint_text_area(
                     pygame_module, left, row_top, right, row_bottom, visible_anchor
                 )
                 if glyph_clip is not None:
+                    look = None
+                    if item.runs:
+                        meaning = item.meaning_at(placed.start)
+                        if meaning is not None:
+                            look = REFERENCE_TEXT_THEME.get(meaning)
+                    color = text_color
+                    if look is not None and look.color is not None and enabled:
+                        color = look.color
                     _paint_cluster(
                         pygame_module,
                         surface,
                         font,
                         placed.text,
-                        text_color,
+                        color,
                         glyph_clip,
                         left=left,
                         top=row_top,
                         bottom=row_bottom,
+                        bold=look is not None and look.bold,
+                        italic=look is not None and look.italic,
                     )
+                    if look is not None and look.underline is not None:
+                        underline = _clipped_python_rect(
+                            pygame_module,
+                            left,
+                            row_bottom - 2,
+                            right,
+                            row_bottom - 1,
+                            glyph_clip,
+                        )
+                        if underline is not None:
+                            surface.fill(
+                                look.underline if enabled else _DISABLED_TEXT,
+                                underline,
+                            )
 
         surface.set_clip(visible_anchor)
         _paint_clipped_border(

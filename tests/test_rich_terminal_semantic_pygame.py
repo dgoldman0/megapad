@@ -9,6 +9,7 @@ import pytest
 from rich_terminal import text_rules
 from rich_terminal.apt1 import UINT32_MAX
 from rich_terminal.pygame_view import (
+    REFERENCE_TEXT_THEME,
     ControlIdentity,
     ControlSurface,
     PixelRect,
@@ -45,6 +46,8 @@ from rich_terminal.semantic_content import (
     SemanticTextItem,
     SemanticTextRole,
     SemanticTextState,
+    StyleRun,
+    TextStyle,
 )
 
 
@@ -1416,3 +1419,95 @@ def test_tab_labels_are_laid_out_as_paragraphs():
     )
     assert _visual(_HEBREW_WORD) == list(reversed(_HEBREW_WORD))
     assert font.rendered == _visual(_HEBREW_WORD)
+
+
+class _StyleFont:
+    """Monospace test font that remembers how each glyph was asked for:
+    each distinct (text, colour, bold, italic) renders as a 3x1 glyph in an
+    identifying colour of its own."""
+
+    def __init__(self, pygame_module):
+        self.pygame = pygame_module
+        self.bold = False
+        self.italic = False
+        self.drawn: dict[tuple[int, int, int], tuple] = {}
+
+    def size(self, text):
+        return len(text), 1
+
+    def get_bold(self):
+        return self.bold
+
+    def set_bold(self, value):
+        self.bold = bool(value)
+
+    def get_italic(self):
+        return self.italic
+
+    def set_italic(self, value):
+        self.italic = bool(value)
+
+    def render(self, text, antialias, color):
+        look = (text, tuple(color)[:3], self.bold, self.italic)
+        for rgb, known in self.drawn.items():
+            if known == look:
+                break
+        else:
+            rgb = (len(self.drawn) + 1, 11, 13)
+            self.drawn[rgb] = look
+        glyph = self.pygame.Surface((3, 1), flags=self.pygame.SRCALPHA)
+        glyph.fill((*rgb, 255))
+        return glyph
+
+    def look_at(self, surface, x, y):
+        return self.drawn.get(tuple(surface.get_at((x, y)))[:3])
+
+
+def test_text_area_characters_take_their_meanings_look():
+    pygame = pytest.importorskip("pygame")
+    text = "ab cd"
+    content = SemanticTextContent(
+        content_revision=1,
+        rows=1,
+        columns=6,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=1,
+        viewport_columns=6,
+        flags=SemanticContentFlag(0),
+        primary_key=0,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1, 0, 0, 1, 6,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                text,
+                (StyleRun(0, 2, TextStyle.HEADING), StyleRun(3, 2, TextStyle.LINK)),
+            ),
+        ),
+    )
+    area = TextAreaDraw(32, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 6, 1), content)
+    surface = pygame.Surface((60, 10))
+    surface.fill((184, 190, 201))
+    font = _StyleFont(pygame)
+    composite_draw_plane_result(
+        pygame, surface, _plane(_region(area, cols=6, rows=1)), font, 10, 10
+    )
+    heading = REFERENCE_TEXT_THEME[TextStyle.HEADING]
+    link = REFERENCE_TEXT_THEME[TextStyle.LINK]
+    looks = [font.look_at(surface, 10 * slot + 1, 5) for slot in range(5)]
+    assert looks[0] == ("a", heading.color, True, False)
+    assert looks[1] == ("b", heading.color, True, False)
+    assert looks[2][0] == " " or looks[2] is None
+    assert looks[3] == ("c", link.color, False, False)
+    assert looks[4] == ("d", link.color, False, False)
+    # Links are underlined across their slots; plain and heading text is not.
+    underline_y = 10 - 2
+    assert tuple(surface.get_at((35, underline_y)))[:3] == link.underline
+    assert tuple(surface.get_at((45, underline_y)))[:3] == link.underline
+    assert tuple(surface.get_at((5, underline_y)))[:3] != link.underline
+    # The font is left as it was found.
+    assert not font.bold and not font.italic

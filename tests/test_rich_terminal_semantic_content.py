@@ -28,6 +28,8 @@ from rich_terminal.semantic_content import (
     SemanticTextItem,
     SemanticTextRole,
     SemanticTextState,
+    StyleRun,
+    TextStyle,
     decode_semantic_text_content,
     encode_semantic_text_content,
 )
@@ -114,23 +116,24 @@ def test_stx1_collection_has_exact_headers_and_round_trips() -> None:
         2,
         1,
     )
-    expected += struct.pack("<QIIIIHHI", 101, 1, 0, 1, 23, 1, 0, 5) + b"first"
+    expected += struct.pack("<QIIIIHHII", 101, 1, 0, 1, 23, 1, 0, 5, 0) + b"first"
     expected += (
-        struct.pack("<QIIIIHHI", 102, 3, 0, 1, 23, 1, 0, 5)
+        struct.pack("<QIIIIHHII", 102, 3, 0, 1, 23, 1, 0, 5, 0)
         + b"\xce\xbbine"
     )
-    expected += struct.pack("<QIIIIHHI", 103, 6, 0, 1, 23, 1, 0, 0)
+    expected += struct.pack("<QIIIIHHII", 103, 6, 0, 1, 23, 1, 0, 0, 0)
     assert payload == expected
     assert content.wire_bytes == len(expected)
     assert content.text_area_compatible
     assert content.current_item_count == 0
+    assert content.style_run_count == 0
     decoded = decode_semantic_text_content(payload)
     assert decoded == content
     assert decoded.text_area_compatible
     assert decoded.current_item_count == 0
 
     derived_fields = {value.name: value for value in fields(SemanticTextContent)}
-    for name in ("text_area_compatible", "current_item_count"):
+    for name in ("text_area_compatible", "current_item_count", "style_run_count"):
         assert not derived_fields[name].init
         assert not derived_fields[name].compare
 
@@ -147,7 +150,7 @@ def test_stx1_collection_has_exact_headers_and_round_trips() -> None:
     assert item.value.code is SemanticContentErrorCode.RESERVED
 
     disallowed_text = bytearray(payload)
-    disallowed_text[72 + 32] = ord("\n")
+    disallowed_text[72 + 36] = ord("\n")
     with pytest.raises(SemanticContentError) as scalar:
         decode_semantic_text_content(disallowed_text)
     assert scalar.value.code is SemanticContentErrorCode.SCALAR
@@ -507,3 +510,143 @@ def test_content_flags_carry_the_paragraph_direction() -> None:
     with pytest.raises(SemanticContentError) as error:
         decode_semantic_text_content(bytes(payload))
     assert error.value.code is SemanticContentErrorCode.ENUM
+
+
+def _styled_line(text: str, *runs: tuple[int, int, TextStyle]) -> SemanticTextItem:
+    return SemanticTextItem(
+        item_key=1,
+        row=0,
+        column=0,
+        row_span=1,
+        column_span=40,
+        role=SemanticTextRole.CONTENT,
+        state=SemanticTextState(0),
+        text=text,
+        runs=tuple(StyleRun(*run) for run in runs),
+    )
+
+
+def _single_row(item: SemanticTextItem) -> SemanticTextContent:
+    return SemanticTextContent(
+        content_revision=1,
+        rows=1,
+        columns=40,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=1,
+        viewport_columns=40,
+        flags=SemanticContentFlag(0),
+        primary_key=0,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(item,),
+    )
+
+
+def test_style_runs_follow_their_item_text_and_round_trip() -> None:
+    # "é" is two bytes but one scalar: runs count scalars.
+    text = "é [a](b) x"
+    item = _styled_line(text, (0, 1, TextStyle.STRONG), (2, 6, TextStyle.LINK))
+    content = _single_row(item)
+    payload = encode_semantic_text_content(content)
+    body = text.encode()
+    expected_item = (
+        struct.pack("<QIIIIHHII", 1, 0, 0, 1, 40, 1, 0, len(body), 2)
+        + body
+        + struct.pack("<IIHH", 0, 1, 7, 0)
+        + struct.pack("<IIHH", 2, 6, 9, 0)
+    )
+    assert payload[72:] == expected_item
+    assert content.wire_bytes == len(payload) == 72 + 36 + len(body) + 24
+    assert content.style_run_count == 2
+    decoded = decode_semantic_text_content(payload)
+    assert decoded == content
+    assert decoded.items[0].runs == item.runs
+    # A character takes the meaning of the run over its first scalar.
+    assert [item.meaning_at(offset) for offset in range(len(text))] == [
+        TextStyle.STRONG, None,
+        TextStyle.LINK, TextStyle.LINK, TextStyle.LINK,
+        TextStyle.LINK, TextStyle.LINK, TextStyle.LINK,
+        None, None,
+    ]
+
+    run_at = 72 + 36 + len(body)
+    reserved = bytearray(payload)
+    reserved[run_at + 10] = 1
+    with pytest.raises(SemanticContentError) as error:
+        decode_semantic_text_content(reserved)
+    assert error.value.code is SemanticContentErrorCode.RESERVED
+
+    unknown = bytearray(payload)
+    unknown[run_at + 8 : run_at + 10] = (11).to_bytes(2, "little")
+    with pytest.raises(SemanticContentError) as error:
+        decode_semantic_text_content(unknown)
+    assert error.value.code is SemanticContentErrorCode.ENUM
+
+    empty = bytearray(payload)
+    empty[run_at + 4 : run_at + 8] = bytes(4)
+    with pytest.raises(SemanticContentError) as error:
+        decode_semantic_text_content(empty)
+    assert error.value.code is SemanticContentErrorCode.CONSISTENCY
+
+    truncated = bytearray(payload)
+    truncated[72 + 32 : 72 + 36] = (3).to_bytes(4, "little")
+    with pytest.raises(SemanticContentError) as error:
+        decode_semantic_text_content(truncated)
+    assert error.value.code is SemanticContentErrorCode.PAYLOAD
+
+
+@pytest.mark.parametrize(
+    ("runs", "message"),
+    [
+        (((2, 3, TextStyle.LINK), (0, 1, TextStyle.CODE)), "out of order or overlap"),
+        (((0, 3, TextStyle.LINK), (2, 3, TextStyle.CODE)), "out of order or overlap"),
+        (((0, 2, TextStyle.CODE), (2, 3, TextStyle.CODE)), "same meaning touch"),
+        (((8, 3, TextStyle.CODE),), "past the item's text"),
+    ],
+)
+def test_style_runs_must_be_canonical(runs, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        _styled_line("0123456789", *runs)
+
+
+def test_touching_runs_with_different_meanings_are_canonical() -> None:
+    item = _styled_line("abcdef", (0, 2, TextStyle.CODE), (2, 2, TextStyle.LINK))
+    assert [run.meaning for run in item.runs] == [TextStyle.CODE, TextStyle.LINK]
+    with pytest.raises(ValueError):
+        StyleRun(0, 0, TextStyle.CODE)
+    with pytest.raises(ValueError):
+        StyleRun(0, 1, 0)
+
+
+def test_text_grids_carry_no_style_runs() -> None:
+    grid = SemanticTextContent(
+        content_revision=1,
+        rows=1,
+        columns=4,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=1,
+        viewport_columns=4,
+        flags=SemanticContentFlag(0),
+        primary_key=0,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                item_key=1,
+                row=0,
+                column=0,
+                row_span=1,
+                column_span=1,
+                role=SemanticTextRole.CONTENT,
+                state=SemanticTextState(0),
+                text="7",
+                runs=(StyleRun(0, 1, TextStyle.NUMBER),),
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="no style runs"):
+        _root(ControlKind.TEXT_GRID, grid)

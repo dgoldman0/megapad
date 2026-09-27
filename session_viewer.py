@@ -966,7 +966,8 @@ class _GuestKeyboardForwarder:
         wheel_x: int = 0,
         wheel_y: int = 0,
     ) -> bool:
-        """Send one PLACE, EXTEND, or SCROLL intent for an acknowledged root."""
+        """Send one PLACE, EXTEND, FOLLOW, or SCROLL intent for an
+        acknowledged root."""
 
         if not isinstance(target, TextHitTarget):
             raise TypeError("target must be TextHitTarget")
@@ -982,7 +983,7 @@ class _GuestKeyboardForwarder:
             params.update(wheel_x=wheel_x, wheel_y=wheel_y)
         else:
             if not isinstance(position, TextPosition):
-                raise TypeError("PLACE and EXTEND require a TextPosition")
+                raise TypeError("PLACE, EXTEND, and FOLLOW require a TextPosition")
             params.update(
                 content_revision=target.content_revision,
                 item_key=position.item_key,
@@ -1109,6 +1110,7 @@ class _GuestKeyboardForwarder:
 _POINTER_BUTTON_BITS = {1: 0x01, 2: 0x02, 3: 0x04}
 _LEFT_BUTTON = 0x01
 _APT_SHIFT = 0x01
+_APT_CTRL = 0x02
 _WHEEL_LIMIT = (1 << 15) - 1
 
 
@@ -1380,6 +1382,19 @@ class _PointerRouter:
             if bit != _LEFT_BUTTON:
                 return False
             x, y, _width, _height = self._point_and_extent(position, terminal_size)
+            # SEMANTIC-CONTENT-1: a press on a link follows it with Ctrl, and
+            # in read-only text without Shift or Ctrl; no drag follows it.
+            if modifiers & _APT_CTRL or (
+                target.read_only and not modifiers & (_APT_SHIFT | _APT_CTRL)
+            ):
+                link = target.link_at(x, y)
+                if link is not None:
+                    return self.keyboard.send_text_event(
+                        target,
+                        ControlEventKind.FOLLOW,
+                        modifiers=modifiers,
+                        position=link,
+                    )
             text_position = target.position_at(x, y)
             if text_position is None:
                 return False

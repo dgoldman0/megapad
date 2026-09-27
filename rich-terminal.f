@@ -92,6 +92,7 @@ PROVIDED rich-terminal.f
 2 CONSTANT PT-CONTROL-PLACE
 3 CONSTANT PT-CONTROL-EXTEND
 4 CONSTANT PT-CONTROL-SCROLL
+5 CONSTANT PT-CONTROL-FOLLOW
 
 \ RETAINED-1 semantic values accepted by the typed resource API.
 1 CONSTANT PT-RESOURCE-RGBA8
@@ -679,7 +680,7 @@ VARIABLE _PT-U64-A
 : _PT-I16@  ( a -- n )
     W@ DUP 0x8000 AND IF 0xFFFFFFFFFFFF0000 OR THEN ;
 
-\ Positioned (PLACE/EXTEND) and SCROLL CONTROL_EVENT tails are read through
+\ Positioned (PLACE/EXTEND/FOLLOW) and SCROLL CONTROL_EVENT tails are read through
 \ the descriptor's data span.  A reader on an event without that exact tail
 \ returns zero, so a caller never interprets another kind's bytes.
 : _PT-CONTROL-TAIL  ( event bytes -- a | 0 )
@@ -2480,9 +2481,11 @@ VARIABLE _PT-RSZ-BASE
     _PT-ACCEPT-EVENT ;
 
 \ Exact payload bytes for one CONTROL_EVENT kind, or zero when unknown.
+\ PLACE, EXTEND, and FOLLOW carry the same position tail.
 : _PT-CONTROL-EVENT-BYTES  ( kind -- bytes )
     DUP PT-CONTROL-ACTIVATE = IF DROP 40 EXIT THEN
-    DUP PT-CONTROL-PLACE = OVER PT-CONTROL-EXTEND = OR IF DROP 64 EXIT THEN
+    DUP PT-CONTROL-PLACE = OVER PT-CONTROL-EXTEND = OR
+    OVER PT-CONTROL-FOLLOW = OR IF DROP 64 EXIT THEN
     PT-CONTROL-SCROLL = IF 48 EXIT THEN
     0 ;
 

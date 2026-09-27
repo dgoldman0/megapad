@@ -8,11 +8,10 @@ Akashic `desktop-apt1` producer now advertises the capability, projects ordinary
 UIDL/canonical-widget values, and has exercised all four kinds plus
 acknowledgement-bound TAB activation through that sink. MegaPad's terminal
 core, guest module, shared host, and reference viewer also implement the
-positioned `PLACE`, `EXTEND`, and `SCROLL` input specified below. Style runs
-and the `FOLLOW` event, added on 2026-09-27 for styled text and links, are
-specified but not yet implemented. A physical renderer must not advertise
-`RET_CONTROL_COLLECTIONS` until its compositor and acknowledgement path can
-render every visible kind.
+positioned `PLACE`, `EXTEND`, `SCROLL`, and `FOLLOW` input specified below,
+and the reference viewer draws style runs through its theme. A physical
+renderer must not advertise `RET_CONTROL_COLLECTIONS` until its compositor
+and acknowledgement path can render every visible kind.
 
 ## Decision
 

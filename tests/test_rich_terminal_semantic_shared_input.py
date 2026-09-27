@@ -250,7 +250,11 @@ def _pointer_params(**changes) -> dict:
 def test_text_event_rpc_forwards_each_kind_with_its_exact_tail():
     server, session = _server()
 
-    for kind in (ControlEventKind.PLACE, ControlEventKind.EXTEND):
+    for kind in (
+        ControlEventKind.PLACE,
+        ControlEventKind.EXTEND,
+        ControlEventKind.FOLLOW,
+    ):
         assert server.dispatch(
             "send_text_event",
             _text_params(int(kind)),
@@ -262,7 +266,7 @@ def test_text_event_rpc_forwards_each_kind_with_its_exact_tail():
         connection_id=CONNECTION,
     ) == {"status": "progress", "accepted_events": 1}
 
-    assert session.events == [(7, 3, 11, 1)] * 3
+    assert session.events == [(7, 3, 11, 1)] * 4
     position = {
         "content_revision": 41,
         "item_key": 5,
@@ -273,6 +277,7 @@ def test_text_event_rpc_forwards_each_kind_with_its_exact_tail():
     assert session.tails == [
         (ControlEventKind.PLACE, position),
         (ControlEventKind.EXTEND, position),
+        (ControlEventKind.FOLLOW, position),
         (
             ControlEventKind.SCROLL,
             {
@@ -290,7 +295,7 @@ def test_text_event_rpc_forwards_each_kind_with_its_exact_tail():
     ("params", "match"),
     (
         (_text_params(1), "event_kind must be"),
-        (_text_params(5), "event_kind must be"),
+        (_text_params(6), "event_kind must be"),
         (_text_params(2, wheel_y=1), "fields are not exact"),
         (_text_params(4, item_key=5), "fields are not exact"),
         (

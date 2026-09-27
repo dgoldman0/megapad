@@ -500,10 +500,10 @@ leaves the cursor overlay last, and derives immutable enabled-TAB hit geometry
 from that exact paint pass. An accepted selected-sink offer therefore
 authorizes TAB ACTIVATE through the existing exact-revision path. The same
 pass records text targets for enabled text areas and grids, so the viewer can
-send positioned `PLACE`, `EXTEND`, and `SCROLL` events naming the content
-revision, item key, and scalar offset it drew, and raw `POINTER` input for
-residual content; the terminal core revalidates each against the active
-scene. The selected Akashic `desktop-apt1` policy now advertises bit 9;
+send positioned `PLACE`, `EXTEND`, `FOLLOW`, and `SCROLL` events naming the
+content revision, item key, and scalar offset it drew, and raw `POINTER` input
+for residual content; the terminal core revalidates each against the active
+scene, and a `FOLLOW` only on a link. The selected Akashic `desktop-apt1` policy now advertises bit 9;
 its generic UIDL/canonical-widget producer and ordinary product journey exercise
 this physical path. Applets do not register that projection or acquire
 renderer-facing code.

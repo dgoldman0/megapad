@@ -77,10 +77,12 @@ from .retained_scene import (
     RegionDefinition,
     RetainedMode,
     RetainedSceneModel,
+    SceneErrorCode,
     SceneModelError,
     SceneModelState,
     SeriesDefinition,
 )
+from .semantic_content import TextStyle
 from .retained_resources import (
     PreparedResourceInstall,
     ResourceStoreError,
@@ -1143,7 +1145,7 @@ class RichTerminalCore:
                     grid_allowed=True,
                 )
             else:
-                scene.require_text_position(
+                item = scene.require_text_position(
                     owner,
                     event.control_id,
                     grid_allowed=event.event_kind is ControlEventKind.PLACE,
@@ -1151,6 +1153,14 @@ class RichTerminalCore:
                     item_key=event.item_key,
                     scalar_offset=event.scalar_offset,
                 )
+                if (
+                    event.event_kind is ControlEventKind.FOLLOW
+                    and item.meaning_at(event.scalar_offset) is not TextStyle.LINK
+                ):
+                    raise SceneModelError(
+                        SceneErrorCode.STATE,
+                        "a FOLLOW position does not lie on a link",
+                    )
         except SceneModelError as exc:
             raise TerminalSessionError(
                 f"semantic control target is not interactable: {exc}"
