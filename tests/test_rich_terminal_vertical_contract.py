@@ -59,7 +59,10 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
     assert "_ACCENT = (78, 139, 246, 255)" in compositor
     assert "def send_control_event" in server
     assert "MessageType.CONTROL_EVENT" in server
-    assert 'pygame.font.SysFont("sans"' in viewer
+    # Cell text and the proportional status text each use a font set with
+    # per-character fallbacks (the proportional one takes the host's sans).
+    assert "FontSet(pygame, args.font, args.font_size, fallbacks)" in viewer
+    assert "cells=False" in viewer
     assert "def stage_frame_hit_map" in viewer
     assert "def capture_final_terminal_raster" in viewer
     assert "def finish_presentation" in viewer
