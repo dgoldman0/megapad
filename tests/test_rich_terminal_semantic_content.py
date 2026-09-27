@@ -485,3 +485,25 @@ def test_semantic_content_capability_is_additive_and_caller_bounded() -> None:
             terminal_to_client_max_payload=64,
             base_max_transaction_bytes=4096,
         )
+
+
+def test_content_flags_carry_the_paragraph_direction() -> None:
+    for flags, direction in (
+        (SemanticContentFlag(0), 0),
+        (SemanticContentFlag.DIRECTION_LTR, 1),
+        (SemanticContentFlag.DIRECTION_RTL | SemanticContentFlag.READ_ONLY, 2),
+    ):
+        content = replace(_text_area_content(), flags=flags)
+        assert content.direction == direction
+        decoded = decode_semantic_text_content(encode_semantic_text_content(content))
+        assert decoded == content and decoded.direction == direction
+
+    # Direction 3 names both LTR and RTL.
+    both = SemanticContentFlag.DIRECTION_LTR | SemanticContentFlag.DIRECTION_RTL
+    with pytest.raises(ValueError, match="both LTR and RTL"):
+        replace(_text_area_content(), flags=both)
+    payload = bytearray(encode_semantic_text_content(_text_area_content()))
+    payload[44] = int(both)
+    with pytest.raises(SemanticContentError) as error:
+        decode_semantic_text_content(bytes(payload))
+    assert error.value.code is SemanticContentErrorCode.ENUM

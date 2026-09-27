@@ -317,9 +317,10 @@ class TextHitTarget:
     ``rect`` is the visible root.  The anchor fields keep the unclipped root
     geometry because rows and columns are partitioned from it exactly as the
     paint pass partitioned them.  TEXT_AREA ``rows`` holds ``(row, item_key,
-    scalar_length)`` for every carried row; TEXT_GRID ``cells`` holds ``(row,
-    column, row_span, column_span, item_key, selectable)`` for every carried
-    item that intersects the viewport.
+    text)`` for every carried row, laid out in ``direction`` exactly as the
+    paint pass laid it out; TEXT_GRID ``cells`` holds ``(row, column,
+    row_span, column_span, item_key, selectable)`` for every carried item
+    that intersects the viewport.
     """
 
     identity: ControlIdentity
@@ -334,8 +335,9 @@ class TextHitTarget:
     viewport_column: int
     viewport_rows: int
     viewport_columns: int
-    rows: tuple[tuple[int, int, int], ...] = ()
+    rows: tuple[tuple[int, int, str], ...] = ()
     cells: tuple[tuple[int, int, int, int, int, bool], ...] = ()
+    direction: int = text_rules.DIRECTION_AUTO
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, ControlIdentity):
@@ -352,6 +354,7 @@ class TextHitTarget:
             _integer(name, getattr(self, name), minimum=1)
         for name in ("content_revision",):
             _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX)
+        _integer("direction", self.direction, minimum=0, maximum=2)
         object.__setattr__(self, "rows", tuple(sorted(self.rows)))
         object.__setattr__(self, "cells", tuple(self.cells))
 
@@ -385,10 +388,9 @@ class TextHitTarget:
         row = self.viewport_row + self._index(
             self.anchor_top, self.anchor_height, self.viewport_rows, y
         )
-        column = self.viewport_column + self._index(
-            self.anchor_left, self.anchor_width, self.viewport_columns, x
-        )
+        slot = self._index(self.anchor_left, self.anchor_width, self.viewport_columns, x)
         if self.kind is ControlKind.TEXT_GRID:
+            column = self.viewport_column + slot
             for item_row, item_column, row_span, column_span, key, selectable in self.cells:
                 if (
                     item_row <= row < item_row + row_span
@@ -396,13 +398,17 @@ class TextHitTarget:
                 ):
                     return TextPosition(key, 0) if selectable else None
             return None
+        # APT-1-TEXT Section 9.1: a point on a character names its start, and
+        # past the content the end side names the row's end.
         above = None
         below = None
-        for item_row, key, length in self.rows:
+        for item_row, key, text in self.rows:
             if item_row == row:
-                return TextPosition(key, min(column, length))
+                layout = text_rules.cached_row(text, self.direction, True)
+                shift = _text_area_shift(layout, self.viewport_column, self.viewport_columns)
+                return TextPosition(key, layout.position_at_column(slot - shift))
             if item_row < row:
-                above = (key, length)
+                above = (key, len(text))
             elif below is None:
                 below = key
         if above is not None:
@@ -860,7 +866,10 @@ def _paint_text(
     if viewport.width <= 0 or viewport.height <= 0:
         return
     tab_advance = max(1, _text_width(font, " ") * 4)
-    text_width = sum(_scalar_advance(font, character, tab_advance) for character in text)
+    text_width = sum(
+        _scalar_advance(font, character, tab_advance)
+        for character in _label_characters(text)
+    )
     if right is not None:
         logical_left = right - text_width
         logical_right = right
@@ -870,7 +879,7 @@ def _paint_text(
     else:
         raise ValueError("control text needs a left or right edge")
     font_height = _font_height(font, viewport.height)
-    _paint_bounded_scalar_text(
+    _paint_bounded_text(
         pygame_module,
         surface,
         font,
@@ -924,11 +933,28 @@ def _scalar_advance(font, character: str, tab_advance: int) -> int:
     return max(1, _text_width(font, character))
 
 
-def _bounded_text_width(font, text: str, maximum: int, tab_advance: int) -> int:
+def _label_characters(text: str, direction: int = text_rules.DIRECTION_AUTO):
+    """Renderer-laid-out text in visual order, one display text per
+    character (APT-1-TEXT Section 10): one paragraph in DIRECTION,
+    reordered, mirrored, and joined.  Plain ASCII in an LTR or AUTO
+    paragraph is already in visual order, one scalar per character."""
+
+    if text.isascii() and direction != text_rules.DIRECTION_RTL:
+        return text
+    return [placed.text for placed in text_rules.cached_row(text, direction, True).characters]
+
+
+def _bounded_text_width(
+    font,
+    text: str,
+    maximum: int,
+    tab_advance: int,
+    direction: int = text_rules.DIRECTION_AUTO,
+) -> int:
     """Measure only until a renderer-owned pixel bound has been exceeded."""
 
     width = 0
-    for character in text:
+    for character in _label_characters(text, direction):
         advance = _scalar_advance(font, character, tab_advance)
         if width > maximum - advance:
             return maximum + 1
@@ -936,7 +962,7 @@ def _bounded_text_width(font, text: str, maximum: int, tab_advance: int) -> int:
     return width
 
 
-def _paint_bounded_scalar_text(
+def _paint_bounded_text(
     pygame_module,
     surface,
     font,
@@ -949,8 +975,10 @@ def _paint_bounded_scalar_text(
     top: int,
     bottom: int,
     tab_advance: int,
+    direction: int = text_rules.DIRECTION_AUTO,
 ) -> None:
-    """Paint scalar-at-a-time so clipping never creates a huge text surface."""
+    """Paint laid-out text a character at a time, in visual order, so
+    clipping never creates a huge text surface."""
 
     if (
         right <= left
@@ -966,7 +994,7 @@ def _paint_bounded_scalar_text(
     cursor = left
     center_y = top + (bottom - top) // 2
     try:
-        for character in text:
+        for character in _label_characters(text, direction):
             if cursor >= right:
                 break
             advance = _scalar_advance(font, character, tab_advance)
@@ -1550,9 +1578,10 @@ def _text_root_entries(region, draw, anchor, visible_anchor) -> list[HitMapEntry
                 ControlKind.TEXT_AREA,
                 rect,
                 rows=tuple(
-                    (item.row, item.item_key, len(item.text))
+                    (item.row, item.item_key, item.text)
                     for item in content.items
                 ),
+                direction=content.direction,
                 **layout,
             )
         ]
@@ -1584,6 +1613,34 @@ def _text_root_entries(region, draw, anchor, visible_anchor) -> list[HitMapEntry
     ]
 
 
+def _text_area_shift(layout, column_start: int, columns: int) -> int:
+    """The viewport slot of a laid-out row's visual column 0.
+
+    SEMANTIC-CONTENT-1: an LTR row starts at the viewport's left edge, with
+    its column origin counted in cells from the left; an RTL row is
+    mirrored, starting at the right edge with the origin counted from the
+    right.
+    """
+
+    if layout.rtl:
+        return columns - layout.width + column_start
+    return -column_start
+
+
+def _paint_cluster(
+    pygame_module, surface, font, text: str, color, clip, *, left: int, top: int, bottom: int
+) -> None:
+    """Paint one character's display scalars as one glyph cluster from
+    LEFT, centred between TOP and BOTTOM and clipped to CLIP."""
+
+    glyph, has_ink, _width, height = _glyph_raster(
+        pygame_module, font, text, color, 0xFF
+    )
+    if has_ink:
+        glyph_top = top + (bottom - top) // 2 - height // 2
+        _blit_bounded_surface(pygame_module, surface, glyph, left, glyph_top, clip)
+
+
 def _paint_text_area(
     pygame_module,
     surface,
@@ -1592,7 +1649,14 @@ def _paint_text_area(
     region_rect,
     draw: TextAreaDraw,
 ) -> list[HitMapEntry]:
-    """Paint one exact logical text viewport with persistent selection state."""
+    """Paint one exact logical text viewport with persistent selection state.
+
+    Each row is one paragraph in the content's direction, laid out by the
+    shared text rules (APT-1-TEXT Sections 3 to 8): its characters take
+    their cells in visual order, a right-to-left row is mirrored, and a
+    selection covers exactly the characters between its endpoints, whose
+    cells need not be contiguous.
+    """
 
     anchor, visible_anchor = _semantic_root_rects(
         pygame_module,
@@ -1607,7 +1671,7 @@ def _paint_text_area(
     row_start = content.viewport_row
     row_end = row_start + content.viewport_rows
     column_start = content.viewport_column
-    column_end = column_start + content.viewport_columns
+    columns = content.viewport_columns
     visible_items = []
     primary_item = None
     anchor_item = None
@@ -1626,6 +1690,16 @@ def _paint_text_area(
         if endpoint_a != endpoint_b:
             selection = tuple(sorted((endpoint_a, endpoint_b)))
 
+    def row_edges(row: int) -> tuple[int, int]:
+        relative_row = row - row_start
+        return (
+            _partition_edge(anchor.top, anchor.height, relative_row, content.viewport_rows),
+            _partition_edge(anchor.top, anchor.height, relative_row + 1, content.viewport_rows),
+        )
+
+    def slot_edge(slot: int) -> int:
+        return _partition_edge(anchor.left, anchor.width, slot, columns)
+
     enabled = bool(draw.state & ControlState.ENABLED)
     text_color = _TEXT if enabled else _DISABLED_TEXT
     prior_clip = surface.get_clip()
@@ -1633,122 +1707,53 @@ def _paint_text_area(
         surface.set_clip(visible_anchor)
         surface.fill(_COLLECTION_SURFACE, visible_anchor)
         for item in visible_items:
-            surface.set_clip(visible_anchor)
-            relative_row = item.row - row_start
-            row_top = _partition_edge(
-                anchor.top,
-                anchor.height,
-                relative_row,
-                content.viewport_rows,
-            )
-            row_bottom = _partition_edge(
-                anchor.top,
-                anchor.height,
-                relative_row + 1,
-                content.viewport_rows,
-            )
-            row_rect = _WideRect(
-                anchor.left,
-                row_top,
-                anchor.width,
-                row_bottom - row_top,
-            )
-            visible_row = _bounded_pygame_rect(
-                pygame_module,
-                row_rect,
-                visible_anchor,
-            )
-            if visible_row.width <= 0 or visible_row.height <= 0:
+            row_top, row_bottom = row_edges(item.row)
+            if _clipped_python_rect(
+                pygame_module, anchor.left, row_top, anchor.right, row_bottom, visible_anchor
+            ) is None:
                 continue
-
+            layout = text_rules.cached_row(item.text, content.direction, True)
+            shift = _text_area_shift(layout, column_start, columns)
+            selected = None
             if selection is not None:
-                selection_start, selection_end = selection
-                if selection_start[0] <= item.row <= selection_end[0]:
-                    selected_start = (
-                        selection_start[1]
-                        if item.row == selection_start[0]
-                        else 0
-                    )
-                    selected_end = (
-                        selection_end[1]
-                        if item.row == selection_end[0]
-                        else len(item.text)
-                    )
-                    selected_start = max(selected_start, column_start)
-                    selected_end = min(
-                        selected_end,
-                        column_end,
-                        len(item.text),
-                    )
-                    if selected_start < selected_end:
-                        selection_left = _partition_edge(
-                            anchor.left,
-                            anchor.width,
-                            selected_start - column_start,
-                            content.viewport_columns,
-                        )
-                        selection_right = _partition_edge(
-                            anchor.left,
-                            anchor.width,
-                            selected_end - column_start,
-                            content.viewport_columns,
-                        )
-                        selected_rect = _clipped_python_rect(
-                            pygame_module,
-                            selection_left,
-                            row_top,
-                            selection_right,
-                            row_bottom,
-                            visible_anchor,
-                        )
-                        if selected_rect is not None:
-                            surface.fill(_TEXT_SELECTION, selected_rect)
-
-            first_scalar = max(column_start, 0)
-            last_scalar = min(len(item.text), column_end)
-            for scalar_offset in range(first_scalar, last_scalar):
-                character = item.text[scalar_offset]
-                if character == "\t":
+                (first_row, first_offset), (last_row, last_offset) = selection
+                if first_row <= item.row <= last_row:
+                    low = first_offset if item.row == first_row else 0
+                    high = last_offset if item.row == last_row else layout.length
+                    if low < high:
+                        selected = (low, high)
+            for placed in layout.characters:
+                first = placed.column + shift
+                last = first + placed.width
+                if last <= 0 or first >= columns:
                     continue
-                relative_column = scalar_offset - column_start
-                slot_left = _partition_edge(
-                    anchor.left,
-                    anchor.width,
-                    relative_column,
-                    content.viewport_columns,
-                )
-                slot_right = _partition_edge(
-                    anchor.left,
-                    anchor.width,
-                    relative_column + 1,
-                    content.viewport_columns,
-                )
-                slot = _WideRect(
-                    slot_left,
-                    row_top,
-                    slot_right - slot_left,
-                    row_bottom - row_top,
-                )
-                slot_clip = _bounded_pygame_rect(
-                    pygame_module,
-                    slot,
-                    visible_anchor,
-                )
-                if slot_clip.width <= 0 or slot_clip.height <= 0:
+                left = slot_edge(max(first, 0))
+                right = slot_edge(min(last, columns))
+                if selected is not None and selected[0] <= placed.start < selected[1]:
+                    selected_rect = _clipped_python_rect(
+                        pygame_module, left, row_top, right, row_bottom, visible_anchor
+                    )
+                    if selected_rect is not None:
+                        surface.fill(_TEXT_SELECTION, selected_rect)
+                # A character the viewport edge cuts is not drawn, and a tab
+                # is a renderer-owned blank (APT-1-TEXT Section 6).
+                if first < 0 or last > columns or placed.text == "\t":
                     continue
-                _paint_bounded_scalar_text(
-                    pygame_module,
-                    surface,
-                    font,
-                    character,
-                    text_color,
-                    slot_clip,
-                    left=slot.left,
-                    right=slot.right,
-                    top=slot.top,
-                    bottom=slot.bottom,
-                    tab_advance=max(1, slot.width),
+                glyph_clip = _clipped_python_rect(
+                    pygame_module, left, row_top, right, row_bottom, visible_anchor
                 )
+                if glyph_clip is not None:
+                    _paint_cluster(
+                        pygame_module,
+                        surface,
+                        font,
+                        placed.text,
+                        text_color,
+                        glyph_clip,
+                        left=left,
+                        top=row_top,
+                        bottom=row_bottom,
+                    )
 
         surface.set_clip(visible_anchor)
         _paint_clipped_border(
@@ -1764,42 +1769,32 @@ def _paint_text_area(
             width=1,
             clip=visible_anchor,
         )
-        if (
-            primary_item is not None
-            and row_start <= primary_item.row < row_end
-            and column_start <= content.primary_offset <= column_end
-        ):
-            relative_row = primary_item.row - row_start
-            row_top = _partition_edge(
-                anchor.top,
-                anchor.height,
-                relative_row,
-                content.viewport_rows,
-            )
-            row_bottom = _partition_edge(
-                anchor.top,
-                anchor.height,
-                relative_row + 1,
-                content.viewport_rows,
-            )
-            caret_x = _partition_edge(
-                anchor.left,
-                anchor.width,
-                content.primary_offset - column_start,
-                content.viewport_columns,
-            )
-            if caret_x >= anchor.right:
-                caret_x = anchor.right - 1
-            caret = _clipped_python_rect(
-                pygame_module,
-                caret_x,
-                row_top + (1 if row_bottom - row_top > 2 else 0),
-                caret_x + 1,
-                row_bottom - (1 if row_bottom - row_top > 2 else 0),
-                visible_anchor,
-            )
-            if caret is not None:
-                surface.fill(_ACCENT[:3] if enabled else _DISABLED_TEXT, caret)
+        if primary_item is not None and row_start <= primary_item.row < row_end:
+            # APT-1-TEXT Section 9.2: the caret stands at its character's
+            # leading edge, the left at an even level and the right at an odd
+            # one; at the row's end, just past the content on its end side.
+            layout = text_rules.cached_row(primary_item.text, content.direction, True)
+            shift = _text_area_shift(layout, column_start, columns)
+            placed = layout.caret_character(content.primary_offset)
+            if placed is None:
+                edge = (0 if layout.rtl else layout.width) + shift
+            elif placed.level & 1:
+                edge = placed.column + placed.width + shift
+            else:
+                edge = placed.column + shift
+            if 0 <= edge <= columns:
+                row_top, row_bottom = row_edges(primary_item.row)
+                caret_x = min(slot_edge(edge), anchor.right - 1)
+                caret = _clipped_python_rect(
+                    pygame_module,
+                    caret_x,
+                    row_top + (1 if row_bottom - row_top > 2 else 0),
+                    caret_x + 1,
+                    row_bottom - (1 if row_bottom - row_top > 2 else 0),
+                    visible_anchor,
+                )
+                if caret is not None:
+                    surface.fill(_ACCENT[:3] if enabled else _DISABLED_TEXT, caret)
     finally:
         surface.set_clip(prior_clip)
     return _text_root_entries(region, draw, anchor, visible_anchor)
@@ -1940,7 +1935,24 @@ def _paint_text_grid(
             )
             text_left = logical_left + padding
             text_right = logical_right - padding
-            _paint_bounded_scalar_text(
+            # Each item is one paragraph in the content's direction; a
+            # right-to-left one is set against the item's right edge.
+            if (
+                not item.text.isascii()
+                or content.direction == text_rules.DIRECTION_RTL
+            ) and text_rules.cached_row(item.text, content.direction, True).rtl:
+                text_left = max(
+                    text_left,
+                    text_right
+                    - _bounded_text_width(
+                        font,
+                        item.text,
+                        text_right - text_left,
+                        tab_advance,
+                        content.direction,
+                    ),
+                )
+            _paint_bounded_text(
                 pygame_module,
                 surface,
                 font,
@@ -1952,6 +1964,7 @@ def _paint_text_grid(
                 top=logical_top,
                 bottom=logical_bottom,
                 tab_advance=tab_advance,
+                direction=content.direction,
             )
 
         surface.set_clip(visible_anchor)
@@ -2134,7 +2147,7 @@ def _paint_tabset(
                 else inner_right
             )
             text_color = _TEXT if effectively_enabled else _DISABLED_TEXT
-            _paint_bounded_scalar_text(
+            _paint_bounded_text(
                 pygame_module,
                 surface,
                 font,
@@ -2148,7 +2161,7 @@ def _paint_tabset(
                 tab_advance=tab_advance,
             )
             if tab.shortcut:
-                _paint_bounded_scalar_text(
+                _paint_bounded_text(
                     pygame_module,
                     surface,
                     font,
@@ -2304,7 +2317,7 @@ def _paint_readout(pygame_module, surface, font, region, region_rect, draw) -> N
         text_width = _bounded_text_width(font, draw.text, available, tab_advance)
         if text_width <= available:
             left = right - text_width
-        _paint_bounded_scalar_text(
+        _paint_bounded_text(
             pygame_module,
             surface,
             font,
@@ -2392,7 +2405,7 @@ def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> Non
             if text_width <= available:
                 left += (available - text_width) // 2
                 right = left + text_width
-            _paint_bounded_scalar_text(
+            _paint_bounded_text(
                 pygame_module,
                 surface,
                 font,

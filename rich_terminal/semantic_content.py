@@ -47,12 +47,20 @@ class SemanticContentError(ValueError):
 
 
 class SemanticContentFlag(IntFlag):
-    """Renderer-neutral properties of one complete text collection."""
+    """Renderer-neutral properties of one complete text collection.
+
+    Bits 1 and 2 hold the paragraph direction of every row or item
+    (APT-1-TEXT Section 7.1): neither for AUTO, one for LTR or RTL.  Both
+    together are invalid.
+    """
 
     READ_ONLY = 1 << 0
+    DIRECTION_LTR = 1 << 1
+    DIRECTION_RTL = 1 << 2
 
 
-SEMANTIC_CONTENT_FLAG_MASK = SemanticContentFlag.READ_ONLY
+_DIRECTION_BITS = SemanticContentFlag.DIRECTION_LTR | SemanticContentFlag.DIRECTION_RTL
+SEMANTIC_CONTENT_FLAG_MASK = SemanticContentFlag.READ_ONLY | _DIRECTION_BITS
 
 
 class SemanticTextRole(IntEnum):
@@ -344,6 +352,8 @@ class SemanticTextContent:
         flags = SemanticContentFlag(flag_bits)
         if int(flags) & ~int(SEMANTIC_CONTENT_FLAG_MASK):
             raise ValueError("flags contain reserved semantic content bits")
+        if flags & _DIRECTION_BITS == _DIRECTION_BITS:
+            raise ValueError("flags name both LTR and RTL")
         object.__setattr__(self, "flags", flags)
 
         items = tuple(self.items)
@@ -401,6 +411,13 @@ class SemanticTextContent:
         object.__setattr__(self, "current_item_count", current_item_count)
         object.__setattr__(self, "_utf8_bytes", utf8_bytes)
         object.__setattr__(self, "_wire_bytes", wire_bytes)
+
+    @property
+    def direction(self) -> int:
+        """Every row's or item's paragraph direction: 0 AUTO, 1 LTR, or 2 RTL,
+        numbered as text_rules numbers them."""
+
+        return (int(self.flags) >> 1) & 3
 
     @staticmethod
     def _validate_position(
@@ -528,6 +545,11 @@ def decode_semantic_text_content(payload) -> SemanticTextContent:
         raise SemanticContentError(
             SemanticContentErrorCode.RESERVED,
             "semantic text content flags contain reserved bits",
+        )
+    if flags & int(_DIRECTION_BITS) == int(_DIRECTION_BITS):
+        raise SemanticContentError(
+            SemanticContentErrorCode.ENUM,
+            "semantic text content direction 3 is invalid",
         )
     if item_count > (len(raw) - _CONTENT_HEADER.size) // _ITEM_HEADER.size:
         raise SemanticContentError(

@@ -304,23 +304,32 @@ cursor overlay last. Collection roots are opaque rich representations over
 that complete fallback; pixels outside their root bounds remain the CELL image.
 
 TEXT_AREA maps the exact declared logical viewport to half-open integer row and
-scalar-column slots. Missing rows remain blank, U+0009 is a renderer-owned blank
-logical slot in this first policy, the anchor-to-primary range receives a
-half-open selection fill, and the primary scalar boundary receives a persistent
-caret. An offscreen endpoint remains authoritative but is never moved to the
-viewport origin. The reference sink uses the terminal monospace font for this
-editor policy.
+cell-column slots. Each row is laid out by `APT-1-TEXT.md` Sections 3 to 8 in
+the content's direction: a character's display scalars are one glyph cluster
+starting at its first slot, a wide character spans two slots, a right-to-left
+row is mirrored, and a character the viewport edge cuts is not drawn. Missing
+rows remain blank, U+0009 is a renderer-owned blank slot in this first policy,
+the characters between the anchor and the primary receive a selection fill,
+which need not be contiguous, and the primary position receives a persistent
+caret at its character's leading edge, or past the row's content on its end
+side (Section 9.2). An offscreen endpoint remains authoritative but is never
+moved to the viewport origin. The reference sink uses the terminal monospace
+font for this editor policy.
 
 TEXT_GRID maps item rectangles directly from their logical viewport-relative
 row, column, and span values. It paints role, primary, `CURRENT`, and
 `UNAVAILABLE` states with renderer-owned styling and never materializes a
-rows-by-columns matrix. TABSET uses renderer-owned sans-serif metrics: natural
+rows-by-columns matrix. Each item's text is laid out as one paragraph in the
+content's direction, and a right-to-left item is set against its rectangle's
+right edge. Tab, menu, and shortcut labels are laid out as AUTO paragraphs
+(`APT-1-TEXT.md` Section 10). TABSET uses renderer-owned sans-serif metrics: natural
 tab widths when they fit and deterministic equal partitioning when they do not.
 Only physically visible, effectively enabled TAB children enter the immutable
 hit map as activation targets. An enabled TEXT_AREA or TEXT_GRID root enters it
-as a text target that keeps the exact partition its paint pass used, so a
-point maps to the item and scalar slot drawn there (a point on a slot names
-the boundary before it). A disabled text root, and every menu bar, tabset, and
+as a text target that keeps the exact partition and layout its paint pass
+used, so a point maps to the item and position drawn there: on a text area
+row, the start of the character on that slot, and past the content the row's
+end on its end side and its start on the other (`APT-1-TEXT.md` Section 9.1). A disabled text root, and every menu bar, tabset, and
 open popup, enters as a control surface: it blocks lower controls and never
 starts a raw pointer gesture. A point covered only by a region barrier, or by
 nothing, shows CELL or residual content and may start one.
@@ -334,9 +343,9 @@ acknowledged display is current.
 
 Raster code consumes the already validated immutable draw/content values. It
 does not encode or decode STX1, rerun family/UTF-8/overlap proofs, or render an
-unbounded whole collection string into one temporary surface. Grid and tab text
-uses one-scalar glyph surfaces and emits only glyph pixels that intersect the
-physical clip. That bounds each raster allocation and render call; it does not
+unbounded whole collection string into one temporary surface. Text area, grid,
+and tab text uses one glyph surface per character and emits only glyph pixels
+that intersect the physical clip. That bounds each raster allocation and render call; it does not
 claim bounded traversal of a long proportional-font prefix. Grid edges are
 intersected as Python integers before constructing SDL-backed rectangles, so
 valid extreme-u32 spans cannot wrap into false geometry. A paint failure occurs

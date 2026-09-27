@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from rich_terminal import text_rules
 from rich_terminal.apt1 import UINT32_MAX
 from rich_terminal.pygame_view import (
     ControlIdentity,
@@ -1165,3 +1166,253 @@ def test_renderer_laid_out_controls_are_surfaces_that_swallow_raw_points():
     tab = _target(result, 51)
     assert _resolve(result, tab.rect.right + 5, tab.rect.top + 1) is None
     assert _resolve(result, 295, 195) == ResidualPoint(29, 19)
+
+
+class _ClusterFont:
+    """Monospace test font: each character's display text renders as one
+    3x1 glyph in a colour of its own, so a pixel names the glyph drawn
+    there.  Its second pixel is clear of the root's one-pixel border."""
+
+    def __init__(self, pygame_module):
+        self.pygame = pygame_module
+        self.colors: dict[str, tuple[int, int, int]] = {}
+
+    def size(self, text):
+        return len(text), 1
+
+    def render(self, text, antialias, color):
+        assert antialias
+        rgb = self.colors.setdefault(text, (len(self.colors) + 1, 7, 9))
+        glyph = self.pygame.Surface((3, 1), flags=self.pygame.SRCALPHA)
+        glyph.fill((*rgb, 255))
+        return glyph
+
+    def glyph_at(self, surface, x, y):
+        rgb = tuple(surface.get_at((x, y)))[:3]
+        return next((text for text, color in self.colors.items() if color == rgb), None)
+
+
+def _mixed_area(
+    *items, flags=SemanticContentFlag(0), primary=(0, 0), anchor=(0, 0), columns=6
+):
+    """A text area six columns wide whose rows are ITEMS, one per row."""
+
+    content = SemanticTextContent(
+        content_revision=1,
+        rows=len(items),
+        columns=columns,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=len(items),
+        viewport_columns=6,
+        flags=flags,
+        primary_key=primary[0],
+        primary_offset=primary[1],
+        anchor_key=anchor[0],
+        anchor_offset=anchor[1],
+        items=tuple(
+            SemanticTextItem(
+                row + 1, row, 0, 1, columns,
+                SemanticTextRole.CONTENT,
+                SemanticTextState(0),
+                text,
+            )
+            for row, text in enumerate(items)
+        ),
+    )
+    return TextAreaDraw(32, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 6, len(items)), content)
+
+
+def _paint_area(pygame, area, rows):
+    # Six columns and ROWS rows of ten-pixel cells.
+    surface = pygame.Surface((60, 10 * rows))
+    surface.fill((184, 190, 201))
+    font = _ClusterFont(pygame)
+    composite_draw_plane_result(
+        pygame, surface, _plane(_region(area, cols=6, rows=rows)), font, 10, 10
+    )
+    return surface, font
+
+
+def _row_glyphs(surface, font, row):
+    return [font.glyph_at(surface, 10 * slot + 1, 10 * row + 5) for slot in range(6)]
+
+
+_WIDE_ROW = "a\u4e2db"  # four cells
+_HEBREW_ROW = "\u05d0\u05d1\u05d2"  # RTL, three cells
+_MIXED_ROW = "ab\u05d0\u05d1cd"  # LTR with an RTL run inside
+
+
+def test_text_area_rows_take_their_cells_in_visual_order():
+    pygame = pytest.importorskip("pygame")
+    surface, font = _paint_area(
+        pygame, _mixed_area(_WIDE_ROW, _HEBREW_ROW, _MIXED_ROW, "e\u0301x"), 4
+    )
+    # A wide character takes two slots, drawn once from the first.
+    assert _row_glyphs(surface, font, 0) == ["a", "\u4e2d", None, "b", None, None]
+    # An RTL row is mirrored and starts at the right edge.
+    assert _row_glyphs(surface, font, 1) == [None, None, None, "\u05d2", "\u05d1", "\u05d0"]
+    assert _row_glyphs(surface, font, 2) == ["a", "b", "\u05d1", "\u05d0", "c", "d"]
+    # A character of several scalars is one glyph cluster.
+    assert _row_glyphs(surface, font, 3) == ["e\u0301", "x", None, None, None, None]
+
+
+def test_text_area_rows_follow_the_content_direction():
+    pygame = pytest.importorskip("pygame")
+    surface, font = _paint_area(
+        pygame, _mixed_area("ab", flags=SemanticContentFlag.DIRECTION_RTL), 1
+    )
+    assert _row_glyphs(surface, font, 0) == [None, None, None, None, "a", "b"]
+
+
+def test_text_area_does_not_draw_a_wide_character_the_viewport_cuts():
+    pygame = pytest.importorskip("pygame")
+    surface, font = _paint_area(pygame, _mixed_area("abcde\u4e2d", columns=7), 1)
+    assert _row_glyphs(surface, font, 0) == ["a", "b", "c", "d", "e", None]
+
+
+def test_text_area_selection_covers_exactly_the_selected_characters():
+    pygame = pytest.importorskip("pygame")
+    # Offsets 1..3 select "b" and the Hebrew letter after it, whose cells
+    # are not next to each other.
+    surface, font = _paint_area(
+        pygame, _mixed_area(_MIXED_ROW, primary=(1, 3), anchor=(1, 1)), 1
+    )
+    selected = [
+        tuple(surface.get_at((10 * slot + 5, 5)))[:3] == (42, 75, 122)
+        for slot in range(6)
+    ]
+    assert selected == [False, True, False, True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("text", "offset", "caret_x"),
+    [
+        # The left edge of an LTR character, and past an LTR row's end.
+        (_WIDE_ROW, 1, 10),
+        (_WIDE_ROW, 3, 40),
+        # The right edge of an RTL character, and left of an RTL row's end.
+        (_HEBREW_ROW, 1, 50),
+        (_HEBREW_ROW, 3, 30),
+    ],
+)
+def test_text_area_caret_stands_at_the_leading_edge(text, offset, caret_x):
+    pygame = pytest.importorskip("pygame")
+    surface, _font = _paint_area(pygame, _mixed_area(text, primary=(1, offset)), 1)
+    caret = [
+        x for x in range(60) if tuple(surface.get_at((x, 5)))[:3] == (78, 139, 246)
+    ]
+    assert caret == [caret_x]
+
+
+def test_text_area_points_name_character_starts_and_row_ends():
+    target = TextHitTarget(
+        ControlIdentity(7, 2, 30),
+        ControlKind.TEXT_AREA,
+        PixelRect(0, 0, 60, 20),
+        anchor_left=0,
+        anchor_top=0,
+        anchor_width=60,
+        anchor_height=20,
+        content_revision=1,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=2,
+        viewport_columns=6,
+        rows=((0, 1, _WIDE_ROW), (1, 2, _HEBREW_ROW)),
+    )
+
+    def offsets(y):
+        return [target.position_at(10 * slot + 5, y).scalar_offset for slot in range(6)]
+
+    # The wide character's second cell names its start; past the LTR row's
+    # content names its end.
+    assert offsets(5) == [0, 1, 1, 2, 3, 3]
+    # Left of the RTL content is its end side; its cells name their
+    # characters' starts from the right.
+    assert offsets(15) == [3, 3, 3, 2, 1, 0]
+
+
+def _visual(text):
+    """The reference layout's display text per character, left to right."""
+
+    return [placed.text for placed in text_rules.layout_row(text).characters]
+
+
+_ARABIC = "\u0645\u0631\u062d\u0628\u0627"
+_HEBREW_WORD = "\u05e9\u05dc\u05d5\u05dd"
+
+
+def test_text_grid_items_are_laid_out_as_paragraphs():
+    pygame = pytest.importorskip("pygame")
+
+    class RecordingGlyphFont(_GlyphFont):
+        def __init__(self, pygame_module):
+            super().__init__(pygame_module)
+            self.rendered = []
+
+        def render(self, text, antialias, color):
+            self.rendered.append(text)
+            return super().render(text, antialias, color)
+
+    content = SemanticTextContent(
+        content_revision=1,
+        rows=1,
+        columns=1,
+        viewport_row=0,
+        viewport_column=0,
+        viewport_rows=1,
+        viewport_columns=1,
+        flags=SemanticContentFlag.READ_ONLY,
+        primary_key=0,
+        primary_offset=0,
+        anchor_key=0,
+        anchor_offset=0,
+        items=(
+            SemanticTextItem(
+                1, 0, 0, 1, 1, SemanticTextRole.CONTENT, SemanticTextState(0), _ARABIC
+            ),
+        ),
+    )
+    grid = TextGridDraw(40, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 20, 4), content)
+    surface = pygame.Surface((300, 200))
+    font = RecordingGlyphFont(pygame)
+    composite_draw_plane_result(pygame, surface, _plane(_region(grid)), font, 10, 10)
+    # Visual order, with each letter in its joined form.
+    assert font.rendered == _visual(_ARABIC)
+    assert font.rendered != list(_ARABIC)
+
+
+def test_tab_labels_are_laid_out_as_paragraphs():
+    pygame = pytest.importorskip("pygame")
+
+    class RecordingControlFont(_ControlFont):
+        def __init__(self, pygame_module):
+            super().__init__(pygame_module)
+            self.rendered = []
+
+        def render(self, text, antialias, color):
+            self.rendered.append(text)
+            return super().render(text, antialias, color)
+
+    tabs = TabSetDraw(
+        50,
+        VISIBLE | ENABLED,
+        0,
+        0,
+        ObjectBounds(0, 0, 30, 4),
+        (TabDraw(51, VISIBLE | ENABLED, 0, _HEBREW_WORD, ""),),
+    )
+    surface = pygame.Surface((300, 200))
+    font = RecordingControlFont(pygame)
+    composite_draw_plane_result(
+        pygame,
+        surface,
+        _plane(_region(tabs)),
+        _GlyphFont(pygame),
+        10,
+        10,
+        control_font=font,
+    )
+    assert _visual(_HEBREW_WORD) == list(reversed(_HEBREW_WORD))
+    assert font.rendered == _visual(_HEBREW_WORD)

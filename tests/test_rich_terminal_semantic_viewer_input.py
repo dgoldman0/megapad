@@ -561,7 +561,7 @@ def _text_target(*, content_revision=6, rect=(0, 0, 40, 20)):
         viewport_column=0,
         viewport_rows=2,
         viewport_columns=4,
-        rows=((0, 1, 3), (1, 2, 4)),
+        rows=((0, 1, "abc"), (1, 2, "abcd")),
     )
 
 
