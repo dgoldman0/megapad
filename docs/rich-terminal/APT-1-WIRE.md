@@ -579,6 +579,7 @@ kind-specific tail
 | 2 | `PLACE` | position | 64 bytes | `TEXT_AREA`, `TEXT_GRID` |
 | 3 | `EXTEND` | position | 64 bytes | `TEXT_AREA` |
 | 4 | `SCROLL` | scroll | 48 bytes | `TEXT_AREA`, `TEXT_GRID` |
+| 5 | `FOLLOW` | position | 64 bytes | `TEXT_AREA` |
 
 The position tail is `<QQII>`:
 
@@ -592,8 +593,10 @@ u32 reserved               = 0
 The scroll tail is `<hhI>`: signed horizontal wheel detents, signed vertical
 wheel detents, and a zero u32. At least one detent count is nonzero; positive
 X is right and positive Y is down, as in `POINTER`. `TAB`, `PLACE`, `EXTEND`,
-and `SCROLL` require feature bit 9 `RET_CONTROL_COLLECTIONS`, and
-SEMANTIC-CONTENT-1 defines what their positions mean. All other event-kind
+`SCROLL`, and `FOLLOW` require feature bit 9 `RET_CONTROL_COLLECTIONS`, and
+SEMANTIC-CONTENT-1 defines what their positions mean. `FOLLOW` asks the
+client to follow the link at its position; the client decides what that
+does. All other event-kind
 values are invalid. Modifier bits are Shift 0, Ctrl 1, Alt 2, Super 3, Caps
 Lock 4, and Num Lock 5; all other bits are zero. The identity is normalized
 routing and freshness data, not application authority. The terminal may emit
@@ -767,7 +770,7 @@ remain outside the CELL-1 implementation gate. The optional additive contract
 `RET_CONTROLS` gates `CONTROL_DEFINE`, `CONTROL_REPLACE`, `CONTROL_DROP`, and
 `CONTROL_EVENT`; feature bit 9 `RET_CONTROL_COLLECTIONS` gates the additive
 TEXT_AREA/TEXT_GRID/TABSET/TAB kinds, their STX1 content body, and the
-`PLACE`, `EXTEND`, and `SCROLL` event kinds. `4003`–`4FFF`
+`PLACE`, `EXTEND`, `SCROLL`, and `FOLLOW` event kinds. `4003`–`4FFF`
 remains reserved. Every other reserved ID keeps
 the behavior defined here; in particular, a sender may not infer a payload
 from its range. CELL-1 alone still defines no semantic controls. A complete

@@ -8,10 +8,11 @@ Akashic `desktop-apt1` producer now advertises the capability, projects ordinary
 UIDL/canonical-widget values, and has exercised all four kinds plus
 acknowledgement-bound TAB activation through that sink. MegaPad's terminal
 core, guest module, shared host, and reference viewer also implement the
-positioned `PLACE`, `EXTEND`, and `SCROLL` input specified below. A physical
-renderer must not
-advertise `RET_CONTROL_COLLECTIONS` until its compositor and acknowledgement
-path can render every visible kind.
+positioned `PLACE`, `EXTEND`, and `SCROLL` input specified below. Style runs
+and the `FOLLOW` event, added on 2026-09-27 for styled text and links, are
+specified but not yet implemented. A physical renderer must not advertise
+`RET_CONTROL_COLLECTIONS` until its compositor and acknowledgement path can
+render every visible kind.
 
 ## Decision
 
@@ -47,11 +48,13 @@ This is one extensible semantic record with one shared text-collection body:
 | `TAB` | 8 | renderer-laid-out `TABSET` child using the existing label/shortcut fields |
 
 The design is renderer-neutral. It carries logical rows, columns, spans,
-stable item keys, logical-order text with a paragraph direction, a generic
-viewport origin, authoritative state, and selection/caret positions. It does
-not carry a retained-cell capacity, font, padding, pixel rectangle, refresh
-waveform, e-paper cadence, or physical hit box. Characters, widths, ordering,
-mirroring, and joining follow the shared text rules in `APT-1-TEXT.md`.
+stable item keys, logical-order text with a paragraph direction, style runs
+that say what parts of the text mean, a generic viewport origin,
+authoritative state, and selection/caret positions. It does not carry a
+retained-cell capacity, font, colour, text size, padding, pixel rectangle,
+refresh waveform, e-paper cadence, or physical hit box. Characters, widths,
+ordering, mirroring, and joining follow the shared text rules in
+`APT-1-TEXT.md`.
 
 ## CONTROL envelope
 
@@ -115,8 +118,9 @@ Content flag bit 0 is `READ_ONLY`. Bits 1 and 2 hold the paragraph
 direction of every row or item (`APT-1-TEXT.md` Section 7.1): 0 `AUTO`,
 1 `LTR`, 2 `RTL`; 3 is invalid. All other bits are zero.
 
-Exactly `item_count` variable records follow. Each begins with the 32-byte
-header `<QIIIIHHI>`, followed immediately by its UTF-8 text:
+Exactly `item_count` variable records follow. Each begins with the 36-byte
+header `<QIIIIHHII>`, followed immediately by its UTF-8 text and then its
+style runs:
 
 | Offset | Field | Type |
 |---:|---|---|
@@ -128,6 +132,11 @@ header `<QIIIIHHI>`, followed immediately by its UTF-8 text:
 | 24 | role | u16 |
 | 26 | state | u16 |
 | 28 | text bytes | u32 |
+| 32 | style run count | u32 |
+
+Each style run is the 12-byte record `<IIHH>`: u32 start, a Unicode-scalar
+offset into the item's text; u32 length in scalars, positive; u16 meaning;
+and u16 reserved = 0. The section on style runs below gives their rules.
 
 Roles are 1 `CONTENT`, 2 `ROW_HEADER`, and 3 `COLUMN_HEADER`. State bit 0 is
 `CURRENT`; bit 1 is `UNAVAILABLE`; other bits are zero and an unavailable item
@@ -183,6 +192,46 @@ therefore use zero offsets and no anchor. At most one `CURRENT` grid item
 exists. The primary item is the authoritative selection and may differ from
 `CURRENT` (for example, a selected calendar date distinct from today).
 
+### Style runs
+
+Style runs say what parts of an item's text mean, so that each renderer can
+choose how they look. A run names a start, a length, and one meaning from
+this list:
+
+| Value | Meaning | Marks |
+|---:|---|---|
+| 1 | `KEYWORD` | a keyword of a programming language |
+| 2 | `COMMENT` | a comment |
+| 3 | `STRING` | a string or character literal |
+| 4 | `NUMBER` | a numeric literal |
+| 5 | `HEADING` | a heading |
+| 6 | `EMPHASIS` | emphasised text |
+| 7 | `STRONG` | strongly emphasised text |
+| 8 | `CODE` | code set within prose |
+| 9 | `LINK` | a link the reader can follow |
+| 10 | `ERROR` | text the application reports as wrong |
+
+Runs are in increasing start order, lie within the item's text, and do not
+overlap. Two runs with the same meaning never touch: the client writes them
+as one run. Text that no run covers is plain. Only `TEXT_AREA` items carry
+runs in this version; a `TEXT_GRID` item has zero runs. A zero length, a
+meaning not in the list, a nonzero reserved field, and runs out of order,
+overlapping, touching with the same meaning, or reaching past the text are
+rejected.
+
+A character takes the meaning of the run that covers its first scalar, so a
+run boundary inside a character never splits it. The client need not place
+run boundaries on character boundaries.
+
+Runs carry no colour, font, or size. A renderer shows each meaning in a look
+its own theme chooses, such as a colour, a weight, a slant, or an underline,
+and a meaning never moves a character from the cells the text rules give it.
+A heading therefore keeps its cells: it is not set in larger text. A theme
+may show two meanings alike, or show a meaning like plain text, except
+`LINK`: a link always looks different from plain text, so that a reader can
+find it. An e-paper theme might use weight and underline where a colour
+screen uses colour.
+
 ## Hierarchy and mutation
 
 `TEXT_AREA`, `TEXT_GRID`, and `TABSET` are bounded roots with parent and order
@@ -207,15 +256,16 @@ below.
 
 ## Positioned input
 
-`CONTROL_EVENT` kinds 2 to 4 let a pointer act on text areas and grids without
+`CONTROL_EVENT` kinds 2 to 5 let a pointer act on text areas and grids without
 the terminal guessing application state. They require feature bit 9. Their
 position tail names the exact acknowledged content: `content_revision` is the
 control's STX1 content revision in the composite named by `model_revision`,
 `item_key` names an item carried in that content, and `scalar_offset` is a
 Unicode-scalar boundary within that item. The terminal computes a position
 from its own presentation of the content and emits an event only for a
-visible, effectively enabled root. `READ_ONLY` content admits all three kinds,
-because they move the caret, selection, or viewport, never the text.
+visible, effectively enabled root. `READ_ONLY` content admits all four kinds,
+because they move the caret, selection, or viewport, or follow a link, and
+never change the text.
 
 `PLACE` puts the caret in a text area or selects a grid item:
 
@@ -240,25 +290,39 @@ first clamped to the root's nearest edge.
 `SCROLL` carries wheel detents over a TEXT_AREA or TEXT_GRID root. The client
 decides how far one detent moves the viewport and whether the caret follows.
 
+`FOLLOW` asks the client to follow a link in a TEXT_AREA. It names a
+position as `PLACE` does, and only the start of a character whose meaning is
+`LINK` may be named. A terminal sends it, instead of `PLACE`, for a primary
+press on such a character with Ctrl held, and also for a press there
+without Shift or Ctrl when the content is `READ_ONLY`. No `EXTEND` follows
+that press. So in editable text a plain press on a link still places the
+caret, and Ctrl and a press follows the link; in read-only text a plain press
+follows it. The client decides what following a link does, such as opening
+the file it names. The terminal never opens anything itself, and no link
+target is carried on the wire.
+
 The client revalidates the owner, generation, control identity, kind, event
 revision, and content revision, and resolves the item key in the content it
 published. It then routes the position to the ordinary widget that produced
 that content, which applies it to its current state and clamps it if that
-state has since moved on. A stale or unknown position is discarded. The
-terminal never changes the caret, selection, or viewport itself; the client
-publishes the result in a later transaction.
+state has since moved on. A stale or unknown position is discarded, and so
+is a `FOLLOW` whose position no longer lies on a link. The terminal never
+changes the caret, selection, or viewport itself; the client publishes the
+result in a later transaction.
 
 ## Cost boundary
 
-STX1 adds one 72-byte collection header and one 32-byte header per carried
-text item. Decode and canonical validation use linear scalar/key passes. The
+STX1 adds one 72-byte collection header, one 36-byte header per carried
+text item, and 12 bytes per style run. Decode and canonical validation use
+linear scalar/key/run passes. The
 common one-row-span case uses a linear overlap pass; genuine row spans use an
 `O(n log n)` rectangle sweep. They do not compute content hashes, rasterize,
 scan terminal cells, or rebuild a second scene. Immutable values cache their
 validated UTF-8 and wire byte totals, so quota admission and scene freezing do
-not re-encode every string. That same canonical item loop derives exactly two
-non-semantic summaries: whether the content has TEXT_AREA shape and how many
-items carry `CURRENT`. Later scene, view, and shared-wire family checks consult
+not re-encode every string. That same canonical item loop derives exactly
+three non-semantic summaries: whether the content has TEXT_AREA shape, how
+many items carry `CURRENT`, and how many style runs it has. Later scene,
+view, and shared-wire family checks consult
 those immutable facts in `O(1)` instead of rescanning items. They add no hash,
 certificate, cache, traversal, or wire field; canonical STX1 construction and
 decode remain the boundary that proves the facts. Wire encoding still makes
@@ -316,6 +380,14 @@ side (Section 9.2). An offscreen endpoint remains authoritative but is never
 moved to the viewport origin. The reference sink uses the terminal monospace
 font for this editor policy.
 
+Each text area character takes the look the viewer's theme gives its
+meaning. The reference theme gives every meaning its own colour, sets
+`KEYWORD`, `HEADING`, and `STRONG` in the monospace family's bold face and
+`EMPHASIS` and `COMMENT` in its italic face, underlines `LINK`, and draws a
+red underline under `ERROR`. It uses the family's real bold and italic
+faces when the host has them, and only otherwise synthesizes them from the
+regular face. A style never changes a character's slots.
+
 TEXT_GRID maps item rectangles directly from their logical viewport-relative
 row, column, and span values. It paints role, primary, `CURRENT`, and
 `UNAVAILABLE` states with renderer-owned styling and never materializes a
@@ -336,7 +408,10 @@ nothing, shows CELL or residual content and may start one.
 
 The reference viewer routes a left press on a text target as `PLACE` (as
 `EXTEND` with Shift on a text area), a drag that began there as `EXTEND` at the
-clamped position, and wheel input there as `SCROLL`. Presses, drags, releases,
+clamped position, and wheel input there as `SCROLL`. A left press on a text
+area character whose meaning is `LINK` is `FOLLOW` instead when Ctrl is held,
+or when the content is `READ_ONLY` and neither Shift nor Ctrl is; the text
+target keeps each row's style runs for that test. Presses, drags, releases,
 and wheel steps on residual content become raw `POINTER` input at the cell
 under the pointer, with a release that cannot yet be sent kept until the
 acknowledged display is current.

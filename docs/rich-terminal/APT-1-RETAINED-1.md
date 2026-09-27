@@ -1056,8 +1056,9 @@ resulting authoritative state in a later transaction.
 | 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
 | 3 | `EXTEND` | 64 bytes | `TEXT_AREA` | 8 and 9 |
 | 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
+| 5 | `FOLLOW` | 64 bytes | `TEXT_AREA` | 8 and 9 |
 
-`PLACE` and `EXTEND` end with the position tail `<QQII>`: u64
+`PLACE`, `EXTEND`, and `FOLLOW` end with the position tail `<QQII>`: u64
 `content_revision`, u64 `item_key`, u32 `scalar_offset`, and u32 `reserved` =
 0. `SCROLL` ends with `<hhI>`: i16 horizontal wheel detents, i16 vertical wheel
 detents, and u32 `reserved` = 0, with at least one nonzero detent count. All
