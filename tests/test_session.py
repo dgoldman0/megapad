@@ -1198,6 +1198,16 @@ def test_machine_session_boots_interacts_and_captures(tmp_path):
         assert bounds[3] - bounds[1] > 40
 
 
+def test_machine_session_starts_its_clock_at_a_given_time():
+    # Noon UTC on 2026-09-27.
+    noon = 1_790_510_400_000
+
+    with MachineSession.from_bios(BIOS, rtc_epoch_ms=noon) as session:
+        assert session.system.rtc.epoch_ms == noon
+    with MachineSession.from_bios(BIOS) as session:
+        assert session.system.rtc.epoch_ms == 0
+
+
 def test_machine_session_owns_injected_nic_backend():
     backend = LoopbackBackend()
 

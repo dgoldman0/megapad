@@ -639,7 +639,15 @@ class MachineSession:
         rich_terminal: RichTerminalSessionConfig | None = None,
         nic_backend: NICBackend | None = None,
         realtime_clock: bool = False,
+        rtc_epoch_ms: int | None = None,
     ) -> "MachineSession":
+        """A session on a new machine running the BIOS at BIOS_PATH.
+
+        The machine's clock starts at RTC_EPOCH_MS, milliseconds since the
+        Unix epoch, when one is given; otherwise at the host's time for a
+        real-time clock, or at zero.
+        """
+
         code, labels = _load_bios(Path(bios_path))
         system = MegapadSystem(
             ram_size=ram_size,
@@ -651,6 +659,7 @@ class MachineSession:
             worker_count=lanes,
             nic_backend=nic_backend,
             realtime_clock=realtime_clock,
+            rtc_epoch_ms=rtc_epoch_ms,
         )
         system.load_binary(0, code)
         for name, hook_id, code_size in _ACCEL_HOOKS:
