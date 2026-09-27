@@ -114,6 +114,7 @@ The module defines these status values, shared with the Akashic adapter:
 | 2 | `PT-S-SESSION-LOST` | The enhanced session is no longer usable. |
 | 3 | `PT-S-INVALID` | Invalid caller arguments or call order. |
 | 4 | `PT-S-UNSUPPORTED` | Negotiation was refused, ignored, or timed out. |
+| 5 | `PT-S-TOO-LARGE` | The request fits the negotiated limits only without its cluster tails. |
 
 The first implementation preserves these public stack contracts:
 
@@ -153,7 +154,7 @@ PT-RESOURCE-COMMIT  ( owner generation resource session -- status )
 PT-RESOURCE-DROP    ( owner generation resource session -- status )
 PT-RESOURCE-ABORT   ( owner generation resource reason session -- status )
 
-PT-PRESENT-BEGIN    ( cols rows cell-spans cells retained-ops
+PT-PRESENT-BEGIN    ( cols rows cell-spans cells cluster-words retained-ops
                       retained-frame-bytes cell-mode retained-mode session
                       -- status )
 PT-REGION-DEFINE    ( owner generation region logical-x logical-y
@@ -262,10 +263,13 @@ PT-CONTROL-REPLACE  ( owner generation control kind state z region parent order
 PT-CONTROL-DROP     ( owner generation control session -- status )
 PT-PRESENT-COMMIT   ( disposition session -- status )
 
-PT-TX-BEGIN         ( cols rows span-count cell-count session -- status )
-PT-SNAPSHOT-BEGIN   ( cols rows span-count cell-count session -- status )
-PT-SPAN-BEGIN       ( row col count session -- status )
+PT-TX-BEGIN         ( cols rows span-count cell-count cluster-words session
+                      -- status )
+PT-SNAPSHOT-BEGIN   ( cols rows span-count cell-count cluster-words session
+                      -- status )
+PT-SPAN-BEGIN       ( row col count cluster-words session -- status )
 PT-CELL             ( cp fg bg attrs session -- status )
+PT-CLUSTER-CELL     ( cp fg bg attrs extras-a extras-n session -- status )
 PT-CURSOR           ( row col visible session -- status )
 PT-TX-COMMIT        ( session -- status )
 PT-TX-ABORT         ( reason session -- status )
@@ -360,13 +364,34 @@ Neither case may replace the first close reason or restart its deadline.
 caller performs an external attachment reset/drain and reinitializes the
 session at that proven boundary.
 
-Transaction begin uses the exact span and cell counts to preflight all frame
-bytes: `176 + 52 * span-count + 8 * cell-count`. Negotiation guarantees that a
+Transaction begin uses the exact span, cell, and cluster-word counts to
+preflight all frame bytes: `176 + 52 * span-count + 8 * cell-count + 4 *
+cluster-words` (`APT-1-WIRE.md` Section 9). Negotiation guarantees that a
 maximum-width row span fits one payload. After a successful begin, valid calls
 matching those counts cannot return `WOULD-BLOCK`. `PT-SPAN-BEGIN` opens one
-declared span and exactly `count` calls to `PT-CELL` complete it. The module
-encodes every field; it does not accept a pointer to Akashic's native packed
-cell.
+declared span with its own cluster words, and exactly `count` calls to
+`PT-CELL` or `PT-CLUSTER-CELL` complete it. The module encodes every field; it
+does not accept a pointer to Akashic's native packed cell.
+
+Cells follow `APT-1-TEXT.md` as `APT-1-WIRE.md` Section 11 applies it: the
+caller lays text out, and the module encodes and checks the cells.
+`PT-ATTR-WIDE` marks a wide character's lead and `PT-ATTR-CONTINUATION` its
+right half, which has scalar zero and its lead's colors and style bits. A lead
+never carries a scalar that Section 5 of the text rules replaces. A pair
+inside one span is checked when its second cell is written; a pair that
+crosses the span's edge is checked by the terminal against its model.
+`PT-CLUSTER-CELL` writes a lead whose character has further display scalars:
+it borrows `extras-n` little-endian u32 scalars at `extras-a` until it
+returns, sets `PT-ATTR-CLUSTER`, and appends the span tail. The span's last
+cell must complete exactly its declared words.
+
+A begin or span whose cluster tails would take it past the negotiated maximum
+payload or transaction, when it would fit without them, returns
+`PT-S-TOO-LARGE` without output. The caller then sends the transaction again
+with every cluster cell degraded to U+FFFD, as `APT-1-WIRE.md` Section 11.1
+requires. A span can meet that limit only after its begin, so the caller
+checks each span's payload, `12 + 8 * count + 4 * cluster-words`, against
+`PT-OUTBOUND-MAX-PAYLOAD@` before it begins.
 
 `PT-SNAPSHOT-NEEDED?` is true after opening and after an accepted soft reset.
 Only a successful `TX_RESULT` for a snapshot commit clears it. Normal delta
@@ -452,7 +477,8 @@ new-epoch RESET_ACK. The upper engine therefore does not acquire a second
 transport-cleanup state machine.
 
 `PT-PRESENT-BEGIN` derives transaction ID, base revision, geometry generation,
-and exact declared bytes. `retained-frame-bytes` is the exact sum of complete
+and exact declared bytes, which include four bytes per cluster word of its CELL
+spans. `retained-frame-bytes` is the exact sum of complete
 40-byte headers plus payloads for the declared retained operations. PT
 preflights the complete BEGIN-through-COMMIT byte and sequence budget before it
 emits BEGIN, then checks every operation against the declared count and byte

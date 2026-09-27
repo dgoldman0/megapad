@@ -813,7 +813,13 @@ class PresentBegin:
         )
         if self.declared_transaction_bytes < minimum:
             raise ValueError("declared transaction bytes are below the canonical minimum")
-        if self.retained_operation_count == 0 and self.declared_transaction_bytes != minimum:
+        # Without retained operations only CELL cluster tails, four bytes
+        # per word (APT-1-WIRE Section 9), can add to the minimum.
+        if self.retained_operation_count == 0 and (
+            cell_mode is CellMode.NONE
+            and self.declared_transaction_bytes != minimum
+            or (self.declared_transaction_bytes - minimum) % 4
+        ):
             raise ValueError("operation-free declared transaction bytes are not exact")
 
 

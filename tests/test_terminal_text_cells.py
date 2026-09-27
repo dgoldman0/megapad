@@ -1,0 +1,176 @@
+"""Wide characters and characters of several scalars in terminal cells.
+
+APT-1-TEXT Sections 3 to 6 put one character in one cell, or in a lead and a
+continuation cell when it is wide.  These tests cover the simulator's ANSI
+terminal, the CELL-1 view it shows, the viewer's snapshot wire, and the
+GLYPH_RUN slots of the rich viewer.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from display import ATTR_CONTINUATION, ATTR_WIDE, VirtualTerminal
+from rich_terminal.cell_model import (
+    ATTRIBUTE_CLUSTER,
+    ATTRIBUTE_CONTINUATION,
+    ATTRIBUTE_WIDE,
+    Cell,
+    Cursor,
+    TerminalView,
+)
+from rich_terminal.pygame_view import _glyph_slots
+from session import MachineSession, TerminalCell, TerminalSnapshot
+from shared_session import snapshot_from_wire, snapshot_to_wire
+
+
+def _row(terminal: VirtualTerminal, row: int = 0) -> list[tuple[str, int]]:
+    return [(cell[0], cell[3] & (ATTR_WIDE | ATTR_CONTINUATION)) for cell in terminal.grid[row]]
+
+
+def _feed(text: str | bytes, cols: int = 8, rows: int = 2) -> VirtualTerminal:
+    terminal = VirtualTerminal(cols=cols, rows=rows)
+    terminal.write(text.encode("utf-8") if isinstance(text, str) else text)
+    return terminal
+
+
+W, C = ATTR_WIDE, ATTR_CONTINUATION
+
+
+def test_scalars_join_their_character_and_wide_ones_take_two_cells() -> None:
+    terminal = _feed("e\u0301\u4e2dx")
+    assert _row(terminal)[:5] == [("e\u0301", 0), ("\u4e2d", W), ("", C), ("x", 0), (" ", 0)]
+    assert terminal.cx == 4
+
+
+def test_emoji_sequences_and_flags_are_one_wide_character() -> None:
+    family = "\U0001F468\u200d\U0001F469\u200d\U0001F467"
+    terminal = _feed(family + "\U0001F1EF\U0001F1F5!")
+    assert _row(terminal)[:5] == [(family, W), ("", C), ("\U0001F1EF\U0001F1F5", W), ("", C), ("!", 0)]
+
+
+def test_emoji_presentation_widens_a_character_in_place() -> None:
+    terminal = _feed("\u2764")
+    assert _row(terminal)[:2] == [("\u2764", 0), (" ", 0)]
+    assert terminal.cx == 1
+    terminal.write("\ufe0fz".encode())
+    assert _row(terminal)[:3] == [("\u2764\ufe0f", W), ("", C), ("z", 0)]
+
+
+def test_a_wide_character_never_spans_rows() -> None:
+    terminal = _feed("abc\u4e2d", cols=4)
+    assert _row(terminal, 0) == [("a", 0), ("b", 0), ("c", 0), (" ", 0)]
+    assert _row(terminal, 1)[:2] == [("\u4e2d", W), ("", C)]
+
+
+def test_zero_width_characters_take_no_cell_and_lone_marks_take_one() -> None:
+    terminal = _feed("\u200ba\u0301")
+    assert _row(terminal)[:2] == [("a\u0301", 0), (" ", 0)]
+    # An escape sequence ends the character, so the mark stands alone.
+    terminal = _feed(b"e\x1b[m\xcc\x81")
+    assert _row(terminal)[:3] == [("e", 0), ("\u0301", 0), (" ", 0)]
+
+
+def test_ill_formed_utf8_shows_one_replacement_per_maximal_subpart() -> None:
+    terminal = _feed(b"\xe0\x80A\xf0\x9f\x98B\xc2\x85")
+    assert [cell[0] for cell in terminal.grid[0][:6]] == [
+        "\ufffd", "\ufffd", "A", "\ufffd", "B", "\ufffd",
+    ]
+
+
+def test_overwriting_or_erasing_half_a_pair_blanks_the_other_half() -> None:
+    terminal = _feed("\u4e2d\u6587")
+    terminal.write(b"\x1b[1;2Hx")
+    assert _row(terminal)[:4] == [(" ", 0), ("x", 0), ("\u6587", W), ("", C)]
+    terminal.write(b"\x1b[1;4H\x1b[K")
+    assert _row(terminal)[:4] == [(" ", 0), ("x", 0), (" ", 0), (" ", 0)]
+
+
+def test_resize_cuts_no_pair() -> None:
+    terminal = _feed("ab\u4e2d", cols=4)
+    terminal.resize(3, 2)
+    assert _row(terminal) == [("a", 0), ("b", 0), (" ", 0)]
+
+
+def _view(cells) -> TerminalView:
+    return TerminalView(
+        attachment_epoch=1,
+        session_id=1,
+        presentation_epoch=1,
+        revision=1,
+        cols=len(cells[0]),
+        rows=len(cells),
+        cells=tuple(tuple(row) for row in cells),
+        dirty_spans=(),
+        cursor=Cursor(0, 0, False),
+    )
+
+
+def test_cell_view_snapshots_carry_whole_characters_and_true_columns() -> None:
+    view = _view([[
+        Cell(0x4E2D, 7, 0, ATTRIBUTE_WIDE | 0x40),
+        Cell(0, 7, 0, ATTRIBUTE_CONTINUATION | 0x40),
+        Cell(ord("e"), 7, 0, ATTRIBUTE_CLUSTER | 1, (0x301,)),
+        Cell(ord("o"), 7, 0),
+        Cell(ord("k"), 7, 0),
+    ]])
+    snapshot = MachineSession._snapshot_output_view(view)
+    assert [(cell.char, cell.attrs) for cell in snapshot.cells[0]] == [
+        ("\u4e2d", 0x80 | ATTR_WIDE),
+        ("", 0x80 | ATTR_CONTINUATION),
+        ("e\u0301", 1),
+        ("o", 0),
+        ("k", 0),
+    ]
+    assert snapshot.lines() == ["\u4e2de\u0301ok"]
+    assert snapshot.find("ok") == [(0, 3)]
+    assert snapshot.find("\u0301") == [(0, 2)]
+    assert snapshot.row_text(0, 2, 4) == "e\u0301o"
+
+
+def _snapshot(chars_and_attrs) -> TerminalSnapshot:
+    row = tuple(
+        TerminalCell(char, (1, 2, 3), (4, 5, 6), attrs)
+        for char, attrs in chars_and_attrs
+    )
+    return TerminalSnapshot(
+        len(row), 1, (row,), cursor_col=0, cursor_row=0,
+        cursor_visible=False, alternate_screen=False,
+    )
+
+
+def test_snapshot_wire_round_trips_clusters_and_pairs() -> None:
+    snapshot = _snapshot([
+        ("\U0001F468\u200d\U0001F469", ATTR_WIDE), ("", ATTR_CONTINUATION),
+        ("a\u0301", 8), (" ", 0),
+    ])
+    assert snapshot_from_wire(snapshot_to_wire(snapshot)) == snapshot
+
+
+@pytest.mark.parametrize(
+    "cells",
+    [
+        [("\u4e2d", ATTR_WIDE), ("x", 0)],
+        [("x", 0), ("", ATTR_CONTINUATION)],
+        [("x", 0), ("\u4e2d", ATTR_WIDE)],
+        [("", 0), ("x", 0)],
+        [("\u4e2d", ATTR_WIDE), ("y", ATTR_CONTINUATION)],
+    ],
+)
+def test_snapshot_wire_rejects_broken_pairs_and_empty_leads(cells) -> None:
+    with pytest.raises(ValueError):
+        snapshot_from_wire(snapshot_to_wire(_snapshot(cells)))
+
+
+def test_glyph_run_characters_take_their_width_in_slots() -> None:
+    slots, total = _glyph_slots("a\u4e2de\u0301\u200b\U0001F1EF\U0001F1F5")
+    assert list(slots) == [
+        ("a", 0, 1),
+        ("\u4e2d", 1, 2),
+        ("e\u0301", 3, 1),
+        ("\u200b", 4, 0),
+        ("\U0001F1EF\U0001F1F5", 4, 2),
+    ]
+    assert total == 6
+    slots, total = _glyph_slots("ab")
+    assert (list(slots), total) == ([("a", 0, 1), ("b", 1, 1)], 2)

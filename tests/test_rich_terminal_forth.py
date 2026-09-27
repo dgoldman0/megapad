@@ -24,7 +24,16 @@ from rich_terminal.server import (
     TerminalConfig,
     TerminalState,
 )
-from rich_terminal.apt1 import Frame, encode_frame
+from rich_terminal.apt1 import Frame, MessageType, encode_frame
+from rich_terminal.cell_model import (
+    ATTRIBUTE_CLUSTER,
+    ATTRIBUTE_CONTINUATION,
+    ATTRIBUTE_WIDE,
+    Cell,
+    CellSpan,
+    decode_cell_span,
+    encode_cell_span,
+)
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
 from rich_terminal.retained_wire import RetainedMessageType
 
@@ -1757,6 +1766,212 @@ class TestRichTerminalForth(_KDOSTestBase):
             struct.pack(f"<{len(expected_facts)}q", *expected_facts),
         )
 
+    def test_cell_writer_checks_pairs_and_writes_cluster_tails(self) -> None:
+        """Encode a wide pair and a cluster; reject broken cells and big tails."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        def mark(name: bytes) -> str:
+            return f"  {int.from_bytes(name, 'little'):#x} PT-CW-MARK"
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PT-CW-RX 8192 ALLOT",
+                "CREATE PT-CW-TX 8192 ALLOT",
+                "CREATE PT-CW-EVENT PT-EVENT-SIZE ALLOT",
+                "CREATE PT-CW-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PT-CW-S PT-CW-SESSION-STORAGE 7 + -8 AND ;",
+                "CREATE PT-CW-EXTRAS 8 ALLOT",
+                "CREATE PT-CW-MARK-BUFFER 8 ALLOT",
+                "CREATE PT-CW-STATUSES 32 8 * ALLOT",
+                "VARIABLE PT-CW-STATUS-I",
+                ": PT-CW-STATUS!  ( status -- )",
+                "  PT-CW-STATUSES PT-CW-STATUS-I @ 8 * + !",
+                "  1 PT-CW-STATUS-I +! ;",
+                ": PT-CW-MARK  ( u -- )",
+                "  PT-CW-MARK-BUFFER _PT-U64!",
+                "  PT-CW-MARK-BUFFER 8 TYPE TX-FLUSH ;",
+                ": PT-CW-PRIME",
+                "  PT-CW-STATUSES 32 8 * 0 FILL PT-CW-STATUS-I OFF",
+                "  0x301 PT-CW-EXTRAS L! 0x302 PT-CW-EXTRAS 4 + L!",
+                "  PT-CW-RX 8192 PT-CW-TX 8192",
+                "    PT-CW-EVENT PT-EVENT-SIZE PT-CW-S PT-INIT PT-CW-STATUS!",
+                "  PT-ST-ACTIVE PT-CW-S _PT.S.STATE !",
+                "  4 PT-CW-S _PT.S.COLS ! 2 PT-CW-S _PT.S.ROWS !",
+                "  128 PT-CW-S _PT.S.PEER-MAX-PAY !",
+                "  268 PT-CW-S _PT.S.PEER-MAX-TX !",
+                "  4096 PT-CW-S _PT.S.PEER-GRANT !",
+                "  4096 PT-CW-S _PT.S.PEER-INITIAL !",
+                "  0 PT-CW-S _PT.S.PEER-SENT !",
+                "  0 PT-CW-S _PT.S.TX-SEQ !",
+                "  0x4142434445464748 PT-CW-S _PT.S.SESSION-ID !",
+                "  9 PT-CW-S _PT.S.EPOCH !",
+                "  1 PT-CW-S _PT.S.REVISION !",
+                "  1 PT-CW-S _PT.S.NEXT-TXID !",
+                "  0 PT-CW-S _PT.S.SNAPSHOT? ! ;",
+                ": PT-CW-RUN",
+                "  PT-CW-PRIME",
+                mark(b"CBEG0001"),
+                # 260 cluster-free bytes fit 268; three tail words do not.
+                "  4 2 1 4 3 PT-CW-S PT-TX-BEGIN PT-CW-STATUS!",
+                "  4 2 1 4 2 PT-CW-S PT-TX-BEGIN PT-CW-STATUS!",
+                "  0 0 4 3 PT-CW-S PT-SPAN-BEGIN PT-CW-STATUS!",
+                "  0 0 4 2 PT-CW-S PT-SPAN-BEGIN PT-CW-STATUS!",
+                "  101 7 0 1 PT-CW-EXTRAS 0 PT-CW-S PT-CLUSTER-CELL PT-CW-STATUS!",
+                "  101 7 0 1 PT-CW-EXTRAS 1 PT-CW-S PT-CLUSTER-CELL PT-CW-STATUS!",
+                "  0 7 0 PT-ATTR-CONTINUATION PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  9 7 0 0 PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  0x85 7 0 0 PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  0x2028 7 0 0 PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  65 7 0 PT-ATTR-CLUSTER PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  65 7 0 0x400 PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  0x4E2D 4 1 PT-ATTR-WIDE 8 OR PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  65 4 1 0 PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  0 4 1 PT-ATTR-CONTINUATION PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  0 3 1 PT-ATTR-CONTINUATION 8 OR PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  5 4 1 PT-ATTR-CONTINUATION 8 OR PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  0 4 1 PT-ATTR-CONTINUATION 8 OR PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  0x4E2E 7 0 PT-ATTR-WIDE PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  0 7 0 0 PT-CW-S PT-CELL PT-CW-STATUS!",
+                "  1 1 1 PT-CW-S PT-CURSOR PT-CW-STATUS!",
+                "  PT-CW-S PT-TX-COMMIT PT-CW-STATUS!",
+                "  PT-CW-S _PT-AWAIT-CLEAR",
+                # The minimum payload holds four cells but not their tail.
+                "  44 PT-CW-S _PT.S.PEER-MAX-PAY !",
+                "  4 2 1 4 2 PT-CW-S PT-TX-BEGIN PT-CW-STATUS!",
+                "  0 0 4 2 PT-CW-S PT-SPAN-BEGIN PT-CW-STATUS!",
+                "  0 PT-CW-S PT-TX-ABORT PT-CW-STATUS!",
+                mark(b"CEND0002"),
+                mark(b"CSTS0003"),
+                "  PT-CW-STATUSES PT-CW-STATUS-I @ 8 * TYPE",
+                mark(b"CSTE0004") + " ;",
+                "PT-CW-RUN BYE",
+            ]
+        )
+        program = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data:
+                if position >= len(program):
+                    break
+                chunk = _next_line_chunk(program, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+                continue
+            executed = system.run_batch(
+                min(RUN_BATCH_STEPS, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += max(executed, 1)
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(program), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "cell writer byte oracle exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "dictionary overflow",
+            "Stack underflow",
+            "Stack overflow",
+            "Return stack overflow",
+            "nested definition",
+            "branch out of range",
+            "control-flow",
+            "*** BUS FAULT",
+            "*** PRIVILEGE FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+
+        span = CellSpan(
+            0,
+            0,
+            (
+                Cell(101, 7, 0, 1 | ATTRIBUTE_CLUSTER, (0x301,)),
+                Cell(0x4E2D, 4, 1, 8 | ATTRIBUTE_WIDE),
+                Cell(0, 4, 1, 8 | ATTRIBUTE_CONTINUATION),
+                Cell(32, 7, 0, 0),
+            ),
+        )
+        span_payload = encode_cell_span(span)
+        self.assertEqual(len(span_payload), 12 + 8 * 4 + 4 * 2)
+        self.assertEqual(decode_cell_span(span_payload), span)
+        frames = [
+            (MessageType.TX_BEGIN, struct.pack("<QQIIII", 1, 1, 4, 2, 1, 4)),
+            (MessageType.CELL_SPAN, span_payload),
+            (MessageType.CURSOR, struct.pack("<IIB7x", 1, 1, 1)),
+            (MessageType.TX_COMMIT, struct.pack("<Q", 1)),
+            (MessageType.TX_BEGIN, struct.pack("<QQIIII", 2, 1, 4, 2, 1, 4)),
+            (MessageType.TX_ABORT, struct.pack("<QH6x", 2, 0)),
+        ]
+        expected = b"".join(
+            encode_frame(
+                Frame(message_type, 0x4142434445464748, sequence, 9, payload),
+                max_payload=128,
+            )
+            for sequence, (message_type, payload) in enumerate(frames)
+        )
+        # The first transaction is exactly the 268-byte maximum.
+        self.assertEqual(sum(len(encode_frame(
+            Frame(t, 0x4142434445464748, i, 9, p), max_payload=128))
+            for i, (t, p) in enumerate(frames[:4])), 268)
+
+        begin = raw.index(b"CBEG0001") + 8
+        end_at = raw.index(b"CEND0002", begin)
+        self.assertEqual(raw[begin:end_at], expected)
+
+        ok, too_large, invalid = 0, 5, 3
+        expected_statuses = (
+            ok,           # PT-INIT
+            too_large,    # begin with three tail words
+            ok,           # begin with two
+            invalid,      # a span claiming more words than declared
+            ok,           # the span
+            invalid,      # a cluster cell without extras
+            ok,           # e + U+0301
+            invalid,      # a continuation without a wide lead
+            invalid,      # tab
+            invalid,      # NEL
+            invalid,      # LINE SEPARATOR
+            invalid,      # CLUSTER through PT-CELL
+            invalid,      # an undefined attribute bit
+            ok,           # the wide lead
+            invalid,      # a lead where the continuation belongs
+            invalid,      # a continuation whose style differs
+            invalid,      # a continuation whose color differs
+            invalid,      # a continuation with a scalar
+            ok,           # the continuation
+            invalid,      # a wide lead in the last column
+            ok,           # zero, sent as U+0020, completes the span
+            ok,           # cursor
+            ok,           # commit
+            ok,           # begin at the minimum payload
+            too_large,    # the span's tail does not fit
+            ok,           # abort
+        )
+        status_begin = raw.index(b"CSTS0003", end_at) + 8
+        status_end = raw.index(b"CSTE0004", status_begin)
+        self.assertEqual(
+            raw[status_begin:status_end],
+            struct.pack(f"<{len(expected_statuses)}q", *expected_statuses),
+        )
+
     def test_real_core_snapshot_key_resize_and_synchronized_close(self) -> None:
         memory, ext_memory, cpu_state = self._snapshot_data()
         system = make_system(
@@ -1854,16 +2069,20 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-TEST-CLOSE-S @ . PT-TEST-CLOSE-WAIT-S @ .",
                 "  PT-TEST-SESSION PT-STATE@ . PT-STREAM-OWNED? .",
                 "  TX-FLUSH ;",
+                "CREATE PT-TEST-EXTRAS 4 ALLOT 0x301 PT-TEST-EXTRAS L!",
                 ": PT-TEST-SEND-INITIAL-SNAPSHOT",
                 "  0 PT-TEST-TX-S !",
-                "  2 2 2 4 PT-TEST-SESSION PT-SNAPSHOT-BEGIN",
+                "  2 2 2 4 2 PT-TEST-SESSION PT-SNAPSHOT-BEGIN",
                 "    PT-TEST-TX-STATUS",
-                "  0 0 2 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
-                "  65 7 0 1 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  0 0 2 2 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
+                "  101 7 0 1 PT-TEST-EXTRAS 1 PT-TEST-SESSION PT-CLUSTER-CELL",
+                "    PT-TEST-TX-STATUS",
                 "  66 2 0 8 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
-                "  1 0 2 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
-                "  67 4 0 0 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
-                "  32 7 1 32 PT-TEST-SESSION PT-CELL PT-TEST-TX-STATUS",
+                "  1 0 2 0 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
+                "  0x4E2D 4 0 PT-ATTR-WIDE PT-TEST-SESSION PT-CELL",
+                "    PT-TEST-TX-STATUS",
+                "  0 4 0 PT-ATTR-CONTINUATION PT-TEST-SESSION PT-CELL",
+                "    PT-TEST-TX-STATUS",
                 "  1 1 1 PT-TEST-SESSION PT-CURSOR PT-TEST-TX-STATUS",
                 "  PT-TEST-SESSION PT-TX-COMMIT PT-TEST-TX-STATUS ;",
                 ": PT-TEST-SEND-16-CELLS",
@@ -1872,11 +2091,11 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  LOOP DROP ;",
                 ": PT-TEST-SEND-RESIZED-SNAPSHOT",
                 "  0 PT-TEST-TX-S !",
-                "  16 2 2 32 PT-TEST-SESSION PT-SNAPSHOT-BEGIN",
+                "  16 2 2 32 0 PT-TEST-SESSION PT-SNAPSHOT-BEGIN",
                 "    PT-TEST-TX-STATUS",
-                "  0 0 16 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
+                "  0 0 16 0 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
                 "  65 PT-TEST-SEND-16-CELLS",
-                "  1 0 16 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
+                "  1 0 16 0 PT-TEST-SESSION PT-SPAN-BEGIN PT-TEST-TX-STATUS",
                 "  81 PT-TEST-SEND-16-CELLS",
                 "  1 15 1 PT-TEST-SESSION PT-CURSOR PT-TEST-TX-STATUS",
                 "  PT-TEST-SESSION PT-TX-COMMIT PT-TEST-TX-STATUS ;",
@@ -2090,8 +2309,17 @@ class TestRichTerminalForth(_KDOSTestBase):
         initial_view, resized_view = terminal_views
         self.assertEqual(initial_view.revision, 1)
         self.assertEqual(
-            tuple(cell.codepoint for row in initial_view.cells for cell in row),
-            (ord("A"), ord("B"), ord("C"), ord(" ")),
+            tuple(initial_view.cells),
+            (
+                (
+                    Cell(ord("e"), 7, 0, 1 | ATTRIBUTE_CLUSTER, (0x301,)),
+                    Cell(ord("B"), 2, 0, 8),
+                ),
+                (
+                    Cell(0x4E2D, 4, 0, ATTRIBUTE_WIDE),
+                    Cell(0, 4, 0, ATTRIBUTE_CONTINUATION),
+                ),
+            ),
         )
         self.assertEqual((resized_view.cols, resized_view.rows), (16, 2))
         self.assertEqual(resized_view.revision, 1)
@@ -2167,33 +2395,48 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-RICH-COMPLETION PT-COMPLETION-REVISION@",
                 "    PT-RICH-WANT-REVISION @ <> PT-RICH-STATUS+ ;",
                 ": PT-RICH-SNAPSHOT",
-                "  2 2 2 4 PT-RICH-SESSION PT-SNAPSHOT-BEGIN PT-RICH-STATUS+",
-                "  0 0 2 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
+                "  2 2 2 4 0 PT-RICH-SESSION PT-SNAPSHOT-BEGIN PT-RICH-STATUS+",
+                "  0 0 2 0 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
                 "  65 7 0 0 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
                 "  66 7 0 0 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
-                "  1 0 2 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
+                "  1 0 2 0 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
                 "  67 7 0 0 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
                 "  68 7 0 0 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
                 "  0 0 0 PT-RICH-SESSION PT-CURSOR PT-RICH-STATUS+",
                 "  PT-RICH-SESSION PT-TX-COMMIT PT-RICH-STATUS+ ;",
                 ": PT-RICH-REPLACE-START",
-                "  2 2 0 0 1 88 PT-CELL-NONE PT-RET-REPLACE-START",
+                "  2 2 0 0 0 1 104 PT-CELL-NONE PT-RET-REPLACE-START",
                 "    PT-RICH-SESSION PT-PRESENT-BEGIN PT-RICH-STATUS+",
                 "  1 1 1 0 0 2 2 0 0 0 0 0 1 PT-RICH-SESSION",
                 "    PT-REGION-DEFINE PT-RICH-STATUS+",
                 "  PT-COMMIT PT-RICH-SESSION PT-PRESENT-COMMIT",
                 "    PT-RICH-STATUS+ ;",
                 ": PT-RICH-REPLACE-REVEAL",
-                "  2 2 0 0 0 0 PT-CELL-NONE PT-RET-REPLACE-CONTINUE",
+                "  2 2 0 0 0 0 0 PT-CELL-NONE PT-RET-REPLACE-CONTINUE",
                 "    PT-RICH-SESSION PT-PRESENT-BEGIN PT-RICH-STATUS+",
                 "  PT-COMMIT-AND-REVEAL PT-RICH-SESSION PT-PRESENT-COMMIT",
                 "    PT-RICH-STATUS+ ;",
                 ": PT-RICH-CELL-DELTA",
-                "  2 2 1 1 PT-RICH-SESSION PT-TX-BEGIN PT-RICH-STATUS+",
-                "  0 0 1 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
+                "  2 2 1 1 0 PT-RICH-SESSION PT-TX-BEGIN PT-RICH-STATUS+",
+                "  0 0 1 0 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
                 "  90 2 0 1 PT-RICH-SESSION PT-CELL PT-RICH-STATUS+",
                 "  0 0 1 PT-RICH-SESSION PT-CURSOR PT-RICH-STATUS+",
                 "  PT-RICH-SESSION PT-TX-COMMIT PT-RICH-STATUS+ ;",
+                "CREATE PT-RICH-EXTRAS 4 ALLOT 0x301 PT-RICH-EXTRAS L!",
+                ": PT-RICH-PRESENT-TEXT",
+                "  2 2 2 3 2 0 0 PT-CELL-DELTA PT-RET-NONE",
+                "    PT-RICH-SESSION PT-PRESENT-BEGIN PT-RICH-STATUS+",
+                "  0 1 1 2 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
+                "  101 7 0 0 PT-RICH-EXTRAS 1 PT-RICH-SESSION PT-CLUSTER-CELL",
+                "    PT-RICH-STATUS+",
+                "  1 0 2 0 PT-RICH-SESSION PT-SPAN-BEGIN PT-RICH-STATUS+",
+                "  0x4E2D 7 0 PT-ATTR-WIDE PT-RICH-SESSION PT-CELL",
+                "    PT-RICH-STATUS+",
+                "  0 7 0 PT-ATTR-CONTINUATION PT-RICH-SESSION PT-CELL",
+                "    PT-RICH-STATUS+",
+                "  0 0 1 PT-RICH-SESSION PT-CURSOR PT-RICH-STATUS+",
+                "  PT-COMMIT PT-RICH-SESSION PT-PRESENT-COMMIT",
+                "    PT-RICH-STATUS+ ;",
                 ": PT-RICH-SEND-DROP",
                 "  BEGIN",
                 "    1 1 PT-RICH-SESSION PT-OWNER-DROP DUP",
@@ -2242,9 +2485,13 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "    PT-RICH-STATUS+",
                 "  PT-COMPLETE-TX PT-REQUEST-TX-COMMIT 4",
                 "    PT-RICH-CHECK-COMPLETION",
+                "  PT-RICH-PRESENT-TEXT PT-RICH-WAIT-COMPLETION",
+                "    PT-RICH-STATUS+",
+                "  PT-COMPLETE-TX PT-REQUEST-PRESENT-COMMIT 5",
+                "    PT-RICH-CHECK-COMPLETION",
                 "  PT-RICH-SEND-DROP PT-RICH-STATUS+",
                 "  PT-RICH-WAIT-COMPLETION PT-RICH-STATUS+",
-                "  PT-COMPLETE-TX PT-REQUEST-OWNER-DROP 5",
+                "  PT-COMPLETE-TX PT-REQUEST-OWNER-DROP 6",
                 "    PT-RICH-CHECK-COMPLETION 4 PT-RICH-PHASE !",
                 "  0 PT-RICH-SESSION PT-CLOSE PT-RICH-STATUS+",
                 "  PT-RICH-WAIT-ANSI PT-RICH-STATUS+",
@@ -2345,3 +2592,21 @@ class TestRichTerminalForth(_KDOSTestBase):
         self.assertIn(b"PTREPORT 0 0 0 ", raw)
         self.assertEqual(core.state, TerminalState.ANSI)
         self.assertGreaterEqual(len(terminal_views), 3)
+        # PRESENT commits publish composite views whose CELL plane is .cell.
+        cell_views = [getattr(view, "cell", view) for view in terminal_views]
+        text_views = [
+            view for view in cell_views
+            if view is not None
+            and any(cell.codepoint == 0x4E2D for row in view.cells for cell in row)
+        ]
+        self.assertTrue(text_views, "the PRESENT text delta produced no view")
+        self.assertEqual(
+            tuple(text_views[0].cells),
+            (
+                (Cell(90, 2, 0, 1), Cell(101, 7, 0, ATTRIBUTE_CLUSTER, (0x301,))),
+                (
+                    Cell(0x4E2D, 7, 0, ATTRIBUTE_WIDE),
+                    Cell(0, 7, 0, ATTRIBUTE_CONTINUATION),
+                ),
+            ),
+        )

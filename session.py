@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from asm import assemble
-from display import VirtualTerminal
+from display import ATTR_CONTINUATION, ATTR_WIDE, VirtualTerminal
 from rich_terminal import (
     DriverLimits,
     DriverServiceResult,
@@ -53,6 +53,11 @@ _IDLE_OWNER_YIELD_SECONDS = 0.001
 
 @dataclass(frozen=True)
 class TerminalCell:
+    """One grid cell.  ``char`` is the whole character a lead cell shows,
+    which may hold several scalars, and is empty in the continuation cell
+    of a wide character.  ``attrs`` uses the SGR bits of ``VirtualTerminal``
+    plus ``ATTR_WIDE`` and ``ATTR_CONTINUATION``."""
+
     char: str
     fg: tuple[int, int, int]
     bg: tuple[int, int, int]
@@ -78,16 +83,31 @@ class TerminalSnapshot:
     def text(self, trim_right: bool = False) -> str:
         return "\n".join(self.lines(trim_right=trim_right))
 
+    def row_text(self, row: int, start: int = 0, end: int | None = None) -> str:
+        """The text of the characters whose lead cells lie in columns
+        ``start`` to ``end`` of ``row``."""
+
+        return "".join(cell.char for cell in self.cells[row][start:end])
+
     def find(self, needle: str) -> list[tuple[int, int]]:
+        """Each (row, column) whose cells begin ``needle``."""
+
         hits: list[tuple[int, int]] = []
-        for row, line in enumerate(self.lines()):
+        for row, cells in enumerate(self.cells):
+            line = []
+            columns = []
+            for column, cell in enumerate(cells):
+                for _ in cell.char:
+                    columns.append(column)
+                line.append(cell.char)
+            text = "".join(line)
             start = 0
             while True:
-                col = line.find(needle, start)
-                if col < 0:
+                offset = text.find(needle, start)
+                if offset < 0:
                     break
-                hits.append((row, col))
-                start = col + 1
+                hits.append((row, columns[offset]))
+                start = offset + 1
         return hits
 
     def to_dict(self) -> dict:
@@ -160,9 +180,12 @@ class TerminalSnapshot:
         draw = ImageDraw.Draw(image)
 
         for row_index, row in enumerate(self.cells):
+            y = padding + row_index * cell_h
+            items = []
             for col_index, cell in enumerate(row):
-                x = padding + col_index * cell_w
-                y = padding + row_index * cell_h
+                if cell.attrs & ATTR_CONTINUATION:
+                    continue
+                span = 2 if cell.attrs & ATTR_WIDE else 1
                 fg = cell.fg
                 bg = cell.bg
                 if cell.attrs & 32:
@@ -171,15 +194,19 @@ class TerminalSnapshot:
                     fg = tuple(min(255, int(channel * 1.4)) for channel in fg)
                 if cell.attrs & 2:
                     fg = tuple(channel // 2 for channel in fg)
+                items.append((padding + col_index * cell_w, span * cell_w, cell, fg, bg))
+            # Backgrounds first, so a wide glyph keeps its right half.
+            for x, width, cell, fg, bg in items:
                 if bg != (0, 0, 0):
-                    draw.rectangle((x, y, x + cell_w - 1, y + cell_h - 1), fill=bg)
+                    draw.rectangle((x, y, x + width - 1, y + cell_h - 1), fill=bg)
+            for x, width, cell, fg, bg in items:
                 if cell.char and cell.char != " " and not (cell.attrs & 64):
                     draw.text((x, y - bbox[1] + 1), cell.char, font=font, fill=fg)
                 if cell.attrs & 8:
-                    draw.line((x, y + cell_h - 2, x + cell_w - 1, y + cell_h - 2), fill=fg)
+                    draw.line((x, y + cell_h - 2, x + width - 1, y + cell_h - 2), fill=fg)
                 if cell.attrs & 128:
                     mid = y + cell_h // 2
-                    draw.line((x, mid, x + cell_w - 1, mid), fill=fg)
+                    draw.line((x, mid, x + width - 1, mid), fill=fg)
 
         if self.cursor_visible:
             x = padding + self.cursor_col * cell_w
@@ -1932,14 +1959,17 @@ class MachineSession:
     @staticmethod
     def _snapshot_output_view(view: TerminalView) -> TerminalSnapshot:
         palette = VirtualTerminal.COLORS
+        # CELL-1 style bits 0 to 5 match; its strike bit 6 is the grid's
+        # 0x80, and its WIDE and CONTINUATION bits 7 and 8 are one higher.
         cells = tuple(
             tuple(
                 TerminalCell(
-                    char=chr(cell.codepoint),
+                    char="".join(map(chr, (cell.codepoint, *cell.extras)))
+                    if cell.codepoint else "",
                     fg=palette[cell.foreground],
                     bg=palette[cell.background],
                     attrs=(cell.attributes & 0x3F)
-                    | ((cell.attributes & 0x40) << 1),
+                    | ((cell.attributes & 0x1C0) << 1),
                 )
                 for cell in row
             )

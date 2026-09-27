@@ -12,14 +12,22 @@ import struct
 from dataclasses import dataclass
 from enum import Enum
 
+from . import text_rules
 from .apt1 import UINT32_MAX, UINT64_MAX, snapshot_wire_bytes
 from .update_authority import TransactionFamily, TransactionLease
 
 
-WIRE_ATTRIBUTE_MASK = 0x007F
+# APT-1-WIRE Section 11: style bits 0 to 6, then the wide lead, its
+# continuation, and a cluster whose extra scalars follow in the span tail.
+STYLE_ATTRIBUTE_MASK = 0x007F
+ATTRIBUTE_WIDE = 0x0080
+ATTRIBUTE_CONTINUATION = 0x0100
+ATTRIBUTE_CLUSTER = 0x0200
+WIRE_ATTRIBUTE_MASK = 0x03FF
 _BEGIN = struct.Struct("<QQIIII")
 _SPAN_PREFIX = struct.Struct("<III")
 _CELL = struct.Struct("<IBBH")
+_TAIL_WORD = struct.Struct("<I")
 _CURSOR = struct.Struct("<IIB7x")
 _COMMIT = struct.Struct("<Q")
 _ABORT = struct.Struct("<QH6x")
@@ -70,10 +78,16 @@ def _is_unicode_scalar(codepoint: int) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Cell:
+    """One cell: a lead showing one character, or a wide lead's continuation.
+
+    ``extras`` holds a cluster's display scalars after the first, in order.
+    """
+
     codepoint: int
     foreground: int
     background: int
     attributes: int = 0
+    extras: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         codepoint = _integer(
@@ -86,6 +100,24 @@ class Cell:
         )
         if attributes & ~WIRE_ATTRIBUTE_MASK:
             raise ValueError("attributes contain undefined CELL-1 bits")
+        extras = tuple(self.extras)
+        if attributes & ATTRIBUTE_CONTINUATION:
+            if attributes & (ATTRIBUTE_WIDE | ATTRIBUTE_CLUSTER) or codepoint or extras:
+                raise ValueError(
+                    "a continuation cell has scalar zero and no WIDE, CLUSTER, or extras"
+                )
+        else:
+            if not 0x20 <= codepoint < 0x7F and (
+                codepoint == 0 or text_rules.invalid(text_rules.props(codepoint))
+            ):
+                raise ValueError("a lead cell's scalar must be displayable")
+            if bool(attributes & ATTRIBUTE_CLUSTER) != bool(extras):
+                raise ValueError("CLUSTER is set exactly when the cell has extra scalars")
+            for extra in extras:
+                extra = _integer("extra scalar", extra, minimum=1, maximum=0x10FFFF)
+                if not _is_unicode_scalar(extra):
+                    raise ValueError("an extra scalar must be a Unicode scalar value")
+        object.__setattr__(self, "extras", extras)
         object.__setattr__(self, "codepoint", codepoint)
         object.__setattr__(
             self,
@@ -164,6 +196,12 @@ class CellSpan:
     def count(self) -> int:
         return len(self.cells)
 
+    @property
+    def cluster_words(self) -> int:
+        """Tail words: one count plus the extras for each cluster cell."""
+
+        return sum(1 + len(cell.extras) for cell in self.cells if cell.extras)
+
 
 @dataclass(slots=True)
 class _Staging:
@@ -175,6 +213,7 @@ class _Staging:
     last_row: int
     last_end_column: int
     next_snapshot_cell: int
+    transaction_bytes: int
     cursor: Cursor | None
     dirty_spans: list[DirtySpan]
     changed_rows: dict[int, list[Cell]]
@@ -212,24 +251,45 @@ def decode_transaction_begin(payload) -> TransactionBegin:
 
 
 def decode_cell_span(payload) -> CellSpan:
+    """Decode a CELL_SPAN: prefix, fixed cells, then the cluster tail."""
+
     raw = _payload(payload)
     if len(raw) < _SPAN_PREFIX.size:
         raise CellModelError(CellModelErrorCode.PAYLOAD, "CELL_SPAN prefix is truncated")
     row, column, count = _SPAN_PREFIX.unpack_from(raw)
     if count == 0:
         raise CellModelError(CellModelErrorCode.PAYLOAD, "CELL_SPAN count is zero")
-    expected = _SPAN_PREFIX.size + count * _CELL.size
-    if len(raw) != expected:
+    cells_end = _SPAN_PREFIX.size + count * _CELL.size
+    if len(raw) < cells_end or (len(raw) - cells_end) % _TAIL_WORD.size:
         raise CellModelError(
             CellModelErrorCode.PAYLOAD,
-            f"CELL_SPAN payload is {len(raw)} bytes, expected {expected}",
+            f"CELL_SPAN payload is {len(raw)} bytes, which is not "
+            f"{cells_end} plus whole tail words",
         )
+    fields = [
+        _CELL.unpack_from(raw, _SPAN_PREFIX.size + index * _CELL.size)
+        for index in range(count)
+    ]
+    tail = cells_end
     cells: list[Cell] = []
-    position = _SPAN_PREFIX.size
-    for _ in range(count):
-        codepoint, foreground, background, attributes = _CELL.unpack_from(raw, position)
+    for codepoint, foreground, background, attributes in fields:
+        extras: tuple[int, ...] = ()
+        if attributes & ATTRIBUTE_CLUSTER:
+            if tail + _TAIL_WORD.size > len(raw):
+                raise CellModelError(CellModelErrorCode.PAYLOAD, "cluster tail is truncated")
+            (extra_count,) = _TAIL_WORD.unpack_from(raw, tail)
+            tail += _TAIL_WORD.size
+            if extra_count == 0 or tail + extra_count * _TAIL_WORD.size > len(raw):
+                raise CellModelError(
+                    CellModelErrorCode.PAYLOAD, "cluster extra count is zero or truncated"
+                )
+            extras = tuple(
+                _TAIL_WORD.unpack_from(raw, tail + index * _TAIL_WORD.size)[0]
+                for index in range(extra_count)
+            )
+            tail += extra_count * _TAIL_WORD.size
         try:
-            cells.append(Cell(codepoint, foreground, background, attributes))
+            cells.append(Cell(codepoint, foreground, background, attributes, extras))
         except ValueError as exc:
             code = (
                 CellModelErrorCode.SCALAR
@@ -237,8 +297,48 @@ def decode_cell_span(payload) -> CellSpan:
                 else CellModelErrorCode.PAYLOAD
             )
             raise CellModelError(code, str(exc)) from exc
-        position += _CELL.size
+    if tail != len(raw):
+        raise CellModelError(CellModelErrorCode.PAYLOAD, "CELL_SPAN has trailing tail words")
     return CellSpan(row, column, tuple(cells))
+
+
+def encode_cell_span(span: CellSpan) -> bytes:
+    """The exact CELL_SPAN payload for ``span`` (APT-1-WIRE Section 9)."""
+
+    body = bytearray(_SPAN_PREFIX.pack(span.row, span.column, span.count))
+    tail = bytearray()
+    for cell in span.cells:
+        body += _CELL.pack(cell.codepoint, cell.foreground, cell.background, cell.attributes)
+        if cell.extras:
+            tail += _TAIL_WORD.pack(len(cell.extras))
+            for extra in cell.extras:
+                tail += _TAIL_WORD.pack(extra)
+    return bytes(body + tail)
+
+
+def _row_pairs_valid(row: tuple[Cell, ...] | list[Cell]) -> str | None:
+    """APT-1-WIRE Section 11: every wide lead is followed by its
+    continuation, which repeats the lead's colors and style bits."""
+
+    last = len(row) - 1
+    for column, cell in enumerate(row):
+        if cell.attributes & ATTRIBUTE_WIDE:
+            if column == last:
+                return f"WIDE cell in the last column {column}"
+            follower = row[column + 1]
+            if not follower.attributes & ATTRIBUTE_CONTINUATION:
+                return f"WIDE cell at column {column} is not followed by a continuation"
+            if (
+                follower.foreground != cell.foreground
+                or follower.background != cell.background
+                or follower.attributes & STYLE_ATTRIBUTE_MASK
+                != cell.attributes & STYLE_ATTRIBUTE_MASK
+            ):
+                return f"continuation at column {column + 1} differs from its lead's style"
+        elif cell.attributes & ATTRIBUTE_CONTINUATION:
+            if column == 0 or not row[column - 1].attributes & ATTRIBUTE_WIDE:
+                return f"continuation at column {column} has no WIDE lead"
+    return None
 
 
 def decode_cursor(payload) -> Cursor:
@@ -522,6 +622,7 @@ class CellModel:
             last_row=-1,
             last_end_column=0,
             next_snapshot_cell=0,
+            transaction_bytes=transaction_bytes,
             cursor=None,
             dirty_spans=[],
             changed_rows={},
@@ -554,6 +655,14 @@ class CellModel:
             self._fail(
                 CellModelErrorCode.TRANSACTION,
                 "spans are overlapping or not row-major",
+            )
+        # The declared counts cover the cluster-free size; tails add four
+        # bytes per word and must still fit the negotiated maximum.
+        staging.transaction_bytes += 4 * span.cluster_words
+        if staging.transaction_bytes > self._max_transaction_bytes:
+            self._fail(
+                CellModelErrorCode.TRANSACTION,
+                "cluster tails take the transaction past the negotiated maximum",
             )
 
         if staging.snapshot:
@@ -683,12 +792,19 @@ class CellModel:
             )
             if any(len(row) != self._cols for row in rows):
                 self._fail(CellModelErrorCode.TRANSACTION, "snapshot contains an empty cell")
+            for row in rows:
+                problem = _row_pairs_valid(row)
+                if problem is not None:
+                    self._fail(CellModelErrorCode.TRANSACTION, problem)
         else:
             view = self._state.view
             assert view is not None
             if staging.changed_rows:
                 mutable_rows = list(view.cells)
                 for row_index, row in staging.changed_rows.items():
+                    problem = _row_pairs_valid(row)
+                    if problem is not None:
+                        self._fail(CellModelErrorCode.TRANSACTION, problem)
                     mutable_rows[row_index] = tuple(row)
                 rows = tuple(mutable_rows)
             else:
@@ -848,6 +964,11 @@ __all__ = [
     "TerminalView",
     "TransactionBegin",
     "WIRE_ATTRIBUTE_MASK",
+    "STYLE_ATTRIBUTE_MASK",
+    "ATTRIBUTE_WIDE",
+    "ATTRIBUTE_CONTINUATION",
+    "ATTRIBUTE_CLUSTER",
+    "encode_cell_span",
     "decode_abort",
     "decode_cell_span",
     "decode_commit",

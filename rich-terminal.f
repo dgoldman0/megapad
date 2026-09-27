@@ -10,6 +10,8 @@
 \             owner/resource/region/object/series/control transport subset
 \             of APT-1-RETAINED-1-2026-09-01.
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
+\  Cell text follows APT-1-TEXT-1-2026-09-26 (docs/rich-terminal/APT-1-TEXT.md):
+\  the caller lays text out; this module encodes and checks the cells.
 
 PROVIDED rich-terminal.f
 
@@ -22,6 +24,10 @@ PROVIDED rich-terminal.f
 2 CONSTANT PT-S-SESSION-LOST
 3 CONSTANT PT-S-INVALID
 4 CONSTANT PT-S-UNSUPPORTED
+\ The request would fit the negotiated limits without its cluster tails but
+\ not with them.  APT-1-WIRE Section 11.1: send it again with every cluster
+\ cell degraded to U+FFFD.
+5 CONSTANT PT-S-TOO-LARGE
 
 0 CONSTANT PT-ST-ANSI
 1 CONSTANT PT-ST-PROBING
@@ -52,7 +58,7 @@ PROVIDED rich-terminal.f
 \ session.
 64  CONSTANT /PT-EVENT
 80  CONSTANT /PT-COMPLETION
-952 CONSTANT /PT-SESSION
+984 CONSTANT /PT-SESSION
 
 : PT-SESSION-SIZE  ( -- bytes )  /PT-SESSION ;
 : PT-EVENT-SIZE    ( -- bytes )  /PT-EVENT ;
@@ -185,6 +191,12 @@ PROVIDED rich-terminal.f
 0 CONSTANT PT-CELL-NONE
 1 CONSTANT PT-CELL-DELTA
 2 CONSTANT PT-CELL-REPLACE
+
+\ CELL attribute bits 7 to 9 (APT-1-WIRE Section 11).  Bits 0 to 6 are the
+\ style bits.  PT-CLUSTER-CELL sets CLUSTER itself.
+0x0080 CONSTANT PT-ATTR-WIDE
+0x0100 CONSTANT PT-ATTR-CONTINUATION
+0x0200 CONSTANT PT-ATTR-CLUSTER
 
 0 CONSTANT PT-RET-NONE
 1 CONSTANT PT-RET-DELTA
@@ -425,6 +437,12 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
 : _PT.S.UPLOAD-ITEM     ( s -- a ) 928 + ;
 : _PT.S.UPLOAD-LENGTH   ( s -- a ) 936 + ;
 : _PT.S.UPLOAD-OFFSET   ( s -- a ) 944 + ;
+\ Cluster tails: the transaction's declared words, the words claimed by its
+\ begun spans, and the open span's unwritten words and next tail offset.
+: _PT.S.TX-WORDS        ( s -- a ) 952 + ;
+: _PT.S.TX-WORDS-DONE   ( s -- a ) 960 + ;
+: _PT.S.SPAN-WORDS      ( s -- a ) 968 + ;
+: _PT.S.SPAN-TAIL       ( s -- a ) 976 + ;
 
 0 CONSTANT _PT-TX-NONE
 1 CONSTANT _PT-TX-CELL
@@ -559,6 +577,10 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
 
 : _PT-TX-CLEAR  ( s -- )
     DUP _PT.S.TX-OPEN? OFF
+    DUP _PT.S.TX-WORDS OFF
+    DUP _PT.S.TX-WORDS-DONE OFF
+    DUP _PT.S.SPAN-WORDS OFF
+    DUP _PT.S.SPAN-TAIL OFF
     DUP _PT.S.TX-KIND OFF
     DUP _PT.S.TX-SNAPSHOT? OFF
     DUP _PT.S.TX-CELL-MODE OFF
@@ -3491,6 +3513,8 @@ VARIABLE _PT-B-FRAMES
 VARIABLE _PT-B-SEQ-ROOM?
 VARIABLE _PT-B-SPAN-BYTES
 VARIABLE _PT-B-CELL-BYTES
+VARIABLE _PT-B-WORDS
+VARIABLE _PT-B-TAILS-BIG?
 
 : _PT-BEGIN-ARGS?  ( -- flag )
     _PT-B-COLS @ 0= _PT-B-ROWS @ 0= OR IF FALSE EXIT THEN
@@ -3500,7 +3524,7 @@ VARIABLE _PT-B-CELL-BYTES
     _PT-B-ROWS @ _PT-B-S @ _PT.S.ROWS @ <> OR IF FALSE EXIT THEN
     _PT-B-CELLS @ _PT-B-COLS @ _PT-B-ROWS @ * U> IF FALSE EXIT THEN
     _PT-B-CELLS @ _PT-B-SPANS @ _PT-B-COLS @ * U> IF FALSE EXIT THEN
-    _PT-B-SPANS @ 0= IF _PT-B-CELLS @ 0= EXIT THEN
+    _PT-B-SPANS @ 0= IF _PT-B-CELLS @ 0= _PT-B-WORDS @ 0= AND EXIT THEN
     _PT-B-CELLS @ _PT-B-SPANS @ _PT-U>= ;
 
 : _PT-SNAPSHOT-COUNTS?  ( -- flag )
@@ -3511,6 +3535,7 @@ VARIABLE _PT-B-CELL-BYTES
 
 : _PT-TX-PREFLIGHT?  ( -- flag )
     TRUE _PT-B-SEQ-ROOM? !
+    FALSE _PT-B-TAILS-BIG? !
     _PT-B-SPANS @ 3 + DUP _PT-B-FRAMES !
     0xFFFFFFFFFFFFFFFF SWAP -
     _PT-B-S @ _PT.S.TX-SEQ @ U< IF
@@ -3525,6 +3550,12 @@ VARIABLE _PT-B-CELL-BYTES
     THEN
     176 _PT-UADD? 0= IF DROP FALSE EXIT THEN DUP _PT-B-BYTES !
     _PT-B-S @ _PT.S.PEER-MAX-TX @ U> IF FALSE EXIT THEN
+    \ The cluster-free size fits, so a failure from here on is the tails'.
+    TRUE _PT-B-TAILS-BIG? !
+    _PT-B-WORDS @ 4 _PT-UMUL? 0= IF DROP FALSE EXIT THEN
+    _PT-B-BYTES @ _PT-UADD? 0= IF DROP FALSE EXIT THEN DUP _PT-B-BYTES !
+    _PT-B-S @ _PT.S.PEER-MAX-TX @ U> IF FALSE EXIT THEN
+    FALSE _PT-B-TAILS-BIG? !
     _PT-B-S @ _PT.S.PEER-SENT @ _PT-B-S @ _PT.S.PEER-GRANT @ U> IF
         FALSE EXIT
     THEN
@@ -3543,8 +3574,10 @@ VARIABLE _PT-B-CELL-BYTES
     _PT-B-CELLS @ _PT-FRAME-PAYLOAD 28 + L!
     TRUE _PT-B-S @ _PT-FRAME-QUEUE ;
 
-: _PT-BEGIN-TX  ( cols rows span-count cell-count snapshot? session -- status )
-    _PT-B-S ! _PT-B-SNAPSHOT ! _PT-B-CELLS ! _PT-B-SPANS !
+\ Stack: cols rows span-count cell-count cluster-words snapshot? session
+\        -- status
+: _PT-BEGIN-TX
+    _PT-B-S ! _PT-B-SNAPSHOT ! _PT-B-WORDS ! _PT-B-CELLS ! _PT-B-SPANS !
     _PT-B-ROWS ! _PT-B-COLS !
     _PT-B-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-B-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
@@ -3575,6 +3608,7 @@ VARIABLE _PT-B-CELL-BYTES
     _PT-B-SNAPSHOT @ IF _PT-SNAPSHOT-COUNTS? 0= IF PT-S-INVALID EXIT THEN THEN
     _PT-TX-PREFLIGHT? 0= IF
         _PT-B-SEQ-ROOM? @ 0= IF PT-S-INVALID EXIT THEN
+        _PT-B-TAILS-BIG? @ IF PT-S-TOO-LARGE EXIT THEN
         _PT-B-BYTES @ _PT-B-S @ _PT.S.PEER-MAX-TX @ U> IF
             PT-S-INVALID
         ELSE
@@ -3598,25 +3632,28 @@ VARIABLE _PT-B-CELL-BYTES
     _PT-B-TXID @ _PT-B-S @ _PT.S.TXID !
     _PT-B-SPANS @ _PT-B-S @ _PT.S.TX-SPANS !
     _PT-B-CELLS @ _PT-B-S @ _PT.S.TX-CELLS !
+    _PT-B-WORDS @ _PT-B-S @ _PT.S.TX-WORDS !
     0 _PT-B-S @ _PT.S.TX-SPANS-DONE !
     0 _PT-B-S @ _PT.S.TX-CELLS-DONE !
+    0 _PT-B-S @ _PT.S.TX-WORDS-DONE !
     0 _PT-B-S @ _PT.S.SPAN-REMAIN !
     0 _PT-B-S @ _PT.S.CURSOR-DONE? !
     0 _PT-B-S @ _PT.S.LAST-END !
     _PT-B-BYTES @ _PT-B-S @ _PT.S.TX-BYTES !
     PT-S-OK ;
 
-: PT-TX-BEGIN  ( cols rows span-count cell-count session -- status )
-    FALSE SWAP _PT-BEGIN-TX ;
+\ Both take: cols rows span-count cell-count cluster-words session -- status
+\ cluster-words is the sum of the spans' cluster_words (APT-1-WIRE Section 9).
+: PT-TX-BEGIN  FALSE SWAP _PT-BEGIN-TX ;
 
-: PT-SNAPSHOT-BEGIN  ( cols rows span-count cell-count session -- status )
-    TRUE SWAP _PT-BEGIN-TX ;
+: PT-SNAPSHOT-BEGIN  TRUE SWAP _PT-BEGIN-TX ;
 
 VARIABLE _PT-PB-S
 VARIABLE _PT-PB-COLS
 VARIABLE _PT-PB-ROWS
 VARIABLE _PT-PB-SPANS
 VARIABLE _PT-PB-CELLS
+VARIABLE _PT-PB-WORDS
 VARIABLE _PT-PB-RET-OPS
 VARIABLE _PT-PB-RET-BYTES
 VARIABLE _PT-PB-CELL-MODE
@@ -3627,6 +3664,7 @@ VARIABLE _PT-PB-BYTES
 VARIABLE _PT-PB-FRAMES
 VARIABLE _PT-PB-TXID
 VARIABLE _PT-PB-HARD-FAIL?
+VARIABLE _PT-PB-TAILS-BIG?
 VARIABLE _PT-PB-RET-MIN
 
 : _PT-PB-CELL-ARGS?  ( -- flag )
@@ -3636,14 +3674,14 @@ VARIABLE _PT-PB-RET-MIN
     _PT-PB-COLS @ _PT-PB-S @ _PT.S.COLS @ <>
     _PT-PB-ROWS @ _PT-PB-S @ _PT.S.ROWS @ <> OR IF FALSE EXIT THEN
     _PT-PB-CELL-MODE @ PT-CELL-NONE = IF
-        _PT-PB-SPANS @ 0= _PT-PB-CELLS @ 0= AND EXIT
+        _PT-PB-SPANS @ 0= _PT-PB-CELLS @ 0= AND _PT-PB-WORDS @ 0= AND EXIT
     THEN
     _PT-PB-CELL-MODE @ PT-CELL-DELTA = IF
         _PT-PB-S @ _PT.S.STATE @ PT-ST-ACTIVE <> IF FALSE EXIT THEN
         _PT-PB-S @ _PT.S.SNAPSHOT? @ IF FALSE EXIT THEN
         _PT-PB-CELLS @ _PT-PB-COLS @ _PT-PB-ROWS @ * U> IF FALSE EXIT THEN
         _PT-PB-CELLS @ _PT-PB-SPANS @ _PT-PB-COLS @ * U> IF FALSE EXIT THEN
-        _PT-PB-SPANS @ 0= IF _PT-PB-CELLS @ 0= EXIT THEN
+        _PT-PB-SPANS @ 0= IF _PT-PB-CELLS @ 0= _PT-PB-WORDS @ 0= AND EXIT THEN
         _PT-PB-CELLS @ _PT-PB-SPANS @ _PT-U>= EXIT
     THEN
     _PT-PB-CELL-MODE @ PT-CELL-REPLACE <> IF FALSE EXIT THEN
@@ -3685,6 +3723,7 @@ VARIABLE _PT-PB-RET-MIN
 
 : _PT-PB-PREFLIGHT?  ( -- flag )
     FALSE _PT-PB-HARD-FAIL? !
+    FALSE _PT-PB-TAILS-BIG? !
     _PT-PB-SPANS @ 52 _PT-UMUL? 0= IF
         DROP TRUE _PT-PB-HARD-FAIL? ! FALSE EXIT
     THEN
@@ -3714,6 +3753,18 @@ VARIABLE _PT-PB-RET-MIN
     _PT-PB-BYTES @ _PT-PB-S @ _PT.S.PEER-MAX-TX @ U> IF
         TRUE _PT-PB-HARD-FAIL? ! FALSE EXIT
     THEN
+    \ The cluster-free size fits both maxima, so a failure here is the tails'.
+    _PT-PB-WORDS @ 4 _PT-UMUL? 0= IF
+        DROP TRUE _PT-PB-TAILS-BIG? ! FALSE EXIT
+    THEN
+    _PT-PB-BYTES @ _PT-UADD? 0= IF
+        DROP TRUE _PT-PB-TAILS-BIG? ! FALSE EXIT
+    THEN
+    DUP _PT-PB-BYTES !
+    _PT-PB-S @ _PT.S.RET-CAPS 48 + _PT-U64@ U>
+    _PT-PB-BYTES @ _PT-PB-S @ _PT.S.PEER-MAX-TX @ U> OR IF
+        TRUE _PT-PB-TAILS-BIG? ! FALSE EXIT
+    THEN
     _PT-PB-SPANS @ _PT-PB-RET-OPS @ + 2 +
     _PT-PB-CELL-MODE @ PT-CELL-NONE <> IF 1+ THEN
     DUP _PT-PB-FRAMES !
@@ -3741,11 +3792,11 @@ VARIABLE _PT-PB-RET-MIN
     _PT-PB-RET-MODE @ _PT-FRAME-PAYLOAD 56 + L!
     TRUE _PT-PB-S @ _PT-FRAME-QUEUE ;
 
-\ Stack: cols rows cell-spans cells retained-ops retained-frame-bytes
-\        cell-mode retained-mode session -- status
+\ Stack: cols rows cell-spans cells cluster-words retained-ops
+\        retained-frame-bytes cell-mode retained-mode session -- status
 : PT-PRESENT-BEGIN
     _PT-PB-S ! _PT-PB-RET-MODE ! _PT-PB-CELL-MODE !
-    _PT-PB-RET-BYTES ! _PT-PB-RET-OPS ! _PT-PB-CELLS !
+    _PT-PB-RET-BYTES ! _PT-PB-RET-OPS ! _PT-PB-WORDS ! _PT-PB-CELLS !
     _PT-PB-SPANS ! _PT-PB-ROWS ! _PT-PB-COLS !
     _PT-PB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-PB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
@@ -3767,7 +3818,8 @@ VARIABLE _PT-PB-RET-MIN
         PT-ST-LOST _PT-PB-S @ _PT.S.STATE ! PT-S-SESSION-LOST EXIT
     THEN
     _PT-PB-PREFLIGHT? 0= IF
-        _PT-PB-HARD-FAIL? @ IF PT-S-INVALID ELSE PT-S-WOULD-BLOCK THEN
+        _PT-PB-HARD-FAIL? @ IF PT-S-INVALID EXIT THEN
+        _PT-PB-TAILS-BIG? @ IF PT-S-TOO-LARGE ELSE PT-S-WOULD-BLOCK THEN
         EXIT
     THEN
     _PT-PB-S @ _PT.S.NEXT-TXID @ DUP 0=
@@ -3785,6 +3837,8 @@ VARIABLE _PT-PB-RET-MIN
     _PT-PB-TXID @ _PT-PB-S @ _PT.S.TXID !
     _PT-PB-SPANS @ _PT-PB-S @ _PT.S.TX-SPANS !
     _PT-PB-CELLS @ _PT-PB-S @ _PT.S.TX-CELLS !
+    _PT-PB-WORDS @ _PT-PB-S @ _PT.S.TX-WORDS !
+    0 _PT-PB-S @ _PT.S.TX-WORDS-DONE !
     _PT-PB-RET-OPS @ _PT-PB-S @ _PT.S.TX-RET-OPS !
     _PT-PB-RET-BYTES @ _PT-PB-S @ _PT.S.TX-RET-BYTES !
     _PT-PB-BYTES @ _PT-PB-S @ _PT.S.TX-BYTES !
@@ -3803,8 +3857,11 @@ VARIABLE _PT-SP-COL
 VARIABLE _PT-SP-COUNT
 VARIABLE _PT-SP-START
 VARIABLE _PT-SP-END
-: PT-SPAN-BEGIN  ( row col count session -- status )
-    _PT-SP-S ! _PT-SP-COUNT ! _PT-SP-COL ! _PT-SP-ROW !
+VARIABLE _PT-SP-WORDS
+VARIABLE _PT-SP-PAY
+\ cluster-words is this span's cluster_words (APT-1-WIRE Section 9).
+: PT-SPAN-BEGIN  ( row col count cluster-words session -- status )
+    _PT-SP-S ! _PT-SP-WORDS ! _PT-SP-COUNT ! _PT-SP-COL ! _PT-SP-ROW !
     _PT-SP-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-SP-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
     _PT-SP-S @ _PT.S.TX-OPEN? @ 0= IF PT-S-INVALID EXIT THEN
@@ -3830,6 +3887,10 @@ VARIABLE _PT-SP-END
     _PT-SP-S @ _PT.S.TX-CELLS-DONE @ _PT-SP-COUNT @ + DUP
     _PT-SP-S @ _PT.S.TX-CELLS-DONE @ U< IF DROP PT-S-INVALID EXIT THEN
     _PT-SP-S @ _PT.S.TX-CELLS @ U> IF PT-S-INVALID EXIT THEN
+    _PT-SP-S @ _PT.S.TX-WORDS-DONE @ _PT-SP-WORDS @ _PT-UADD? 0= IF
+        DROP PT-S-INVALID EXIT
+    THEN
+    _PT-SP-S @ _PT.S.TX-WORDS @ U> IF PT-S-INVALID EXIT THEN
     _PT-SP-ROW @ _PT-SP-S @ _PT.S.COLS @ * _PT-SP-COL @ +
     DUP _PT-SP-START ! _PT-SP-COUNT @ + DUP _PT-SP-END !
     _PT-SP-S @ _PT.S.LAST-END @ U< IF PT-S-INVALID EXIT THEN
@@ -3846,14 +3907,22 @@ VARIABLE _PT-SP-END
             PT-S-INVALID EXIT
         THEN
     THEN
-    12 _PT-SP-COUNT @ 8 * + DUP
-    _PT-SP-S @ _PT.S.PEER-MAX-PAY @ U> IF DROP PT-S-INVALID EXIT THEN
+    \ Negotiation guarantees that the cells of a row span fit one payload,
+    \ so a span that does not fit is too large only because of its tail.
+    12 _PT-SP-COUNT @ 8 * + DUP _PT-SP-PAY !
+    _PT-SP-S @ _PT.S.PEER-MAX-PAY @ U> IF PT-S-INVALID EXIT THEN
+    _PT-SP-WORDS @ 4 _PT-UMUL? 0= IF DROP PT-S-TOO-LARGE EXIT THEN
+    _PT-SP-PAY @ _PT-UADD? 0= IF DROP PT-S-TOO-LARGE EXIT THEN
+    DUP _PT-SP-S @ _PT.S.PEER-MAX-PAY @ U> IF DROP PT-S-TOO-LARGE EXIT THEN
     _PT-M-CELL-SPAN SWAP _PT-SP-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
     _PT-SP-ROW @ _PT-FRAME-PAYLOAD L!
     _PT-SP-COL @ _PT-FRAME-PAYLOAD 4 + L!
     _PT-SP-COUNT @ _PT-FRAME-PAYLOAD 8 + L!
     _PT-SP-COUNT @ _PT-SP-S @ _PT.S.SPAN-REMAIN !
     _PT-SP-END @ _PT-SP-S @ _PT.S.LAST-END !
+    _PT-SP-WORDS @ _PT-SP-S @ _PT.S.SPAN-WORDS !
+    _PT-SP-PAY @ _PT-SP-S @ _PT.S.SPAN-TAIL !
+    _PT-SP-WORDS @ _PT-SP-S @ _PT.S.TX-WORDS-DONE +!
     PT-S-OK ;
 
 VARIABLE _PT-C-S
@@ -3862,24 +3931,95 @@ VARIABLE _PT-C-FG
 VARIABLE _PT-C-BG
 VARIABLE _PT-C-ATTRS
 VARIABLE _PT-C-INDEX
-: PT-CELL  ( cp fg bg attrs session -- status )
-    _PT-C-S ! _PT-C-ATTRS ! _PT-C-BG ! _PT-C-FG ! _PT-C-CP !
+VARIABLE _PT-C-A
+VARIABLE _PT-C-EXTRAS-A
+VARIABLE _PT-C-EXTRAS-N
+VARIABLE _PT-C-WORDS
+
+\ APT-1-TEXT Section 5 replaces General_Category Cc, Zl, and Zp before
+\ display, so no lead cell carries one.
+: _PT-LEAD-SCALAR?  ( cp -- flag )
+    DUP 0x7F U< IF 0x20 _PT-U>= EXIT THEN
+    DUP 0xA0 U< IF DROP FALSE EXIT THEN
+    DUP 0x2028 = OVER 0x2029 = OR IF DROP FALSE EXIT THEN
+    _PT-SCALAR? ;
+
+\ A wide pair inside one span is checked here.  A pair that crosses the
+\ span's edge involves a cell the span does not carry, so the terminal
+\ checks it against its model (APT-1-WIRE Section 11).
+: _PT-CELL-PAIR?  ( -- flag )
+    _PT-C-INDEX @ IF _PT-C-A @ 2 - W@ ELSE 0 THEN      ( previous-attrs )
+    _PT-C-ATTRS @ PT-ATTR-CONTINUATION AND IF
+        _PT-C-ATTRS @ PT-ATTR-WIDE AND _PT-C-CP @ OR
+        _PT-C-EXTRAS-N @ OR IF DROP FALSE EXIT THEN
+        _PT-FRAME-PAYLOAD 4 + L@ _PT-C-INDEX @ + 0= IF DROP FALSE EXIT THEN
+        _PT-C-INDEX @ 0= IF DROP TRUE EXIT THEN
+        DUP PT-ATTR-WIDE AND 0= IF DROP FALSE EXIT THEN
+        _PT-C-ATTRS @ XOR 0x7F AND IF FALSE EXIT THEN
+        _PT-C-A @ 4 - C@ _PT-C-FG @ =
+        _PT-C-A @ 3 - C@ _PT-C-BG @ = AND EXIT
+    THEN
+    PT-ATTR-WIDE AND IF FALSE EXIT THEN
+    _PT-C-ATTRS @ PT-ATTR-WIDE AND IF
+        _PT-FRAME-PAYLOAD 4 + L@ _PT-C-INDEX @ + 1+
+        _PT-C-S @ _PT.S.COLS @ U< EXIT
+    THEN
+    TRUE ;
+
+\ The extra scalars are a borrowed span of little-endian u32 values.
+: _PT-EXTRAS?  ( -- flag )
+    _PT-C-EXTRAS-A @ _PT-C-EXTRAS-N @ 4 *
+    2DUP _PT-RANGE-VALID? 0= IF 2DROP FALSE EXIT THEN
+    2DUP _PT-C-S @ /PT-SESSION _PT-RANGES-OVERLAP? IF 2DROP FALSE EXIT THEN
+    _PT-C-S @ _PT.S.TX-A @ _PT-C-S @ _PT.S.TX-U @
+        _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-C-EXTRAS-N @ 0 ?DO
+        _PT-C-EXTRAS-A @ I 4 * + L@
+        DUP 0= SWAP _PT-SCALAR? 0= OR IF UNLOOP FALSE EXIT THEN
+    LOOP
+    TRUE ;
+
+\ The tail holds the cell's extra count, then its extras.
+: _PT-TAIL-WRITE  ( -- )
+    _PT-FRAME-PAYLOAD _PT-C-S @ _PT.S.SPAN-TAIL @ +
+    _PT-C-EXTRAS-N @ OVER L!
+    4 + _PT-C-EXTRAS-A @ SWAP _PT-C-EXTRAS-N @ 4 * CMOVE
+    _PT-C-WORDS @ 4 * _PT-C-S @ _PT.S.SPAN-TAIL +!
+    _PT-C-WORDS @ NEGATE _PT-C-S @ _PT.S.SPAN-WORDS +! ;
+
+: _PT-CELL-WRITE  ( -- status )
     _PT-C-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-C-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
     _PT-C-S @ _PT.S.TX-OPEN? @ 0=
     _PT-C-S @ _PT.S.SPAN-REMAIN @ 0= OR IF PT-S-INVALID EXIT THEN
-    _PT-C-CP @ 0= IF 32 _PT-C-CP ! THEN
-    _PT-C-CP @ _PT-SCALAR? 0= IF PT-S-INVALID EXIT THEN
     _PT-C-FG @ _PT-U8? 0= _PT-C-BG @ _PT-U8? 0= OR
     _PT-C-ATTRS @ _PT-U16? 0= OR
-    _PT-C-ATTRS @ 0xFF80 AND 0<> OR IF PT-S-INVALID EXIT THEN
+    _PT-C-ATTRS @ 0xFC00 AND 0<> OR IF PT-S-INVALID EXIT THEN
+    _PT-C-ATTRS @ PT-ATTR-CLUSTER AND 0<>
+    _PT-C-EXTRAS-N @ 0<> <> IF PT-S-INVALID EXIT THEN
+    _PT-C-ATTRS @ PT-ATTR-CONTINUATION AND 0= IF
+        _PT-C-CP @ 0= IF 32 _PT-C-CP ! THEN
+        _PT-C-CP @ _PT-LEAD-SCALAR? 0= IF PT-S-INVALID EXIT THEN
+    THEN
     _PT-FRAME-PAYLOAD 8 + L@
     _PT-C-S @ _PT.S.SPAN-REMAIN @ - DUP _PT-C-INDEX !
-    8 * _PT-FRAME-PAYLOAD 12 + +
-    DUP _PT-C-CP @ SWAP L!
-    DUP 4 + _PT-C-FG @ SWAP C!
-    DUP 5 + _PT-C-BG @ SWAP C!
-    6 + _PT-C-ATTRS @ SWAP W!
+    8 * _PT-FRAME-PAYLOAD 12 + + _PT-C-A !
+    _PT-CELL-PAIR? 0= IF PT-S-INVALID EXIT THEN
+    \ The span's last cell completes its tail.
+    _PT-C-EXTRAS-N @ DUP IF 1+ THEN _PT-C-WORDS !
+    _PT-C-WORDS @ _PT-C-S @ _PT.S.SPAN-WORDS @ U> IF PT-S-INVALID EXIT THEN
+    _PT-C-S @ _PT.S.SPAN-REMAIN @ 1 =
+    _PT-C-S @ _PT.S.SPAN-WORDS @ _PT-C-WORDS @ <> AND IF
+        PT-S-INVALID EXIT
+    THEN
+    _PT-C-EXTRAS-N @ IF
+        _PT-EXTRAS? 0= IF PT-S-INVALID EXIT THEN
+        _PT-TAIL-WRITE
+    THEN
+    _PT-C-CP @ _PT-C-A @ L!
+    _PT-C-FG @ _PT-C-A @ 4 + C!
+    _PT-C-BG @ _PT-C-A @ 5 + C!
+    _PT-C-ATTRS @ _PT-C-A @ 6 + W!
     _PT-C-S @ _PT.S.SPAN-REMAIN @ 1- DUP
     _PT-C-S @ _PT.S.SPAN-REMAIN ! IF PT-S-OK EXIT THEN
     TRUE _PT-C-S @ _PT-FRAME-QUEUE ?DUP IF EXIT THEN
@@ -3888,6 +4028,22 @@ VARIABLE _PT-C-INDEX
     _PT-C-S @ _PT.S.TX-CELLS-DONE @ _PT-FRAME-PAYLOAD 8 + L@ +
         _PT-C-S @ _PT.S.TX-CELLS-DONE !
     PT-S-OK ;
+
+\ One lead or continuation cell.  A continuation (PT-ATTR-CONTINUATION)
+\ has scalar zero; a lead's scalar zero is sent as U+0020.
+: PT-CELL  ( cp fg bg attrs session -- status )
+    _PT-C-S ! _PT-C-ATTRS ! _PT-C-BG ! _PT-C-FG ! _PT-C-CP !
+    0 _PT-C-EXTRAS-A ! 0 _PT-C-EXTRAS-N !
+    _PT-CELL-WRITE ;
+
+\ A lead cell whose character has further display scalars: extras-n
+\ little-endian u32 scalars at extras-a, borrowed until the call returns.
+\ The word sets PT-ATTR-CLUSTER and writes the cell's part of the span tail.
+: PT-CLUSTER-CELL  ( cp fg bg attrs extras-a extras-n session -- status )
+    _PT-C-S ! _PT-C-EXTRAS-N ! _PT-C-EXTRAS-A !
+    PT-ATTR-CLUSTER OR _PT-C-ATTRS ! _PT-C-BG ! _PT-C-FG ! _PT-C-CP !
+    _PT-C-EXTRAS-N @ 0= IF PT-S-INVALID EXIT THEN
+    _PT-CELL-WRITE ;
 
 VARIABLE _PT-CUR-S
 VARIABLE _PT-CUR-ROW
@@ -3907,7 +4063,8 @@ VARIABLE _PT-CUR-VISIBLE
     _PT-CUR-S @ _PT.S.SPAN-REMAIN @ IF PT-S-INVALID EXIT THEN
     _PT-CUR-S @ _PT.S.CURSOR-DONE? @ IF PT-S-INVALID EXIT THEN
     _PT-CUR-S @ _PT.S.TX-SPANS-DONE @ _PT-CUR-S @ _PT.S.TX-SPANS @ <>
-    _PT-CUR-S @ _PT.S.TX-CELLS-DONE @ _PT-CUR-S @ _PT.S.TX-CELLS @ <> OR IF
+    _PT-CUR-S @ _PT.S.TX-CELLS-DONE @ _PT-CUR-S @ _PT.S.TX-CELLS @ <> OR
+    _PT-CUR-S @ _PT.S.TX-WORDS-DONE @ _PT-CUR-S @ _PT.S.TX-WORDS @ <> OR IF
         PT-S-INVALID EXIT
     THEN
     _PT-CUR-ROW @ _PT-U32? 0= _PT-CUR-COL @ _PT-U32? 0= OR
@@ -4022,7 +4179,8 @@ VARIABLE _PT-PR-CLIP-YEND
     _PT-PO-S @ _PT.S.TX-RET-MODE @ PT-RET-NONE = IF PT-S-INVALID EXIT THEN
     _PT-PO-S @ _PT.S.SPAN-REMAIN @ IF PT-S-INVALID EXIT THEN
     _PT-PO-S @ _PT.S.TX-SPANS-DONE @ _PT-PO-S @ _PT.S.TX-SPANS @ <>
-    _PT-PO-S @ _PT.S.TX-CELLS-DONE @ _PT-PO-S @ _PT.S.TX-CELLS @ <> OR IF
+    _PT-PO-S @ _PT.S.TX-CELLS-DONE @ _PT-PO-S @ _PT.S.TX-CELLS @ <> OR
+    _PT-PO-S @ _PT.S.TX-WORDS-DONE @ _PT-PO-S @ _PT.S.TX-WORDS @ <> OR IF
         PT-S-INVALID EXIT
     THEN
     _PT-PO-S @ _PT.S.TX-CELL-MODE @ PT-CELL-NONE = IF
@@ -5521,7 +5679,8 @@ VARIABLE _PT-PC-DISPOSITION
     SWAP PT-COMMIT-AND-REVEAL = OR 0= IF PT-S-INVALID EXIT THEN
     _PT-PC-S @ _PT.S.SPAN-REMAIN @ IF PT-S-INVALID EXIT THEN
     _PT-PC-S @ _PT.S.TX-SPANS-DONE @ _PT-PC-S @ _PT.S.TX-SPANS @ <>
-    _PT-PC-S @ _PT.S.TX-CELLS-DONE @ _PT-PC-S @ _PT.S.TX-CELLS @ <> OR IF
+    _PT-PC-S @ _PT.S.TX-CELLS-DONE @ _PT-PC-S @ _PT.S.TX-CELLS @ <> OR
+    _PT-PC-S @ _PT.S.TX-WORDS-DONE @ _PT-PC-S @ _PT.S.TX-WORDS @ <> OR IF
         PT-S-INVALID EXIT
     THEN
     _PT-PC-S @ _PT.S.TX-CELL-MODE @ PT-CELL-NONE = IF
@@ -5568,6 +5727,8 @@ VARIABLE _PT-COMMIT-S
         _PT-COMMIT-S @ _PT.S.TX-SPANS @ <> IF PT-S-INVALID EXIT THEN
     _PT-COMMIT-S @ _PT.S.TX-CELLS-DONE @
         _PT-COMMIT-S @ _PT.S.TX-CELLS @ <> IF PT-S-INVALID EXIT THEN
+    _PT-COMMIT-S @ _PT.S.TX-WORDS-DONE @
+        _PT-COMMIT-S @ _PT.S.TX-WORDS @ <> IF PT-S-INVALID EXIT THEN
     _PT-COMMIT-S @ _PT.S.CURSOR-DONE? @ 0= IF PT-S-INVALID EXIT THEN
     _PT-COMMIT-S @ _PT.S.TX-SNAPSHOT? @ IF
         _PT-COMMIT-S @ _PT.S.COLS @ _PT-COMMIT-S @ _PT.S.ROWS @ *

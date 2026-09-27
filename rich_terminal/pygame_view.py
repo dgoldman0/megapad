@@ -8,7 +8,9 @@ from __future__ import annotations
 import operator
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import repeat
 
+from . import text_rules
 from .apt1 import UINT32_MAX, UINT64_MAX
 from .retained_model import ResourceFormat
 from .retained_scene import ControlKind, ControlState, ImageFit
@@ -2625,6 +2627,32 @@ def _glyph_raster(pygame_module, font, codepoint: str, color, alpha: int):
     return (glyph, ink.width > 0 and ink.height > 0, *glyph.get_size())
 
 
+_GLYPH_SLOTS: dict[str, tuple[tuple[tuple[str, int, int], ...], int]] = {}
+_GLYPH_SLOTS_LIMIT = 4096
+
+
+def _glyph_slots(text: str):
+    """A GLYPH_RUN's characters as (character, first slot, slots), and the
+    slot count (APT-1-TEXT Section 10).  A character takes ``W(c)`` equal
+    slots, so a wide one spans two and one of width 0 draws nothing."""
+
+    if text.isascii():
+        return zip(text, range(len(text)), repeat(1)), len(text)
+    cached = _GLYPH_SLOTS.get(text)
+    if cached is None:
+        slots = []
+        total = 0
+        for character in text_rules.characters(text):
+            width = text_rules.char_width(character)
+            slots.append((character, total, width))
+            total += width
+        cached = (tuple(slots), total)
+        if len(_GLYPH_SLOTS) >= _GLYPH_SLOTS_LIMIT:
+            _GLYPH_SLOTS.clear()
+        _GLYPH_SLOTS[text] = cached
+    return cached
+
+
 def _batched_glyph_blits(
     pygame_module, font, text: str, rasters: dict, color, alpha: int,
     object_rect, clip, bold: bool,
@@ -2636,7 +2664,7 @@ def _batched_glyph_blits(
     paints the same pixels as the per-slot path.  Slots partition the run,
     so their order cannot matter.
     """
-    count = len(text)
+    slots, count = _glyph_slots(text)
     run_left = object_rect.left
     run_width = object_rect.width
     top = object_rect.top
@@ -2652,11 +2680,11 @@ def _batched_glyph_blits(
     # inkless, later spaces are skipped before any slot arithmetic.  Glyphs
     # are still rasterized in text order, exactly as the per-slot path does.
     inkless_space = False
-    for index, codepoint in enumerate(text):
-        if inkless_space and codepoint == " ":
+    for codepoint, index, width in slots:
+        if inkless_space and codepoint == " " or not width:
             continue
         left = run_left + (index * run_width) // count
-        right = run_left + ((index + 1) * run_width) // count
+        right = run_left + ((index + width) * run_width) // count
         if left >= right or right <= clip_left or left >= clip_right:
             continue
         raster = rasters.get(codepoint)
@@ -2713,7 +2741,7 @@ def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw, gl
                 (*_rgb(background), background.alpha),
                 radius=0,
             )
-        count = len(draw.text)
+        slots, count = _glyph_slots(draw.text)
         if not count or foreground.alpha == 0:
             return
         color = _rgb(foreground)
@@ -2753,9 +2781,11 @@ def _paint_glyph_run(pygame_module, surface, font, region, region_rect, draw, gl
                 if batched:
                     surface.blits(batched, doreturn=False)
                 return
-            for index, codepoint in enumerate(draw.text):
+            for codepoint, index, width in slots:
+                if not width:
+                    continue
                 left = object_rect.left + (index * object_rect.width) // count
-                right = object_rect.left + ((index + 1) * object_rect.width) // count
+                right = object_rect.left + ((index + width) * object_rect.width) // count
                 if left >= right or right <= clip.left or left >= clip.right:
                     continue
                 raster = rasters.get(codepoint)

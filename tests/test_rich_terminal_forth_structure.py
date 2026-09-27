@@ -82,7 +82,7 @@ def test_transaction_frames_batch_until_an_atomic_protocol_boundary() -> None:
     buffered = (
         "_PT-EMIT-BEGIN",
         "_PT-PB-EMIT",
-        "PT-CELL",
+        "_PT-CELL-WRITE",
         "PT-CURSOR",
         "_PT-PO-SEND",
     )
@@ -227,7 +227,7 @@ def test_close_intent_is_one_bounded_writer_barrier() -> None:
     close = _definition(source, "PT-CLOSE")
     service = _definition(source, "PT-SERVICE")
 
-    assert "952 CONSTANT /PT-SESSION" in source
+    assert "984 CONSTANT /PT-SESSION" in source
     assert ": _PT.S.CLOSE-PENDING?  ( s -- a ) 872 + ;" in source
     for field in (
         "_PT.S.AWAIT?",
@@ -795,7 +795,7 @@ def test_resource_lifecycle_exposes_one_generic_typed_abi() -> None:
     ):
         assert declaration in source
 
-    assert "952 CONSTANT /PT-SESSION" in source
+    assert "984 CONSTANT /PT-SESSION" in source
     for accessor in (
         ": _PT.S.LIFE-ITEM       ( s -- a ) 880 + ;",
         ": _PT.S.LIFE-WATERMARK  ( s -- a ) 888 + ;",

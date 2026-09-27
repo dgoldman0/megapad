@@ -270,6 +270,6 @@ def test_skipped_cells_are_exactly_the_covered_cells_whose_glyphs_fit(font):
         for col in range(COLS):
             char, _fg, _bg, attrs = terminal.grid[row][col]
             if covered[row * COLS + col] and char not in ("", " "):
-                assert char in fits
+                assert (char, 2 if attrs & 0x100 else 1) in fits
     assert any(not fit for fit in fits.values())
     assert any(fit for fit in fits.values())

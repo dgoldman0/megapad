@@ -64,6 +64,7 @@ from rich_terminal.semantic_content import (
 )
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_wire import ControlEventKind
+from display import ATTR_CONTINUATION, ATTR_WIDE
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
 from session import (
     MachineSession,
@@ -297,8 +298,6 @@ def snapshot_from_wire(data: dict) -> TerminalSnapshot:
             raise TypeError(f"snapshot run {index} must be a five-item array")
         count = _wire_integer(run[0], f"snapshot run {index} count", minimum=1)
         char = _wire_text(run[1], f"snapshot run {index} char")
-        if len(char) != 1:
-            raise ValueError(f"snapshot run {index} char must be one character")
         fg = _wire_integer(
             run[2], f"snapshot run {index} foreground", minimum=0, maximum=0xFFFFFF
         )
@@ -306,8 +305,17 @@ def snapshot_from_wire(data: dict) -> TerminalSnapshot:
             run[3], f"snapshot run {index} background", minimum=0, maximum=0xFFFFFF
         )
         attrs = _wire_integer(
-            run[4], f"snapshot run {index} attrs", minimum=0, maximum=0xFF
+            run[4], f"snapshot run {index} attrs", minimum=0, maximum=0x3FF
         )
+        # A lead cell shows one whole character, which may hold several
+        # scalars; the continuation of a wide character shows none.
+        if attrs & ATTR_CONTINUATION:
+            if char or attrs & ATTR_WIDE:
+                raise ValueError(
+                    f"snapshot run {index} continuation must be empty and not wide"
+                )
+        elif not char:
+            raise ValueError(f"snapshot run {index} char must not be empty")
         if len(flat) + count > expected:
             raise ValueError("snapshot runs exceed the declared geometry")
         cell = TerminalCell(
@@ -323,6 +331,17 @@ def snapshot_from_wire(data: dict) -> TerminalSnapshot:
         tuple(flat[row * cols:(row + 1) * cols])
         for row in range(rows)
     )
+    for row_index, row in enumerate(cells):
+        for column, cell in enumerate(row):
+            wide = cell.attrs & ATTR_WIDE
+            if wide and (
+                column + 1 == cols or not row[column + 1].attrs & ATTR_CONTINUATION
+            ) or cell.attrs & ATTR_CONTINUATION and (
+                column == 0 or not row[column - 1].attrs & ATTR_WIDE
+            ):
+                raise ValueError(
+                    f"snapshot row {row_index} column {column} breaks a wide pair"
+                )
     return TerminalSnapshot(
         cols=cols,
         rows=rows,

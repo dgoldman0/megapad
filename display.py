@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from diskutil import MP64FS, FTYPE_NAMES, FTYPE_FREE, FTYPE_DIR
+from rich_terminal import text_rules
 
 if TYPE_CHECKING:
     from system import MegapadSystem
@@ -46,6 +47,13 @@ VRAM_BASE = 0xFF00_0000
 # Virtual terminal defaults
 TERM_COLS = 80
 TERM_ROWS = 30
+
+# Grid attribute bits above the SGR bits: a wide character's lead cell and
+# the continuation cell to its right (APT-1-TEXT Section 6).  A continuation
+# cell's text is empty; a lead cell's text is its whole character.
+ATTR_WIDE = 0x100
+ATTR_CONTINUATION = 0x200
+_PAIR_BITS = ATTR_WIDE | ATTR_CONTINUATION
 CURSOR_BLINK_MS = 530    # cursor blink interval
 
 # Base (unscaled) chrome sizes — multiplied by ui_scale in FramebufferDisplay
@@ -268,6 +276,21 @@ class VirtualTerminal:
         # UTF-8 accumulator
         self._utf8_buf = bytearray()
         self._utf8_remaining = 0   # continuation bytes still expected
+        self._utf8_low = 0x80      # accepted range of the next byte
+        self._utf8_high = 0xBF
+
+        # The character most recently placed, while further scalars may
+        # still join it (APT-1-TEXT Section 3).  Control bytes and cursor
+        # motion end it.  A width-0 character is held but takes no cell.
+        self._char_open = False
+        self._char_text = ""
+        self._char_row = 0
+        self._char_col = 0
+        self._char_width = 0
+        self._char_style: tuple[tuple, tuple, int] = (
+            self._DEFAULT_FG, self._DEFAULT_BG, 0
+        )
+        self._segmenter = text_rules.GraphemeSegmenter()
 
         # Lock for thread safety
         self._lock = threading.Lock()
@@ -324,6 +347,15 @@ class VirtualTerminal:
 
             self.cols = cols
             self.rows = rows
+            self._char_open = False
+            for grid in (self.grid, self._alt_grid):
+                if grid is None:
+                    continue
+                for row in grid:
+                    last = row[cols - 1]
+                    if last[3] & ATTR_WIDE:
+                        row[cols - 1] = (' ', last[1], last[2],
+                                         last[3] & ~_PAIR_BITS)
             self.cx = min(self.cx, cols - 1)
             self.cy = min(self.cy, rows - 1)
             self._saved_cx = min(self._saved_cx, cols - 1)
@@ -349,39 +381,40 @@ class VirtualTerminal:
             self._dirty = True
 
     def _process_byte(self, b: int):
-        # ── UTF-8 continuation byte accumulation ──────────────────
+        # ── UTF-8: one U+FFFD per maximal ill-formed subpart ─────
         if self._utf8_remaining > 0:
-            if 0x80 <= b <= 0xBF:          # valid continuation byte
+            if self._utf8_low <= b <= self._utf8_high:
                 self._utf8_buf.append(b)
                 self._utf8_remaining -= 1
+                self._utf8_low, self._utf8_high = 0x80, 0xBF
                 if self._utf8_remaining == 0:
-                    # Completed sequence — decode and place character
-                    try:
-                        ch = bytes(self._utf8_buf).decode('utf-8')
-                    except UnicodeDecodeError:
-                        ch = '?'
+                    ch = bytes(self._utf8_buf).decode('utf-8')
                     self._utf8_buf.clear()
                     self._place_char(ch)
                 return
-            else:
-                # Broken sequence — discard buffer, re-process this byte
-                self._utf8_buf.clear()
-                self._utf8_remaining = 0
-                # fall through to normal processing below
+            # The subpart ends before this byte, which is processed anew.
+            self._utf8_buf.clear()
+            self._utf8_remaining = 0
+            self._place_char('\ufffd')
 
-        # ── UTF-8 leading byte detection ──────────────────────────
-        if b >= 0xC0:
-            if b < 0xE0:
-                self._utf8_remaining = 1   # 2-byte sequence
-            elif b < 0xF0:
-                self._utf8_remaining = 2   # 3-byte sequence
-            else:
-                self._utf8_remaining = 3   # 4-byte sequence
-            self._utf8_buf = bytearray([b])
-            return
-
-        # ── Bare continuation byte (0x80-0xBF) outside sequence — ignore
         if b >= 0x80:
+            if 0xC2 <= b <= 0xDF:
+                self._utf8_remaining = 1
+                low, high = 0x80, 0xBF
+            elif 0xE0 <= b <= 0xEF:
+                self._utf8_remaining = 2
+                low, high = {0xE0: (0xA0, 0xBF), 0xED: (0x80, 0x9F)}.get(
+                    b, (0x80, 0xBF))
+            elif 0xF0 <= b <= 0xF4:
+                self._utf8_remaining = 3
+                low, high = {0xF0: (0x90, 0xBF), 0xF4: (0x80, 0x8F)}.get(
+                    b, (0x80, 0xBF))
+            else:
+                # A stray continuation byte or a byte that never leads.
+                self._place_char('\ufffd')
+                return
+            self._utf8_low, self._utf8_high = low, high
+            self._utf8_buf = bytearray([b])
             return
 
         ch = chr(b)
@@ -429,7 +462,10 @@ class VirtualTerminal:
                 self._osc_buf += ch
             return
 
-        # Normal character processing
+        # Normal character processing.  A control byte, including the ESC
+        # of any sequence, ends the open character.
+        if b < 0x20 or b == 0x7F:
+            self._char_open = False
         if b == 0x1B:   # ESC
             self._esc_state = 1
             return
@@ -449,6 +485,7 @@ class VirtualTerminal:
             self._pending_wrap = False
             if self.cx > 0:
                 self.cx -= 1
+                self._release(self.cy, self.cx)
                 self.grid[self.cy][self.cx] = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
             return
         if b == 0x07:   # BEL — ignore
@@ -460,17 +497,113 @@ class VirtualTerminal:
         self._place_char(ch)
 
     def _place_char(self, ch: str):
-        """Place a decoded character (ASCII or Unicode) into the grid."""
+        """Place one decoded scalar: it joins the open character or starts
+        the next one (APT-1-TEXT Sections 3 to 6)."""
+        p = text_rules.props(ord(ch))
+        if text_rules.invalid(p):
+            ch = '\ufffd'
+            p = text_rules.props(0xFFFD)
+        if not self._char_open:
+            self._segmenter = text_rules.GraphemeSegmenter()
+        if not self._segmenter.breaks_before(p) and self._char_open:
+            self._char_text += ch
+            self._grow_char()
+            return
+        self._char_open = True
+        self._char_text = ch
+        self._char_width = 0
+        self._char_style = (self.fg, self.bg, self._attrs_mask())
+        width = text_rules.char_width(ch)
+        if width:
+            self._put_char(width)
+
+    def _grow_char(self) -> None:
+        """Rewrite the open character after a scalar joined it."""
+        width = text_rules.char_width(self._char_text)
+        if self._char_width == 0:
+            if width:
+                self._put_char(width)
+            return
+        row = self.grid[self._char_row]
+        x = self._char_col
+        lead = row[x]
+        if width == 2 and self._char_width == 1 and x + 1 < self.cols:
+            # A flag or emoji presentation widens the character in place.
+            self._release(self._char_row, x + 1)
+            row[x] = (self._char_text, lead[1], lead[2], lead[3] | ATTR_WIDE)
+            row[x + 1] = ("", lead[1], lead[2],
+                          (lead[3] & ~_PAIR_BITS) | ATTR_CONTINUATION)
+            self._char_width = 2
+            if self._pending_wrap:
+                return
+            self._advance(1)
+            return
+        # A character that cannot widen at the right edge stays one cell.
+        row[x] = (self._char_text, lead[1], lead[2], lead[3])
+
+    def _put_char(self, width: int) -> None:
+        """Place the open character at the cursor in ``width`` cells."""
         if self._pending_wrap:
             self._pending_wrap = False
             self.cx = 0
             self._line_feed()
-        self.grid[self.cy][self.cx] = (ch, self.fg, self.bg, self._attrs_mask())
-        if self.cx < self.cols - 1:
-            self.cx += 1
+        if width == 2 and self.cx == self.cols - 1:
+            if self.cols < 2:
+                width = 1
+            else:
+                # A character never spans rows: a wide one wraps whole.
+                self._release(self.cy, self.cx)
+                self.grid[self.cy][self.cx] = (
+                    ' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
+                self.cx = 0
+                self._line_feed()
+        fg, bg, attrs = self._char_style
+        row = self.grid[self.cy]
+        self._release(self.cy, self.cx)
+        if width == 2:
+            self._release(self.cy, self.cx + 1)
+            row[self.cx] = (self._char_text, fg, bg, attrs | ATTR_WIDE)
+            row[self.cx + 1] = ("", fg, bg, attrs | ATTR_CONTINUATION)
         else:
-            # At last column — enter pending wrap state (deferred wrap).
+            row[self.cx] = (self._char_text, fg, bg, attrs)
+        self._char_row = self.cy
+        self._char_col = self.cx
+        self._char_width = width
+        self._advance(width)
+
+    def _advance(self, width: int) -> None:
+        if self.cx + width < self.cols:
+            self.cx += width
+        else:
+            # At the last column — enter pending wrap state (deferred wrap).
+            self.cx = self.cols - 1
             self._pending_wrap = True
+
+    def _release(self, y: int, x: int) -> None:
+        """Blank the other half of a wide pair that cell (y, x) belongs to,
+        before the cell is overwritten."""
+        row = self.grid[y]
+        attrs = row[x][3]
+        if attrs & ATTR_WIDE and x + 1 < self.cols:
+            other = row[x + 1]
+            row[x + 1] = (' ', other[1], other[2], other[3] & ~_PAIR_BITS)
+        elif attrs & ATTR_CONTINUATION and x > 0:
+            other = row[x - 1]
+            row[x - 1] = (' ', other[1], other[2], other[3] & ~_PAIR_BITS)
+
+    def _repair_row(self, y: int) -> None:
+        """Blank any half of a wide pair whose other half was erased."""
+        row = self.grid[y]
+        for x, cell in enumerate(row):
+            attrs = cell[3]
+            if attrs & ATTR_WIDE and (
+                x + 1 >= self.cols or not row[x + 1][3] & ATTR_CONTINUATION
+            ):
+                row[x] = (' ', cell[1], cell[2], attrs & ~_PAIR_BITS)
+            elif attrs & ATTR_CONTINUATION and (
+                x == 0 or not row[x - 1][3] & ATTR_WIDE
+            ):
+                row[x] = (' ', cell[1], cell[2], attrs & ~_PAIR_BITS)
 
     def _save_cursor(self):
         """Save cursor position and attributes (DECSC / ESC[s)."""
@@ -623,6 +756,7 @@ class VirtualTerminal:
                 for y in range(self.cy + 1, self.rows):
                     for x in range(self.cols):
                         self.grid[y][x] = blank
+                self._repair_row(self.cy)
             elif n == 1:
                 # Erase from beginning of screen to cursor
                 for y in range(0, self.cy):
@@ -630,6 +764,7 @@ class VirtualTerminal:
                         self.grid[y][x] = blank
                 for x in range(0, self.cx + 1):
                     self.grid[self.cy][x] = blank
+                self._repair_row(self.cy)
         elif cmd == 'K':
             n = num(0, 0)
             blank = (' ', self._DEFAULT_FG, self._DEFAULT_BG, 0)
@@ -642,6 +777,7 @@ class VirtualTerminal:
             elif n == 2:
                 for x in range(self.cols):
                     self.grid[self.cy][x] = blank
+            self._repair_row(self.cy)
         elif cmd == 'S':
             # Scroll Up: ESC[nS
             self._scroll_up(num())
@@ -832,27 +968,35 @@ class VirtualTerminal:
             fits = cache.setdefault((_GLYPH_FITS_KEY, cell_w, cell_h), {})
 
             for y in range(self.rows):
+                row = self.grid[y]
                 row_start = y * self.cols
+                py = y * cell_h
+                # One item per character: its column, its cells, its colors.
+                # Backgrounds are all painted before any glyph, so a wide
+                # glyph is not cut by the background of its own right half.
+                items = []
                 for x in range(self.cols):
-                    cell = self.grid[y][x]
+                    cell = row[x]
+                    attrs = cell[3] if len(cell) > 3 else 0
+                    if attrs & ATTR_CONTINUATION and x and row[x - 1][3] & ATTR_WIDE:
+                        continue
+                    span = 2 if attrs & ATTR_WIDE and x + 1 < self.cols else 1
                     ch = cell[0]
-                    if covered is not None and covered[row_start + x]:
+                    if covered is not None and all(
+                        covered[row_start + x + i] for i in range(span)
+                    ):
                         if not ch or ch == ' ':
                             continue
-                        fit = fits.get(ch)
+                        fit = fits.get((ch, span))
                         if fit is None:
                             width, height = font.render(
                                 ch, True, (255, 255, 255)).get_size()
-                            fit = width <= cell_w and height <= cell_h
-                            fits[ch] = fit
+                            fit = width <= span * cell_w and height <= cell_h
+                            fits[(ch, span)] = fit
                         if fit:
                             continue
                     fg_rgb = cell[1]
                     bg_rgb = cell[2]
-                    attrs = cell[3] if len(cell) > 3 else 0
-
-                    px = x * cell_w
-                    py = y * cell_h
 
                     # Apply reverse video (swap fg/bg)
                     if attrs & 32:
@@ -869,13 +1013,14 @@ class VirtualTerminal:
                         fg_rgb = (fg_rgb[0] // 2,
                                   fg_rgb[1] // 2,
                                   fg_rgb[2] // 2)
+                    items.append((x * cell_w, span * cell_w, ch, fg_rgb, bg_rgb, attrs))
 
-                    # Draw background
+                for px, width, _ch, _fg, bg_rgb, _attrs in items:
                     if bg_rgb != self._DEFAULT_BG:
                         pygame_module.draw.rect(
-                            surface, bg_rgb,
-                            (px, py, cell_w, cell_h))
+                            surface, bg_rgb, (px, py, width, cell_h))
 
+                for px, width, ch, fg_rgb, _bg, attrs in items:
                     # Draw character (skip if hidden, space, or empty)
                     if ch and ch != ' ' and not (attrs & 64):
                         key = (ch, fg_rgb)
@@ -890,14 +1035,14 @@ class VirtualTerminal:
                         pygame_module.draw.line(
                             surface, fg_rgb,
                             (px, py + cell_h - 1),
-                            (px + cell_w - 1, py + cell_h - 1))
+                            (px + width - 1, py + cell_h - 1))
 
                     # Draw strikethrough
                     if attrs & 128:
                         mid_y = py + cell_h // 2
                         pygame_module.draw.line(
                             surface, fg_rgb,
-                            (px, mid_y), (px + cell_w - 1, mid_y))
+                            (px, mid_y), (px + width - 1, mid_y))
 
             # Draw cursor
             if show_cursor and self.cursor_visible:
