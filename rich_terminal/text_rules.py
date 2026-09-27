@@ -705,11 +705,19 @@ class RowLayout:
         return None
 
     def position_at_column(self, column: int) -> int:
-        """Section 9.1 for a visual column counted from the left edge."""
+        """Section 9.1 for a visual column counted from the left edge.
+
+        A column past the content on the paragraph's end side names the
+        row's end; past it on the start side, the row's start.  The end side
+        is the right of an LTR paragraph and the left of an RTL one.
+        """
 
         placed = self.character_at_column(column)
         if placed is not None:
             return placed.start
+        before = column < 0
+        if before != self.rtl:
+            return 0
         return self.length
 
     def character_starting_at(self, offset: int) -> PlacedCharacter | None:

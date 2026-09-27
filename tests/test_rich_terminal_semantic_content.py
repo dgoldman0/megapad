@@ -311,6 +311,31 @@ def test_control_record_carries_one_generic_text_content_body() -> None:
         _root(ControlKind.TEXT_AREA, mismatched)
 
 
+def test_text_area_columns_count_cells() -> None:
+    def content(text: str) -> SemanticTextContent:
+        return SemanticTextContent(
+            content_revision=1,
+            rows=1,
+            columns=2,
+            viewport_row=0,
+            viewport_column=0,
+            viewport_rows=1,
+            viewport_columns=2,
+            flags=SemanticContentFlag(0),
+            primary_key=0,
+            primary_offset=0,
+            anchor_key=0,
+            anchor_offset=0,
+            items=(replace(_line(1, 0, text), column_span=2),),
+        )
+
+    # Three scalars in two cells fit, as does a tab, one cell wide; two wide
+    # characters in four cells do not.
+    assert content("e\u0301x").text_area_compatible
+    assert content("a\t").text_area_compatible
+    assert not content("\u4e2d\u6587").text_area_compatible
+
+
 def test_text_grid_and_tabs_share_control_identity_without_private_layout() -> None:
     content = SemanticTextContent(
         content_revision=9,

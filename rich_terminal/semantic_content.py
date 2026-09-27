@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum, IntEnum, IntFlag
 
 from .apt1 import UINT16_MAX, UINT32_MAX, UINT64_MAX
+from .text_rules import string_width
 
 
 SEMANTIC_TEXT_TAG = 0x31585453  # little-endian ``STX1``
@@ -368,7 +369,7 @@ class SemanticTextContent:
                 or item.column != 0
                 or item.column_span != self.columns
                 or item.state
-                or len(item.text) > self.columns
+                or string_width(item.text, keep_tab=True) > self.columns
             ):
                 text_area_compatible = False
             if item.state & SemanticTextState.CURRENT:

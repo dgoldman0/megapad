@@ -187,8 +187,13 @@ def test_row_layout_widths_and_columns() -> None:
     assert layout.width == 7
     assert layout.length == 8
     # Section 9.1: a point on a character names its start; past the end,
-    # the row's end.
-    assert [layout.position_at_column(c) for c in range(9)] == [0, 1, 1, 2, 2, 4, 7, 8, 8]
+    # the row's end.  Left of an LTR row is its start side.
+    assert [layout.position_at_column(c) for c in range(-1, 9)] == [
+        0, 0, 1, 1, 2, 2, 4, 7, 8, 8]
+    # In an RTL row the end side is the left.
+    rtl = tr.layout_row("\u05d0\u05d1\u05d2")
+    assert rtl.rtl
+    assert [rtl.position_at_column(c) for c in range(-1, 4)] == [3, 2, 1, 0, 0]
 
 
 def test_row_layout_keeps_tabs_as_one_cell_on_request() -> None:
