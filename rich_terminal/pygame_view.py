@@ -18,6 +18,7 @@ from .retained_view import (
     GlyphRunDraw,
     ImageDraw,
     ImageResourceManifest,
+    ItemViewDraw,
     MenuBarDraw,
     MenuDraw,
     MenuItemDraw,
@@ -40,6 +41,7 @@ from .semantic_content import (
     SemanticTextState,
     TextStyle,
 )
+from .semantic_items import ItemColumnKind, ItemRole, ItemState, ItemViewRole
 
 ATTR_BOLD = 0x01
 ATTR_DIM = 0x02
@@ -486,6 +488,74 @@ class TextHitTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class ItemPart:
+    """One shown item as its view painted it: the item's area, and the
+    disclosure mark and check box inside it when it has them."""
+
+    item_key: int
+    area: PixelRect
+    selectable: bool
+    disclosure: PixelRect | None = None
+    expanded: bool = False
+    check_box: PixelRect | None = None
+
+    def __post_init__(self) -> None:
+        _integer("item_key", self.item_key, minimum=1, maximum=UINT64_MAX)
+        for name in ("area", "disclosure", "check_box"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, PixelRect):
+                raise TypeError(f"{name} must be PixelRect")
+        if self.area is None:
+            raise TypeError("area must be PixelRect")
+        object.__setattr__(self, "selectable", bool(self.selectable))
+        object.__setattr__(self, "expanded", bool(self.expanded))
+
+
+@dataclass(frozen=True, slots=True)
+class ItemHitTarget:
+    """One enabled ITEM_VIEW root and the item areas its paint pass drew.
+
+    ``item_at`` names what a press at one point asks for
+    (SEMANTIC-CONTENT-1): the disclosure mark expands or collapses, the check
+    box checks, and anywhere else on a selectable item selects it.
+    """
+
+    identity: ControlIdentity
+    rect: PixelRect
+    content_revision: int
+    items: tuple[ItemPart, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, ControlIdentity):
+            raise TypeError("identity must be ControlIdentity")
+        if not isinstance(self.rect, PixelRect):
+            raise TypeError("rect must be PixelRect")
+        _integer("content_revision", self.content_revision, minimum=1, maximum=UINT64_MAX)
+        items = tuple(self.items)
+        if any(not isinstance(item, ItemPart) for item in items):
+            raise TypeError("items must contain only ItemPart values")
+        object.__setattr__(self, "items", items)
+
+    def item_at(self, x: int, y: int) -> tuple[str, int] | None:
+        """``(action, item_key)`` for a press at one point, where action is
+        "select", "expand", "collapse", or "check"; None for nothing."""
+
+        if not self.rect.contains(x, y):
+            return None
+        for part in self.items:
+            if not part.area.contains(x, y):
+                continue
+            if part.disclosure is not None and part.disclosure.contains(x, y):
+                return ("collapse" if part.expanded else "expand", part.item_key)
+            if part.check_box is not None and part.check_box.contains(x, y):
+                return ("check", part.item_key)
+            if part.selectable:
+                return ("select", part.item_key)
+            return None
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class ResidualPoint:
     """A point showing CELL or residual content, named by its cell."""
 
@@ -493,22 +563,25 @@ class ResidualPoint:
     row: int
 
 
-HitMapEntry = ControlHitTarget | RegionOcclusion | ControlSurface | TextHitTarget
-PointerTarget = ControlHitTarget | TextHitTarget | ResidualPoint
+HitMapEntry = (
+    ControlHitTarget | RegionOcclusion | ControlSurface | TextHitTarget | ItemHitTarget
+)
+PointerTarget = ControlHitTarget | TextHitTarget | ItemHitTarget | ResidualPoint
+HIT_MAP_ENTRY_TYPES = (
+    ControlHitTarget,
+    RegionOcclusion,
+    ControlSurface,
+    TextHitTarget,
+    ItemHitTarget,
+)
 
 
 def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
     entries = tuple(hit_entries)
-    if any(
-        not isinstance(
-            entry,
-            (ControlHitTarget, RegionOcclusion, ControlSurface, TextHitTarget),
-        )
-        for entry in entries
-    ):
+    if any(not isinstance(entry, HIT_MAP_ENTRY_TYPES) for entry in entries):
         raise TypeError(
             "hit_entries must contain only ControlHitTarget, RegionOcclusion, "
-            "ControlSurface, or TextHitTarget values"
+            "ControlSurface, TextHitTarget, or ItemHitTarget values"
         )
     return entries
 
@@ -550,7 +623,7 @@ def resolve_pointer(
     for entry in reversed(hit_entries):
         if not entry.rect.contains(x, y):
             continue
-        if isinstance(entry, (ControlHitTarget, TextHitTarget)):
+        if isinstance(entry, (ControlHitTarget, TextHitTarget, ItemHitTarget)):
             return entry
         if isinstance(entry, ControlSurface):
             return None
@@ -2111,6 +2184,264 @@ def _paint_text_grid(
     return _text_root_entries(region, draw, anchor, visible_anchor)
 
 
+# Reference item view layout, in cells: a tree indents two cells a level and
+# gives the disclosure mark two; a check box takes two and a gap; fields in
+# a row are two cells apart.
+_ITEM_INDENT = 2
+_ITEM_MARK = 2
+_ITEM_CHECK = 3
+_ITEM_GAP = 2
+
+
+def _paint_item_view(
+    pygame_module,
+    surface,
+    font,
+    region,
+    region_rect,
+    draw: ItemViewDraw,
+) -> list[HitMapEntry]:
+    """Paint one item view's viewport, one item per row (a card per item),
+    in the monospace font on the root's cell slots (SEMANTIC-CONTENT-1).
+
+    The layout is this renderer's: a tree indents by depth and marks
+    expandable items, a table heads its columns and aligns NUMBER fields at
+    the end, a list or tree puts later fields at the row's end, sections set
+    their headings in the heading look, and cards stack an item's fields.
+    """
+
+    anchor, visible_anchor = _semantic_root_rects(
+        pygame_module, surface, region, region_rect, draw.bounds
+    )
+    if visible_anchor.width <= 0 or visible_anchor.height <= 0:
+        return []
+    content = draw.content
+    slots = draw.bounds.cell_cols
+    rows = draw.bounds.cell_rows
+    direction = content.direction
+    enabled = bool(draw.state & ControlState.ENABLED)
+    role = content.role
+    shown = content.shown_items()
+    header = role is ItemViewRole.TABLE and any(
+        column.label for column in content.columns
+    )
+    lines_per_item = len(content.columns) if role is ItemViewRole.CARDS else 1
+
+    def slot_edge(slot: int) -> int:
+        return _partition_edge(anchor.left, anchor.width, min(max(slot, 0), slots), slots)
+
+    def row_edge(row: int) -> int:
+        return _partition_edge(anchor.top, anchor.height, min(max(row, 0), rows), rows)
+
+    def width_of(text: str) -> int:
+        return text_rules.cached_row(text, direction, True).width
+
+    # A table's columns take their natural widths; the first gives way when
+    # they do not fit.
+    column_starts: list[int] = []
+    column_widths: list[int] = []
+    if role is ItemViewRole.TABLE:
+        widths = []
+        for index, column in enumerate(content.columns):
+            natural = width_of(column.label) if header else 0
+            for item in shown:
+                if index < len(item.fields):
+                    natural = max(natural, width_of(item.fields[index].text))
+            widths.append(max(1, natural))
+        gaps = _ITEM_GAP * (len(widths) - 1)
+        if sum(widths) + gaps > slots:
+            widths[0] = max(1, slots - gaps - sum(widths[1:]))
+        start = 0
+        for width in widths:
+            column_starts.append(start)
+            column_widths.append(width)
+            start += width + _ITEM_GAP
+
+    def paint_text(item_field, text, first, last, top, bottom, *, color, end=False, look=None):
+        """Paint one field or label between slots FIRST and LAST as one
+        paragraph, at LAST's side when END or right-to-left; a character
+        the bounds cut is not drawn."""
+
+        if last <= first:
+            return
+        layout = text_rules.cached_row(text, direction, True)
+        start = last - layout.width if (end or layout.rtl) else first
+        start = max(start, first)
+        for placed in layout.characters:
+            left_slot = start + placed.column
+            right_slot = left_slot + placed.width
+            if right_slot > last:
+                continue
+            left, right = slot_edge(left_slot), slot_edge(right_slot)
+            clip = _clipped_python_rect(pygame_module, left, top, right, bottom, visible_anchor)
+            if clip is None:
+                continue
+            char_look = look
+            if item_field is not None and item_field.runs:
+                meaning = item_field.meaning_at(placed.start)
+                if meaning is not None:
+                    char_look = REFERENCE_TEXT_THEME.get(meaning)
+            char_color = color
+            if char_look is not None and char_look.color is not None and enabled:
+                char_color = char_look.color
+            _paint_cluster(
+                pygame_module, surface, font, placed.text, char_color, clip,
+                left=left, top=top, bottom=bottom,
+                bold=char_look is not None and char_look.bold,
+                italic=char_look is not None and char_look.italic,
+            )
+            if char_look is not None and char_look.underline is not None:
+                underline = _clipped_python_rect(
+                    pygame_module, left, bottom - 2, right, bottom - 1, clip
+                )
+                if underline is not None:
+                    surface.fill(char_look.underline if enabled else _DISABLED_TEXT, underline)
+
+    parts: list[ItemPart] = []
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(visible_anchor)
+        surface.fill(_COLLECTION_SURFACE, visible_anchor)
+        row = 0
+        if header:
+            top, bottom = row_edge(0), row_edge(1)
+            for index, column in enumerate(content.columns):
+                first = column_starts[index]
+                paint_text(
+                    None, column.label, first, first + column_widths[index], top, bottom,
+                    color=_MUTED_TEXT, end=column.kind is ItemColumnKind.NUMBER,
+                )
+            line = _clipped_python_rect(
+                pygame_module, anchor.left, bottom - 1, anchor.right, bottom, visible_anchor
+            )
+            if line is not None:
+                surface.fill(_COLLECTION_BORDER, line)
+            row = 1
+        heading = REFERENCE_TEXT_THEME[TextStyle.HEADING]
+        for item in shown:
+            top, bottom = row_edge(row), row_edge(row + lines_per_item)
+            row += lines_per_item
+            area = _clipped_python_rect(
+                pygame_module, anchor.left, top, anchor.right, bottom, visible_anchor
+            )
+            if area is None:
+                continue
+            state = item.state
+            unavailable = bool(state & ItemState.UNAVAILABLE)
+            color = _DISABLED_TEXT if (not enabled or unavailable) else _TEXT
+            if state & ItemState.SELECTED:
+                surface.fill(_TEXT_SELECTION, area)
+            if state & ItemState.CURRENT:
+                bar = _clipped_python_rect(
+                    pygame_module, anchor.left, top, anchor.left + 2, bottom, visible_anchor
+                )
+                if bar is not None:
+                    surface.fill(_ACCENT[:3], bar)
+            if role is ItemViewRole.CARDS:
+                _paint_clipped_border(
+                    pygame_module, surface, _COLLECTION_BORDER,
+                    left=anchor.left, top=top, right=anchor.right, bottom=bottom,
+                    width=1, clip=visible_anchor,
+                )
+            slot = 0
+            if role in (ItemViewRole.TREE, ItemViewRole.SECTIONS):
+                slot = _ITEM_INDENT * item.depth
+            line_top, line_bottom = top, row_edge(row - lines_per_item + 1)
+            disclosure = None
+            if role is ItemViewRole.TREE:
+                if state & ItemState.EXPANDABLE:
+                    mark = "\u25be" if state & ItemState.EXPANDED else "\u25b8"
+                    paint_text(None, mark, slot, slot + _ITEM_MARK, line_top, line_bottom,
+                               color=_MUTED_TEXT)
+                    disclosure = _clipped_python_rect(
+                        pygame_module, slot_edge(slot), line_top,
+                        slot_edge(slot + _ITEM_MARK), line_bottom, visible_anchor,
+                    )
+                slot += _ITEM_MARK
+            check_box = None
+            if state & ItemState.CHECKABLE:
+                box_left, box_right = slot_edge(slot), slot_edge(slot + 2)
+                size = max(3, min(box_right - box_left, line_bottom - line_top) - 4)
+                box_top = line_top + (line_bottom - line_top - size) // 2
+                box_left += (box_right - box_left - size) // 2
+                _paint_clipped_border(
+                    pygame_module, surface, color,
+                    left=box_left, top=box_top, right=box_left + size, bottom=box_top + size,
+                    width=1, clip=visible_anchor,
+                )
+                if state & ItemState.CHECKED:
+                    inner = _clipped_python_rect(
+                        pygame_module, box_left + 2, box_top + 2,
+                        box_left + size - 2, box_top + size - 2, visible_anchor,
+                    )
+                    if inner is not None:
+                        surface.fill(_ACCENT[:3] if enabled else _DISABLED_TEXT, inner)
+                if not unavailable:
+                    check_box = _clipped_python_rect(
+                        pygame_module, slot_edge(slot), line_top,
+                        slot_edge(slot + 2), line_bottom, visible_anchor,
+                    )
+                slot += _ITEM_CHECK
+            fields = item.fields
+            if item.role is ItemRole.SECTION:
+                paint_text(fields[0], fields[0].text, 0, slots, line_top, line_bottom,
+                           color=color, look=heading)
+            elif role is ItemViewRole.TABLE:
+                for index, item_field in enumerate(fields):
+                    first = max(column_starts[index], slot if index == 0 else 0)
+                    paint_text(
+                        item_field, item_field.text, first,
+                        column_starts[index] + column_widths[index], line_top, line_bottom,
+                        color=color,
+                        end=content.columns[index].kind is ItemColumnKind.NUMBER,
+                    )
+            elif role is ItemViewRole.CARDS:
+                for index, item_field in enumerate(fields):
+                    field_top = row_edge(row - lines_per_item + index)
+                    field_bottom = row_edge(row - lines_per_item + index + 1)
+                    paint_text(item_field, item_field.text, slot + 1, slots - 1,
+                               field_top, field_bottom, color=color)
+            else:
+                # Later fields sit at the row's end, the last one last.
+                right = slots
+                for index in range(len(fields) - 1, 0, -1):
+                    item_field = fields[index]
+                    width = width_of(item_field.text)
+                    paint_text(item_field, item_field.text, max(slot, right - width), right,
+                               line_top, line_bottom, color=_MUTED_TEXT if not unavailable else color,
+                               end=True)
+                    right = max(slot, right - width - _ITEM_GAP)
+                paint_text(fields[0], fields[0].text, slot, right, line_top, line_bottom,
+                           color=color)
+            parts.append(
+                ItemPart(
+                    item.item_key,
+                    _pixel_rect(area),
+                    item.role is ItemRole.ITEM and not unavailable,
+                    None if disclosure is None else _pixel_rect(disclosure),
+                    bool(state & ItemState.EXPANDED),
+                    None if check_box is None else _pixel_rect(check_box),
+                )
+            )
+        surface.set_clip(visible_anchor)
+        _paint_clipped_border(
+            pygame_module, surface,
+            _ACCENT[:3] if draw.state & ControlState.SELECTED else _COLLECTION_BORDER,
+            left=anchor.left, top=anchor.top, right=anchor.right, bottom=anchor.bottom,
+            width=1, clip=visible_anchor,
+        )
+    finally:
+        surface.set_clip(prior_clip)
+    rect = _pixel_rect(visible_anchor)
+    if not enabled:
+        return [ControlSurface(region.owner_id, region.owner_generation, draw.control_id, rect)]
+    return [
+        ItemHitTarget(
+            _identity(region, draw.control_id), rect, content.content_revision, tuple(parts)
+        )
+    ]
+
+
 def _tab_width(
     font,
     tab: TabDraw,
@@ -3469,6 +3800,17 @@ def composite_draw_plane_result(
                         cell_w,
                     )
                 )
+            elif isinstance(draw, ItemViewDraw):
+                hit_entries.extend(
+                    _paint_item_view(
+                        pygame_module,
+                        surface,
+                        font,
+                        region,
+                        region_rect,
+                        draw,
+                    )
+                )
             elif isinstance(draw, TabSetDraw):
                 hit_entries.extend(
                     _paint_tabset(
@@ -3553,6 +3895,9 @@ __all__ = [
     "PixelRect",
     "PointerTarget",
     "RegionOcclusion",
+    "HIT_MAP_ENTRY_TYPES",
+    "ItemHitTarget",
+    "ItemPart",
     "ResidualPoint",
     "TextHitTarget",
     "TextPosition",

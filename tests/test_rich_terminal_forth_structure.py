@@ -143,7 +143,12 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
 
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
-    assert "0x33F    CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
+    assert "0x73F    CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert (
+        "_PT-RV-FEATURES @ _PT-RET-CONTROL-ITEMS AND\n"
+        "    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND"
+    ) in caps
     assert "_PT-RET-FEATURE-MASK INVERT AND" in caps
     assert (
         "_PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND\n"
@@ -607,6 +612,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
         "PT-CONTROL-TEXT-GRID",
         "PT-CONTROL-TABSET",
         "PT-CONTROL-TAB",
+        "PT-CONTROL-ITEM-VIEW",
     ):
         assert kind in kinds
     for value, kind in enumerate(
@@ -615,11 +621,13 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
             "PT-CONTROL-TEXT-GRID",
             "PT-CONTROL-TABSET",
             "PT-CONTROL-TAB",
+            "PT-CONTROL-ITEM-VIEW",
         ),
         start=5,
     ):
         assert f"{value} CONSTANT {kind}" in source
     assert "_PT-CT-CONTENT-U @ 72 U<" in kinds
+    assert "_PT-CT-CONTENT-U @ 48 U<" in kinds
     assert "_PT-CT-ROOT-BOUNDS?" in kinds
     assert kinds.count("_PT-CT-DESCENDANT?") == 4
 
@@ -681,6 +689,10 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
     assert "_PT-RX-P @ 60 + L@ 0= AND" in tail_valid
     assert "_PT-RX-P @ 44 + L@ 0=" in tail_valid
     assert "W@ OR 0<> AND" in tail_valid
+    # An item tail's offset is reserved.
+    assert "_PT-CONTROL-ITEM-EVENT? IF _PT-RX-P @ 56 + L@ 0= AND THEN" in tail_valid
+    assert "DUP _PT-CONTROL-ITEM-EVENT? IF DROP 64 EXIT THEN" in bytes_for_kind
+    assert "_PT-RET-CONTROL-ITEMS? 0= IF" in dispatch
 
     for mapping in (
         "_PT-EP-P @ 32 + _PT-U64@ _PT-EP-DST @ 8 + !",
@@ -711,6 +723,12 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
         ("PT-CONTROL-PLACE", 2),
         ("PT-CONTROL-EXTEND", 3),
         ("PT-CONTROL-SCROLL", 4),
+        ("PT-CONTROL-FOLLOW", 5),
+        ("PT-CONTROL-SELECT", 6),
+        ("PT-CONTROL-OPEN", 7),
+        ("PT-CONTROL-EXPAND", 8),
+        ("PT-CONTROL-COLLAPSE", 9),
+        ("PT-CONTROL-CHECK", 10),
     ):
         assert f"{value} CONSTANT {kind}" in source
 

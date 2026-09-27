@@ -1511,3 +1511,92 @@ def test_text_area_characters_take_their_meanings_look():
     assert tuple(surface.get_at((5, underline_y)))[:3] != link.underline
     # The font is left as it was found.
     assert not font.bold and not font.italic
+
+
+# --- Item views ----------------------------------------------------------------
+
+from rich_terminal.pygame_view import ItemHitTarget  # noqa: E402
+from rich_terminal.retained_view import ItemViewDraw  # noqa: E402
+from rich_terminal.semantic_items import (  # noqa: E402
+    ItemColumn,
+    ItemColumnKind,
+    ItemField,
+    ItemRole,
+    ItemState,
+    ItemViewContent,
+    ItemViewRole,
+    ViewItem,
+)
+
+
+def _view_item(key, ordinal, *texts, parent=0, depth=0, state=0, role=ItemRole.ITEM):
+    return ViewItem(key, parent, ordinal, depth, ItemState(state), role,
+                    tuple(ItemField(text) for text in texts))
+
+
+def _tree_view(*, state=VISIBLE | ENABLED):
+    S = ItemState
+    content = ItemViewContent(
+        8, ItemViewRole.TREE, 0, (ItemColumn(ItemColumnKind.TEXT),), 4, 0, 4,
+        (
+            _view_item(1, 0, "/", state=S.EXPANDABLE | S.EXPANDED),
+            _view_item(2, 1, "docs", parent=1, depth=1, state=S.EXPANDABLE),
+            _view_item(3, 2, "notes.md", parent=1, depth=1, state=S.SELECTED),
+            _view_item(4, 3, "locked", parent=1, depth=1, state=S.UNAVAILABLE),
+        ),
+    )
+    return ItemViewDraw(50, state, 0, 0, ObjectBounds(0, 0, 20, 6), content)
+
+
+def test_item_view_paints_one_row_per_item_and_maps_its_parts():
+    pygame = pytest.importorskip("pygame")
+    surface, result = _render(pygame, _plane(_region(_tree_view())))
+    (target,) = [e for e in result.hit_entries if isinstance(e, ItemHitTarget)]
+    assert target.identity == ControlIdentity(11, 7, 50)
+    assert target.content_revision == 8
+    assert target.rect == PixelRect(0, 0, 200, 60)
+    assert [part.item_key for part in target.items] == [1, 2, 3, 4]
+    # Rows are ten pixels tall.  "/" is expanded: its mark collapses it.
+    assert target.item_at(5, 5) == ("collapse", 1)
+    assert target.item_at(60, 5) == ("select", 1)
+    # "docs" is indented one level and collapsed.
+    assert target.item_at(25, 15) == ("expand", 2)
+    assert target.item_at(5, 15) == ("select", 2)
+    assert target.item_at(60, 25) == ("select", 3)
+    # An unavailable item and the space below the items name nothing.
+    assert target.item_at(60, 35) is None
+    assert target.item_at(60, 45) is None
+    # The selected row is filled.
+    assert surface.get_at((150, 25))[:3] == (42, 75, 122)
+    assert _resolve(result, 60, 25) is target
+    assert result.hit_targets == ()
+
+
+def test_item_view_heads_table_columns_and_maps_check_boxes():
+    pygame = pytest.importorskip("pygame")
+    S = ItemState
+    content = ItemViewContent(
+        3, ItemViewRole.TABLE, 0,
+        (ItemColumn(ItemColumnKind.TEXT, "Name"), ItemColumn(ItemColumnKind.NUMBER, "Size")),
+        2, 0, 2,
+        (
+            _view_item(7, 0, "large.txt", "2K", state=S.CHECKABLE | S.CHECKED),
+            _view_item(8, 1, "notes.md", "54"),
+        ),
+    )
+    draw = ItemViewDraw(51, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 20, 4), content)
+    _surface, result = _render(pygame, _plane(_region(draw)))
+    (target,) = [e for e in result.hit_entries if isinstance(e, ItemHitTarget)]
+    # Row 0 is the header; the items follow.
+    assert target.item_at(60, 5) is None
+    assert target.item_at(5, 15) == ("check", 7)
+    assert target.item_at(60, 15) == ("select", 7)
+    assert target.item_at(60, 25) == ("select", 8)
+
+
+def test_a_disabled_item_view_is_a_surface_without_item_targets():
+    pygame = pytest.importorskip("pygame")
+    _surface, result = _render(pygame, _plane(_region(_tree_view(state=VISIBLE))))
+    assert not any(isinstance(e, ItemHitTarget) for e in result.hit_entries)
+    assert [e.control_id for e in result.hit_entries if isinstance(e, ControlSurface)] == [50]
+    assert _resolve(result, 60, 25) is None

@@ -27,6 +27,7 @@ from rich_terminal.retained_view import (
     DisplayScope,
     GlyphRunDraw,
     ImageDraw,
+    ItemViewDraw,
     ImageResourceManifest,
     MenuBarDraw,
     MenuDraw,
@@ -61,6 +62,11 @@ from rich_terminal.semantic_content import (
     SemanticTextContent,
     decode_semantic_text_content,
     encode_semantic_text_content,
+)
+from rich_terminal.semantic_items import (
+    ItemViewContent,
+    decode_item_view_content,
+    encode_item_view_content,
 )
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_wire import ControlEventKind
@@ -137,6 +143,19 @@ _TEXT_EVENT_FIELDS = {
     int(ControlEventKind.SCROLL): _CONTROL_INPUT_FIELDS
     + ("event_kind", "wheel_x", "wheel_y"),
 }
+# Item events name one item and carry no offset.
+_TEXT_EVENT_FIELDS.update(
+    {
+        int(kind): _CONTROL_INPUT_FIELDS + ("event_kind", "content_revision", "item_key")
+        for kind in (
+            ControlEventKind.SELECT,
+            ControlEventKind.OPEN,
+            ControlEventKind.EXPAND,
+            ControlEventKind.COLLAPSE,
+            ControlEventKind.CHECK,
+        )
+    }
+)
 _POINTER_INPUT_FIELDS = _DISPLAY_INPUT_FIELDS + (
     "x",
     "y",
@@ -587,6 +606,15 @@ _TEXT_COLLECTION_WIRE_FIELDS = (
     "bounds",
     "content_stx1_base64",
 )
+_ITEM_VIEW_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "z_order",
+    "bounds",
+    "content_itm1_base64",
+)
 _TABSET_WIRE_FIELDS = (
     "kind",
     "control_id",
@@ -627,6 +655,12 @@ def _semantic_content_to_wire(content: SemanticTextContent) -> str:
 
     payload = encode_semantic_text_content(content)
     return base64.b64encode(payload).decode("ascii")
+
+
+def _item_content_to_wire(content: ItemViewContent) -> str:
+    """Carry the one canonical ITM1 schema through JSON without restating it."""
+
+    return base64.b64encode(encode_item_view_content(content)).decode("ascii")
 
 
 def _bounds_to_wire(bounds: ObjectBounds) -> list[int]:
@@ -758,6 +792,29 @@ def _image_resource_from_wire(data, name: str) -> ImageResourceManifest:
     )
 
 
+def _canonical_base64(value, name: str) -> bytes:
+    encoded = _wire_text(value, name)
+    try:
+        ascii_payload = encoded.encode("ascii", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be canonical base64 ASCII") from exc
+    try:
+        payload = base64.b64decode(ascii_payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"{name} must be canonical base64") from exc
+    if base64.b64encode(payload).decode("ascii") != encoded:
+        raise ValueError(f"{name} must use canonical base64 padding")
+    return payload
+
+
+def _item_content_from_wire(value, name: str) -> ItemViewContent:
+    payload = _canonical_base64(value, name)
+    try:
+        return decode_item_view_content(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical ITM1: {exc}") from exc
+
+
 def _semantic_content_from_wire(value, name: str) -> SemanticTextContent:
     encoded = _wire_text(value, name)
     try:
@@ -782,7 +839,7 @@ def _validate_collection_draw_shape(
     order: int,
     z_order: int,
     bounds: ObjectBounds,
-    content: SemanticTextContent,
+    content: SemanticTextContent | ItemViewContent,
 ) -> None:
     """Reassert family rules from immutable O(1) content summaries."""
 
@@ -1052,6 +1109,24 @@ def _retained_draw_to_wire(
             "bounds": _bounds_to_wire(draw.bounds),
             "content_stx1_base64": _semantic_content_to_wire(draw.content),
         }
+    if isinstance(draw, ItemViewDraw):
+        _validate_collection_draw_shape(
+            ControlKind.ITEM_VIEW,
+            draw.state,
+            draw.order,
+            draw.z_order,
+            draw.bounds,
+            draw.content,
+        )
+        return {
+            "kind": "item_view",
+            "control_id": draw.control_id,
+            "state": int(draw.state),
+            "order": draw.order,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "content_itm1_base64": _item_content_to_wire(draw.content),
+        }
     if isinstance(draw, TabSetDraw):
         return {
             "kind": "tabset",
@@ -1252,6 +1327,45 @@ def _text_collection_from_wire(
     )
 
 
+def _item_view_from_wire(data, name: str) -> ItemViewDraw:
+    wire = _wire_object(data, name, _ITEM_VIEW_WIRE_FIELDS)
+    if wire["kind"] != "item_view":
+        raise ValueError(f"{name} kind must be item_view")
+    state = _control_state_from_wire(wire["state"], f"{name} state")
+    order = _wire_integer(
+        wire["order"], f"{name} order", minimum=0, maximum=UINT32_MAX
+    )
+    z_order = _wire_integer(
+        wire["z_order"],
+        f"{name} z_order",
+        minimum=INT32_MIN,
+        maximum=INT32_MAX,
+    )
+    bounds = ObjectBounds(
+        *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+    )
+    content = _item_content_from_wire(
+        wire["content_itm1_base64"],
+        f"{name} content_itm1_base64",
+    )
+    _validate_collection_draw_shape(
+        ControlKind.ITEM_VIEW, state, order, z_order, bounds, content
+    )
+    return ItemViewDraw(
+        control_id=_wire_integer(
+            wire["control_id"],
+            f"{name} control_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        state=state,
+        order=order,
+        z_order=z_order,
+        bounds=bounds,
+        content=content,
+    )
+
+
 def _tabset_from_wire(data, name: str) -> TabSetDraw:
     wire = _wire_object(data, name, _TABSET_WIRE_FIELDS)
     if wire["kind"] != "tabset":
@@ -1305,6 +1419,7 @@ def _retained_draw_from_wire(
     | TextAreaDraw
     | TextGridDraw
     | TabSetDraw
+    | ItemViewDraw
 ):
     if not isinstance(data, Mapping):
         raise TypeError(f"{name} must be an object")
@@ -1656,6 +1771,8 @@ def _retained_draw_from_wire(
         return _text_collection_from_wire(data, name, ControlKind.TEXT_GRID)
     if kind == "tabset":
         return _tabset_from_wire(data, name)
+    if kind == "item_view":
+        return _item_view_from_wire(data, name)
     raise ValueError(f"{name} kind is not a retained draw kind")
 
 
@@ -3738,7 +3855,8 @@ class SessionServer:
             fields = _TEXT_EVENT_FIELDS.get(kind)
             if fields is None:
                 raise ValueError(
-                    "text event_kind must be 2 PLACE, 3 EXTEND, 4 SCROLL, or 5 FOLLOW"
+                    "text event_kind must be 2 PLACE, 3 EXTEND, 4 SCROLL, 5 FOLLOW, "
+                    "6 SELECT, 7 OPEN, 8 EXPAND, 9 COLLAPSE, or 10 CHECK"
                 )
             params = _wire_object(params, "text control input", fields)
         elif method == "send_pointer":

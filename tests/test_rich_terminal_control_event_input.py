@@ -30,6 +30,7 @@ from tests.test_rich_terminal_dual_backend import (
 
 CONTROLS = 0x100
 CONTROL_COLLECTIONS = 0x200
+CONTROL_ITEMS = 0x400
 REVISION = 17
 REPORT_BEGIN = 30
 REPORT_END = 31
@@ -229,6 +230,12 @@ def test_place_extend_and_scroll_round_trip_through_the_guest_parser(runtime):
     assert (activate["content_revision"], activate["wheel_y"]) == (0, 0)
 
 
+def _select_bytes() -> bytes:
+    return encode_control_event(
+        _event(ControlEventKind.SELECT, content_revision=43, item_key=9)
+    )
+
+
 def _place_bytes() -> bytes:
     return encode_control_event(
         _event(
@@ -277,13 +284,19 @@ def _with(payload: bytes, offset: int, replacement: bytes) -> bytes:
         ),
         # Unknown kinds remain invalid.
         (
-            _with(_place_bytes(), 24, (6).to_bytes(2, "little")),
+            _with(_place_bytes(), 24, (11).to_bytes(2, "little")),
             CONTROLS | CONTROL_COLLECTIONS,
         ),
         # FOLLOW needs RET_CONTROL_COLLECTIONS, like the other positions.
         (
             _with(_place_bytes(), 24, (5).to_bytes(2, "little")),
             CONTROLS,
+        ),
+        # Item kinds need RET_CONTROL_ITEMS, and their offset is reserved.
+        (_select_bytes(), CONTROLS | CONTROL_COLLECTIONS),
+        (
+            _with(_select_bytes(), 56, b"\x01"),
+            CONTROLS | CONTROL_COLLECTIONS | CONTROL_ITEMS,
         ),
     ),
 )
@@ -294,3 +307,26 @@ def test_guest_parser_rejects_noncanonical_positioned_events(runtime, payload, f
     # PT-S-SESSION-LOST: the module fails the session rather than guessing.
     assert report["dispatch"] == 2
     assert report["has"] == 0
+
+
+def test_item_events_round_trip_through_the_guest_parser(runtime):
+    features = CONTROLS | CONTROL_COLLECTIONS | CONTROL_ITEMS
+    for kind in (
+        ControlEventKind.SELECT,
+        ControlEventKind.OPEN,
+        ControlEventKind.EXPAND,
+        ControlEventKind.COLLAPSE,
+        ControlEventKind.CHECK,
+    ):
+        report = _dispatch(
+            runtime,
+            encode_control_event(_event(kind, content_revision=43, item_key=9)),
+            features=features,
+        )
+        assert (report["dispatch"], report["has"]) == (0, -1)
+        assert report["kind"] == int(kind)
+        assert (report["content_revision"], report["item_key"], report["offset"]) == (
+            43,
+            9,
+            0,
+        )

@@ -295,7 +295,7 @@ def test_text_event_rpc_forwards_each_kind_with_its_exact_tail():
     ("params", "match"),
     (
         (_text_params(1), "event_kind must be"),
-        (_text_params(6), "event_kind must be"),
+        (_text_params(11), "event_kind must be"),
         (_text_params(2, wheel_y=1), "fields are not exact"),
         (_text_params(4, item_key=5), "fields are not exact"),
         (

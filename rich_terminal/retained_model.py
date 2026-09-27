@@ -28,6 +28,7 @@ class RetainedFeature(IntFlag):
     CADENCE = 1 << 5
     CONTROLS = 1 << 8
     CONTROL_COLLECTIONS = 1 << 9
+    CONTROL_ITEMS = 1 << 10
 
 
 class ResourceFormat(IntEnum):
@@ -43,6 +44,7 @@ _ALL_FEATURES = (
     | RetainedFeature.CADENCE
     | RetainedFeature.CONTROLS
     | RetainedFeature.CONTROL_COLLECTIONS
+    | RetainedFeature.CONTROL_ITEMS
 )
 
 
@@ -246,6 +248,10 @@ class RetainedPolicy:
         control_collections = bool(features & RetainedFeature.CONTROL_COLLECTIONS)
         if control_collections and not controls:
             raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
+        # Item views need no larger minimum: the smallest ITM1 body and the
+        # 64-byte item events fit CONTROL_COLLECTIONS's minima.
+        if features & RetainedFeature.CONTROL_ITEMS and not control_collections:
+            raise ValueError("CONTROL_ITEMS requires CONTROL_COLLECTIONS")
         glyph_runs = self.max_glyph_run_bytes > 0
         if glyph_runs and self.max_objects == 0:
             raise ValueError("glyph-run capacity requires object capacity")

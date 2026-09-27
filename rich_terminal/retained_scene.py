@@ -46,6 +46,7 @@ from .semantic_content import (
     SemanticTextRole,
     SemanticTextState,
 )
+from .semantic_items import ItemRole, ItemViewContent, ViewItem
 
 
 INT32_MIN = -(1 << 31)
@@ -131,6 +132,7 @@ class ControlKind(IntEnum):
     TEXT_GRID = 6
     TABSET = 7
     TAB = 8
+    ITEM_VIEW = 9
 
 
 class ControlState(IntFlag):
@@ -690,7 +692,7 @@ def validate_control_shape(
     bounds: ObjectBounds | None,
     label: str,
     shortcut: str,
-    content: SemanticTextContent | None,
+    content: SemanticTextContent | ItemViewContent | None,
 ) -> tuple[ControlKind, ControlState]:
     """Validate the common scene/wire shape of one semantic control.
 
@@ -720,8 +722,10 @@ def validate_control_shape(
         raise TypeError("bounds must be ObjectBounds or None")
     label_bytes = _control_text_bytes("label", label)
     shortcut_bytes = _control_text_bytes("shortcut", shortcut)
-    if content is not None and not isinstance(content, SemanticTextContent):
-        raise TypeError("content must be SemanticTextContent or None")
+    if content is not None and not isinstance(
+        content, (SemanticTextContent, ItemViewContent)
+    ):
+        raise TypeError("content must be SemanticTextContent, ItemViewContent, or None")
 
     allowed = {
         ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
@@ -748,6 +752,9 @@ def validate_control_shape(
         ControlKind.TAB: (
             ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
         ),
+        ControlKind.ITEM_VIEW: (
+            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+        ),
     }[normalized_kind]
     if int(normalized_state) & ~int(allowed):
         raise ValueError(
@@ -764,6 +771,7 @@ def validate_control_shape(
         ControlKind.TEXT_AREA,
         ControlKind.TEXT_GRID,
         ControlKind.TABSET,
+        ControlKind.ITEM_VIEW,
     }
     if normalized_kind in root_kinds:
         if parent_control_id or order or bounds is None:
@@ -779,7 +787,10 @@ def validate_control_shape(
                 raise ValueError(
                     f"{normalized_kind.name} carries no semantic text content"
                 )
-        elif content is None:
+        elif normalized_kind is ControlKind.ITEM_VIEW:
+            if not isinstance(content, ItemViewContent):
+                raise ValueError("ITEM_VIEW requires an item collection")
+        elif not isinstance(content, SemanticTextContent):
             raise ValueError(
                 f"{normalized_kind.name} requires semantic text content"
             )
@@ -844,7 +855,7 @@ class ControlDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | None = None
+    content: SemanticTextContent | ItemViewContent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, OwnerIdentity):
@@ -1217,8 +1228,10 @@ class RetainedSceneModel:
         control_id: int,
         *,
         grid_allowed: bool,
+        item_view_allowed: bool = False,
     ) -> ControlDefinition:
-        """Resolve one visible, enabled TEXT_AREA (or TEXT_GRID) root."""
+        """Resolve one visible, enabled TEXT_AREA root, or also a TEXT_GRID
+        or ITEM_VIEW root when those are allowed."""
 
         _owner_scene, definition = self._active_control(owner, control_id)
         kinds = (
@@ -1226,6 +1239,8 @@ class RetainedSceneModel:
             if grid_allowed
             else (ControlKind.TEXT_AREA,)
         )
+        if item_view_allowed:
+            kinds += (ControlKind.ITEM_VIEW,)
         if definition.kind not in kinds or definition.content is None:
             raise SceneModelError(
                 SceneErrorCode.STATE,
@@ -1288,6 +1303,60 @@ class RetainedSceneModel:
             raise SceneModelError(
                 SceneErrorCode.STATE,
                 "grid position does not name a selectable content item",
+            )
+        return item
+
+    def require_item(
+        self,
+        owner: OwnerIdentity,
+        control_id: int,
+        *,
+        content_revision: int,
+        item_key: int,
+    ) -> ViewItem:
+        """Resolve one ITM1 item an item event may name.
+
+        The item must be carried in the control's current content revision,
+        shown in its viewport, and an ITEM rather than a section heading.
+        Each event's own state rule belongs to the caller.  Nothing here
+        changes the guest's selection, expansion, or checks.
+        """
+
+        _owner_scene, definition = self._active_control(owner, control_id)
+        if definition.kind is not ControlKind.ITEM_VIEW or not isinstance(
+            definition.content, ItemViewContent
+        ):
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "control kind does not accept an item event",
+            )
+        if not definition.visible or not definition.enabled:
+            raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+        content = definition.content
+        if content_revision != content.content_revision:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "item event names a superseded content revision",
+            )
+        item = content.item(item_key)
+        if item is None:
+            raise SceneModelError(
+                SceneErrorCode.MISSING_ID,
+                "item event names an item that is not carried",
+            )
+        if not (
+            content.viewport_first
+            <= item.ordinal
+            < content.viewport_first + content.viewport_count
+        ):
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "item event names an item outside the viewport",
+            )
+        if item.role is not ItemRole.ITEM:
+            raise SceneModelError(
+                SceneErrorCode.STATE,
+                "item event names a section heading",
             )
         return item
 
@@ -1528,7 +1597,11 @@ class RetainedSceneModel:
         }:
             compatible = replace(definition, state=current.state) == current
             failure = "control replacement may change only the control state"
-        elif definition.kind in {ControlKind.TEXT_AREA, ControlKind.TEXT_GRID}:
+        elif definition.kind in {
+            ControlKind.TEXT_AREA,
+            ControlKind.TEXT_GRID,
+            ControlKind.ITEM_VIEW,
+        }:
             compatible = (
                 replace(
                     definition,
@@ -2365,6 +2438,11 @@ class RetainedSceneModel:
                 SceneErrorCode.FEATURE,
                 "CONTROL_COLLECTIONS was not advertised",
             )
+        if (
+            definition.kind is ControlKind.ITEM_VIEW
+            and not features & RetainedFeature.CONTROL_ITEMS
+        ):
+            self._fail(SceneErrorCode.FEATURE, "CONTROL_ITEMS was not advertised")
 
     def _validate_control_dependencies(
         self,
@@ -2381,6 +2459,7 @@ class RetainedSceneModel:
             ControlKind.TEXT_AREA,
             ControlKind.TEXT_GRID,
             ControlKind.TABSET,
+            ControlKind.ITEM_VIEW,
         }:
             return
         parent = owner_scene.controls.get(definition.parent_control_id)
@@ -2521,6 +2600,7 @@ class RetainedSceneModel:
                     ControlKind.TEXT_AREA,
                     ControlKind.TEXT_GRID,
                     ControlKind.TABSET,
+                    ControlKind.ITEM_VIEW,
                 }:
                     continue
                 order_key = (definition.parent_control_id, definition.order)

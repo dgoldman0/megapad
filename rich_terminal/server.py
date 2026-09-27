@@ -83,6 +83,7 @@ from .retained_scene import (
     SeriesDefinition,
 )
 from .semantic_content import TextStyle
+from .semantic_items import ItemState
 from .retained_resources import (
     PreparedResourceInstall,
     ResourceStoreError,
@@ -213,6 +214,24 @@ class TerminalSessionError(RuntimeError):
 
 class TerminalInputPending(TerminalSessionError):
     """Input must wait for a transaction/result boundary without being lost."""
+
+
+def _require_item_event_state(kind: ControlEventKind, state: ItemState) -> None:
+    """Each item event's own rule on the item's state (SEMANTIC-CONTENT-1)."""
+
+    if kind in (ControlEventKind.SELECT, ControlEventKind.OPEN):
+        ok = not state & ItemState.UNAVAILABLE
+    elif kind is ControlEventKind.EXPAND:
+        ok = bool(state & ItemState.EXPANDABLE) and not state & ItemState.EXPANDED
+    elif kind is ControlEventKind.COLLAPSE:
+        ok = bool(state & ItemState.EXPANDED)
+    else:  # CHECK
+        ok = bool(state & ItemState.CHECKABLE) and not state & ItemState.UNAVAILABLE
+    if not ok:
+        raise SceneModelError(
+            SceneErrorCode.STATE,
+            f"{kind.name} does not apply to an item in this state",
+        )
 
 
 def _integer(name: str, value, *, minimum: int, maximum: int) -> int:
@@ -1128,6 +1147,9 @@ class RichTerminalCore:
             raise TerminalSessionError(
                 "positioned control input requires active RET_CONTROL_COLLECTIONS"
             )
+        items_active = bool(policy.features & RetainedFeature.CONTROL_ITEMS)
+        if event.names_item and not items_active:
+            raise TerminalSessionError("item input requires active RET_CONTROL_ITEMS")
         owner = OwnerIdentity(
             session_id=session_id,
             presentation_epoch=clock.presentation_epoch,
@@ -1143,7 +1165,16 @@ class RichTerminalCore:
                     owner,
                     event.control_id,
                     grid_allowed=True,
+                    item_view_allowed=items_active,
                 )
+            elif event.names_item:
+                item = scene.require_item(
+                    owner,
+                    event.control_id,
+                    content_revision=event.content_revision,
+                    item_key=event.item_key,
+                )
+                _require_item_event_state(event.event_kind, item.state)
             else:
                 item = scene.require_text_position(
                     owner,

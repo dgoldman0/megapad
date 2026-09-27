@@ -817,3 +817,74 @@ def test_a_plain_press_follows_a_link_in_read_only_text():
         _text_request(offer, 3, 2, 2, modifiers=1),
         _text_request(offer, 2, 2, 0),
     ]
+
+
+# --- Item views ----------------------------------------------------------------
+
+from rich_terminal.pygame_view import ItemHitTarget, ItemPart  # noqa: E402
+
+
+def _item_target():
+    rect = PixelRect
+    return ItemHitTarget(
+        ControlIdentity(7, 2, 40),
+        rect(0, 0, 100, 30),
+        6,
+        (
+            ItemPart(1, rect(0, 0, 100, 10), True, rect(0, 0, 20, 10), True),
+            ItemPart(2, rect(0, 10, 100, 20), True, None, False, rect(20, 10, 40, 20)),
+            ItemPart(3, rect(0, 20, 100, 30), False),
+        ),
+    )
+
+
+def _item_request(offer, kind, key):
+    return (
+        "send_text_event",
+        {
+            "owner_id": 7,
+            "owner_generation": 2,
+            "control_id": 40,
+            "event_kind": kind,
+            "modifiers": 0,
+            "content_revision": 6,
+            "item_key": key,
+            "generation": 5,
+            "display_offer_id": offer.offer_id,
+            "display_scope": display_scope_to_wire(offer.scope),
+        },
+    )
+
+
+def test_item_presses_select_open_expand_collapse_and_check(monkeypatch):
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    offer = _offer(3)
+    _promote(state, keyboard, offer, (_occlusion(rect=(0, 0, 100, 80)), _item_target()))
+    clock = iter((10.0, 10.2, 11.0, 12.0, 13.0, 14.0, 14.9))
+    monkeypatch.setattr(session_viewer.time, "monotonic", lambda: next(clock))
+
+    assert pointer.button_down(1, (60, 5), (100, 80))    # select item 1
+    assert pointer.button_down(1, (60, 5), (100, 80))    # a double press opens it
+    assert pointer.button_down(1, (60, 5), (100, 80))    # a new first press
+    assert pointer.button_down(1, (5, 5), (100, 80))     # its mark collapses it
+    assert pointer.button_down(1, (30, 15), (100, 80))   # item 2's check box
+    assert pointer.button_down(1, (60, 15), (100, 80))   # select item 2
+    assert not pointer.button_down(1, (60, 25), (100, 80))  # unselectable
+    assert pointer.wheel(0, -1, (60, 15), (100, 80))
+
+    scroll = {
+        "owner_id": 7, "owner_generation": 2, "control_id": 40, "event_kind": 4,
+        "modifiers": 0, "wheel_x": 0, "wheel_y": 1, "generation": 5,
+        "display_offer_id": offer.offer_id,
+        "display_scope": display_scope_to_wire(offer.scope),
+    }
+    assert client.requests == [
+        _item_request(offer, 6, 1),
+        _item_request(offer, 7, 1),
+        _item_request(offer, 6, 1),
+        _item_request(offer, 9, 1),
+        _item_request(offer, 10, 2),
+        _item_request(offer, 6, 2),
+        ("send_text_event", scroll),
+    ]

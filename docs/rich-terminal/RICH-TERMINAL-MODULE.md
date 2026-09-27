@@ -88,7 +88,9 @@ The module admits in-place RETAINED-1 feature bit 8 `RET_CONTROLS`, supplies
 typed MENU_BAR/MENU/MENU_ITEM/MENU_SEPARATOR writers, and decodes
 revision-bound `CONTROL_EVENT ACTIVATE`. With bit 9 `RET_CONTROL_COLLECTIONS`
 it also decodes the positioned `PLACE`, `EXTEND`, and `FOLLOW` kinds and
-`SCROLL`, each at its one exact length. Their tails stay in the session event buffer, like
+`SCROLL`, and with bit 10 `RET_CONTROL_ITEMS` the item kinds `SELECT`,
+`OPEN`, `EXPAND`, `COLLAPSE`, and `CHECK`, whose tail has the position
+tail's shape with a zero offset, each at its one exact length. Their tails stay in the session event buffer, like
 TEXT data, until the next `PT-SERVICE`; the typed readers above return zero on
 an event without that tail. This completes only the MegaPad guest
 transport boundary. Independent CONTROL high-water validation, shared
@@ -733,8 +735,10 @@ and physical renderer carry that complete advertised family. Series, vector,
 and image remain separate optional families and are not implied by this pass.
 
 The guest CONTROL writer is now extended in place rather than split into a
-second encoder. It accepts retained mask `0x33f`, requires bit 8 whenever bit 9
-is present, and admits kinds 5 through 8 only for a negotiated bit-9 session.
+second encoder. It accepts retained mask `0x73f`, requires bit 8 whenever bit 9
+is present and bit 9 whenever bit 10 is, admits kinds 5 through 8 only for a
+negotiated bit-9 session, and admits kind 9, `ITEM_VIEW`, only for a bit-10
+session and with at least the 48-byte smallest ITM1 body.
 TEXT_AREA and TEXT_GRID require at least the fixed 72-byte STX1 header; the
 caller supplies the complete canonical STX1 body as one bounded span, while the
 terminal remains the authority for its item and graph validation. All three

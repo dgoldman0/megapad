@@ -45,6 +45,16 @@ from rich_terminal.semantic_content import (
     StyleRun,
     TextStyle,
 )
+from rich_terminal.semantic_items import (
+    ItemColumn,
+    ItemColumnKind,
+    ItemField,
+    ItemRole,
+    ItemState,
+    ItemViewContent,
+    ItemViewRole,
+    ViewItem,
+)
 from rich_terminal.retained_wire import (
     ControlEvent,
     ControlEventKind,
@@ -83,12 +93,16 @@ def _config() -> TerminalConfig:
     )
 
 
-def _policy(*, controls: bool, collections: bool = False) -> RetainedPolicy:
+def _policy(
+    *, controls: bool, collections: bool = False, items: bool = False
+) -> RetainedPolicy:
     features = RetainedFeature.CORE
     if controls:
         features |= RetainedFeature.CONTROLS
     if collections:
         features |= RetainedFeature.CONTROL_COLLECTIONS
+    if items:
+        features |= RetainedFeature.CONTROL_ITEMS
     return RetainedPolicy(
         features=features,
         max_owner_records=2,
@@ -694,4 +708,142 @@ def test_driver_maps_closed_and_failed_lifetimes_before_control_validation() -> 
     assert (
         failed.send_control_event(0, 0, 0, model_revision=MODEL_REVISION)
         is DriverStatus.FAILED
+    )
+
+
+# --- Item views --------------------------------------------------------------
+
+ITEM_VIEW_ID = 60
+ITEM_REVISION = 5
+
+
+def _item_view_controls(owner) -> dict[int, ControlDefinition]:
+    S = ItemState
+
+    def item(key, ordinal, text, parent=0, depth=0, state=0):
+        return ViewItem(key, parent, ordinal, depth, S(state), ItemRole.ITEM,
+                        (ItemField(text),))
+
+    tree = ItemViewContent(
+        ITEM_REVISION, ItemViewRole.TREE, 0, (ItemColumn(ItemColumnKind.TEXT),),
+        6, 0, 5,
+        (
+            item(1, 0, "/", state=S.EXPANDABLE | S.EXPANDED),
+            item(2, 1, "docs", 1, 1, S.EXPANDABLE),
+            item(3, 2, "notes.md", 1, 1, S.SELECTED),
+            item(4, 3, "todo", 1, 1, S.CHECKABLE),
+            item(5, 4, "locked", 1, 1, S.UNAVAILABLE),
+            # Carried, but past the viewport.
+            item(6, 5, "zeta", 1, 1),
+        ),
+    )
+    return {
+        ITEM_VIEW_ID: ControlDefinition(
+            owner, ITEM_VIEW_ID, ControlKind.ITEM_VIEW,
+            ControlState.VISIBLE | ControlState.ENABLED, 0, 1, 0, 0,
+            ObjectBounds(0, 0, 2, 2), "", "", tree,
+        ),
+    }
+
+
+def _item_core(*, items: bool = True) -> RichTerminalCore:
+    core = _text_core()
+    owner = OwnerIdentity(SESSION_ID, 0, OWNER_ID, OWNER_GENERATION)
+    state = core._retained_model._state
+    owner_scene = state.active.owners[OWNER_ID]
+    controls = dict(owner_scene.controls)
+    controls.update(_item_view_controls(owner))
+    patched = OwnerScene(
+        owner=owner_scene.owner,
+        regions=owner_scene.regions,
+        objects=owner_scene.objects,
+        series=owner_scene.series,
+        usage=owner_scene.usage,
+        controls=MappingProxyType(controls),
+    )
+    core._retained_model._state = SceneModelState(
+        revision=state.revision,
+        geometry=state.geometry,
+        active=RetainedScene(MappingProxyType({OWNER_ID: patched})),
+        hidden=None,
+        hidden_kind=None,
+        requirement=None,
+        retained_visible=True,
+        retained_initialized=True,
+    )
+    core._session_retained_policy = _policy(controls=True, collections=True, items=items)
+    return core
+
+
+def test_driver_emits_item_events_for_shown_items() -> None:
+    for kind, key in (
+        (ControlEventKind.SELECT, 3),
+        (ControlEventKind.OPEN, 3),
+        (ControlEventKind.EXPAND, 2),
+        (ControlEventKind.COLLAPSE, 1),
+        (ControlEventKind.CHECK, 4),
+    ):
+        core = _item_core()
+        before = core.retained_state
+        driver = _driver(core)
+        assert (
+            _send_text(driver, ITEM_VIEW_ID, kind, modifiers=1,
+                       content_revision=ITEM_REVISION, item_key=key)
+            is DriverStatus.PROGRESS
+        )
+        assert driver.pending_outbound_bytes == 40 + 64
+        (event,) = _sent_events(driver)
+        assert event == ControlEvent(
+            OWNER_ID, OWNER_GENERATION, ITEM_VIEW_ID, kind, 1, MODEL_REVISION,
+            content_revision=ITEM_REVISION, item_key=key,
+        )
+        assert core.retained_state is before
+    driver = _driver(_item_core())
+    assert (
+        _send_text(driver, ITEM_VIEW_ID, ControlEventKind.SCROLL, wheel_y=-1)
+        is DriverStatus.PROGRESS
+    )
+    assert driver.pending_outbound_bytes == 40 + 48
+
+
+@pytest.mark.parametrize(
+    ("control_id", "kind", "key"),
+    (
+        (ITEM_VIEW_ID, ControlEventKind.EXPAND, 1),    # already expanded
+        (ITEM_VIEW_ID, ControlEventKind.COLLAPSE, 2),  # not expanded
+        (ITEM_VIEW_ID, ControlEventKind.EXPAND, 3),    # not expandable
+        (ITEM_VIEW_ID, ControlEventKind.CHECK, 3),     # not checkable
+        (ITEM_VIEW_ID, ControlEventKind.SELECT, 5),    # unavailable
+        (ITEM_VIEW_ID, ControlEventKind.OPEN, 5),
+        (ITEM_VIEW_ID, ControlEventKind.SELECT, 6),    # past the viewport
+        (ITEM_VIEW_ID, ControlEventKind.SELECT, 99),   # not carried
+        (TEXT_AREA_ID, ControlEventKind.SELECT, 1),    # not an item view
+    ),
+)
+def test_driver_refuses_item_events_the_scene_does_not_allow(control_id, kind, key):
+    driver = _driver(_item_core())
+    assert (
+        _send_text(driver, control_id, kind, content_revision=ITEM_REVISION, item_key=key)
+        is DriverStatus.INVALID
+    )
+    stale = _send_text(driver, ITEM_VIEW_ID, ControlEventKind.SELECT,
+                       content_revision=ITEM_REVISION - 1, item_key=3)
+    assert stale is DriverStatus.INVALID
+    assert driver.pending_outbound_events == 0
+
+
+def test_item_events_require_the_items_feature() -> None:
+    core = _item_core(items=False)
+    with pytest.raises(TerminalSessionError, match="RET_CONTROL_ITEMS"):
+        core.send_control_event(
+            OWNER_ID, OWNER_GENERATION, ITEM_VIEW_ID,
+            model_revision=MODEL_REVISION,
+            event_kind=ControlEventKind.SELECT,
+            content_revision=ITEM_REVISION, item_key=3,
+        )
+    # Without the feature an item view is no scroll target either.
+    driver = _driver(core)
+    assert (
+        _send_text(driver, ITEM_VIEW_ID, ControlEventKind.SCROLL, wheel_y=1)
+        is DriverStatus.INVALID
     )

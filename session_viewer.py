@@ -23,7 +23,9 @@ from rich_terminal.pygame_view import (
     ControlHitTarget,
     ControlIdentity,
     ControlSurface,
+    HIT_MAP_ENTRY_TYPES,
     HitMapEntry,
+    ItemHitTarget,
     PointerTarget,
     RegionOcclusion,
     ResidualPoint,
@@ -539,16 +541,11 @@ class _RetainedDisplayState:
     @staticmethod
     def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
         entries = tuple(hit_entries)
-        if any(
-            not isinstance(
-                entry,
-                (ControlHitTarget, RegionOcclusion, ControlSurface, TextHitTarget),
-            )
-            for entry in entries
-        ):
+        if any(not isinstance(entry, HIT_MAP_ENTRY_TYPES) for entry in entries):
             raise TypeError(
                 "hit_entries must contain only ControlHitTarget, "
-                "RegionOcclusion, ControlSurface, or TextHitTarget values"
+                "RegionOcclusion, ControlSurface, TextHitTarget, or "
+                "ItemHitTarget values"
             )
         return entries
 
@@ -694,6 +691,21 @@ class _RetainedDisplayState:
             return None
         for entry in self._hit_entries:
             if isinstance(entry, TextHitTarget) and entry.identity == identity:
+                return entry
+        return None
+
+    def item_target(
+        self,
+        identity: ControlIdentity,
+        *,
+        display_token: tuple[int, DisplayScope] | None,
+    ) -> ItemHitTarget | None:
+        """Return the acknowledged item view with this identity, if any."""
+
+        if display_token is None or display_token != self._hit_map_token:
+            return None
+        for entry in self._hit_entries:
+            if isinstance(entry, ItemHitTarget) and entry.identity == identity:
                 return entry
         return None
 
@@ -991,6 +1003,34 @@ class _GuestKeyboardForwarder:
             )
         return self._request_now("send_text_event", **params)
 
+    def send_item_event(
+        self,
+        target: ItemHitTarget,
+        kind: ControlEventKind,
+        *,
+        modifiers: int,
+        item_key: int = 0,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> bool:
+        """Send one item event, or SCROLL, for an acknowledged item view."""
+
+        if not isinstance(target, ItemHitTarget):
+            raise TypeError("target must be ItemHitTarget")
+        identity = target.identity
+        params = {
+            "owner_id": identity.owner_id,
+            "owner_generation": identity.owner_generation,
+            "control_id": identity.control_id,
+            "event_kind": int(kind),
+            "modifiers": modifiers,
+        }
+        if kind is ControlEventKind.SCROLL:
+            params.update(wheel_x=wheel_x, wheel_y=wheel_y)
+        else:
+            params.update(content_revision=target.content_revision, item_key=item_key)
+        return self._request_now("send_text_event", **params)
+
     def _request_input(self, method: str, **params) -> None:
         if not self.input_enabled:
             self._pending_inputs.clear()
@@ -1109,6 +1149,14 @@ class _GuestKeyboardForwarder:
 # pygame buttons 1..3 are left, middle, and right: APT-1 button bits 0..2.
 _POINTER_BUTTON_BITS = {1: 0x01, 2: 0x02, 3: 0x04}
 _LEFT_BUTTON = 0x01
+# A second press on the same item within this many seconds opens it.
+_DOUBLE_PRESS_SECONDS = 0.45
+_ITEM_ACTIONS = {
+    "select": ControlEventKind.SELECT,
+    "expand": ControlEventKind.EXPAND,
+    "collapse": ControlEventKind.COLLAPSE,
+    "check": ControlEventKind.CHECK,
+}
 _APT_SHIFT = 0x01
 _APT_CTRL = 0x02
 _WHEEL_LIMIT = (1 << 15) - 1
@@ -1125,7 +1173,10 @@ class _PointerRouter:
     A menu, menu item, or tab activates on a matching release in the same
     acknowledged frame.  A press on an enabled text root sends PLACE (EXTEND
     with Shift), and dragging from it sends EXTEND at the position under the
-    pointer, clamped to the root.  A press on CELL or residual content starts
+    pointer, clamped to the root.  A press on an item view sends EXPAND or
+    COLLAPSE on a disclosure mark, CHECK on a check box, and otherwise
+    SELECT, or OPEN for a second press on the same item within the
+    double-press interval.  A press on CELL or residual content starts
     a raw gesture: its moves and release reach the guest at the cell under the
     pointer until no button is held.  Wheel input scrolls a text root or
     reaches residual content as raw wheel steps.
@@ -1162,6 +1213,8 @@ class _PointerRouter:
         self._owed_release: tuple[tuple[int, int], int] | None = None
         self._text_identity: ControlIdentity | None = None
         self._text_position: TextPosition | None = None
+        # The last item a press selected, for recognizing a double press.
+        self._last_item_press: tuple[ControlIdentity, int, float] | None = None
 
     def _authority_token(self) -> tuple[int, DisplayScope] | None:
         display_ack = self.keyboard.display_ack
@@ -1414,6 +1467,35 @@ class _PointerRouter:
                 self._text_identity = target.identity
                 self._text_position = text_position
             return True
+        if isinstance(target, ItemHitTarget):
+            if bit != _LEFT_BUTTON:
+                return False
+            x, y, _width, _height = self._point_and_extent(position, terminal_size)
+            hit = target.item_at(x, y)
+            if hit is None:
+                return False
+            action, item_key = hit
+            kind = _ITEM_ACTIONS[action]
+            now = time.monotonic()
+            if kind is ControlEventKind.SELECT:
+                last = self._last_item_press
+                if (
+                    last is not None
+                    and last[0] == target.identity
+                    and last[1] == item_key
+                    and now - last[2] <= _DOUBLE_PRESS_SECONDS
+                ):
+                    # SEMANTIC-CONTENT-1: a second press on the same item
+                    # within the double-press interval opens it.
+                    kind = ControlEventKind.OPEN
+            self._last_item_press = (
+                (target.identity, item_key, now)
+                if kind is ControlEventKind.SELECT
+                else None
+            )
+            return self.keyboard.send_item_event(
+                target, kind, modifiers=modifiers, item_key=item_key
+            )
         if isinstance(target, ResidualPoint):
             cell = (target.column, target.row)
             if self._send_raw(cell, kind=2, buttons=bit, modifiers=modifiers):
@@ -1488,6 +1570,14 @@ class _PointerRouter:
         target = self._resolve(position, terminal_size)
         if isinstance(target, TextHitTarget):
             return self.keyboard.send_text_event(
+                target,
+                ControlEventKind.SCROLL,
+                modifiers=modifiers,
+                wheel_x=wheel_x,
+                wheel_y=wheel_y,
+            )
+        if isinstance(target, ItemHitTarget):
+            return self.keyboard.send_item_event(
                 target,
                 ControlEventKind.SCROLL,
                 modifiers=modifiers,

@@ -51,10 +51,15 @@ from .semantic_content import (
     decode_semantic_text_content,
     encode_semantic_text_content,
 )
+from .semantic_items import (
+    ItemViewContent,
+    decode_item_view_content,
+    encode_item_view_content,
+)
 
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0x33F
+_RETAINED_FEATURE_MASK = 0x73F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -168,18 +173,35 @@ class ControlEventKind(IntEnum):
     EXTEND = 3
     SCROLL = 4
     FOLLOW = 5
+    SELECT = 6
+    OPEN = 7
+    EXPAND = 8
+    COLLAPSE = 9
+    CHECK = 10
 
 
 _POSITIONED_CONTROL_EVENTS = frozenset(
     (ControlEventKind.PLACE, ControlEventKind.EXTEND, ControlEventKind.FOLLOW)
 )
+# Item events name one ITM1 item; their tail has the position tail's shape
+# with both u32 fields reserved.
+ITEM_CONTROL_EVENTS = frozenset(
+    (
+        ControlEventKind.SELECT,
+        ControlEventKind.OPEN,
+        ControlEventKind.EXPAND,
+        ControlEventKind.COLLAPSE,
+        ControlEventKind.CHECK,
+    )
+)
+_KEYED_CONTROL_EVENTS = _POSITIONED_CONTROL_EVENTS | ITEM_CONTROL_EVENTS
 
 
 def control_event_payload_size(kind: ControlEventKind) -> int:
     """Return the exact CONTROL_EVENT payload length for one event kind."""
 
     normalized = _enum("event_kind", ControlEventKind, kind)
-    if normalized in _POSITIONED_CONTROL_EVENTS:
+    if normalized in _KEYED_CONTROL_EVENTS:
         return _CONTROL_EVENT.size + _CONTROL_EVENT_POSITION.size
     if normalized is ControlEventKind.SCROLL:
         return _CONTROL_EVENT.size + _CONTROL_EVENT_SCROLL.size
@@ -342,6 +364,11 @@ class RetainedCaps:
             and not features & RetainedFeature.CONTROLS
         ):
             raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
+        if (
+            features & RetainedFeature.CONTROL_ITEMS
+            and not features & RetainedFeature.CONTROL_COLLECTIONS
+        ):
+            raise ValueError("CONTROL_ITEMS requires CONTROL_COLLECTIONS")
         object.__setattr__(self, "features", features)
         for name in (
             "max_owner_records",
@@ -962,7 +989,7 @@ class ControlWireDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | None = None
+    content: SemanticTextContent | ItemViewContent | None = None
 
     def __post_init__(self) -> None:
         for name, minimum in (
@@ -1019,9 +1046,11 @@ class ControlWireDefinition:
 class ControlEvent:
     """Revision-bound semantic intent emitted by the terminal.
 
-    ``PLACE`` and ``EXTEND`` name one STX1 position by content revision, item
-    key, and scalar offset; ``SCROLL`` carries signed wheel detents.  Fields a
-    kind does not carry must be zero, so every value has one wire form.
+    ``PLACE``, ``EXTEND``, and ``FOLLOW`` name one STX1 position by content
+    revision, item key, and scalar offset; the item events name one ITM1
+    item by content revision and item key; ``SCROLL`` carries signed wheel
+    detents.  Fields a kind does not carry must be zero, so every value has
+    one wire form.
     """
 
     owner_id: int
@@ -1061,6 +1090,7 @@ class ControlEvent:
             ),
         )
         positioned = kind in _POSITIONED_CONTROL_EVENTS
+        keyed = kind in _KEYED_CONTROL_EVENTS
         scroll = kind is ControlEventKind.SCROLL
         for name, maximum in (
             ("content_revision", UINT64_MAX),
@@ -1072,8 +1102,8 @@ class ControlEvent:
                 _integer(
                     name,
                     getattr(self, name),
-                    minimum=1 if positioned else 0,
-                    maximum=maximum if positioned else 0,
+                    minimum=1 if keyed else 0,
+                    maximum=maximum if keyed else 0,
                 ),
             )
         object.__setattr__(
@@ -1103,6 +1133,18 @@ class ControlEvent:
     @property
     def positioned(self) -> bool:
         return self.event_kind in _POSITIONED_CONTROL_EVENTS
+
+    @property
+    def names_item(self) -> bool:
+        """Whether this event names one ITM1 item."""
+
+        return self.event_kind in ITEM_CONTROL_EVENTS
+
+    @property
+    def keyed(self) -> bool:
+        """Whether this event carries a content revision and item key."""
+
+        return self.event_kind in _KEYED_CONTROL_EVENTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -2081,11 +2123,12 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
     shortcut_bytes = _integer(
         "shortcut_bytes", len(shortcut), minimum=0, maximum=UINT32_MAX
     )
-    content = (
-        b""
-        if definition.content is None
-        else encode_semantic_text_content(definition.content)
-    )
+    if definition.content is None:
+        content = b""
+    elif isinstance(definition.content, ItemViewContent):
+        content = encode_item_view_content(definition.content)
+    else:
+        content = encode_semantic_text_content(definition.content)
     content_bytes = _integer(
         "content_bytes", len(content), minimum=0, maximum=UINT32_MAX
     )
@@ -2158,14 +2201,14 @@ def decode_control_definition(payload) -> ControlWireDefinition:
         raw[text_offset : text_offset + shortcut_bytes], "CONTROL shortcut"
     )
     text_offset += shortcut_bytes
+    body = raw[text_offset : text_offset + content_bytes]
     try:
-        content = (
-            None
-            if content_bytes == 0
-            else decode_semantic_text_content(
-                raw[text_offset : text_offset + content_bytes]
-            )
-        )
+        if content_bytes == 0:
+            content = None
+        elif kind is ControlKind.ITEM_VIEW:
+            content = decode_item_view_content(body)
+        else:
+            content = decode_semantic_text_content(body)
     except SemanticContentError as exc:
         raise RetainedWireError(
             RetainedWireErrorCode(exc.code.value),
@@ -2219,7 +2262,7 @@ def encode_control_event(event: ControlEvent) -> bytes:
         0,
         event.model_revision,
     )
-    if event.positioned:
+    if event.keyed:
         return prefix + _CONTROL_EVENT_POSITION.pack(
             event.content_revision,
             event.item_key,
@@ -2265,10 +2308,14 @@ def decode_control_event(payload) -> ControlEvent:
             f"expected {expected}",
         )
     tail = {}
-    if kind in _POSITIONED_CONTROL_EVENTS:
+    if kind in _KEYED_CONTROL_EVENTS:
         content_revision, item_key, scalar_offset, tail_reserved = (
             _CONTROL_EVENT_POSITION.unpack_from(raw, _CONTROL_EVENT.size)
         )
+        if kind in ITEM_CONTROL_EVENTS:
+            # An item event's first u32 is reserved too.
+            tail_reserved |= scalar_offset
+            scalar_offset = 0
         tail = {
             "content_revision": content_revision,
             "item_key": item_key,

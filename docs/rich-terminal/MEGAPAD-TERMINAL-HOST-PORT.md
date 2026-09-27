@@ -503,7 +503,11 @@ pass records text targets for enabled text areas and grids, so the viewer can
 send positioned `PLACE`, `EXTEND`, `FOLLOW`, and `SCROLL` events naming the
 content revision, item key, and scalar offset it drew, and raw `POINTER` input
 for residual content; the terminal core revalidates each against the active
-scene, and a `FOLLOW` only on a link. The selected Akashic `desktop-apt1` policy now advertises bit 9;
+scene, and a `FOLLOW` only on a link. Enabled item views enter as item
+targets holding each shown item's area, disclosure mark, and check box, so
+the viewer can send `SELECT`, `OPEN` for a double press, `EXPAND`,
+`COLLAPSE`, `CHECK`, and `SCROLL`, which the core checks against the item's
+state in the active scene. The selected Akashic `desktop-apt1` policy now advertises bit 9;
 its generic UIDL/canonical-widget producer and ordinary product journey exercise
 this physical path. Applets do not register that projection or acquire
 renderer-facing code.

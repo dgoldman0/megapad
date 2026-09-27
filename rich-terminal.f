@@ -81,6 +81,7 @@ PROVIDED rich-terminal.f
 6 CONSTANT PT-CONTROL-TEXT-GRID
 7 CONSTANT PT-CONTROL-TABSET
 8 CONSTANT PT-CONTROL-TAB
+9 CONSTANT PT-CONTROL-ITEM-VIEW
 
 0x01 CONSTANT PT-CONTROL-VISIBLE
 0x02 CONSTANT PT-CONTROL-ENABLED
@@ -93,6 +94,11 @@ PROVIDED rich-terminal.f
 3 CONSTANT PT-CONTROL-EXTEND
 4 CONSTANT PT-CONTROL-SCROLL
 5 CONSTANT PT-CONTROL-FOLLOW
+6 CONSTANT PT-CONTROL-SELECT
+7 CONSTANT PT-CONTROL-OPEN
+8 CONSTANT PT-CONTROL-EXPAND
+9 CONSTANT PT-CONTROL-COLLAPSE
+10 CONSTANT PT-CONTROL-CHECK
 
 \ RETAINED-1 semantic values accepted by the typed resource API.
 1 CONSTANT PT-RESOURCE-RGBA8
@@ -240,7 +246,8 @@ PROVIDED rich-terminal.f
 0x10     CONSTANT _PT-RET-SERIES
 0x100    CONSTANT _PT-RET-CONTROLS
 0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS
-0x33F    CONSTANT _PT-RET-FEATURE-MASK
+0x400    CONSTANT _PT-RET-CONTROL-ITEMS
+0x73F    CONSTANT _PT-RET-FEATURE-MASK
 250      CONSTANT _PT-TIMEOUT-MS
 3        CONSTANT _PT-PROBE-LIMIT
 256      CONSTANT _PT-SERVICE-BYTES
@@ -654,6 +661,10 @@ VARIABLE _PT-U64-A
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
     _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CONTROL-COLLECTIONS AND 0<> ;
 
+: _PT-RET-CONTROL-ITEMS?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CONTROL-ITEMS AND 0<> ;
+
 : _PT-RET-CORE?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
     _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CORE AND 0<> ;
@@ -680,8 +691,9 @@ VARIABLE _PT-U64-A
 : _PT-I16@  ( a -- n )
     W@ DUP 0x8000 AND IF 0xFFFFFFFFFFFF0000 OR THEN ;
 
-\ Positioned (PLACE/EXTEND/FOLLOW) and SCROLL CONTROL_EVENT tails are read through
-\ the descriptor's data span.  A reader on an event without that exact tail
+\ Positioned (PLACE/EXTEND/FOLLOW), item (SELECT/OPEN/EXPAND/COLLAPSE/CHECK),
+\ and SCROLL CONTROL_EVENT tails are read through the descriptor's data span;
+\ an item tail is a position tail whose offset is always zero.  A reader on an event without that exact tail
 \ returns zero, so a caller never interprets another kind's bytes.
 : _PT-CONTROL-TAIL  ( event bytes -- a | 0 )
     OVER 56 + @ <> IF DROP 0 EXIT THEN
@@ -2128,6 +2140,9 @@ VARIABLE _PT-RV-TOTAL
     DUP 0x10 AND SWAP 0x08 AND 0= AND IF FALSE EXIT THEN
     _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND
     _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND IF FALSE EXIT THEN
+    \ Item views need collections, whose minima also cover them.
+    _PT-RV-FEATURES @ _PT-RET-CONTROL-ITEMS AND
+    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND IF FALSE EXIT THEN
 
     _PT-RV-P @ 16 + L@ 0= _PT-RV-P @ 20 + L@ 0= OR IF FALSE EXIT THEN
     _PT-RV-P @ 20 + L@ _PT-RV-P @ 16 + L@ U> IF FALSE EXIT THEN
@@ -2480,24 +2495,32 @@ VARIABLE _PT-RSZ-BASE
     THEN
     _PT-ACCEPT-EVENT ;
 
+: _PT-CONTROL-ITEM-EVENT?  ( kind -- flag )
+    PT-CONTROL-SELECT PT-CONTROL-CHECK 1+ WITHIN ;
+
 \ Exact payload bytes for one CONTROL_EVENT kind, or zero when unknown.
-\ PLACE, EXTEND, and FOLLOW carry the same position tail.
+\ PLACE, EXTEND, and FOLLOW carry the position tail, and the item kinds a
+\ tail of the same shape.
 : _PT-CONTROL-EVENT-BYTES  ( kind -- bytes )
     DUP PT-CONTROL-ACTIVATE = IF DROP 40 EXIT THEN
     DUP PT-CONTROL-PLACE = OVER PT-CONTROL-EXTEND = OR
     OVER PT-CONTROL-FOLLOW = OR IF DROP 64 EXIT THEN
+    DUP _PT-CONTROL-ITEM-EVENT? IF DROP 64 EXIT THEN
     PT-CONTROL-SCROLL = IF 48 EXIT THEN
     0 ;
 
 : _PT-CONTROL-TAIL-VALID?  ( kind -- flag )
     DUP PT-CONTROL-ACTIVATE = IF DROP TRUE EXIT THEN
-    PT-CONTROL-SCROLL = IF
+    DUP PT-CONTROL-SCROLL = IF
+        DROP
         _PT-RX-P @ 44 + L@ 0=
         _PT-RX-P @ 40 + W@ _PT-RX-P @ 42 + W@ OR 0<> AND EXIT
     THEN
     _PT-RX-P @ 40 + _PT-U64@ 0<>
     _PT-RX-P @ 48 + _PT-U64@ 0<> AND
-    _PT-RX-P @ 60 + L@ 0= AND ;
+    _PT-RX-P @ 60 + L@ 0= AND
+    \ An item tail's offset field is reserved too.
+    SWAP _PT-CONTROL-ITEM-EVENT? IF _PT-RX-P @ 56 + L@ 0= AND THEN ;
 
 : _PT-DISPATCH-CONTROL-EVENT  ( s -- status )
     DUP _PT-INPUT-STATE? 0= IF
@@ -2508,8 +2531,9 @@ VARIABLE _PT-RSZ-BASE
     THEN
     \ A crossed input is discarded once close has become irrevocable.  Before
     \ that boundary, only a positively discovered RET_CONTROLS session may
-    \ admit this additive event family, and only RET_CONTROL_COLLECTIONS may
-    \ admit the positioned and scroll kinds.
+    \ admit this additive event family, only RET_CONTROL_COLLECTIONS may
+    \ admit the positioned and scroll kinds, and only RET_CONTROL_ITEMS the
+    \ item kinds.
     DUP _PT.S.STATE @ PT-ST-CLOSING <>
     OVER _PT.S.CLOSE-PENDING? @ 0= AND IF
         DUP _PT-RET-CONTROLS? 0= IF
@@ -2517,6 +2541,11 @@ VARIABLE _PT-RSZ-BASE
         THEN
         _PT-RX-P @ 24 + W@ PT-CONTROL-ACTIVATE <> IF
             DUP _PT-RET-CONTROL-COLLECTIONS? 0= IF
+                6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+            THEN
+        THEN
+        _PT-RX-P @ 24 + W@ _PT-CONTROL-ITEM-EVENT? IF
+            DUP _PT-RET-CONTROL-ITEMS? 0= IF
                 6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
             THEN
         THEN
@@ -5526,6 +5555,14 @@ VARIABLE _PT-CT-TU
         _PT-CT-CONTENT-U @ IF FALSE EXIT THEN
         _PT-CT-STATE @ 0x0B INVERT AND 0= EXIT
     THEN
+    \ An item view carries at least the 48-byte smallest ITM1 body.
+    _PT-CT-KIND @ PT-CONTROL-ITEM-VIEW = IF
+        _PT-CT-PARENT @ _PT-CT-ORDER @ OR IF FALSE EXIT THEN
+        _PT-CT-LABEL-U @ _PT-CT-SHORTCUT-U @ OR IF FALSE EXIT THEN
+        _PT-CT-CONTENT-U @ 48 U< IF FALSE EXIT THEN
+        _PT-CT-STATE @ 0x0B INVERT AND IF FALSE EXIT THEN
+        _PT-CT-ROOT-BOUNDS? EXIT
+    THEN
     FALSE ;
 
 : _PT-CT-FIELDS?  ( -- flag )
@@ -5599,6 +5636,9 @@ VARIABLE _PT-CT-TU
         _PT-CT-S @ _PT-RET-CONTROL-COLLECTIONS? 0= IF
             PT-S-UNSUPPORTED EXIT
         THEN
+    THEN
+    _PT-CT-KIND @ PT-CONTROL-ITEM-VIEW = IF
+        _PT-CT-S @ _PT-RET-CONTROL-ITEMS? 0= IF PT-S-UNSUPPORTED EXIT THEN
     THEN
     _PT-CT-TYPE @ DUP _PT-M-CONTROL-DEFINE =
     SWAP _PT-M-CONTROL-REPLACE = OR 0= IF PT-S-INVALID EXIT THEN

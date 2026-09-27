@@ -13,10 +13,12 @@ and the reference viewer draws style runs through its theme. A physical
 renderer must not advertise `RET_CONTROL_COLLECTIONS` until its compositor
 and acknowledgement path can render every visible kind.
 
-The `ITEM_VIEW` kind, its `ITM1` body, and the item input below are
-specified for part 4 of Akashic's rich experience plan and are not yet
-implemented. No renderer advertises `RET_CONTROL_ITEMS` until its codec,
-model, view, hit map, and item input all are.
+The `ITEM_VIEW` kind, its `ITM1` body, and the item input below serve part 4
+of Akashic's rich experience plan. MegaPad implements them: the ITM1 codec,
+wire, scene, terminal core, view, reference renderer and hit map, viewer
+routing, shared-viewer transport, and guest module. Until the Akashic
+producer publishes item views, no selected profile advertises
+`RET_CONTROL_ITEMS`.
 
 ## Decision
 
@@ -665,9 +667,10 @@ terminal API, renderer-specific annotation, or future per-applet repair
 obligation.
 
 Advertisement was deliberately treated as one final vertical gate, not an
-isolated policy bit flip. The MegaPad guest module accepts mask `0x33f`, requires bit 8 for
-bit 9, and evolves the one public CONTROL writer to copy caller-bounded kinds 5
-through 8 without a parallel message or legacy encoder. It enforces exact root,
+isolated policy bit flip. The MegaPad guest module accepts mask `0x73f`, requires bit 8 for
+bit 9 and bit 9 for bit 10, and evolves the one public CONTROL writer to copy
+caller-bounded kinds 5 through 9 without a parallel message or legacy encoder;
+ITEM_VIEW requires bit 10 and at least the 48-byte smallest ITM1 body. It enforces exact root,
 child, state, label, shortcut, and zero/nonzero content shapes; TEXT_AREA and
 TEXT_GRID also reject a body shorter than the fixed 72-byte STX1 header. The
 guest does not repeat canonical STX1 item/graph validation: Akashic supplies
