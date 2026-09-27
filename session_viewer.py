@@ -17,6 +17,7 @@ from pathlib import Path
 
 from display import VirtualTerminal
 from rich_terminal.final_raster import FinalRaster
+from rich_terminal.font_set import FontSet, discover_fallback_fonts
 from rich_terminal.pygame_view import (
     CompositeDrawResult,
     ControlHitTarget,
@@ -1942,6 +1943,15 @@ def main() -> int:
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--font", type=Path)
     parser.add_argument("--font-size", type=int, default=18)
+    parser.add_argument(
+        "--fallback-font",
+        type=Path,
+        action="append",
+        help=(
+            "a font for characters the primary font lacks, tried in order; "
+            "repeat for more (default: the Noto faces fontconfig finds)"
+        ),
+    )
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--title", default="MegaPad-64 Shared Session")
     parser.add_argument(
@@ -2004,11 +2014,15 @@ def main() -> int:
         pygame.font.init()
         _configure_keyboard(pygame)
         text_input_started = True
-        font = (
-            pygame.font.Font(str(args.font), args.font_size)
-            if args.font else pygame.font.SysFont("monospace", args.font_size)
+        fallbacks = (
+            tuple(args.fallback_font)
+            if args.fallback_font
+            else discover_fallback_fonts()
         )
-        status_font = pygame.font.SysFont("sans", max(12, args.font_size - 4))
+        font = FontSet(pygame, args.font, args.font_size, fallbacks)
+        status_font = FontSet(
+            pygame, None, max(12, args.font_size - 4), fallbacks, cells=False
+        )
         cell_w = max(1, font.size("M")[0])
         cell_h = font.get_linesize()
         status_h = max(24, status_font.get_linesize() + 8)
