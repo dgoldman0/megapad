@@ -13,11 +13,16 @@ and the reference viewer draws style runs through its theme. A physical
 renderer must not advertise `RET_CONTROL_COLLECTIONS` until its compositor
 and acknowledgement path can render every visible kind.
 
+The `ITEM_VIEW` kind, its `ITM1` body, and the item input below are
+specified for part 4 of Akashic's rich experience plan and are not yet
+implemented. No renderer advertises `RET_CONTROL_ITEMS` until its codec,
+model, view, hit map, and item input all are.
+
 ## Decision
 
-Text areas, logical text grids, tabsets, and tabs extend the existing retained
-`CONTROL` namespace. They do not create four message families, an applet scene
-API, or terminal-buffer reservations.
+Text areas, logical text grids, tabsets, tabs, and item views extend the
+existing retained `CONTROL` namespace. They do not create message families of
+their own, an applet scene API, or terminal-buffer reservations.
 
 The wire does not equate one CONTROL root with one UIDL source element. One
 ordinary core UIDL type or canonical reusable widget may automatically project
@@ -31,13 +36,16 @@ independent CONTROL definitions in one owner and region, not a mirrored DOM or
 element-owned scene. Applets do not register a provider or maintain a second
 semantic description.
 
-Feature bit 9, `RET_CONTROL_COLLECTIONS`, gates all four kinds and depends on
-bit 8 `RET_CONTROLS`. The same `CONTROL_DEFINE`, `CONTROL_REPLACE`,
+Feature bit 9, `RET_CONTROL_COLLECTIONS`, gates the text, grid, tabset, and
+tab kinds and depends on bit 8 `RET_CONTROLS`. Feature bit 10,
+`RET_CONTROL_ITEMS`, gates `ITEM_VIEW` and the item input below and depends
+on bits 8 and 9. The same `CONTROL_DEFINE`, `CONTROL_REPLACE`,
 `CONTROL_DROP`, owner authority, independent control-ID high-water, object
 quota, UTF-8 quota, transaction, and exact-revision publication rules apply.
 Menus remain valid with bit 8 alone.
 
-This is one extensible semantic record with one shared text-collection body:
+This is one extensible semantic record with two content bodies, the text
+collection `STX1` and the item collection `ITM1`:
 
 | Control kind | Value | Shape |
 |---|---:|---|
@@ -45,11 +53,15 @@ This is one extensible semantic record with one shared text-collection body:
 | `TEXT_GRID` | 6 | bounded root plus one `STX1` logical text collection |
 | `TABSET` | 7 | bounded root, no content body |
 | `TAB` | 8 | renderer-laid-out `TABSET` child using the existing label/shortcut fields |
+| `ITEM_VIEW` | 9 | bounded root plus one `ITM1` item collection |
 
 The design is renderer-neutral. It carries logical rows, columns, spans,
 stable item keys, logical-order text with a paragraph direction, style runs
 that say what parts of the text mean, a generic viewport origin,
-authoritative state, and selection/caret positions. It does not carry a
+authoritative state, and selection/caret positions. Item views carry each
+item's key, parent, depth, fields, and state, and a viewport over the items'
+order, and say whether they are a list, a tree, a table, sections, or cards.
+It does not carry a
 retained-cell capacity, font, colour, text size, padding, pixel rectangle,
 refresh waveform, e-paper cadence, or physical hit box. Characters, widths,
 ordering, mirroring, and joining follow the shared text rules in
@@ -72,13 +84,16 @@ content_bytes bytes of canonical semantic content
 Menu controls, `TABSET`, and `TAB` require `content_bytes = 0`.
 `TEXT_AREA` and `TEXT_GRID` require a nonempty canonical `STX1` body. The
 smallest body is 72 bytes, so advertising bit 9 requires at least 152 inbound
-payload bytes and a retained transaction maximum of at least 352 bytes. There
+payload bytes and a retained transaction maximum of at least 352 bytes.
+`ITEM_VIEW` requires a nonempty canonical `ITM1` body, whose smallest form is
+48 bytes; bit 10 depends on bit 9, whose minima already cover it. There
 is no second item-count or content-byte policy maximum; the negotiated frame
 maximum, retained transaction maximum, object quota, owner aggregate UTF-8
 quota, and caller's terminal allocation are the bounds.
 Every CONTROL record consumes one existing object-quota slot and every STX1
-item consumes one more; this accounts for stable retained values a selected
-renderer may materialize without introducing a new kind-specific capacity.
+or ITM1 item consumes one more; this accounts for stable retained values a
+selected renderer may materialize without introducing a new kind-specific
+capacity.
 
 Existing menu frames are byte-for-byte unchanged because their former zero
 reserved field is still zero as `content_bytes`. This repository is unreleased,
@@ -231,27 +246,142 @@ may show two meanings alike, or show a meaning like plain text, except
 find it. An e-paper theme might use weight and underline where a colour
 screen uses colour.
 
+## ITM1 body
+
+An item view shows a collection of items as a list, a tree, a table,
+sections, or cards. The client says which, and gives each item a stable key,
+its fields, and its state. The renderer lays the items out and never infers
+structure from their text or indentation.
+
+All integers are little-endian. The 40-byte header is `<IHHQHHIIIII>`:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | tag = `0x314D5449` (`ITM1`) | u32 |
+| 4 | version = 1 | u16 |
+| 6 | reserved = 0 | u16 |
+| 8 | content revision | u64, positive |
+| 16 | role | u16 |
+| 18 | content flags | u16 |
+| 20 | column count | u32, positive |
+| 24 | item total | u32 |
+| 28 | viewport first | u32 |
+| 32 | viewport count | u32 |
+| 36 | carried item count | u32 |
+
+Roles are 1 `LIST`, 2 `TREE`, 3 `TABLE`, 4 `SECTIONS`, and 5 `CARDS`.
+Content flag bits 0 and 1 hold the paragraph direction of every field and
+column label (`APT-1-TEXT.md` Section 7.1): 0 `AUTO`, 1 `LTR`, 2 `RTL`; 3 is
+invalid. All other bits are zero.
+
+Exactly `column count` column records follow the header. Each is the 8-byte
+`<HHI>`: u16 column kind, u16 reserved = 0, and u32 label bytes, followed by
+the label. Column kinds are 1 `TEXT` and 2 `NUMBER`. A `NUMBER` column holds
+quantities such as sizes or counts. A label names its column and may be
+empty.
+
+Exactly `carried item count` items follow the columns. Each begins with the
+32-byte header `<QQIHHHHI>`:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | stable nonzero item key | u64 |
+| 8 | parent item key, zero when none | u64 |
+| 16 | ordinal | u32 |
+| 20 | depth | u16 |
+| 22 | state | u16 |
+| 24 | item role | u16 |
+| 26 | field count | u16 |
+| 28 | reserved = 0 | u32 |
+
+Then come `field count` fields, one per column from the first. Each field is
+the 8-byte `<II>` (u32 text bytes, u32 style run count), then its text, then
+its style runs, exactly as an STX1 item carries its text and runs. Every
+item has at least one field and no more fields than columns.
+
+Item roles are 1 `ITEM` and 2 `SECTION`, a heading that starts a section.
+Item state bits are:
+
+| Bit | Name | Meaning |
+|---:|---|---|
+| 0 | `SELECTED` | the application's selection |
+| 1 | `CURRENT` | the item the application marks as current, such as the open folder |
+| 2 | `EXPANDABLE` | the item has children that can be shown |
+| 3 | `EXPANDED` | its children are shown |
+| 4 | `CHECKABLE` | the item has a check box |
+| 5 | `CHECKED` | the check box is checked |
+| 6 | `UNAVAILABLE` | the item cannot be selected, opened, or checked |
+
+Other bits are zero. `EXPANDED` requires `EXPANDABLE`, `CHECKED` requires
+`CHECKABLE`, and an `UNAVAILABLE` item is not `SELECTED`. At most one item
+is `SELECTED` and at most one is `CURRENT`. A `SECTION` has state zero and
+exactly one field.
+
+Items have the order the application shows them in: ordinals count from
+zero to `item total` minus one. The viewport is the half-open range of
+ordinals from `viewport first` for `viewport count` items. When the total is
+zero, both are zero. Otherwise `viewport first` is less than the total, and
+the count is positive and reaches no further than the total. Every ordinal in
+the viewport is carried. Items outside it may be carried or omitted, but a
+`SELECTED` item is always carried, so its key stays authoritative. Carried
+items are in increasing ordinal order, and their keys are unique.
+
+The role fixes the structure:
+
+- In a `LIST`, `TABLE`, or `CARDS` view, every item is an `ITEM` with
+  parent zero and depth zero, and none is `EXPANDABLE`.
+- In a `TREE`, every item is an `ITEM`. A top-level item has parent zero and
+  depth zero. Any other item names its parent and has depth one more than
+  the parent's. A carried parent has a lower ordinal and is `EXPANDABLE`
+  and `EXPANDED`.
+- In `SECTIONS`, each `SECTION` has parent zero and depth zero, and each
+  `ITEM` has depth one and names its section as parent. A carried parent is
+  a `SECTION` with a lower ordinal. No item is `EXPANDABLE`.
+
+Ordinals follow the structure in preorder. Between two carried items with
+consecutive ordinals the depth rises by at most one, and when it rises, the
+second item's parent is the first.
+
+Field text and labels are well-formed Unicode scalar UTF-8 with no C0
+control scalar and no DEL. Each is one paragraph with the content's
+direction, laid out by the shared text rules. Fields may carry style runs,
+with the rules and meanings of STX1's style runs; this version defines no way
+to follow a link in a field. Trailing bytes, impossible counts, unknown
+versions, roles, kinds, or state bits, nonzero reserved fields, and any rule
+above that fails are rejected.
+
+The renderer shows the viewport's items in order within the root bounds,
+and never an item outside the viewport, even when space remains; items that
+do not fit are clipped. It chooses the fonts, metrics, and indentation, the
+disclosure mark of an `EXPANDABLE` item, the check box of a `CHECKABLE` one,
+and how `SELECTED`, `CURRENT`, and `UNAVAILABLE` look. A `TABLE` shows its
+column labels as a header when any is nonempty. `CARDS` shows each item's
+fields together as one card. A `NUMBER` field may be aligned at its column's
+end.
+
 ## Hierarchy and mutation
 
-`TEXT_AREA`, `TEXT_GRID`, and `TABSET` are bounded roots with parent and order
-zero. They have no label or shortcut. `TAB` is a label-bearing child of one
+`TEXT_AREA`, `TEXT_GRID`, `TABSET`, and `ITEM_VIEW` are bounded roots with
+parent and order zero. They have no label or shortcut. `TAB` is a
+label-bearing child of one
 same-owner, same-region `TABSET`; it has renderer-owned child geometry and a
 unique sibling order. At most one visible/enabled tab is `SELECTED` per tabset.
-TEXT_AREA, TEXT_GRID, and TAB admit `VISIBLE`, `ENABLED`, and `SELECTED`;
-TABSET admits `VISIBLE` and `ENABLED`. As elsewhere, `SELECTED` requires the
-same control to be visible and enabled.
+TEXT_AREA, TEXT_GRID, ITEM_VIEW, and TAB admit `VISIBLE`, `ENABLED`, and
+`SELECTED`; TABSET admits `VISIBLE` and `ENABLED`. As elsewhere, `SELECTED`
+requires the same control to be visible and enabled.
 
 Menu and tabset replacements retain the existing state-only rule. `TAB`
 replacement may change state, label, or shortcut while preserving identity and
-hierarchy. Text area/grid replacement may change state and the complete
-semantic content while preserving identity and geometry; a changed body must
-carry a strictly newer content revision. UTF-8 usage is removed and added
-atomically against the owner's existing aggregate reservation.
+hierarchy. Text area, text grid, and item view replacement may change state
+and the complete semantic content while preserving identity and geometry; a
+changed body must carry a strictly newer content revision. UTF-8 usage is
+removed and added atomically against the owner's existing aggregate
+reservation.
 
 `CONTROL_EVENT` activation is sufficient for `TAB` and remains revision-bound.
 Existing revision-bound KEY/TEXT input remains usable by the authoritative
 focused UI. Pointer input on text areas and grids uses the positioned kinds
-below.
+below, and on item views the item kinds.
 
 ## Positioned input
 
@@ -309,6 +439,44 @@ is a `FOLLOW` whose position no longer lies on a link. The terminal never
 changes the caret, selection, or viewport itself; the client publishes the
 result in a later transaction.
 
+## Item input
+
+`CONTROL_EVENT` kinds 6 to 10 let a pointer act on the items of an item
+view. They require feature bit 10. Each ends with the item tail `<QQII>`:
+`content_revision`, the control's ITM1 content revision in the composite
+named by `model_revision`; `item_key`, an item carried in that content and
+shown in its viewport; and two u32 reserved fields that are zero. The
+terminal emits them only for a visible, effectively enabled `ITEM_VIEW`
+root.
+
+- `SELECT` (6) asks the client to select the item. A terminal sends it for
+  a primary press on an `ITEM` that is not `UNAVAILABLE`, other than on its
+  disclosure mark or check box. The modifiers are carried, and the client
+  decides what they mean.
+- `OPEN` (7) asks the client to open the item, as a double click does. A
+  terminal sends it, instead of `SELECT`, for a second primary press on the
+  same item within its own double-press interval. The item is an `ITEM`
+  that is not `UNAVAILABLE`.
+- `EXPAND` (8) and `COLLAPSE` (9) ask the client to show or hide the
+  children of an `EXPANDABLE` item. A terminal sends `EXPAND` for a primary
+  press on the disclosure mark of an item that is not `EXPANDED`, and
+  `COLLAPSE` for one that is.
+- `CHECK` (10) asks the client to check or uncheck a `CHECKABLE` item that
+  is not `UNAVAILABLE`. A terminal sends it for a primary press on the
+  item's check box.
+
+`SCROLL` (4) also targets `ITEM_VIEW` roots, with the same detents; the
+client decides how far one detent moves the viewport.
+
+The client revalidates the owner, generation, control identity, kind, event
+revision, and content revision, and resolves the item key in the content it
+published. It then routes the event to the ordinary widget that produced that
+content, which applies it to its current state if the item is still there,
+and otherwise discards it. The terminal changes no selection, expansion,
+check, or viewport itself; the client publishes the result in a later
+transaction. Keys such as the arrows and Enter still reach the focused
+application as `KEY` input.
+
 ## Cost boundary
 
 STX1 adds one 72-byte collection header, one 36-byte header per carried
@@ -330,6 +498,13 @@ so one accepted control replaces many per-row GLYPH_RUN definitions without
 evading the caller's retained-value bound. `CONTROL_REPLACE` currently resends
 the complete small collection.
 
+ITM1 adds a 40-byte header, 8 bytes and the label per column, a 32-byte
+header per carried item, and per field 8 bytes, its text, and 12 bytes per
+style run. Decode and validation make one linear pass over columns, items,
+fields, and runs, plus the key-uniqueness check, which may sort. They do not
+walk or rebuild a tree: the preorder rules compare each carried item only
+with the one before it and, through a key lookup, with its parent.
+
 That full replacement is the bounded first slice, not a claim that it is the
 best steady-state Pad keystroke transport. Before adding machinery, measure its
 guest instructions and exact UART bytes against the residual-glyph path. If
@@ -341,9 +516,11 @@ renderer cache exposed on the wire.
 ## Shared-viewer transport
 
 The local JSON display-offer wire carries the renderer-facing values with exact
-tags `text_area`, `text_grid`, `tabset`, and nested `tab`. Text collection roots
-use the exact fields `kind`, `control_id`, `state`, `order`, `z_order`,
-`bounds`, and `content_stx1_base64`. A tabset replaces the content field with
+tags `text_area`, `text_grid`, `tabset`, nested `tab`, and `item_view`. Text
+collection roots use the exact fields `kind`, `control_id`, `state`, `order`,
+`z_order`, `bounds`, and `content_stx1_base64`. An item view has the same
+fields with `content_itm1_base64`, canonical padded base64 of its ITM1 bytes,
+decoded and checked as STX1 is below. A tabset replaces the content field with
 `tabs`; each tab has only `kind`, `control_id`, `state`, `order`, `label`, and
 `shortcut`.
 
@@ -405,6 +582,20 @@ open popup, enters as a control surface: it blocks lower controls and never
 starts a raw pointer gesture. A point covered only by a region barrier, or by
 nothing, shows CELL or residual content and may start one.
 
+ITEM_VIEW rows each show one item, in viewport order, in the terminal
+monospace font. A tree indents each item by its depth and puts a disclosure
+mark before an `EXPANDABLE` one; a checkable item gets a check box before its
+first field; a table puts its column labels in a header row and aligns
+`NUMBER` fields at their column's end; sections show each `SECTION` as a
+heading; and cards give each item a box holding its fields on separate lines.
+`SELECTED` items get a selection fill, `CURRENT` a mark, and `UNAVAILABLE`
+dimmed text, and fields take their style runs' looks from the theme. An
+enabled item view enters the hit map as an item target that keeps each shown
+row's item and the rectangles of its disclosure mark and check box. The
+reference viewer routes a left press there as `EXPAND`, `COLLAPSE`, `CHECK`,
+or `SELECT` by what it hits, a second press on the same item within its
+double-press interval as `OPEN`, and wheel input as `SCROLL`.
+
 The reference viewer routes a left press on a text target as `PLACE` (as
 `EXTEND` with Shift on a text area), a drag that began there as `EXTEND` at the
 clamped position, and wheel input there as `SCROLL`. A left press on a text
@@ -438,6 +629,7 @@ settling remain selected-sink policy.
 The coherent protocol slice is owned by:
 
 - `rich_terminal/semantic_content.py`: immutable STX1 values and exact codec;
+- `rich_terminal/semantic_items.py`: immutable ITM1 values and exact codec;
 - `rich_terminal/retained_model.py`: negotiated bit and caller-bound policy;
 - `rich_terminal/retained_wire.py`: CONTROL envelope and kind validation;
 - `rich_terminal/retained_scene.py`: authority, graph, quota, replacement, and

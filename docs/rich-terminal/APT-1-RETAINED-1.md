@@ -24,7 +24,8 @@ semantics. `RET_CONTROLS` therefore carries renderer-neutral control identity,
 hierarchy, state, ordering, optional bounds, labels, shortcuts, and
 revision-bound activation while leaving representation to the selected
 renderer. `RET_CONTROL_COLLECTIONS` adds text-area, logical-grid, and tab
-semantics through that same namespace rather than an applet or renderer API.
+semantics, and `RET_CONTROL_ITEMS` adds item views, through that same
+namespace rather than an applet or renderer API.
 Another trusted system renderer may use the same engine without creating
 another protocol or session. No applet is a direct protocol consumer or
 determines this profile's semantics or limits.
@@ -229,8 +230,9 @@ Feature bits are:
 | 7 | reserved `RET_MOSAIC` | same-phase addendum; must be zero here |
 | 8 | `RET_CONTROLS` | semantic menu controls and revision-bound activation |
 | 9 | `RET_CONTROL_COLLECTIONS` | text-area, text-grid, tabset, and tab CONTROL kinds |
+| 10 | `RET_CONTROL_ITEMS` | the item-view CONTROL kind and its item events |
 
-Bits 10 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 11 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -238,6 +240,8 @@ also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `max_objects` and `total_utf8_bytes`, and uses those existing bounds as defined
 in Sections 5, 6, and 9.1. `RET_CONTROL_COLLECTIONS` requires `RET_CONTROLS` and
 uses the same limits; it adds no item-count or content-byte policy maximum.
+`RET_CONTROL_ITEMS` requires `RET_CONTROL_COLLECTIONS` and likewise adds no
+maximum of its own.
 
 All maxima are terminal policy supplied by its caller. This contract does not
 assign desktop-, application-, or implementation-specific numeric caps.
@@ -264,7 +268,8 @@ item-size maximum; it instead requires the negotiated inbound payload and
 retained transaction maxima to admit at least one canonical MENU_BAR root,
 whose minimum complete transaction is 280 bytes. `RET_CONTROL_COLLECTIONS`
 raises that floor to 352 bytes for one CONTROL prefix plus the 72-byte
-zero-item STX1 body. These are complete frame bytes, not payload bytes.
+zero-item STX1 body, which also covers the 48-byte smallest ITM1 body of
+`RET_CONTROL_ITEMS`. These are complete frame bytes, not payload bytes.
 Advertising a payload maximum that cannot be used in one valid transaction is
 inconsistent discovery.
 
@@ -342,8 +347,10 @@ the fixed prefix, at least 40 terminal-to-client payload bytes for
 `RET_CONTROL_COLLECTIONS` requires at least 152 inbound payload bytes so one
 CONTROL prefix and the smallest STX1 body fit, at least 64 terminal-to-client
 payload bytes for a positioned `CONTROL_EVENT`, and a retained transaction
-maximum of at least 352 bytes. A client must treat an inconsistent reply pair
-as the deterministic unsupported-profile outcome.
+maximum of at least 352 bytes. `RET_CONTROL_ITEMS` needs no more: its
+smallest body and its 64-byte item events fit those minima. A client must
+treat an inconsistent reply pair as the deterministic unsupported-profile
+outcome.
 
 ## 5. Shared transaction and revision domain
 
@@ -576,8 +583,8 @@ individual count quota must not exceed its corresponding advertised maximum,
 and the sum of region, resource, object, and series count quotas respectively
 across all live owners must not exceed `max_regions`, `max_resources`,
 `max_objects`, and `max_series`. `object_quota` is one shared reservation for
-the target's combined OBJECT records, CONTROL records, and STX1 items; it is not
-multiplied when CONTROLS is advertised. Resource-byte, UTF-8-byte, and
+the target's combined OBJECT records, CONTROL records, and STX1 and ITM1 items;
+it is not multiplied when CONTROLS is advertised. Resource-byte, UTF-8-byte, and
 sample-slot reservations across all live owners likewise must not exceed their
 advertised totals. Checked addition precedes mutation. An individually valid
 request whose aggregate would exceed any total returns RET_NO_CAPACITY and
@@ -891,10 +898,11 @@ renderer-neutral semantic extension rather than pixel inference.
 A region barrier point that no control surface covers shows CELL or residual
 content, so a pointer gesture may start there and reach the client as raw
 `POINTER` at that cell (APT-1 Section 12). The visible root bounds of every
-`MENU_BAR`, `TABSET`, `TEXT_AREA`, and `TEXT_GRID`, and every open menu
-popup, are control surfaces laid out by the renderer: a point on one never
-starts a raw gesture. It resolves to an activatable target, to a
-`TEXT_AREA`/`TEXT_GRID` position under SEMANTIC-CONTENT-1, or to nothing.
+`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, and `ITEM_VIEW`, and every
+open menu popup, are control surfaces laid out by the renderer: a point on
+one never starts a raw gesture. It resolves to an activatable target, to a
+`TEXT_AREA`/`TEXT_GRID` position or an `ITEM_VIEW` item under
+SEMANTIC-CONTENT-1, or to nothing.
 
 Regions are stamped with PRESENT_BEGIN `geometry_generation`. A resize makes
 the active retained plane hidden and layout-rebuild-required. A layout reveal
@@ -903,8 +911,8 @@ is invalid until every surviving region is stamped with the new generation.
 ### 9.1 Semantic controls
 
 `RET_CONTROLS` defines the independent CONTROL identity namespace and its menu
-kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds in that same
-namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
+kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds, and
+`RET_CONTROL_ITEMS` the item view, in that same namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
 80-byte prefix `<QQQHHiQQIiiIIIII>`, followed immediately by `label_bytes`
 bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
 
@@ -948,12 +956,14 @@ Control kinds are:
 | 6 | `TEXT_GRID` (requires `RET_CONTROL_COLLECTIONS`) |
 | 7 | `TABSET` (requires `RET_CONTROL_COLLECTIONS`) |
 | 8 | `TAB` (requires `RET_CONTROL_COLLECTIONS`) |
+| 9 | `ITEM_VIEW` (requires `RET_CONTROL_ITEMS`) |
 
 Menu controls, `TABSET`, and `TAB` require `content_bytes = 0`. `TEXT_AREA`
-and `TEXT_GRID` require one canonical STX1 text collection. Its exact header,
-item, graph, state, replacement, and quota rules are specified in the
-MegaPad-owned `docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract. Menu and
-collection roots use the same CELL_RECT32 geometry contract.
+and `TEXT_GRID` require one canonical STX1 text collection, and `ITEM_VIEW`
+one canonical ITM1 item collection. Their exact header, item, graph, state,
+replacement, and quota rules are specified in the MegaPad-owned
+`docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract. Menu and collection
+roots use the same CELL_RECT32 geometry contract.
 
 State bits are:
 
@@ -1007,8 +1017,8 @@ CONTROL high-water. That high-water is independent of the OBJECT high-water;
 equal numeric IDs in the two namespaces are distinct. `CONTROL_REPLACE`
 requires an existing exact-target control and resends its complete wire record.
 Menu and TABSET records remain state-only replacements; TAB may replace state,
-label, and shortcut; TEXT_AREA/TEXT_GRID may replace state and their complete
-content with a strictly newer content revision. Every identity, kind,
+label, and shortcut; TEXT_AREA, TEXT_GRID, and ITEM_VIEW may replace state
+and their complete content with a strictly newer content revision. Every identity, kind,
 authority, hierarchy, order, bounds, and geometry field remains exact. The
 proposed value still undergoes normal control policy, dependency, quota, and
 final-graph validation.
@@ -1017,9 +1027,9 @@ of a dropped control makes commit invalid. IDs are not reused within an owner
 generation.
 
 Each committed control consumes one slot from the target's existing
-`object_quota`. Each STX1 item carried by a text/grid control consumes one
-additional slot because it is a separately retained, stable-keyed value that a
-selected renderer may need to
+`object_quota`. Each STX1 or ITM1 item carried by a text, grid, or item-view
+control consumes one additional slot because it is a separately retained,
+stable-keyed value that a selected renderer may need to
 materialize. OBJECTs, controls, and semantic items are summed before the
 comparison. Label, shortcut, and semantic-content text bytes are summed with
 GLYPH_RUN and READOUT text against the same `utf8_byte_quota`. The terminal
@@ -1055,16 +1065,24 @@ resulting authoritative state in a later transaction.
 | 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB` | 8; `TAB` also 9 |
 | 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
 | 3 | `EXTEND` | 64 bytes | `TEXT_AREA` | 8 and 9 |
-| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
+| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW` | 8 and 9; `ITEM_VIEW` also 10 |
 | 5 | `FOLLOW` | 64 bytes | `TEXT_AREA` | 8 and 9 |
+| 6 | `SELECT` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
+| 7 | `OPEN` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
+| 8 | `EXPAND` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
+| 9 | `COLLAPSE` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
+| 10 | `CHECK` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
 
 `PLACE`, `EXTEND`, and `FOLLOW` end with the position tail `<QQII>`: u64
 `content_revision`, u64 `item_key`, u32 `scalar_offset`, and u32 `reserved` =
-0. `SCROLL` ends with `<hhI>`: i16 horizontal wheel detents, i16 vertical wheel
-detents, and u32 `reserved` = 0, with at least one nonzero detent count. All
-other kind values, lengths, and nonzero reserved fields are invalid. Modifier
-bits are the APT-1 KEY modifier bits and all other bits are zero.
-SEMANTIC-CONTENT-1 defines how a position names STX1 content.
+0. `SELECT`, `OPEN`, `EXPAND`, `COLLAPSE`, and `CHECK` end with the item tail
+of the same shape, u64 `content_revision`, u64 `item_key`, and two u32
+`reserved` = 0. `SCROLL` ends with `<hhI>`: i16 horizontal wheel detents, i16
+vertical wheel detents, and u32 `reserved` = 0, with at least one nonzero
+detent count. All other kind values, lengths, and nonzero reserved fields are
+invalid. Modifier bits are the APT-1 KEY modifier bits and all other bits are
+zero. SEMANTIC-CONTENT-1 defines how a position names STX1 content and an
+item names ITM1 content.
 
 The terminal may emit an event only for the exact active owner generation and
 control ID of a target kind listed for it, when the complete current control
@@ -1144,8 +1162,8 @@ No object type in this table defines a semantic UI control. The APT-1 base
 contract reserves `4000` through `4FFF` for semantic controls; this profile now
 defines `CONTROL_DEFINE`, `CONTROL_REPLACE`, and `CONTROL_DROP` at `4000`
 through `4002` under `RET_CONTROLS`; feature bit 9 adds text, grid, and tab
-kinds to those same messages. Controls remain outside the OBJECT namespace
-even though OBJECTs, CONTROL records, and STX1 items share the owner
+kinds, and feature bit 10 the item view, to those same messages. Controls remain outside the OBJECT namespace
+even though OBJECTs, CONTROL records, and STX1 and ITM1 items share the owner
 object-count and aggregate UTF-8 quotas. A complete GLYPH_RUN screen still cannot, by
 itself, satisfy the semantic-control vertical.
 

@@ -530,8 +530,8 @@ While RETAINED-1 is active, `POINTER` addresses only CELL and residual content,
 never a control the renderer lays out itself. The terminal starts a pointer
 gesture only at a position where the exact current, physically presented and
 acknowledged composite shows no such control: outside the visible root bounds
-of every `MENU_BAR`, `TABSET`, `TEXT_AREA`, and `TEXT_GRID`, and outside every
-open menu popup. Once a press starts a gesture there, the terminal reports that
+of every `MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, and `ITEM_VIEW`, and
+outside every open menu popup. Once a press starts a gesture there, the terminal reports that
 gesture's moves and its release at the cells under the pointer, even where the
 pointer crosses a control, until no button is held. A wheel event follows the
 same position rule on its own. A terminal need not report motion while no
@@ -578,8 +578,13 @@ kind-specific tail
 | 1 | `ACTIVATE` | none | 40 bytes | `MENU`, `MENU_ITEM`, `TAB` |
 | 2 | `PLACE` | position | 64 bytes | `TEXT_AREA`, `TEXT_GRID` |
 | 3 | `EXTEND` | position | 64 bytes | `TEXT_AREA` |
-| 4 | `SCROLL` | scroll | 48 bytes | `TEXT_AREA`, `TEXT_GRID` |
+| 4 | `SCROLL` | scroll | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW` |
 | 5 | `FOLLOW` | position | 64 bytes | `TEXT_AREA` |
+| 6 | `SELECT` | item | 64 bytes | `ITEM_VIEW` |
+| 7 | `OPEN` | item | 64 bytes | `ITEM_VIEW` |
+| 8 | `EXPAND` | item | 64 bytes | `ITEM_VIEW` |
+| 9 | `COLLAPSE` | item | 64 bytes | `ITEM_VIEW` |
+| 10 | `CHECK` | item | 64 bytes | `ITEM_VIEW` |
 
 The position tail is `<QQII>`:
 
@@ -590,13 +595,24 @@ u32 scalar_offset
 u32 reserved               = 0
 ```
 
+The item tail has the same `<QQII>` shape, with both u32 fields reserved:
+
+```text
+u64 content_revision
+u64 item_key
+u32 reserved               = 0
+u32 reserved               = 0
+```
+
 The scroll tail is `<hhI>`: signed horizontal wheel detents, signed vertical
 wheel detents, and a zero u32. At least one detent count is nonzero; positive
 X is right and positive Y is down, as in `POINTER`. `TAB`, `PLACE`, `EXTEND`,
 `SCROLL`, and `FOLLOW` require feature bit 9 `RET_CONTROL_COLLECTIONS`, and
 SEMANTIC-CONTENT-1 defines what their positions mean. `FOLLOW` asks the
 client to follow the link at its position; the client decides what that
-does. All other event-kind
+does. `SELECT`, `OPEN`, `EXPAND`, `COLLAPSE`, `CHECK`, and `SCROLL` on an
+`ITEM_VIEW` also require feature bit 10 `RET_CONTROL_ITEMS`, and
+SEMANTIC-CONTENT-1 defines what they ask of the client. All other event-kind
 values are invalid. Modifier bits are Shift 0, Ctrl 1, Alt 2, Super 3, Caps
 Lock 4, and Num Lock 5; all other bits are zero. The identity is normalized
 routing and freshness data, not application authority. The terminal may emit
@@ -770,8 +786,10 @@ remain outside the CELL-1 implementation gate. The optional additive contract
 `RET_CONTROLS` gates `CONTROL_DEFINE`, `CONTROL_REPLACE`, `CONTROL_DROP`, and
 `CONTROL_EVENT`; feature bit 9 `RET_CONTROL_COLLECTIONS` gates the additive
 TEXT_AREA/TEXT_GRID/TABSET/TAB kinds, their STX1 content body, and the
-`PLACE`, `EXTEND`, `SCROLL`, and `FOLLOW` event kinds. `4003`–`4FFF`
-remains reserved. Every other reserved ID keeps
+`PLACE`, `EXTEND`, `SCROLL`, and `FOLLOW` event kinds; and feature bit 10
+`RET_CONTROL_ITEMS` gates the ITEM_VIEW kind, its ITM1 content body, and the
+`SELECT`, `OPEN`, `EXPAND`, `COLLAPSE`, and `CHECK` event kinds.
+`4003`–`4FFF` remains reserved. Every other reserved ID keeps
 the behavior defined here; in particular, a sender may not infer a payload
 from its range. CELL-1 alone still defines no semantic controls. A complete
 styled-cell or GLYPH_RUN screen is therefore a foundation and fallback, not
@@ -788,10 +806,10 @@ all-zero rectangle is canonical absence. REPLACE resends that complete record
 with the kind-specific immutable and mutable field rules. DROP is exact
 `<QQQ>`. RETAINED-1 Section 9.1 and the MegaPad-owned
 `docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract define the canonical menu,
-text, grid, and tab graph, content, replacement, and state rules.
+text, grid, tab, and item view graph, content, replacement, and state rules.
 Controls have an independent ID high-water but share each owner's existing
 object-count and aggregate UTF-8 quotas. One CONTROL record and each
-stable-keyed STX1 item consume one object-count slot. Negotiated inbound
+stable-keyed STX1 or ITM1 item consume one object-count slot. Negotiated inbound
 payload and transaction bounds are the only additional size limits; no fixed
 control, semantic-item, or control-string maximum is introduced.
 
