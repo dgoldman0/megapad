@@ -268,7 +268,7 @@ item-size maximum; it instead requires the negotiated inbound payload and
 retained transaction maxima to admit at least one canonical MENU_BAR root,
 whose minimum complete transaction is 280 bytes. `RET_CONTROL_COLLECTIONS`
 raises that floor to 352 bytes for one CONTROL prefix plus the 72-byte
-zero-item STX1 body, which also covers the 48-byte smallest ITM1 body of
+zero-item STX1 body, which also covers the 56-byte smallest ITM1 body of
 `RET_CONTROL_ITEMS`. These are complete frame bytes, not payload bytes.
 Advertising a payload maximum that cannot be used in one valid transaction is
 inconsistent discovery.

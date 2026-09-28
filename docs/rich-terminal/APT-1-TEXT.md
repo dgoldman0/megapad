@@ -20,14 +20,17 @@ document pins those rules once. It covers:
 - characters built from several scalars: combining marks, emoji sequences
   with joiners, modifiers, and variation selectors, keycaps, and flags;
 - right-to-left text in Hebrew and Arabic, including Arabic letter joining;
-- the mapping between logical text positions and cells.
+- the mapping between logical text positions and cells;
+- breaking a paragraph into lines of a given width, where a format asks for
+  it.
 
 The selected renderer still owns fonts, glyph images, sizes, colors, and
 pixels. No font name, font metric, or glyph identifier crosses the wire.
 
 Out of scope for this contract: shaping of Indic and other complex scripts
 beyond what these rules give, mirroring whole interfaces for right-to-left
-users, vertical text, and line breaking. Rows are always explicit.
+users, vertical text, and any line breaking other than Section 12's. Rows are
+explicit except where a format asks for Section 12's lines.
 
 ## 2. Unicode version and data
 
@@ -121,7 +124,9 @@ character's one or two cells.
 ### 7.1 Paragraphs
 
 Every row of text is one paragraph in the sense of UAX #9 BD2: a drawn label,
-a text area row, a text grid item, a field. Its direction is one of:
+a text area row, a text grid item, a field. The exception is a paragraph
+broken into lines by Section 12, which takes one row for each line. A
+paragraph's direction is one of:
 
 - LTR (paragraph level 0);
 - RTL (paragraph level 1);
@@ -212,6 +217,9 @@ its two endpoints. In mixed-direction text its cells need not be contiguous.
   since such labels may use proportional fonts.
 - **STX1 text** is logical text. `SEMANTIC-CONTENT-1.md` defines its
   paragraph direction, its columns in cells, and how rows are laid out.
+- **ITM1 fields and column labels** are logical text laid out like STX1
+  text. A field in a `WRAP` column is broken into lines by Section 12, at the
+  widths `SEMANTIC-CONTENT-1.md` gives.
 
 ## 11. Cost
 
@@ -220,3 +228,41 @@ A row whose scalars are all printable ASCII needs no table lookup: each byte
 is one character of width 1 at level 0. A row with no scalar of Bidi_Class
 `R`, `AL`, `AN`, `RLE`, `RLO`, `RLI`, or `FSI`, in an LTR or AUTO paragraph,
 needs no bidi processing and no joining.
+
+## 12. Lines
+
+A format may ask for a paragraph to be broken into lines no wider than `N`
+cells, where `N` is at least 1. This section is the only rule for that, so
+every implementation finds the same lines.
+
+The paragraph's characters (Section 3) are taken in logical order, each with
+its width (Section 4). A space is a character that is exactly U+0020. A break
+opportunity is the position after a space and before a character that is not
+a space, when the line has a character that is not a space before it. A
+line's width is the sum of its characters' widths, not counting the spaces at
+its end.
+
+Each line starts where the one before it ended, the first at the paragraph's
+start, and is as long as possible:
+
+1. When the rest of the paragraph has width at most `N`, it is the last line.
+2. Otherwise the line ends at the last break opportunity that keeps its width
+   at most `N`.
+3. When there is none, the line ends before the first character that would
+   take the sum of all its characters' widths, spaces included, past `N`, or
+   after its first character when that one alone is wider than `N`.
+
+An empty paragraph is one empty line. Breaking keeps every character: spaces
+at the start of a line are shown, and the spaces at the end of a line take no
+cell and are not drawn. Offsets into the paragraph stay valid on every line.
+
+Levels are resolved once for the whole paragraph, by Section 7.2 up to and
+including rule I2. Rule L1 then applies to each line, with that line's end as
+the end of the line, and Sections 7.3 and 7.4 apply to each line on its own.
+Arabic joining (Section 8) is still decided over the whole paragraph. Each line
+starts at its paragraph's start edge: the left for level 0 and the right for
+level 1.
+
+A paragraph whose scalars are all printable ASCII needs no table lookup: each
+byte is one character of width 1, and a break opportunity is a space byte
+followed by a byte that is not a space.

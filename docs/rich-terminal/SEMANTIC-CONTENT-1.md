@@ -16,9 +16,11 @@ and acknowledgement path can render every visible kind.
 The `ITEM_VIEW` kind, its `ITM1` body, and the item input below serve part 4
 of Akashic's rich experience plan. MegaPad implements them: the ITM1 codec,
 wire, scene, terminal core, view, reference renderer and hit map, viewer
-routing, shared-viewer transport, and guest module. Until the Akashic
-producer publishes item views, no selected profile advertises
-`RET_CONTROL_ITEMS`.
+routing, shared-viewer transport, and guest module. The paired Akashic
+`desktop-apt1` producer publishes item views and advertises
+`RET_CONTROL_ITEMS`. Wrapping card fields, which serve Akashic's Agent
+transcript, are specified below: the `WRAP` column flag, line feeds in its
+fields, exact card rows, and the viewport row. Nothing implements them yet.
 
 ## Decision
 
@@ -88,7 +90,7 @@ Menu controls, `TABSET`, and `TAB` require `content_bytes = 0`.
 smallest body is 72 bytes, so advertising bit 9 requires at least 152 inbound
 payload bytes and a retained transaction maximum of at least 352 bytes.
 `ITEM_VIEW` requires a nonempty canonical `ITM1` body, whose smallest form is
-48 bytes; bit 10 depends on bit 9, whose minima already cover it. There
+56 bytes; bit 10 depends on bit 9, whose minima already cover it. There
 is no second item-count or content-byte policy maximum; the negotiated frame
 maximum, retained transaction maximum, object quota, owner aggregate UTF-8
 quota, and caller's terminal allocation are the bounds.
@@ -255,7 +257,7 @@ sections, or cards. The client says which, and gives each item a stable key,
 its fields, and its state. The renderer lays the items out and never infers
 structure from their text or indentation.
 
-All integers are little-endian. The 40-byte header is `<IHHQHHIIIII>`:
+All integers are little-endian. The 48-byte header is `<IHHQHHIIIIIII>`:
 
 | Offset | Field | Type |
 |---:|---|---|
@@ -270,6 +272,8 @@ All integers are little-endian. The 40-byte header is `<IHHQHHIIIII>`:
 | 28 | viewport first | u32 |
 | 32 | viewport count | u32 |
 | 36 | carried item count | u32 |
+| 40 | viewport row | u32 |
+| 44 | reserved = 0 | u32 |
 
 Roles are 1 `LIST`, 2 `TREE`, 3 `TABLE`, 4 `SECTIONS`, and 5 `CARDS`.
 Content flag bits 0 and 1 hold the paragraph direction of every field and
@@ -277,10 +281,12 @@ column label (`APT-1-TEXT.md` Section 7.1): 0 `AUTO`, 1 `LTR`, 2 `RTL`; 3 is
 invalid. All other bits are zero.
 
 Exactly `column count` column records follow the header. Each is the 8-byte
-`<HHI>`: u16 column kind, u16 reserved = 0, and u32 label bytes, followed by
+`<HHI>`: u16 column kind, u16 column flags, and u32 label bytes, followed by
 the label. Column kinds are 1 `TEXT` and 2 `NUMBER`. A `NUMBER` column holds
 quantities such as sizes or counts. A label names its column and may be
-empty.
+empty. Column flag bit 0 is `WRAP`: the column's fields break into lines, as
+the rendering rules below say. Only a `CARDS` view may have a `WRAP` column.
+Other flag bits are zero.
 
 Exactly `carried item count` items follow the columns. Each begins with the
 32-byte header `<QQIHHHHI>`:
@@ -328,10 +334,18 @@ the viewport is carried. Items outside it may be carried or omitted, but a
 `SELECTED` item is always carried, so its key stays authoritative. Carried
 items are in increasing ordinal order, and their keys are unique.
 
+The viewport row is zero except in `CARDS`, where it counts the rows of the
+first viewport item that lie above the root's top edge, so a view can scroll
+through a card taller than the root. It is less than that item's row count
+at the control's width, as the rendering rules below give it, so the first
+viewport item always shows a row. A terminal checks it against the control's
+bounds before it commits the control.
+
 The role fixes the structure:
 
 - In a `LIST`, `TABLE`, or `CARDS` view, every item is an `ITEM` with
-  parent zero and depth zero, and none is `EXPANDABLE`.
+  parent zero and depth zero, and none is `EXPANDABLE`. No `CARDS` item is
+  `CHECKABLE`.
 - In a `TREE`, every item is an `ITEM`. A top-level item has parent zero and
   depth zero. Any other item names its parent and has depth one more than
   the parent's. A carried parent has a lower ordinal and is `EXPANDABLE`
@@ -345,21 +359,40 @@ consecutive ordinals the depth rises by at most one, and when it rises, the
 second item's parent is the first.
 
 Field text and labels are well-formed Unicode scalar UTF-8 with no C0
-control scalar and no DEL. Each is one paragraph with the content's
-direction, laid out by the shared text rules. Fields may carry style runs,
-with the rules and meanings of STX1's style runs; this version defines no way
-to follow a link in a field. Trailing bytes, impossible counts, unknown
-versions, roles, kinds, or state bits, nonzero reserved fields, and any rule
-above that fails are rejected.
+control scalar and no DEL, except that a field in a `WRAP` column may contain
+U+000A LINE FEED, which ends a paragraph. Such a field is one paragraph more
+than it has line feeds; every other field, and every label, is one paragraph.
+Each paragraph has the content's direction and is laid out by the shared text
+rules. Fields may carry style runs, with the rules and meanings of STX1's
+style runs; a line feed is a scalar that a run may cover. This version
+defines no way to follow a link in a field. Trailing bytes, impossible
+counts, unknown versions, roles, kinds, or state bits, nonzero reserved
+fields, and any rule above that fails are rejected.
 
 The renderer shows the viewport's items in order within the root bounds,
 and never an item outside the viewport, even when space remains; items that
 do not fit are clipped. It chooses the fonts, metrics, and indentation, the
 disclosure mark of an `EXPANDABLE` item, the check box of a `CHECKABLE` one,
 and how `SELECTED`, `CURRENT`, and `UNAVAILABLE` look. A `TABLE` shows its
-column labels as a header when any is nonempty. `CARDS` shows each item's
-fields together as one card. A `NUMBER` field may be aligned at its column's
-end.
+column labels as a header when any is nonempty. A `NUMBER` field may be
+aligned at its column's end.
+
+`CARDS` shows each item's fields together as one card, and its rows are
+exact, so that client and renderer agree on every row. With `W` the root's
+width in cells, field 0's lines are at most `max(W - 2, 1)` cells wide and
+each later field's at most `max(W - 4, 1)`. A card's rows are its fields'
+lines, column by column:
+
+- a field in a column without `WRAP` is one line, clipped at its width;
+- a field in a `WRAP` column is broken into lines of its width, paragraph by
+  paragraph, by `APT-1-TEXT.md` Section 12; an empty paragraph is one line;
+- a column the item has no field for is one empty line.
+
+The first viewport item starts `viewport row` rows above the root's top
+edge, each later item starts on the row after the one before it ends, and
+rows past the root's bottom edge are clipped. The renderer adds no row
+between cards and chooses where each field's lines sit across the card,
+within their widths. A card box or other mark lies within the card's rows.
 
 ## Hierarchy and mutation
 
@@ -500,12 +533,14 @@ so one accepted control replaces many per-row GLYPH_RUN definitions without
 evading the caller's retained-value bound. `CONTROL_REPLACE` currently resends
 the complete small collection.
 
-ITM1 adds a 40-byte header, 8 bytes and the label per column, a 32-byte
+ITM1 adds a 48-byte header, 8 bytes and the label per column, a 32-byte
 header per carried item, and per field 8 bytes, its text, and 12 bytes per
 style run. Decode and validation make one linear pass over columns, items,
 fields, and runs, plus the key-uniqueness check, which may sort. They do not
 walk or rebuild a tree: the preorder rules compare each carried item only
-with the one before it and, through a key lookup, with its parent.
+with the one before it and, through a key lookup, with its parent. Breaking a
+`WRAP` field into lines is one pass over its text, and checking the viewport
+row breaks only the first viewport item's fields.
 
 That full replacement is the bounded first slice, not a claim that it is the
 best steady-state Pad keystroke transport. Before adding machinery, measure its
@@ -584,12 +619,14 @@ open popup, enters as a control surface: it blocks lower controls and never
 starts a raw pointer gesture. A point covered only by a region barrier, or by
 nothing, shows CELL or residual content and may start one.
 
-ITEM_VIEW rows each show one item, in viewport order, in the terminal
-monospace font. A tree indents each item by its depth and puts a disclosure
-mark before an `EXPANDABLE` one; a checkable item gets a check box before its
-first field; a table puts its column labels in a header row and aligns
+An ITEM_VIEW shows its items in viewport order in the terminal monospace
+font, one row each except in cards. A tree indents each item by its depth and
+puts a disclosure mark before an `EXPANDABLE` one; a checkable item gets a
+check box before its first field; a table puts its column labels in a header
+row and aligns
 `NUMBER` fields at their column's end; sections show each `SECTION` as a
-heading; and cards give each item a box holding its fields on separate lines.
+heading; and cards give each item a box holding its fields' lines on the
+exact rows the rules above give, with later fields indented two cells.
 `SELECTED` items get a selection fill, `CURRENT` a mark, and `UNAVAILABLE`
 dimmed text, and fields take their style runs' looks from the theme. An
 enabled item view enters the hit map as an item target that keeps each shown
@@ -670,7 +707,7 @@ Advertisement was deliberately treated as one final vertical gate, not an
 isolated policy bit flip. The MegaPad guest module accepts mask `0x73f`, requires bit 8 for
 bit 9 and bit 9 for bit 10, and evolves the one public CONTROL writer to copy
 caller-bounded kinds 5 through 9 without a parallel message or legacy encoder;
-ITEM_VIEW requires bit 10 and at least the 48-byte smallest ITM1 body. It enforces exact root,
+ITEM_VIEW requires bit 10 and at least the 56-byte smallest ITM1 body. It enforces exact root,
 child, state, label, shortcut, and zero/nonzero content shapes; TEXT_AREA and
 TEXT_GRID also reject a body shorter than the fixed 72-byte STX1 header. The
 guest does not repeat canonical STX1 item/graph validation: Akashic supplies
