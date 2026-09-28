@@ -638,7 +638,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     ):
         assert f"{value} CONSTANT {kind}" in source
     assert "_PT-CT-CONTENT-U @ 72 U<" in kinds
-    assert "_PT-CT-CONTENT-U @ 48 U<" in kinds
+    assert "_PT-CT-CONTENT-U @ 56 U<" in kinds
     assert "_PT-CT-ROOT-BOUNDS?" in kinds
     assert kinds.count("_PT-CT-DESCENDANT?") == 4
 

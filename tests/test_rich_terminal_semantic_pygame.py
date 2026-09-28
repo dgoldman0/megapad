@@ -1600,3 +1600,58 @@ def test_a_disabled_item_view_is_a_surface_without_item_targets():
     assert not any(isinstance(e, ItemHitTarget) for e in result.hit_entries)
     assert [e.control_id for e in result.hit_entries if isinstance(e, ControlSurface)] == [50]
     assert _resolve(result, 60, 25) is None
+
+
+def _ink(surface, col, row, background):
+    """Whether cell (COL, ROW) shows anything other than BACKGROUND between
+    its top and bottom pixel rows, where a card's border may run; cells are
+    ten pixels square and the test font draws a glyph as one pixel."""
+
+    return any(
+        tuple(surface.get_at((x, y)))[:3] != background
+        for x in range(col * 10, col * 10 + 10)
+        for y in range(row * 10 + 1, row * 10 + 9)
+    )
+
+
+def test_cards_take_exact_rows_wrap_their_fields_and_scroll_by_rows():
+    pygame = pytest.importorskip("pygame")
+    S = ItemState
+    content = ItemViewContent(
+        5, ItemViewRole.CARDS, 0,
+        (ItemColumn(ItemColumnKind.TEXT), ItemColumn(ItemColumnKind.TEXT, wrap=True)),
+        3, 0, 3,
+        (
+            # The text column is 16 cells: "Summarise the" / "notes".
+            _view_item(1, 0, "YOU", "Summarise the notes"),
+            _view_item(2, 1, "AGENT", "Three points.", state=S.SELECTED),
+            _view_item(3, 2, "YOU", "ok"),
+        ),
+        viewport_row=1,
+    )
+    draw = ItemViewDraw(52, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 20, 6), content)
+    surface, result = _render(pygame, _plane(_region(draw)))
+    (target,) = [e for e in result.hit_entries if isinstance(e, ItemHitTarget)]
+    # The first card's header row is scrolled above the root, so its two
+    # text lines take rows 0 and 1; the next cards take two rows each.
+    assert [(part.item_key, part.area) for part in target.items] == [
+        (1, PixelRect(0, 0, 200, 20)),
+        (2, PixelRect(0, 20, 200, 40)),
+        (3, PixelRect(0, 40, 200, 60)),
+    ]
+    assert target.item_at(60, 15) == ("select", 1)
+    assert target.item_at(60, 35) == ("select", 2)
+    assert target.item_at(60, 55) == ("select", 3)
+    plain = tuple(surface.get_at((175, 5)))[:3]
+    selected = tuple(surface.get_at((175, 25)))[:3]
+    assert selected == (42, 75, 122)
+    # Field 0 starts one cell in and later fields three; the hidden header
+    # leaves its cell empty.
+    assert not _ink(surface, 1, 0, plain)
+    assert _ink(surface, 3, 0, plain) and _ink(surface, 3, 1, plain)
+    assert _ink(surface, 1, 2, selected) and not _ink(surface, 7, 2, selected)
+    assert _ink(surface, 3, 3, selected) and not _ink(surface, 1, 3, selected)
+    assert _ink(surface, 1, 4, plain) and _ink(surface, 3, 5, plain)
+    # "Summarise the" fills cells 3 to 15; the wrapped "notes" stops at 7.
+    assert _ink(surface, 15, 0, plain) and not _ink(surface, 16, 0, plain)
+    assert _ink(surface, 7, 1, plain) and not _ink(surface, 8, 1, plain)

@@ -384,7 +384,7 @@ class TestRichTerminalForth(_KDOSTestBase):
 
     def test_item_view_control_writer_emits_exact_target_forth_bytes(self) -> None:
         """Pack one minimum ITM1 item view through the production guest word,
-        which needs RET_CONTROL_ITEMS and at least the 48-byte body."""
+        which needs RET_CONTROL_ITEMS and at least the 56-byte body."""
         memory, ext_memory, cpu_state = self._snapshot_data()
         system = make_system(
             ram_kib=1024,
@@ -404,20 +404,20 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "CREATE PT-COL-EVENT PT-EVENT-SIZE ALLOT",
                 "CREATE PT-COL-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
                 ": PT-COL-SESSION PT-COL-SESSION-STORAGE 7 + -8 AND ;",
-                "CREATE PT-COL-CONTENT 48 ALLOT",
+                "CREATE PT-COL-CONTENT 56 ALLOT",
                 "VARIABLE PT-COL-INIT-S",
                 "VARIABLE PT-COL-FEATURE-S",
                 "VARIABLE PT-COL-SHORT-S",
                 "VARIABLE PT-COL-WRITE-S",
                 "VARIABLE PT-COL-ALIAS-S",
                 ": PT-COL-CONTENT!",
-                "  PT-COL-CONTENT 48 0 FILL",
+                "  PT-COL-CONTENT 56 0 FILL",
                 "  0x314D5449 PT-COL-CONTENT L!",
                 "  1 PT-COL-CONTENT 4 + W!",
                 "  1 PT-COL-CONTENT 8 + _PT-U64!",
                 "  1 PT-COL-CONTENT 16 + W!",
                 "  1 PT-COL-CONTENT 20 + L!",
-                "  1 PT-COL-CONTENT 40 + W! ;",
+                "  1 PT-COL-CONTENT 48 + W! ;",
                 ": PT-COL-PRIME",
                 "  PT-COL-CONTENT!",
                 "  PT-COL-RX 8192 PT-COL-TX 8192",
@@ -456,14 +456,14 @@ class TestRichTerminalForth(_KDOSTestBase):
                 ": PT-COL-RUN",
                 "  PT-COL-PRIME",
                 "  0x301 PT-COL-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
-                "  PT-COL-CONTENT 48 PT-COL-WRITE PT-COL-FEATURE-S !",
+                "  PT-COL-CONTENT 56 PT-COL-WRITE PT-COL-FEATURE-S !",
                 "  0x701 PT-COL-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
-                "  PT-COL-CONTENT 47 PT-COL-WRITE PT-COL-SHORT-S !",
+                "  PT-COL-CONTENT 55 PT-COL-WRITE PT-COL-SHORT-S !",
                 "  PT-COL-BEGIN-MARK TX-FLUSH",
-                "  PT-COL-CONTENT 48 PT-COL-WRITE PT-COL-WRITE-S !",
+                "  PT-COL-CONTENT 56 PT-COL-WRITE PT-COL-WRITE-S !",
                 "  TX-FLUSH",
                 "  PT-COL-END-MARK TX-FLUSH",
-                "  PT-COL-SESSION _PT.S.TX-A @ 48",
+                "  PT-COL-SESSION _PT.S.TX-A @ 56",
                 "    PT-COL-WRITE PT-COL-ALIAS-S !",
                 '  S" PTCOLSTATUS " TYPE',
                 "  PT-COL-INIT-S @ . PT-COL-FEATURE-S @ .",
@@ -515,9 +515,9 @@ class TestRichTerminalForth(_KDOSTestBase):
             self.assertNotIn(diagnostic, text)
 
         content = struct.pack(
-            "<IHHQHHIIIII", 0x314D5449, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0
+            "<IHHQHHIIIIIII", 0x314D5449, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0
         ) + struct.pack("<HHI", 1, 0, 0)
-        self.assertEqual(len(content), 48)
+        self.assertEqual(len(content), 56)
         control = struct.pack(
             "<QQQHHiQQIiiIIIII",
             0x0102030405060708,

@@ -41,7 +41,14 @@ from .semantic_content import (
     SemanticTextState,
     TextStyle,
 )
-from .semantic_items import ItemColumnKind, ItemRole, ItemState, ItemViewRole
+from .semantic_items import (
+    ItemColumnKind,
+    ItemRole,
+    ItemState,
+    ItemViewRole,
+    card_field_width,
+    card_row_count,
+)
 
 ATTR_BOLD = 0x01
 ATTR_DIM = 0x02
@@ -2206,8 +2213,11 @@ def _paint_item_view(
 
     The layout is this renderer's: a tree indents by depth and marks
     expandable items, a table heads its columns and aligns NUMBER fields at
-    the end, a list or tree puts later fields at the row's end, sections set
-    their headings in the heading look, and cards stack an item's fields.
+    the end, a list or tree puts later fields at the row's end, and sections
+    set their headings in the heading look.  Cards take the exact rows the
+    contract gives, the first starting ``viewport_row`` rows above the root:
+    field 0 one cell in and later fields three, a WRAP field's lines on
+    rows of their own.
     """
 
     anchor, visible_anchor = _semantic_root_rects(
@@ -2225,7 +2235,7 @@ def _paint_item_view(
     header = role is ItemViewRole.TABLE and any(
         column.label for column in content.columns
     )
-    lines_per_item = len(content.columns) if role is ItemViewRole.CARDS else 1
+    cards = role is ItemViewRole.CARDS
 
     def slot_edge(slot: int) -> int:
         return _partition_edge(anchor.left, anchor.width, min(max(slot, 0), slots), slots)
@@ -2262,9 +2272,15 @@ def _paint_item_view(
         paragraph, at LAST's side when END or right-to-left; a character
         the bounds cut is not drawn."""
 
+        paint_layout(item_field, text_rules.cached_row(text, direction, True),
+                     first, last, top, bottom, color=color, end=end, look=look)
+
+    def paint_layout(item_field, layout, first, last, top, bottom, *, color, end=False,
+                     look=None):
+        """Paint one laid-out row or line between slots FIRST and LAST."""
+
         if last <= first:
             return
-        layout = text_rules.cached_row(text, direction, True)
         start = last - layout.width if (end or layout.rtl) else first
         start = max(start, first)
         for placed in layout.characters:
@@ -2318,9 +2334,13 @@ def _paint_item_view(
                 surface.fill(_COLLECTION_BORDER, line)
             row = 1
         heading = REFERENCE_TEXT_THEME[TextStyle.HEADING]
+        if cards:
+            row = -content.viewport_row
         for item in shown:
-            top, bottom = row_edge(row), row_edge(row + lines_per_item)
-            row += lines_per_item
+            item_rows = card_row_count(content, item, slots) if cards else 1
+            item_row = row
+            top, bottom = row_edge(row), row_edge(row + item_rows)
+            row += item_rows
             area = _clipped_python_rect(
                 pygame_module, anchor.left, top, anchor.right, bottom, visible_anchor
             )
@@ -2337,7 +2357,7 @@ def _paint_item_view(
                 )
                 if bar is not None:
                     surface.fill(_ACCENT[:3], bar)
-            if role is ItemViewRole.CARDS:
+            if cards:
                 _paint_clipped_border(
                     pygame_module, surface, _COLLECTION_BORDER,
                     left=anchor.left, top=top, right=anchor.right, bottom=bottom,
@@ -2346,7 +2366,7 @@ def _paint_item_view(
             slot = 0
             if role in (ItemViewRole.TREE, ItemViewRole.SECTIONS):
                 slot = _ITEM_INDENT * item.depth
-            line_top, line_bottom = top, row_edge(row - lines_per_item + 1)
+            line_top, line_bottom = top, row_edge(item_row + 1)
             disclosure = None
             if role is ItemViewRole.TREE:
                 if state & ItemState.EXPANDABLE:
@@ -2395,12 +2415,26 @@ def _paint_item_view(
                         color=color,
                         end=content.columns[index].kind is ItemColumnKind.NUMBER,
                     )
-            elif role is ItemViewRole.CARDS:
-                for index, item_field in enumerate(fields):
-                    field_top = row_edge(row - lines_per_item + index)
-                    field_bottom = row_edge(row - lines_per_item + index + 1)
-                    paint_text(item_field, item_field.text, slot + 1, slots - 1,
-                               field_top, field_bottom, color=color)
+            elif cards:
+                line_row = item_row
+                for index, column in enumerate(content.columns):
+                    first = 1 if index == 0 else 3
+                    last = first + card_field_width(slots, index)
+                    if index >= len(fields):
+                        line_row += 1
+                        continue
+                    item_field = fields[index]
+                    if column.wrap:
+                        lines = text_rules.cached_lines(
+                            item_field.text, direction, card_field_width(slots, index)
+                        )
+                    else:
+                        lines = (text_rules.cached_row(item_field.text, direction, True),)
+                    for line in lines:
+                        if 0 <= line_row < rows:
+                            paint_layout(item_field, line, first, last, row_edge(line_row),
+                                         row_edge(line_row + 1), color=color)
+                        line_row += 1
             else:
                 # Later fields sit at the row's end, the last one last.
                 right = slots

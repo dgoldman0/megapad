@@ -3,8 +3,8 @@
 This module is the terminal's implementation of the contract: characters
 (extended grapheme clusters, UAX #29), widths, invalid-input replacement,
 the Unicode Bidirectional Algorithm (UAX #9) at the character level, Arabic
-joining on the cell grid, and the layout of one row of logical text into
-visual cells.  All data comes from :mod:`rich_terminal.text_data`, which is
+joining on the cell grid, the layout of one row of logical text into visual
+cells, and Section 12's breaking of a paragraph into lines.  All data comes from :mod:`rich_terminal.text_data`, which is
 generated from the pinned Unicode 15.1.0 files.
 
 The client (Akashic) implements the same rules independently.  Both are
@@ -309,14 +309,50 @@ def bidi_levels(
     classes: list[int],
     direction: int = DIRECTION_AUTO,
     scalars: list[int] | None = None,
+    line_ends: tuple[int, ...] | list[int] | None = None,
 ) -> tuple[list[int | None], int]:
     """Resolve embedding levels for one paragraph.
 
     ``classes`` are Bidi_Class values; ``scalars`` supply the paired brackets
-    for rule N0 and may be omitted when no character is a bracket.  Returns
-    the per-character levels, with ``None`` for characters removed by X9, and
-    the paragraph embedding level.
+    for rule N0 and may be omitted when no character is a bracket.  Rule L1
+    applies to each line; ``line_ends`` are the scalar indexes where the
+    paragraph's lines end, and by default the paragraph is one line.
+    Returns the per-character levels, with ``None`` for characters removed by
+    X9, and the paragraph embedding level.
     """
+
+    levels, removed, paragraph = _resolve_levels(classes, direction, scalars)
+    start = 0
+    for end in (len(classes),) if line_ends is None else line_ends:
+        _apply_l1(levels, classes, removed, paragraph, start, end)
+        start = end
+    return [None if removed[i] else levels[i] for i in range(len(classes))], paragraph
+
+
+def _apply_l1(levels, classes, removed, paragraph, start, end) -> None:
+    """L1 over one line: separators, and whitespace before them or at the
+    line's end, reset to the paragraph level."""
+
+    trailing = True
+    for index in range(end - 1, start - 1, -1):
+        kind = classes[index]
+        if kind in (BC_S, BC_B):
+            levels[index] = paragraph
+            trailing = True
+        elif kind in (BC_WS, BC_FSI, BC_LRI, BC_RLI, BC_PDI) or removed[index]:
+            if trailing:
+                levels[index] = paragraph
+        else:
+            trailing = False
+
+
+def _resolve_levels(
+    classes: list[int],
+    direction: int,
+    scalars: list[int] | None,
+) -> tuple[list[int], list[bool], int]:
+    """Rules P2 to I2 for one paragraph: levels before L1, the characters X9
+    removes, and the paragraph level."""
 
     n = len(classes)
     if direction == DIRECTION_AUTO:
@@ -421,21 +457,7 @@ def bidi_levels(
         _resolve_sequence(
             sequence, classes, types, levels, explicit, removed, matches, paragraph, scalars
         )
-
-    # L1: separators, and whitespace before them or at the end, reset.
-    trailing = True
-    for index in range(n - 1, -1, -1):
-        kind = classes[index]
-        if kind in (BC_S, BC_B):
-            levels[index] = paragraph
-            trailing = True
-        elif kind in (BC_WS, BC_FSI, BC_LRI, BC_RLI, BC_PDI) or removed[index]:
-            if trailing:
-                levels[index] = paragraph
-        else:
-            trailing = False
-
-    return [None if removed[i] else levels[i] for i in range(n)], paragraph
+    return levels, removed, paragraph
 
 
 def _neighbour_level(levels, removed, index, step, n, paragraph) -> int:
@@ -791,3 +813,156 @@ def layout_row(
 @lru_cache(maxsize=4096)
 def cached_row(text: str, direction: int = DIRECTION_AUTO, keep_tab: bool = False) -> RowLayout:
     return layout_row(text, direction, keep_tab=keep_tab)
+
+
+# ---------------------------------------------------------------------------
+# Section 12: lines
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True, slots=True)
+class LineLayout:
+    """One line of a paragraph broken by Section 12, laid out left to right
+    from visual column zero.  Its characters' offsets, and ``start`` and
+    ``end``, count scalars from the start of the text the paragraph is in.
+    The spaces at the line's end are part of it but take no cell."""
+
+    characters: tuple[PlacedCharacter, ...]   # visual order, width > 0
+    width: int
+    paragraph_level: int
+    start: int
+    end: int
+
+    @property
+    def rtl(self) -> bool:
+        return bool(self.paragraph_level & 1)
+
+
+def break_lines(widths: list[int], spaces: list[bool], limit: int) -> list[tuple[int, int]]:
+    """Section 12 over one paragraph's characters in logical order, given
+    each one's width and whether it is a space: the half-open character
+    ranges of its lines, each at most ``limit`` cells wide."""
+
+    if limit < 1:
+        raise ValueError("a line is at least one cell wide")
+    count = len(widths)
+    if count == 0:
+        return [(0, 0)]
+    lines: list[tuple[int, int]] = []
+    first = 0
+    while first < count:
+        total = content = 0
+        seen = False
+        opportunity = forced = None
+        index = first
+        while index < count:
+            if spaces[index]:
+                total += widths[index]
+            else:
+                if seen and spaces[index - 1] and content <= limit:
+                    opportunity = index
+                total += widths[index]
+                content = total
+                seen = True
+            if forced is None and total > limit:
+                forced = index
+            if content > limit:
+                break
+            index += 1
+        if index == count:
+            lines.append((first, count))
+            break
+        if opportunity is not None:
+            end = opportunity
+        elif forced is not None and forced > first:
+            end = forced
+        else:
+            end = first + 1
+        lines.append((first, end))
+        first = end
+    return lines
+
+
+def _paragraph_lines(
+    paragraph: str, direction: int, limit: int, base: int
+) -> list[LineLayout]:
+    scalars = display_scalars(paragraph)
+    if all(0x20 <= cp < 0x7F for cp in scalars) and direction != DIRECTION_RTL:
+        lines = []
+        for first, end in break_lines([1] * len(scalars), [cp == 0x20 for cp in scalars], limit):
+            last = end
+            while last > first and scalars[last - 1] == 0x20:
+                last -= 1
+            placed = tuple(
+                PlacedCharacter(base + i, 1, chr(scalars[i]), 1, 0, i - first)
+                for i in range(first, last)
+            )
+            lines.append(LineLayout(placed, last - first, 0, base + first, base + end))
+        return lines
+    spans = segment(scalars)
+    widths = [char_width(scalars[start:start + length]) for start, length in spans]
+    spaces = [length == 1 and scalars[start] == 0x20 for start, length in spans]
+    breaks = break_lines(widths, spaces, limit)
+
+    def scalar_at(character: int) -> int:
+        return spans[character][0] if character < len(spans) else len(scalars)
+
+    classes = [bidi_class(props(cp)) for cp in scalars]
+    levels, paragraph_level = bidi_levels(
+        classes, direction, scalars, [scalar_at(end) for _, end in breaks]
+    )
+    forms = joining_forms(scalars)
+    lines = []
+    for first, end in breaks:
+        last = end
+        while last > first and spaces[last - 1]:
+            last -= 1
+        items = []
+        for character in range(first, last):
+            start, length = spans[character]
+            width = widths[character]
+            if width == 0:
+                continue
+            level = levels[start]
+            if level is None:
+                level = next(
+                    (lv for lv in levels[start:start + length] if lv is not None),
+                    paragraph_level,
+                )
+            shown = scalars[start]
+            if level & 1:
+                shown = mirror(shown)
+            form = arabic_form(scalars[start], forms[start]) if shown == scalars[start] else 0
+            if form:
+                shown = form
+            text = "".join(map(chr, [shown, *scalars[start + 1:start + length]]))
+            items.append((start, length, text, width, level))
+        column = 0
+        placed_list = []
+        for index in visual_order([item[4] for item in items]):
+            start, length, text, width, level = items[index]
+            placed_list.append(PlacedCharacter(base + start, length, text, width, level, column))
+            column += width
+        lines.append(
+            LineLayout(
+                tuple(placed_list), column, paragraph_level,
+                base + scalar_at(first), base + scalar_at(end),
+            )
+        )
+    return lines
+
+
+def layout_lines(text: str, direction: int, limit: int) -> tuple[LineLayout, ...]:
+    """Every line of TEXT, whose paragraphs line feeds separate, broken at
+    ``limit`` cells by Section 12 and laid out by Sections 3 to 8."""
+
+    lines: list[LineLayout] = []
+    base = 0
+    for paragraph in text.split("\n"):
+        lines.extend(_paragraph_lines(paragraph, direction, limit, base))
+        base += len(paragraph) + 1
+    return tuple(lines)
+
+
+@lru_cache(maxsize=1024)
+def cached_lines(text: str, direction: int, limit: int) -> tuple[LineLayout, ...]:
+    return layout_lines(text, direction, limit)

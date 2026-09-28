@@ -16,6 +16,7 @@ from rich_terminal.semantic_content import (
 from rich_terminal.semantic_items import (
     ITEM_VIEW_TAG,
     ItemColumn,
+    ItemColumnFlag,
     ItemColumnKind,
     ItemField,
     ItemRole,
@@ -24,6 +25,8 @@ from rich_terminal.semantic_items import (
     ItemViewFlag,
     ItemViewRole,
     ViewItem,
+    card_field_width,
+    card_row_count,
     decode_item_view_content,
     encode_item_view_content,
 )
@@ -94,15 +97,15 @@ def test_itm1_has_exact_headers_and_round_trips() -> None:
     content = _table()
     raw = encode_item_view_content(content)
     assert len(raw) == content.wire_bytes
-    header = struct.unpack_from("<IHHQHHIIIII", raw)
-    assert header == (ITEM_VIEW_TAG, 1, 0, 4, 3, 0, 3, 51, 10, 2, 3)
+    header = struct.unpack_from("<IHHQHHIIIIIII", raw)
+    assert header == (ITEM_VIEW_TAG, 1, 0, 4, 3, 0, 3, 51, 10, 2, 3, 0, 0)
     assert raw[:4] == b"ITM1"
-    offset = 40
+    offset = 48
     labels = []
     for _ in range(3):
-        kind, reserved, label_bytes = struct.unpack_from("<HHI", raw, offset)
+        kind, flags, label_bytes = struct.unpack_from("<HHI", raw, offset)
         offset += 8
-        labels.append((kind, reserved, raw[offset : offset + label_bytes].decode()))
+        labels.append((kind, flags, raw[offset : offset + label_bytes].decode()))
         offset += label_bytes
     assert labels == [(1, 0, "Name"), (2, 0, "Size"), (1, 0, "Type")]
     key, parent, ordinal, depth, state, role, fields, reserved = struct.unpack_from(
@@ -159,7 +162,7 @@ def test_every_role_round_trips_and_shows_its_viewport() -> None:
 def test_an_empty_view_has_an_empty_viewport() -> None:
     empty = ItemViewContent(1, ItemViewRole.LIST, 0, (ItemColumn(TEXT),), 0, 0, 0, ())
     raw = encode_item_view_content(empty)
-    assert len(raw) == 48
+    assert len(raw) == 56
     assert decode_item_view_content(raw) == empty
     with pytest.raises(ValueError, match="empty viewport"):
         ItemViewContent(1, ItemViewRole.LIST, 0, (ItemColumn(TEXT),), 0, 0, 1, ())
@@ -240,6 +243,88 @@ def test_fields_carry_style_runs() -> None:
         ItemField("ab", (StyleRun(1, 2, TextStyle.LINK),))
 
 
+def _transcript(viewport_row=0, **change) -> ItemViewContent:
+    """Cards whose second column wraps, as in a chat transcript."""
+
+    values = dict(
+        content_revision=3,
+        role=ItemViewRole.CARDS,
+        flags=ItemViewFlag(0),
+        columns=(ItemColumn(TEXT), ItemColumn(TEXT, wrap=True)),
+        item_total=3,
+        viewport_first=1,
+        viewport_count=2,
+        items=(
+            _item(11, 0, "YOU", "Summarise the notes"),
+            _item(12, 1, "AGENT", "Three points.\n\nFirst, the notes are short.",
+                  state=S.SELECTED),
+            _item(13, 2, "YOU", ""),
+        ),
+        viewport_row=1,
+    )
+    values["viewport_row"] = viewport_row
+    values.update(change)
+    return ItemViewContent(**values)
+
+
+def test_wrapping_cards_carry_line_feeds_and_a_viewport_row() -> None:
+    content = _transcript(viewport_row=2)
+    raw = encode_item_view_content(content)
+    header = struct.unpack_from("<IHHQHHIIIIIII", raw)
+    assert header[-2:] == (2, 0)
+    assert struct.unpack_from("<HHI", raw, 48) == (1, 0, 0)
+    assert struct.unpack_from("<HHI", raw, 56) == (1, int(ItemColumnFlag.WRAP), 0)
+    decoded = decode_item_view_content(raw)
+    assert decoded == content
+    assert decoded.columns[1].wrap and decoded.viewport_row == 2
+    assert decoded.items[1].fields[1].has_line_feed
+    # A style run may cover a line feed.
+    linked = ItemField("a\nb", (StyleRun(0, 3, TextStyle.STRONG),))
+    replaced = replace(content, items=(content.items[0], _item(12, 1, "AGENT", linked)),
+                       item_total=2, viewport_count=1)
+    assert decode_item_view_content(encode_item_view_content(replaced)) == replaced
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (dict(role=ItemViewRole.LIST, viewport_row=0), "only cards have a wrapping column"),
+        (dict(columns=(ItemColumn(TEXT), ItemColumn(TEXT))), "does not wrap"),
+        (dict(items=(), item_total=0, viewport_first=0, viewport_count=0),
+         "empty viewport"),
+        (dict(items=(_item(11, 0, "YOU", "hi", state=S.CHECKABLE),
+                     _item(12, 1, "AGENT", "x"), _item(13, 2, "YOU", "y"))),
+         "no check box"),
+    ],
+)
+def test_only_cards_wrap_have_a_viewport_row_and_no_check_box(change, message) -> None:
+    change = {"viewport_row": 1, **change}
+    with pytest.raises(ValueError, match=message):
+        _transcript(**change)
+    with pytest.raises(ValueError, match="only cards have a viewport row"):
+        replace(_table(), viewport_row=1)
+    with pytest.raises(ValueError, match="control character"):
+        ItemField("a\rb")
+
+
+def test_card_rows_follow_the_shared_line_rule() -> None:
+    content = _transcript()
+    you, agent, empty = content.items
+    # Width 20: field 0 lines are 18 cells, later fields' 16.
+    assert (card_field_width(20, 0), card_field_width(20, 1)) == (18, 16)
+    assert (card_field_width(3, 0), card_field_width(3, 1)) == (1, 1)
+    # "Summarise the notes" is 19 cells: "Summarise the" / "notes".
+    assert card_row_count(content, you, 20) == 1 + 2
+    # "Three points." / "" / "First, the notes" / "are short."
+    assert card_row_count(content, agent, 20) == 1 + 4
+    # An empty field is one empty line; so is a missing field.
+    assert card_row_count(content, empty, 20) == 2
+    lone = _item(14, 0, "SYSTEM")
+    assert card_row_count(content, lone, 20) == 2
+    # Wider views break less.
+    assert card_row_count(content, agent, 40) == 1 + 3
+
+
 def _code(raw: bytes) -> SemanticContentErrorCode:
     with pytest.raises(SemanticContentError) as caught:
         decode_item_view_content(raw)
@@ -250,7 +335,7 @@ def test_decoder_rejects_every_noncanonical_byte() -> None:
     raw = bytearray(encode_item_view_content(_tree()))
     assert _code(bytes(raw) + b"\0") is SemanticContentErrorCode.PAYLOAD
     assert _code(bytes(raw[:-1])) is SemanticContentErrorCode.PAYLOAD
-    assert _code(bytes(raw[:39])) is SemanticContentErrorCode.PAYLOAD
+    assert _code(bytes(raw[:47])) is SemanticContentErrorCode.PAYLOAD
     bad = bytearray(raw); bad[0] = 0
     assert _code(bytes(bad)) is SemanticContentErrorCode.CONSISTENCY
     bad = bytearray(raw); bad[4] = 2
@@ -263,20 +348,31 @@ def test_decoder_rejects_every_noncanonical_byte() -> None:
     assert _code(bytes(bad)) is SemanticContentErrorCode.ENUM
     bad = bytearray(raw); bad[18] = 4
     assert _code(bytes(bad)) is SemanticContentErrorCode.RESERVED
-    # The first column's kind and reserved field.
-    bad = bytearray(raw); bad[40] = 3
-    assert _code(bytes(bad)) is SemanticContentErrorCode.ENUM
-    bad = bytearray(raw); bad[42] = 1
+    # The viewport row belongs to cards; the last header field is reserved.
+    bad = bytearray(raw); bad[40] = 1
+    assert _code(bytes(bad)) is SemanticContentErrorCode.CONSISTENCY
+    bad = bytearray(raw); bad[44] = 1
     assert _code(bytes(bad)) is SemanticContentErrorCode.RESERVED
-    item = 48  # the first item, after the one empty-label column
+    # The first column's kind and flags: WRAP belongs to cards, bit 1 is
+    # reserved.
+    bad = bytearray(raw); bad[48] = 3
+    assert _code(bytes(bad)) is SemanticContentErrorCode.ENUM
+    bad = bytearray(raw); bad[50] = 1
+    assert _code(bytes(bad)) is SemanticContentErrorCode.CONSISTENCY
+    bad = bytearray(raw); bad[50] = 2
+    assert _code(bytes(bad)) is SemanticContentErrorCode.RESERVED
+    item = 56  # the first item, after the one empty-label column
     bad = bytearray(raw); bad[item + 22] = 0x80
     assert _code(bytes(bad)) is SemanticContentErrorCode.RESERVED
     bad = bytearray(raw); bad[item + 24] = 3
     assert _code(bytes(bad)) is SemanticContentErrorCode.ENUM
     bad = bytearray(raw); bad[item + 28] = 1
     assert _code(bytes(bad)) is SemanticContentErrorCode.RESERVED
-    # The first field's text "/" becomes a control character.
+    # The first field's text "/" becomes a control character, and a line
+    # feed in a column that does not wrap is one too.
     bad = bytearray(raw); bad[item + 40] = 0x09
+    assert _code(bytes(bad)) is SemanticContentErrorCode.SCALAR
+    bad = bytearray(raw); bad[item + 40] = 0x0A
     assert _code(bytes(bad)) is SemanticContentErrorCode.SCALAR
     # A structural rule broken in otherwise canonical bytes.
     bad = bytearray(raw); bad[item + 22] = int(S.EXPANDABLE)  # "/" no longer expanded
@@ -368,3 +464,22 @@ def test_item_events_have_an_item_tail_with_reserved_fields() -> None:
 
 def test_the_item_feature_needs_the_collections_feature() -> None:
     assert RetainedFeature.CONTROL_ITEMS == 1 << 10
+
+
+def test_a_terminal_checks_the_viewport_row_against_the_control_width() -> None:
+    # At width 30 the text column is 26 cells: "Three points.", "", "First,
+    # the notes are", "short." -- four lines under the header line.
+    content = _transcript(viewport_row=4)
+    first = content.shown_items()[0]
+    assert card_row_count(content, first, 30) == 5
+    definition = _item_view_control(content)
+    decoded = decode_control_definition(encode_control_definition(definition))
+    assert decoded.content.viewport_row == 4
+    with pytest.raises(ValueError, match="lies past the first viewport card"):
+        _item_view_control(_transcript(viewport_row=5))
+    # A narrower control breaks the same card into more rows: at width 16,
+    # "Three" / "points." / "" / "First, the" / "notes are" / "short.".
+    narrow = replace(definition, bounds=ObjectBounds(0, 2, 16, 8),
+                     content=_transcript(viewport_row=6))
+    assert card_row_count(narrow.content, first, 16) == 7
+    assert narrow.content.viewport_row == 6

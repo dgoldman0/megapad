@@ -46,7 +46,7 @@ from .semantic_content import (
     SemanticTextRole,
     SemanticTextState,
 )
-from .semantic_items import ItemRole, ItemViewContent, ViewItem
+from .semantic_items import ItemRole, ItemViewContent, ViewItem, card_row_count
 
 
 INT32_MIN = -(1 << 31)
@@ -790,6 +790,14 @@ def validate_control_shape(
         elif normalized_kind is ControlKind.ITEM_VIEW:
             if not isinstance(content, ItemViewContent):
                 raise ValueError("ITEM_VIEW requires an item collection")
+            if content.viewport_row:
+                # SEMANTIC-CONTENT-1: the first viewport card shows a row at
+                # this control's width.
+                first = content.shown_items()[0]
+                if content.viewport_row >= card_row_count(content, first, bounds.cell_cols):
+                    raise ValueError(
+                        "the viewport row lies past the first viewport card"
+                    )
         elif not isinstance(content, SemanticTextContent):
             raise ValueError(
                 f"{normalized_kind.name} requires semantic text content"

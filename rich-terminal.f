@@ -5574,11 +5574,11 @@ VARIABLE _PT-CT-TU
         _PT-CT-CONTENT-U @ IF FALSE EXIT THEN
         _PT-CT-STATE @ 0x0B INVERT AND 0= EXIT
     THEN
-    \ An item view carries at least the 48-byte smallest ITM1 body.
+    \ An item view carries at least the 56-byte smallest ITM1 body.
     _PT-CT-KIND @ PT-CONTROL-ITEM-VIEW = IF
         _PT-CT-PARENT @ _PT-CT-ORDER @ OR IF FALSE EXIT THEN
         _PT-CT-LABEL-U @ _PT-CT-SHORTCUT-U @ OR IF FALSE EXIT THEN
-        _PT-CT-CONTENT-U @ 48 U< IF FALSE EXIT THEN
+        _PT-CT-CONTENT-U @ 56 U< IF FALSE EXIT THEN
         _PT-CT-STATE @ 0x0B INVERT AND IF FALSE EXIT THEN
         _PT-CT-ROOT-BOUNDS? EXIT
     THEN

@@ -10,6 +10,10 @@ The value and its wire codec are immutable and self-validating.  Like STX1,
 ITM1 has no item or text maximum of its own: the enclosing APT-1 payload,
 transaction, owner UTF-8 reservation, and caller-provided terminal limits
 are the bounds.
+
+Cards have exact rows (SEMANTIC-CONTENT-1): ``card_row_count`` gives them at
+a root width, breaking ``WRAP`` fields by APT-1-TEXT Section 12, so that the
+terminal's viewport check and the renderer use one rule.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ import struct
 from dataclasses import dataclass, field
 from enum import IntEnum, IntFlag
 
+from . import text_rules
 from .apt1 import UINT16_MAX, UINT32_MAX, UINT64_MAX
 from .semantic_content import (
     SemanticContentError,
@@ -32,7 +37,7 @@ from .semantic_content import (
 ITEM_VIEW_TAG = 0x314D5449  # little-endian ``ITM1``
 ITEM_VIEW_VERSION = 1
 
-_HEADER = struct.Struct("<IHHQHHIIIII")
+_HEADER = struct.Struct("<IHHQHHIIIIIII")
 _COLUMN = struct.Struct("<HHI")
 _ITEM = struct.Struct("<QQIHHHHI")
 _FIELD = struct.Struct("<II")
@@ -64,6 +69,16 @@ class ItemColumnKind(IntEnum):
     NUMBER = 2
 
 
+class ItemColumnFlag(IntFlag):
+    """Bit 0, ``WRAP``: the column's fields break into lines.  Only a
+    ``CARDS`` view may have a wrapping column."""
+
+    WRAP = 1 << 0
+
+
+ITEM_COLUMN_FLAG_MASK = ItemColumnFlag.WRAP
+
+
 class ItemRole(IntEnum):
     ITEM = 1
     SECTION = 2
@@ -92,14 +107,18 @@ ITEM_STATE_MASK = (
 )
 
 
-def _has_control(value: str) -> bool:
-    return any(ord(character) < 0x20 or character == "\x7f" for character in value)
+def _has_control(value: str, allow_line_feed: bool = False) -> bool:
+    return any(
+        (ord(character) < 0x20 and not (allow_line_feed and character == "\n"))
+        or character == "\x7f"
+        for character in value
+    )
 
 
-def _clean_text(name: str, value: str) -> bytes:
+def _clean_text(name: str, value: str, *, allow_line_feed: bool = False) -> bytes:
     if not isinstance(value, str):
         raise TypeError(f"{name} must be str")
-    if _has_control(value):
+    if _has_control(value, allow_line_feed):
         raise ValueError(f"{name} contains a control character")
     try:
         return value.encode("utf-8", "strict")
@@ -123,11 +142,18 @@ class ItemColumn:
 
     kind: ItemColumnKind
     label: str = ""
+    wrap: bool = False
     _utf8_bytes: int = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", _enum("column kind", ItemColumnKind, self.kind))
+        if not isinstance(self.wrap, bool):
+            raise TypeError("wrap must be bool")
         object.__setattr__(self, "_utf8_bytes", len(_clean_text("label", self.label)))
+
+    @property
+    def flags(self) -> ItemColumnFlag:
+        return ItemColumnFlag.WRAP if self.wrap else ItemColumnFlag(0)
 
     @property
     def utf8_bytes(self) -> int:
@@ -141,15 +167,22 @@ class ItemColumn:
 @dataclass(frozen=True, slots=True)
 class ItemField:
     """One field's text and the style runs that say what parts of it mean,
-    under the rules of STX1's style runs."""
+    under the rules of STX1's style runs.  Only a field in a ``WRAP`` column
+    may hold a line feed, which ends a paragraph; the view checks that."""
 
     text: str
     runs: tuple[StyleRun, ...] = ()
     _utf8_bytes: int = field(init=False, repr=False, compare=False)
     _run_starts: tuple[int, ...] = field(init=False, repr=False, compare=False)
+    _line_feed: bool = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "_utf8_bytes", len(_clean_text("field text", self.text)))
+        object.__setattr__(
+            self,
+            "_utf8_bytes",
+            len(_clean_text("field text", self.text, allow_line_feed=True)),
+        )
+        object.__setattr__(self, "_line_feed", "\n" in self.text)
         runs = tuple(self.runs)
         if any(not isinstance(run, StyleRun) for run in runs):
             raise TypeError("runs must contain only StyleRun values")
@@ -175,6 +208,10 @@ class ItemField:
     @property
     def wire_bytes(self) -> int:
         return _FIELD.size + self._utf8_bytes + _STYLE_RUN.size * len(self.runs)
+
+    @property
+    def has_line_feed(self) -> bool:
+        return self._line_feed
 
     def meaning_at(self, offset: int) -> TextStyle | None:
         """The meaning of the scalar at OFFSET, or None when it is plain."""
@@ -260,7 +297,9 @@ class ItemViewContent:
     Items are in the order the application shows them, numbered by
     ``ordinal`` from zero to ``item_total`` minus one.  The viewport is the
     ordinals from ``viewport_first`` for ``viewport_count`` items; every one
-    of them is carried, and so is a selected item.
+    of them is carried, and so is a selected item.  In ``CARDS``,
+    ``viewport_row`` rows of the first viewport card lie above the root; a
+    terminal checks it against the control's width.
     """
 
     content_revision: int
@@ -271,6 +310,7 @@ class ItemViewContent:
     viewport_first: int
     viewport_count: int
     items: tuple[ViewItem, ...]
+    viewport_row: int = 0
     style_run_count: int = field(init=False, repr=False, compare=False)
     _by_key: dict = field(init=False, repr=False, compare=False)
     _utf8_bytes: int = field(init=False, repr=False, compare=False)
@@ -282,6 +322,7 @@ class ItemViewContent:
             ("item_total", 0, UINT32_MAX),
             ("viewport_first", 0, UINT32_MAX),
             ("viewport_count", 0, UINT32_MAX),
+            ("viewport_row", 0, UINT32_MAX),
         ):
             object.__setattr__(
                 self,
@@ -295,8 +336,10 @@ class ItemViewContent:
         if flag_bits == int(ITEM_VIEW_FLAG_MASK):
             raise ValueError("flags name both LTR and RTL")
         object.__setattr__(self, "flags", ItemViewFlag(flag_bits))
+        if self.viewport_row and self.role is not ItemViewRole.CARDS:
+            raise ValueError("only cards have a viewport row")
         if self.item_total == 0:
-            if self.viewport_first or self.viewport_count:
+            if self.viewport_first or self.viewport_count or self.viewport_row:
                 raise ValueError("an empty item view has an empty viewport at zero")
         elif not (
             self.viewport_first < self.item_total
@@ -309,6 +352,8 @@ class ItemViewContent:
             raise TypeError("columns must contain only ItemColumn values")
         if not 1 <= len(columns) <= UINT32_MAX:
             raise ValueError("an item view has at least one column")
+        if self.role is not ItemViewRole.CARDS and any(column.wrap for column in columns):
+            raise ValueError("only cards have a wrapping column")
         items = tuple(self.items)
         if any(not isinstance(item, ViewItem) for item in items):
             raise TypeError("items must contain only ViewItem values")
@@ -326,6 +371,9 @@ class ItemViewContent:
         for item in items:
             if len(item.fields) > len(columns):
                 raise ValueError("an item has more fields than the view has columns")
+            for item_field, column in zip(item.fields, columns):
+                if item_field.has_line_feed and not column.wrap:
+                    raise ValueError("a line feed lies in a field that does not wrap")
             if item.ordinal >= self.item_total:
                 raise ValueError("an item's ordinal lies past the item total")
             if prior is not None and item.ordinal <= prior.ordinal:
@@ -384,6 +432,8 @@ class ItemViewContent:
                 raise ValueError(
                     "a list, table, or cards item is a top-level item that cannot expand"
                 )
+            if self.role is ItemViewRole.CARDS and item.state & ItemState.CHECKABLE:
+                raise ValueError("a card has no check box")
             return
         if self.role is ItemViewRole.TREE:
             if item.role is not ItemRole.ITEM:
@@ -464,11 +514,13 @@ def encode_item_view_content(content: ItemViewContent) -> bytes:
         content.viewport_first,
         content.viewport_count,
         len(content.items),
+        content.viewport_row,
+        0,
     )
     offset = _HEADER.size
     for column in content.columns:
         label = column.label.encode("utf-8", "strict")
-        _COLUMN.pack_into(result, offset, int(column.kind), 0, len(label))
+        _COLUMN.pack_into(result, offset, int(column.kind), int(column.flags), len(label))
         offset += _COLUMN.size
         result[offset : offset + len(label)] = label
         offset += len(label)
@@ -504,14 +556,14 @@ def _fail(code: SemanticContentErrorCode, detail: str) -> SemanticContentError:
     return SemanticContentError(code, detail)
 
 
-def _decode_text(raw: bytes, what: str) -> str:
+def _decode_text(raw: bytes, what: str, allow_line_feed: bool = False) -> str:
     try:
         text = raw.decode("utf-8", "strict")
     except UnicodeDecodeError as exc:
         raise _fail(
             SemanticContentErrorCode.SCALAR, f"{what} is not well-formed UTF-8"
         ) from exc
-    if _has_control(text):
+    if _has_control(text, allow_line_feed):
         raise _fail(SemanticContentErrorCode.SCALAR, f"{what} contains a control character")
     return text
 
@@ -542,6 +594,8 @@ def decode_item_view_content(payload) -> ItemViewContent:
         viewport_first,
         viewport_count,
         item_count,
+        viewport_row,
+        reserved1,
     ) = _HEADER.unpack_from(raw)
     if tag != ITEM_VIEW_TAG:
         raise _fail(SemanticContentErrorCode.CONSISTENCY, "item view content tag is not ITM1")
@@ -550,7 +604,7 @@ def decode_item_view_content(payload) -> ItemViewContent:
             SemanticContentErrorCode.ENUM,
             f"item view content version {version} is not canonical",
         )
-    if reserved0:
+    if reserved0 or reserved1:
         raise _fail(
             SemanticContentErrorCode.RESERVED, "item view content reserved field is nonzero"
         )
@@ -578,11 +632,11 @@ def decode_item_view_content(payload) -> ItemViewContent:
     for _ in range(column_count):
         if _COLUMN.size > len(raw) - offset:
             raise _fail(SemanticContentErrorCode.PAYLOAD, "a column record is truncated")
-        kind_value, reserved, label_bytes = _COLUMN.unpack_from(raw, offset)
+        kind_value, column_flags, label_bytes = _COLUMN.unpack_from(raw, offset)
         offset += _COLUMN.size
-        if reserved:
+        if column_flags & ~int(ITEM_COLUMN_FLAG_MASK):
             raise _fail(
-                SemanticContentErrorCode.RESERVED, "a column's reserved field is nonzero"
+                SemanticContentErrorCode.RESERVED, "a column's flags contain reserved bits"
             )
         try:
             kind = ItemColumnKind(kind_value)
@@ -594,7 +648,7 @@ def decode_item_view_content(payload) -> ItemViewContent:
             raise _fail(SemanticContentErrorCode.PAYLOAD, "a column label is truncated")
         label = _decode_text(raw[offset : offset + label_bytes], "a column label")
         offset += label_bytes
-        columns.append(ItemColumn(kind, label))
+        columns.append(ItemColumn(kind, label, bool(column_flags & ItemColumnFlag.WRAP)))
 
     if item_count > (len(raw) - offset) // _ITEM.size:
         raise _fail(
@@ -634,14 +688,15 @@ def decode_item_view_content(payload) -> ItemViewContent:
         if field_count > (len(raw) - offset) // _FIELD.size:
             raise _fail(SemanticContentErrorCode.PAYLOAD, "an item's fields are truncated")
         item_fields: list[ItemField] = []
-        for _ in range(field_count):
+        for field_index in range(field_count):
             if _FIELD.size > len(raw) - offset:
                 raise _fail(SemanticContentErrorCode.PAYLOAD, "a field record is truncated")
             text_bytes, run_count = _FIELD.unpack_from(raw, offset)
             offset += _FIELD.size
             if text_bytes > len(raw) - offset:
                 raise _fail(SemanticContentErrorCode.PAYLOAD, "a field's text is truncated")
-            text = _decode_text(raw[offset : offset + text_bytes], "a field")
+            wraps = field_index < len(columns) and columns[field_index].wrap
+            text = _decode_text(raw[offset : offset + text_bytes], "a field", wraps)
             offset += text_bytes
             if run_count > (len(raw) - offset) // _STYLE_RUN.size:
                 raise _fail(
@@ -696,17 +751,48 @@ def decode_item_view_content(payload) -> ItemViewContent:
             viewport_first=viewport_first,
             viewport_count=viewport_count,
             items=tuple(items),
+            viewport_row=viewport_row,
         )
     except (TypeError, ValueError) as exc:
         raise _fail(SemanticContentErrorCode.CONSISTENCY, str(exc)) from exc
 
 
+def card_field_width(root_cols: int, field_index: int) -> int:
+    """The widest a card's field ``field_index`` may be at a root width:
+    ``max(W - 2, 1)`` for the first field and ``max(W - 4, 1)`` for later
+    ones (SEMANTIC-CONTENT-1)."""
+
+    return max(root_cols - (2 if field_index == 0 else 4), 1)
+
+
+def card_row_count(content: ItemViewContent, item: ViewItem, root_cols: int) -> int:
+    """How many rows one card takes at a root width: one per column, except
+    that a field in a ``WRAP`` column takes one per line of its paragraphs
+    (APT-1-TEXT Section 12)."""
+
+    rows = 0
+    for index, column in enumerate(content.columns):
+        if column.wrap and index < len(item.fields):
+            rows += len(
+                text_rules.cached_lines(
+                    item.fields[index].text,
+                    content.direction,
+                    card_field_width(root_cols, index),
+                )
+            )
+        else:
+            rows += 1
+    return rows
+
+
 __all__ = [
+    "ITEM_COLUMN_FLAG_MASK",
     "ITEM_STATE_MASK",
     "ITEM_VIEW_FLAG_MASK",
     "ITEM_VIEW_TAG",
     "ITEM_VIEW_VERSION",
     "ItemColumn",
+    "ItemColumnFlag",
     "ItemColumnKind",
     "ItemField",
     "ItemRole",
@@ -715,6 +801,8 @@ __all__ = [
     "ItemViewFlag",
     "ItemViewRole",
     "ViewItem",
+    "card_field_width",
+    "card_row_count",
     "decode_item_view_content",
     "encode_item_view_content",
 ]

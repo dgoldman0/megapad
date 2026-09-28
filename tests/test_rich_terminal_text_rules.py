@@ -209,3 +209,95 @@ def test_caret_belongs_to_the_character_that_starts_at_it() -> None:
     assert layout.caret_character(2).column == 3
     assert layout.caret_character(3).column == 2
     assert layout.caret_character(4) is None
+
+
+# --- Section 12: lines -------------------------------------------------------
+
+def _lines(text: str, limit: int, direction: int = tr.DIRECTION_AUTO):
+    return [
+        (line.start, line.end, "".join(placed.text for placed in line.characters))
+        for line in tr.layout_lines(text, direction, limit)
+    ]
+
+
+@pytest.mark.parametrize(
+    "text, limit, lines",
+    [
+        # Rule 1: the rest fits.
+        ("hello world", 11, [(0, 11, "hello world")]),
+        # Rule 2: the last opportunity that fits; its spaces hang.
+        ("hello world foo bar", 11, [(0, 12, "hello world"), (12, 19, "foo bar")]),
+        ("abc   defgh", 5, [(0, 6, "abc"), (6, 11, "defgh")]),
+        # Trailing spaces never count, even past the limit.
+        ("ab" + " " * 9, 3, [(0, 11, "ab")]),
+        # Rule 3: a word wider than the line is broken by width.
+        ("supercalifragilistic", 6,
+         [(0, 6, "superc"), (6, 12, "alifra"), (12, 18, "gilist"), (18, 20, "ic")]),
+        # Leading spaces are shown and never make an opportunity.
+        ("  indented text", 10, [(0, 11, "  indented"), (11, 15, "text")]),
+        # An indent as wide as the line leaves a line of spaces alone.
+        ("    word", 4, [(0, 4, ""), (4, 8, "word")]),
+        # Wide characters: a two-cell character that would pass the limit
+        # starts the next line; alone and too wide, it takes a line anyway.
+        ("日本語テキスト", 5,
+         [(0, 2, "日本"), (2, 4, "語テ"), (4, 6, "キス"), (6, 7, "ト")]),
+        ("日本", 1, [(0, 1, "日"), (1, 2, "本")]),
+        # A character of width zero never pushes a line past its limit.
+        ("ab​cd", 2, [(0, 3, "ab"), (3, 5, "cd")]),
+        # Only U+0020 is a space: no-break space keeps words together.
+        ("a b c", 3, [(0, 4, "a b"), (4, 5, "c")]),
+        # Paragraphs end at line feeds; an empty one is one empty line.
+        ("", 5, [(0, 0, "")]),
+        ("x\n\ny", 3, [(0, 1, "x"), (2, 2, ""), (3, 4, "y")]),
+    ],
+)
+def test_lines_follow_section_12(text: str, limit: int, lines) -> None:
+    assert _lines(text, limit) == lines
+
+
+def test_lines_partition_every_paragraph_in_order() -> None:
+    import random
+
+    randomizer = random.Random(1512)
+    alphabet = "ab cd  eé́אבال日本\U0001f600 "
+    for _ in range(400):
+        text = "".join(randomizer.choice(alphabet) for _ in range(randomizer.randrange(0, 40)))
+        limit = randomizer.randrange(1, 12)
+        lines = tr.layout_lines(text, tr.DIRECTION_AUTO, limit)
+        assert lines[0].start == 0 and lines[-1].end == len(text)
+        for before, after in zip(lines, lines[1:]):
+            assert before.end == after.start
+        for line in lines:
+            assert line.width == sum(placed.width for placed in line.characters)
+            chars = tr.characters(text[line.start:line.end])
+            if line.width > limit:
+                # Only a lone character too wide for the line may pass it.
+                assert len([c for c in chars if c != " "]) == 1
+
+
+def test_right_to_left_lines_start_at_the_right_and_reorder_alone() -> None:
+    # Hebrew words, one line each at width 5: each line reads right to left.
+    lines = tr.layout_lines("שלום עולם", tr.DIRECTION_AUTO, 5)
+    assert [line.rtl for line in lines] == [True, True]
+    assert ["".join(p.text for p in line.characters) for line in lines] == [
+        "םולש", "םלוע"
+    ]
+    # Each paragraph of an AUTO field takes its own direction.
+    mixed = tr.layout_lines("hello\nשלום", tr.DIRECTION_AUTO, 9)
+    assert [line.rtl for line in mixed] == [False, True]
+    # Offsets count scalars of the whole text, line feeds included.
+    assert [(p.start, p.text) for p in mixed[1].characters][0] == (9, "ם")
+
+
+def test_lines_resolve_levels_once_and_apply_l1_per_line() -> None:
+    # Numbers after a right-to-left word keep their order on either line.
+    text = "אבג 123 דהו 456"
+    lines = tr.layout_lines(text, tr.DIRECTION_RTL, 7)
+    assert ["".join(p.text for p in line.characters) for line in lines] == [
+        "123 גבא", "456 והד"
+    ]
+    levels, paragraph = tr.bidi_levels(
+        [tr.bidi_class(tr.props(ord(c))) for c in "ab cd"], tr.DIRECTION_RTL, None, [3, 5]
+    )
+    # The space ends the first line, so L1 gives it the paragraph level.
+    assert paragraph == 1 and levels == [2, 2, 1, 2, 2]

@@ -20,7 +20,9 @@ routing, shared-viewer transport, and guest module. The paired Akashic
 `desktop-apt1` producer publishes item views and advertises
 `RET_CONTROL_ITEMS`. Wrapping card fields, which serve Akashic's Agent
 transcript, are specified below: the `WRAP` column flag, line feeds in its
-fields, exact card rows, and the viewport row. Nothing implements them yet.
+fields, exact card rows, and the viewport row. MegaPad implements them in
+the codec, the terminal's viewport-row check, and the reference renderer;
+Akashic does not publish them yet.
 
 ## Decision
 
