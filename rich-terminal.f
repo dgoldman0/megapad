@@ -58,7 +58,7 @@ PROVIDED rich-terminal.f
 \ session.
 64  CONSTANT /PT-EVENT
 80  CONSTANT /PT-COMPLETION
-984 CONSTANT /PT-SESSION
+992 CONSTANT /PT-SESSION
 
 : PT-SESSION-SIZE  ( -- bytes )  /PT-SESSION ;
 : PT-EVENT-SIZE    ( -- bytes )  /PT-EVENT ;
@@ -451,6 +451,8 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
 : _PT.S.TX-WORDS-DONE   ( s -- a ) 960 + ;
 : _PT.S.SPAN-WORDS      ( s -- a ) 968 + ;
 : _PT.S.SPAN-TAIL       ( s -- a ) 976 + ;
+\ Which PT-INIT fixed the borrowed geometry; see PT-LAYOUT-SERIAL@.
+: _PT.S.LAYOUT-SERIAL   ( s -- a ) 984 + ;
 
 0 CONSTANT _PT-TX-NONE
 1 CONSTANT _PT-TX-CELL
@@ -833,6 +835,11 @@ VARIABLE _PT-I-EVA
 VARIABLE _PT-I-EVU
 VARIABLE _PT-I-S
 
+\ The last layout serial PT-INIT issued.  Serials are never reused, so a
+\ session initialized again, even with the same spans, gets a new one.
+VARIABLE _PT-LAYOUT-SERIALS
+0 _PT-LAYOUT-SERIALS !
+
 : _PT-INIT-RANGES?  ( -- flag )
     _PT-I-RXA @ _PT-I-RXU @ _PT-RANGE-VALID? 0= IF FALSE EXIT THEN
     _PT-I-TXA @ _PT-I-TXU @ _PT-RANGE-VALID? 0= IF FALSE EXIT THEN
@@ -875,6 +882,8 @@ VARIABLE _PT-I-S
     THEN
     _PT-I-S @ /PT-SESSION 0 FILL
     _PT-SIGNATURE _PT-I-S @ _PT.S.SIGNATURE !
+    _PT-LAYOUT-SERIALS @ 1+ DUP 0= IF 1+ THEN
+    DUP _PT-LAYOUT-SERIALS ! _PT-I-S @ _PT.S.LAYOUT-SERIAL !
     _PT-I-RXA @ _PT-I-S @ _PT.S.RX-A !
     _PT-I-RXU @ _PT-I-S @ _PT.S.RX-U !
     _PT-I-TXA @ _PT-I-S @ _PT.S.TX-A !
@@ -918,6 +927,16 @@ VARIABLE _PT-I-S
         2DROP R> DROP FALSE EXIT
     THEN
     2DROP R> DROP TRUE ;
+
+\ PT-LAYOUT-SERIAL@ ( session -- serial )
+\   Name the PT-INIT that fixed this session's borrowed geometry: nonzero for
+\   a valid initialized session, different after any later PT-INIT, and zero
+\   otherwise.  Only PT-INIT sets the session record and its RX, TX, and event
+\   spans, so a PT-STORAGE-DISJOINT? result holds while this serial and the
+\   queried span are unchanged.  Like that query it only reads.
+: PT-LAYOUT-SERIAL@  ( session -- serial )
+    DUP _PT-VALID-S? 0= IF DROP 0 EXIT THEN
+    _PT.S.LAYOUT-SERIAL @ ;
 
 \ =====================================================================
 \  Atomic UART publication and fixed-width negotiation encoding

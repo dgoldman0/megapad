@@ -126,6 +126,7 @@ PT-EVENT-SIZE       ( -- bytes )
 PT-COMPLETION-SIZE  ( -- bytes )
 PT-INIT             ( rx-a rx-u tx-a tx-u event-a event-u session -- status )
 PT-STORAGE-DISJOINT? ( a u session -- flag )
+PT-LAYOUT-SERIAL@   ( session -- serial )
 PT-START            ( session -- status )
 PT-SERVICE          ( session -- status )
 PT-STATE@           ( session -- state )
@@ -309,6 +310,15 @@ disjoint from the session record and the session's complete borrowed RX, TX,
 and event spans. Composed adapters must use this predicate before clearing or
 retaining any additional caller-owned storage; they do not learn the private
 borrowed addresses.
+
+`PT-LAYOUT-SERIAL@` names the `PT-INIT` that fixed a session's borrowed
+geometry. It is nonzero for a valid initialized session, different after any
+later `PT-INIT` (serials are never reused, even for the same spans), and zero
+otherwise. Only `PT-INIT` sets the session record and its RX, TX, and event
+spans, so a `PT-STORAGE-DISJOINT?` result for an unchanged span holds while
+the serial is unchanged. A composed adapter that checks the same storage on
+every service turn may keep one proof per serial instead of repeating it. Like
+the predicate, the query only reads.
 
 `PT-START` is nonblocking and is the only call that initiates negotiation.
 `PT-SERVICE` incrementally advances negotiation, framed input, timeouts,

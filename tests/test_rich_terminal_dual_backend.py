@@ -131,11 +131,13 @@ CREATE DBN-EVENT PT-EVENT-SIZE ALLOT
 CREATE DBN-EXTRA 16 ALLOT
 CREATE DBN-S-STORAGE PT-SESSION-SIZE 7 + ALLOT
 : DBN-S  DBN-S-STORAGE 7 + -8 AND ;
+VARIABLE DBN-SERIAL
 : DBN-ARGS
   DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
   DBN-TX _PT-OPEN-BYTES DBN-EVENT PT-EVENT-SIZE ;
 : DBN-RUN
   17 EMIT
+  DBN-S PT-LAYOUT-SERIAL@ .
   DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 31 +
     DBN-TX _PT-OPEN-BYTES DBN-EVENT PT-EVENT-SIZE DBN-S PT-INIT .
   DBN-RX _PT-CONTROL-RESERVE _PT-HDR + 32 +
@@ -148,6 +150,9 @@ CREATE DBN-S-STORAGE PT-SESSION-SIZE 7 + ALLOT
   DBN-ARGS DBN-S PT-INIT .
   DBN-EXTRA 16 DBN-S PT-STORAGE-DISJOINT? .
   DBN-RX 1 DBN-S PT-STORAGE-DISJOINT? .
+  DBN-S PT-LAYOUT-SERIAL@ DUP DBN-SERIAL ! 0<> .
+  DBN-ARGS DBN-S PT-INIT .
+  DBN-S PT-LAYOUT-SERIAL@ DUP 0<> SWAP DBN-SERIAL @ <> AND .
   DEPTH .
   18 EMIT TX-FLUSH
   0x0102030405060708 DBN-S _PT.S.NONCE !
@@ -813,7 +818,8 @@ def test_production_initialization_and_negotiation_start_match_oracle(
     fixed_records = _between_unique(output, 19, 20)
     public_start = _between_unique(output, 21, 22)
 
-    assert initialization == b"3 3 3 3 3 0 -1 0 0 "
+    # No serial before a valid PT-INIT, and a new one after each.
+    assert initialization == b"0 3 3 3 3 3 0 -1 0 -1 0 -1 0 "
     assert fixed_records == (
         encode_probe(FIXED_NONCE)
         + encode_open(

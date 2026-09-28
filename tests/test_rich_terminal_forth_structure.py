@@ -243,7 +243,7 @@ def test_close_intent_is_one_bounded_writer_barrier() -> None:
     close = _definition(source, "PT-CLOSE")
     service = _definition(source, "PT-SERVICE")
 
-    assert "984 CONSTANT /PT-SESSION" in source
+    assert "992 CONSTANT /PT-SESSION" in source
     assert ": _PT.S.CLOSE-PENDING?  ( s -- a ) 872 + ;" in source
     for field in (
         "_PT.S.AWAIT?",
@@ -788,6 +788,25 @@ def test_composed_storage_can_be_proven_disjoint_from_every_pt_borrow() -> None:
     assert "R> AND" in overlap
 
 
+def test_layout_serial_names_the_init_that_fixed_borrowed_geometry() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    serial = _definition(source, "PT-LAYOUT-SERIAL@")
+    init = _definition(source, "PT-INIT")
+
+    assert ": _PT.S.LAYOUT-SERIAL   ( s -- a ) 984 + ;" in source
+    assert "_PT-VALID-S? 0= IF DROP 0 EXIT THEN" in serial
+    assert "_PT.S.LAYOUT-SERIAL @" in serial
+    assert "!" not in serial
+    # Every successful PT-INIT, and only PT-INIT, issues a fresh nonzero serial
+    # after clearing the record, so no borrowed span survives under an old one.
+    fill = init.index("_PT-I-S @ /PT-SESSION 0 FILL")
+    issue = init.index("_PT-LAYOUT-SERIALS @ 1+ DUP 0= IF 1+ THEN", fill)
+    store = init.index("_PT-I-S @ _PT.S.LAYOUT-SERIAL !", issue)
+    assert fill < issue < store < init.index("_PT.S.RX-A !")
+    assert source.count("_PT.S.LAYOUT-SERIAL !") == 1
+    assert source.count("_PT-LAYOUT-SERIALS !") == 2
+
+
 def test_owner_lifecycle_uses_ret_result_and_shared_drop_tx_result() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     owner_open = _definition(source, "PT-OWNER-OPEN")
@@ -824,7 +843,7 @@ def test_resource_lifecycle_exposes_one_generic_typed_abi() -> None:
     ):
         assert declaration in source
 
-    assert "984 CONSTANT /PT-SESSION" in source
+    assert "992 CONSTANT /PT-SESSION" in source
     for accessor in (
         ": _PT.S.LIFE-ITEM       ( s -- a ) 880 + ;",
         ": _PT.S.LIFE-WATERMARK  ( s -- a ) 888 + ;",
