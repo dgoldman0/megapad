@@ -21,8 +21,9 @@ routing, shared-viewer transport, and guest module. The paired Akashic
 `RET_CONTROL_ITEMS`. Wrapping card fields, which serve Akashic's Agent
 transcript, are specified below: the `WRAP` column flag, line feeds in its
 fields, exact card rows, and the viewport row. MegaPad implements them in
-the codec, the terminal's viewport-row check, and the reference renderer;
-Akashic does not publish them yet.
+the codec, the terminal's viewport-row check, and the reference renderer.
+Akashic's canonical list publishes them in card mode, and breaks the same
+lines for its CELL fallback; the Agent does not use them yet.
 
 ## Decision
 
