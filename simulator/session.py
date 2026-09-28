@@ -17,6 +17,7 @@ from simulator.rich_terminal_host import (
     SemanticBatchStop,
     SimulatorSessionBackend,
 )
+from simulator.memory import AddressClass
 from simulator.runtime import CreatedDefinition, MegaForthRuntime
 
 
@@ -369,10 +370,19 @@ class SimulatorSharedMachine(SharedMachine):
             self._thread.start()
 
     def _record_boundary_locked(self, result: SimulatorSessionRun) -> None:
+        step_lower_bound = self.total_steps
         self.total_steps += result.semantic_steps
         self.total_batches += 1
         self.total_external_events += result.external_events_applied
         self.last_stop_reason = result.stop_reason.value
+        # Only guest execution can change the phase cell.
+        if result.semantic_steps:
+            self._sample_phase_profile(
+                step_lower_bound,
+                self.total_steps,
+                source="semantic_boundary",
+                batch_index=self.total_batches,
+            )
 
     def _terminal_failure_locked(self) -> str | None:
         failure = self.semantic_session.rich_terminal_failure
@@ -681,20 +691,27 @@ class SimulatorSharedMachine(SharedMachine):
                 ],
             }
 
-    def start_phase_profile(
-        self,
-        address: int,
-        max_events: int,
-        *,
-        generation: int,
-    ) -> dict:
-        raise self._unsupported_diagnostic("instruction phase profiling")
+    # The phase observer is the shared owner's.  Here it samples the packed
+    # cell after each semantic boundary, so its bounds count semantic steps,
+    # never instructions.  A boundary usually ends at its quantum, but a
+    # nested evaluation or accelerated word runs past it, so no interval
+    # size is promised; each transition keeps its exact interval instead.
+    def _phase_profile_address_valid(self, address: int) -> bool:
+        """Admit only a complete Bank 0 or external-memory cell."""
 
-    def phase_profile(self) -> dict:
-        raise self._unsupported_diagnostic("instruction phase profiling")
+        memory = self.semantic_session.runtime.memory
+        return any(
+            spec.kind in (AddressClass.BANK0, AddressClass.EXTERNAL)
+            and spec.base <= address
+            and address + 8 <= spec.base + spec.size
+            for spec in memory.regions
+        )
 
-    def stop_phase_profile(self) -> dict:
-        raise self._unsupported_diagnostic("instruction phase profiling")
+    def _phase_profile_read(self, address: int) -> int:
+        return int(self.semantic_session.runtime.memory.read64(address))
+
+    def _phase_profile_batch_step_bound(self) -> None:
+        return None
 
 
 __all__ = [

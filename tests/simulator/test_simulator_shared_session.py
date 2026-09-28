@@ -113,9 +113,8 @@ def test_facade_reports_semantic_work_without_hardware_statistics() -> None:
             "values": [runtime.memory.read64(root.header_address)],
         }
 
-        for diagnostic in (machine.network, machine.phase_profile):
-            with pytest.raises(RuntimeError, match="without emulator hardware"):
-                diagnostic()
+        with pytest.raises(RuntimeError, match="without emulator hardware"):
+            machine.network()
 
         with pytest.raises(RuntimeError, match="rebuilding the prepared runtime"):
             machine.reset(paused=True)
@@ -167,6 +166,66 @@ def test_semantic_quantum_prefers_caller_then_environment_then_executor(
         monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, invalid)
         with pytest.raises(ValueError, match=SEMANTIC_QUANTUM_ENVIRONMENT):
             idle_session("python")
+
+
+# Two phase changes separated by more work than one small quantum, then idle.
+# Each event packs a sequence above the low phase byte.
+PHASE_ROOT_SOURCE = b"""
+VARIABLE SIM-PHASE
+: IDLE  [ 0 C, ] ;
+: SIM-PHASE-WORK  0 400 0 DO I + LOOP DROP ;
+: SIM-PHASE-ROOT
+    259 SIM-PHASE ! SIM-PHASE-WORK
+    512 SIM-PHASE ! SIM-PHASE-WORK
+    BEGIN IDLE AGAIN ;
+"""
+
+
+def test_phase_profile_samples_semantic_boundaries() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(PHASE_ROOT_SOURCE, source_name="simulator-phase-root.f")
+    cell = runtime.find("SIM-PHASE").body_address
+    machine = SimulatorSharedMachine(
+        SimulatorMachineSession(
+            runtime, "SIM-PHASE-ROOT", semantic_quantum_steps=96
+        )
+    )
+    machine.paused = True
+    machine.start()
+    try:
+        with pytest.raises(ValueError, match="complete RAM or external"):
+            machine.start_phase_profile(1 << 62, 8, generation=1)
+        with pytest.raises(RuntimeError, match="stale phase profile generation"):
+            machine.start_phase_profile(cell, 8, generation=2)
+
+        started = machine.start_phase_profile(cell, 8, generation=1)
+        assert started["status"] == "active"
+        assert started["batch_step_bound"] is None
+        assert started["initial"] == {"event": 0, "sequence": 0, "phase": 0}
+
+        while not machine.semantic_session.idle:
+            machine.step(1)
+
+        profile = machine.stop_phase_profile()
+        assert profile["status"] == "stopped"
+        assert profile["stopped_steps"] == machine.total_steps
+        assert profile["successful_samples"] == machine.total_batches + 1
+        assert profile["observed_transitions"] == 2
+        assert profile["coalesced_transitions"] == 0
+        transitions = profile["transitions"]
+        assert [(item["sequence"], item["phase"]) for item in transitions] == [
+            (1, 3),
+            (2, 0),
+        ]
+        assert transitions[0]["step_upper_bound"] <= transitions[1][
+            "step_lower_bound"
+        ]
+        for item in transitions:
+            assert item["source"] == "semantic_boundary"
+            assert item["step_upper_bound"] > item["step_lower_bound"]
+        assert machine.phase_profile()["status"] == "disabled"
+    finally:
+        machine.stop()
 
 
 def test_forth_diagnostics_resolve_newest_created_binding_and_live_value() -> None:
@@ -277,6 +336,7 @@ def test_host_handoffs_preserve_each_semantic_boundary_without_per_batch_sleep(m
     machine.last_error = None
     machine.total_steps = machine.total_batches = machine.total_external_events = 0
     machine.idle_sleep_s = 0.002
+    machine._phase_profile = None
     locked = False
 
     class Condition:

@@ -94,7 +94,7 @@ class _PhaseEventProfile:
     address: int
     max_events: int
     machine_generation: int
-    batch_step_bound: int
+    batch_step_bound: int | None
     started_steps: int
     started_batches: int
     initial_event: int
@@ -1998,6 +1998,20 @@ class SharedMachine:
             system.ext_mem_end
         )
 
+    def _phase_profile_read(self, address: int) -> int:
+        """Read the packed phase cell without changing guest state."""
+
+        return self.session.system.cpu.mem_read64(address)
+
+    def _phase_profile_batch_step_bound(self) -> int | None:
+        """Return the most guest steps one sample interval can retire.
+
+        None means sample intervals have no fixed size.  Every transition
+        still carries the exact bounds of the interval it was seen in.
+        """
+
+        return int(self.session.batch_steps)
+
     def _phase_profile_snapshot_locked(self) -> dict:
         profile = self._phase_profile
         if profile is None:
@@ -2095,7 +2109,7 @@ class SharedMachine:
                     "external-memory cell"
                 )
             event = _wire_integer(
-                self.session.system.cpu.mem_read64(normalized_address),
+                self._phase_profile_read(normalized_address),
                 "phase profile event",
                 minimum=0,
                 maximum=UINT64_MAX,
@@ -2104,7 +2118,7 @@ class SharedMachine:
                 address=normalized_address,
                 max_events=normalized_capacity,
                 machine_generation=self._reset_generation,
-                batch_step_bound=int(self.session.batch_steps),
+                batch_step_bound=self._phase_profile_batch_step_bound(),
                 started_steps=self.total_steps,
                 started_batches=self.total_batches,
                 initial_event=event,
@@ -2152,7 +2166,7 @@ class SharedMachine:
         profile.sample_attempts += 1
         try:
             event = _wire_integer(
-                self.session.system.cpu.mem_read64(profile.address),
+                self._phase_profile_read(profile.address),
                 "phase profile event",
                 minimum=0,
                 maximum=UINT64_MAX,
