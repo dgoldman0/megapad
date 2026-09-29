@@ -1057,10 +1057,10 @@ emulator, native accelerator, hosted simulator, and RTL give the same bits.
 | `FP32-MODE` | `( -- )` | Set TMODE to FP32 single precision (EW=6, 16 lanes). |
 | `FP64-MODE` | `( -- )` | Set TMODE to FP64 double precision (EW=7, 8 lanes). |
 
-FP32 and FP64 operations land in Phases 4 and 5 of
-`docs/megapad-full-float-plan.md`. Until then every tile operation in EW 6 or
-7 raises `IVEC_ILLEGAL_OP` before any access, and hosted execution rejects it
-the same way. Codes 8–15 are reserved and always trap.
+FP32 and FP64 element-wise operations run in every backend. Their reductions
+and dot products land in Phase 5 of `docs/megapad-full-float-plan.md`; until
+then they raise `IVEC_ILLEGAL_OP` before any access, and hosted execution
+rejects them the same way. Codes 8–15 are reserved and always trap.
 
 ---
 

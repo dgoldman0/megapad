@@ -10,6 +10,11 @@
 //           EXT.8 extended TALU (VSHR/VSHL/VSEL/VCLZ),
 //           signed/unsigned modes, saturating arithmetic.
 //
+// Float formats (docs/floating-point.md): FP16 and BF16 run on 32 parallel
+// half-precision lanes.  FP32 and FP64 element-wise arithmetic runs on
+// FMA_UNITS multi-format FMA units (mp64_fma.v) over 8 / FMA_UNITS beats;
+// the production chip has FMA_UNITS = 2, which is the §10 timing model.
+//
 
 `include "mp64_pkg.vh"
 
@@ -21,7 +26,10 @@ module mp64_tile #(
     parameter [63:0] TACC_EXT_LIMIT   = 64'h0000_0000_FF00_0000,
     parameter [63:0] TACC_VRAM_BASE   = 64'h0000_0000_FF00_0000,
     parameter [63:0] TACC_VRAM_LIMIT  = 64'h0000_0000_FF40_0000,
-    parameter [63:0] TACC_HBW_LIMIT   = 64'h0000_0001_0000_0000
+    parameter [63:0] TACC_HBW_LIMIT   = 64'h0000_0001_0000_0000,
+    // Multi-format FMA units for FP32/FP64 element-wise arithmetic: 1, 2, 4,
+    // or 8.  The architectural timing model is FMA_UNITS = 2.
+    parameter integer FMA_UNITS = 2
 ) (
     input  wire        clk,
     input  wire        rst_n,
@@ -299,9 +307,44 @@ module mp64_tile #(
         endcase
     endfunction
 
-    function tile_format_ready;
+    // Whether a MEX operation may run in a format (shared/tile_formats.py
+    // admits).  funct is the effective function (0 for the immediate form)
+    // and ext8 marks the EXT.8 forms.  docs/floating-point.md §5.2 makes
+    // PACK, UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL
+    // illegal in FP64; the EXT.8 functions 4-7 land in Phases 6 and 8.
+    // FP32/FP64 reductions and dot products land in Phase 5 of
+    // docs/megapad-full-float-plan.md, and their VSEL in Phase 6.
+    function tile_op_admitted;
         input [3:0] ew;
-        tile_format_ready = (ew <= TMODE_BF16);
+        input [1:0] op;
+        input [2:0] funct;
+        input       ext8;
+        begin
+            if (ew > TMODE_FP64)
+                tile_op_admitted = 1'b0;
+            else if (ext8 && (op == MEX_TALU))
+                tile_op_admitted = !tile_format_is_float(ew) ||
+                    (((ew == TMODE_FP16) || (ew == TMODE_BF16)) &&
+                     (funct == ETALU_VSEL));
+            else if (ext8 && (op == MEX_TSYS))
+                tile_op_admitted = 1'b1;
+            else if ((ew != TMODE_FP32) && (ew != TMODE_FP64))
+                tile_op_admitted = 1'b1;
+            else case (op)
+                MEX_TALU:
+                    tile_op_admitted = 1'b1;
+                MEX_TMUL:
+                    tile_op_admitted =
+                        (funct == TMUL_MUL) || (funct == TMUL_MAC) ||
+                        (funct == TMUL_FMA) ||
+                        ((funct == TMUL_WMUL) && (ew == TMODE_FP32));
+                MEX_TRED:
+                    tile_op_admitted = (funct == TRED_POPC);
+                default:
+                    tile_op_admitted =
+                        (funct != TSYS_PACK) && (funct != TSYS_UNPACK);
+            endcase
+        end
     endfunction
 
     wire [3:0] mode_ew       = tmode[3:0];
@@ -310,7 +353,8 @@ module mp64_tile #(
     wire       mode_rounding = tmode[6];
     wire       mode_fp       = tile_format_is_float(mode_ew);
     wire       mode_bf16     = (mode_ew == TMODE_BF16);  // 0 = FP16, 1 = BF16
-    wire       mode_ready    = tile_format_ready(mode_ew);
+    wire       mode_fp64     = (mode_ew == TMODE_FP64);
+    wire       mode_wide_fp  = (mode_ew == TMODE_FP32) || mode_fp64;
     // Every lane-shaped path uses the format's real lane width; FP16 and BF16
     // lanes are 16 bits (docs/floating-point.md §5).
     wire [1:0] lane_ew       = tile_format_lane_log2(mode_ew);
@@ -342,6 +386,7 @@ module mp64_tile #(
     localparam S_TAMAC_LOAD_A= 5'd21;  // wait first TAMAC source
     localparam S_TAMAC_LOAD_B= 5'd22;  // wait second TAMAC source
     localparam S_TACC_INT    = 5'd23;  // one 16-lane feedback slice
+    localparam S_FMA         = 5'd24;  // one FP32/FP64 FMA beat
 
     reg [4:0]   state;
     reg         mex_done_reg;
@@ -856,29 +901,58 @@ module mp64_tile #(
         tamac_datapath_active ? tamac_ew_reg : mode_ew;
     // Float formats take the unsigned immediate converted exactly to the lane
     // format (docs/floating-point.md §5.1); every value 0-255 is exact.
-    function [15:0] fp_half_from_u8;
-        input       is_bf16;
+    function [63:0] fp_from_u8;
+        input [3:0] ew;
         input [7:0] value;
         integer lead;
         integer k;
+        reg [63:0] exponent;
+        reg [63:0] widened;
         begin
             lead = -1;
             for (k = 0; k < 8; k = k + 1)
                 if (value[k])
                     lead = k;
-            if (lead < 0)
-                fp_half_from_u8 = 16'd0;
-            else if (is_bf16)
-                fp_half_from_u8 = ((127 + lead) << 7) |
-                                  (({8'd0, value} << (7 - lead)) & 16'h007F);
-            else
-                fp_half_from_u8 = ((15 + lead) << 10) |
-                                  (({8'd0, value} << (10 - lead)) & 16'h03FF);
+            widened = {56'd0, value};
+            if (lead < 0) begin
+                fp_from_u8 = 64'd0;
+            end else case (ew)
+                TMODE_BF16: begin
+                    exponent   = 127 + lead;
+                    fp_from_u8 = (exponent << 7) |
+                                 ((widened << (7 - lead)) & 64'h7F);
+                end
+                TMODE_FP32: begin
+                    exponent   = 127 + lead;
+                    fp_from_u8 = (exponent << 23) |
+                                 ((widened << (23 - lead)) & 64'h7F_FFFF);
+                end
+                TMODE_FP64: begin
+                    exponent   = 1023 + lead;
+                    fp_from_u8 = (exponent << 52) |
+                                 ((widened << (52 - lead)) &
+                                  64'h000F_FFFF_FFFF_FFFF);
+                end
+                default: begin
+                    exponent   = 15 + lead;
+                    fp_from_u8 = (exponent << 10) |
+                                 ((widened << (10 - lead)) & 64'h3FF);
+                end
+            endcase
         end
     endfunction
 
-    wire [15:0] fp_imm_lane = fp_half_from_u8(mode_bf16, imm8_reg);
-    wire [511:0] imm_splat = mode_fp ? {32{fp_imm_lane}} : {64{imm8_reg}};
+    wire [63:0] fp_imm_lane = fp_from_u8(mode_ew, imm8_reg);
+    reg  [511:0] imm_splat;
+    always @(*) begin
+        if (!mode_fp)
+            imm_splat = {64{imm8_reg}};
+        else case (lane_ew)
+            2'd1:    imm_splat = {32{fp_imm_lane[15:0]}};
+            2'd2:    imm_splat = {16{fp_imm_lane[31:0]}};
+            default: imm_splat = {8{fp_imm_lane}};
+        endcase
+    end
 
     always @(*) begin
         // Broadcast replicates the low lane-width bits of Rn as raw bits.
@@ -1133,7 +1207,9 @@ module mp64_tile #(
     // ALU result mux
     reg [511:0] alu_result_muxed;
     always @(*) begin
-        if (mode_fp)
+        if (mode_wide_fp)
+            alu_result_muxed = fp_wide_alu_result;
+        else if (mode_fp)
             alu_result_muxed = fp_alu_result;
         else case (lane_ew)
             2'd0: alu_result_muxed = alu_result_8;
@@ -1285,6 +1361,155 @@ module mp64_tile #(
             endcase
         end
     end
+
+    // ========================================================================
+    // FP32/FP64 element-wise datapath (docs/floating-point.md §5, §10)
+    // ========================================================================
+    //
+    // TALU MIN, MAX, ABS, AND, OR, and XOR are combinational over every lane.
+    // MIN and MAX are IEEE 754-2019 minimum and maximum: a NaN gives the
+    // canonical NaN and -0 orders below +0 (§3.8).
+    function [63:0] fp_wide_lane_alu;
+        input        is64;
+        input [2:0]  funct;
+        input [63:0] a;
+        input [63:0] b;
+        reg   [63:0] width_mask;
+        reg   [63:0] sign_bit;
+        reg   [63:0] magnitude;
+        reg   [63:0] infinity;
+        reg   [63:0] quiet_nan;
+        reg   [63:0] key_a;
+        reg   [63:0] key_b;
+        reg          any_nan;
+        begin
+            width_mask = is64 ? 64'hFFFF_FFFF_FFFF_FFFF : 64'h0000_0000_FFFF_FFFF;
+            sign_bit   = is64 ? 64'h8000_0000_0000_0000 : 64'h0000_0000_8000_0000;
+            magnitude  = width_mask ^ sign_bit;
+            infinity   = is64 ? 64'h7FF0_0000_0000_0000 : 64'h0000_0000_7F80_0000;
+            quiet_nan  = is64 ? 64'h7FF8_0000_0000_0000 : 64'h0000_0000_7FC0_0000;
+            any_nan    = ((a & magnitude) > infinity) ||
+                         ((b & magnitude) > infinity);
+            // Order keys: negative encodings reverse below positive ones.
+            key_a = (a & sign_bit) ? (width_mask ^ a) : (a | sign_bit);
+            key_b = (b & sign_bit) ? (width_mask ^ b) : (b | sign_bit);
+            case (funct)
+                TALU_AND: fp_wide_lane_alu = a & b;
+                TALU_OR:  fp_wide_lane_alu = a | b;
+                TALU_XOR: fp_wide_lane_alu = a ^ b;
+                TALU_MIN: fp_wide_lane_alu =
+                    any_nan ? quiet_nan : ((key_a <= key_b) ? a : b);
+                TALU_MAX: fp_wide_lane_alu =
+                    any_nan ? quiet_nan : ((key_a >= key_b) ? a : b);
+                TALU_ABS: fp_wide_lane_alu = a & magnitude;
+                default:  fp_wide_lane_alu = 64'd0;  // ADD/SUB use the FMA units
+            endcase
+        end
+    endfunction
+
+    reg [511:0] fp_wide_alu_result;
+    reg [63:0]  fp_wide_lane32;
+    integer fwl;
+    always @(*) begin
+        fp_wide_alu_result = 512'd0;
+        fp_wide_lane32 = 64'd0;
+        if (mode_fp64) begin
+            for (fwl = 0; fwl < 8; fwl = fwl + 1)
+                fp_wide_alu_result[fwl*64 +: 64] = fp_wide_lane_alu(
+                    1'b1, funct_reg, tile_a[fwl*64 +: 64],
+                    src_b_selected[fwl*64 +: 64]);
+        end else begin
+            for (fwl = 0; fwl < 16; fwl = fwl + 1) begin
+                fp_wide_lane32 = fp_wide_lane_alu(
+                    1'b0, funct_reg, {32'd0, tile_a[fwl*32 +: 32]},
+                    {32'd0, src_b_selected[fwl*32 +: 32]});
+                fp_wide_alu_result[fwl*32 +: 32] = fp_wide_lane32[31:0];
+            end
+        end
+    end
+
+    // TALU ADD and SUB and TMUL MUL, MAC, FMA, and WMUL run on FMA_UNITS
+    // multi-format FMA units over FMA_BEATS beats of one cycle.  A beat gives
+    // each unit one binary64 lane, or two adjacent binary32 lanes.  ADD is
+    // a * 1 + b, SUB is a * 1 + (-b), MUL and WMUL are a * b + (-0), and MAC
+    // and FMA are a * b + [TDST].  WMUL multiplies binary32 lanes into exact
+    // binary64 products: lanes 0-7 go to [TDST] and 8-15 to [TDST+64].
+    localparam integer FMA_BEATS = 8 / FMA_UNITS;
+
+`ifndef SYNTHESIS
+    initial begin
+        if (FMA_UNITS != 1 && FMA_UNITS != 2 &&
+            FMA_UNITS != 4 && FMA_UNITS != 8)
+            $fatal(1, "mp64_tile: FMA_UNITS must be 1, 2, 4, or 8");
+    end
+`endif
+
+    reg  [3:0] fma_beat;
+    integer    fma_i;
+    integer    fma_j;
+    wire fma_is_wmul     = (op_reg == MEX_TMUL) && (funct_reg == TMUL_WMUL);
+    wire fma_is_talu     = (op_reg == MEX_TALU);
+    wire fma_uses_addend = (op_reg == MEX_TMUL) &&
+                           ((funct_reg == TMUL_MAC) || (funct_reg == TMUL_FMA));
+    wire fma_out64       = mode_fp64 || fma_is_wmul;
+    wire fma_op = mode_wide_fp &&
+        !(ext_active_reg && (ext_mod_reg == 4'd8)) &&
+        ((fma_is_talu &&
+          ((funct_reg == TALU_ADD) || (funct_reg == TALU_SUB))) ||
+         ((op_reg == MEX_TMUL) &&
+          ((funct_reg == TMUL_MUL) || fma_is_wmul || fma_uses_addend)));
+    wire fma_negate_b = fma_is_talu && (funct_reg == TALU_SUB);
+
+    wire [64*FMA_UNITS-1:0] fma_r0_bus;
+    wire [64*FMA_UNITS-1:0] fma_r1_bus;
+    genvar fmu;
+    generate
+        for (fmu = 0; fmu < FMA_UNITS; fmu = fmu + 1) begin : fma_units
+            wire [3:0] lane64 = fma_beat * FMA_UNITS + fmu;
+            wire [3:0] lane32 = fma_beat * (2 * FMA_UNITS) + 2 * fmu;
+
+            wire [63:0] a0_lane = mode_fp64 ? tile_a[lane64[2:0]*64 +: 64]
+                                            : {32'd0, tile_a[lane32*32 +: 32]};
+            wire [63:0] b0_lane = mode_fp64 ?
+                src_b_selected[lane64[2:0]*64 +: 64] :
+                {32'd0, src_b_selected[lane32*32 +: 32]};
+            wire [63:0] c0_lane = mode_fp64 ? tile_c[lane64[2:0]*64 +: 64]
+                                            : {32'd0, tile_c[lane32*32 +: 32]};
+            wire [31:0] a1_lane = tile_a[(lane32 + 1)*32 +: 32];
+            wire [31:0] b1_lane = src_b_selected[(lane32 + 1)*32 +: 32];
+            wire [31:0] c1_lane = tile_c[(lane32 + 1)*32 +: 32];
+
+            wire [63:0] one0      = mode_fp64 ? 64'h3FF0_0000_0000_0000
+                                              : 64'h0000_0000_3F80_0000;
+            wire [63:0] sign0     = mode_fp64 ? 64'h8000_0000_0000_0000
+                                              : 64'h0000_0000_8000_0000;
+            wire [63:0] neg_zero0 = fma_out64 ? 64'h8000_0000_0000_0000
+                                              : 64'h0000_0000_8000_0000;
+
+            wire [63:0] b0 = fma_is_talu ? one0 : b0_lane;
+            wire [63:0] c0 =
+                fma_is_talu     ? (fma_negate_b ? (b0_lane ^ sign0) : b0_lane) :
+                fma_uses_addend ? c0_lane : neg_zero0;
+            wire [31:0] b1 = fma_is_talu ? 32'h3F80_0000 : b1_lane;
+            wire [31:0] c1 =
+                fma_is_talu     ? (fma_negate_b ? (b1_lane ^ 32'h8000_0000)
+                                                : b1_lane) :
+                fma_uses_addend ? c1_lane : 32'h8000_0000;
+
+            mp64_fma_unit u_fma (
+                .in64 (mode_fp64),
+                .out64(fma_out64),
+                .a0   (a0_lane),
+                .b0   (b0),
+                .c0   (c0),
+                .a1   (a1_lane),
+                .b1   (b1),
+                .c1   (c1),
+                .r0   (fma_r0_bus[fmu*64 +: 64]),
+                .r1   (fma_r1_bus[fmu*64 +: 64])
+            );
+        end
+    endgenerate
 
     // ========================================================================
     // Shared FP32 reduction/TACC feedback bank
@@ -2591,6 +2816,7 @@ module mp64_tile #(
             tamac_ew_reg      <= TMODE_8;
             tamac_signed_reg  <= 1'b0;
             tamac_beat_reg    <= 2'd0;
+            fma_beat          <= 4'd0;
             tamac_src_a_addr_reg <= 64'd0;
             tamac_src_b_addr_reg <= 64'd0;
             tacc_image_addr_reg  <= 64'd0;
@@ -2746,10 +2972,13 @@ module mp64_tile #(
                                 state <= S_TACC_WAIT;
                             end
                         end
-                    // A reserved format, or one whose operations have not
-                    // landed, retires as an illegal operation before any
+                    // A reserved format, or an operation the format does not
+                    // admit, retires as an illegal operation before any
                     // memory, accumulator, or TCTRL side effect.
-                    else if (!mode_ready) begin
+                    else if (!tile_op_admitted(
+                                 mode_ew, mex_op,
+                                 (mex_ss == 2'd2) ? 3'd0 : mex_funct,
+                                 mex_ext_active && (mex_ext_mod == 4'd8))) begin
                         mex_fault_reg <= MEX_FAULT_ILLEGAL;
                         state         <= S_DONE;
                     end
@@ -3029,9 +3258,46 @@ module mp64_tile #(
                     end
                     state <= S_DONE;
                 end
+                else if (fma_op) begin
+                    fma_beat <= 4'd0;
+                    state    <= S_FMA;
+                end
                 else begin
                     state <= S_STORE;
                 end
+            end
+
+            // One beat of the FP32/FP64 element-wise datapath: capture each
+            // unit's lanes, then store after the last beat.
+            S_FMA: begin
+                for (fma_i = 0; fma_i < FMA_UNITS; fma_i = fma_i + 1) begin
+                    if (mode_fp64) begin
+                        fma_j = fma_beat * FMA_UNITS + fma_i;
+                        result[fma_j*64 +: 64] <= fma_r0_bus[fma_i*64 +: 64];
+                    end else begin
+                        fma_j = fma_beat * (2 * FMA_UNITS) + 2 * fma_i;
+                        if (!fma_is_wmul) begin
+                            result[fma_j*32 +: 32] <=
+                                fma_r0_bus[fma_i*64 +: 32];
+                            result[(fma_j + 1)*32 +: 32] <=
+                                fma_r1_bus[fma_i*64 +: 32];
+                        end else if (fma_j < 8) begin
+                            result[fma_j*64 +: 64] <=
+                                fma_r0_bus[fma_i*64 +: 64];
+                            result[(fma_j + 1)*64 +: 64] <=
+                                fma_r1_bus[fma_i*64 +: 64];
+                        end else begin
+                            result2[(fma_j - 8)*64 +: 64] <=
+                                fma_r0_bus[fma_i*64 +: 64];
+                            result2[(fma_j - 7)*64 +: 64] <=
+                                fma_r1_bus[fma_i*64 +: 64];
+                        end
+                    end
+                end
+                if (fma_beat == FMA_BEATS - 1)
+                    state <= S_STORE;
+                else
+                    fma_beat <= fma_beat + 4'd1;
             end
 
             S_STORE: begin

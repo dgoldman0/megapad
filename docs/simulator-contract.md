@@ -735,9 +735,9 @@ requested. The signed and saturating mode flags are ignored for floating
 formats. The extended operations preserve the Python architectural emulator's
 raw-bit, lane-selection, accumulator, two-tile widening, and 8-by-8
 byte-transpose semantics; focused differential vectors define their detailed
-integer, FP16, BF16, NaN, alias, and control behavior. Reserved EW 6/7 and all
-remaining unbound tile/TACC words fail rather than silently aliasing another
-format.
+integer, FP16, BF16, FP32, FP64, NaN, alias, and control behavior. Reserved
+EW codes, operations a format does not admit, and all remaining unbound
+tile/TACC words fail rather than silently aliasing another format.
 
 Each used operand is the exact addressed 64-byte span and must fit one ordinary
 mapped region; MMIO and crossing or wrapping spans are rejected before
@@ -756,10 +756,10 @@ hardware-throughput claim.
 Floating-point tile results follow the normative `docs/floating-point.md`.
 The hosted service takes its values from `shared/ieee_fp.py` and
 `shared/tile_float.py`, as the Python emulator does and the native accelerator
-reproduces. `TMODE` keeps bits `[6:0]` and `TCTRL` keeps bits `[1:0]`. EW 6
-and 7 (FP32 and FP64) and the reserved codes 8–15 fail closed here until FP32
-and FP64 are implemented in Phases 4 and 5 of
-`docs/megapad-full-float-plan.md`.
+reproduces. `TMODE` keeps bits `[6:0]` and `TCTRL` keeps bits `[1:0]`. The
+reserved codes 8–15, and every operation `shared/tile_formats.admits`
+rejects (including FP32/FP64 reductions until Phase 5 of
+`docs/megapad-full-float-plan.md`), fail closed here.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal

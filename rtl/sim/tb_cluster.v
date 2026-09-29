@@ -2465,8 +2465,8 @@ module tb_cluster;
 
         // Each caller's TMODE and TCTRL shadows keep only their defined
         // bits.  The shared engine samples the granted caller's format, and
-        // a reserved code or an FP32/FP64 format whose operations have not
-        // landed retires as an illegal operation without touching memory.
+        // a reserved code or an operation the format does not admit retires
+        // as an illegal operation without touching memory.
         drive_private_tile_csr(1, CSR_TMODE, 64'hFFFF_FFFF_FFFF_FFFF);
         drive_private_tile_csr(1, CSR_TCTRL, 64'hFFFF_FFFF_FFFF_FFFF);
         check64("caller TMODE shadow keeps bits 6:0",
@@ -2484,9 +2484,9 @@ module tb_cluster;
         check64("reserved EW 8 traps in the shared engine",
                 tb_private_mex_fault, MEX_FAULT_ILLEGAL);
         drive_private_tile_csr(1, CSR_TMODE, {60'd0, TMODE_FP64});
-        drive_private_mex(1, 2'd0, MEX_TALU, TALU_ADD, {5'd0, TALU_ADD},
+        drive_private_mex(1, 2'd0, MEX_TMUL, TMUL_DOT, {5'd0, TMUL_DOT},
                           4'd0, 1'b0, tb_private_mex_fault);
-        check64("FP64 traps until its operations land",
+        check64("FP64 DOT traps until Phase 5",
                 tb_private_mex_fault, MEX_FAULT_ILLEGAL);
         if (tile_mem_model[2] === {64{8'hD5}})
             pass_count = pass_count + 1;

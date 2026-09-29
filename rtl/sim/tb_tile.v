@@ -286,6 +286,32 @@ module tb_tile;
     end
     endtask
 
+    // Dispatch a tile-tile MEX operation and count cycles to completion.
+    task mex_timed;
+        input  [1:0] op;
+        input  [2:0] funct;
+        output integer cycles;
+    begin
+        @(posedge clk);
+        mex_valid      <= 1;
+        mex_ss         <= 2'd0;
+        mex_op         <= op;
+        mex_funct      <= funct;
+        mex_funct_byte <= {5'd0, funct};
+        mex_gpr_val    <= 64'd0;
+        mex_imm8       <= 8'd0;
+        mex_ext_mod    <= 4'd0;
+        mex_ext_active <= 1'b0;
+        cycles = 0;
+        @(posedge clk);
+        mex_valid <= 0;
+        while (!mex_done) begin
+            @(posedge clk);
+            cycles = cycles + 1;
+        end
+    end
+    endtask
+
     task check64;
         input [63:0]  got;
         input [63:0]  expected;
@@ -1273,11 +1299,11 @@ module tb_tile;
                      64'hDEAD_BEEF_CAFE_4000, 8'd0);  // low BF16 = 2.0
         check512(tile_mem[2], {32{16'h4000}}, "broadcast low BF16 element");
 
-        // ====== TEST 54b: TMODE/TCTRL width and fail-closed formats ======
+        // ====== TEST 54b: TMODE/TCTRL width and fail-closed operations ======
         // TMODE keeps [6:0] and TCTRL keeps [1:0].  A reserved EW (8-15), or
-        // FP32/FP64 before their operations land, retires as an illegal
+        // an operation the format does not admit, retires as an illegal
         // operation with no memory request, ACC change, or ACC_ZERO use.
-        $display("\n=== TEST 54b: TMODE width and fail-closed formats ===");
+        $display("\n=== TEST 54b: TMODE width and fail-closed operations ===");
         begin : mode_width
             reg [63:0] readback;
             reg [3:0]  bad_ew [0:3];
@@ -1304,27 +1330,98 @@ module tb_tile;
                 csr_write(CSR_TMODE, {60'd0, bad_ew[k]} | 64'h10);
                 tacc_mem_req_count = 0;
                 tacc_monitor = 1'b1;
-                mex_dispatch(2'd0, MEX_TALU, TALU_ADD, 64'd0, 8'd0);
-                check3(mex_fault, MEX_FAULT_ILLEGAL, "TALU in unready EW traps");
+                if (k >= 2) begin
+                    // Reserved codes admit nothing.
+                    mex_dispatch(2'd0, MEX_TALU, TALU_ADD, 64'd0, 8'd0);
+                    check3(mex_fault, MEX_FAULT_ILLEGAL,
+                           "TALU in a reserved EW traps");
+                    mex_dispatch(2'd0, MEX_TSYS, TSYS_ZERO, 64'd0, 8'd0);
+                    check3(mex_fault, MEX_FAULT_ILLEGAL,
+                           "ZERO in a reserved EW traps");
+                    mex_dispatch_ext(2'd0, MEX_TSYS, ETSYS_LOAD2D, 64'd0,
+                                     8'd0, 4'd8);
+                    check3(mex_fault, MEX_FAULT_ILLEGAL,
+                           "LOAD2D in a reserved EW traps");
+                end else begin
+                    // FP32/FP64 reductions and DOT land in Phase 5; PACK,
+                    // VSHR, and VCLZ are illegal in float formats.
+                    mex_dispatch(2'd0, MEX_TMUL, TMUL_DOT, 64'd0, 8'd0);
+                    check3(mex_fault, MEX_FAULT_ILLEGAL,
+                           "FP32/FP64 DOT traps until Phase 5");
+                    mex_dispatch(2'd0, MEX_TSYS, TSYS_PACK, 64'd0, 8'd0);
+                    check3(mex_fault, MEX_FAULT_ILLEGAL,
+                           "float PACK traps");
+                    mex_dispatch_ext(2'd0, MEX_TALU, ETALU_VSHR, 64'd0,
+                                     8'd0, 4'd8);
+                    check3(mex_fault, MEX_FAULT_ILLEGAL,
+                           "float VSHR traps");
+                end
                 mex_dispatch(2'd0, MEX_TRED, TRED_SUM, 64'd0, 8'd0);
-                check3(mex_fault, MEX_FAULT_ILLEGAL, "TRED in unready EW traps");
-                mex_dispatch(2'd0, MEX_TSYS, TSYS_ZERO, 64'd0, 8'd0);
-                check3(mex_fault, MEX_FAULT_ILLEGAL, "ZERO in unready EW traps");
-                mex_dispatch_ext(2'd0, MEX_TSYS, ETSYS_LOAD2D, 64'd0, 8'd0,
-                                 4'd8);
                 check3(mex_fault, MEX_FAULT_ILLEGAL,
-                       "LOAD2D in unready EW traps");
+                       "TRED SUM in an unadmitting EW traps");
                 tacc_monitor = 1'b0;
                 check64(tacc_mem_req_count, 64'd0,
-                        "unready EW makes no memory request");
+                        "an unadmitted operation makes no memory request");
                 check512(tile_mem[2], {8{64'hD5D5_0000_0000_0000 | k}},
-                         "unready EW leaves the destination");
+                         "an unadmitted operation leaves the destination");
                 check64(u_tile.acc[0], 64'hACC0_0000_0000_0000 | k,
-                        "unready EW leaves ACC0");
+                        "an unadmitted operation leaves ACC0");
                 csr_read(CSR_TCTRL, readback);
-                check64(readback, 64'd2, "unready EW keeps ACC_ZERO pending");
+                check64(readback, 64'd2,
+                        "an unadmitted operation keeps ACC_ZERO pending");
             end
+
+            // FP16 and BF16 reject the integer-only extended shifts.
+            csr_write(CSR_TMODE, {60'd0, TMODE_FP16});
+            mex_dispatch_ext(2'd0, MEX_TALU, ETALU_VCLZ, 64'd0, 8'd0, 4'd8);
+            check3(mex_fault, MEX_FAULT_ILLEGAL, "FP16 VCLZ traps");
             csr_write(CSR_TCTRL, 64'd0);
+            csr_write(CSR_TMODE, 64'd0);
+        end
+
+        // ====== TEST 54c: FP32/FP64 beat schedule ======
+        // With FMA_UNITS = 2, FP32/FP64 ADD, MUL, and FMA spend four more
+        // cycles than FP16 (docs/floating-point.md §10); MIN does not.
+        $display("\n=== TEST 54c: FP32/FP64 beat schedule ===");
+        begin : fma_schedule
+            integer half_cycles;
+            integer wide_cycles;
+            integer ops;
+            reg [1:0] sched_op [0:3];
+            reg [2:0] sched_funct [0:3];
+            reg [63:0] sched_extra [0:3];
+
+            sched_op[0] = MEX_TALU; sched_funct[0] = TALU_ADD; sched_extra[0] = 4;
+            sched_op[1] = MEX_TMUL; sched_funct[1] = TMUL_MUL; sched_extra[1] = 4;
+            sched_op[2] = MEX_TMUL; sched_funct[2] = TMUL_FMA; sched_extra[2] = 4;
+            sched_op[3] = MEX_TALU; sched_funct[3] = TALU_MIN; sched_extra[3] = 0;
+            csr_write(CSR_TSRC0, 64'h00);
+            csr_write(CSR_TSRC1, 64'h40);
+            csr_write(CSR_TDST,  64'h80);
+            csr_write(CSR_TCTRL, 64'd0);
+            for (ops = 0; ops < 4; ops = ops + 1) begin
+                csr_write(CSR_TMODE, {60'd0, TMODE_FP16});
+                mex_timed(sched_op[ops], sched_funct[ops], half_cycles);
+                csr_write(CSR_TMODE, {60'd0, TMODE_FP32});
+                mex_timed(sched_op[ops], sched_funct[ops], wide_cycles);
+                check64(wide_cycles - half_cycles, sched_extra[ops],
+                        "FP32 extra cycles over FP16");
+                csr_write(CSR_TMODE, {60'd0, TMODE_FP64});
+                mex_timed(sched_op[ops], sched_funct[ops], wide_cycles);
+                check64(wide_cycles - half_cycles, sched_extra[ops],
+                        "FP64 extra cycles over FP16");
+            end
+            // ADD and MUL move the same tiles as the zero-cost AND.
+            csr_write(CSR_TMODE, {60'd0, TMODE_FP32});
+            mex_timed(MEX_TALU, TALU_AND, half_cycles);
+            mex_timed(MEX_TALU, TALU_ADD, wide_cycles);
+            check64(wide_cycles - half_cycles, 64'd4,
+                    "FP32 ADD is AND + 4 cycles");
+            csr_write(CSR_TMODE, {60'd0, TMODE_FP64});
+            mex_timed(MEX_TALU, TALU_AND, half_cycles);
+            mex_timed(MEX_TMUL, TMUL_MUL, wide_cycles);
+            check64(wide_cycles - half_cycles, 64'd4,
+                    "FP64 MUL is AND + 4 cycles");
             csr_write(CSR_TMODE, 64'd0);
         end
 

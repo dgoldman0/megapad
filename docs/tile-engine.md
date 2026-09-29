@@ -110,12 +110,9 @@ accumulator, or `TCTRL`. The TACC lifecycle follows its own format rules:
 `CLEAR`, `LOAD`, and `TAMAC` trap on any format that is not a legal TACC
 format, and `TRY`, `STORE`, and `RELEASE` do not read `TMODE`.
 
-> **Implementation status:** FP32 (EW 6) and FP64 (EW 7) are decoded as
-> defined formats in every backend. Their element-wise and raw lane
-> operations run in the Python emulator, native accelerator, and hosted
-> simulator; the RTL traps them until its slice of Phase 4 of
-> `docs/megapad-full-float-plan.md` lands. Their reductions and dot products
-> trap until Phase 5.
+> **Implementation status:** FP32 (EW 6) and FP64 (EW 7) element-wise and
+> raw lane operations run in every backend. Their reductions and dot
+> products trap until Phase 5 of `docs/megapad-full-float-plan.md`.
 
 **Common TMODE values:**
 
@@ -525,11 +522,13 @@ and RTL implement these rules.  The software backends take their values from
 `shared/ieee_fp.py`, a seeded differential test holds the native accelerator
 to the Python results, and the RTL replays emulator-generated golden vectors
 (`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 element-wise and raw lane
-operations run in the software backends; the RTL, FP32/FP64 reductions and
-dot products (Phase 5), and the new operations (Phases 6 and 8) follow the
-schedule in `docs/megapad-full-float-plan.md`.  Until an operation lands in a
-backend, it traps `IVEC_ILLEGAL_OP` there before any access.  Float PACK and
-UNPACK remain in FP16 and BF16 until `TCVT` replaces them.
+operations run in all four backends; the RTL computes their arithmetic on two
+multi-format FMA units per engine (`rtl/core/mp64_fma.v`) over four beats,
+the §10 timing model.  FP32/FP64 reductions and dot products (Phase 5) and
+the new operations (Phases 6 and 8) follow the schedule in
+`docs/megapad-full-float-plan.md`; until then they trap `IVEC_ILLEGAL_OP`
+before any access.  Float PACK and UNPACK remain in FP16 and BF16 until
+`TCVT` replaces them.
 
 
 ---

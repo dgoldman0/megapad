@@ -2,11 +2,12 @@
 
 **Started:** 2026-09-29
 
-**Status:** Phases 1–3 complete. Decisions D1–D18 were confirmed on
+**Status:** Phases 1–4 complete. Decisions D1–D18 were confirmed on
 2026-09-29 and are recorded in `docs/floating-point.md`, the normative
-floating-point specification. FP16 and BF16 give the same bit-exact results
-in all four backends, and every backend decodes the 4-bit format field, with
-FP32 and FP64 failing closed until their operations land. Phase 4 is next.
+floating-point specification. FP16 and BF16, and the FP32 and FP64
+element-wise operations, give the same bit-exact results in all four
+backends. FP32 and FP64 reductions fail closed until Phase 5, which is
+next.
 
 **Branch:** `feature/megapad-fp64`
 
@@ -523,7 +524,50 @@ Progress:
 - **BIOS and hosted words.** Add `FP32-MODE` and `FP64-MODE` to the BIOS and
   to hosted `core_words.py`, and update the dictionary docs.
 
-### Phase 4 — FP32/FP64 element-wise tile operations
+### Phase 4 — FP32/FP64 element-wise tile operations (complete)
+
+Progress:
+
+- **Admission rule.** `tile_formats.admits`, mirrored by `tile_op_admitted`
+  in C++ and in `mp64_tile.v`, replaces Phase 3's blanket FP32/FP64 trap and
+  encodes §5.2. The float-format decisions it makes:
+  - PACK, UNPACK, VSHR, VSHL, and VCLZ are illegal in every float format.
+    This changes FP16/BF16, where the three shifts used to run on 16-bit
+    lanes.
+  - FP64 WMUL is illegal.
+  - The EXT.8 functions 4–7 wait for Phases 6 and 8.
+  - FP32/FP64 reductions, DOT, and DOTACC wait for Phase 5, and FP32/FP64
+    VSEL for Phase 6.
+- **Software backends.** The FP32/FP64 element-wise operations and the raw
+  lane operations run in the Python emulator, native accelerator, and hosted
+  simulator, from `shared/ieee_fp.py`. Native FP64 FMA uses `std::fma`, and
+  converting a double to FP64 now returns its bits directly (the old path
+  shifted by −1 and dropped binary64 subnormals).
+- **Timing.** The §10 table is `_FLOAT_EXTRA_CYCLES` in Python and
+  `tile_float_extra_cycles` in C++. Tests pin the table's deltas in both CPUs
+  and the RTL's four extra cycles (with `FMA_UNITS = 2`) against the
+  zero-cost AND.
+- **FMA unit.** `rtl/core/mp64_fma.v` pairs a 53-bit lane with a 24-bit lane.
+  Each lane forms the exact product in a field of `max(2·SW + 3, 56)` bits
+  and rounds once to binary32 or binary64. Details:
+  - The 56-bit lower bound is what lets the 24-bit lane round correctly to
+    binary64, which WMUL uses; the first vector run found this.
+  - `tb_fma_unit` replays 1,055 generated vectors on both lanes, and a
+    one-off sweep of 36,000 more random rows passed.
+  - The lanes use separate multipliers. Sharing one partitioned multiplier
+    array between them is an area refinement that would not change any
+    result.
+- **Tile engine.** `mp64_tile.v` has the `FMA_UNITS` parameter (1, 2, 4,
+  or 8; production 2) and an `S_FMA` beat state. How it runs the arithmetic:
+  - ADD is `a × 1 + b`, SUB is `a × 1 + (−b)`, MUL and WMUL are
+    `a × b + (−0)`, and MAC and FMA take `[TDST]` as the addend.
+  - MIN, MAX, ABS, AND, OR, and XOR are combinational over all lanes.
+  - The immediate is converted exactly for every float format.
+  - `tile_fp_vectors.vec` gains 262 FP32/FP64 rows, and all 1,264 rows
+    pass.
+- **Regression.** Passing: the full RTL list (tile, TACC, cluster, CPU,
+  opcodes, multicore, TACC SoC, SoC smoke, SoC tile/icache, SoC
+  elaboration), the Python/native suites, and the hosted suite (2,255).
 
 - **Element-wise operations.**
   - TALU ADD, SUB, MIN, MAX, ABS; AND, OR, and XOR are raw.
@@ -647,6 +691,14 @@ without fixing them.
   were already out of step with `bios.asm` before this branch, and nothing at
   runtime reads them except the FPGA ROM image. Regenerate them in their own
   commit, as `1672dd4` did.
+- **RTL integer accumulator width.** RTL integer reductions write only ACC0
+  when neither `ACC_ZERO` nor `ACC_ACC` is set, and add only within ACC0
+  under `ACC_ACC`. Python keeps a 256-bit sum across ACC0–ACC3. The golden
+  vectors therefore run integer reductions and raw POPCNT with `ACC_ZERO`.
+- **RTL FP16/BF16 timing.** The RTL computes FP16/BF16 MUL, MAC, FMA, WMUL,
+  DOT, and DOTACC in the single compute cycle, while the §10 model (and the
+  emulator) charges 1, 2, 2, 2, 3, and 3 extra cycles. FP32/FP64 match the
+  model.
 - **Stale benchmark pin on `main`.**
   `tests/test_native_cycle_execution.py::test_phase0_oracle_captures_bus_state_and_requires_quiescence`
   expects `bench_phase0_concurrency.SCHEMA_VERSION == 20`; the script is at
