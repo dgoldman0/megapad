@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import operator
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import repeat
 
 from . import text_rules
@@ -3757,6 +3757,341 @@ def opaque_cell_coverage(
     return covered
 
 
+def _paint_draw(
+    pygame_module,
+    surface,
+    font,
+    control_font,
+    region,
+    region_rect,
+    draw,
+    cell_w: int,
+    cell_h: int,
+    glyphs: dict,
+    image_surfaces,
+    series_by_key,
+    hovered,
+    pressed,
+    hit_entries: list,
+    region_popups: list,
+) -> None:
+    """Paint one draw, adding its hit entries and the popups it opens."""
+
+    if isinstance(draw, GlyphRunDraw):
+        _paint_glyph_run(
+            pygame_module,
+            surface,
+            font,
+            region,
+            region_rect,
+            draw,
+            glyphs,
+        )
+    elif isinstance(draw, PolylineDraw):
+        _paint_polyline(
+            pygame_module,
+            surface,
+            region,
+            region_rect,
+            draw,
+        )
+    elif isinstance(draw, ImageDraw):
+        _paint_image(
+            pygame_module,
+            surface,
+            region,
+            region_rect,
+            draw,
+            image_surfaces[
+                (
+                    region.owner_id,
+                    region.owner_generation,
+                    draw.resource_id,
+                )
+            ],
+        )
+    elif isinstance(draw, ReadoutDraw):
+        _paint_readout(
+            pygame_module,
+            surface,
+            font,
+            region,
+            region_rect,
+            draw,
+        )
+    elif isinstance(draw, MeterDraw):
+        _paint_meter(
+            pygame_module,
+            surface,
+            font,
+            region,
+            region_rect,
+            draw,
+        )
+    elif isinstance(draw, StatusDraw):
+        _paint_status(
+            pygame_module,
+            surface,
+            region,
+            region_rect,
+            draw,
+        )
+    elif isinstance(draw, PlotDraw):
+        _paint_plot(
+            pygame_module,
+            surface,
+            region,
+            region_rect,
+            draw,
+            series_by_key[
+                (region.owner_id, region.owner_generation, draw.series_id)
+            ],
+        )
+    elif isinstance(draw, WaveformDraw):
+        _paint_waveform(
+            pygame_module,
+            surface,
+            region,
+            region_rect,
+            draw,
+            series_by_key[
+                (region.owner_id, region.owner_generation, draw.series_id)
+            ],
+        )
+    elif isinstance(draw, MenuBarDraw):
+        targets, popups = _paint_menu_bar(
+            pygame_module,
+            surface,
+            control_font,
+            region,
+            region_rect,
+            draw,
+            cell_w,
+            cell_h,
+            hovered=hovered,
+            pressed=pressed,
+        )
+        hit_entries.extend(targets)
+        region_popups.extend(popups)
+    elif isinstance(draw, TextAreaDraw):
+        hit_entries.extend(
+            _paint_text_area(
+                pygame_module,
+                surface,
+                font,
+                region,
+                region_rect,
+                draw,
+            )
+        )
+    elif isinstance(draw, TextGridDraw):
+        hit_entries.extend(
+            _paint_text_grid(
+                pygame_module,
+                surface,
+                control_font,
+                region,
+                region_rect,
+                draw,
+                cell_w,
+            )
+        )
+    elif isinstance(draw, ItemViewDraw):
+        hit_entries.extend(
+            _paint_item_view(
+                pygame_module,
+                surface,
+                font,
+                region,
+                region_rect,
+                draw,
+            )
+        )
+    elif isinstance(draw, TabSetDraw):
+        hit_entries.extend(
+            _paint_tabset(
+                pygame_module,
+                surface,
+                control_font,
+                region,
+                region_rect,
+                draw,
+                cell_w,
+                cell_h,
+                hovered=hovered,
+                pressed=pressed,
+            )
+        )
+    else:  # Legitimate newer kinds remain fail-closed until implemented.
+        raise TypeError("unsupported retained draw value")
+
+
+def _region_rect(region, cell_width: int, cell_height: int) -> _WideRect:
+    return _WideRect(
+        region.logical_x * cell_width,
+        region.logical_y * cell_height,
+        region.logical_cols * cell_width,
+        region.logical_rows * cell_height,
+    )
+
+
+def _region_occlusion(pygame_module, region, region_rect, viewport) -> tuple:
+    coverage = _bounded_pygame_rect(pygame_module, region_rect, viewport)
+    if coverage.width <= 0 or coverage.height <= 0:
+        return ()
+    return (
+        RegionOcclusion(
+            region.owner_id,
+            region.owner_generation,
+            region.region_id,
+            PixelRect(coverage.left, coverage.top, coverage.right, coverage.bottom),
+        ),
+    )
+
+
+def _meets(extent: PixelRect | None, area: PixelRect) -> bool:
+    return (
+        extent is not None
+        and extent.left < area.right
+        and area.left < extent.right
+        and extent.top < area.bottom
+        and area.top < extent.bottom
+    )
+
+
+def retained_plane_layout(
+    pygame_module,
+    plane: RetainedDrawPlane,
+    width: int,
+    height: int,
+    cell_width: int,
+    cell_height: int,
+    *,
+    control_font,
+) -> tuple[PaintedRegion, ...]:
+    """Lay PLANE out on a WIDTH by HEIGHT frame without painting it.
+
+    Each region gets its full-frame viewport and occlusion entry, and each
+    draw its identity and extent; no draw has hit entries yet.
+    """
+
+    if not isinstance(plane, RetainedDrawPlane):
+        raise TypeError("plane must be RetainedDrawPlane")
+    cell_w = _integer("cell_width", cell_width, minimum=1)
+    cell_h = _integer("cell_height", cell_height, minimum=1)
+    frame = _FullSurfaceBounds(pygame_module, width, height)
+    regions = []
+    for region in plane.regions:
+        region_rect = _region_rect(region, cell_w, cell_h)
+        viewport = _region_viewport(pygame_module, frame, region, region_rect)
+        regions.append(
+            PaintedRegion(
+                (region.owner_id, region.owner_generation, region.region_id),
+                None
+                if viewport.width <= 0 or viewport.height <= 0
+                else _pixel_rect(viewport),
+                _region_occlusion(pygame_module, region, region_rect, viewport),
+                tuple(
+                    PaintedDraw(
+                        retained_draw_key(draw),
+                        _draw_extent(
+                            pygame_module,
+                            region,
+                            region_rect,
+                            viewport,
+                            draw,
+                            cell_w,
+                            cell_h,
+                            control_font,
+                        ),
+                    )
+                    for draw in region.draws
+                ),
+            )
+        )
+    return tuple(regions)
+
+
+def _paint_region(
+    pygame_module,
+    surface,
+    font,
+    control_font,
+    region,
+    planned: PaintedRegion,
+    cell_w: int,
+    cell_h: int,
+    glyphs: dict,
+    image_surfaces,
+    series_by_key,
+    hovered,
+    pressed,
+    area: PixelRect | None = None,
+) -> list[list]:
+    """Paint REGION's draws in order, then the popups they opened.
+
+    With AREA, only the draws whose extent meets it are painted.  Returns
+    ``[draw index, entries, popup entries]`` for each painted draw.
+    """
+
+    region_rect = _region_rect(region, cell_w, cell_h)
+    popups: list[_MenuPopup] = []
+    owners: list[int] = []
+    painted: list[list] = []
+    for index, (draw, planned_draw) in enumerate(zip(region.draws, planned.draws)):
+        if area is not None and not _meets(planned_draw.extent, area):
+            continue
+        entries: list[HitMapEntry] = []
+        popups_start = len(popups)
+        _paint_draw(
+            pygame_module,
+            surface,
+            font,
+            control_font,
+            region,
+            region_rect,
+            draw,
+            cell_w,
+            cell_h,
+            glyphs,
+            image_surfaces,
+            series_by_key,
+            hovered,
+            pressed,
+            entries,
+            popups,
+        )
+        owners.extend([len(painted)] * (len(popups) - popups_start))
+        painted.append([index, tuple(entries), []])
+    # A popup is a renderer-owned foreground surface above this region's
+    # ordinary controls and objects.  Keep both its pixels and item targets
+    # here so a later collection cannot cover the popup while its old hits
+    # remain active.  Higher regions still paint and occlude afterward.
+    for popup, owner in zip(popups, owners):
+        prior_clip = surface.get_clip()
+        try:
+            surface.set_clip(popup.viewport)
+            painted[owner][2].extend(
+                _paint_popup(
+                    pygame_module,
+                    surface,
+                    control_font,
+                    region,
+                    popup.anchor,
+                    popup.viewport,
+                    popup.menu,
+                    popup.title,
+                    popup.metrics,
+                    root_enabled=popup.root_enabled,
+                    hovered=hovered,
+                    pressed=pressed,
+                )
+            )
+        finally:
+            surface.set_clip(prior_clip)
+    return painted
+
+
 def composite_draw_plane_result(
     pygame_module,
     surface,
@@ -3789,253 +4124,124 @@ def composite_draw_plane_result(
         resource_surfaces,
     )
     series_by_key = {history.key: history.samples for history in plane.series}
+    layout = retained_plane_layout(
+        pygame_module,
+        plane,
+        *surface.get_size(),
+        cell_w,
+        cell_h,
+        control_font=control_font,
+    )
     hit_entries: list[HitMapEntry] = []
     glyphs = {}
-    # The record describes the full frame, whatever the surface's clip.
-    full_frame = _FullSurfaceBounds(pygame_module, *surface.get_size())
     painted_regions: list[PaintedRegion] = []
-    for region in plane.regions:
-        region_rect = _WideRect(
-            region.logical_x * cell_w,
-            region.logical_y * cell_h,
-            region.logical_cols * cell_w,
-            region.logical_rows * cell_h,
-        )
-        full_viewport = _region_viewport(pygame_module, full_frame, region, region_rect)
-        occlusion_start = len(hit_entries)
-        region_coverage = _bounded_pygame_rect(
+    for region, planned in zip(plane.regions, layout):
+        region_rect = _region_rect(region, cell_w, cell_h)
+        occlusion = _region_occlusion(
             pygame_module,
+            region,
             region_rect,
             _region_viewport(pygame_module, surface, region, region_rect),
         )
-        if region_coverage.width > 0 and region_coverage.height > 0:
-            hit_entries.append(
-                RegionOcclusion(
-                    region.owner_id,
-                    region.owner_generation,
-                    region.region_id,
-                    PixelRect(
-                        region_coverage.left,
-                        region_coverage.top,
-                        region_coverage.right,
-                        region_coverage.bottom,
-                    ),
-                )
-            )
-        occlusion = tuple(hit_entries[occlusion_start:])
-        region_popups: list[_MenuPopup] = []
-        popup_owners: list[int] = []
-        draw_records: list[list] = []
-        for draw in region.draws:
-            entries_start = len(hit_entries)
-            popups_start = len(region_popups)
-            if isinstance(draw, GlyphRunDraw):
-                _paint_glyph_run(
-                    pygame_module,
-                    surface,
-                    font,
-                    region,
-                    region_rect,
-                    draw,
-                    glyphs,
-                )
-            elif isinstance(draw, PolylineDraw):
-                _paint_polyline(
-                    pygame_module,
-                    surface,
-                    region,
-                    region_rect,
-                    draw,
-                )
-            elif isinstance(draw, ImageDraw):
-                _paint_image(
-                    pygame_module,
-                    surface,
-                    region,
-                    region_rect,
-                    draw,
-                    image_surfaces[
-                        (
-                            region.owner_id,
-                            region.owner_generation,
-                            draw.resource_id,
-                        )
-                    ],
-                )
-            elif isinstance(draw, ReadoutDraw):
-                _paint_readout(
-                    pygame_module,
-                    surface,
-                    font,
-                    region,
-                    region_rect,
-                    draw,
-                )
-            elif isinstance(draw, MeterDraw):
-                _paint_meter(
-                    pygame_module,
-                    surface,
-                    font,
-                    region,
-                    region_rect,
-                    draw,
-                )
-            elif isinstance(draw, StatusDraw):
-                _paint_status(
-                    pygame_module,
-                    surface,
-                    region,
-                    region_rect,
-                    draw,
-                )
-            elif isinstance(draw, PlotDraw):
-                _paint_plot(
-                    pygame_module,
-                    surface,
-                    region,
-                    region_rect,
-                    draw,
-                    series_by_key[
-                        (region.owner_id, region.owner_generation, draw.series_id)
-                    ],
-                )
-            elif isinstance(draw, WaveformDraw):
-                _paint_waveform(
-                    pygame_module,
-                    surface,
-                    region,
-                    region_rect,
-                    draw,
-                    series_by_key[
-                        (region.owner_id, region.owner_generation, draw.series_id)
-                    ],
-                )
-            elif isinstance(draw, MenuBarDraw):
-                targets, popups = _paint_menu_bar(
-                    pygame_module,
-                    surface,
-                    control_font,
-                    region,
-                    region_rect,
-                    draw,
-                    cell_w,
-                    cell_h,
-                    hovered=hovered,
-                    pressed=pressed,
-                )
-                hit_entries.extend(targets)
-                region_popups.extend(popups)
-            elif isinstance(draw, TextAreaDraw):
-                hit_entries.extend(
-                    _paint_text_area(
-                        pygame_module,
-                        surface,
-                        font,
-                        region,
-                        region_rect,
-                        draw,
-                    )
-                )
-            elif isinstance(draw, TextGridDraw):
-                hit_entries.extend(
-                    _paint_text_grid(
-                        pygame_module,
-                        surface,
-                        control_font,
-                        region,
-                        region_rect,
-                        draw,
-                        cell_w,
-                    )
-                )
-            elif isinstance(draw, ItemViewDraw):
-                hit_entries.extend(
-                    _paint_item_view(
-                        pygame_module,
-                        surface,
-                        font,
-                        region,
-                        region_rect,
-                        draw,
-                    )
-                )
-            elif isinstance(draw, TabSetDraw):
-                hit_entries.extend(
-                    _paint_tabset(
-                        pygame_module,
-                        surface,
-                        control_font,
-                        region,
-                        region_rect,
-                        draw,
-                        cell_w,
-                        cell_h,
-                        hovered=hovered,
-                        pressed=pressed,
-                    )
-                )
-            else:  # Legitimate newer kinds remain fail-closed until implemented.
-                raise TypeError("unsupported retained draw value")
-            popup_owners.extend(
-                [len(draw_records)] * (len(region_popups) - popups_start)
-            )
-            draw_records.append([
-                retained_draw_key(draw),
-                _draw_extent(
-                    pygame_module,
-                    region,
-                    region_rect,
-                    full_viewport,
-                    draw,
-                    cell_w,
-                    cell_h,
-                    control_font,
-                ),
-                tuple(hit_entries[entries_start:]),
-                [],
-            ])
-        # A popup is a renderer-owned foreground surface above this region's
-        # ordinary controls and objects.  Keep both its pixels and item targets
-        # here so a later collection cannot cover the popup while its old hits
-        # remain active.  Higher regions still paint and occlude afterward.
-        for popup, owner in zip(region_popups, popup_owners):
-            entries_start = len(hit_entries)
-            prior_clip = surface.get_clip()
-            try:
-                surface.set_clip(popup.viewport)
-                hit_entries.extend(
-                    _paint_popup(
-                        pygame_module,
-                        surface,
-                        control_font,
-                        region,
-                        popup.anchor,
-                        popup.viewport,
-                        popup.menu,
-                        popup.title,
-                        popup.metrics,
-                        root_enabled=popup.root_enabled,
-                        hovered=hovered,
-                        pressed=pressed,
-                    )
-                )
-            finally:
-                surface.set_clip(prior_clip)
-            draw_records[owner][3].extend(hit_entries[entries_start:])
-        painted_regions.append(
-            PaintedRegion(
-                (region.owner_id, region.owner_generation, region.region_id),
-                None
-                if full_viewport.width <= 0 or full_viewport.height <= 0
-                else _pixel_rect(full_viewport),
-                occlusion,
-                tuple(
-                    PaintedDraw(key, extent, entries, tuple(popup_entries))
-                    for key, extent, entries, popup_entries in draw_records
-                ),
-            )
+        painted = _paint_region(
+            pygame_module,
+            surface,
+            font,
+            control_font,
+            region,
+            planned,
+            cell_w,
+            cell_h,
+            glyphs,
+            image_surfaces,
+            series_by_key,
+            hovered,
+            pressed,
         )
+        record = PaintedRegion(
+            planned.key,
+            planned.viewport,
+            occlusion,
+            tuple(
+                replace(planned.draws[index], entries=entries,
+                        popup_entries=tuple(popup_entries))
+                for index, entries, popup_entries in painted
+            ),
+        )
+        painted_regions.append(record)
+        hit_entries.extend(record.entries())
     return CompositeDrawResult(surface, tuple(hit_entries), tuple(painted_regions))
+
+
+def repaint_draw_plane_area(
+    pygame_module,
+    surface,
+    plane,
+    font,
+    cell_width: int,
+    cell_height: int,
+    area: PixelRect,
+    *,
+    layout: tuple[PaintedRegion, ...],
+    resource_surfaces: Mapping[ImageSurfaceKey, object] | None = None,
+    control_font=None,
+    hovered: ControlIdentity | None = None,
+    pressed: ControlIdentity | None = None,
+) -> dict[tuple, tuple[tuple[HitMapEntry, ...], tuple[HitMapEntry, ...]]]:
+    """Repaint, under the clip AREA, every draw of PLANE whose extent meets it.
+
+    LAYOUT is PLANE's ``retained_plane_layout`` for SURFACE.  The caller has
+    already painted everything below the plane inside AREA.  Draws are
+    painted in painter order, each region's popups after its draws, so inside
+    AREA this gives the pixels a full composition gives.  Returns each
+    painted draw's entries and popup entries by region and draw identity;
+    only a draw whose whole extent lies in AREA painted its exact entries.
+    """
+
+    if not isinstance(plane, RetainedDrawPlane):
+        raise TypeError("plane must be RetainedDrawPlane")
+    if not isinstance(area, PixelRect):
+        raise TypeError("area must be PixelRect")
+    cell_w = _integer("cell_width", cell_width, minimum=1)
+    cell_h = _integer("cell_height", cell_height, minimum=1)
+    control_font = font if control_font is None else control_font
+    hovered = _optional_identity("hovered", hovered)
+    pressed = _optional_identity("pressed", pressed)
+    image_surfaces = _preflight_image_surfaces(pygame_module, plane, resource_surfaces)
+    series_by_key = {history.key: history.samples for history in plane.series}
+    glyphs = {}
+    painted_draws = {}
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(
+            pygame_module.Rect(area.left, area.top, area.width, area.height)
+        )
+        for region, planned in zip(plane.regions, layout):
+            if not _meets(planned.viewport, area):
+                continue
+            for index, entries, popup_entries in _paint_region(
+                pygame_module,
+                surface,
+                font,
+                control_font,
+                region,
+                planned,
+                cell_w,
+                cell_h,
+                glyphs,
+                image_surfaces,
+                series_by_key,
+                hovered,
+                pressed,
+                area,
+            ):
+                painted_draws[(planned.key, planned.draws[index].key)] = (
+                    entries,
+                    tuple(popup_entries),
+                )
+    finally:
+        surface.set_clip(prior_clip)
+    return painted_draws
 
 
 def composite_draw_plane(
@@ -4086,6 +4292,8 @@ __all__ = [
     "TextPosition",
     "composite_draw_plane",
     "composite_draw_plane_result",
+    "repaint_draw_plane_area",
+    "retained_plane_layout",
     "hit_test_hit_map",
     "resolve_pointer",
     "opaque_cell_coverage",

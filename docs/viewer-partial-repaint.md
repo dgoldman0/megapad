@@ -52,11 +52,11 @@ composition, and outside D nothing changes.
 
 ## Extents
 
-- A CELL cell: its box of `span` cells, extended right and down by its
-  glyph's overhang. The CELL renderer records the largest overhang it has
-  drawn, in cells, for each direction. The reference Desktop font has none:
-  its glyphs are fitted to their cells, and its line height equals its
-  glyph height.
+- A CELL cell: its box of `span` cells, and its glyph, drawn from the
+  cell's top-left corner. The glyph cache records the widest and tallest
+  glyph drawn with it, which bounds how far any glyph reaches right and
+  down. The reference Desktop font reaches no further than its cells: its
+  glyphs are fitted to them, and its line height equals its glyph height.
 - An object draw (GLYPH_RUN, POLYLINE, IMAGE, READOUT, METER, STATUS, PLOT,
   WAVEFORM): its object rectangle within the region viewport, which is where
   every object painter clips.
@@ -77,17 +77,19 @@ paint would: CELL cells; GLYPH_RUN, whose glyphs are cropped to their own
 slots and whose fill and decorations are axis-aligned; READOUT and METER,
 which are clipped fills and text; STATUS, whose shape is tested per pixel in
 frame coordinates; IMAGE, sampled per pixel in frame coordinates; and the
-pixels of TEXT_AREA, TEXT_GRID and ITEM_VIEW, which are an opaque fill,
-per-slot glyphs, clipped fills and clipped borders.
+pixels of TEXT_AREA, TEXT_GRID, ITEM_VIEW and TABSET, which are an opaque
+fill, per-slot glyphs, rounded fills, horizontal accent lines, clipped
+fills and clipped borders, all inside their anchor.
 
 **Whole only.** POLYLINE, PLOT and WAVEFORM clip diagonal lines and fill
 polygons to the current clip with integer rounding (`_clip_line_segment`,
-`_alpha_polygon`), so a smaller clip can move a pixel. MENU_BAR, with its
-popups, and TABSET draw their lines through the same clipping, which also
-caps a line's width by the visible size, and they change with hover and
-press. When a whole-only draw meets D, D grows to hold its whole extent, and
-this repeats until D is stable. Such a draw then paints under exactly the
-clip a full composition gives it.
+`_alpha_polygon`), so a smaller clip can move a pixel. A MENU_BAR paints a
+shadow below its anchor but returns before painting anything when its
+anchor is clipped out, so a clip holding only part of the shadow would lose
+it; while one of its menus is open, its popups may paint anywhere in the
+region viewport. When a whole-only draw meets D, D grows to hold its whole
+extent, and this repeats until D is stable. Such a draw then paints under
+exactly the clip a full composition gives it.
 
 ## Hit map
 
@@ -117,30 +119,35 @@ region and draw identity, and the values they came from.
   overhang.
 - Cursor: the previous and the new cursor cell, when its position,
   visibility or blink phase changes.
-- Regions added, removed or reordered, or with a changed header: the
-  previous and the new region viewport.
+- Regions added or removed, or with a changed header: the previous and
+  the new region viewport.
 - Draws added, removed or changed in a kept region, except for a
   revision-only change: their previous and new extents.
 - A changed series history: the whole extents of the plots and waveforms
   that read it.
-- A changed hover or press: the whole viewports of the regions holding the
-  previous and the new control.
+- A changed hover or press: the extents of the draws that carry the
+  previous and the new control, in the previous and the new plane.
+
+Overlapping rectangles are united only when their bounding box is no larger
+than the two together. Rectangles may still overlap: each repaint recomputes
+its whole rectangle, so repainting both is exact.
 
 The viewer composes in full instead for the first frame; after a window,
-font or cell size change or an SDL window repaint event; when retained
-visibility or initialization changes; when an IMAGE manifest changes; and
+font, cell size or glyph cache change or an SDL window repaint event; when
+retained visibility or initialization changes; when an IMAGE manifest
+changes; when regions kept from the previous frame change their order; and
 when the damage covers more than half the frame.
 
 ## The CELL pass
 
 `VirtualTerminal.render` is split into the full render and a partial paint
 of a range of rows and columns into an existing surface, both using the same
-per-cell code. A damage rectangle repaints the rows it meets, and the rows
-above whose recorded downward overhang reaches it, and the columns it meets,
-and the columns to its left within the recorded rightward overhang. Each row
-still paints its backgrounds before its glyphs. Coverage by opaque glyph-run
-fills may still skip a cell: a covered cell in D is painted over by its
-covering run, which meets D and is therefore repainted.
+per-cell code. A damage rectangle repaints every cell whose box or glyph can reach it:
+the rows and columns it meets, and the rows above and columns to its left
+that the recorded glyph extent and a wide character's second cell allow.
+Each row still paints its backgrounds before its glyphs. Coverage by opaque
+glyph-run fills could still skip a covered cell, because its covering run
+meets D and is repainted, but a repaint paints every cell it includes.
 
 ## Presenting
 

@@ -12,10 +12,10 @@ import sys
 import time
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from display import VirtualTerminal
+from display import VirtualTerminal, glyph_extent
 from rich_terminal.final_raster import FinalRaster
 from rich_terminal.font_set import FontSet, discover_fallback_fonts
 from rich_terminal.pygame_view import (
@@ -26,6 +26,8 @@ from rich_terminal.pygame_view import (
     HIT_MAP_ENTRY_TYPES,
     HitMapEntry,
     ItemHitTarget,
+    PaintedRegion,
+    PixelRect,
     PointerTarget,
     RegionOcclusion,
     ResidualPoint,
@@ -35,7 +37,9 @@ from rich_terminal.pygame_view import (
     composite_draw_plane_result,
     hit_test_hit_map,
     opaque_cell_coverage,
+    repaint_draw_plane_area,
     resolve_pointer,
+    retained_plane_layout,
 )
 from rich_terminal.retained_model import ResourceFormat
 from rich_terminal.retained_scene import ControlKind
@@ -43,7 +47,15 @@ from rich_terminal.retained_wire import ControlEventKind
 from rich_terminal.retained_view import (
     DisplayScope,
     ImageResourceManifest,
+    ItemViewDraw,
+    MenuBarDraw,
+    PlotDraw,
+    PolylineDraw,
     RetainedDrawPlane,
+    TextAreaDraw,
+    TextGridDraw,
+    WaveformDraw,
+    retained_draw_control_ids,
 )
 from session import TerminalDisplayOffer, TerminalSnapshot
 from shared_session import (
@@ -1946,6 +1958,468 @@ def capture_final_terminal_raster(pygame_module, surface) -> FinalRaster:
         bytes_per_pixel=3,
         pixel_format="RGB888",
         pixels=pixels,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ComposedFrame:
+    """A composed frame, what it was composed from, and how it was reached.
+
+    ``damage`` holds the rectangles repainted from the previous frame, or is
+    None when this frame was composed in full.  The inputs let the next frame
+    repaint only what changes (docs/viewer-partial-repaint.md).
+    """
+
+    surface: object
+    hit_entries: tuple[HitMapEntry, ...]
+    regions: tuple[PaintedRegion, ...]
+    damage: tuple[PixelRect, ...] | None
+    grid: tuple[tuple, ...]
+    cursor: tuple[int, int] | None
+    plane: RetainedDrawPlane | None
+    hovered: ControlIdentity | None
+    pressed: ControlIdentity | None
+    geometry: tuple[int, int, int, int]
+    font: object
+    control_font: object
+    glyph_cache: dict
+    resource_surfaces: object
+
+
+# Repainted only whole: these painters clip diagonal lines or fill polygons
+# with rounding, and a menu bar skips its shadow when its anchor is clipped
+# out, while an open menu's popups may paint anywhere in the region.
+_REPAINTED_WHOLE = (PolylineDraw, PlotDraw, WaveformDraw, MenuBarDraw)
+
+
+def _revision_only(previous, draw) -> bool:
+    """Whether DRAW differs from PREVIOUS only in its content revision, which
+    no painter reads; only its hit entries carry it."""
+
+    return (
+        type(draw) is type(previous)
+        and isinstance(draw, (TextAreaDraw, TextGridDraw, ItemViewDraw))
+        and replace(
+            draw,
+            content=replace(
+                draw.content, content_revision=previous.content.content_revision
+            ),
+        )
+        == previous
+    )
+
+
+def _with_revision(entries, revision: int) -> tuple[HitMapEntry, ...]:
+    return tuple(
+        replace(entry, content_revision=revision)
+        if isinstance(entry, (TextHitTarget, ItemHitTarget))
+        else entry
+        for entry in entries
+    )
+
+
+def _region_header(region) -> tuple:
+    return (
+        region.logical_x,
+        region.logical_y,
+        region.logical_cols,
+        region.logical_rows,
+        region.clip_x,
+        region.clip_y,
+        region.clip_cols,
+        region.clip_rows,
+        region.z_order,
+        region.clipped,
+    )
+
+
+def _area(rect) -> int:
+    return (rect[2] - rect[0]) * (rect[3] - rect[1])
+
+
+def _merged(rects) -> list[tuple[int, int, int, int]]:
+    """Unite overlapping rectangles whose bounding box is no larger than the
+    two together.  Overlapping rectangles may remain: each repaint recomputes
+    its whole rectangle, so repainting both is still exact."""
+
+    rects = [rect for rect in rects if rect[0] < rect[2] and rect[1] < rect[3]]
+    changed = True
+    while changed:
+        changed = False
+        united: list[tuple[int, int, int, int]] = []
+        for rect in rects:
+            for index, other in enumerate(united):
+                box = (
+                    min(rect[0], other[0]),
+                    min(rect[1], other[1]),
+                    max(rect[2], other[2]),
+                    max(rect[3], other[3]),
+                )
+                if (
+                    rect[0] < other[2] and other[0] < rect[2]
+                    and rect[1] < other[3] and other[1] < rect[3]
+                    and _area(box) <= _area(rect) + _area(other)
+                ):
+                    united[index] = box
+                    changed = True
+                    break
+            else:
+                united.append(rect)
+        rects = united
+    return rects
+
+
+def _edges(rect: PixelRect | None) -> tuple[int, int, int, int] | None:
+    return None if rect is None else (rect.left, rect.top, rect.right, rect.bottom)
+
+
+def _frame_damage(
+    previous: ComposedFrame,
+    grid,
+    cursor,
+    plane,
+    layout,
+    hovered,
+    pressed,
+    geometry,
+    cell_width: int,
+    cell_height: int,
+) -> list[tuple[int, int, int, int]] | None:
+    """The rectangles to repaint, or None when the frame must be composed in
+    full: the previous and new extents of every paint operation that
+    changed, united, and grown over the draws that are repainted only whole.
+    """
+
+    cols, rows = geometry[0], geometry[1]
+    width, height = cols * cell_width, rows * cell_height
+    rects: list[tuple[int, int, int, int] | None] = []
+
+    # A changed CELL row repaints its full-width band, down as far as a
+    # glyph can reach.
+    band = max(cell_height, glyph_extent(previous.glyph_cache)[1])
+    for row, (cells, old) in enumerate(zip(grid, previous.grid)):
+        if cells is not old and cells != old:
+            top = row * cell_height
+            rects.append((0, top, width, min(height, top + band)))
+    if cursor != previous.cursor:
+        for cell in (previous.cursor, cursor):
+            if cell is not None:
+                rects.append((
+                    cell[0] * cell_width,
+                    cell[1] * cell_height,
+                    (cell[0] + 1) * cell_width,
+                    (cell[1] + 1) * cell_height,
+                ))
+
+    whole: list[tuple[int, int, int, int]] = []
+    if plane is not None:
+        old_plane = previous.plane
+        old_regions = {
+            record.key: (region, record)
+            for region, record in zip(old_plane.regions, previous.regions)
+        }
+        new_keys = {planned.key for planned in layout}
+        if [key for key in old_regions if key in new_keys] != [
+            planned.key for planned in layout if planned.key in old_regions
+        ]:
+            return None
+        old_series = {history.key: history for history in old_plane.series}
+        new_series = {history.key: history for history in plane.series}
+        changed_series = {
+            key
+            for key in old_series.keys() | new_series.keys()
+            if old_series.get(key) != new_series.get(key)
+        }
+        for region, planned in zip(plane.regions, layout):
+            for draw, planned_draw in zip(region.draws, planned.draws):
+                if isinstance(draw, _REPAINTED_WHOLE) and planned_draw.extent is not None:
+                    whole.append(_edges(planned_draw.extent))
+            found = old_regions.get(planned.key)
+            if found is None or _region_header(found[0]) != _region_header(region):
+                rects.append(_edges(planned.viewport))
+                if found is not None:
+                    rects.append(_edges(found[1].viewport))
+                continue
+            old_region, old_record = found
+            old_draws = {
+                draw_record.key: (draw, draw_record)
+                for draw, draw_record in zip(old_region.draws, old_record.draws)
+            }
+            for draw, planned_draw in zip(region.draws, planned.draws):
+                old = old_draws.pop(planned_draw.key, None)
+                if old is None:
+                    rects.append(_edges(planned_draw.extent))
+                    continue
+                old_draw, old_draw_record = old
+                if old_draw is draw or old_draw == draw or _revision_only(old_draw, draw):
+                    series_id = getattr(draw, "series_id", None)
+                    if series_id is None or (
+                        region.owner_id, region.owner_generation, series_id
+                    ) not in changed_series:
+                        continue
+                rects.append(_edges(old_draw_record.extent))
+                rects.append(_edges(planned_draw.extent))
+            rects.extend(_edges(record.extent) for _draw, record in old_draws.values())
+        rects.extend(
+            _edges(record.viewport)
+            for key, (_region, record) in old_regions.items()
+            if key not in new_keys
+        )
+        # Hover and press change only the pixels of the draws that carry
+        # the controls they name.
+        identities = set()
+        if hovered != previous.hovered:
+            identities.update((hovered, previous.hovered))
+        if pressed != previous.pressed:
+            identities.update((pressed, previous.pressed))
+        identities.discard(None)
+        for draw_plane, records in ((old_plane, previous.regions), (plane, layout)):
+            if not identities:
+                break
+            for region, record in zip(draw_plane.regions, records):
+                for draw, draw_record in zip(region.draws, record.draws):
+                    ids = retained_draw_control_ids(draw)
+                    if any(
+                        identity.owner_id == region.owner_id
+                        and identity.owner_generation == region.owner_generation
+                        and identity.control_id in ids
+                        for identity in identities
+                    ):
+                        rects.append(_edges(draw_record.extent))
+
+    damage = _merged(
+        (max(0, rect[0]), max(0, rect[1]), min(width, rect[2]), min(height, rect[3]))
+        for rect in rects
+        if rect is not None
+    )
+    while True:
+        grown = []
+        for rect in damage:
+            for extent in whole:
+                if (
+                    extent[0] < rect[2] and rect[0] < extent[2]
+                    and extent[1] < rect[3] and rect[1] < extent[3]
+                ):
+                    rect = (
+                        min(rect[0], extent[0]),
+                        min(rect[1], extent[1]),
+                        max(rect[2], extent[2]),
+                        max(rect[3], extent[3]),
+                    )
+            grown.append(rect)
+        grown = _merged(grown)
+        if grown == damage:
+            break
+        damage = grown
+    if 2 * sum(_area(rect) for rect in damage) > width * height:
+        return None
+    return damage
+
+
+def compose_terminal_frame_changes(
+    pygame_module,
+    terminal: VirtualTerminal,
+    font,
+    cell_width: int,
+    cell_height: int,
+    *,
+    retained_plane: RetainedDrawPlane | None,
+    show_cursor: bool,
+    glyph_cache: dict,
+    control_font=None,
+    hovered: ControlIdentity | None = None,
+    pressed: ControlIdentity | None = None,
+    resource_surfaces: Mapping | None = None,
+    previous: ComposedFrame | None = None,
+) -> ComposedFrame:
+    """Compose the frame, repainting in PREVIOUS's surface only what changed.
+
+    The frame is exactly what ``compose_terminal_frame_result`` composes
+    from the same inputs, pixel for pixel and entry for entry.  It is
+    composed in full for the first frame, after a change of geometry, fonts,
+    glyph cache, retained visibility or IMAGE resources, when regions are
+    reordered, and when the damage would cover more than half the frame.
+    """
+
+    control_font = font if control_font is None else control_font
+    with terminal._lock:
+        grid = tuple(tuple(row) for row in terminal.grid)
+        cols, rows = terminal.cols, terminal.rows
+        cursor = (
+            (terminal.cx, terminal.cy)
+            if show_cursor
+            and terminal.cursor_visible
+            and 0 <= terminal.cx < cols
+            and 0 <= terminal.cy < rows
+            else None
+        )
+    geometry = (cols, rows, cell_width, cell_height)
+    layout = None
+    damage = None
+    if (
+        previous is not None
+        and previous.geometry == geometry
+        and previous.font is font
+        and previous.control_font is control_font
+        and previous.glyph_cache is glyph_cache
+        and (previous.plane is None) == (retained_plane is None)
+        and (
+            retained_plane is None
+            or (
+                retained_plane.retained_initialized,
+                retained_plane.retained_visible,
+                retained_plane.resources,
+            )
+            == (
+                previous.plane.retained_initialized,
+                previous.plane.retained_visible,
+                previous.plane.resources,
+            )
+            and (not retained_plane.resources
+                 or resource_surfaces is previous.resource_surfaces)
+        )
+    ):
+        if retained_plane is not None:
+            layout = retained_plane_layout(
+                pygame_module,
+                retained_plane,
+                cols * cell_width,
+                rows * cell_height,
+                cell_width,
+                cell_height,
+                control_font=control_font,
+            )
+        damage = _frame_damage(
+            previous,
+            grid,
+            cursor,
+            retained_plane,
+            layout,
+            hovered,
+            pressed,
+            geometry,
+            cell_width,
+            cell_height,
+        )
+    if damage is None:
+        result = compose_terminal_frame_result(
+            pygame_module,
+            terminal,
+            font,
+            cell_width,
+            cell_height,
+            retained_plane=retained_plane,
+            show_cursor=show_cursor,
+            glyph_cache=glyph_cache,
+            control_font=control_font,
+            hovered=hovered,
+            pressed=pressed,
+            resource_surfaces=resource_surfaces,
+        )
+        return ComposedFrame(
+            result.surface, result.hit_entries, result.regions, None, grid, cursor,
+            retained_plane, hovered, pressed, geometry, font, control_font,
+            glyph_cache, resource_surfaces,
+        )
+
+    surface = previous.surface
+    extents = {
+        (planned.key, planned_draw.key): planned_draw.extent
+        for planned in layout or ()
+        for planned_draw in planned.draws
+    }
+    painted: dict = {}
+    for left, top, right, bottom in damage:
+        area = PixelRect(left, top, right, bottom)
+        rect = pygame_module.Rect(left, top, right - left, bottom - top)
+        prior_clip = surface.get_clip()
+        try:
+            surface.set_clip(rect)
+            surface.fill(VirtualTerminal._DEFAULT_BG)
+            terminal.paint_area(
+                pygame_module, surface, font, cell_width, cell_height, rect,
+                _cache=glyph_cache,
+            )
+        finally:
+            surface.set_clip(prior_clip)
+        if retained_plane is not None:
+            for key, value in repaint_draw_plane_area(
+                pygame_module,
+                surface,
+                retained_plane,
+                font,
+                cell_width,
+                cell_height,
+                area,
+                layout=layout,
+                resource_surfaces=resource_surfaces,
+                control_font=control_font,
+                hovered=hovered,
+                pressed=pressed,
+            ).items():
+                extent = extents[key]
+                # Only a draw painted whole under this clip made exact entries.
+                if (
+                    extent.left >= left and extent.top >= top
+                    and extent.right <= right and extent.bottom <= bottom
+                ):
+                    painted[key] = value
+        if cursor is not None and rect.colliderect(
+            (cursor[0] * cell_width, cursor[1] * cell_height, cell_width, cell_height)
+        ):
+            prior_clip = surface.get_clip()
+            try:
+                surface.set_clip(rect)
+                _paint_terminal_cursor(
+                    pygame_module, surface, terminal, cell_width, cell_height,
+                    show_cursor=show_cursor,
+                )
+            finally:
+                surface.set_clip(prior_clip)
+
+    regions: list[PaintedRegion] = []
+    if retained_plane is not None:
+        old_regions = {
+            record.key: (region, record)
+            for region, record in zip(previous.plane.regions, previous.regions)
+        }
+        for region, planned in zip(retained_plane.regions, layout):
+            found = old_regions.get(planned.key)
+            if found is not None and _region_header(found[0]) != _region_header(region):
+                found = None
+            old_draws = {} if found is None else {
+                draw_record.key: (draw, draw_record)
+                for draw, draw_record in zip(found[0].draws, found[1].draws)
+            }
+            draws = []
+            for draw, planned_draw in zip(region.draws, planned.draws):
+                old = old_draws.get(planned_draw.key)
+                if old is not None:
+                    old_draw, old_record = old
+                    if old_draw is draw or old_draw == draw:
+                        draws.append(old_record)
+                        continue
+                    if _revision_only(old_draw, draw):
+                        draws.append(replace(
+                            old_record,
+                            entries=_with_revision(
+                                old_record.entries, draw.content.content_revision
+                            ),
+                        ))
+                        continue
+                entries, popup_entries = painted.get(
+                    (planned.key, planned_draw.key), ((), ())
+                )
+                draws.append(replace(
+                    planned_draw, entries=entries, popup_entries=popup_entries
+                ))
+            regions.append(replace(planned, draws=tuple(draws)))
+    hit_entries = tuple(entry for region in regions for entry in region.entries())
+    return ComposedFrame(
+        surface, hit_entries, tuple(regions),
+        tuple(PixelRect(*rect) for rect in damage), grid, cursor,
+        retained_plane, hovered, pressed, geometry, font, control_font,
+        glyph_cache, resource_surfaces,
     )
 
 

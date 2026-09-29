@@ -139,6 +139,12 @@ _GLYPH_FITS_KEY = object()
 _GLYPH_EXTENT_KEY = object()
 
 
+def glyph_extent(cache: dict) -> tuple[int, int]:
+    """The widest and tallest glyph, in pixels, drawn with a glyph cache."""
+
+    return cache.get(_GLYPH_EXTENT_KEY, (0, 0))
+
+
 class VirtualTerminal:
     """VT100-compatible text terminal backed by a character grid.
 
@@ -997,7 +1003,7 @@ class VirtualTerminal:
         with self._lock:
             if covered is not None and len(covered) != self.cols * self.rows:
                 covered = None
-            widest, tallest = _cache.get(_GLYPH_EXTENT_KEY, (0, 0))
+            widest, tallest = glyph_extent(_cache)
             # A cell paints from its own top-left corner: its box spans at
             # most two cells, and its glyph at most WIDEST by TALLEST.
             reach_right = max(2 * cell_w, widest)
