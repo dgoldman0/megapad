@@ -441,11 +441,9 @@ followed by a TALU-class instruction:
 VSHR, VSHL, and VCLZ are illegal in float formats.  VSEL, TDIV, TSQRT,
 TCVT, and TCMP are defined normatively in `docs/floating-point.md` §6,
 including their legal source selectors and how TCVT widens into several
-destination tiles or narrows from several source tiles.  They are specified
-and not yet implemented: VSEL, TCVT, and TCMP land in Phase 6 of the
-full-float plan, and TDIV and TSQRT in Phase 8.  Until then, functions 4–7
-are unimplemented in every backend and do not yet trap, and VSEL is only a
-placeholder that disagrees between backends.
+destination tiles or narrows from several source tiles.  VSEL, TCVT, and
+TCMP run in all four backends.  TDIV and TSQRT land in Phase 8 of the
+full-float plan; until then they trap `IVEC_ILLEGAL_OP` in every format.
 
 **Rounding shifts**: When TMODE bit 6 is set, VSHR adds the bit that's
 about to be shifted out before truncating (round-to-nearest).  This is
@@ -528,10 +526,10 @@ computes their arithmetic on two multi-format FMA units per engine
 (`rtl/core/mp64_fma.v`): element-wise operations take four beats, the
 canonical tree schedules its products, levels, and reserved `ACC_ACC` beats
 over the same units, and `TAMAC` gives each unit one binary64 lane per beat,
-all at the §10 costs.  FP32/FP64 VSEL and the new operations (Phases 6 and 8)
-follow the schedule in `docs/megapad-full-float-plan.md`; until then they
-trap `IVEC_ILLEGAL_OP` before any access.  Float PACK and UNPACK remain in
-FP16 and BF16 until `TCVT` replaces them.
+all at the §10 costs.  VSEL, TCMP, and TCVT run in every format in all four
+backends; the RTL converts sixteen lanes per beat and pads each TCVT to its
+§10 cost.  Float PACK and UNPACK trap.  TDIV and TSQRT (Phase 8) trap
+`IVEC_ILLEGAL_OP` before any access until they land.
 
 
 ---
@@ -854,9 +852,9 @@ long to retry:
 | `BF16-MODE` | `( -- )` | Set TMODE = 5 |
 | `FP32-MODE` | `( -- )` | Set TMODE = 6 |
 | `FP64-MODE` | `( -- )` | Set TMODE = 7 |
-| `TCVT` | `( ew -- )` | Convert from the current format to `ew` (Phase 6) |
-| `TCMP` | `( pred -- )` | Compare to lane mask, predicate 0–7 (Phase 6) |
-| `TVSEL` | `( -- )` | Select lanes by the mask in `[TDST]` (Phase 6) |
+| `TCVT` | `( ew -- )` | Convert from the current format to `ew` |
+| `TCMP` | `( pred -- )` | Compare to lane mask, predicate 0–7 |
+| `TVSEL` | `( -- )` | Select lanes by the mask in `[TDST]` |
 | `TDIV` | `( -- )` | Lane divide (Phase 8) |
 | `TSQRT` | `( -- )` | Lane square root (Phase 8) |
 

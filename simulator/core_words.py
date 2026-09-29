@@ -2816,8 +2816,8 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
     runtime.define_directive(b"TO", DirectiveKind.TO)
 
-    # The FP32 and FP64 format words follow at the frontier.  The tile service
-    # keeps both formats fail-closed until their operations land.
+    # The FP32 and FP64 format words and the conversion, compare, and select
+    # words follow at the frontier.
     runtime.define_primitive(
         b"FP32-MODE",
         lambda _context: runtime.tile.set_mode(6),
@@ -2825,6 +2825,18 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.define_primitive(
         b"FP64-MODE",
         lambda _context: runtime.tile.set_mode(7),
+    )
+    runtime.define_primitive(
+        b"TCVT",
+        lambda context: runtime.tile.convert(context.data.pop()),
+    )
+    runtime.define_primitive(
+        b"TCMP",
+        lambda context: runtime.tile.compare_mask(context.data.pop()),
+    )
+    runtime.define_primitive(
+        b"TVSEL",
+        lambda _context: runtime.tile.select(),
     )
 
 __all__ = ["install_core"]

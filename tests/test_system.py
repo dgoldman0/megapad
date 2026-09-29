@@ -5709,7 +5709,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 483)
+        self.assertEqual(len(seen), 486)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -5898,7 +5898,10 @@ class TestBIOSTileModes(unittest.TestCase):
         labels = self._bios_harness._bios_labels
         code = self._bios_harness.bios_code
         for current, previous in (
-            ("d_icache_on", "d_fp64_mode"),
+            ("d_icache_on", "d_tvsel"),
+            ("d_tvsel", "d_tcmp"),
+            ("d_tcmp", "d_tcvt"),
+            ("d_tcvt", "d_fp64_mode"),
             ("d_fp64_mode", "d_fp32_mode"),
             ("d_fp32_mode", "d_bf16_mode"),
             ("d_bf16_mode", "d_fp16_mode"),
@@ -5930,6 +5933,31 @@ class TestBIOSTileModes(unittest.TestCase):
             "CTRL=3 ",
         ):
             self.assertIn(expected, text)
+
+    def test_convert_compare_and_select_words(self):
+        """TCVT widens U8 to FP32, TCMP masks the lanes, TVSEL picks."""
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            "CREATE TBUF 704 ALLOT",
+            "TBUF 63 + -64 AND CONSTANT TB",
+            ": FILL-U8  64 0 DO I TB I + C! LOOP ;",
+            "FILL-U8",
+            "0 TMODE! TB TSRC0! TB 256 + TDST! 6 TCVT",
+            '." L63=" TB 256 + 252 + L@ .',
+            "6 TMODE! TB 256 + TSRC0! TB 320 + TSRC1! TB 512 + TDST!",
+            "2 TCMP",
+            '." M0=" TB 512 + L@ . ." M15=" TB 512 + 60 + L@ .',
+            "TVSEL",
+            '." S0=" TB 512 + L@ .',
+            "0 TMODE!",
+        ])
+        # 63.0 as binary32 is 0x427C0000; lanes 0-15 (0..15) are below
+        # lanes 16-31 (16..31), so every LT mask is all ones and VSEL takes
+        # source 0.
+        self.assertIn("L63=1115422720 ", text)
+        self.assertIn("M0=4294967295 ", text)
+        self.assertIn("M15=4294967295 ", text)
+        self.assertIn("S0=0 ", text)
 
 
 class TestMulticore(unittest.TestCase):
@@ -15494,7 +15522,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 483)
+        self.assertEqual(len(seen), 486)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)

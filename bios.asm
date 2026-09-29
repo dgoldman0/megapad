@@ -4222,6 +4222,97 @@ w_tmode_fetch:
     str r14, r0
     ret.l
 
+; TVSEL ( -- ) [TDST] lane <- msb([TDST]) ? [TSRC0] : [TSRC1]
+; (docs/floating-point.md §6.4).
+w_tvsel:
+    t.vsel
+    ret.l
+
+; TCVT ( ew -- ) convert the tile region from TMODE.EW to format ew
+; (docs/floating-point.md §6.3).  The target is part of the instruction, so
+; each code has its own table entry; codes above 15 use reserved code 15,
+; which traps exactly as the instruction does.
+w_tcvt:
+    ldn r0, r14
+    addi r14, 8
+    cmpi r0, 16
+    brcc .tcvt_dispatch
+    ldi r0, 15
+.tcvt_dispatch:
+    lsli r0, 2
+    ldi64 r11, w_tcvt_table
+    add r11, r0
+    call.l r11
+    ret.l
+w_tcvt_table:
+    t.cvt 0
+    ret.l
+    t.cvt 1
+    ret.l
+    t.cvt 2
+    ret.l
+    t.cvt 3
+    ret.l
+    t.cvt 4
+    ret.l
+    t.cvt 5
+    ret.l
+    t.cvt 6
+    ret.l
+    t.cvt 7
+    ret.l
+    t.cvt 8
+    ret.l
+    t.cvt 9
+    ret.l
+    t.cvt 10
+    ret.l
+    t.cvt 11
+    ret.l
+    t.cvt 12
+    ret.l
+    t.cvt 13
+    ret.l
+    t.cvt 14
+    ret.l
+    t.cvt 15
+    ret.l
+
+; TCMP ( pred -- ) [TDST] lane <- all ones when pred([TSRC0], [TSRC1]),
+; else zero (docs/floating-point.md §6.5).  Predicates above 7 use an entry
+; with function bits [7:6] set, which traps exactly as the instruction does.
+w_tcmp:
+    ldn r0, r14
+    addi r14, 8
+    cmpi r0, 8
+    brcc .tcmp_dispatch
+    ldi r0, 8
+.tcmp_dispatch:
+    lsli r0, 2
+    ldi64 r11, w_tcmp_table
+    add r11, r0
+    call.l r11
+    ret.l
+w_tcmp_table:
+    t.cmp eq
+    ret.l
+    t.cmp ne
+    ret.l
+    t.cmp lt
+    ret.l
+    t.cmp le
+    ret.l
+    t.cmp gt
+    ret.l
+    t.cmp ge
+    ret.l
+    t.cmp unord
+    ret.l
+    t.cmp ord
+    ret.l
+    .db 0xF8, 0xE0, 0xC7
+    ret.l
+
 ; TCTRL@ ( -- n ) read current tile ctrl
 w_tctrl_fetch:
     csrr r0, 0x15
@@ -21991,9 +22082,36 @@ d_fp64_mode:
     csrw 0x14, r0
     ret.l
 
+; === TCVT ( ew -- ) ===
+d_tcvt:
+    .dq d_fp64_mode
+    .db 4
+    .ascii "TCVT"
+    ldi64 r11, w_tcvt
+    call.l r11
+    ret.l
+
+; === TCMP ( pred -- ) ===
+d_tcmp:
+    .dq d_tcvt
+    .db 4
+    .ascii "TCMP"
+    ldi64 r11, w_tcmp
+    call.l r11
+    ret.l
+
+; === TVSEL ( -- ) ===
+d_tvsel:
+    .dq d_tcmp
+    .db 5
+    .ascii "TVSEL"
+    ldi64 r11, w_tvsel
+    call.l r11
+    ret.l
+
 ; === ICACHE-ON ( -- ) ===
 d_icache_on:
-    .dq d_fp64_mode
+    .dq d_tvsel
     .db 9
     .ascii "ICACHE-ON"
     ldi64 r11, w_icache_on

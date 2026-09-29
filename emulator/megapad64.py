@@ -3987,6 +3987,37 @@ class Megapad64:
         source_cycles = 1 if ss == 1 else 2
         return source_cycles + arithmetic_cycles
 
+    def _exec_tcvt(self, source, funct_byte: int) -> int:
+        """TCVT: convert a region from TMODE.EW to function bits [7:4] (§6.3).
+
+        Widening reads the tile at TSRC0 and writes k tiles from TDST;
+        narrowing reads k tiles from TSRC0 and writes one tile at TDST.  Every
+        source tile is read before any destination tile is written.
+        """
+        target = tile_formats.decode(funct_byte >> 4)
+        k = tile_formats.tcvt_ratio(source, target)
+        reads = k if target.lane_bytes < source.lane_bytes else 1
+        writes = k if target.lane_bytes > source.lane_bytes else 1
+        lanes = []
+        for index in range(reads):
+            lanes += tile_float.unpack_bits(
+                source.lane_bits,
+                self._read_tile(u64(self.tsrc0 + 64 * index)))
+        converted = tile_float.pack_bits(
+            target.lane_bits,
+            tile_float.convert_region(
+                source,
+                target,
+                lanes,
+                bool(self.tmode & tile_formats.TMODE_SIGNED),
+                bool(self.tmode & tile_formats.TMODE_ROUNDING),
+            ),
+        )
+        for index in range(writes):
+            self._write_tile(u64(self.tdst + 64 * index),
+                             converted[64 * index:64 * (index + 1)])
+        return 4 + (k - 1)
+
     # -- 0xE: MEX --
     def _exec_mex(self, n: int) -> int:
         ss = (n >> 2) & 0x3   # operand selector
@@ -4042,6 +4073,8 @@ class Megapad64:
             op,
             0 if ss == 0x2 else funct,
             self._ext_modifier == 8,
+            ss,
+            funct_byte,
         ):
             self._ext_modifier = -1
             ew_bits = tile_formats.element_width(self.tmode)
@@ -4056,6 +4089,10 @@ class Megapad64:
         elem_bytes = lane_format.lane_bytes
         num_lanes = lane_format.lanes
         signed = (self.tmode >> 4) & 1
+
+        # TCVT reads and writes its own multi-tile region.
+        if self._ext_modifier == 8 and op == 0x0 and funct == 6:
+            return self._exec_tcvt(lane_format, funct_byte)
 
         # Load source tiles as byte arrays
         read_tile = self._read_tile
@@ -4113,6 +4150,31 @@ class Megapad64:
 
         # Extended Tile ALU (EXT modifier 8 = 0xF8 prefix)
         if self._ext_modifier == 8 and op == 0x0:
+            bits = lane_format.lane_bits
+            if funct == 2:  # VSEL — msb(M) ? A : B, M = old [TDST] (§6.4)
+                masks = tile_float.unpack_bits(bits, read_tile(self.tdst))
+                write_tile(self.tdst, tile_float.pack_bits(
+                    bits,
+                    tile_float.select(
+                        lane_format,
+                        masks,
+                        tile_float.unpack_bits(bits, src_a),
+                        tile_float.unpack_bits(bits, src_b),
+                    ),
+                ))
+                return 1
+            if funct == 7:  # TCMP — lane masks (§6.5)
+                write_tile(self.tdst, tile_float.pack_bits(
+                    bits,
+                    tile_float.compare_mask(
+                        lane_format,
+                        (funct_byte >> 3) & 0x7,
+                        tile_float.unpack_bits(bits, src_a),
+                        tile_float.unpack_bits(bits, src_b),
+                        bool(signed),
+                    ),
+                ))
+                return 1
             rounding = (self.tmode >> 6) & 1
             for lane in range(num_lanes):
                 ea = tile_get_elem(src_a, lane, elem_bytes)
@@ -4133,16 +4195,8 @@ class Megapad64:
                         r = (ea >> shift_amt) & mask
                 elif funct == 1:  # VSHL — per-lane left shift
                     r = (ea << shift_amt) & mask
-                elif funct == 2:  # VSEL — per-lane select (dst = b ? src0 : src1)
-                    # Not yet implemented
-                    r = ea
-                elif funct == 3:  # VCLZ — count leading zeros
-                    if ea == 0:
-                        r = bits
-                    else:
-                        r = bits - ea.bit_length()
-                else:
-                    r = 0
+                else:             # VCLZ — count leading zeros
+                    r = bits if ea == 0 else bits - ea.bit_length()
                 tile_set_elem(dst, lane, elem_bytes, r)
             write_tile(self.tdst, dst)
             return 1  # 2 cycles for extended tile ALU
@@ -4568,22 +4622,9 @@ class Megapad64:
                     tile_set_elem(out, lane, elem_bytes, out_val)
                 write_tile(self.tdst, out)
                 return 2  # 3 cycles total
-            elif funct == 5:  # PACK — narrow elements / FP format convert
+            elif funct == 5:  # PACK — narrow integer elements (float: TCVT)
                 src = read_tile(self.tsrc0)
                 out = bytearray(64)
-
-                if is_fp:
-                    # FP PACK swaps FP16 and BF16 with one RNE rounding.  TCVT
-                    # replaces it in Phase 6 of the full-float plan.
-                    target = (
-                        ieee_fp.BF16 if fmt is ieee_fp.FP16 else ieee_fp.FP16
-                    )
-                    write_tile(self.tdst, tile_float.pack_lanes(
-                        target,
-                        tile_float.convert_lanes(
-                            target, fmt, tile_float.unpack_lanes(fmt, src)),
-                    ))
-                    return 1
 
                 # Integer PACK: narrows to half width
                 if elem_bytes < 2:
@@ -4610,20 +4651,9 @@ class Megapad64:
                     tile_set_elem(out, lane, out_eb, val)
                 write_tile(self.tdst, out)
                 return 1  # 2 cycles total
-            elif funct == 6:  # UNPACK — widen elements / FP format convert
+            elif funct == 6:  # UNPACK — widen integer elements (float: TCVT)
                 src = read_tile(self.tsrc0)
                 out = bytearray(64)
-
-                if is_fp:
-                    # FP UNPACK widens the first 16 lanes exactly to FP32.
-                    # TCVT replaces it in Phase 6 of the full-float plan.
-                    write_tile(self.tdst, tile_float.pack_lanes(
-                        ieee_fp.FP32,
-                        tile_float.convert_lanes(
-                            ieee_fp.FP32, fmt,
-                            tile_float.unpack_lanes(fmt, src)[:16]),
-                    ))
-                    return 1
 
                 # Integer UNPACK: widens to double width
                 out_eb = elem_bytes * 2

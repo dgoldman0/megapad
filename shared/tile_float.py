@@ -19,20 +19,33 @@ TILE_BYTES = 64
 ADD, SUB, AND, OR, XOR, MIN, MAX, ABS = range(8)
 
 
-def unpack_lanes(fmt: Format, tile: bytes) -> list[int]:
-    width = fmt.width // 8
+def unpack_bits(bits: int, tile: bytes) -> list[int]:
+    """Split a tile (or a region of tiles) into raw ``bits``-wide lanes."""
+
+    width = bits // 8
     return [int.from_bytes(tile[offset:offset + width], "little")
-            for offset in range(0, TILE_BYTES, width)]
+            for offset in range(0, len(tile), width)]
 
 
-def pack_lanes(fmt: Format, lanes: Sequence[int]) -> bytearray:
-    width = fmt.width // 8
+def pack_bits(bits: int, lanes: Sequence[int]) -> bytearray:
+    """Join raw ``bits``-wide lanes, masking each to its width."""
+
+    width = bits // 8
+    mask = (1 << bits) - 1
     output = bytearray(len(lanes) * width)
     for index, value in enumerate(lanes):
         output[index * width:(index + 1) * width] = (
-            value & fmt.mask
+            value & mask
         ).to_bytes(width, "little")
     return output
+
+
+def unpack_lanes(fmt: Format, tile: bytes) -> list[int]:
+    return unpack_bits(fmt.width, tile[:TILE_BYTES])
+
+
+def pack_lanes(fmt: Format, lanes: Sequence[int]) -> bytearray:
+    return pack_bits(fmt.width, lanes)
 
 
 def elementwise(fmt: Format, funct: int, a: Sequence[int],
@@ -155,7 +168,71 @@ def is_zero(fmt: Format, bits: int) -> bool:
     return (bits & fmt.mask & ~fmt.sign_bit) == 0
 
 
-def convert_lanes(dst: Format, src: Format, a: Sequence[int]) -> list[int]:
-    """Convert each lane with one RNE rounding (exact when widening)."""
+# TCMP predicates (docs/floating-point.md §6.5).
+CMP_EQ, CMP_NE, CMP_LT, CMP_LE, CMP_GT, CMP_GE, CMP_UNORD, CMP_ORD = range(8)
 
-    return [fp.lane_convert(dst, src, x) for x in a]
+
+def _signed_lane(value: int, bits: int) -> int:
+    return value - (1 << bits) if value >> (bits - 1) else value
+
+
+def select(lane_format, masks: Sequence[int], a: Sequence[int],
+           b: Sequence[int]) -> list[int]:
+    """VSEL: ``msb(M[i]) ? A[i] : B[i]`` on raw lanes (§6.4)."""
+
+    top = 1 << (lane_format.lane_bits - 1)
+    return [x if m & top else y for m, x, y in zip(masks, a, b)]
+
+
+def compare_mask(lane_format, predicate: int, a: Sequence[int],
+                 b: Sequence[int], signed: bool) -> list[int]:
+    """TCMP: an all-ones or zero lane mask per predicate (§6.5)."""
+
+    ones = lane_format.lane_mask
+    bits = lane_format.lane_bits
+    out = []
+    for x, y in zip(a, b):
+        if lane_format.is_float:
+            order = fp.compare(lane_format.float_format, x, y)
+        else:
+            if signed:
+                x, y = _signed_lane(x, bits), _signed_lane(y, bits)
+            order = fp.LESS if x < y else fp.GREATER if x > y else fp.EQUAL
+        unordered = order == fp.UNORDERED
+        true = (
+            order == fp.EQUAL if predicate == CMP_EQ
+            else order != fp.EQUAL if predicate == CMP_NE
+            else order == fp.LESS if predicate == CMP_LT
+            else order in (fp.LESS, fp.EQUAL) if predicate == CMP_LE
+            else order == fp.GREATER if predicate == CMP_GT
+            else order in (fp.GREATER, fp.EQUAL) if predicate == CMP_GE
+            else unordered if predicate == CMP_UNORD
+            else not unordered
+        )
+        out.append(ones if true else 0)
+    return out
+
+
+def convert_region(source, target, lanes: Sequence[int], signed: bool,
+                   round_nearest: bool) -> list[int]:
+    """TCVT lane values from ``source`` to ``target`` formats (§6.3).
+
+    int to float and float to float round to nearest-even; float to int
+    rounds toward zero or to nearest-even, saturates, and maps NaN to 0.
+    Signedness of the integer side comes from TMODE[4].
+    """
+
+    out = []
+    for x in lanes:
+        if source.is_float and target.is_float:
+            out.append(fp.convert(target.float_format, source.float_format,
+                                  x)[0])
+        elif source.is_float:
+            out.append(fp.to_int(source.float_format, x, target.lane_bits,
+                                 signed, fp.RNE if round_nearest else fp.RTZ
+                                 )[0])
+        else:
+            value = _signed_lane(x, source.lane_bits) if signed else x
+            out.append(fp.from_int(target.float_format, value)[0])
+    return out
+

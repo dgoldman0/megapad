@@ -758,7 +758,13 @@ The hosted service takes its values from `shared/ieee_fp.py` and
 `shared/tile_float.py`, as the Python emulator does and the native accelerator
 reproduces. `TMODE` keeps bits `[6:0]` and `TCTRL` keeps bits `[1:0]`. The
 reserved codes 8–15, and every operation `shared/tile_formats.admits`
-rejects, fail closed here.
+rejects, fail closed here. `FP32-MODE` and `FP64-MODE` set the wide formats.
+`TCVT`, `TCMP`, and `TVSEL` convert, compare, and select over the same
+operand spans as the BIOS words (`docs/floating-point.md` §6). A `TCVT`
+region of k tiles reads or writes k consecutive 64-byte spans, each under the
+exact-address rule above. Every source is read before the first write, and
+the destination tiles are written in order, as in the executable machine, so
+a fault in a later destination keeps the earlier ones, like `TWMUL`.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal

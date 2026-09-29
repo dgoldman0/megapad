@@ -392,6 +392,88 @@ class HostedTileService:
         self._memory.write_bytes(self.destination, output)
         self._account()
 
+    def select(self) -> None:
+        """TVSEL: msb([TDST]) ? [TSRC0] : [TSRC1] per lane (§6.4)."""
+
+        lane_format = self._extended_format(tile_formats.EXT_VSEL, 0)
+        bits = lane_format.lane_bits
+        left = self._memory.read_bytes(self.source0, TILE_BYTES)
+        right = self._memory.read_bytes(self.source1, TILE_BYTES)
+        masks = self._memory.read_bytes(self.destination, TILE_BYTES)
+        self._memory.write_bytes(
+            self.destination,
+            bytes(tile_float.pack_bits(bits, tile_float.select(
+                lane_format,
+                tile_float.unpack_bits(bits, masks),
+                tile_float.unpack_bits(bits, left),
+                tile_float.unpack_bits(bits, right),
+            ))),
+        )
+        self._account()
+
+    def compare_mask(self, predicate: int) -> None:
+        """TCMP: all-ones lanes where pred([TSRC0], [TSRC1]) holds (§6.5)."""
+
+        predicate = self._cell(predicate, label="compare predicate")
+        # Out-of-range predicates take the trapping high function bits.
+        funct_byte = (predicate << 3 | tile_formats.EXT_TCMP
+                      if predicate < 8 else 0xC7)
+        lane_format = self._extended_format(tile_formats.EXT_TCMP, funct_byte)
+        bits = lane_format.lane_bits
+        left = self._memory.read_bytes(self.source0, TILE_BYTES)
+        right = self._memory.read_bytes(self.source1, TILE_BYTES)
+        self._memory.write_bytes(
+            self.destination,
+            bytes(tile_float.pack_bits(bits, tile_float.compare_mask(
+                lane_format,
+                predicate,
+                tile_float.unpack_bits(bits, left),
+                tile_float.unpack_bits(bits, right),
+                bool(self._mode & tile_formats.TMODE_SIGNED),
+            ))),
+        )
+        self._account()
+
+    def convert(self, target: int) -> None:
+        """TCVT: convert the region at TSRC0 to ``target`` at TDST (§6.3)."""
+
+        target = self._cell(target, label="conversion target")
+        code = target if target < 16 else 15  # reserved, as the BIOS word
+        source = self._extended_format(tile_formats.EXT_TCVT, code << 4 | 6)
+        target_format = tile_formats.decode(code)
+        k = tile_formats.tcvt_ratio(source, target_format)
+        reads = k if target_format.lane_bytes < source.lane_bytes else 1
+        writes = k if target_format.lane_bytes > source.lane_bytes else 1
+        region = b"".join(
+            self._memory.read_bytes(u64(self.source0 + TILE_BYTES * index),
+                                    TILE_BYTES)
+            for index in range(reads)
+        )
+        converted = tile_float.pack_bits(
+            target_format.lane_bits,
+            tile_float.convert_region(
+                source,
+                target_format,
+                tile_float.unpack_bits(source.lane_bits, region),
+                bool(self._mode & tile_formats.TMODE_SIGNED),
+                bool(self._mode & tile_formats.TMODE_ROUNDING),
+            ),
+        )
+        for index in range(writes):
+            self._memory.write_bytes(
+                u64(self.destination + TILE_BYTES * index),
+                bytes(converted[TILE_BYTES * index:TILE_BYTES * (index + 1)]),
+            )
+        self._account()
+
+    def _extended_format(self, funct: int, funct_byte: int):
+        lane_format = tile_formats.decode(self._mode)
+        if not tile_formats.admits(
+            lane_format, tile_formats.TALU, funct, True, 0, funct_byte
+        ):
+            raise UnsupportedTileModeError(self._mode)
+        return lane_format
+
     def _binary(self, operation: str) -> None:
         if operation == "multiply":
             op, funct = tile_formats.TMUL, tile_formats.TMUL_MUL

@@ -231,8 +231,9 @@ static constexpr bool tile_format_is_float(int ew) {
 }
 
 // Whether a MEX operation may run in a format (shared/tile_formats.py
-// admits).  funct is the effective function (0 for the immediate form) and
-// extended marks the EXT.8 forms.  docs/floating-point.md §5.2 makes PACK,
+// admits).  funct is the effective function (0 for the immediate form),
+// extended marks the EXT.8 forms, and ss and funct_byte are the source
+// selector and complete function byte that the EXT.8 rules check.  docs/floating-point.md §5.2 makes PACK,
 // UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL illegal in
 // FP64; the EXT.8 functions 4-7 land in Phases 6 and 8, and FP32/FP64 VSEL
 // in Phase 6.  FP16/BF16 PACK and UNPACK remain until TCVT replaces them.
@@ -240,14 +241,30 @@ static constexpr bool tile_op_admitted(
         int ew,
         int op,
         int funct,
-        bool extended) {
+        bool extended,
+        int ss,
+        int funct_byte) {
     const TileFormat& format = TILE_FORMATS[ew];
     if (!format.defined())
         return false;
     if (extended && op == 0x0) {
-        if (!format.is_float())
-            return true;
-        return (ew == EW_FP16 || ew == EW_BF16) && funct == 2;
+        switch (funct) {
+            case 0: case 1: case 3:  // VSHR, VSHL, VCLZ
+                return !format.is_float();
+            case 2:  // VSEL
+                return ss != 3;
+            case 6: {  // TCVT
+                const int target = (funct_byte >> 4) & 0xF;
+                return ss == 0 && !(funct_byte & 0x08) &&
+                       TILE_FORMATS[target].defined() && target != ew &&
+                       (format.is_float() ||
+                        TILE_FORMATS[target].is_float());
+            }
+            case 7:  // TCMP
+                return ss != 2 && !(funct_byte & 0xC0);
+            default:  // TDIV and TSQRT land in Phase 8
+                return false;
+        }
     }
     if (extended && op == 0x3)
         return true;
@@ -9525,6 +9542,126 @@ static inline bool tile_float_index_replaces(
     return largest ? candidate_key > old_key : candidate_key < old_key;
 }
 
+// Round an exact integer, given as a sign and magnitude, once to a tile
+// float format (RNE).  Integer magnitudes are never subnormal.
+static inline uint64_t tile_float_from_integer(
+        const TileFloatFormat& f,
+        bool negative,
+        uint64_t magnitude) {
+    if (magnitude == 0)
+        return 0;
+    const uint64_t sign_bits = negative ? tile_float_sign(f) : 0;
+    const int precision = f.fraction_bits + 1;
+    const int bias = (1 << (f.exponent_bits - 1)) - 1;
+    int exponent = 63 - __builtin_clzll(magnitude);
+    uint64_t mantissa;
+    if (exponent < precision) {
+        mantissa = magnitude << (precision - 1 - exponent);
+    } else {
+        const int shift = exponent - (precision - 1);
+        mantissa = magnitude >> shift;
+        const uint64_t remainder = magnitude & ((1ULL << shift) - 1);
+        const uint64_t half = 1ULL << (shift - 1);
+        if (remainder > half || (remainder == half && (mantissa & 1))) {
+            mantissa++;
+            if (mantissa >> precision) {
+                mantissa >>= 1;
+                exponent++;
+            }
+        }
+    }
+    const int biased = exponent + bias;
+    if (biased >= (1 << f.exponent_bits) - 1)
+        return sign_bits | tile_float_infinity(f);
+    return sign_bits |
+           (static_cast<uint64_t>(biased) << f.fraction_bits) |
+           (mantissa & ((1ULL << f.fraction_bits) - 1));
+}
+
+// A float lane converted to a saturating integer lane of width bits: NaN
+// gives 0, and the value rounds toward zero or to nearest-even first.  Every
+// tile float format converts exactly to double.
+static inline uint64_t tile_float_to_integer(
+        const TileFloatFormat& f,
+        uint64_t bits,
+        int width,
+        bool is_signed,
+        bool nearest) {
+    const double x = tile_float_to_double(f, bits);
+    if (std::isnan(x))
+        return 0;
+    double r = std::trunc(x);
+    if (nearest) {
+        r = std::floor(x);
+        const double fraction = x - r;
+        if (fraction > 0.5 || (fraction == 0.5 && std::fmod(r, 2.0) != 0.0))
+            r += 1.0;
+    }
+    const uint64_t mask = width == 64 ? ~0ULL : (1ULL << width) - 1;
+    if (is_signed) {
+        const double bound = std::ldexp(1.0, width - 1);
+        if (r >= bound)
+            return (mask >> 1);
+        if (r < -bound)
+            return (1ULL << (width - 1)) & mask;
+        return static_cast<uint64_t>(static_cast<int64_t>(r)) & mask;
+    }
+    if (r >= std::ldexp(1.0, width))
+        return mask;
+    if (r <= 0.0)
+        return 0;
+    return static_cast<uint64_t>(r) & mask;
+}
+
+// TCVT: convert a region from TMODE.EW to function bits [7:4] (§6.3).
+// Widening reads TSRC0 and writes k tiles from TDST; narrowing reads k tiles
+// from TSRC0 and writes one tile.  Every source tile is read before any
+// destination tile is written.
+static int exec_native_tcvt(
+        CPUState& s,
+        const StepCallbacks& cb,
+        int source_ew,
+        int funct_byte) {
+    const TileFormat& source = TILE_FORMATS[source_ew];
+    const TileFormat& target = TILE_FORMATS[(funct_byte >> 4) & 0xF];
+    const bool is_signed = (s.tmode >> 4) & 1;
+    const bool nearest = (s.tmode >> 6) & 1;
+    const int wide = std::max(source.lane_bytes, target.lane_bytes);
+    const int k = wide / std::min(source.lane_bytes, target.lane_bytes);
+    const int reads = target.lane_bytes < source.lane_bytes ? k : 1;
+    const int writes = target.lane_bytes > source.lane_bytes ? k : 1;
+    std::array<Tile, 8> region{};
+    for (int index = 0; index < reads; index++)
+        tile_read_64bytes(s, cb, s.tsrc0 + 64ULL * index, region[index]);
+    std::array<Tile, 8> output{};
+    const int lanes = reads * source.lanes();
+    for (int lane = 0; lane < lanes; lane++) {
+        const uint64_t x = tile_get_elem(
+            region[lane / source.lanes()], lane % source.lanes(),
+            source.lane_bytes);
+        uint64_t y = 0;
+        if (source.is_float() && target.is_float()) {
+            y = tile_float_convert(*target.floating, *source.floating, x);
+        } else if (source.is_float()) {
+            y = tile_float_to_integer(*source.floating, x,
+                                      target.lane_bits(), is_signed, nearest);
+        } else {
+            const bool negative =
+                is_signed && (x >> (source.lane_bits() - 1)) & 1;
+            const uint64_t magnitude = negative
+                ? (0ULL - static_cast<uint64_t>(
+                      to_signed_eb(x, source.lane_bytes)))
+                : x;
+            y = tile_float_from_integer(*target.floating, negative, magnitude);
+        }
+        tile_set_elem(output[lane / target.lanes()], lane % target.lanes(),
+                      target.lane_bytes, y);
+    }
+    for (int index = 0; index < writes; index++)
+        tile_write_64bytes(s, cb, s.tdst + 64ULL * index, output[index]);
+    return 4 + (k - 1);
+}
+
 static int exec_mex(
         CPUState& s,
         const StepCallbacks& cb,
@@ -9661,8 +9798,7 @@ static int exec_mex(
     // the integer accumulator.
     const bool fp_bit_reduction = is_fp && op == 0x2 && funct == 3;
     const bool extended = s.ext_modifier == 8;
-    if (!tile_op_admitted(ew_bits, op, funct, extended) ||
-        (is_fp && extended) ||
+    if (!tile_op_admitted(ew_bits, op, funct, extended, ss, funct_byte) ||
         (op == 0x1 && !is_fp && funct != 0) ||
         (op == 0x2 && (!is_fp || fp_bit_reduction)) ||
         op == 0x3) {
@@ -9672,6 +9808,10 @@ static int exec_mex(
     const int elem_bytes = lane_format.lane_bytes;
     const int num_lanes = lane_format.lanes();
     const bool is_signed = (s.tmode >> 4) & 1;
+
+    // TCVT reads and writes its own multi-tile region.
+    if (extended && op == 0x0 && funct == 6)
+        return exec_native_tcvt(s, cb, ew_bits, funct_byte);
 
     // Read source tiles
     Tile src_a{}, src_b{}, dst{};
@@ -9703,6 +9843,59 @@ static int exec_mex(
 
     // Extended Tile ALU (EXT modifier 8)
     if (s.ext_modifier == 8 && op == 0x0) {
+        if (funct == 2) {  // VSEL: msb(M) ? A : B, M = old [TDST] (§6.4)
+            Tile masks{};
+            tile_read_64bytes(s, cb, s.tdst, masks);
+            const uint64_t top = 1ULL << (elem_bytes * 8 - 1);
+            for (int lane = 0; lane < num_lanes; lane++) {
+                tile_set_elem(dst, lane, elem_bytes,
+                    (tile_get_elem(masks, lane, elem_bytes) & top)
+                        ? tile_get_elem(src_a, lane, elem_bytes)
+                        : tile_get_elem(src_b, lane, elem_bytes));
+            }
+            tile_write_64bytes(s, cb, s.tdst, dst);
+            return 1;
+        }
+        if (funct == 7) {  // TCMP: all-ones or zero lane masks (§6.5)
+            const int predicate = (funct_byte >> 3) & 0x7;
+            for (int lane = 0; lane < num_lanes; lane++) {
+                const uint64_t a = tile_get_elem(src_a, lane, elem_bytes);
+                const uint64_t b = tile_get_elem(src_b, lane, elem_bytes);
+                bool less = false, equal = false, unordered = false;
+                if (is_fp) {
+                    const TileFloatFormat& fmt = tile_float_format(ew_bits);
+                    const double x = tile_float_to_double(fmt, a);
+                    const double y = tile_float_to_double(fmt, b);
+                    unordered = std::isnan(x) || std::isnan(y);
+                    less = x < y;
+                    equal = x == y;
+                } else if (is_signed) {
+                    const int64_t x = to_signed_eb(a, elem_bytes);
+                    const int64_t y = to_signed_eb(b, elem_bytes);
+                    less = x < y;
+                    equal = x == y;
+                } else {
+                    less = a < b;
+                    equal = a == b;
+                }
+                const bool greater = !unordered && !less && !equal;
+                bool result = false;
+                switch (predicate) {
+                    case 0: result = equal; break;
+                    case 1: result = !equal; break;
+                    case 2: result = less; break;
+                    case 3: result = less || equal; break;
+                    case 4: result = greater; break;
+                    case 5: result = greater || equal; break;
+                    case 6: result = unordered; break;
+                    default: result = !unordered; break;
+                }
+                tile_set_elem(dst, lane, elem_bytes,
+                              result ? elem_mask(elem_bytes) : 0);
+            }
+            tile_write_64bytes(s, cb, s.tdst, dst);
+            return 1;
+        }
         bool rounding = (s.tmode >> 6) & 1;
         for (int lane = 0; lane < num_lanes; lane++) {
             uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
@@ -9726,15 +9919,10 @@ static int exec_mex(
                 }
             } else if (funct == 1) {  // VSHL
                 r = (ea << shift_amt) & mask;
-            } else if (funct == 2) {  // VSEL
-                r = ea;
-            } else if (funct == 3) {  // VCLZ
-                if (ea == 0) r = bits;
-                else {
-                    r = bits;
-                    uint64_t tmp = ea;
-                    while (tmp) { tmp >>= 1; r--; }
-                }
+            } else {  // VCLZ
+                r = bits;
+                uint64_t tmp = ea;
+                while (tmp) { tmp >>= 1; r--; }
             }
             tile_set_elem(dst, lane, elem_bytes, r);
         }

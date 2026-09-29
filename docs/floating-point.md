@@ -288,9 +288,8 @@ round once to the lane format. That is exactly correct because 24 ≥ 2p + 2.
 - B is `[TSRC1]` for SS=0, or broadcast Rn for SS=1.
 - SS=3 is illegal. SS=2 cannot reach VSEL.
 
-Lanes are raw bits at the format's lane width. This replaces the current,
-inconsistent placeholders: Python and native return A, and RTL returns
-`msb(B) ? A : 0`.
+Lanes are raw bits at the format's lane width. This replaced earlier,
+inconsistent placeholders in Phase 6.
 
 **6.5 TCMP (function 7).**
 
@@ -568,6 +567,6 @@ models no instruction encodings.
 | 4-bit `TMODE.EW`, `TMODE`/`TCTRL` write widths, `TACC_STATUS` repack, format descriptors, `FP32-MODE`, `FP64-MODE`; EW 6 and 7 trap until Phases 4–5 | 3 | Implemented |
 | FP32/FP64 element-wise operations, operand forms, lane shapes, and the §10 costs; illegal VSHR/VSHL/VCLZ in every float format; the multi-format FMA unit: all four backends | 4 | Implemented |
 | FP32/FP64 reductions, DOT/DOTACC, and TACC formats: all four backends | 5 | Implemented |
-| `TCVT`, `TCMP`, `VSEL`; removal of float PACK and UNPACK | 6 | Specified |
+| `TCVT`, `TCMP`, `VSEL`; removal of float PACK and UNPACK: all four backends | 6 | Implemented |
 | Scalar `FC` engine and `FPCSR` | 7 | Specified |
 | `TDIV`, `TSQRT` | 8 | Specified |

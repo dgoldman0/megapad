@@ -413,11 +413,12 @@ def test_tmode_and_tctrl_keep_only_their_defined_bits(
 _RESERVED_MODE_INSTRUCTIONS = (
     "t.add", "t.dot", "t.sum", "t.zero", "t.shuffle", "t.load2d",
 )
-# Operations FP32/FP64 do not admit yet (VSEL and the EXT.8 functions 4-7
-# land in Phases 6 and 8) or at all (PACK, UNPACK, VSHR, VSHL, VCLZ).
+# Operations FP32/FP64 do not admit yet (TDIV and TSQRT land in Phase 8) or
+# at all (PACK, UNPACK, VSHR, VSHL, VCLZ, and noncanonical EXT.8 encodings).
 _WIDE_FLOAT_UNADMITTED = (
-    "t.pack", "t.unpack", "t.vshr", "t.vshl", "t.vclz", "t.vsel",
-    ".db 0xF8, 0xE0, 0x04", ".db 0xF8, 0xE0, 0x07",
+    "t.pack", "t.unpack", "t.vshr", "t.vshl", "t.vclz", "t.div", "t.sqrt",
+    "t.vsel inplace", ".db 0xF8, 0xE0, 0x6E",
+    ".db 0xF8, 0xE4, 0x46, 0x03", ".db 0xF8, 0xE0, 0x47",
 )
 _UNADMITTED_CASES = (
     [
@@ -434,8 +435,18 @@ _UNADMITTED_CASES = (
     + [
         pytest.param(mode, instruction, id=f"{name}-{instruction}")
         for mode, name in ((0x04, "fp16"), (0x05, "bf16"))
-        for instruction in ("t.vshr", "t.vshl", "t.vclz",
-                            ".db 0xF8, 0xE0, 0x05")
+        for instruction in ("t.vshr", "t.vshl", "t.vclz", "t.pack",
+                            "t.unpack", ".db 0xF8, 0xE0, 0x05")
+    ]
+    + [
+        # TCVT between two integer formats, to a reserved target, and TCMP
+        # with nonzero function bits [7:6] are illegal in integer formats too.
+        pytest.param(0x00, "t.cvt u16", id="u8-cvt-integer-pair"),
+        pytest.param(0x06, "t.cvt fp32", id="fp32-cvt-same-format"),
+        pytest.param(0x07, "t.cvt fp64", id="fp64-cvt-same-format"),
+        pytest.param(0x00, "t.cvt 9", id="u8-cvt-reserved-target"),
+        pytest.param(0x01, ".db 0xF8, 0xE0, 0x8F", id="u16-cmp-high-bits"),
+        pytest.param(0x02, "t.div", id="u32-div"),
     ]
 )
 
@@ -3433,6 +3444,107 @@ def test_float_tile_extra_cycles_follow_the_timing_table(
         base = cycles(ew, "t.and")
         for instruction, extra in table.items():
             assert cycles(ew, instruction) - base == extra, (ew, instruction)
+
+
+_ALL_TILE_FORMATS = (0x00, 0x10, 0x01, 0x11, 0x02, 0x12, 0x03, 0x13,
+                     EW_FP16, EW_BF16, EW_FP32, EW_FP64)
+
+
+def _random_format_tile(rng: random.Random, tmode: int) -> bytes:
+    ew = tmode & 0xF
+    if ew >= EW_FP16:
+        fmt = ieee_fp.FORMAT_BY_EW[ew]
+        return bytes(tile_float.pack_lanes(
+            fmt, _random_float_lanes(rng, fmt, 64 // (fmt.width // 8))))
+    width = 1 << ew
+    lanes = []
+    for _ in range(64 // width):
+        pick = rng.random()
+        if pick < 0.2:
+            lanes.append(rng.choice((0, 1, (1 << (8 * width)) - 1,
+                                     1 << (8 * width - 1))))
+        else:
+            lanes.append(rng.getrandbits(8 * width))
+    return b"".join(lane.to_bytes(width, "little") for lane in lanes)
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    ["t.vsel", "t.vsel r3"]
+    + [f"t.cmp {pred}{form}" for pred in
+       ("eq", "ne", "lt", "le", "gt", "ge", "unord", "ord")
+       for form in ("", ", r3", ", inplace")],
+)
+@pytest.mark.parametrize("tmode", _ALL_TILE_FORMATS)
+def test_select_and_compare_masks_match_oracle(
+    instruction: str,
+    tmode: int,
+) -> None:
+    """VSEL and TCMP run natively and bit-exactly in every format."""
+    rng = random.Random(f"{instruction}/{tmode}")
+    for index in range(8):
+        src0 = _random_format_tile(rng, tmode)
+        src1 = src0 if index == 0 else _random_format_tile(rng, tmode)
+        dst0 = _random_format_tile(rng, tmode)
+        register = rng.getrandbits(64)
+
+        def setup(cpu: Any) -> Watchers:
+            watchers = _seed_common_state(
+                cpu, tmode=tmode, src0=src0, src1=src1, dst0=dst0,
+            )
+            cpu.regs[3] = register
+            return watchers
+
+        _assert_native_matches_oracle(
+            instruction, setup, expected_dispatch="native"
+        )
+
+
+_TCVT_PAIRS = [
+    (source, target)
+    for source in range(8)
+    for target in range(8)
+    if source != target and (source >= EW_FP16 or target >= EW_FP16)
+]
+
+
+@pytest.mark.parametrize(("source", "target"), _TCVT_PAIRS)
+@pytest.mark.parametrize("mode_bits", [0x00, 0x10, 0x40, 0x50])
+def test_tcvt_region_matches_oracle(
+    source: int,
+    target: int,
+    mode_bits: int,
+) -> None:
+    """TCVT converts every format pair natively; signedness and
+    float-to-int rounding come from TMODE[4] and TMODE[6]."""
+    names = ("u8", "u16", "u32", "u64", "fp16", "bf16", "fp32", "fp64")
+    widths = (1, 2, 4, 8, 2, 2, 4, 8)
+    k = max(widths[source], widths[target]) // min(
+        widths[source], widths[target])
+    reads = k if widths[target] < widths[source] else 1
+    writes = k if widths[target] > widths[source] else 1
+    rng = random.Random(f"tcvt/{source}/{target}/{mode_bits}")
+    region = b"".join(_random_format_tile(rng, source | (mode_bits & 0x10))
+                      for _ in range(reads))
+    base = 0x800
+
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu, tmode=source | mode_bits, src0=bytes(64), src1=bytes(64),
+        )
+        cpu.mem[base:base + len(region)] = region
+        cpu.mem[0xC00:0xE00] = bytes([0x5A]) * 0x200
+        cpu.tsrc0 = base
+        cpu.tdst = 0xC00
+        watchers["region"] = lambda: bytes(cpu.mem[0xC00:0xE00])
+        return watchers
+
+    result = _assert_native_matches_oracle(
+        f"t.cvt {names[target]}", setup, expected_dispatch="native"
+    )
+    assert result["mex_cycles"] == 2 + 4 + (k - 1)
+    written = result["after_mex"]["memory:region"]
+    assert written[64 * writes:] == bytes([0x5A]) * (0x200 - 64 * writes)
 
 
 @pytest.mark.parametrize(

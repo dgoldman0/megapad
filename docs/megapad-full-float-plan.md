@@ -594,7 +594,7 @@ Progress:
   format-generic. The native ones (tree, publication, extremes, lane width)
   now take the accumulation format instead of assuming binary32. The
   admission rule refuses in FP32/FP64 only what §5.2 makes illegal and
-  FP32/FP64 VSEL (Phase 6). TACC accepts FP32 (16 binary64 lanes, 128-byte
+  FP32/FP64 VSEL (then still Phase 6 work). TACC accepts FP32 (16 binary64 lanes, 128-byte
   image) and FP64 (8 lanes, 64-byte image), and the TAMAC arithmetic costs
   join the §10 table in both CPUs.
 - **RTL tree.** `S_TREE` runs the canonical tree on the FMA units over
@@ -642,12 +642,36 @@ Progress:
     bytes 128-255 still holds.
 - **Tests.** Extend the TACC vector generators and benches.
 
-### Phase 6 — Conversions and compares
+### Phase 6 — Conversions and compares (complete)
 
-- Implement `TCVT` (D9), `TCMP` (D10), and the new `VSEL` definition in all
-  backends.
-- Remove float PACK and UNPACK.
-- Add BIOS and KDOS words for buffer conversion between formats.
+Progress:
+
+- **Software backends.** `shared/tile_formats.admits` now takes the source
+  selector and function byte and applies the §6 rules for VSEL, TCVT, and
+  TCMP; TDIV and TSQRT trap until Phase 8. `shared/tile_float` gains
+  `select`, `compare_mask`, and `convert_region`, built on the oracle. The
+  Python emulator, native accelerator (its own exact integer/float
+  conversions, checked by seeded differentials), and hosted simulator run all
+  three. Float PACK and UNPACK trap everywhere.
+- **Assembler.** `t.cvt FORMAT`, `t.cmp PRED[, Rn|inplace]`, `t.div`, and
+  `t.sqrt` encode the EXT.8 functions.
+- **Words.** The BIOS gains `TCVT ( ew -- )`, `TCMP ( pred -- )`, and
+  `TVSEL ( -- )` (486 words); out-of-range arguments reach a trapping
+  encoding. The hosted simulator binds the same three words (380).
+- **RTL.** VSEL and TCMP are combinational in the compute cycle. TCVT has
+  its own read, convert, write, and pad states: sixteen lane converters per
+  beat, k tiles read or written in order, padded to exactly 4 + (k − 1)
+  cycles. `tb_tile_ext` replays 536 emulator-generated rows
+  (`tile_ext_vectors.vec`) covering VSEL and every TCMP predicate in all
+  twelve modes and every legal TCVT pair under all four signedness and
+  rounding settings.
+- **KDOS `B.CVT` deferred.** A KDOS buffer-conversion word was planned, but
+  `kdos.f` is pinned by whole-file blob tests and line-numbered fixtures, so
+  any edit churns about fifty unrelated expectations. The BIOS `TCVT` word
+  already converts any tile region. A KDOS wrapper belongs to the software
+  consumers' own vertical (Phase 9 handoff note).
+- **Regression.** The full RTL list and SoC elaboration, the Python and
+  native suites, the BIOS system tests, and the hosted suite pass.
 
 ### Phase 7 — Scalar FP unit
 
@@ -729,10 +753,8 @@ without fixing them.
 - **Non-asserting emulator tests.** `tests/test_megapad64.py` reports every
   check through a `check()` helper that never fails the test. Only
   `test_tile_fp` now asserts.
-- **Unassigned extended functions.** `F8` with TALU functions 4–7 does not
-  trap in Python, which writes zero lanes. The other backends were not
-  checked. Phases 6 and 8 give those functions
-  meanings.
+- **Unassigned extended functions.** Fixed in Phase 6: functions 6 and 7
+  are TCVT and TCMP, and 4 and 5 trap in every backend until Phase 8.
 - **Generated BIOS images.** The checked-in `bios.rom` and `fpga/bios.hex`
   were already out of step with `bios.asm` before this branch, and nothing at
   runtime reads them except the FPGA ROM image. Regenerate them in their own

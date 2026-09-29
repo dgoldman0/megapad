@@ -1649,7 +1649,7 @@ def test_tile_fp():
     check("BF16 T.DOT: 32×(1.0*3.0)=96.0", dot_bf == 96.0,
           f"got {dot_bf}")
 
-    # ---- FP16 PACK: fp16 → bf16 format conversion ----
+    # ---- TCVT FP16 → BF16 (float PACK/UNPACK are illegal; §6.3) ----
     cpu12 = Megapad64()
     cpu12.tsrc0 = 0x1000; cpu12.tdst = 0x3000
     cpu12.tmode = EW_FP16
@@ -1657,7 +1657,7 @@ def test_tile_fp():
     write_fp16_lane(cpu12, 0x1000, 1, -3.0)
     for lane in range(2, 32):
         write_fp16_lane(cpu12, 0x1000, lane, 0.0)
-    code = assemble("t.pack\nhalt")
+    code = assemble("t.cvt bf16\nhalt")
     cpu12.load_bytes(0, code)
     cpu12.pc = 0
     try:
@@ -1667,12 +1667,12 @@ def test_tile_fp():
     # Result should be bf16 encoded values
     raw0 = cpu12.mem_read8(0x3000) | (cpu12.mem_read8(0x3001) << 8)
     raw1 = cpu12.mem_read8(0x3002) | (cpu12.mem_read8(0x3003) << 8)
-    check("FP16 PACK→BF16: 1.5", _bf16_to_float(raw0) == 1.5,
+    check("TCVT FP16→BF16: 1.5", _bf16_to_float(raw0) == 1.5,
           f"got {_bf16_to_float(raw0)}")
-    check("FP16 PACK→BF16: -3.0", _bf16_to_float(raw1) == -3.0,
+    check("TCVT FP16→BF16: -3.0", _bf16_to_float(raw1) == -3.0,
           f"got {_bf16_to_float(raw1)}")
 
-    # ---- FP16 UNPACK: fp16 → fp32 widening ----
+    # ---- TCVT FP16 → FP32 widens all 32 lanes into two tiles ----
     cpu13 = Megapad64()
     cpu13.tsrc0 = 0x1000; cpu13.tdst = 0x3000
     cpu13.tmode = EW_FP16
@@ -1680,7 +1680,7 @@ def test_tile_fp():
     write_fp16_lane(cpu13, 0x1000, 1, -7.0)
     for lane in range(2, 32):
         write_fp16_lane(cpu13, 0x1000, lane, 0.0)
-    code = assemble("t.unpack\nhalt")
+    code = assemble("t.cvt fp32\nhalt")
     cpu13.load_bytes(0, code)
     cpu13.pc = 0
     try:
@@ -1690,9 +1690,9 @@ def test_tile_fp():
     # Output: 16 × fp32 values (4 bytes each)
     fp32_raw0 = cpu13.mem_read32(0x3000)
     fp32_raw1 = cpu13.mem_read32(0x3004)
-    check("FP16 UNPACK→FP32: 2.5", _bits_to_fp32(fp32_raw0) == 2.5,
+    check("TCVT FP16→FP32: 2.5", _bits_to_fp32(fp32_raw0) == 2.5,
           f"got {_bits_to_fp32(fp32_raw0)}")
-    check("FP16 UNPACK→FP32: -7.0", _bits_to_fp32(fp32_raw1) == -7.0,
+    check("TCVT FP16→FP32: -7.0", _bits_to_fp32(fp32_raw1) == -7.0,
           f"got {_bits_to_fp32(fp32_raw1)}")
 
     # ---- FP16 NaN propagation in MIN/MAX ----
@@ -1881,6 +1881,8 @@ def test_tile_kernels():
         """Assemble, load at address 0, run to halt."""
         code = assemble(asm_src)
         cpu.load_bytes(0, code)
+        # New code at a reused address needs an instruction-cache flush.
+        cpu._icache_invalidate_all(reset_statistics=False)
         cpu.pc = 0
         cpu.halted = False
         try:
@@ -1970,20 +1972,20 @@ def test_tile_kernels():
     check("Precision: 32×256²=2097152 (FP32)", p == 2097152.0, f"got {p}")
 
     # ================================================================
-    # Kernel 5: Format roundtrip fp16 → bf16 → fp16 via PACK
-    # Tests: PACK format conversion chaining, lossless for shared values
+    # Kernel 5: Format roundtrip fp16 → bf16 → fp16 via TCVT
+    # Tests: conversion chaining, lossless for shared values
     # ================================================================
     rt_vals = [1.0, -2.0, 0.5, 4.0, 0.0, 8.0, 16.0, 64.0]
     cpu5 = Megapad64()
     cpu5.tmode = EW_FP16; cpu5.tsrc0 = 0x1000; cpu5.tdst = 0x2000
     fill_fp16(cpu5, 0x1000, rt_vals)
-    run_tile(cpu5, "t.pack\nhalt")              # fp16 → bf16
+    run_tile(cpu5, "t.cvt bf16\nhalt")         # fp16 → bf16
     cpu5.tmode = EW_BF16; cpu5.tsrc0 = 0x2000; cpu5.tdst = 0x3000
-    run_tile(cpu5, "t.pack\nhalt")              # bf16 → fp16
+    run_tile(cpu5, "t.cvt fp16\nhalt")         # bf16 → fp16
     for i, exp in enumerate(rt_vals):
         got = _fp16_to_float(cpu5.mem_read16(0x3000 + i*2))
         ok = got == exp or (exp == 0.0 and got == 0.0)
-        check(f"PACK roundtrip [{i}]={exp}", ok, f"got {got}")
+        check(f"TCVT roundtrip [{i}]={exp}", ok, f"got {got}")
 
     # ================================================================
     # Kernel 6: Chained pipeline MUL → ADD → SUM

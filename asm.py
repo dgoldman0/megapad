@@ -144,6 +144,44 @@ def _parse_imm(tok: str) -> int:
         return int(tok, 10)
     return int(tok, 0)
 
+_TILE_FORMAT_NAMES = {
+    "u8": 0, "u16": 1, "u32": 2, "u64": 3,
+    "fp16": 4, "bf16": 5, "fp32": 6, "fp64": 7,
+}
+_TILE_PREDICATE_NAMES = {
+    "eq": 0, "ne": 1, "lt": 2, "le": 3, "gt": 4, "ge": 5,
+    "unord": 6, "ord": 7,
+}
+
+
+def _tile_format_code(text: str, lineno: int) -> int:
+    """A TMODE.EW name (u8 ... fp64) or number for t.cvt."""
+    key = text.strip().lower()
+    if key in _TILE_FORMAT_NAMES:
+        return _TILE_FORMAT_NAMES[key]
+    try:
+        value = int(key, 0)
+    except ValueError:
+        raise AsmError(lineno, f"unknown tile format {text!r}") from None
+    if not 0 <= value <= 15:
+        raise AsmError(lineno, f"tile format {value} is outside 0-15")
+    return value
+
+
+def _tile_predicate_code(text: str, lineno: int) -> int:
+    """A TCMP predicate name (eq ... ord) or number 0-7."""
+    key = text.strip().lower()
+    if key in _TILE_PREDICATE_NAMES:
+        return _TILE_PREDICATE_NAMES[key]
+    try:
+        value = int(key, 0)
+    except ValueError:
+        raise AsmError(lineno, f"unknown TCMP predicate {text!r}") from None
+    if not 0 <= value <= 7:
+        raise AsmError(lineno, f"TCMP predicate {value} is outside 0-7")
+    return value
+
+
 def _split_ops(rest: str) -> list[str]:
     """Split operand string by comma, trimming whitespace."""
     return [s.strip() for s in rest.split(",") if s.strip()]
@@ -541,7 +579,8 @@ def _instruction_size(lineno: int, text: str) -> int:
         }:
             return 3
         # Extended ops use EXT.8 prefix: +1 byte
-        ext_talu = {"vshr", "vshl", "vsel", "vclz"}
+        ext_talu = {"vshr", "vshl", "vsel", "vclz", "div", "sqrt", "cvt",
+                    "cmp"}
         ext_tsys = {"load2d", "store2d"}
         extra = 1 if sub_name in ext_talu or sub_name in ext_tsys else 0
         # RROT has an extra control byte
@@ -941,7 +980,8 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         tsys_ops = {"trans": 0, "zero": 4, "loadc": 3, "movbank": 2,
                     "shuffle": 1, "pack": 5, "unpack": 6}
         # Extended tile ALU ops via EXT.8 prefix (0xF8)
-        ext_talu_ops = {"vshr": 0, "vshl": 1, "vsel": 2, "vclz": 3}
+        ext_talu_ops = {"vshr": 0, "vshl": 1, "vsel": 2, "vclz": 3,
+                        "div": 4, "sqrt": 5}
         # Extended TSYS ops via EXT.8 prefix (0xF8)
         ext_tsys_ops = {"load2d": 0, "store2d": 1}
         tacc_lifecycle_ops = {
@@ -991,17 +1031,31 @@ def _emit_instruction(lineno: int, text: str, pc: int,
             out.append(0xE3)            # MEX byte: ss=0, op=3 (TSYS)
             out.append(ext_funct & 0x07)
             return out
-        elif sub_name in ext_talu_ops:
-            ext_funct = ext_talu_ops[sub_name]
+        elif sub_name in ("cvt", "cmp") or sub_name in ext_talu_ops:
+            # t.cvt TARGET; t.cmp PRED[, Rn|inplace]; others [Rn|inplace]
+            if sub_name == "cvt":
+                if len(ops) != 1:
+                    raise AsmError(lineno, "t.cvt expects a target format")
+                funct_byte = (_tile_format_code(ops[0], lineno) << 4) | 0x6
+                source_ops = []
+            elif sub_name == "cmp":
+                if not 1 <= len(ops) <= 2:
+                    raise AsmError(lineno, "t.cmp expects PRED[, Rn|inplace]")
+                funct_byte = (_tile_predicate_code(ops[0], lineno) << 3) | 0x7
+                source_ops = ops[1:]
+            else:
+                funct_byte = ext_talu_ops[sub_name]
+                source_ops = ops
             ss = 0  # tile-tile
-            if ops and ops[0].lower().startswith("r"):
+            if source_ops and source_ops[0].lower() == "inplace":
+                ss = 3
+            elif source_ops and source_ops[0].lower().startswith("r"):
                 ss = 1  # broadcast
-            n_nibble = (ss << 2) | 0x0  # op=0 (TALU variant)
             out.append(0xF8)            # EXT prefix, modifier=8
-            out.append(0xE0 | n_nibble) # MEX byte
-            out.append(ext_funct & 0x07)
+            out.append(0xE0 | (ss << 2))  # MEX byte, op=0 (TALU variant)
+            out.append(funct_byte)
             if ss == 1:
-                out.append(_parse_reg(ops[0]) & 0xF)
+                out.append(_parse_reg(source_ops[0]) & 0xF)
             return out
         elif sub_name in talu_ops:
             funct = talu_ops[sub_name]

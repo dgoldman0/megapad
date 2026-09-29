@@ -44,7 +44,8 @@ TMUL_TAMAC = 6
 TRED_SUM, TRED_MIN, TRED_MAX, TRED_POPCNT, TRED_L1, TRED_SUMSQ = range(6)
 TRED_MINIDX, TRED_MAXIDX = 6, 7
 TSYS_TRANS, TSYS_PACK, TSYS_UNPACK = 0, 5, 6
-EXT_TALU_VSEL = 2
+EXT_VSHR, EXT_VSHL, EXT_VSEL, EXT_VCLZ = range(4)
+EXT_TDIV, EXT_TSQRT, EXT_TCVT, EXT_TCMP = range(4, 8)
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,13 @@ _BY_CODE: tuple[TileFormat | None, ...] = FORMATS + (None,) * (
 )
 
 
+def tcvt_ratio(source: TileFormat, target: TileFormat) -> int:
+    """The TCVT region width ratio k (1 for equal widths, §6.3)."""
+
+    wide = max(source.lane_bytes, target.lane_bytes)
+    return wide // min(source.lane_bytes, target.lane_bytes)
+
+
 def element_width(tmode: int) -> int:
     """Return the 4-bit ``EW`` code of ``tmode``."""
 
@@ -121,26 +129,25 @@ def admits(
     op: int,
     funct: int,
     extended: bool = False,
+    ss: int = 0,
+    funct_byte: int = 0,
 ) -> bool:
     """Whether a MEX operation may run in ``lane_format``.
 
-    ``funct`` is the effective function (0 for the immediate form) and
-    ``extended`` marks the EXT.8 forms.  docs/floating-point.md §5.2 makes
-    PACK, UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL
-    illegal in FP64.  The EXT.8 functions 4-7 are float operations that land
-    in Phases 6 and 8, so float formats reject them until then, and FP32 and
-    FP64 VSEL lands in Phase 6.  TACC operations follow their own format
-    rule.
+    ``funct`` is the effective function (0 for the immediate form),
+    ``extended`` marks the EXT.8 forms, ``ss`` is the source selector, and
+    ``funct_byte`` is the complete function byte.  docs/floating-point.md §5.2
+    and §6 define the rules: PACK, UNPACK, VSHR, VSHL, and VCLZ are illegal in
+    float formats, WMUL in FP64, and TDIV and TSQRT in integer formats; each
+    EXT.8 operation also restricts its sources and function-byte bits.
+    TDIV and TSQRT land in Phase 8 of docs/megapad-full-float-plan.md.  TACC
+    operations follow their own format rule.
     """
 
     if lane_format is None:
         return False
     if extended and op == TALU:
-        if not lane_format.is_float:
-            return True
-        return (
-            lane_format.ew in (EW_FP16, EW_BF16) and funct == EXT_TALU_VSEL
-        )
+        return _extended_alu_admits(lane_format, funct, ss, funct_byte)
     if extended and op == TSYS:
         return True
     if not lane_format.is_float:
@@ -148,12 +155,32 @@ def admits(
     if op == TMUL:
         return funct != TMUL_WMUL or lane_format.ew != EW_FP64
     if op == TSYS:
-        # FP16/BF16 PACK and UNPACK remain until TCVT replaces them.
-        return (
-            lane_format.ew in (EW_FP16, EW_BF16)
-            or funct not in (TSYS_PACK, TSYS_UNPACK)
-        )
+        return funct not in (TSYS_PACK, TSYS_UNPACK)
     return True
+
+
+def _extended_alu_admits(
+    lane_format: TileFormat,
+    funct: int,
+    ss: int,
+    funct_byte: int,
+) -> bool:
+    if funct in (EXT_VSHR, EXT_VSHL, EXT_VCLZ):
+        return not lane_format.is_float
+    if funct == EXT_VSEL:
+        return ss != 3
+    if funct == EXT_TCVT:
+        target = decode(funct_byte >> 4)
+        return (
+            ss == 0
+            and not funct_byte & 0x08
+            and target is not None
+            and target.ew != lane_format.ew
+            and (lane_format.is_float or target.is_float)
+        )
+    if funct == EXT_TCMP:
+        return ss in (0, 1, 3) and not funct_byte & 0xC0
+    return False  # TDIV and TSQRT land in Phase 8
 
 
 __all__ = [
@@ -177,6 +204,7 @@ __all__ = [
     "TMODE_WRITE_MASK",
     "TileFormat",
     "admits",
+    "tcvt_ratio",
     "decode",
     "element_width",
 ]

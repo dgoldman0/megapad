@@ -695,3 +695,100 @@ def test_fp32_fp64_reductions_publish_binary64(
             ieee_fp.from_double(fp64, 4.0),
         ),
     )
+
+
+def _oracle_region(instruction: str, mode: int, source: bytes,
+                   source1: bytes, destination: bytes
+                   ) -> tuple[bytes, tuple[int, ...]]:
+    cpu = PythonMegapad64(mem_size=0x1000)
+    cpu.load_bytes(0, assemble(instruction))
+    cpu.pc = 0
+    cpu.mem[0x400:0x400 + len(source)] = source
+    cpu.mem[0x600:0x640] = source1
+    cpu.mem[0x800:0x800 + len(destination)] = destination
+    cpu.csr_write(CSR_TMODE, mode)
+    cpu.tsrc0, cpu.tsrc1, cpu.tdst = 0x400, 0x600, 0x800
+    cpu.step()
+    return bytes(cpu.mem[0x800:0x800 + len(destination)]), tuple(cpu.acc)
+
+
+def _hosted_region(operation, mode: int, source: bytes, source1: bytes,
+                   destination: bytes) -> bytes:
+    runtime = MegaForthRuntime()
+    runtime.memory.write_bytes(0x400, source)
+    runtime.memory.write_bytes(0x600, source1)
+    runtime.memory.write_bytes(0x800, destination)
+    runtime.tile.set_mode(mode)
+    runtime.tile.set_source0(0x400)
+    runtime.tile.set_source1(0x600)
+    runtime.tile.set_destination(0x800)
+    operation(runtime.tile)
+    assert runtime.diagnostics.perf_tileops == 1
+    return runtime.memory.read_bytes(0x800, len(destination))
+
+
+_FORMAT_CODES = ("u8", "u16", "u32", "u64", "fp16", "bf16", "fp32", "fp64")
+
+
+@pytest.mark.parametrize("mode", (0x00, 0x11, 0x13, FP16_FORMAT, BF16_FORMAT,
+                                  FP32_FORMAT, FP64_FORMAT))
+@pytest.mark.parametrize("predicate", range(8))
+def test_compare_mask_and_select_match_the_executable_machine(
+    mode: int,
+    predicate: int,
+) -> None:
+    import random
+
+    rng = random.Random(f"{mode}/{predicate}")
+    left = bytes(rng.getrandbits(8) for _ in range(64))
+    right = left[:32] + bytes(rng.getrandbits(8) for _ in range(32))
+    destination = bytes(rng.getrandbits(8) for _ in range(64))
+    names = ("eq", "ne", "lt", "le", "gt", "ge", "unord", "ord")
+    assert _hosted_region(
+        lambda tile: tile.compare_mask(predicate), mode, left, right,
+        destination,
+    ) == _oracle_region(f"t.cmp {names[predicate]}", mode, left, right,
+                        destination)[0]
+    assert _hosted_region(
+        lambda tile: tile.select(), mode, left, right, destination,
+    ) == _oracle_region("t.vsel", mode, left, right, destination)[0]
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [(s, t) for s in range(8) for t in range(8)
+     if s != t and (s >= 4 or t >= 4)],
+)
+def test_convert_matches_the_executable_machine(source: int,
+                                                target: int) -> None:
+    import random
+
+    widths = (1, 2, 4, 8, 2, 2, 4, 8)
+    k = max(widths[source], widths[target]) // min(widths[source],
+                                                    widths[target])
+    reads = k if widths[target] < widths[source] else 1
+    rng = random.Random(f"{source}/{target}")
+    region = bytes(rng.getrandbits(8) for _ in range(64 * reads))
+    destination = bytes((0x5A,)) * 512
+    for mode_bits in (0x00, 0x50):
+        mode = source | mode_bits
+        assert _hosted_region(
+            lambda tile: tile.convert(target), mode, region, bytes(64),
+            destination,
+        ) == _oracle_region(f"t.cvt {_FORMAT_CODES[target]}", mode, region,
+                            bytes(64), destination)[0]
+
+
+def test_convert_compare_and_select_words_fail_closed() -> None:
+    """Integer-to-integer TCVT, TCMP predicates above 7, and reserved
+    targets raise before any memory change, as the instructions trap."""
+    runtime = MegaForthRuntime()
+    runtime.memory.write_bytes(0x800, bytes((0x5A,)) * 64)
+    runtime.tile.set_destination(0x800)
+    runtime.tile.set_mode(0x00)
+    for call in (lambda: runtime.tile.convert(1),
+                 lambda: runtime.tile.convert(99),
+                 lambda: runtime.tile.compare_mask(8)):
+        with pytest.raises(UnsupportedTileModeError):
+            call()
+    assert runtime.memory.read_bytes(0x800, 64) == bytes((0x5A,)) * 64
