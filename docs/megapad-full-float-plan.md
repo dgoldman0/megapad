@@ -503,6 +503,10 @@ Progress:
   layout, and `CLEAR` in EW 6–9. The RTL tile and cluster benches check the
   widths and the admission trap, and `tb_tacc` checks `CLEAR` in EW 6, 7, 8,
   and 15. Each of these fails on the 3-bit decoders.
+- **Regression gate.** The hosted simulator changed, so the canonical
+  physical Desktop journey ran once, with Akashic `f2f06799` and this branch
+  at `71ec1e8`. It passed in 251 s, with a peak aggregate RSS of 511 MB,
+  clean trees, and the native simulator executor.
 
 - **TMODE.** Implement the 4-bit `EW` in all four backends, with the D1
   reserved-format traps and the TMODE/TCTRL width rule.
