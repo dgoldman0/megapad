@@ -568,6 +568,10 @@ Progress:
 - **Regression.** Passing: the full RTL list (tile, TACC, cluster, CPU,
   opcodes, multicore, TACC SoC, SoC smoke, SoC tile/icache, SoC
   elaboration), the Python/native suites, and the hosted suite (2,255).
+  The hosted simulator changed, so the canonical physical Desktop journey
+  ran once, with Akashic `f2f06799` and this branch at `1cb3bc5`. It passed
+  in 202 s, with a peak aggregate RSS of 512 MB, clean trees, and the native
+  simulator executor.
 
 - **Element-wise operations.**
   - TALU ADD, SUB, MIN, MAX, ABS; AND, OR, and XOR are raw.
