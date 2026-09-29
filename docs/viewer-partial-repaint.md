@@ -83,7 +83,8 @@ per-slot glyphs, clipped fills and clipped borders.
 **Whole only.** POLYLINE, PLOT and WAVEFORM clip diagonal lines and fill
 polygons to the current clip with integer rounding (`_clip_line_segment`,
 `_alpha_polygon`), so a smaller clip can move a pixel. MENU_BAR, with its
-popups, and TABSET draw the same kind of lines, and change with hover and
+popups, and TABSET draw their lines through the same clipping, which also
+caps a line's width by the visible size, and they change with hover and
 press. When a whole-only draw meets D, D grows to hold its whole extent, and
 this repeats until D is stable. Such a draw then paints under exactly the
 clip a full composition gives it.
