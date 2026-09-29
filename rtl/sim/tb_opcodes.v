@@ -660,11 +660,11 @@ module tb_opcodes;
         // SP (R15) = 0x1000
         mem[0] = 8'h60; mem[1] = 8'hF0; mem[2] = 8'h10;
         mem[3] = 8'h68; mem[4] = 8'hF8;
-        // MARK → T = (X<<4|P) = (2<<4|3) = 0x23, push T, X←P
+        // MARK → T = {3'b0, XSEL, 3'b0, PSEL} = (2<<8|3) = 0x203, push T, X←P
         mem[5] = 8'h07;                                     // MARK
         mem[6] = 8'h02;                                     // HALT
         load_and_run(400);
-        check64("T after MARK", {56'd0, uut.T}, 64'h23);
+        check64("T after MARK", {56'd0, uut.T}, 64'h203);
         // After MARK, X = P = 3
         check64("xsel after MARK", {60'd0, uut.xsel}, 64'h3);
 
