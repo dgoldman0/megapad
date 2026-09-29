@@ -604,7 +604,7 @@ def test_micro_force_release_uses_cluster_privilege_not_caller_shadow():
     sibling.csr_write(CSR_TACC_CTL, 1)
 
     status = owner.csr_read(CSR_TACC_STATUS)
-    assert status & 0x3FF == 0
+    assert status & 0x7FF == 0
     assert (status >> 16) & 0x1F == TACC_OWNER_NONE
 
 
@@ -647,7 +647,7 @@ def test_reentrant_force_observes_busy_and_wins_at_terminal_boundary(
             sibling.csr_write(CSR_TACC_CTL, 1)
             pending = sibling.csr_read(CSR_TACC_STATUS)
             assert pending & (1 << 4)
-            assert pending & (1 << 9)
+            assert pending & (1 << 10)
             if fault_at_completion:
                 raise injected
         return original_read8(address)

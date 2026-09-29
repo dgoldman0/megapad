@@ -26,6 +26,8 @@ import importlib
 import sys
 from typing import Optional
 
+from shared.tile_formats import TCTRL_WRITE_MASK, TMODE_WRITE_MASK
+
 # Always import the pure-Python module — we need its constants and
 # exception classes regardless of whether the accelerator is available.
 from .megapad64 import (
@@ -1670,9 +1672,9 @@ def _csr_read_py(cpu, addr: int) -> int:
             | (4 if cs.tacc_valid else 0)
             | (8 if cs.tacc_dirty else 0)
             | (16 if cs.tacc_busy else 0)
-            | ((cs.tacc_format_ew & 0x7) << 5)
-            | ((cs.tacc_format_signed & 1) << 8)
-            | (0x200 if cs.tacc_force_pending else 0)
+            | ((cs.tacc_format_ew & 0xF) << 5)
+            | ((cs.tacc_format_signed & 1) << 9)
+            | (0x400 if cs.tacc_force_pending else 0)
             | ((cs.tacc_owner & 0x1F) << 16)
         ),
         CSR_TACC_CTL: lambda: 0,
@@ -1727,8 +1729,8 @@ def _csr_write_py(cpu, addr: int, val: int):
     elif addr == CSR_SR:      cs.sr = val
     elif addr == CSR_SC:      cs.sc = val
     elif addr == CSR_SW:      cs.sw = val
-    elif addr == CSR_TMODE:   cs.tmode = val
-    elif addr == CSR_TCTRL:   cs.tctrl = val
+    elif addr == CSR_TMODE:   cs.tmode = val & TMODE_WRITE_MASK
+    elif addr == CSR_TCTRL:   cs.tctrl = val & TCTRL_WRITE_MASK
     elif addr == CSR_TSRC0:   cs.tsrc0 = val
     elif addr == CSR_TSRC1:   cs.tsrc1 = val
     elif addr == CSR_TDST:    cs.tdst = val

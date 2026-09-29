@@ -16,7 +16,10 @@ from typing import Callable, Optional
 
 from shared.cells import MASK64, SIGN64, s64, u64
 from shared.crc import CRC_MODE_PARAMETERS, crc_update_byte
-from shared import ieee_fp, tile_float
+from shared import ieee_fp, tile_float, tile_formats
+from shared.tile_formats import (
+    EW_BF16, EW_FP16, EW_FP32, EW_FP64, EW_U16, EW_U32, EW_U64, EW_U8,
+)
 
 # ---------------------------------------------------------------------------
 #  Constants
@@ -179,14 +182,6 @@ CLUSTER_SPAD_ADDR  = 0xFFFF_FE00_0000_0000  # scratchpad addr[63:32] sentinel
 # Micro-core CPUID: "MP64" v1 "MC" (micro-core variant)
 CPUID_MICRO = 0x4D50_3634_0001_4D43
 
-# TMODE EW codes (bits [2:0])
-EW_U8    = 0  # 64 lanes × 8-bit
-EW_U16   = 1  # 32 lanes × 16-bit
-EW_U32   = 2  # 16 lanes × 32-bit
-EW_U64   = 3  #  8 lanes × 64-bit
-EW_FP16  = 4  # 32 lanes × IEEE 754 half-precision
-EW_BF16  = 5  # 32 lanes × bfloat16
-
 TACC_IMAGE_BYTES = 256
 TACC_OWNER_NONE = 31
 TACC_CANONICAL_NAN = ieee_fp.FP32.canonical_nan
@@ -242,10 +237,10 @@ def _signed_divmod_trunc(dividend: int, divisor: int) -> tuple[int, int]:
 #  Floating-point tile formats (values come from shared.ieee_fp)
 # ---------------------------------------------------------------------------
 
-# EW 6 (FP32) and 7 (FP64) are specified in docs/floating-point.md but are not
-# implemented until Phases 4 and 5 of docs/megapad-full-float-plan.md; tile
-# operations in them trap until then.
-_TILE_FLOAT_FORMATS = {EW_FP16: ieee_fp.FP16, EW_BF16: ieee_fp.BF16}
+# FP32 (EW 6) and FP64 (EW 7) are defined formats whose tile operations land
+# in Phases 4 and 5 of docs/megapad-full-float-plan.md.  Until then every MEX
+# operation in them traps, so the emulator fails closed.
+_PENDING_TILE_FORMATS = frozenset((EW_FP32, EW_FP64))
 
 
 def sign_extend(val: int, bits: int) -> int:
@@ -1135,9 +1130,9 @@ class Megapad64:
             | ((1 if self.tacc_valid else 0) << 2)
             | ((1 if self.tacc_dirty else 0) << 3)
             | ((1 if self.tacc_busy else 0) << 4)
-            | ((self.tacc_format_ew & 0x7) << 5)
-            | ((self.tacc_format_signed & 1) << 8)
-            | ((1 if self.tacc_force_pending else 0) << 9)
+            | ((self.tacc_format_ew & 0xF) << 5)
+            | ((self.tacc_format_signed & 1) << 9)
+            | ((1 if self.tacc_force_pending else 0) << 10)
             | ((self.tacc_owner & 0x1F) << 16)
         )
 
@@ -1159,13 +1154,14 @@ class Megapad64:
         return self.priv_level
 
     def _tacc_format_from_tmode(self) -> tuple[int, int]:
-        ew = self.tmode & 0x7
+        ew = tile_formats.element_width(self.tmode)
         if ew not in TACC_LEGAL_EW:
             self._tacc_trap(
                 IVEC_ILLEGAL_OP,
                 f"unsupported TACC element-width code {ew}",
             )
-        signed = 0 if ew in (EW_FP16, EW_BF16) else ((self.tmode >> 4) & 1)
+        signed = 0 if tile_formats.decode(ew).is_float else (
+            (self.tmode >> 4) & 1)
         return ew, signed
 
     def _tacc_require_mine(self, *, valid: bool = False):
@@ -1785,8 +1781,10 @@ class Megapad64:
             CSR_SR:       lambda v: setattr(self, 'sr', v & 0xFFFFF),
             CSR_SC:       lambda v: setattr(self, 'sc', v & 0xFFFFF),
             CSR_SW:       lambda v: setattr(self, 'sw', v & 0xFFFFF),
-            CSR_TMODE:    lambda v: setattr(self, 'tmode', v & 0xFF),
-            CSR_TCTRL:    lambda v: setattr(self, 'tctrl', v & 0xFF),
+            CSR_TMODE:    lambda v: setattr(
+                self, 'tmode', v & tile_formats.TMODE_WRITE_MASK),
+            CSR_TCTRL:    lambda v: setattr(
+                self, 'tctrl', v & tile_formats.TCTRL_WRITE_MASK),
             CSR_TSRC0:    lambda v: setattr(self, 'tsrc0', v),
             CSR_TSRC1:    lambda v: setattr(self, 'tsrc1', v),
             CSR_TDST:     lambda v: setattr(self, 'tdst', v),
@@ -2100,11 +2098,11 @@ class Megapad64:
                          broadcast_reg: int = -1):
         """Execute a tile op directly without fetching from PC.
         Used by tile datapath self-test, which runs integer formats only."""
-        ew_bits = self.tmode & 0x7
-        if ew_bits >= EW_FP16:
+        lane_format = tile_formats.decode(self.tmode)
+        if lane_format is None or lane_format.is_float:
             raise ValueError("the tile self-test executor is integer-only")
-        elem_bytes = 1 << ew_bits
-        num_lanes = 64 // elem_bytes
+        elem_bytes = lane_format.lane_bytes
+        num_lanes = lane_format.lanes
         signed = (self.tmode >> 4) & 1
 
         read_tile = self._read_tile
@@ -3883,7 +3881,7 @@ class Megapad64:
                 self._tacc_fault_cycles = 2
                 src_a = self._tacc_read_beat(source_addresses[0])
                 src_b = bytearray(64)
-                source_bits = 16 if ew in (EW_FP16, EW_BF16) else (8 << ew)
+                source_bits = tile_formats.decode(ew).lane_bits
                 source_bytes = source_bits // 8
                 scalar = self.regs[broadcast_reg] & ((1 << source_bits) - 1)
                 for lane in range(64 // source_bytes):
@@ -3934,17 +3932,20 @@ class Megapad64:
                     )
                 arithmetic_cycles = (4, 2, 1)[ew]
             else:
-                for lane in range(32):
-                    offset = lane * 2
-                    a = int.from_bytes(src_a[offset:offset + 2], "little")
-                    b = int.from_bytes(src_b[offset:offset + 2], "little")
-                    old = self._tacc_lane_read(staged, lane, 32)
+                lane_format = tile_formats.decode(ew)
+                source = lane_format.float_format
+                wide = lane_format.accumulation
+                width = lane_format.lane_bytes
+                for lane in range(lane_format.lanes):
+                    offset = lane * width
+                    a = int.from_bytes(src_a[offset:offset + width], "little")
+                    b = int.from_bytes(src_b[offset:offset + width], "little")
+                    old = self._tacc_lane_read(staged, lane, wide.width)
                     self._tacc_lane_write(
                         staged,
                         lane,
-                        32,
-                        ieee_fp.lane_mixed_fma(
-                            ieee_fp.FP32, _TILE_FLOAT_FORMATS[ew], a, b, old),
+                        wide.width,
+                        ieee_fp.lane_mixed_fma(wide, source, a, b, old),
                     )
                 arithmetic_cycles = 4
 
@@ -4005,22 +4006,22 @@ class Megapad64:
             )
             return self._exec_tacc_lifecycle(ss, funct_byte)
 
-        # Element width from TMODE (3-bit EW: 0-3 = int, 4 = fp16, 5 = bf16)
-        ew_bits = self.tmode & 0x7
-        is_fp = ew_bits >= EW_FP16
-        if is_fp:
-            fmt = _TILE_FLOAT_FORMATS.get(ew_bits)
-            if fmt is None:
-                self._ext_modifier = -1
-                raise TrapError(
-                    IVEC_ILLEGAL_OP,
-                    f"tile format EW {ew_bits} is not implemented",
-                )
-            wide = ieee_fp.accumulation_format(fmt)
-            elem_bytes = fmt.width // 8
-        else:
-            elem_bytes = 1 << ew_bits  # 1, 2, 4, or 8
-        num_lanes = 64 // elem_bytes
+        # A reserved format, or one whose operations have not landed yet,
+        # traps before any source, destination, or accumulator access.
+        lane_format = tile_formats.decode(self.tmode)
+        if lane_format is None or lane_format.ew in _PENDING_TILE_FORMATS:
+            self._ext_modifier = -1
+            ew_bits = tile_formats.element_width(self.tmode)
+            raise TrapError(
+                IVEC_ILLEGAL_OP,
+                f"tile format EW {ew_bits} is "
+                + ("reserved" if lane_format is None else "not implemented"),
+            )
+        is_fp = lane_format.is_float
+        fmt = lane_format.float_format
+        wide = lane_format.accumulation
+        elem_bytes = lane_format.lane_bytes
+        num_lanes = lane_format.lanes
         signed = (self.tmode >> 4) & 1
 
         # Load source tiles as byte arrays

@@ -50,7 +50,7 @@ def _status(cpu) -> tuple[bool, bool, bool, bool, bool, bool, int]:
         bool(value & (1 << 2)),
         bool(value & (1 << 3)),
         bool(value & (1 << 4)),
-        bool(value & (1 << 9)),
+        bool(value & (1 << 10)),
         (value >> 16) & 0x1F,
     )
 

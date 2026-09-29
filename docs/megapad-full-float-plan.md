@@ -2,10 +2,11 @@
 
 **Started:** 2026-09-29
 
-**Status:** Phases 1 and 2 complete. Decisions D1–D18 were confirmed on
+**Status:** Phases 1–3 complete. Decisions D1–D18 were confirmed on
 2026-09-29 and are recorded in `docs/floating-point.md`, the normative
-floating-point specification. FP16 and BF16 now give the same bit-exact
-results in all four backends. Phase 3 is next.
+floating-point specification. FP16 and BF16 give the same bit-exact results
+in all four backends, and every backend decodes the 4-bit format field, with
+FP32 and FP64 failing closed until their operations land. Phase 4 is next.
 
 **Branch:** `feature/megapad-fp64`
 
@@ -473,7 +474,35 @@ Progress:
 KDOS words keep working because the inter-tile rule is still one rounding per
 tile, but some expected values in their tests change.
 
-### Phase 3 — Mode and state plumbing
+### Phase 3 — Mode and state plumbing (complete)
+
+Progress:
+
+- **Format descriptors.** `shared/tile_formats.py` is the Python table used
+  by the emulator and the hosted simulator. The native accelerator has
+  `TILE_FORMATS` beside its EW codes, and the RTL tile engine decodes EW
+  through `tile_format_is_float`, `tile_format_lane_log2`, and
+  `tile_format_ready`. The 3-bit shortcuts (`& 0x7`, `mode_ew[2]`,
+  `mode_ew[1:0]`, the FP16-or-BF16 branches) are gone, and the native
+  accelerator's five copies of the TACC format check became one.
+- **Widths.** `TMODE` keeps `[6:0]` and `TCTRL` keeps `[1:0]` on every write
+  path: Python, native CSR writes, the hosted service, the RTL tile engine,
+  and the cluster's per-caller shadows.
+- **Fail closed.** Reserved EW 8–15, and EW 6 and 7 until Phases 4–5, trap
+  every MEX tile operation before any memory, accumulator, or `TCTRL`
+  effect. The RTL tile engine retires them with `MEX_FAULT_ILLEGAL` at
+  admission. The TACC lifecycle keeps its own rule, and the spec now says
+  so (§5.3).
+- **TACC_STATUS.** Repacked as D2 in Python, native, the accelerator wrapper,
+  and RTL. `format_ew` is 4 bits through `mp64_tacc.v`,
+  `mp64_tacc_transfer.v`, `mp64_tile.v`, `mp64_cluster.v`, and `mp64_soc.v`.
+- **Words.** `FP32-MODE` and `FP64-MODE` are in the BIOS (483 words) and are
+  appended at the hosted core frontier (377 words).
+- **Tests.** New emulator/native differential tests cover the write widths,
+  the unready-format traps for raw and arithmetic operations, the status
+  layout, and `CLEAR` in EW 6–9. The RTL tile and cluster benches check the
+  widths and the admission trap, and `tb_tacc` checks `CLEAR` in EW 6, 7, 8,
+  and 15. Each of these fails on the 3-bit decoders.
 
 - **TMODE.** Implement the 4-bit `EW` in all four backends, with the D1
   reserved-format traps and the TMODE/TCTRL width rule.
@@ -610,3 +639,11 @@ without fixing them.
   trap in Python, which writes zero lanes. The other backends were not
   checked. Phases 6 and 8 give those functions
   meanings.
+- **Generated BIOS images.** The checked-in `bios.rom` and `fpga/bios.hex`
+  were already out of step with `bios.asm` before this branch, and nothing at
+  runtime reads them except the FPGA ROM image. Regenerate them in their own
+  commit, as `1672dd4` did.
+- **Stale benchmark pin on `main`.**
+  `tests/test_native_cycle_execution.py::test_phase0_oracle_captures_bus_state_and_requires_quiescence`
+  expects `bench_phase0_concurrency.SCHEMA_VERSION == 20`; the script is at
+  26. This belongs to the simulator speed work on `main`.

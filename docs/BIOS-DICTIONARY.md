@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **481** entries.  The numbered
+The `bios.asm` dictionary link chain contains **483** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -693,12 +693,14 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 243 | `TLOAD2D` | `( -- )` | | 2D strided load into tile register (t.load2d) |
 | 244 | `TSTORE2D` | `( -- )` | | 2D strided store from tile register (t.store2d) |
 
-### FP16 / BF16 Modes (2 words)
+### Float Format Modes (4 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 245 | `FP16-MODE` | `( -- )` | | Set TMODE to FP16 half-precision (EW=4) |
 | 246 | `BF16-MODE` | `( -- )` | | Set TMODE to bfloat16 (EW=5) |
+| 482 | `FP32-MODE` | `( -- )` | | Set TMODE to FP32 single precision (EW=6) |
+| 483 | `FP64-MODE` | `( -- )` | | Set TMODE to FP64 double precision (EW=7) |
 
 ### Instruction Cache (5 words)
 

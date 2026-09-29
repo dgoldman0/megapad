@@ -211,8 +211,8 @@ def test_lifecycle_status_and_locked_base_cycles() -> None:
     status = cpu.csr_read(CSR_TACC_STATUS)
     assert status & (1 << 2)
     assert status & (1 << 3)
-    assert (status >> 5) & 0x7 == EW_U16
-    assert (status >> 8) & 1 == 1
+    assert (status >> 5) & 0xF == EW_U16
+    assert (status >> 9) & 1 == 1
     assert bytes(cpu.tacc) == bytes(TACC_IMAGE_BYTES)
 
     assert _step(cpu, "t.acc.release") == 2

@@ -1525,7 +1525,7 @@ def test_accelerated_micro_tacc_reentrant_force_wins_at_terminal_boundary(
             sibling.csr_write(CSR_TACC_CTL, 1)
             pending = sibling.csr_read(CSR_TACC_STATUS)
             assert pending & (1 << 4)
-            assert pending & (1 << 9)
+            assert pending & (1 << 10)
             assert (pending >> 16) & 0x1F == owner.core_id
             if fault_at_completion:
                 raise injected
@@ -1541,7 +1541,7 @@ def test_accelerated_micro_tacc_reentrant_force_wins_at_terminal_boundary(
 
     assert probed
     terminal = sibling.csr_read(CSR_TACC_STATUS)
-    assert terminal & 0x3FF == 0
+    assert terminal & 0x7FF == 0
     assert (terminal >> 16) & 0x1F == 31
     assert not any(cluster._shared_engine_snapshot()["tacc"])
 

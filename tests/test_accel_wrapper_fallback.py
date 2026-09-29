@@ -509,7 +509,7 @@ def test_direct_accelerated_tamac_publishes_busy_before_callbacks(
             cpu.csr_write(CSR_TACC_CTL, 1)
             pending = cpu.csr_read(CSR_TACC_STATUS)
             assert pending & (1 << 4)
-            assert pending & (1 << 9)
+            assert pending & (1 << 10)
             if fault_at_completion:
                 raise injected
         return original_read8(address)

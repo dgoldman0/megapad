@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Protocol
 
-from shared import ieee_fp, tile_float
+from shared import ieee_fp, tile_float, tile_formats
 from shared.cells import MASK64, u64
 from simulator.errors import ExecutionError
 from simulator.memory import SparseAddressSpace
@@ -20,7 +20,9 @@ from simulator.memory import SparseAddressSpace
 TILE_BYTES = 64
 ACCUMULATOR_WORDS = 4
 _ACCUMULATOR_MASK = (1 << (ACCUMULATOR_WORDS * 64)) - 1
-_FLOAT_FORMATS = {4: ieee_fp.FP16, 5: ieee_fp.BF16}
+# FP32 and FP64 are defined formats whose operations land in Phases 4 and 5
+# of docs/megapad-full-float-plan.md; until then they fail closed here.
+_PENDING_FORMATS = frozenset((tile_formats.EW_FP32, tile_formats.EW_FP64))
 _TALU_FUNCTIONS = {
     "add": tile_float.ADD,
     "subtract": tile_float.SUB,
@@ -105,7 +107,8 @@ def tile_sum_u8(tile: bytes) -> int:
 class HostedTileService:
     """One runtime-local semantic legacy tile engine.
 
-    The service accepts all four integer element widths, FP16, and BF16.  It
+    The service accepts all four integer element widths, FP16, and BF16; the
+    defined FP32 and FP64 formats and the reserved codes fail closed.  It
     implements the legacy and extended BIOS operations reached by ordinary
     source.  The separately owned full-width TACC family remains unsupported.
     """
@@ -173,10 +176,15 @@ class HostedTileService:
         return self._registers.accumulator_words(self._core_id)
 
     def set_mode(self, value: int) -> None:
-        self._mode = self._cell(value, label="tile mode") & 0xFF
+        self._mode = (
+            self._cell(value, label="tile mode") & tile_formats.TMODE_WRITE_MASK
+        )
 
     def set_control(self, value: int) -> None:
-        self._control = self._cell(value, label="tile control") & 0xFF
+        self._control = (
+            self._cell(value, label="tile control")
+            & tile_formats.TCTRL_WRITE_MASK
+        )
 
     def set_source0(self, address: int) -> None:
         self._registers.set_operand_address(self._core_id, address)
@@ -736,18 +744,17 @@ class HostedTileService:
     def _mode_format(
         self,
     ) -> tuple[int, bool, bool, ieee_fp.Format | None]:
-        element_width = self._mode & 0x07
-        if element_width <= 3:
-            return (
-                1 << element_width,
-                bool(self._mode & 0x10),
-                bool(self._mode & 0x20),
-                None,
-            )
-        floating_format = _FLOAT_FORMATS.get(element_width)
-        if floating_format is not None:
-            return floating_format.width // 8, False, False, floating_format
-        raise UnsupportedTileModeError(self._mode)
+        lane_format = tile_formats.decode(self._mode)
+        if lane_format is None or lane_format.ew in _PENDING_FORMATS:
+            raise UnsupportedTileModeError(self._mode)
+        if lane_format.is_float:
+            return lane_format.lane_bytes, False, False, lane_format.float_format
+        return (
+            lane_format.lane_bytes,
+            bool(self._mode & tile_formats.TMODE_SIGNED),
+            bool(self._mode & tile_formats.TMODE_SATURATE),
+            None,
+        )
 
     def _accumulator_value(self) -> int:
         return sum(

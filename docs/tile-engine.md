@@ -104,14 +104,16 @@ Bit layout:    7  6  5  4  3  2  1  0
 | `[6]` | Rounding | `0`=truncate, `1`=round-to-nearest (applies to VSHR and float-to-integer TCVT) |
 
 TMODE is an 8-bit register in every backend: writes keep bits `[6:0]`, and
-bit 7 and all higher bits read as zero. A tile operation in a reserved format
-(`EW` 8–15) raises `IVEC_ILLEGAL_OP` before touching memory.
+bit 7 and all higher bits read as zero. A MEX tile operation in a reserved
+format (`EW` 8–15) raises `IVEC_ILLEGAL_OP` before touching memory, the
+accumulator, or `TCTRL`. The TACC lifecycle follows its own format rules:
+`CLEAR`, `LOAD`, and `TAMAC` trap on any format that is not a legal TACC
+format, and `TRY`, `STORE`, and `RELEASE` do not read `TMODE`.
 
-> **Implementation status:** the 4-bit `EW` field, the FP32 and FP64 codes,
-> and the write-width rule are specified in `docs/floating-point.md` and land
-> in Phase 3 of `docs/megapad-full-float-plan.md`. Until then, every backend
-> decodes only bits `[2:0]`, and EW 6 and 7 behave inconsistently (see
-> "Current implementation status" under Floating-Point Support).
+> **Implementation status:** FP32 (EW 6) and FP64 (EW 7) are decoded as
+> defined formats in every backend, but their operations land in Phases 4
+> and 5 of `docs/megapad-full-float-plan.md`. Until then every MEX tile
+> operation in them traps exactly as a reserved format does.
 
 **Common TMODE values:**
 
@@ -139,6 +141,8 @@ bit 7 and all higher bits read as zero. A tile operation in a reserved format
 |-----|------|-------------|
 | `0` | `ACC_ACC` | **Accumulate mode** — add result to existing accumulator value instead of overwriting |
 | `1` | `ACC_ZERO` | **Zero-first** — clear ACC to zero before this operation, then auto-clear this bit |
+
+Writes keep bits `[1:0]`; every other bit reads as zero.
 
 **The typical pattern for multi-tile accumulation:**
 
@@ -518,11 +522,12 @@ For FP16 and BF16, the Python emulator, native accelerator, hosted simulator,
 and RTL implement these rules.  The software backends take their values from
 `shared/ieee_fp.py`, a seeded differential test holds the native accelerator
 to the Python results, and the RTL replays emulator-generated golden vectors
-(`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 arrive in Phases 3–5 of
-`docs/megapad-full-float-plan.md` and the new operations in Phases 6 and 8;
-until then EW 6 and 7 trap in the emulator and are rejected by the hosted
-simulator, while the RTL still treats them as FP16.  Float PACK and UNPACK
-remain until `TCVT` replaces them.
+(`rtl/sim/tile_fp_vectors.vec`).  Every backend decodes FP32 and FP64 as
+defined formats, but their operations arrive in Phases 4 and 5 of
+`docs/megapad-full-float-plan.md` and the new operations in Phases 6 and 8.
+Until then every MEX tile operation in EW 6 or 7 traps `IVEC_ILLEGAL_OP`
+before any access, in all four backends.  Float PACK and UNPACK remain until
+`TCVT` replaces them.
 
 
 ---
@@ -587,11 +592,6 @@ other field describes the physical engine.
 | `[9]` | `FORMAT_SIGNED` | Latched integer signedness |
 | `[10]` | `FORCE_PENDING` | Privileged recovery is queued behind active work |
 | `[20:16]` | `OWNER` | Absolute core ID; 31 means no owner |
-
-> **Implementation status:** this packing, with the 4-bit format field, lands
-> in Phase 3 of `docs/megapad-full-float-plan.md`.  Until then, backends pack
-> `FORMAT_EW` in `[7:5]`, `FORMAT_SIGNED` in `[8]`, and `FORCE_PENDING` in
-> `[9]`.
 
 `TACC_CTL` at `0x1E` reads as zero.  A supervisor write of bit 0 pulses
 `FORCE_RELEASE`; a user write with bit 0 set raises `IVEC_PRIV_FAULT`.
@@ -849,8 +849,8 @@ long to retry:
 |------|-------------|-------------|
 | `FP16-MODE` | `( -- )` | Set TMODE = 4 |
 | `BF16-MODE` | `( -- )` | Set TMODE = 5 |
-| `FP32-MODE` | `( -- )` | Set TMODE = 6 (Phase 3) |
-| `FP64-MODE` | `( -- )` | Set TMODE = 7 (Phase 3) |
+| `FP32-MODE` | `( -- )` | Set TMODE = 6 |
+| `FP64-MODE` | `( -- )` | Set TMODE = 7 |
 | `TCVT` | `( ew -- )` | Convert from the current format to `ew` (Phase 6) |
 | `TCMP` | `( pred -- )` | Compare to lane mask, predicate 0–7 (Phase 6) |
 | `TVSEL` | `( -- )` | Select lanes by the mask in `[TDST]` (Phase 6) |
@@ -869,12 +869,14 @@ on) are listed in `docs/floating-point.md` §11.
 | `TTILE-H!` | `( n -- )` | Set tile height (CSR 0x42) |
 | `TTILE-W!` | `( n -- )` | Set tile width (CSR 0x43) |
 
-### FP16 / BF16 Mode
+### Float Format Modes
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `FP16-MODE` | `( -- )` | Set TMODE = 4 (IEEE FP16, 32 lanes) |
 | `BF16-MODE` | `( -- )` | Set TMODE = 5 (bfloat16, 32 lanes) |
+| `FP32-MODE` | `( -- )` | Set TMODE = 6 (IEEE FP32, 16 lanes) |
+| `FP64-MODE` | `( -- )` | Set TMODE = 7 (IEEE FP64, 8 lanes) |
 
 ### Diagnostics
 

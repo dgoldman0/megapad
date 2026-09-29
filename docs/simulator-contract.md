@@ -756,8 +756,10 @@ hardware-throughput claim.
 Floating-point tile results follow the normative `docs/floating-point.md`.
 The hosted service takes its values from `shared/ieee_fp.py` and
 `shared/tile_float.py`, as the Python emulator does and the native accelerator
-reproduces. EW 6/7 fail closed here until FP32 and FP64 are implemented; RTL
-convergence is tracked in `docs/megapad-full-float-plan.md`.
+reproduces. `TMODE` keeps bits `[6:0]` and `TCTRL` keeps bits `[1:0]`. EW 6
+and 7 (FP32 and FP64) and the reserved codes 8–15 fail closed here until FP32
+and FP64 are implemented in Phases 4 and 5 of
+`docs/megapad-full-float-plan.md`.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal

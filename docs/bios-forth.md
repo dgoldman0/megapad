@@ -1042,26 +1042,25 @@ memory regions (e.g., extracting an 8×8 patch from a 640-wide framebuffer).
 
 ---
 
-## FP16 / BF16 Modes (2 words)
+## Float Format Modes (4 words)
 
-Half-precision floating-point tile operations. Reductions publish raw binary32
-bits in ACC0. `docs/floating-point.md` defines every result: lanes or their
+Floating-point tile formats. `docs/floating-point.md` defines every result.
+FP16 and BF16 reductions publish raw binary32 bits in ACC0: lanes or their
 products enter binary32 and are summed by one pairwise tree in lane order, and
 with ACC_ACC each tile adds to ACC0 with one more rounding. The Python
-emulator, native accelerator, and hosted simulator implement that definition;
-the RTL datapath still differs until its slice of Phase 2 of
-`docs/megapad-full-float-plan.md` lands.
+emulator, native accelerator, hosted simulator, and RTL give the same bits.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `FP16-MODE` | `( -- )` | Set TMODE to FP16 half-precision (EW=4, 32 lanes). |
 | `BF16-MODE` | `( -- )` | Set TMODE to bfloat16 (EW=5, 32 lanes). |
+| `FP32-MODE` | `( -- )` | Set TMODE to FP32 single precision (EW=6, 16 lanes). |
+| `FP64-MODE` | `( -- )` | Set TMODE to FP64 double precision (EW=7, 8 lanes). |
 
-EW 6 and 7 are reserved. Hosted execution rejects them; current emulator and
-RTL paths alias them inconsistently and must not be used as extra formats. The
-current executable FP16 converter also encodes the exact carry-boundary product
-`0x0017 * 0x5190` as zero rather than IEEE minimum-normal `0x0400`; this remains
-an explicit compatibility discrepancy.
+FP32 and FP64 operations land in Phases 4 and 5 of
+`docs/megapad-full-float-plan.md`. Until then every tile operation in EW 6 or
+7 raises `IVEC_ILLEGAL_OP` before any access, and hosted execution rejects it
+the same way. Codes 8–15 are reserved and always trap.
 
 ---
 

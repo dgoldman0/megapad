@@ -208,7 +208,7 @@ def test_bios_u8_add_sub_latch_exact_state_and_count_completed_operations() -> N
     assert runtime.diagnostics.perf_tileops == 3
 
 
-def test_integer_widths_signed_saturation_and_reserved_formats_fail_closed() -> None:
+def test_integer_widths_signed_saturation_and_unready_formats_fail_closed() -> None:
     runtime = MegaForthRuntime()
     vectors = (
         (0x01, 2, (0xFFFF, 1), (2, 3), (1, 4), (0xFFFD, 0xFFFE)),
@@ -271,13 +271,16 @@ def test_integer_widths_signed_saturation_and_reserved_formats_fail_closed() -> 
     runtime.tile.maximum()
     assert runtime.tile.accumulator == (1234, 0, 0, 0)
 
+    # FP32 and FP64 fail closed until their operations land; EW 8-15 are
+    # reserved.  TMODE keeps bits [6:0], so 0x88 selects EW 8.
     before = runtime.memory.read_bytes(DESTINATION, 64)
     operations = runtime.diagnostics.perf_tileops
-    for reserved_mode in (6, 7):
-        runtime.tile.set_mode(reserved_mode)
+    for written, mode in ((6, 0x06), (7, 0x07), (0x88, 0x08), (0x1F, 0x1F)):
+        runtime.tile.set_mode(written)
+        assert runtime.tile.mode == mode
         with pytest.raises(
             UnsupportedTileModeError,
-            match=f"tile mode 0x{reserved_mode:02x}",
+            match=f"tile mode 0x{mode:02x}",
         ):
             runtime.tile.add()
     assert runtime.memory.read_bytes(DESTINATION, 64) == before
@@ -460,10 +463,10 @@ def test_b_min_max_pin_safe_empty_one_tile_and_multitile_address_bug(
 ) -> None:
     runtime = loaded_buffer_tile
     empty, _empty_data = _define_hbw_buffer(runtime, "EXTREMA-EMPTY", 0)
-    runtime.tile.set_control(0xA5)
+    runtime.tile.set_control(0x03)
     assert _execute(runtime, "B.MIN", empty) == (0,)
     assert _execute(runtime, "B.MAX", empty) == (0,)
-    assert runtime.tile.control == 0xA5
+    assert runtime.tile.control == 0x03
 
     one, one_data = _define_hbw_buffer(runtime, "EXTREMA-ONE", 1)
     runtime.memory.write_bytes(one_data, bytes((4, 250)) + bytes((9,)) * 62)
@@ -547,7 +550,7 @@ def test_b_scale_wraps_exact_logical_bytes_without_touching_tile_state(
     descriptor, data = _define_hbw_buffer(runtime, "SCALE-BUF", 3)
     runtime.memory.write_bytes(data, bytes((128, 200, 255)) + bytes((0xA5,)) * 61)
     runtime.tile.set_mode(0x13)
-    runtime.tile.set_control(0xA5)
+    runtime.tile.set_control(0x03)
     runtime.tile.set_source0(0x1111)
     runtime.tile.set_source1(0x2222)
     runtime.tile.set_destination(0x3333)

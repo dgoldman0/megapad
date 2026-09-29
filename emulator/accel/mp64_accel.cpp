@@ -170,8 +170,79 @@ enum IVEC {
     IVEC_PRIV_FAULT = 15
 };
 
-// Tile EW codes
-enum EW { EW_U8=0, EW_U16, EW_U32, EW_U64, EW_FP16, EW_BF16 };
+// Tile EW codes (TMODE[3:0]); 8-15 are reserved.
+enum EW {
+    EW_U8=0, EW_U16, EW_U32, EW_U64, EW_FP16, EW_BF16, EW_FP32, EW_FP64
+};
+
+// TMODE keeps EW [3:0], signed [4], saturate [5], and rounding [6]; TCTRL
+// keeps ACC_ACC [0] and ACC_ZERO [1].  Every other bit reads as zero.
+static constexpr uint64_t TMODE_EW_MASK = 0x0F;
+static constexpr uint64_t TMODE_WRITE_MASK = 0x7F;
+static constexpr uint64_t TCTRL_WRITE_MASK = 0x03;
+
+// One binary interchange format (docs/floating-point.md §2).
+struct TileFloatFormat {
+    int width;
+    int exponent_bits;
+    int fraction_bits;
+};
+
+static constexpr TileFloatFormat TILE_FP16{16, 5, 10};
+static constexpr TileFloatFormat TILE_BF16{16, 8, 7};
+static constexpr TileFloatFormat TILE_FP32{32, 8, 23};
+static constexpr TileFloatFormat TILE_FP64{64, 11, 52};
+
+// One descriptor per TMODE.EW code.  Lane geometry, float-ness, and the
+// accumulation format come from this table rather than per-site arithmetic.
+struct TileFormat {
+    int lane_bytes;                        // 0 for a reserved code
+    const TileFloatFormat* floating;       // null for integer formats
+    const TileFloatFormat* accumulation;   // the float format A of §4
+
+    constexpr bool defined() const { return lane_bytes != 0; }
+    constexpr bool is_float() const { return floating != nullptr; }
+    constexpr int lanes() const { return 64 / lane_bytes; }
+    constexpr int lane_bits() const { return lane_bytes * 8; }
+};
+
+static constexpr TileFormat TILE_FORMATS[TMODE_EW_MASK + 1] = {
+    {1, nullptr, nullptr},
+    {2, nullptr, nullptr},
+    {4, nullptr, nullptr},
+    {8, nullptr, nullptr},
+    {2, &TILE_FP16, &TILE_FP32},
+    {2, &TILE_BF16, &TILE_FP32},
+    {4, &TILE_FP32, &TILE_FP64},
+    {8, &TILE_FP64, &TILE_FP64},
+};
+
+static constexpr int tmode_ew(uint64_t tmode) {
+    return static_cast<int>(tmode & TMODE_EW_MASK);
+}
+
+static constexpr const TileFormat& tile_format_for(uint64_t tmode) {
+    return TILE_FORMATS[tmode_ew(tmode)];
+}
+
+static constexpr bool tile_format_is_float(int ew) {
+    return ew >= 0 && ew <= static_cast<int>(TMODE_EW_MASK) &&
+           TILE_FORMATS[ew].is_float();
+}
+
+// FP32 and FP64 are defined formats whose tile operations land in Phases 4
+// and 5 of docs/megapad-full-float-plan.md.  Until then their MEX operations
+// return to Python, which traps, so the native path fails closed.
+static constexpr bool tile_format_pending(int ew) {
+    return ew == EW_FP32 || ew == EW_FP64;
+}
+
+// TACC.CLEAR, LOAD, and TAMAC formats (docs/tile-engine.md).  FP32 and FP64
+// TACC formats land in Phase 5.
+static constexpr bool tacc_format_is_legal(int ew) {
+    return ew == EW_U8 || ew == EW_U16 || ew == EW_U32 ||
+           ew == EW_FP16 || ew == EW_BF16;
+}
 
 static constexpr std::size_t TACC_IMAGE_BYTES = 256;
 static constexpr uint8_t TACC_OWNER_NONE = 31;
@@ -2746,19 +2817,11 @@ struct TileMemoryTransport {
     static bool valid_format(
             uint8_t format_ew,
             bool format_signed) noexcept {
-        const bool legal =
-            format_ew == EW_U8 ||
-            format_ew == EW_U16 ||
-            format_ew == EW_U32 ||
-            format_ew == EW_FP16 ||
-            format_ew == EW_BF16;
+        const bool legal = tacc_format_is_legal(format_ew);
         return (
             legal &&
             !(
-                (
-                    format_ew == EW_FP16 ||
-                    format_ew == EW_BF16
-                ) &&
+                tile_format_is_float(format_ew) &&
                 format_signed
             )
         );
@@ -7475,15 +7538,15 @@ static uint64_t tacc_status(const CPUState& state) noexcept {
         (state.tacc_busy ? 1ULL << 4 : 0ULL) |
         (
             static_cast<uint64_t>(
-                state.tacc_format_ew & 0x7
+                state.tacc_format_ew & 0xF
             ) << 5
         ) |
         (
             static_cast<uint64_t>(
                 state.tacc_format_signed & 0x1
-            ) << 8
+            ) << 9
         ) |
-        (state.tacc_force_pending ? 1ULL << 9 : 0ULL) |
+        (state.tacc_force_pending ? 1ULL << 10 : 0ULL) |
         (
             static_cast<uint64_t>(
                 state.tacc_owner & 0x1F
@@ -7598,8 +7661,8 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
         case CSR_SR:        s.sr = val; break;
         case CSR_SC:        s.sc = val; break;
         case CSR_SW:        s.sw = val; break;
-        case CSR_TMODE:     s.tmode = val; break;
-        case CSR_TCTRL:     s.tctrl = val; break;
+        case CSR_TMODE:     s.tmode = val & TMODE_WRITE_MASK; break;
+        case CSR_TCTRL:     s.tctrl = val & TCTRL_WRITE_MASK; break;
         case CSR_TSRC0:     s.tsrc0 = val; break;
         case CSR_TSRC1:     s.tsrc1 = val; break;
         case CSR_TDST:      s.tdst = val; break;
@@ -7789,18 +7852,8 @@ static int next_instruction_size(CPUState& s) {
 //  contraction so the two-sum steps stay separate.
 // ---------------------------------------------------------------------------
 
-struct TileFloatFormat {
-    int width;
-    int exponent_bits;
-    int fraction_bits;
-};
-
-static constexpr TileFloatFormat TILE_FP16{16, 5, 10};
-static constexpr TileFloatFormat TILE_BF16{16, 8, 7};
-static constexpr TileFloatFormat TILE_FP32{32, 8, 23};
-
 static constexpr uint64_t tile_float_mask(const TileFloatFormat& f) {
-    return (1ULL << f.width) - 1;
+    return f.width == 64 ? ~0ULL : (1ULL << f.width) - 1;
 }
 
 static constexpr uint64_t tile_float_sign(const TileFloatFormat& f) {
@@ -7818,9 +7871,11 @@ static constexpr uint64_t tile_float_canonical_nan(const TileFloatFormat& f) {
 static_assert(tile_float_canonical_nan(TILE_FP16) == 0x7E00);
 static_assert(tile_float_canonical_nan(TILE_BF16) == 0x7FC0);
 static_assert(tile_float_canonical_nan(TILE_FP32) == 0x7FC0'0000);
+static_assert(
+    tile_float_canonical_nan(TILE_FP64) == 0x7FF8'0000'0000'0000ULL);
 
 static inline const TileFloatFormat& tile_float_format(int ew) {
-    return ew == EW_FP16 ? TILE_FP16 : TILE_BF16;
+    return *TILE_FORMATS[ew].floating;
 }
 
 static inline bool tile_float_is_nan(
@@ -8508,23 +8563,12 @@ static inline bool native_tacc_resolve_span(
     return result > 0;
 }
 
-static inline bool native_tacc_format_is_legal(int ew) noexcept {
-    return (
-        ew == EW_U8 ||
-        ew == EW_U16 ||
-        ew == EW_U32 ||
-        ew == EW_FP16 ||
-        ew == EW_BF16
-    );
-}
-
 static inline int native_tacc_format_signed(
         const CPUState& s,
         int ew) noexcept {
-    return (
-        ew == EW_FP16 ||
-        ew == EW_BF16
-    ) ? 0 : static_cast<int>((s.tmode >> 4) & 0x1);
+    return tile_format_is_float(ew)
+        ? 0
+        : static_cast<int>((s.tmode >> 4) & 0x1);
 }
 
 static inline std::size_t native_tacc_active_bytes(int ew) noexcept {
@@ -8934,8 +8978,8 @@ static int exec_native_tacc_lifecycle(
         return -1;
 
     if (function == 3 || function == 4) {
-        const int ew = s.tmode & 0x7;
-        if (!native_tacc_format_is_legal(ew))
+        const int ew = tmode_ew(s.tmode);
+        if (!tacc_format_is_legal(ew))
             return -1;
         const int signed_mode =
             native_tacc_format_signed(s, ew);
@@ -9158,8 +9202,8 @@ static int exec_native_tacc_tamac(
         return -1;
     }
 
-    const int ew = s.tmode & 0x7;
-    if (!native_tacc_format_is_legal(ew))
+    const int ew = tmode_ew(s.tmode);
+    if (!tacc_format_is_legal(ew))
         return -1;
     const int signed_mode =
         native_tacc_format_signed(s, ew);
@@ -9170,9 +9214,10 @@ static int exec_native_tacc_tamac(
         return -1;
     }
 
-    // FP16/BF16 lanes accumulate RN32(acc + a * b) with one rounding.
-    const bool floating = ew == EW_FP16 || ew == EW_BF16;
-    const int source_bits = floating ? 16 : 8 << ew;
+    // Float lanes accumulate RN_A(acc + a * b) with one rounding.
+    const TileFormat& lane_format = TILE_FORMATS[ew];
+    const bool floating = lane_format.is_float();
+    const int source_bits = lane_format.lane_bits();
 
     uint64_t source_addresses[2]{};
     int source_count = 0;
@@ -9523,12 +9568,9 @@ static int exec_mex(
             funct_byte);
     }
 
-    int ew_bits = s.tmode & 0x7;
-    bool is_fp = ew_bits >= EW_FP16;
-
-    int elem_bytes = is_fp ? 2 : (1 << ew_bits);
-    int num_lanes = 64 / elem_bytes;
-    bool is_signed = (s.tmode >> 4) & 1;
+    const int ew_bits = tmode_ew(s.tmode);
+    const TileFormat& lane_format = TILE_FORMATS[ew_bits];
+    const bool is_fp = lane_format.is_float();
 
     // SS=imm8 uses the function byte as data and forces the operation's
     // sub-function to zero.
@@ -9536,17 +9578,23 @@ static int exec_mex(
         funct = 0;
 
     // Python owns the 256-bit integer accumulator semantics, the current
-    // TSYS instruction map, and the trap for the unimplemented FP32/FP64
-    // formats (EW 6/7).  Decide this before reading sources or changing
-    // ACC/TCTRL/destination state so rewind-and-fallback is transactional.
-    // FP POPCNT counts raw bits into the integer accumulator.
+    // TSYS instruction map, and the trap for reserved formats and for the
+    // FP32/FP64 formats whose operations have not landed.  Decide this before
+    // reading sources or changing ACC/TCTRL/destination state so
+    // rewind-and-fallback is transactional.  FP POPCNT counts raw bits into
+    // the integer accumulator.
     const bool fp_bit_reduction = is_fp && op == 0x2 && funct == 3;
-    if ((is_fp && ew_bits > EW_BF16) ||
+    if (!lane_format.defined() ||
+        tile_format_pending(ew_bits) ||
         (op == 0x1 && !is_fp && funct != 0) ||
         (op == 0x2 && (!is_fp || fp_bit_reduction)) ||
         op == 0x3) {
         return -1;
     }
+
+    const int elem_bytes = lane_format.lane_bytes;
+    const int num_lanes = lane_format.lanes();
+    const bool is_signed = (s.tmode >> 4) & 1;
 
     // Read source tiles
     Tile src_a{}, src_b{}, dst{};
@@ -11940,25 +11988,15 @@ struct SystemInstructionTraits {
 };
 
 static bool tacc_mode_is_legal(const CPUState& state) noexcept {
-    const int ew = state.tmode & 0x7;
-    return (
-        ew == EW_U8 ||
-        ew == EW_U16 ||
-        ew == EW_U32 ||
-        ew == EW_FP16 ||
-        ew == EW_BF16
-    );
+    return tacc_format_is_legal(tmode_ew(state.tmode));
 }
 
 static bool tacc_mode_matches_latched_format(
         const CPUState& state) noexcept {
     if (!tacc_mode_is_legal(state))
         return false;
-    const int ew = state.tmode & 0x7;
-    const int signed_mode =
-        ew == EW_FP16 || ew == EW_BF16
-        ? 0
-        : (state.tmode >> 4) & 0x1;
+    const int ew = tmode_ew(state.tmode);
+    const int signed_mode = native_tacc_format_signed(state, ew);
     return (
         state.tacc_format_ew == ew &&
         state.tacc_format_signed == signed_mode
@@ -12073,7 +12111,7 @@ static bool native_tacc_span_preflight_valid(
 static uint64_t native_tamac_cycle_bound(
         const CPUState& state,
         int source_selector) noexcept {
-    const int ew = state.tmode & 0x7;
+    const int ew = tmode_ew(state.tmode);
     const bool broadcast = source_selector == 0x1;
     if (ew == EW_U8)
         return broadcast ? 6 : 7;
@@ -12286,7 +12324,7 @@ static SystemInstructionTraits native_tacc_instruction_traits(
             traits.tacc_timed_external_phy =
                 image_span.external_phy;
             if (function == 0x4) {
-                const int ew = state.tmode & 0x7;
+                const int ew = tmode_ew(state.tmode);
                 traits.tacc_timed_format_ew =
                     static_cast<uint8_t>(ew);
                 traits.tacc_timed_format_signed =
@@ -27155,21 +27193,12 @@ prepare_tacc_image_transfer_stage(
         throw std::invalid_argument(
             "TACC image-stage span wraps the address space");
     }
-    if (
-        prepared.format_ew != EW_U8 &&
-        prepared.format_ew != EW_U16 &&
-        prepared.format_ew != EW_U32 &&
-        prepared.format_ew != EW_FP16 &&
-        prepared.format_ew != EW_BF16
-    ) {
+    if (!tacc_format_is_legal(prepared.format_ew)) {
         throw std::invalid_argument(
             "active TACC image stage requires a legal format");
     }
     if (
-        (
-            prepared.format_ew == EW_FP16 ||
-            prepared.format_ew == EW_BF16
-        ) &&
+        tile_format_is_float(prepared.format_ew) &&
         prepared.format_signed
     ) {
         throw std::invalid_argument(
@@ -29087,16 +29116,6 @@ prepare_tile_memory_transport(
     return prepared;
 }
 
-static bool tacc_ew_is_legal(uint8_t ew) noexcept {
-    return (
-        ew == EW_U8 ||
-        ew == EW_U16 ||
-        ew == EW_U32 ||
-        ew == EW_FP16 ||
-        ew == EW_BF16
-    );
-}
-
 static PreparedTaccState prepare_tacc_state(
         const py::dict& state) {
     PreparedTaccState prepared;
@@ -29175,17 +29194,14 @@ static PreparedTaccState prepare_tacc_state(
         }
         if (
             prepared.valid &&
-            !tacc_ew_is_legal(prepared.format_ew)
+            !tacc_format_is_legal(prepared.format_ew)
         ) {
             throw std::invalid_argument(
                 "valid TACC state requires a legal element width");
         }
         if (
             prepared.valid &&
-            (
-                prepared.format_ew == EW_FP16 ||
-                prepared.format_ew == EW_BF16
-            ) &&
+            tile_format_is_float(prepared.format_ew) &&
             prepared.format_signed != 0
         ) {
             throw std::invalid_argument(
@@ -31970,22 +31986,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
                         "TACC image-stage span wraps the "
                         "address space");
                 }
-                if (
-                    format_ew != EW_U8 &&
-                    format_ew != EW_U16 &&
-                    format_ew != EW_U32 &&
-                    format_ew != EW_FP16 &&
-                    format_ew != EW_BF16
-                ) {
+                if (!tacc_format_is_legal(format_ew)) {
                     throw std::invalid_argument(
                         "TACC image-stage acquisition requires "
                         "a legal format");
                 }
                 if (
-                    (
-                        format_ew == EW_FP16 ||
-                        format_ew == EW_BF16
-                    ) &&
+                    tile_format_is_float(format_ew) &&
                     format_signed
                 ) {
                     throw std::invalid_argument(

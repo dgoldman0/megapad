@@ -274,7 +274,7 @@ def test_native_guest_tacc_csrs_are_not_silent_placeholders() -> None:
         0x8 |
         0x10 |
         (1 << 5) |
-        (1 << 8) |
+        (1 << 9) |
         (2 << 16)
     )
     assert cpu.step() == 1

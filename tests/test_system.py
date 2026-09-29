@@ -5709,7 +5709,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 481)
+        self.assertEqual(len(seen), 483)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -5886,6 +5886,51 @@ class TestBIOSTACC(unittest.TestCase):
 # ---------------------------------------------------------------------------
 #  Multicore BIOS tests (4-core)
 # ---------------------------------------------------------------------------
+
+class TestBIOSTileModes(unittest.TestCase):
+    """Tile format words and the TMODE/TCTRL register widths."""
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def test_float_format_words_follow_bf16_in_the_chain(self):
+        labels = self._bios_harness._bios_labels
+        code = self._bios_harness.bios_code
+        for current, previous in (
+            ("d_icache_on", "d_fp64_mode"),
+            ("d_fp64_mode", "d_fp32_mode"),
+            ("d_fp32_mode", "d_bf16_mode"),
+            ("d_bf16_mode", "d_fp16_mode"),
+        ):
+            link = int.from_bytes(
+                code[labels[current]:labels[current] + 8],
+                "little",
+            )
+            self.assertEqual(link, labels[previous])
+
+    def test_format_words_and_register_widths(self):
+        """Each format word selects its EW; TMODE keeps [6:0], TCTRL [1:0]."""
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            '." F16=" FP16-MODE TMODE@ .',
+            '." B16=" BF16-MODE TMODE@ .',
+            '." F32=" FP32-MODE TMODE@ .',
+            '." F64=" FP64-MODE TMODE@ .',
+            '." WIDE=" -1 TMODE! TMODE@ .',
+            '." CTRL=" -1 TCTRL! TCTRL@ .',
+            "0 TCTRL! 0 TMODE!",
+        ])
+        for expected in (
+            "F16=4 ",
+            "B16=5 ",
+            "F32=6 ",
+            "F64=7 ",
+            "WIDE=127 ",
+            "CTRL=3 ",
+        ):
+            self.assertIn(expected, text)
+
 
 class TestMulticore(unittest.TestCase):
     """Test BIOS multicore boot, IPI, mailbox, spinlocks, and worker dispatch."""
@@ -15449,7 +15494,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 481)
+        self.assertEqual(len(seen), 483)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)

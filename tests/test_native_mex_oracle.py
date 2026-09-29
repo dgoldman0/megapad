@@ -29,6 +29,9 @@ from accel_wrapper import Megapad64 as NativeMegapad64
 from asm import assemble
 from megapad64 import (
     CLUSTER_SPAD_ADDR,
+    CSR_TACC_STATUS,
+    CSR_TCTRL,
+    CSR_TMODE,
     EW_BF16,
     EW_FP16,
     EW_U16,
@@ -377,6 +380,138 @@ def _format_difference(oracle: Any, native: Any) -> str:
             f"native[{start}:{end}]={native[start:end].hex()}"
         )
     return f"oracle={oracle!r}, native={native!r}"
+
+
+@pytest.mark.parametrize("cpu_type", [PythonMegapad64, NativeMegapad64])
+def test_tmode_and_tctrl_keep_only_their_defined_bits(
+    cpu_type: CPUFactory,
+) -> None:
+    """TMODE keeps [6:0] and TCTRL keeps [1:0] on every write path."""
+    cpu = cpu_type(mem_size=MEM_SIZE)
+    cpu.csr_write(CSR_TMODE, MASK64)
+    cpu.csr_write(CSR_TCTRL, MASK64)
+    assert cpu.csr_read(CSR_TMODE) == 0x7F
+    assert cpu.csr_read(CSR_TCTRL) == 0x03
+
+    code = assemble(
+        "ldi64 r1, 0xFFFFFFFFFFFFFF88\n"
+        f"csrw {CSR_TMODE}, r1\n"
+        f"csrw {CSR_TCTRL}, r1\n"
+        f"csrr r2, {CSR_TMODE}\n"
+        f"csrr r3, {CSR_TCTRL}\n"
+    )
+    cpu.load_bytes(0, code)
+    cpu.pc = 0
+    for _ in range(5):
+        cpu.step()
+    # 0x88 keeps EW 8 (reserved) and drops bit 7; TCTRL keeps neither bit.
+    assert (cpu.regs[2], cpu.regs[3]) == (0x08, 0x00)
+
+
+@pytest.mark.parametrize("instruction", ["t.add", "t.dot", "t.sum", "t.zero",
+                                         "t.shuffle", "t.load2d"])
+@pytest.mark.parametrize(
+    "tmode",
+    [
+        pytest.param(0x06, id="fp32-pending"),
+        pytest.param(0x07, id="fp64-pending"),
+        pytest.param(0x08, id="reserved-8"),
+        pytest.param(0x1F, id="reserved-15-signed"),
+    ],
+)
+def test_unready_tile_formats_trap_before_any_access(
+    tmode: int,
+    instruction: str,
+) -> None:
+    """Reserved EW codes, and FP32/FP64 until their operations land, trap
+    IVEC_ILLEGAL_OP before memory, ACC, or TCTRL changes."""
+    reads: list[int] = []
+
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu,
+            tmode=tmode,
+            src0=bytes((index * 3 + 1) & 0xFF for index in range(64)),
+            src1=bytes((index * 5 + 7) & 0xFF for index in range(64)),
+            tctrl=0x2,
+        )
+        original_read8 = cpu.mem_read8
+
+        def counting_read8(address: int) -> int:
+            reads.append(address)
+            return original_read8(address)
+
+        cpu.mem_read8 = counting_read8
+        return watchers
+
+    result = _assert_trapping_tacc_matches_oracle(
+        instruction,
+        setup,
+        expected_dispatch="fallback",
+    )
+    before = result["before"]
+    after = result["after"]
+    assert result["ivec_id"] == IVEC_ILLEGAL_OP
+    assert reads == []
+    assert after["memory:bank0"] == before["memory:bank0"]
+    assert after["acc"] == before["acc"]
+    assert after["tile"] == before["tile"]
+    assert after["flags"] == before["flags"]
+
+
+@pytest.mark.parametrize("cpu_type", [PythonMegapad64, NativeMegapad64])
+@pytest.mark.parametrize(
+    ("ew", "signed"),
+    [(EW_U16, 1), (EW_BF16, 0)],
+)
+def test_tacc_status_packs_the_four_bit_format(
+    cpu_type: CPUFactory,
+    ew: int,
+    signed: int,
+) -> None:
+    """FORMAT_EW is [8:5], FORMAT_SIGNED [9], FORCE_PENDING [10]."""
+    cpu = cpu_type(mem_size=MEM_SIZE)
+    _restore_tacc_state(cpu, image=bytes(TACC_IMAGE_BYTES), ew=ew,
+                        signed=signed)
+    status = cpu.csr_read(CSR_TACC_STATUS)
+    assert status & 0x1F == 0b01111
+    assert (status >> 5) & 0xF == ew
+    assert (status >> 9) & 1 == signed
+    assert (status >> 10) & 1 == 0
+    assert (status >> 11) & 0x1F == 0
+    assert (status >> 16) & 0x1F == cpu.core_id
+    assert status >> 21 == 0
+
+
+@pytest.mark.parametrize(
+    "tmode",
+    [
+        pytest.param(0x06, id="fp32-pending"),
+        pytest.param(0x07, id="fp64-pending"),
+        pytest.param(0x08, id="reserved-8-is-not-u8"),
+        pytest.param(0x09, id="reserved-9-is-not-u16"),
+    ],
+)
+def test_tacc_clear_decodes_the_full_four_bit_format(tmode: int) -> None:
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu,
+            tmode=tmode,
+            src0=bytes(64),
+            src1=bytes(64),
+        )
+        _restore_tacc_state(
+            cpu,
+            image=bytes(TACC_IMAGE_BYTES),
+            valid=False,
+            dirty=False,
+            ew=0,
+        )
+        return watchers
+
+    result = _assert_trapping_tacc_matches_oracle("t.acc.clear", setup)
+    assert result["ivec_id"] == IVEC_ILLEGAL_OP
+    assert result["after"]["tacc"] == result["before"]["tacc"]
 
 
 @pytest.mark.parametrize(

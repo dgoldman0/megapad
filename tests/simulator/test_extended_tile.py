@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from asm import assemble
+from emulator.megapad64 import CSR_TCTRL, CSR_TMODE
 from emulator.megapad64 import Megapad64 as PythonMegapad64
 from shared.cells import MASK64
 from shared import ieee_fp
@@ -61,8 +62,10 @@ def _run_oracle(
     cpu.mem[DESTINATION + TILE_BYTES : DESTINATION + 2 * TILE_BYTES] = bytes(
         (0xC3,)
     ) * TILE_BYTES
-    cpu.tmode = mode
-    cpu.tctrl = control
+    # Write TMODE and TCTRL through the architectural CSR path, which keeps
+    # only their defined bits, as the hosted service does.
+    cpu.csr_write(CSR_TMODE, mode)
+    cpu.csr_write(CSR_TCTRL, control)
     cpu.tsrc0 = SOURCE0
     cpu.tsrc1 = SOURCE1
     cpu.tdst = DESTINATION
@@ -539,3 +542,25 @@ def test_widening_multiply_keeps_its_first_ordered_write_if_the_second_faults(
     assert runtime.tile.accumulator == (11, 22, 33, 44)
     assert runtime.tile.control == 3
     assert runtime.diagnostics.perf_tileops == 0
+
+
+def test_mode_words_and_register_widths() -> None:
+    """The format words select their EW; TMODE keeps [6:0], TCTRL [1:0]."""
+
+    runtime = MegaForthRuntime()
+    context = runtime.main_context
+    for word, mode in (
+        ("FP16-MODE", 4),
+        ("BF16-MODE", 5),
+        ("FP32-MODE", 6),
+        ("FP64-MODE", 7),
+    ):
+        runtime.execute(word, step_budget=10_000)
+        assert runtime.tile.mode == mode
+    assert context.data.snapshot() == ()
+
+    context.data.push(MASK64)
+    runtime.execute("TMODE!", step_budget=10_000)
+    context.data.push(MASK64)
+    runtime.execute("TCTRL!", step_budget=10_000)
+    assert (runtime.tile.mode, runtime.tile.control) == (0x7F, 0x03)

@@ -96,7 +96,7 @@ def _tacc_status(cpu) -> dict[str, int | bool]:
         "valid": bool(value & (1 << 2)),
         "dirty": bool(value & (1 << 3)),
         "busy": bool(value & (1 << 4)),
-        "force_pending": bool(value & (1 << 9)),
+        "force_pending": bool(value & (1 << 10)),
         "owner": (value >> 16) & 0x1F,
     }
 

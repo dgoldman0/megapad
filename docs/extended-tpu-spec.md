@@ -28,7 +28,7 @@ existing tile engine and SoC infrastructure:
 | Family | Purpose | Area Estimate | Status |
 |--------|---------|---------------|--------|
 | **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium | ✅ Implemented |
-| **Numeric Acceleration** | FP16/BF16/FP32/FP64 tile ops, scalar FP32/FP64 engine | Medium | ✅ FP16/BF16 functional (not yet bit-exact across backends); ☐ full float per `docs/floating-point.md` |
+| **Numeric Acceleration** | FP16/BF16/FP32/FP64 tile ops, scalar FP32/FP64 engine | Medium | ✅ FP16/BF16 bit-exact in all four backends; ☐ FP32/FP64 operations and the scalar engine per `docs/floating-point.md` |
 | **Full-width TACC** | Persistent widened lane accumulation with explicit ownership | Medium | ✅ Emulator and functional RTL; ☐ routed FPGA acceptance |
 | **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE/raw Keccak, checked WOTS chain, 32/64-bit CRC tuples | Large | ✅ Checkpoint-3 WOTS path qualified across execution models, integrated RTL, and BIOS; FPGA routing remains a separate acceptance gate |
 | **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | Weighted arbiter implemented; architectural QoS programming is not integrated; DMA remains design-only |
@@ -214,8 +214,8 @@ in-place (`ED 06`) forms.  Its integer formats widen U8/S8 products into 32-bit
 lanes and U16/S16 or U32/S32 products into 64-bit lanes.  FP16 and BF16
 products accumulate in binary32 with one round-to-nearest-even feedback
 addition per lane.  U64 remains unsupported.  FP32 and FP64 TACC formats
-(EW 6 and 7) are specified in `docs/floating-point.md` §7 and not yet
-implemented.
+(EW 6 and 7) are specified in `docs/floating-point.md` §7 and land in Phase 5
+of `docs/megapad-full-float-plan.md`; until then they trap.
 
 Lifecycle operations use `F8 E3 02` through `F8 E3 06` for `TRY`, `CLEAR`,
 `LOAD`, `STORE`, and `RELEASE`.  `TACC_STATUS` at CSR `0x1D` exposes claimed,

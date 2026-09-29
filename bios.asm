@@ -21973,9 +21973,27 @@ d_bf16_mode:
     csrw 0x14, r0
     ret.l
 
+; === FP32-MODE ( -- ) set TMODE to fp32 (EW=6) ===
+d_fp32_mode:
+    .dq d_bf16_mode
+    .db 9
+    .ascii "FP32-MODE"
+    ldi r0, 6
+    csrw 0x14, r0
+    ret.l
+
+; === FP64-MODE ( -- ) set TMODE to fp64 (EW=7) ===
+d_fp64_mode:
+    .dq d_fp32_mode
+    .db 9
+    .ascii "FP64-MODE"
+    ldi r0, 7
+    csrw 0x14, r0
+    ret.l
+
 ; === ICACHE-ON ( -- ) ===
 d_icache_on:
-    .dq d_bf16_mode
+    .dq d_fp64_mode
     .db 9
     .ascii "ICACHE-ON"
     ldi64 r11, w_icache_on

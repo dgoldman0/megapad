@@ -724,12 +724,10 @@ format.  Legal formats are:
 | 6 — FP32 | 16 | binary64 | 128 bytes |
 | 7 — FP64 | 8 | binary64 | 64 bytes |
 
-EW 3 and the reserved codes 8–15 are illegal.  The repacked status layout
-above, the FP32 and FP64 formats, and the 4-bit format field are specified in
-`docs/floating-point.md` and land in Phases 3 and 5 of
-`docs/megapad-full-float-plan.md`; until then backends use the previous
-packing (`FORMAT_EW [7:5]`, `FORMAT_SIGNED [8]`, `FORCE_PENDING [9]`) and
-reject EW 6 and 7.  FP32 products are exact in binary64 and FP64 `TAMAC` is
+EW 3 and the reserved codes 8–15 are illegal.  The FP32 and FP64 formats are
+specified in `docs/floating-point.md` §7 and land in Phase 5 of
+`docs/megapad-full-float-plan.md`; until then backends reject EW 6 and 7 as
+well.  FP32 products are exact in binary64 and FP64 `TAMAC` is
 fused; both round once per lane and use canonical NaN
 `0x7FF8000000000000`.  Physical lane `i` begins at bit `i × lane_width`;
 inactive high bits are zero.  Integer products are exact, sign- or
@@ -1198,8 +1196,8 @@ when the operands are unordered; test VS first or use `FLE`.
 | `0x11` | **SR** | 20 | RW | Tile row cursor |
 | `0x12` | **SC** | 20 | RW | Tile column cursor |
 | `0x13` | **SW** | 20 | RW | Tile stride width (default 1) |
-| `0x14` | **TMODE** | 8 | RW | Tile element mode: EW `[3:0]`, signed `[4]`, saturate `[5]`, rounding `[6]`; bit 7 reads zero (4-bit EW lands in Phase 3 of the full-float plan) |
-| `0x15` | **TCTRL** | 8 | RW | Tile control register |
+| `0x14` | **TMODE** | 8 | RW | Tile element mode: EW `[3:0]`, signed `[4]`, saturate `[5]`, rounding `[6]`; bit 7 and higher bits read zero |
+| `0x15` | **TCTRL** | 8 | RW | Tile control: `ACC_ACC [0]`, `ACC_ZERO [1]`; higher bits read zero |
 | `0x16` | **TSRC0** | 64 | RW | Tile source 0 address |
 | `0x17` | **TSRC1** | 64 | RW | Tile source 1 address |
 | `0x18` | **TDST** | 64 | RW | Tile destination address |

@@ -228,6 +228,11 @@ access or state change:
 - an operation marked illegal for its format;
 - a noncanonical encoding of a new operation (§6).
 
+The reserved-format rule covers every MEX tile operation, including the raw
+ones. The TACC lifecycle has its own format rule (§7): `CLEAR`, `LOAD`, and
+`TAMAC` trap on a format that is not a legal TACC format, and `TRY`, `STORE`,
+and `RELEASE` do not read `TMODE`.
+
 ## 6. New extended tile operations
 
 These use the `EXT.8` prefix before a TALU-class MEX byte:
@@ -560,7 +565,7 @@ models no instruction encodings.
 | Exact reference oracle (`shared/ieee_fp.py`) | 2 | Implemented |
 | FP16/BF16 unification, including §3, §4, §5.1, fused MAC/FMA, and integer running MIN/MAX: Python emulator, native accelerator, hosted simulator | 2 | Implemented |
 | FP16/BF16 unification: RTL | 2 | Implemented |
-| 4-bit `TMODE.EW`, `TACC_STATUS` repack, format descriptors, `FP32-MODE`, `FP64-MODE` | 3 | Specified |
+| 4-bit `TMODE.EW`, `TMODE`/`TCTRL` write widths, `TACC_STATUS` repack, format descriptors, `FP32-MODE`, `FP64-MODE`; EW 6 and 7 trap until Phases 4–5 | 3 | Implemented |
 | FP32/FP64 element-wise operations and the FMA unit | 4 | Specified |
 | FP32/FP64 reductions and TACC formats | 5 | Specified |
 | `TCVT`, `TCMP`, `VSEL`; removal of float PACK and UNPACK | 6 | Specified |

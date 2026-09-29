@@ -491,7 +491,7 @@ def test_fp16_binary_words_trust_only_the_first_source_tile_count(
     )
     runtime.memory.write_bytes(destination_data, bytes((0xA5,)) * 128)
     runtime.field.replace_accumulator_words(0, (11, 22, 33, 44))
-    runtime.tile.set_control(0xA5)
+    runtime.tile.set_control(0x03)
 
     assert _execute(runtime, "F.ADD", left, right, destination) == ()
     assert _decode_float_tile(
@@ -515,7 +515,7 @@ def test_fp16_binary_words_trust_only_the_first_source_tile_count(
     assert runtime.tile.source1 == right_data + 64
     assert runtime.tile.destination == destination_data + 64
     assert runtime.tile.accumulator == (11, 22, 33, 44)
-    assert runtime.tile.control == 0xA5
+    assert runtime.tile.control == 0x03
     assert runtime.tile.mode == 0
     assert runtime.diagnostics.perf_tileops == 4
 
