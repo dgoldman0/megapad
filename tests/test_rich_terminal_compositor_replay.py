@@ -20,7 +20,7 @@ import pytest
 pygame = pytest.importorskip("pygame")
 
 import session_viewer  # noqa: E402
-from display import VirtualTerminal  # noqa: E402
+from display import ATTR_CONTINUATION, ATTR_WIDE, VirtualTerminal  # noqa: E402
 from rich_terminal import pygame_view  # noqa: E402
 from rich_terminal.pygame_view import (  # noqa: E402
     ATTR_BOLD,
@@ -273,3 +273,96 @@ def test_skipped_cells_are_exactly_the_covered_cells_whose_glyphs_fit(font):
                 assert (char, 2 if attrs & 0x100 else 1) in fits
     assert any(not fit for fit in fits.values())
     assert any(fit for fit in fits.values())
+
+
+# ---------------------------------------------------------------------------
+# Repainting one area of the CELL pass
+# ---------------------------------------------------------------------------
+
+
+def _terminal_with_wide_pairs(seed: int) -> VirtualTerminal:
+    """A random grid whose wide characters take their lead and continuation."""
+
+    terminal = _terminal(seed)
+    randomizer = random.Random(seed + 100)
+    with terminal._lock:
+        for row in terminal.grid:
+            for column in range(0, COLS - 1, 5):
+                if randomizer.random() < 0.6:
+                    _char, fg, bg, attrs = row[column]
+                    row[column] = ("中", fg, bg, attrs | ATTR_WIDE)
+                    row[column + 1] = ("", fg, bg, attrs | ATTR_CONTINUATION)
+    return terminal
+
+
+def _areas(randomizer, bounds, count: int):
+    """Pixel rectangles that cut cells, wide pairs and the frame's edges."""
+
+    for _ in range(count):
+        left = randomizer.randrange(-5, bounds.width)
+        top = randomizer.randrange(-5, bounds.height)
+        area = pygame.Rect(left, top, randomizer.randrange(1, bounds.width // 2),
+                           randomizer.randrange(1, bounds.height // 2))
+        yield area.clip(bounds)
+
+
+def _repaint(terminal, full, font, cell_size, area, cache, covered=None):
+    frame = full.copy()
+    frame.set_clip(area)
+    frame.fill(VirtualTerminal._DEFAULT_BG)
+    terminal.paint_area(pygame, frame, font, *cell_size, area,
+                        _cache=cache, covered=covered)
+    frame.set_clip(None)
+    return pygame.image.tobytes(frame, "RGBA")
+
+
+@pytest.fixture(scope="module")
+def big_font():
+    pygame.font.init()
+    # Drawn into the ordinary font's cells, its glyphs reach more than two
+    # cells right and more than one cell down.
+    return pygame.font.Font(None, 48)
+
+
+@pytest.mark.parametrize("big", (False, True))
+@pytest.mark.parametrize("seed", range(4))
+def test_repainting_any_cell_area_gives_the_full_render(font, big_font, big, seed):
+    cell_size = _cell_size(font)
+    paint_font = big_font if big else font
+    terminal = _terminal_with_wide_pairs(seed)
+    covered = opaque_cell_coverage(
+        pygame, SYNTHETIC_PLANES["partial-rows"], COLS, ROWS, *cell_size
+    )
+    randomizer = random.Random(seed)
+    for coverage in (None, covered):
+        cache = {}
+        full = terminal.render(pygame, paint_font, *cell_size, show_cursor=False,
+                               _cache=cache, covered=coverage)
+        expected = pygame.image.tobytes(full, "RGBA")
+        for area in _areas(randomizer, full.get_rect(), 40):
+            assert _repaint(
+                terminal, full, paint_font, cell_size, area, cache, coverage
+            ) == expected, area
+
+
+def test_an_area_repaint_needs_the_reach_of_glyphs_beside_it(font, big_font):
+    """Glyphs that reach past two cells right and below their row are only
+    repainted into an area through the recorded glyph extent."""
+
+    cell_size = _cell_size(font)
+    terminal = _terminal_with_wide_pairs(0)
+    cache = {}
+    full = terminal.render(pygame, big_font, *cell_size, show_cursor=False, _cache=cache)
+    expected = pygame.image.tobytes(full, "RGBA")
+    widest, tallest = next(value for key, value in cache.items() if not isinstance(key, tuple))
+    assert widest > 2 * cell_size[0] and tallest > cell_size[1]
+    forgetful = {key: value for key, value in cache.items() if isinstance(key, tuple)}
+    areas = list(_areas(random.Random(1), full.get_rect(), 80))
+    assert all(
+        _repaint(terminal, full, big_font, cell_size, area, cache) == expected
+        for area in areas
+    )
+    assert any(
+        _repaint(terminal, full, big_font, cell_size, area, forgetful) != expected
+        for area in areas
+    )
