@@ -413,13 +413,11 @@ def test_tmode_and_tctrl_keep_only_their_defined_bits(
 _RESERVED_MODE_INSTRUCTIONS = (
     "t.add", "t.dot", "t.sum", "t.zero", "t.shuffle", "t.load2d",
 )
-# Operations FP32/FP64 do not admit yet (reductions and dot products land in
-# Phase 5, VSEL and the EXT.8 functions 4-7 in Phases 6 and 8) or at all
-# (PACK, UNPACK, VSHR, VSHL, VCLZ).
+# Operations FP32/FP64 do not admit yet (VSEL and the EXT.8 functions 4-7
+# land in Phases 6 and 8) or at all (PACK, UNPACK, VSHR, VSHL, VCLZ).
 _WIDE_FLOAT_UNADMITTED = (
-    "t.dot", "t.dotacc", "t.sum", "t.rmin", "t.rmax", "t.l1", "t.sumsq",
-    "t.minidx", "t.maxidx", "t.pack", "t.unpack", "t.vshr", "t.vshl",
-    "t.vclz", "t.vsel", ".db 0xF8, 0xE0, 0x04", ".db 0xF8, 0xE0, 0x07",
+    "t.pack", "t.unpack", "t.vshr", "t.vshl", "t.vclz", "t.vsel",
+    ".db 0xF8, 0xE0, 0x04", ".db 0xF8, 0xE0, 0x07",
 )
 _UNADMITTED_CASES = (
     [
@@ -510,10 +508,10 @@ def test_tacc_status_packs_the_four_bit_format(
 @pytest.mark.parametrize(
     "tmode",
     [
-        pytest.param(0x06, id="fp32-pending"),
-        pytest.param(0x07, id="fp64-pending"),
+        pytest.param(0x03, id="u64-is-not-a-tacc-format"),
         pytest.param(0x08, id="reserved-8-is-not-u8"),
         pytest.param(0x09, id="reserved-9-is-not-u16"),
+        pytest.param(0x0F, id="reserved-15"),
     ],
 )
 def test_tacc_clear_decodes_the_full_four_bit_format(tmode: int) -> None:
@@ -1267,6 +1265,72 @@ def test_fp_tacc_tamac_is_native_and_bit_exact(
     assert after["tacc"][0][128:] == bytes(128)
     if expected_lane0 is not None:
         assert int.from_bytes(after["tacc"][0][:4], "little") == expected_lane0
+
+
+@pytest.mark.parametrize(
+    ("instruction", "source_cycles"),
+    [("t.amac", 2), ("t.amac r7", 1), ("t.amac inplace", 2)],
+)
+@pytest.mark.parametrize(
+    ("ew", "arithmetic_cycles", "active_bytes"),
+    [
+        pytest.param(EW_FP32, 8, 128, id="fp32"),
+        pytest.param(EW_FP64, 4, 64, id="fp64"),
+    ],
+)
+def test_wide_fp_tacc_tamac_is_native_and_bit_exact(
+    ew: int,
+    arithmetic_cycles: int,
+    active_bytes: int,
+    instruction: str,
+    source_cycles: int,
+) -> None:
+    """FP32 TAMAC adds exact binary64 products once per lane; FP64 TAMAC is
+    a binary64 FMA per lane (docs/floating-point.md §7)."""
+    fmt = ieee_fp.FORMAT_BY_EW[ew]
+    lanes = 64 // (fmt.width // 8)
+    rng = random.Random(f"tamac/{ew}/{instruction}")
+    for _ in range(12):
+        source_a = bytes(tile_float.pack_lanes(
+            fmt, _random_float_lanes(rng, fmt, lanes)))
+        source_b = bytes(tile_float.pack_lanes(
+            fmt, _random_float_lanes(rng, fmt, lanes)))
+        accumulators = _random_float_lanes(rng, ieee_fp.FP64, 16)
+        initial_image = b"".join(
+            value.to_bytes(8, "little") for value in accumulators
+        )[:active_bytes]
+        initial_image += bytes(TACC_IMAGE_BYTES - len(initial_image))
+        register = rng.getrandbits(64)
+
+        def setup(cpu: Any) -> Watchers:
+            if instruction.endswith("inplace"):
+                watchers = _seed_common_state(
+                    cpu,
+                    tmode=ew,
+                    src0=source_b,
+                    src1=bytes([0xD7]) * 64,
+                    dst0=source_a,
+                )
+            else:
+                watchers = _seed_common_state(
+                    cpu,
+                    tmode=ew,
+                    src0=source_a,
+                    src1=source_b,
+                )
+            cpu.regs[7] = register
+            _restore_tacc_state(cpu, image=initial_image, ew=ew)
+            return watchers
+
+        result = _assert_tacc_sequence_matches_oracle(
+            instruction,
+            setup,
+            expected_dispatch="native",
+        )
+        after = result["states"][0]
+        assert result["cycles"] == (1 + source_cycles + arithmetic_cycles,)
+        assert after["tacc"][0][active_bytes:] == bytes(
+            TACC_IMAGE_BYTES - active_bytes)
 
 
 @pytest.mark.parametrize(
@@ -3245,12 +3309,15 @@ def test_fp_mex_native_matches_oracle_on_seeded_tiles(
 
 _WIDE_FP_DIFFERENTIAL_INSTRUCTIONS = (
     "t.add", "t.sub", "t.and", "t.or", "t.xor", "t.min", "t.max", "t.abs",
-    "t.mul", "t.wmul", "t.mac", "t.fma",
-    "t.add r3", "t.mul r3", "t.fma r3",
+    "t.mul", "t.wmul", "t.mac", "t.fma", "t.dot", "t.dotacc",
+    "t.sum", "t.rmin", "t.rmax", "t.l1", "t.sumsq", "t.minidx", "t.maxidx",
+    "t.add r3", "t.mul r3", "t.fma r3", "t.dot r3",
     ".db 0xE8, 0x07",  # immediate ADD
     ".db 0xE9, 0xFF",  # immediate MUL
+    ".db 0xEA, 0x21",  # immediate TRED (SUM of the tile)
     ".db 0xEC, 0x01",  # in-place SUB
     ".db 0xED, 0x04",  # in-place FMA
+    ".db 0xED, 0x05",  # in-place DOTACC
 )
 
 
@@ -3259,17 +3326,18 @@ _WIDE_FP_DIFFERENTIAL_INSTRUCTIONS = (
     "ew",
     [pytest.param(EW_FP32, id="fp32"), pytest.param(EW_FP64, id="fp64")],
 )
-def test_wide_fp_elementwise_native_matches_oracle_on_seeded_tiles(
+def test_wide_fp_native_matches_oracle_on_seeded_tiles(
     instruction: str,
     ew: int,
 ) -> None:
-    """FP32/FP64 element-wise operations run natively and bit-exactly."""
+    """FP32/FP64 element-wise operations, reductions, and dot products run
+    natively and bit-exactly, under every accumulator control."""
     if ew == EW_FP64 and instruction == "t.wmul":
         pytest.skip("FP64 WMUL is illegal (covered by the trap test)")
     fmt = ieee_fp.FORMAT_BY_EW[ew]
     lanes = 64 // (fmt.width // 8)
     rng = random.Random(f"{instruction}/{ew}")
-    for _ in range(24):
+    for index in range(24):
         src0 = bytes(tile_float.pack_lanes(
             fmt, _random_float_lanes(rng, fmt, lanes)))
         src1 = bytes(tile_float.pack_lanes(
@@ -3277,7 +3345,10 @@ def test_wide_fp_elementwise_native_matches_oracle_on_seeded_tiles(
         dst0 = bytes(tile_float.pack_lanes(
             fmt, _random_float_lanes(rng, fmt, lanes)))
         register = rng.getrandbits(64)
-        tctrl = rng.randrange(4)
+        tctrl = index % 4
+        acc = tuple(
+            _random_float_lanes(rng, ieee_fp.FP64, 1)[0] for _ in range(4)
+        )
 
         def setup(cpu: Any) -> Watchers:
             watchers = _seed_common_state(
@@ -3287,6 +3358,7 @@ def test_wide_fp_elementwise_native_matches_oracle_on_seeded_tiles(
                 src1=src1,
                 dst0=dst0,
                 tctrl=tctrl,
+                acc=acc,
             )
             cpu.regs[3] = register
             return watchers
@@ -3336,13 +3408,18 @@ def test_float_tile_extra_cycles_follow_the_timing_table(
     cpu_type: CPUFactory,
 ) -> None:
     """docs/floating-point.md §10, measured against the zero-cost AND."""
+    reductions = ("t.dot", "t.dotacc", "t.sum", "t.l1", "t.sumsq", "t.rmin",
+                  "t.minidx", "t.popcnt")
     expected = {
         EW_FP16: {"t.add": 0, "t.sub": 0, "t.min": 0, "t.mul": 1,
-                  "t.mac": 2, "t.fma": 2, "t.wmul": 2},
+                  "t.mac": 2, "t.fma": 2, "t.wmul": 2,
+                  **dict(zip(reductions, (3, 3, 0, 0, 0, 0, 0, 0)))},
         EW_FP32: {"t.add": 4, "t.sub": 4, "t.min": 0, "t.mul": 4,
-                  "t.mac": 4, "t.fma": 4, "t.wmul": 5},
+                  "t.mac": 4, "t.fma": 4, "t.wmul": 5,
+                  **dict(zip(reductions, (13, 12, 9, 9, 13, 0, 0, 0)))},
         EW_FP64: {"t.add": 4, "t.sub": 4, "t.min": 0, "t.mul": 4,
-                  "t.mac": 4, "t.fma": 4},
+                  "t.mac": 4, "t.fma": 4,
+                  **dict(zip(reductions, (9, 8, 5, 5, 9, 0, 0, 0)))},
     }
 
     def cycles(ew: int, instruction: str) -> int:

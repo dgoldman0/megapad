@@ -234,8 +234,8 @@ static constexpr bool tile_format_is_float(int ew) {
 // admits).  funct is the effective function (0 for the immediate form) and
 // extended marks the EXT.8 forms.  docs/floating-point.md §5.2 makes PACK,
 // UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL illegal in
-// FP64; the EXT.8 functions 4-7 land in Phases 6 and 8.  FP32 and FP64
-// reductions and dot products land in Phase 5, and their VSEL in Phase 6.
+// FP64; the EXT.8 functions 4-7 land in Phases 6 and 8, and FP32/FP64 VSEL
+// in Phase 6.  FP16/BF16 PACK and UNPACK remain until TCVT replaces them.
 static constexpr bool tile_op_admitted(
         int ew,
         int op,
@@ -251,19 +251,13 @@ static constexpr bool tile_op_admitted(
     }
     if (extended && op == 0x3)
         return true;
-    if (ew != EW_FP32 && ew != EW_FP64)
+    if (!format.is_float())
         return true;
-    switch (op) {
-        case 0x0:
-            return true;
-        case 0x1:
-            return funct == 0 || funct == 3 || funct == 4 ||
-                   (funct == 2 && ew == EW_FP32);
-        case 0x2:
-            return funct == 3;
-        default:
-            return funct != 5 && funct != 6;
-    }
+    if (op == 0x1)
+        return funct != 2 || ew != EW_FP64;
+    if (op == 0x3)
+        return ew == EW_FP16 || ew == EW_BF16 || (funct != 5 && funct != 6);
+    return true;
 }
 
 // docs/floating-point.md §10: extra cycles of float tile operations in
@@ -272,20 +266,21 @@ static constexpr bool tile_op_admitted(
 static constexpr int tile_float_extra_cycles(int ew, int op, int funct) {
     const int column = ew == EW_FP32 ? 1 : ew == EW_FP64 ? 2 : 0;
     constexpr int talu_add_sub[3] = {0, 4, 4};
-    constexpr int tmul[6][3] = {
+    constexpr int tmul[7][3] = {
         {1, 4, 4},    // MUL
         {3, 13, 9},   // DOT
         {2, 5, 0},    // WMUL (illegal in FP64)
         {2, 4, 4},    // MAC
         {2, 4, 4},    // FMA
         {3, 12, 8},   // DOTACC
+        {4, 8, 4},    // TAMAC arithmetic, before its source cycles
     };
     constexpr int tred_sum_l1[3] = {0, 9, 5};
     constexpr int tred_sumsq[3] = {0, 13, 9};
     if (op == 0x0)
         return funct <= 1 ? talu_add_sub[column] : 0;
     if (op == 0x1)
-        return funct <= 5 ? tmul[funct][column] : 0;
+        return funct <= 6 ? tmul[funct][column] : 0;
     if (op == 0x2) {
         if (funct == 0 || funct == 4)
             return tred_sum_l1[column];
@@ -295,11 +290,11 @@ static constexpr int tile_float_extra_cycles(int ew, int op, int funct) {
     return 0;
 }
 
-// TACC.CLEAR, LOAD, and TAMAC formats (docs/tile-engine.md).  FP32 and FP64
-// TACC formats land in Phase 5.
+// TACC.CLEAR, LOAD, and TAMAC formats (docs/tile-engine.md): every defined
+// format except U64.
 static constexpr bool tacc_format_is_legal(int ew) {
     return ew == EW_U8 || ew == EW_U16 || ew == EW_U32 ||
-           ew == EW_FP16 || ew == EW_BF16;
+           ew == EW_FP16 || ew == EW_BF16 || ew == EW_FP32 || ew == EW_FP64;
 }
 
 static constexpr std::size_t TACC_IMAGE_BYTES = 256;
@@ -8119,19 +8114,25 @@ static inline uint64_t tile_float_extreme2(
     return (key_a <= key_b ? a : b) & tile_float_mask(f);
 }
 
-// The canonical pairwise tree over binary32 leaves held as exact doubles.
-static inline uint64_t tile_float_tree32(double* values, int count) {
+// The canonical pairwise tree over leaves held as exact doubles, rounding
+// once to the accumulation format at every node.  A binary64 host addition
+// is RN_64 itself, and for binary32 leaves RN_32(RN_64(x + y)) = RN_32(x + y)
+// because 53 >= 2 * 24 + 2.
+static inline uint64_t tile_float_tree(
+        const TileFloatFormat& wide,
+        double* values,
+        int count) {
     while (count > 1) {
         for (int j = 0; j < count / 2; j++) {
             values[j] = tile_float_to_double(
-                TILE_FP32,
+                wide,
                 tile_float_from_double(
-                    TILE_FP32,
+                    wide,
                     values[2 * j] + values[2 * j + 1]));
         }
         count /= 2;
     }
-    return tile_float_from_double(TILE_FP32, values[0]);
+    return tile_float_from_double(wide, values[0]);
 }
 
 static inline uint32_t fp32_to_bits(float f) {
@@ -8639,11 +8640,11 @@ static inline int native_tacc_format_signed(
         : static_cast<int>((s.tmode >> 4) & 0x1);
 }
 
+// Bytes of the TACC image a format uses; the rest store as zero.
 static inline std::size_t native_tacc_active_bytes(int ew) noexcept {
-    return (
-        ew == EW_U8 ||
-        ew == EW_U16
-    ) ? TACC_IMAGE_BYTES : TACC_IMAGE_BYTES / 2;
+    if (ew == EW_U8 || ew == EW_U16)
+        return TACC_IMAGE_BYTES;
+    return ew == EW_FP64 ? TACC_IMAGE_BYTES / 4 : TACC_IMAGE_BYTES / 2;
 }
 
 class NativeTaccOperation {
@@ -9386,7 +9387,8 @@ static int exec_native_tacc_tamac(
         staged = s.tacc;
     const int source_bytes = source_bits / 8;
     const int accumulator_bits =
-        (floating || ew == EW_U8) ? 32 : 64;
+        floating ? lane_format.accumulation->width :
+        ew == EW_U8 ? 32 : 64;
     const int lane_count =
         static_cast<int>(TILE_BYTES * 8) /
         source_bits;
@@ -9407,7 +9409,7 @@ static int exec_native_tacc_tamac(
         uint64_t result = 0;
         if (floating) {
             result = tile_float_fma(
-                TILE_FP32, tile_float_format(ew), a, b, old);
+                *lane_format.accumulation, tile_float_format(ew), a, b, old);
         } else if (signed_mode) {
             const __int128 product =
                 static_cast<__int128>(
@@ -9449,7 +9451,8 @@ static int exec_native_tacc_tamac(
     const int source_cycles =
         source_selector == 1 ? 1 : 2;
     const int arithmetic_cycles =
-        (floating || ew == EW_U8) ? 4 :
+        floating ? tile_float_extra_cycles(ew, 0x1, 6) :
+        ew == EW_U8 ? 4 :
         ew == EW_U16 ? 2 : 1;
     return source_cycles + arithmetic_cycles;
 }
@@ -9467,53 +9470,58 @@ static inline bool take_accumulator_controls(CPUState& s) {
     return (s.tctrl & 0x1) != 0 && !zero;
 }
 
-// Publish DOT/DOTACC/SUM/SUMSQ/L1 binary32 results to ACC0..ACC{count-1}.
+// Publish DOT/DOTACC/SUM/SUMSQ/L1 results, in the accumulation format, to
+// ACC0..ACC{count-1} (docs/floating-point.md §4.4).
 static void publish_float_sums(
         CPUState& s,
+        const TileFloatFormat& wide,
         const uint64_t* results,
         int count) {
     const bool accumulate = take_accumulator_controls(s);
+    const uint64_t mask = tile_float_mask(wide);
+    const uint64_t magnitude = mask ^ tile_float_sign(wide);
     uint64_t words[4]{};
     bool all_zero = true;
     for (int index = 0; index < count; index++) {
         uint64_t result = results[index];
-        if (accumulate) {
-            result = tile_float_add(
-                TILE_FP32, s.acc[index] & 0xFFFF'FFFFULL, result);
-        }
+        if (accumulate)
+            result = tile_float_add(wide, s.acc[index] & mask, result);
         words[index] = result;
-        all_zero = all_zero && (result & 0x7FFF'FFFFULL) == 0;
+        all_zero = all_zero && (result & magnitude) == 0;
     }
     for (int index = 0; index < 4; index++)
         s.acc[index] = words[index];
     s.flag_z = all_zero ? 1 : 0;
 }
 
-static inline uint64_t tile_float_skip_nan_extreme32(
+// The running NaN-skipping extreme of TRED MIN/MAX under ACC_ACC.
+static inline uint64_t tile_float_skip_nan_extreme(
+        const TileFloatFormat& wide,
         uint64_t old_value,
         uint64_t value,
         bool largest) {
-    if (tile_float_is_nan(TILE_FP32, old_value))
-        return tile_float_is_nan(TILE_FP32, value)
-            ? tile_float_canonical_nan(TILE_FP32) : value;
-    if (tile_float_is_nan(TILE_FP32, value))
+    if (tile_float_is_nan(wide, old_value))
+        return tile_float_is_nan(wide, value)
+            ? tile_float_canonical_nan(wide) : value;
+    if (tile_float_is_nan(wide, value))
         return old_value;
-    const uint64_t old_key = tile_float_order_key(TILE_FP32, old_value);
-    const uint64_t key = tile_float_order_key(TILE_FP32, value);
+    const uint64_t old_key = tile_float_order_key(wide, old_value);
+    const uint64_t key = tile_float_order_key(wide, value);
     return (largest ? key > old_key : key < old_key) ? value : old_value;
 }
 
-static inline bool tile_float_index_replaces32(
+// Whether a MINIDX/MAXIDX tile result replaces ACC0/ACC1 under ACC_ACC.
+static inline bool tile_float_index_replaces(
+        const TileFloatFormat& wide,
         uint64_t candidate,
         uint64_t old_value,
         bool largest) {
-    if (tile_float_is_nan(TILE_FP32, candidate))
+    if (tile_float_is_nan(wide, candidate))
         return false;
-    if (tile_float_is_nan(TILE_FP32, old_value))
+    if (tile_float_is_nan(wide, old_value))
         return true;
-    const uint64_t candidate_key =
-        tile_float_order_key(TILE_FP32, candidate);
-    const uint64_t old_key = tile_float_order_key(TILE_FP32, old_value);
+    const uint64_t candidate_key = tile_float_order_key(wide, candidate);
+    const uint64_t old_key = tile_float_order_key(wide, old_value);
     return largest ? candidate_key > old_key : candidate_key < old_key;
 }
 
@@ -9869,26 +9877,27 @@ static int exec_mex(
                 return cycles;
             }
             if (funct == 1 || funct == 5) {  // DOT, DOTACC
+                const TileFloatFormat& wide = *lane_format.accumulation;
                 double products[32];
                 for (int lane = 0; lane < num_lanes; lane++) {
                     products[lane] = tile_float_to_double(
-                        TILE_FP32,
+                        wide,
                         tile_float_product(
-                            TILE_FP32, fmt,
-                            tile_get_elem(src_a, lane, 2),
-                            tile_get_elem(src_b, lane, 2)));
+                            wide, fmt,
+                            tile_get_elem(src_a, lane, elem_bytes),
+                            tile_get_elem(src_b, lane, elem_bytes)));
                 }
                 uint64_t results[4]{};
                 if (funct == 1) {
-                    results[0] = tile_float_tree32(products, num_lanes);
-                    publish_float_sums(s, results, 1);
+                    results[0] = tile_float_tree(wide, products, num_lanes);
+                    publish_float_sums(s, wide, results, 1);
                 } else {
                     const int chunk = num_lanes / 4;
                     for (int k = 0; k < 4; k++) {
-                        results[k] =
-                            tile_float_tree32(products + k * chunk, chunk);
+                        results[k] = tile_float_tree(
+                            wide, products + k * chunk, chunk);
                     }
-                    publish_float_sums(s, results, 4);
+                    publish_float_sums(s, wide, results, 4);
                 }
                 return cycles;
             }
@@ -9961,20 +9970,21 @@ static int exec_mex(
             return -1;
 
         const TileFloatFormat& fmt = tile_float_format(ew_bits);
+        const TileFloatFormat& wide = *lane_format.accumulation;
         if (funct == 0 || funct == 4 || funct == 5) {  // SUM, L1, SUMSQ
             const uint64_t magnitude =
                 tile_float_mask(fmt) ^ tile_float_sign(fmt);
             double leaves[32];
             for (int lane = 0; lane < num_lanes; lane++) {
-                const uint64_t x = tile_get_elem(src_a, lane, 2);
+                const uint64_t x = tile_get_elem(src_a, lane, elem_bytes);
                 const uint64_t leaf =
-                    funct == 5 ? tile_float_product(TILE_FP32, fmt, x, x)
+                    funct == 5 ? tile_float_product(wide, fmt, x, x)
                     : tile_float_convert(
-                          TILE_FP32, fmt, funct == 4 ? (x & magnitude) : x);
-                leaves[lane] = tile_float_to_double(TILE_FP32, leaf);
+                          wide, fmt, funct == 4 ? (x & magnitude) : x);
+                leaves[lane] = tile_float_to_double(wide, leaf);
             }
-            const uint64_t result = tile_float_tree32(leaves, num_lanes);
-            publish_float_sums(s, &result, 1);
+            const uint64_t result = tile_float_tree(wide, leaves, num_lanes);
+            publish_float_sums(s, wide, &result, 1);
             return tile_float_extra_cycles(ew_bits, op, funct);
         }
 
@@ -9983,7 +9993,7 @@ static int exec_mex(
         int best_index = -1;
         uint64_t best_key = 0;
         for (int lane = 0; lane < num_lanes; lane++) {
-            const uint64_t x = tile_get_elem(src_a, lane, 2);
+            const uint64_t x = tile_get_elem(src_a, lane, elem_bytes);
             if (tile_float_is_nan(fmt, x))
                 continue;
             const uint64_t key = tile_float_order_key(fmt, x);
@@ -9994,24 +10004,26 @@ static int exec_mex(
             }
         }
         const uint64_t value = best_index < 0
-            ? tile_float_canonical_nan(TILE_FP32)
+            ? tile_float_canonical_nan(wide)
             : tile_float_convert(
-                  TILE_FP32, fmt, tile_get_elem(src_a, best_index, 2));
+                  wide, fmt, tile_get_elem(src_a, best_index, elem_bytes));
         const int index = best_index < 0 ? 0 : best_index;
         const bool accumulate = take_accumulator_controls(s);
+        const uint64_t wide_mask = tile_float_mask(wide);
         if (funct == 1 || funct == 2) {
             const uint64_t result = accumulate
-                ? tile_float_skip_nan_extreme32(
-                      s.acc[0] & 0xFFFF'FFFFULL, value, largest)
+                ? tile_float_skip_nan_extreme(
+                      wide, s.acc[0] & wide_mask, value, largest)
                 : value;
             s.acc[0] = result;
             s.acc[1] = s.acc[2] = s.acc[3] = 0;
-            s.flag_z = (result & 0x7FFF'FFFFULL) == 0 ? 1 : 0;
+            s.flag_z =
+                (result & (wide_mask ^ tile_float_sign(wide))) == 0 ? 1 : 0;
             return 0;
         }
         if (!accumulate ||
-            tile_float_index_replaces32(
-                value, s.acc[1] & 0xFFFF'FFFFULL, largest)) {
+            tile_float_index_replaces(
+                wide, value, s.acc[1] & wide_mask, largest)) {
             s.acc[0] = static_cast<uint64_t>(index);
             s.acc[1] = value;
         }
@@ -12192,8 +12204,9 @@ static uint64_t native_tamac_cycle_bound(
         return broadcast ? 4 : 5;
     if (ew == EW_U32)
         return broadcast ? 3 : 4;
-    if (ew == EW_FP16 || ew == EW_BF16)
-        return broadcast ? 6 : 7;
+    // The base instruction cycle, the source cycles, and the arithmetic.
+    if (tile_format_is_float(ew))
+        return 1 + (broadcast ? 1 : 2) + tile_float_extra_cycles(ew, 0x1, 6);
     return 1;
 }
 

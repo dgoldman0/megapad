@@ -23,6 +23,8 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from nic_backends import NICBackend
 
+from shared import tile_formats
+
 from _mp64_accel import (
     BusFault,
     BusOperation,
@@ -49,7 +51,6 @@ from .megapad64 import (
     NUM_ALL_CORES, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR,
     CSR_CL_PRIV, CSR_CL_MPU_BASE, CSR_CL_MPU_LIMIT, CSR_CL_IVTBASE,
     TACC_IMAGE_BYTES, TACC_OWNER_NONE, TACC_LEGAL_EW,
-    EW_FP16, EW_BF16,
 )
 from .devices import (
     MMIO_BASE, DeviceBus, BusError, UART, Timer, Storage, SystemInfo, NetworkDevice,
@@ -374,7 +375,7 @@ class MicroCluster:
             state["tacc_format_signed"],
             "tacc_format_signed",
         )
-        if format_ew > 7 or format_signed > 1:
+        if format_ew > 15 or format_signed > 1:
             raise ValueError("cluster tile TACC format metadata is out of range")
         if force_pending and not busy:
             raise ValueError("cluster tile FORCE_PENDING requires BUSY")
@@ -385,13 +386,11 @@ class MicroCluster:
                 raise ValueError("cluster tile VALID requires an owner")
             if format_ew not in TACC_LEGAL_EW:
                 raise ValueError("cluster tile VALID uses an illegal format")
-            if format_ew in (EW_FP16, EW_BF16) and format_signed:
+            if tile_formats.decode(format_ew).is_float and format_signed:
                 raise ValueError(
                     "cluster tile floating TACC format cannot be signed"
                 )
-            active_bytes = (
-                TACC_IMAGE_BYTES if format_ew in (0, 1) else 128
-            )
+            active_bytes = _PyMegapad64Micro._tacc_active_bytes(format_ew)
             if any(tacc[active_bytes:]):
                 raise ValueError(
                     "cluster tile inactive TACC image bytes must be zero"

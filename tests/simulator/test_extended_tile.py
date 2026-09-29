@@ -635,33 +635,63 @@ def test_fp32_widening_multiply_writes_exact_binary64_products() -> None:
         (1.0 + 15 * 2.0 ** -23) * 2.0 ** -149)
 
 
-@pytest.mark.parametrize(
-    ("format_code", "operation"),
-    (
-        (FP64_FORMAT, "widening_multiply"),
-        (FP32_FORMAT, "dot"),
-        (FP32_FORMAT, "sum"),
-        (FP64_FORMAT, "sum_squares"),
-        (FP64_FORMAT, "minimum"),
-        (FP32_FORMAT, "maximum_index"),
-        (FP64_FORMAT, "l1_norm"),
-    ),
-)
-def test_fp32_fp64_unadmitted_operations_fail_closed(
-    format_code: int,
-    operation: str,
-) -> None:
-    """FP64 WMUL is illegal; FP32/FP64 reductions land in Phase 5."""
+def test_fp64_widening_multiply_fails_closed() -> None:
+    """FP64 WMUL is illegal (docs/floating-point.md §5.2)."""
     runtime = MegaForthRuntime()
     runtime.memory.write_bytes(DESTINATION, bytes((0x5A,)) * 2 * TILE_BYTES)
-    runtime.tile.set_mode(format_code)
+    runtime.tile.set_mode(FP64_FORMAT)
     runtime.tile.set_source0(SOURCE0)
     runtime.tile.set_source1(SOURCE1)
     runtime.tile.set_destination(DESTINATION)
     runtime.field.replace_accumulator_words(0, (11, 22, 33, 44))
     with pytest.raises(UnsupportedTileModeError):
-        getattr(runtime.tile, operation)()
+        runtime.tile.widening_multiply()
     assert runtime.memory.read_bytes(DESTINATION, 2 * TILE_BYTES) == bytes(
         (0x5A,)) * 2 * TILE_BYTES
     assert runtime.tile.accumulator == (11, 22, 33, 44)
     assert runtime.diagnostics.perf_tileops == 0
+
+
+@pytest.mark.parametrize(
+    "format_code",
+    (pytest.param(FP32_FORMAT, id="fp32"), pytest.param(FP64_FORMAT, id="fp64")),
+)
+@pytest.mark.parametrize("control", (0, 1, 2, 3))
+@pytest.mark.parametrize(
+    ("operation", "instruction"),
+    (
+        ("dot", "t.dot"),
+        ("sum", "t.sum"),
+        ("minimum", "t.rmin"),
+        ("maximum", "t.rmax"),
+        ("sum_squares", "t.sumsq"),
+        ("l1_norm", "t.l1"),
+        ("minimum_index", "t.minidx"),
+        ("maximum_index", "t.maxidx"),
+    ),
+)
+def test_fp32_fp64_reductions_publish_binary64(
+    format_code: int,
+    control: int,
+    operation: str,
+    instruction: str,
+) -> None:
+    """FP32/FP64 reductions publish binary64 results to the accumulator
+    (docs/floating-point.md §4) exactly as the executable machine does."""
+    values = (1.5, -0.0, 2.0 ** -40, float("nan"), -7.25, 1e10, 3.0, -2.0)
+    fp64 = ieee_fp.FP64
+    _assert_matches_oracle(
+        operation,
+        instruction,
+        mode=format_code,
+        source0=_wide_float_tile(format_code, values * 2),
+        source1=_wide_float_tile(format_code, tuple(reversed(values)) * 2),
+        destination=bytes((0xA5,)) * TILE_BYTES,
+        control=control,
+        accumulator=(
+            ieee_fp.from_double(fp64, 0.5),
+            ieee_fp.from_double(fp64, -1.0),
+            fp64.canonical_nan,
+            ieee_fp.from_double(fp64, 4.0),
+        ),
+    )

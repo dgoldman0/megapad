@@ -14,6 +14,8 @@ from megapad64 import (
     CSR_TACC_STATUS,
     EW_BF16,
     EW_FP16,
+    EW_FP32,
+    EW_FP64,
     EW_U8,
     EW_U16,
     EW_U32,
@@ -239,7 +241,7 @@ def test_failed_try_retires_normally_without_mutating_foreign_state() -> None:
     assert cpu.perf_cycles == 2
 
 
-@pytest.mark.parametrize("ew", [3, 6, 7])
+@pytest.mark.parametrize("ew", [3, 8, 15])
 @pytest.mark.parametrize(
     ("instruction", "fault_cycles"),
     [
@@ -455,6 +457,57 @@ def test_fp_tamac_canonicalizes_nan_and_preserves_inactive_zeroes() -> None:
     assert _step(cpu, "t.amac") == 7
     assert _read_tacc_lane(cpu, 0, 32) == TACC_CANONICAL_NAN
     assert bytes(cpu.tacc[128:]) == bytes(128)
+
+
+@pytest.mark.parametrize(("ew", "active"), [(EW_FP32, 128), (EW_FP64, 64)])
+def test_fp32_fp64_tacc_images_use_their_active_bytes(
+    ew: int,
+    active: int,
+) -> None:
+    """FP32 TACC holds 16 binary64 lanes and FP64 TACC 8; every other image
+    byte loads as zero and stores as zero (docs/floating-point.md §7)."""
+    cpu = Megapad64(mem_size=4096, core_id=2)
+    _claim_and_clear(cpu, ew, signed=1)
+    status = cpu.csr_read(CSR_TACC_STATUS)
+    assert (status >> 5) & 0xF == ew
+    assert not (status >> 9) & 1  # float formats latch unsigned
+    image = bytes(range(256))
+    cpu.mem[IMAGE_A:IMAGE_A + 256] = image
+    cpu.mem[IMAGE_B:IMAGE_B + 256] = bytes([0xEE]) * 256
+    cpu.tsrc0 = IMAGE_A
+    cpu.tdst = IMAGE_B
+
+    assert _step(cpu, "t.acc.load") == 6
+    assert bytes(cpu.tacc[:active]) == image[:active]
+    assert bytes(cpu.tacc[active:]) == bytes(256 - active)
+    assert _step(cpu, "t.acc.store") == 6
+    assert bytes(cpu.mem[IMAGE_B:IMAGE_B + active]) == image[:active]
+    assert bytes(cpu.mem[IMAGE_B + active:IMAGE_B + 256]) == bytes(
+        256 - active)
+
+
+def test_fp64_tamac_is_fused_and_canonical() -> None:
+    """Each FP64 lane is one binary64 FMA; NaN results are canonical."""
+    one_ulp = ieee_fp.from_double(ieee_fp.FP64, 1.0 + 2.0 ** -52)
+    cpu = Megapad64(mem_size=4096)
+    _claim_and_clear(cpu, EW_FP64)
+    _write_elements(cpu, SOURCE_A,
+                    [one_ulp, 0x7FF0_0000_0000_0123, 0] + [0] * 5, 64)
+    _write_elements(cpu, SOURCE_B,
+                    [one_ulp, ieee_fp.from_double(ieee_fp.FP64, 1.0),
+                     ieee_fp.FP64.infinity] + [0] * 5, 64)
+    cpu.tacc[0:8] = ieee_fp.from_double(
+        ieee_fp.FP64, -(1.0 + 2.0 ** -51)).to_bytes(8, "little")
+    cpu.tsrc0 = SOURCE_A
+    cpu.tsrc1 = SOURCE_B
+
+    assert _step(cpu, "t.amac") == 7
+    # (1 + 2**-52)**2 - (1 + 2**-51) is exactly 2**-104; unfused it is 0.
+    assert _read_tacc_lane(cpu, 0, 64) == ieee_fp.from_double(
+        ieee_fp.FP64, 2.0 ** -104)
+    assert _read_tacc_lane(cpu, 1, 64) == ieee_fp.FP64.canonical_nan
+    assert _read_tacc_lane(cpu, 2, 64) == ieee_fp.FP64.canonical_nan
+    assert bytes(cpu.tacc[64:]) == bytes(192)
 
 
 def test_load_store_canonical_image_and_preserve_cursor_csrs() -> None:

@@ -567,7 +567,8 @@ models no instruction encodings.
 | FP16/BF16 unification: RTL | 2 | Implemented |
 | 4-bit `TMODE.EW`, `TMODE`/`TCTRL` write widths, `TACC_STATUS` repack, format descriptors, `FP32-MODE`, `FP64-MODE`; EW 6 and 7 trap until Phases 4–5 | 3 | Implemented |
 | FP32/FP64 element-wise operations, operand forms, lane shapes, and the §10 costs; illegal VSHR/VSHL/VCLZ in every float format; the multi-format FMA unit: all four backends | 4 | Implemented |
-| FP32/FP64 reductions and TACC formats | 5 | Specified |
+| FP32/FP64 reductions, DOT/DOTACC, and TACC formats: Python emulator, native accelerator, hosted simulator | 5 | Implemented |
+| FP32/FP64 reductions, DOT/DOTACC, and TACC formats: RTL | 5 | Specified |
 | `TCVT`, `TCMP`, `VSEL`; removal of float PACK and UNPACK | 6 | Specified |
 | Scalar `FC` engine and `FPCSR` | 7 | Specified |
 | `TDIV`, `TSQRT` | 8 | Specified |

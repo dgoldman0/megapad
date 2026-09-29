@@ -10,6 +10,8 @@ from megapad64 import (
     CSR_TACC_STATUS,
     EW_BF16,
     EW_FP16,
+    EW_FP32,
+    EW_FP64,
     EW_U16,
     EW_U32,
     EW_U8,
@@ -266,6 +268,11 @@ def test_cycle_api_locks_lifecycle_and_transfer_latencies(
         pytest.param(EW_FP16, "t.amac r7", 6, id="fp16-broadcast-6"),
         pytest.param(EW_BF16, "t.amac", 7, id="bf16-tile-7"),
         pytest.param(EW_BF16, "t.amac r7", 6, id="bf16-broadcast-6"),
+        pytest.param(EW_FP32, "t.amac", 11, id="fp32-tile-11"),
+        pytest.param(EW_FP32, "t.amac r7", 10, id="fp32-broadcast-10"),
+        pytest.param(EW_FP32, "t.amac inplace", 11, id="fp32-inplace-11"),
+        pytest.param(EW_FP64, "t.amac", 7, id="fp64-tile-7"),
+        pytest.param(EW_FP64, "t.amac r7", 6, id="fp64-broadcast-6"),
     ],
 )
 def test_cycle_api_locks_normal_tamac_latencies(

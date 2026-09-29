@@ -271,13 +271,12 @@ def test_integer_widths_signed_saturation_and_unready_formats_fail_closed() -> N
     runtime.tile.maximum()
     assert runtime.tile.accumulator == (1234, 0, 0, 0)
 
-    # FP32 and FP64 reductions fail closed until Phase 5; EW 8-15 are
-    # reserved.  TMODE keeps bits [6:0], so 0x88 selects EW 8.
+    # FP64 WMUL is illegal; EW 8-15 are reserved.  TMODE keeps bits [6:0],
+    # so 0x88 selects EW 8.
     before = runtime.memory.read_bytes(DESTINATION, 64)
     operations = runtime.diagnostics.perf_tileops
     for written, mode, operation in (
-        (6, 0x06, "sum"),
-        (7, 0x07, "sum_squares"),
+        (7, 0x07, "widening_multiply"),
         (0x88, 0x08, "add"),
         (0x1F, 0x1F, "add"),
     ):

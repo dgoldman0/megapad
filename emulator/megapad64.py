@@ -185,7 +185,9 @@ CPUID_MICRO = 0x4D50_3634_0001_4D43
 TACC_IMAGE_BYTES = 256
 TACC_OWNER_NONE = 31
 TACC_CANONICAL_NAN = ieee_fp.FP32.canonical_nan
-TACC_LEGAL_EW = frozenset((EW_U8, EW_U16, EW_U32, EW_FP16, EW_BF16))
+TACC_LEGAL_EW = frozenset(
+    (EW_U8, EW_U16, EW_U32, EW_FP16, EW_BF16, EW_FP32, EW_FP64)
+)
 EXTERNAL_PHY_WORD_BYTES = 8
 EXTERNAL_PHY_WORDS_PER_TILE_BEAT = 8
 EXTERNAL_PHY_TIMEOUT_CYCLES = 255
@@ -249,6 +251,8 @@ _FLOAT_EXTRA_CYCLES = {
     (tile_formats.TMUL, tile_formats.TMUL_MAC): (2, 4, 4),
     (tile_formats.TMUL, tile_formats.TMUL_FMA): (2, 4, 4),
     (tile_formats.TMUL, tile_formats.TMUL_DOTACC): (3, 12, 8),
+    # TAMAC arithmetic, before its one broadcast or two tile source cycles.
+    (tile_formats.TMUL, tile_formats.TMUL_TAMAC): (4, 8, 4),
     (tile_formats.TRED, tile_formats.TRED_SUM): (0, 9, 5),
     (tile_formats.TRED, tile_formats.TRED_L1): (0, 9, 5),
     (tile_formats.TRED, tile_formats.TRED_SUMSQ): (0, 13, 9),
@@ -1681,7 +1685,10 @@ class Megapad64:
 
     @staticmethod
     def _tacc_active_bytes(ew: int) -> int:
-        return TACC_IMAGE_BYTES if ew in (EW_U8, EW_U16) else 128
+        """Bytes of the TACC image a format uses; the rest store as zero."""
+        if ew in (EW_U8, EW_U16):
+            return TACC_IMAGE_BYTES
+        return 64 if ew == EW_FP64 else 128
 
     @staticmethod
     def _tacc_lane_read(image: bytearray, lane: int, lane_bits: int) -> int:
@@ -3967,7 +3974,8 @@ class Megapad64:
                         wide.width,
                         ieee_fp.lane_mixed_fma(wide, source, a, b, old),
                     )
-                arithmetic_cycles = 4
+                arithmetic_cycles = _float_extra_cycles(
+                    lane_format, tile_formats.TMUL, tile_formats.TMUL_TAMAC)
 
             active = self._tacc_active_bytes(ew)
             staged[active:] = bytes(TACC_IMAGE_BYTES - active)
