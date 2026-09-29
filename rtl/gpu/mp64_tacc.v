@@ -52,7 +52,7 @@ module mp64_tacc #(
     input  wire         req_canonical,
     input  wire [4:0]   req_caller_id,
     input  wire [1:0]   req_caller_slot,
-    input  wire [2:0]   req_format_ew,
+    input  wire [3:0]   req_format_ew,
     input  wire         req_format_signed,
     input  wire [63:0]  req_image_addr,
     input  wire [2:0]   req_preflight_fault,
@@ -80,7 +80,7 @@ module mp64_tacc #(
     output wire         xfer_req,
     output wire         xfer_store,
     output wire [63:0]  xfer_base,
-    output wire [2:0]   xfer_format_ew,
+    output wire [3:0]   xfer_format_ew,
     output wire [7:0]   xfer_token,
     output wire [2047:0] xfer_store_image,
     output wire         xfer_cancel,
@@ -113,7 +113,7 @@ module mp64_tacc #(
     reg [4:0]    owner_reg;
     reg          valid_reg;
     reg          dirty_reg;
-    reg [2:0]    format_ew_reg;
+    reg [3:0]    format_ew_reg;
     reg          format_signed_reg;
     reg          force_pending_reg;
 
@@ -121,7 +121,7 @@ module mp64_tacc #(
     reg          active_is_tamac_reg;
     reg [2:0]    active_funct_reg;
     reg [4:0]    active_caller_id_reg;
-    reg [2:0]    active_format_ew_reg;
+    reg [3:0]    active_format_ew_reg;
     reg          active_format_signed_reg;
     reg [63:0]   active_image_addr_reg;
     reg [7:0]    active_token_reg;
@@ -140,7 +140,7 @@ module mp64_tacc #(
     reg          force_seen;
 
     function format_is_legal;
-        input [2:0] ew;
+        input [3:0] ew;
         begin
             case (ew)
                 TMODE_8, TMODE_16, TMODE_32,
@@ -153,7 +153,7 @@ module mp64_tacc #(
     endfunction
 
     function format_signed_is_known;
-        input [2:0] ew;
+        input [3:0] ew;
         input       signed_mode;
         begin
             case (ew)
@@ -174,7 +174,7 @@ module mp64_tacc #(
     endfunction
 
     function normalized_signed;
-        input [2:0] ew;
+        input [3:0] ew;
         input       signed_mode;
         begin
             case (ew)
@@ -187,7 +187,7 @@ module mp64_tacc #(
     endfunction
 
     function tamac_format_is_legal;
-        input [2:0] ew;
+        input [3:0] ew;
         begin
             case (ew)
                 TMODE_8, TMODE_16, TMODE_32,
@@ -418,10 +418,10 @@ module mp64_tacc #(
     assign status_raw = {
         43'd0,
         owner_reg,
-        6'd0,
+        5'd0,
         force_pending_reg,
         (valid_reg ? format_signed_reg : 1'b0),
-        (valid_reg ? format_ew_reg : 3'd0),
+        (valid_reg ? format_ew_reg : 4'd0),
         active_reg,
         dirty_reg,
         valid_reg,
@@ -435,14 +435,14 @@ module mp64_tacc #(
             owner_reg                   <= TACC_OWNER_NONE;
             valid_reg                   <= 1'b0;
             dirty_reg                   <= 1'b0;
-            format_ew_reg               <= 3'd0;
+            format_ew_reg               <= 4'd0;
             format_signed_reg           <= 1'b0;
             force_pending_reg           <= 1'b0;
             active_reg                  <= 1'b0;
             active_is_tamac_reg         <= 1'b0;
             active_funct_reg            <= 3'd0;
             active_caller_id_reg        <= TACC_OWNER_NONE;
-            active_format_ew_reg        <= 3'd0;
+            active_format_ew_reg        <= 4'd0;
             active_format_signed_reg    <= 1'b0;
             active_image_addr_reg       <= 64'd0;
             active_token_reg            <= 8'd0;
@@ -462,14 +462,14 @@ module mp64_tacc #(
             owner_reg                   <= TACC_OWNER_NONE;
             valid_reg                   <= 1'b0;
             dirty_reg                   <= 1'b0;
-            format_ew_reg               <= 3'd0;
+            format_ew_reg               <= 4'd0;
             format_signed_reg           <= 1'b0;
             force_pending_reg           <= 1'b0;
             active_reg                  <= 1'b0;
             active_is_tamac_reg         <= 1'b0;
             active_funct_reg            <= 3'd0;
             active_caller_id_reg        <= TACC_OWNER_NONE;
-            active_format_ew_reg        <= 3'd0;
+            active_format_ew_reg        <= 4'd0;
             active_format_signed_reg    <= 1'b0;
             active_image_addr_reg       <= 64'd0;
             active_token_reg            <= 8'd0;
@@ -511,7 +511,7 @@ module mp64_tacc #(
                         owner_reg         <= TACC_OWNER_NONE;
                         valid_reg         <= 1'b0;
                         dirty_reg         <= 1'b0;
-                        format_ew_reg     <= 3'd0;
+                        format_ew_reg     <= 4'd0;
                         format_signed_reg <= 1'b0;
                         force_pending_reg <= 1'b0;
                         operation_generation_reg <=
@@ -536,7 +536,7 @@ module mp64_tacc #(
                             owner_reg         <= TACC_OWNER_NONE;
                             valid_reg         <= 1'b0;
                             dirty_reg         <= 1'b0;
-                            format_ew_reg     <= 3'd0;
+                            format_ew_reg     <= 4'd0;
                             format_signed_reg <= 1'b0;
                             force_pending_reg <= 1'b0;
                             operation_generation_reg <=
@@ -558,7 +558,7 @@ module mp64_tacc #(
                             owner_reg         <= TACC_OWNER_NONE;
                             valid_reg         <= 1'b0;
                             dirty_reg         <= 1'b0;
-                            format_ew_reg     <= 3'd0;
+                            format_ew_reg     <= 4'd0;
                             format_signed_reg <= 1'b0;
                             force_pending_reg <= 1'b0;
                             operation_generation_reg <=
@@ -606,7 +606,7 @@ module mp64_tacc #(
                                     owner_reg         <= TACC_OWNER_NONE;
                                     valid_reg         <= 1'b0;
                                     dirty_reg         <= 1'b0;
-                                    format_ew_reg     <= 3'd0;
+                                    format_ew_reg     <= 4'd0;
                                     format_signed_reg <= 1'b0;
                                     operation_generation_reg <=
                                         operation_generation_reg + 8'd1;
@@ -649,7 +649,7 @@ module mp64_tacc #(
                         owner_reg         <= TACC_OWNER_NONE;
                         valid_reg         <= 1'b0;
                         dirty_reg         <= 1'b0;
-                        format_ew_reg     <= 3'd0;
+                        format_ew_reg     <= 4'd0;
                         format_signed_reg <= 1'b0;
                         force_pending_reg <= 1'b0;
                         operation_generation_reg <=
@@ -816,7 +816,7 @@ module mp64_tacc #(
             if (valid_reg && owner_reg == TACC_OWNER_NONE)
                 $error("mp64_tacc: valid state has no owner");
             if (!valid_reg &&
-                (format_ew_reg != 3'd0 || format_signed_reg != 1'b0))
+                (format_ew_reg != 4'd0 || format_signed_reg != 1'b0))
                 $error("mp64_tacc: invalid state retained format metadata");
             if (!valid_reg && bank_reg != 2048'd0)
                 $error("mp64_tacc: invalid state retained bank data");

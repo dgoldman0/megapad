@@ -84,7 +84,7 @@ module mp64_cluster #(
     output wire         tacc_xfer_store,
     output wire         tacc_xfer_ext,
     output wire [63:0]  tacc_xfer_base,
-    output wire [2:0]   tacc_xfer_format_ew,
+    output wire [3:0]   tacc_xfer_format_ew,
     output wire [7:0]   tacc_xfer_token,
     output wire [2047:0] tacc_xfer_store_image,
     output wire         tacc_xfer_cancel,
@@ -487,10 +487,12 @@ module mp64_cluster #(
                         case (mc_tile_csr_addr[cfg_i*8 +: 8])
                             CSR_TMODE:
                                 cfg_tmode[cfg_i] <=
-                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64] &
+                                    TMODE_WRITE_MASK;
                             CSR_TCTRL:
                                 cfg_tctrl[cfg_i] <=
-                                    mc_tile_csr_wdata[cfg_i*64 +: 64];
+                                    mc_tile_csr_wdata[cfg_i*64 +: 64] &
+                                    TCTRL_WRITE_MASK;
                             CSR_TSRC0:
                                 cfg_tsrc0[cfg_i] <=
                                     mc_tile_csr_wdata[cfg_i*64 +: 64];

@@ -41,7 +41,7 @@ module mp64_tacc_transfer #(
     input  wire [SOURCE_COUNT-1:0]      req_store,
     input  wire [SOURCE_COUNT-1:0]      req_ext,
     input  wire [SOURCE_COUNT*64-1:0]   req_base,
-    input  wire [SOURCE_COUNT*3-1:0]    req_format_ew,
+    input  wire [SOURCE_COUNT*4-1:0]    req_format_ew,
     input  wire [SOURCE_COUNT*TOKEN_BITS-1:0] req_token,
     input  wire [SOURCE_COUNT*2048-1:0] req_store_image,
     input  wire [SOURCE_COUNT-1:0]      req_cancel,
@@ -87,7 +87,7 @@ module mp64_tacc_transfer #(
     reg                    owner_store;
     reg                    owner_ext;
     reg [63:0]             owner_base;
-    reg [2:0]              owner_format_ew;
+    reg [3:0]              owner_format_ew;
     reg [TOKEN_BITS-1:0]   owner_token;
 
     // This is the sole chip-wide canonical transfer image.
@@ -179,7 +179,7 @@ module mp64_tacc_transfer #(
             owner_store         <= 1'b0;
             owner_ext           <= 1'b0;
             owner_base          <= 64'd0;
-            owner_format_ew     <= 3'd0;
+            owner_format_ew     <= 4'd0;
             owner_token         <= {TOKEN_BITS{1'b0}};
             stage_image         <= 2048'd0;
             beat_index          <= 2'd0;
@@ -211,7 +211,7 @@ module mp64_tacc_transfer #(
                         owner_store         <= 1'b0;
                         owner_ext           <= 1'b0;
                         owner_base          <= 64'd0;
-                        owner_format_ew     <= 3'd0;
+                        owner_format_ew     <= 4'd0;
                         owner_token         <= {TOKEN_BITS{1'b0}};
                         stage_image         <= 2048'd0;
                         beat_index          <= 2'd0;
@@ -236,7 +236,7 @@ module mp64_tacc_transfer #(
                         owner_store         <= 1'b0;
                         owner_ext           <= 1'b0;
                         owner_base          <= 64'd0;
-                        owner_format_ew     <= 3'd0;
+                        owner_format_ew     <= 4'd0;
                         owner_token         <= {TOKEN_BITS{1'b0}};
                         stage_image         <= 2048'd0;
                         beat_index          <= 2'd0;
@@ -312,7 +312,7 @@ module mp64_tacc_transfer #(
                 owner_ext       <= req_ext[next_owner];
                 owner_base      <= req_base[next_owner*64 +: 64];
                 owner_format_ew <=
-                    req_format_ew[next_owner*3 +: 3];
+                    req_format_ew[next_owner*4 +: 4];
                 owner_token     <=
                     req_token[next_owner*TOKEN_BITS +: TOKEN_BITS];
                 beat_index       <= 2'd0;
@@ -331,8 +331,8 @@ module mp64_tacc_transfer #(
                 last_grant       <= next_owner;
 
                 if (req_store[next_owner]) begin
-                    if ((req_format_ew[next_owner*3 +: 3] == TMODE_8) ||
-                        (req_format_ew[next_owner*3 +: 3] == TMODE_16))
+                    if ((req_format_ew[next_owner*4 +: 4] == TMODE_8) ||
+                        (req_format_ew[next_owner*4 +: 4] == TMODE_16))
                         stage_image <=
                             req_store_image[
                                 next_owner*2048 +: 2048

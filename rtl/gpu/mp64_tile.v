@@ -77,7 +77,7 @@ module mp64_tile #(
     output wire         tacc_xfer_store,
     output wire         tacc_xfer_ext,
     output wire [63:0]  tacc_xfer_base,
-    output wire [2:0]   tacc_xfer_format_ew,
+    output wire [3:0]   tacc_xfer_format_ew,
     output wire [7:0]   tacc_xfer_token,
     output wire [2047:0] tacc_xfer_store_image,
     output wire         tacc_xfer_cancel,
@@ -140,7 +140,7 @@ module mp64_tile #(
     reg [63:0] tsrc0;
     reg [63:0] tsrc1;
     reg [63:0] tdst;
-    reg [63:0] tmode;        // bits[2:0]=EW, bit[4]=signed, bit[5]=saturate
+    reg [63:0] tmode;        // [3:0]=EW, [4]=signed, [5]=saturate, [6]=round
     reg [63:0] tctrl;        // bit[0]=accumulate, bit[1]=acc_zero
     reg        tctrl_accumulate_reg;
     reg        tctrl_acc_zero_reg;
@@ -215,8 +215,8 @@ module mp64_tile #(
             ttile_w     <= 64'd8;
         end else begin
             if (cfg_load) begin
-                tmode       <= cfg_tmode;
-                tctrl       <= cfg_tctrl;
+                tmode       <= cfg_tmode & TMODE_WRITE_MASK;
+                tctrl       <= cfg_tctrl & TCTRL_WRITE_MASK;
                 tsrc0       <= cfg_tsrc0;
                 tsrc1       <= cfg_tsrc1;
                 tdst        <= cfg_tdst;
@@ -230,8 +230,8 @@ module mp64_tile #(
                 ttile_w     <= cfg_ttile_w;
             end else if (csr_wen) begin
                 case (csr_addr)
-                    CSR_TMODE: tmode       <= csr_wdata;
-                    CSR_TCTRL: tctrl       <= csr_wdata;
+                    CSR_TMODE: tmode       <= csr_wdata & TMODE_WRITE_MASK;
+                    CSR_TCTRL: tctrl       <= csr_wdata & TCTRL_WRITE_MASK;
                     CSR_TSRC0: tsrc0       <= csr_wdata;
                     CSR_TSRC1: tsrc1       <= csr_wdata;
                     CSR_TDST:  tdst        <= csr_wdata;
@@ -277,17 +277,43 @@ module mp64_tile #(
     wire dst2_internal = dst2_bank0 || dst2_hbw;
 
     // ========================================================================
-    // Mode decode
+    // Mode decode — one format descriptor per TMODE.EW code
     // ========================================================================
-    wire [2:0] mode_ew       = tmode[2:0];
+    // Codes 8-15 are reserved.  FP32 and FP64 are defined formats whose
+    // operations land in Phases 4 and 5 of docs/megapad-full-float-plan.md;
+    // until then admission fails closed on them.
+    function tile_format_is_float;
+        input [3:0] ew;
+        tile_format_is_float = (ew == TMODE_FP16) || (ew == TMODE_BF16) ||
+                               (ew == TMODE_FP32) || (ew == TMODE_FP64);
+    endfunction
+
+    // log2 of the lane width in bytes (docs/floating-point.md §2).
+    function [1:0] tile_format_lane_log2;
+        input [3:0] ew;
+        case (ew)
+            TMODE_16, TMODE_FP16, TMODE_BF16: tile_format_lane_log2 = 2'd1;
+            TMODE_32, TMODE_FP32:             tile_format_lane_log2 = 2'd2;
+            TMODE_64, TMODE_FP64:             tile_format_lane_log2 = 2'd3;
+            default:                          tile_format_lane_log2 = 2'd0;
+        endcase
+    endfunction
+
+    function tile_format_ready;
+        input [3:0] ew;
+        tile_format_ready = (ew <= TMODE_BF16);
+    endfunction
+
+    wire [3:0] mode_ew       = tmode[3:0];
     wire       mode_signed   = tmode[4];
     wire       mode_saturate = tmode[5];
     wire       mode_rounding = tmode[6];
-    wire       mode_fp       = mode_ew[2];          // EW >= 4 → FP mode
+    wire       mode_fp       = tile_format_is_float(mode_ew);
     wire       mode_bf16     = (mode_ew == TMODE_BF16);  // 0 = FP16, 1 = BF16
-    // Raw lane operations (SHUFFLE, RROT, extended TALU) use the format's
-    // lane width; FP16 and BF16 lanes are 16 bits (docs/floating-point.md §5).
-    wire [1:0] lane_ew       = mode_fp ? 2'd1 : mode_ew[1:0];
+    wire       mode_ready    = tile_format_ready(mode_ew);
+    // Every lane-shaped path uses the format's real lane width; FP16 and BF16
+    // lanes are 16 bits (docs/floating-point.md §5).
+    wire [1:0] lane_ew       = tile_format_lane_log2(mode_ew);
 
     // ========================================================================
     // State machine
@@ -365,7 +391,7 @@ module mp64_tile #(
     // before source traffic begins.  Existing tile_a/tile_b and result scratch
     // registers retain operands and completed slices; no second TACC bank is
     // instantiated.
-    reg [2:0]   tamac_ew_reg;
+    reg [3:0]   tamac_ew_reg;
     reg         tamac_signed_reg;
     reg [1:0]   tamac_beat_reg;
     reg [63:0]  tamac_src_a_addr_reg;
@@ -483,7 +509,7 @@ module mp64_tile #(
              (tacc_req_funct_byte == {5'd0, tacc_req_funct}) &&
              (tacc_req_funct >= ETSYS_TACC_TRY) &&
              (tacc_req_funct <= ETSYS_TACC_RESERVED));
-    wire [2:0] tacc_req_format_ew =
+    wire [3:0] tacc_req_format_ew =
         tacc_req_from_input ? mode_ew : tamac_ew_reg;
     wire tacc_req_format_signed =
         tacc_req_from_input ? mode_signed : tamac_signed_reg;
@@ -826,7 +852,7 @@ module mp64_tile #(
     reg [511:0] src_b_selected;
     reg [511:0] gpr_broadcast;
     wire tamac_datapath_active = state == S_TACC_INT;
-    wire [2:0] broadcast_mode_ew =
+    wire [3:0] broadcast_mode_ew =
         tamac_datapath_active ? tamac_ew_reg : mode_ew;
     // Float formats take the unsigned immediate converted exactly to the lane
     // format (docs/floating-point.md §5.1); every value 0-255 is exact.
@@ -855,17 +881,12 @@ module mp64_tile #(
     wire [511:0] imm_splat = mode_fp ? {32{fp_imm_lane}} : {64{imm8_reg}};
 
     always @(*) begin
-        case (broadcast_mode_ew)
-            TMODE_8:
-                gpr_broadcast = {64{gpr_val_reg[7:0]}};
-            TMODE_16, TMODE_FP16, TMODE_BF16:
-                gpr_broadcast = {32{gpr_val_reg[15:0]}};
-            TMODE_32:
-                gpr_broadcast = {16{gpr_val_reg[31:0]}};
-            TMODE_64:
-                gpr_broadcast = {8{gpr_val_reg[63:0]}};
-            default:
-                gpr_broadcast = 512'd0;
+        // Broadcast replicates the low lane-width bits of Rn as raw bits.
+        case (tile_format_lane_log2(broadcast_mode_ew))
+            2'd0: gpr_broadcast = {64{gpr_val_reg[7:0]}};
+            2'd1: gpr_broadcast = {32{gpr_val_reg[15:0]}};
+            2'd2: gpr_broadcast = {16{gpr_val_reg[31:0]}};
+            2'd3: gpr_broadcast = {8{gpr_val_reg[63:0]}};
         endcase
 
         if (tamac_datapath_active && ss_reg == 2'd3)
@@ -1114,7 +1135,7 @@ module mp64_tile #(
     always @(*) begin
         if (mode_fp)
             alu_result_muxed = fp_alu_result;
-        else case (mode_ew[1:0])
+        else case (lane_ew)
             2'd0: alu_result_muxed = alu_result_8;
             2'd1: alu_result_muxed = alu_result_16;
             2'd2: alu_result_muxed = alu_result_32;
@@ -1595,7 +1616,7 @@ module mp64_tile #(
     integer ml;
     always @(*) begin
         mul_result = 512'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: for (ml = 0; ml < 64; ml = ml + 1) begin : m8
                 reg [15:0] p8;
                 if (mode_signed) p8 = $signed({{8{tile_a[ml*8+7]}}, tile_a[ml*8 +: 8]})
@@ -1628,14 +1649,14 @@ module mp64_tile #(
     // ========================================================================
     reg [511:0] wmul_lo, wmul_hi;
     integer wl;
-    wire [2:0] wmul_mode_ew =
+    wire [3:0] wmul_mode_ew =
         tamac_datapath_active ? tamac_ew_reg : mode_ew;
     wire wmul_mode_signed =
         tamac_datapath_active ? tamac_signed_reg : mode_signed;
     always @(*) begin
         wmul_lo = 512'd0;
         wmul_hi = 512'd0;
-        case (wmul_mode_ew[1:0])
+        case (tile_format_lane_log2(wmul_mode_ew))
             2'd0: for (wl = 0; wl < 64; wl = wl + 1) begin : w8
                 reg [15:0] wp8;
                 if (wmul_mode_signed) wp8 = $signed({{8{tile_a[wl*8+7]}}, tile_a[wl*8 +: 8]})
@@ -1837,7 +1858,7 @@ module mp64_tile #(
     integer mcl;
     always @(*) begin
         mac_result = 512'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: for (mcl = 0; mcl < 64; mcl = mcl + 1) begin : mc8
                 reg [15:0] mp8;
                 if (mode_signed) mp8 = $signed({{8{tile_a[mcl*8+7]}}, tile_a[mcl*8 +: 8]})
@@ -1872,7 +1893,7 @@ module mp64_tile #(
     integer dl;
     always @(*) begin
         dot_result = 64'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: for (dl = 0; dl < 64; dl = dl + 1) begin : d8
                 reg [15:0] dp8;
                 if (mode_signed) dp8 = $signed({{8{tile_a[dl*8+7]}}, tile_a[dl*8 +: 8]})
@@ -1907,7 +1928,7 @@ module mp64_tile #(
     integer dal;
     always @(*) begin
         dotacc[0] = 64'd0; dotacc[1] = 64'd0; dotacc[2] = 64'd0; dotacc[3] = 64'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: for (dal = 0; dal < 64; dal = dal + 1) begin : da8
                 reg [15:0] dap8;
                 if (mode_signed) dap8 = $signed({{8{tile_a[dal*8+7]}}, tile_a[dal*8 +: 8]})
@@ -1953,7 +1974,7 @@ module mp64_tile #(
 
     always @(*) begin
         red_result = 64'd0; red_idx = 64'd0; red_val = 64'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
         // ==== 8-bit ====
         2'd0: case (funct_reg)
             TRED_SUM: for (rl=0; rl<64; rl=rl+1)
@@ -2225,7 +2246,7 @@ module mp64_tile #(
     integer pl;
     always @(*) begin
         pack_result = 512'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: pack_result = tile_a; // can't narrow below 8-bit
             2'd1: for (pl=0; pl<32; pl=pl+1) begin : pk16
                 reg [15:0] pv;
@@ -2277,7 +2298,7 @@ module mp64_tile #(
     integer ul;
     always @(*) begin
         unpack_result = 512'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: for (ul=0; ul<32; ul=ul+1) begin : up8
                 if (mode_signed) unpack_result[ul*16 +: 16] = {{8{tile_a[ul*8+7]}}, tile_a[ul*8 +: 8]};
                 else             unpack_result[ul*16 +: 16] = {8'd0, tile_a[ul*8 +: 8]};
@@ -2725,6 +2746,13 @@ module mp64_tile #(
                                 state <= S_TACC_WAIT;
                             end
                         end
+                    // A reserved format, or one whose operations have not
+                    // landed, retires as an illegal operation before any
+                    // memory, accumulator, or TCTRL side effect.
+                    else if (!mode_ready) begin
+                        mex_fault_reg <= MEX_FAULT_ILLEGAL;
+                        state         <= S_DONE;
+                    end
                     // TSYS.ZERO — write zeros
                     else if (mex_op == MEX_TSYS && mex_funct == TSYS_ZERO &&
                         !(mex_ext_active && mex_ext_mod == 4'd8)) begin

@@ -337,20 +337,22 @@ parameter TACC_STATUS_BIT_VALID         = 2;
 parameter TACC_STATUS_BIT_DIRTY         = 3;
 parameter TACC_STATUS_BIT_BUSY          = 4;
 parameter TACC_STATUS_FORMAT_EW_LSB     = 5;
-parameter TACC_STATUS_FORMAT_EW_MSB     = 7;
-parameter TACC_STATUS_BIT_FORMAT_SIGNED = 8;
-parameter TACC_STATUS_BIT_FORCE_PENDING = 9;
+parameter TACC_STATUS_FORMAT_EW_MSB     = 8;
+parameter TACC_STATUS_BIT_FORMAT_SIGNED = 9;
+parameter TACC_STATUS_BIT_FORCE_PENDING = 10;
 parameter TACC_STATUS_OWNER_LSB         = 16;
 parameter TACC_STATUS_OWNER_MSB         = 20;
 parameter [TACC_CALLER_BITS-1:0] TACC_OWNER_NONE = 5'd31;
 
-// Tile modes (TMODE CSR bits [2:0] — 3-bit EW encoding)
-parameter [2:0] TMODE_8    = 3'b000;   // 64 × 8-bit  lanes (u8/i8)
-parameter [2:0] TMODE_16   = 3'b001;   // 32 × 16-bit lanes (u16/i16)
-parameter [2:0] TMODE_32   = 3'b010;   // 16 × 32-bit lanes (u32/i32)
-parameter [2:0] TMODE_64   = 3'b011;   //  8 × 64-bit lanes (u64/i64)
-parameter [2:0] TMODE_FP16 = 3'b100;   // 32 × 16-bit lanes (IEEE 754 fp16)
-parameter [2:0] TMODE_BF16 = 3'b101;   // 32 × 16-bit lanes (bfloat16)
+// Tile modes (TMODE CSR bits [3:0] — 4-bit EW encoding; 8-15 reserved)
+parameter [3:0] TMODE_8    = 4'd0;   // 64 × 8-bit  lanes (u8/i8)
+parameter [3:0] TMODE_16   = 4'd1;   // 32 × 16-bit lanes (u16/i16)
+parameter [3:0] TMODE_32   = 4'd2;   // 16 × 32-bit lanes (u32/i32)
+parameter [3:0] TMODE_64   = 4'd3;   //  8 × 64-bit lanes (u64/i64)
+parameter [3:0] TMODE_FP16 = 4'd4;   // 32 × 16-bit lanes (IEEE 754 fp16)
+parameter [3:0] TMODE_BF16 = 4'd5;   // 32 × 16-bit lanes (bfloat16)
+parameter [3:0] TMODE_FP32 = 4'd6;   // 16 × 32-bit lanes (IEEE 754 fp32)
+parameter [3:0] TMODE_FP64 = 4'd7;   //  8 × 64-bit lanes (IEEE 754 fp64)
 
 // ----------------------------------------------------------------------------
 // CSR addresses  (matches emulator megapad64.py numbering)

@@ -260,10 +260,14 @@ localparam [2:0] ETSYS_TACC_STORE   = 3'd5;
 localparam [2:0] ETSYS_TACC_RELEASE = 3'd6;
 localparam [2:0] ETSYS_TACC_RESERVED = 3'd7;
 
-// TMODE CSR bit positions
+// TMODE CSR bit positions.  TMODE is eight bits wide: writes keep [6:0] and
+// bit 7 and every higher bit read as zero.  TCTRL keeps ACC_ACC [0] and
+// ACC_ZERO [1].
 localparam TMODE_BIT_SIGNED   = 4;
 localparam TMODE_BIT_SATURATE = 5;
 localparam TMODE_BIT_ROUNDING = 6;
+localparam [63:0] TMODE_WRITE_MASK = 64'h7F;
+localparam [63:0] TCTRL_WRITE_MASK = 64'h03;
 
 // TACC_STATUS CSR bit and field positions
 localparam TACC_STATUS_BIT_CLAIMED       = 0;
@@ -272,20 +276,22 @@ localparam TACC_STATUS_BIT_VALID         = 2;
 localparam TACC_STATUS_BIT_DIRTY         = 3;
 localparam TACC_STATUS_BIT_BUSY          = 4;
 localparam TACC_STATUS_FORMAT_EW_LSB     = 5;
-localparam TACC_STATUS_FORMAT_EW_MSB     = 7;
-localparam TACC_STATUS_BIT_FORMAT_SIGNED = 8;
-localparam TACC_STATUS_BIT_FORCE_PENDING = 9;
+localparam TACC_STATUS_FORMAT_EW_MSB     = 8;
+localparam TACC_STATUS_BIT_FORMAT_SIGNED = 9;
+localparam TACC_STATUS_BIT_FORCE_PENDING = 10;
 localparam TACC_STATUS_OWNER_LSB         = 16;
 localparam TACC_STATUS_OWNER_MSB         = 20;
 localparam [TACC_CALLER_BITS-1:0] TACC_OWNER_NONE = 5'd31;
 
-// TMODE element width encoding (bits [2:0])
-localparam [2:0] TMODE_8    = 3'b000;  // 64 × 8-bit lanes
-localparam [2:0] TMODE_16   = 3'b001;  // 32 × 16-bit lanes
-localparam [2:0] TMODE_32   = 3'b010;  // 16 × 32-bit lanes
-localparam [2:0] TMODE_64   = 3'b011;  //  8 × 64-bit lanes
-localparam [2:0] TMODE_FP16 = 3'b100;  // 32 × FP16 lanes
-localparam [2:0] TMODE_BF16 = 3'b101;  // 32 × BF16 lanes
+// TMODE element width encoding (bits [3:0]); codes 8-15 are reserved.
+localparam [3:0] TMODE_8    = 4'd0;  // 64 × 8-bit lanes
+localparam [3:0] TMODE_16   = 4'd1;  // 32 × 16-bit lanes
+localparam [3:0] TMODE_32   = 4'd2;  // 16 × 32-bit lanes
+localparam [3:0] TMODE_64   = 4'd3;  //  8 × 64-bit lanes
+localparam [3:0] TMODE_FP16 = 4'd4;  // 32 × FP16 lanes
+localparam [3:0] TMODE_BF16 = 4'd5;  // 32 × BF16 lanes
+localparam [3:0] TMODE_FP32 = 4'd6;  // 16 × FP32 lanes
+localparam [3:0] TMODE_FP64 = 4'd7;  //  8 × FP64 lanes
 
 // ============================================================================
 // §5 — CSR Address Map

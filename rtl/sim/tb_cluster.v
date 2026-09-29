@@ -2463,6 +2463,40 @@ module tb_cluster;
         check64("fresh ROUND leaves child idle",
                 uut.sha_eng_busy, 64'd0);
 
+        // Each caller's TMODE and TCTRL shadows keep only their defined
+        // bits.  The shared engine samples the granted caller's format, and
+        // a reserved code or an FP32/FP64 format whose operations have not
+        // landed retires as an illegal operation without touching memory.
+        drive_private_tile_csr(1, CSR_TMODE, 64'hFFFF_FFFF_FFFF_FFFF);
+        drive_private_tile_csr(1, CSR_TCTRL, 64'hFFFF_FFFF_FFFF_FFFF);
+        check64("caller TMODE shadow keeps bits 6:0",
+                uut.cfg_tmode[1], 64'h7F);
+        check64("caller TCTRL shadow keeps bits 1:0",
+                uut.cfg_tctrl[1], 64'h03);
+        drive_private_tile_csr(1, CSR_TCTRL, 64'd0);
+        drive_private_tile_csr(1, CSR_TSRC0, 64'h0000);
+        drive_private_tile_csr(1, CSR_TSRC1, 64'h0040);
+        drive_private_tile_csr(1, CSR_TDST, 64'h0080);
+        tile_mem_model[2] = {64{8'hD5}};
+        drive_private_tile_csr(1, CSR_TMODE, 64'h08);
+        drive_private_mex(1, 2'd0, MEX_TALU, TALU_ADD, {5'd0, TALU_ADD},
+                          4'd0, 1'b0, tb_private_mex_fault);
+        check64("reserved EW 8 traps in the shared engine",
+                tb_private_mex_fault, MEX_FAULT_ILLEGAL);
+        drive_private_tile_csr(1, CSR_TMODE, {60'd0, TMODE_FP64});
+        drive_private_mex(1, 2'd0, MEX_TALU, TALU_ADD, {5'd0, TALU_ADD},
+                          4'd0, 1'b0, tb_private_mex_fault);
+        check64("FP64 traps until its operations land",
+                tb_private_mex_fault, MEX_FAULT_ILLEGAL);
+        if (tile_mem_model[2] === {64{8'hD5}})
+            pass_count = pass_count + 1;
+        else begin
+            $display("FAIL [unready EW wrote the destination]: got=%h",
+                     tile_mem_model[2]);
+            fail_count = fail_count + 1;
+        end
+        drive_private_tile_csr(1, CSR_TMODE, 64'd0);
+
         release uut.mc_mex_req;
         release uut.mc_mex_ss;
         release uut.mc_mex_op;

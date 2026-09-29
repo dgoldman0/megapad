@@ -451,7 +451,7 @@ module mp64_soc #(
     wire         cluster_tacc_xfer_store[0:NUM_CLUSTERS-1];
     wire         cluster_tacc_xfer_ext [0:NUM_CLUSTERS-1];
     wire [63:0]  cluster_tacc_xfer_base[0:NUM_CLUSTERS-1];
-    wire [2:0]   cluster_tacc_xfer_format_ew[0:NUM_CLUSTERS-1];
+    wire [3:0]   cluster_tacc_xfer_format_ew[0:NUM_CLUSTERS-1];
     wire [7:0]   cluster_tacc_xfer_token[0:NUM_CLUSTERS-1];
     wire [2047:0] cluster_tacc_xfer_store_image[0:NUM_CLUSTERS-1];
     wire         cluster_tacc_xfer_cancel[0:NUM_CLUSTERS-1];
@@ -967,7 +967,7 @@ module mp64_soc #(
     wire        core_tacc_xfer_store[0:NUM_CORES-1];
     wire        core_tacc_xfer_ext [0:NUM_CORES-1];
     wire [63:0] core_tacc_xfer_base[0:NUM_CORES-1];
-    wire [2:0]  core_tacc_xfer_format_ew[0:NUM_CORES-1];
+    wire [3:0]  core_tacc_xfer_format_ew[0:NUM_CORES-1];
     wire [7:0]  core_tacc_xfer_token[0:NUM_CORES-1];
     wire [2047:0] core_tacc_xfer_store_image[0:NUM_CORES-1];
     wire        core_tacc_xfer_cancel[0:NUM_CORES-1];
@@ -1000,7 +1000,7 @@ module mp64_soc #(
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_store;
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_ext;
     wire [TILE_SOURCE_COUNT*64-1:0] tacc_stage_base;
-    wire [TILE_SOURCE_COUNT*3-1:0] tacc_stage_format_ew;
+    wire [TILE_SOURCE_COUNT*4-1:0] tacc_stage_format_ew;
     wire [TILE_SOURCE_COUNT*8-1:0] tacc_stage_token;
     wire [TILE_SOURCE_COUNT*2048-1:0] tacc_stage_store_image;
     wire [TILE_SOURCE_COUNT-1:0] tacc_stage_cancel;
@@ -1066,7 +1066,7 @@ module mp64_soc #(
             assign tacc_stage_ext[tai] = core_tacc_xfer_ext[tai];
             assign tacc_stage_base[tai*64 +: 64] =
                 core_tacc_xfer_base[tai];
-            assign tacc_stage_format_ew[tai*3 +: 3] =
+            assign tacc_stage_format_ew[tai*4 +: 4] =
                 core_tacc_xfer_format_ew[tai];
             assign tacc_stage_token[tai*8 +: 8] =
                 core_tacc_xfer_token[tai];
@@ -1146,7 +1146,7 @@ module mp64_soc #(
                 cluster_tacc_xfer_ext[tai];
             assign tacc_stage_base[TILE_LANE*64 +: 64] =
                 cluster_tacc_xfer_base[tai];
-            assign tacc_stage_format_ew[TILE_LANE*3 +: 3] =
+            assign tacc_stage_format_ew[TILE_LANE*4 +: 4] =
                 cluster_tacc_xfer_format_ew[tai];
             assign tacc_stage_token[TILE_LANE*8 +: 8] =
                 cluster_tacc_xfer_token[tai];

@@ -1273,6 +1273,61 @@ module tb_tile;
                      64'hDEAD_BEEF_CAFE_4000, 8'd0);  // low BF16 = 2.0
         check512(tile_mem[2], {32{16'h4000}}, "broadcast low BF16 element");
 
+        // ====== TEST 54b: TMODE/TCTRL width and fail-closed formats ======
+        // TMODE keeps [6:0] and TCTRL keeps [1:0].  A reserved EW (8-15), or
+        // FP32/FP64 before their operations land, retires as an illegal
+        // operation with no memory request, ACC change, or ACC_ZERO use.
+        $display("\n=== TEST 54b: TMODE width and fail-closed formats ===");
+        begin : mode_width
+            reg [63:0] readback;
+            reg [3:0]  bad_ew [0:3];
+            integer    k;
+
+            csr_write(CSR_TMODE, 64'hFFFF_FFFF_FFFF_FFFF);
+            csr_read(CSR_TMODE, readback);
+            check64(readback, 64'h7F, "TMODE keeps bits 6:0 only");
+            csr_write(CSR_TCTRL, 64'hFFFF_FFFF_FFFF_FFFF);
+            csr_read(CSR_TCTRL, readback);
+            check64(readback, 64'h03, "TCTRL keeps ACC_ACC and ACC_ZERO only");
+
+            bad_ew[0] = TMODE_FP32;
+            bad_ew[1] = TMODE_FP64;
+            bad_ew[2] = 4'd8;
+            bad_ew[3] = 4'd15;
+            csr_write(CSR_TSRC0, 64'h00);
+            csr_write(CSR_TSRC1, 64'h40);
+            csr_write(CSR_TDST,  64'h80);
+            for (k = 0; k < 4; k = k + 1) begin
+                tile_mem[2] = {8{64'hD5D5_0000_0000_0000 | k}};
+                csr_write(CSR_ACC0, 64'hACC0_0000_0000_0000 | k);
+                csr_write(CSR_TCTRL, 64'd2);  // ACC_ZERO pending
+                csr_write(CSR_TMODE, {60'd0, bad_ew[k]} | 64'h10);
+                tacc_mem_req_count = 0;
+                tacc_monitor = 1'b1;
+                mex_dispatch(2'd0, MEX_TALU, TALU_ADD, 64'd0, 8'd0);
+                check3(mex_fault, MEX_FAULT_ILLEGAL, "TALU in unready EW traps");
+                mex_dispatch(2'd0, MEX_TRED, TRED_SUM, 64'd0, 8'd0);
+                check3(mex_fault, MEX_FAULT_ILLEGAL, "TRED in unready EW traps");
+                mex_dispatch(2'd0, MEX_TSYS, TSYS_ZERO, 64'd0, 8'd0);
+                check3(mex_fault, MEX_FAULT_ILLEGAL, "ZERO in unready EW traps");
+                mex_dispatch_ext(2'd0, MEX_TSYS, ETSYS_LOAD2D, 64'd0, 8'd0,
+                                 4'd8);
+                check3(mex_fault, MEX_FAULT_ILLEGAL,
+                       "LOAD2D in unready EW traps");
+                tacc_monitor = 1'b0;
+                check64(tacc_mem_req_count, 64'd0,
+                        "unready EW makes no memory request");
+                check512(tile_mem[2], {8{64'hD5D5_0000_0000_0000 | k}},
+                         "unready EW leaves the destination");
+                check64(u_tile.acc[0], 64'hACC0_0000_0000_0000 | k,
+                        "unready EW leaves ACC0");
+                csr_read(CSR_TCTRL, readback);
+                check64(readback, 64'd2, "unready EW keeps ACC_ZERO pending");
+            end
+            csr_write(CSR_TCTRL, 64'd0);
+            csr_write(CSR_TMODE, 64'd0);
+        end
+
         // ====== TEST 55: TACC lifecycle plumbing ======
         // Preserve the full function byte, reject TAMAC before ownership and
         // validity, avoid legacy memory effects, de-duplicate held control

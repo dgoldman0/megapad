@@ -18,7 +18,7 @@ module tb_tacc;
     reg         req_canonical;
     reg [4:0]   req_caller_id;
     reg [1:0]   req_caller_slot;
-    reg [2:0]   req_format_ew;
+    reg [3:0]   req_format_ew;
     reg         req_format_signed;
     reg [63:0]  req_image_addr;
     reg [2:0]   req_preflight_fault;
@@ -37,7 +37,7 @@ module tb_tacc;
     wire         xfer_req;
     wire         xfer_store;
     wire [63:0]  xfer_base;
-    wire [2:0]   xfer_format_ew;
+    wire [3:0]   xfer_format_ew;
     wire [7:0]   xfer_token;
     wire [2047:0] xfer_store_image;
     wire         xfer_cancel;
@@ -149,7 +149,7 @@ module tb_tacc;
         input       canonical;
         input [4:0] caller_id;
         input [1:0] caller_slot;
-        input [2:0] format_ew;
+        input [3:0] format_ew;
         input       format_signed;
     begin
         req_is_tamac      = is_tamac;
@@ -168,7 +168,7 @@ module tb_tacc;
         input [2:0] funct;
         input [4:0] caller_id;
         input [1:0] caller_slot;
-        input [2:0] format_ew;
+        input [3:0] format_ew;
         input       format_signed;
     begin
         set_request(1'b0, funct, 1'b1, caller_id, caller_slot,
@@ -199,7 +199,7 @@ module tb_tacc;
         input       canonical;
         input [4:0] caller_id;
         input [1:0] caller_slot;
-        input [2:0] format_ew;
+        input [3:0] format_ew;
         input       format_signed;
         input [2:0] expected_fault;
         reg         deferred_class;
@@ -250,7 +250,7 @@ module tb_tacc;
         input [2:0] funct;
         input [4:0] caller_id;
         input [1:0] caller_slot;
-        input [2:0] format_ew;
+        input [3:0] format_ew;
         input       format_signed;
     begin
         set_request(1'b0, funct, 1'b1, caller_id, caller_slot,
@@ -295,7 +295,7 @@ module tb_tacc;
     always @(negedge clk) begin
         if (rst_n && !engine_reset) begin
             if (status_raw[63:21] !== 43'd0 ||
-                status_raw[15:10] !== 6'd0 ||
+                status_raw[15:11] !== 5'd0 ||
                 status_raw[TACC_STATUS_BIT_MINE] !== 1'b0)
                 $fatal(1, "TACC raw status exposed a reserved or MINE bit");
             if (status_raw[TACC_STATUS_BIT_DIRTY] &&
@@ -385,6 +385,20 @@ module tb_tacc;
                         MEX_FAULT_ILLEGAL);
         lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
                         5'd4, 2'd0, TMODE_64, 1'b0,
+                        MEX_FAULT_ILLEGAL);
+        // FP32 and FP64 TACC formats land in Phase 5, and codes 8-15 are
+        // reserved; the full 4-bit code is decoded, so 8 is not EW 0.
+        lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
+                        5'd4, 2'd0, TMODE_FP32, 1'b0,
+                        MEX_FAULT_ILLEGAL);
+        lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
+                        5'd4, 2'd0, TMODE_FP64, 1'b0,
+                        MEX_FAULT_ILLEGAL);
+        lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
+                        5'd4, 2'd0, 4'd8, 1'b0,
+                        MEX_FAULT_ILLEGAL);
+        lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
+                        5'd4, 2'd0, 4'd15, 1'b0,
                         MEX_FAULT_ILLEGAL);
         lifecycle_fault(1'b0, ETSYS_TACC_RESERVED, 1'b1,
                         5'd4, 2'd0, TMODE_8, 1'b0,

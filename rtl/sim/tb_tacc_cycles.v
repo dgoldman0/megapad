@@ -49,7 +49,7 @@ module tb_tacc_cycles;
     wire        tacc_xfer_store;
     wire        tacc_xfer_ext;
     wire [63:0] tacc_xfer_base;
-    wire [2:0]  tacc_xfer_format_ew;
+    wire [3:0]  tacc_xfer_format_ew;
     wire [7:0]  tacc_xfer_token;
     wire [2047:0] tacc_xfer_store_image;
     wire        tacc_xfer_cancel;
@@ -381,13 +381,13 @@ module tb_tacc_cycles;
     endtask
 
     task load_tacc_image;
-        input [2:0]    format_ew;
+        input [3:0]    format_ew;
         input          format_signed;
         input [2047:0] image;
     begin
         write_csr(
             CSR_TMODE,
-            {59'd0, format_signed, 1'b0, format_ew});
+            {59'd0, format_signed, format_ew});
         write_csr(CSR_TSRC0, 64'd0);
         tacc_xfer_load_image = image;
         set_lifecycle(ETSYS_TACC_LOAD,
@@ -621,7 +621,7 @@ module tb_tacc_cycles;
                 vector_case_count = vector_case_count + 1;
                 $display("  TAMAC vector: %0s", vector_name);
                 load_tacc_image(
-                    vector_ew[2:0],
+                    vector_ew[3:0],
                     vector_signed[0],
                     vector_initial_tacc);
                 tamac_mem_a = vector_source_a;
@@ -769,7 +769,7 @@ module tb_tacc_cycles;
                 vector_case_count = vector_case_count + 1;
                 $display("  FP TAMAC vector: %0s", vector_name);
                 load_tacc_image(
-                    vector_ew[2:0],
+                    vector_ew[3:0],
                     vector_signed[0],
                     vector_initial_tacc);
                 tamac_mem_a = vector_source_a;
