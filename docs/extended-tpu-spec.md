@@ -28,7 +28,7 @@ existing tile engine and SoC infrastructure:
 | Family | Purpose | Area Estimate | Status |
 |--------|---------|---------------|--------|
 | **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium | ✅ Implemented |
-| **Numeric Acceleration** | FP16/bfloat16 tile ops, optional scalar FP32 | Medium | ✅ FP16/BF16 done; ☐ scalar FP32 |
+| **Numeric Acceleration** | FP16/BF16/FP32/FP64 tile ops, scalar FP32/FP64 engine | Medium | ✅ FP16/BF16 functional (not yet bit-exact across backends); ☐ full float per `docs/floating-point.md` |
 | **Full-width TACC** | Persistent widened lane accumulation with explicit ownership | Medium | ✅ Emulator and functional RTL; ☐ routed FPGA acceptance |
 | **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE/raw Keccak, checked WOTS chain, 32/64-bit CRC tuples | Large | ✅ Checkpoint-3 WOTS path qualified across execution models, integrated RTL, and BIOS; FPGA routing remains a separate acceptance gate |
 | **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | Weighted arbiter implemented; architectural QoS programming is not integrated; DMA remains design-only |
@@ -213,7 +213,9 @@ not reserve the engine from nonowner stateless or legacy-ACC MEX work.
 in-place (`ED 06`) forms.  Its integer formats widen U8/S8 products into 32-bit
 lanes and U16/S16 or U32/S32 products into 64-bit lanes.  FP16 and BF16
 products accumulate in binary32 with one round-to-nearest-even feedback
-addition per lane.  U64 and EW 6–7 remain unsupported.
+addition per lane.  U64 remains unsupported.  FP32 and FP64 TACC formats
+(EW 6 and 7) are specified in `docs/floating-point.md` §7 and not yet
+implemented.
 
 Lifecycle operations use `F8 E3 02` through `F8 E3 06` for `TRY`, `CLEAR`,
 `LOAD`, `STORE`, and `RELEASE`.  `TACC_STATUS` at CSR `0x1D` exposes claimed,
@@ -261,19 +263,21 @@ is in `docs/isa-reference.md` and the programming guide in
 New TMODE element types for IEEE 754 half-precision and bfloat16:
 
 ```
-TMODE extended EW encoding (bits [2:0]):
-  000 = u8/i8    (64 lanes)  — existing
-  001 = u16/i16  (32 lanes)  — existing
-  010 = u32/i32  (16 lanes)  — existing
-  011 = u64/i64  ( 8 lanes)  — existing
-  100 = fp16     (32 lanes)  — NEW
-  101 = bf16     (32 lanes)  — NEW
-  110 = reserved
-  111 = reserved
+TMODE EW encoding (bits [3:0]):
+  0000 = u8/i8    (64 lanes)
+  0001 = u16/i16  (32 lanes)
+  0010 = u32/i32  (16 lanes)
+  0011 = u64/i64  ( 8 lanes)
+  0100 = fp16     (32 lanes)
+  0101 = bf16     (32 lanes)
+  0110 = fp32     (16 lanes)
+  0111 = fp64     ( 8 lanes)
+  1000–1111 = reserved
 ```
 
-This requires extending TMODE from 2-bit to 3-bit EW, consuming bit 2
-(currently reserved).
+This section is the historical FP16/BF16 proposal.  The current normative
+floating-point definition, which widens EW to four bits and adds FP32 and
+FP64, is `docs/floating-point.md`.
 
 **Supported FP operations** (use existing TALU/TMUL functs):
 
@@ -293,25 +297,13 @@ inputs, the accumulator registers ACC0–ACC3 hold **FP32** values.
 Products are computed in FP32 precision and accumulated with FP32
 addition. This matches the behavior of modern AI accelerators.
 
-### 3.2 Optional Scalar FP32 Unit
+### 3.2 Scalar Floating-Point Engine
 
-A minimal FP32 unit for the CPU's scalar ALU, gated behind a synthesis
-parameter `HAS_FPU`:
-
-| Instruction | Encoding | Operation |
-|-------------|----------|-----------|
-| `FADD Rd, Rs` | FAM_EXT + funct | FP32 add |
-| `FMUL Rd, Rs` | FAM_EXT + funct | FP32 multiply |
-| `FCVT.I Rd, Rs` | FAM_EXT + funct | FP32 → int64 |
-| `FCVT.F Rd, Rs` | FAM_EXT + funct | int64 → FP32 |
-| `FCMP Rd, Rs` | FAM_EXT + funct | FP32 compare, set flags |
-
-FP32 values are stored in the **low 32 bits** of any GPR. The upper
-32 bits are ignored/zeroed. FP64 is explicitly **not** supported to
-keep the datapath small.
-
-**Synthesis parameter**: `parameter HAS_FPU = 0;` — when 0, FP
-instructions trap as illegal opcode.
+The original optional scalar FP32 unit is superseded.  MegaPad instead gets
+one scalar FP32/FP64 engine, `EXT.FP` (`FC op DR [T]`), on every core, with
+the `FPCSR` control and status register.  Microcores reach it through a
+cluster-shared unit.  There is no build option that removes it.  The
+normative definition is `docs/floating-point.md` §8–§9.
 
 ---
 
@@ -688,15 +680,14 @@ New per-core CSRs:
 ### Extended TMODE
 
 ```
-Bit  7  6  5  4  3  2  1  0
-     R  RM SAT S  x  EW EW EW
-                      ─────── 
-R   = reserved
-RM  = rounding mode (0=truncate, 1=round-to-nearest)
+Bit  7  6  5   4  3  2  1  0
+     R  RM SAT S  EW EW EW EW
+R   = reserved (reads zero)
+RM  = rounding (0=truncate, 1=round-to-nearest; VSHR and float→int TCVT)
 SAT = saturating mode (0=wrapping, 1=saturating)
-S   = signed (existing)
-EW  = element width, 3-bit (extended from 2-bit):
-      000=8, 001=16, 010=32, 011=64, 100=fp16, 101=bf16
+S   = signed
+EW  = element width, 4-bit:
+      0=8, 1=16, 2=32, 3=64, 4=fp16, 5=bf16, 6=fp32, 7=fp64, 8–15 reserved
 ```
 
 ### New MEX Functions (via existing funct codes)
@@ -707,13 +698,16 @@ function field.  TMUL function 7 remains reserved.
 
 ### Extended Tile Ops (FAM_EXT = 0xF)
 
+The historical table that assigned F0/F4/F8/FC/F1 to extended tile groups
+was never the ISA: F0 is EXT.IMM64 and F1–F5 are REX.  Extended tile
+operations use the `F8` prefix before a MEX byte:
+
 ```
-0xF0: EXTALU SS=0 (tile×tile)    — VSHR, VSHL, VSEL, VCLZ, ...
-0xF4: EXTALU SS=1 (broadcast)
-0xF8: EXTALU SS=2 (imm8)
-0xFC: EXTALU SS=3 (in-place)
-0xF1: EXTSYS (LOAD2D, STORE2D, PREFETCH, FENCE)
+F8 E0|SS<<2 funct   extended TALU: VSHR, VSHL, VSEL, VCLZ, TDIV, TSQRT, TCVT, TCMP
+F8 E3 funct         extended TSYS: LOAD2D, STORE2D, TACC lifecycle
 ```
+
+`FC` is the scalar floating-point engine (`docs/floating-point.md` §8).
 
 Canonical TACC lifecycle instructions are three bytes:
 

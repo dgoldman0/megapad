@@ -21,11 +21,11 @@ This guide covers:
 - What a tile is and how the engine thinks about data
 - The tile CSR registers that control everything
 - All four instruction categories (ALU, MUL, Reduction, System)
-- Extended operations (VSHR/VSHL/VCLZ, LOAD2D/STORE2D)
+- Extended operations (VSHR/VSHL/VSEL/VCLZ, TDIV/TSQRT/TCVT/TCMP, LOAD2D/STORE2D)
 - Source selection modes (tile×tile, broadcast, imm8 splat, in-place)
 - The 256-bit accumulator
 - The explicit 2,048-bit full-width tile accumulator (TACC)
-- FP16 / BF16 half-precision support
+- Floating point: FP16, BF16, FP32, and FP64
 - BIOS Forth words for tile operations
 - How KDOS uses the tile engine for buffers, kernels, and pipelines
 - Worked examples
@@ -47,6 +47,9 @@ Depending on the element width, a single tile contains:
 | 16-bit | 32 | u16 / i16 | 32 values |
 | 32-bit | 16 | u32 / i32 | 16 values |
 | 64-bit | 8 | u64 / i64 | 8 values |
+| FP16 / BF16 | 32 | binary16 / bfloat16 | 32 values |
+| FP32 | 16 | binary32 | 16 values |
+| FP64 | 8 | binary64 | 8 values |
 
 Architecturally, every tile operation processes **all lanes** in a single
 instruction; an implementation may schedule those lanes over fixed arithmetic
@@ -84,10 +87,10 @@ FP mode selection.
 
 ```
 Bit layout:    7  6  5  4  3  2  1  0
-               ── ┬─ ┬─ ┬─ ── ┬──┬──┬─
-               R  │  │  │  R  │EW│EW│EW
-                  │  │  │     └──┴──┘
-                  │  │  │  Element width (3 bits)
+               ── ┬─ ┬─ ┬─ ┬──┬──┬──┬─
+               R  │  │  │ EW│EW│EW│EW
+                  │  │  │  └──┴──┴──┘
+                  │  │  │  Element width (4 bits)
                   │  │  └─ Signed flag
                   │  └─── Saturation mode
                   └────── Rounding mode
@@ -95,10 +98,20 @@ Bit layout:    7  6  5  4  3  2  1  0
 
 | Bits | Field | Values |
 |------|-------|--------|
-| `[2:0]` | Element Width (EW) | `0`=8-bit, `1`=16-bit, `2`=32-bit, `3`=64-bit, `4`=fp16, `5`=bf16 |
-| `[4]` | Signed | `0`=unsigned, `1`=signed (affects MIN, MAX, ABS, MUL, DOT, SUM, L1) |
+| `[3:0]` | Element Width (EW) | `0`=8-bit, `1`=16-bit, `2`=32-bit, `3`=64-bit, `4`=fp16, `5`=bf16, `6`=fp32, `7`=fp64; `8`–`15` reserved |
+| `[4]` | Signed | `0`=unsigned, `1`=signed (affects MIN, MAX, ABS, MUL, DOT, SUM, L1, TCMP, TCVT integer sides) |
 | `[5]` | Saturation | `0`=wrapping, `1`=saturating (clamp on overflow for ADD/SUB/PACK) |
-| `[6]` | Rounding | `0`=truncate, `1`=round-to-nearest (applies to VSHR) |
+| `[6]` | Rounding | `0`=truncate, `1`=round-to-nearest (applies to VSHR and float-to-integer TCVT) |
+
+TMODE is an 8-bit register in every backend: writes keep bits `[6:0]`, and
+bit 7 and all higher bits read as zero. A tile operation in a reserved format
+(`EW` 8–15) raises `IVEC_ILLEGAL_OP` before touching memory.
+
+> **Implementation status:** the 4-bit `EW` field, the FP32 and FP64 codes,
+> and the write-width rule are specified in `docs/floating-point.md` and land
+> in Phase 3 of `docs/megapad-full-float-plan.md`. Until then, every backend
+> decodes only bits `[2:0]`, and EW 6 and 7 behave inconsistently (see
+> "Current implementation status" under Floating-Point Support).
 
 **Common TMODE values:**
 
@@ -112,6 +125,8 @@ Bit layout:    7  6  5  4  3  2  1  0
 | `0x03` | Unsigned 64-bit (8 lanes) |
 | `0x04` | FP16 / IEEE 754 half (32 lanes) |
 | `0x05` | BF16 / bfloat16 (32 lanes) |
+| `0x06` | FP32 / IEEE 754 single (16 lanes) |
+| `0x07` | FP64 / IEEE 754 double (8 lanes) |
 | `0x20` | Unsigned 8-bit, saturating |
 | `0x30` | Signed 8-bit, saturating |
 | `0x40` | Unsigned 8-bit, rounding shifts |
@@ -327,6 +342,12 @@ stored in the 256-bit accumulator.  All respect `TCTRL` bits.
 | `6` | **MINIDX** | $\text{argmin}_i a_i$ | ACC0 = index of min, ACC1 = min value |
 | `7` | **MAXIDX** | $\text{argmax}_i a_i$ | ACC0 = index of max, ACC1 = max value |
 
+With `ACC_ACC`, MIN and MAX keep a running minimum or maximum against ACC0
+(read at 64 bits, signed per TMODE bit 4), just as MINIDX and MAXIDX compare
+against their running ACC1 value. This replaces the earlier rule that added
+the tile's minimum or maximum to the accumulator. It is specified in
+`docs/floating-point.md` §4.6 and lands in Phase 2 of the full-float plan.
+
 ### Multi-Tile Sum Example
 
 ```forth
@@ -369,9 +390,11 @@ index.  Output: `dst[i] = src0[index[i]]`.  Out-of-range indices produce
 zero.  This is the universal permutation: any reordering, duplication, or
 broadcast can be expressed as a shuffle.
 
-**PACK/UNPACK** convert between element widths.  PACK narrows (e.g.,
+**PACK/UNPACK** convert between integer element widths.  PACK narrows (e.g.,
 16-bit → 8-bit), with optional saturation (TMODE bit 5).  UNPACK widens
-(e.g., 8-bit → 16-bit), with sign extension if TMODE bit 4 is set.
+(e.g., 8-bit → 16-bit), with sign extension if TMODE bit 4 is set.  In float
+formats PACK and UNPACK are illegal; `TCVT` (below) converts between any
+float format and any other format.
 
 **RROT** rotates or mirrors the tile treated as a 2D matrix. The geometry
 depends on element width: 8-bit = 8×8, 16-bit = 4×8, 32-bit = 4×4,
@@ -402,8 +425,21 @@ followed by a TALU-class instruction:
 |-------|----------|-----------|-------|
 | 0 | **VSHR** | `dst[i] = a[i] >> b[i]` | Right shift; rounds if TMODE bit 6 set |
 | 1 | **VSHL** | `dst[i] = a[i] << b[i]` | Left shift |
-| 2 | **VSEL** | `dst[i] = mask[i] ? a[i] : b[i]` | Conditional select |
+| 2 | **VSEL** | `dst[i] = msb(M[i]) ? a[i] : b[i]` | Select by mask; M is the old `[TDST]` |
 | 3 | **VCLZ** | `dst[i] = clz(a[i])` | Count leading zeros per lane |
+| 4 | **TDIV** | `dst[i] = a[i] / b[i]` | Float formats only; correctly rounded |
+| 5 | **TSQRT** | `dst[i] = √a[i]` | Float formats only; correctly rounded |
+| 6 | **TCVT** | Convert `TMODE.EW` → target format in function bits `[7:4]` | At least one side is a float format |
+| 7 | **TCMP** | `dst[i]` = all ones if `pred(a[i], b[i])`, else zero | Predicate in function bits `[5:3]` |
+
+VSHR, VSHL, and VCLZ are illegal in float formats.  VSEL, TDIV, TSQRT,
+TCVT, and TCMP are defined normatively in `docs/floating-point.md` §6,
+including their legal source selectors and how TCVT widens into several
+destination tiles or narrows from several source tiles.  They are specified
+and not yet implemented: VSEL, TCVT, and TCMP land in Phase 6 of the
+full-float plan, and TDIV and TSQRT in Phase 8.  Until then, functions 4–7
+are unimplemented in every backend and do not yet trap, and VSEL is only a
+placeholder that disagrees between backends.
 
 **Rounding shifts**: When TMODE bit 6 is set, VSHR adds the bit that's
 about to be shifted out before truncating (round-to-nearest).  This is
@@ -433,67 +469,80 @@ TLOAD2D                  \ Gather 8×8 patch into tile
 
 ---
 
-## FP16 / BF16 Half-Precision Support
+## Floating-Point Support
 
-The tile engine supports IEEE 754 half-precision (FP16) and Google
-bfloat16 (BF16) floating-point operations across 32 lanes.
+The tile engine supports four floating-point formats.  The normative
+definition of every floating-point result, including rounding, NaN, signed
+zero, the reduction tree, and each operation's exact behaviour, is
+`docs/floating-point.md`.  This section is a programming summary.
 
-### Enabling FP Mode
-
-Set TMODE element width to 4 (FP16) or 5 (BF16):
+| Format | `TMODE.EW` | Lanes | Accumulates in | Forth word |
+|---|---:|---:|---|---|
+| FP16 (IEEE binary16) | 4 | 32 | binary32 | `FP16-MODE` |
+| BF16 (bfloat16) | 5 | 32 | binary32 | `BF16-MODE` |
+| FP32 (IEEE binary32) | 6 | 16 | binary64 | `FP32-MODE` |
+| FP64 (IEEE binary64) | 7 | 8 | binary64 | `FP64-MODE` |
 
 ```forth
-4 TMODE!    \ FP16 mode — or use the convenience word:
 FP16-MODE   \ Sets TMODE = 4
-
-5 TMODE!    \ BF16 mode — or:
-BF16-MODE   \ Sets TMODE = 5
+FP64-MODE   \ Sets TMODE = 7
 ```
 
-### Supported FP Operations
+### Rules in brief
 
-All standard TALU, TMUL, and TRED operations work with FP16/BF16:
+- Every arithmetic result is the exact result rounded once,
+  round-to-nearest-even.  `TMAC` and `TFMA` are fused.
+- Subnormals are supported everywhere; there is no flush-to-zero.
+- Every arithmetic NaN result is the format's canonical positive quiet NaN.
+  ABS, AND, OR, XOR, VSEL, and data movement are raw bit operations.
+- TALU MIN/MAX propagate NaN; TRED MIN/MAX/MINIDX/MAXIDX skip NaN lanes.
+  Both order −0 below +0.
+- DOT, SUM, SUMSQ, and L1 accumulate in binary32 (FP16, BF16) or binary64
+  (FP32, FP64) with one fixed pairwise tree in lane order.  `DOTACC` uses its
+  four quarter subtrees.  With `ACC_ACC`, each tile adds to ACC0 with one
+  more rounding.
+- `WMUL` gives exact or once-rounded products one format wider: binary32 for
+  FP16/BF16 and binary64 for FP32.  It is illegal for FP64.
+- `TCVT` converts between formats, `TCMP` produces lane masks for `VSEL`, and
+  `TDIV`/`TSQRT` divide and take square roots.  Float PACK and UNPACK are
+  illegal.
+- VSHR, VSHL, and VCLZ are illegal in float formats.  The TMODE signed bit
+  has no effect on float arithmetic.
+- Tile operations raise no floating-point flags.
 
-| Operation | Behavior |
-|-----------|----------|
-| ADD/SUB | IEEE round-to-nearest-even |
-| MUL | FP16×FP16 → FP16 |
-| FMA | FP16×FP16 + FP16 → FP16 |
-| MIN/MAX (TALU) | NaN-**propagating** — if either input is NaN, result is qNaN |
-| MIN/MAX (TRED) | NaN-**skipping** — NaN lanes are ignored; first non-NaN wins |
-| ABS | Clear sign bit |
-| DOT | FP16→FP32 widening multiply, FP32 accumulation |
-| SUM | FP16→FP32 widening, FP32 accumulation |
-| SUMSQ | FP16→FP32 square, FP32 accumulation |
+### Current implementation status
 
-> **Note:** The TMODE signed flag (bit 4) is irrelevant in FP mode.
-> Floating-point comparisons are inherently signed via the sign bit;
-> `mode_signed` is not checked on the FP MIN/MAX path.
-
-### FP32 Accumulation
+The rules above are specified, not yet implemented.  FP16/BF16 converge on
+them in Phase 2 of `docs/megapad-full-float-plan.md`; FP32 and FP64 arrive in
+Phases 3–5, and the new operations in Phases 6 and 8.  Until then, current
+FP16/BF16 code behaves as follows.
 
 DOT, SUM, and SUMSQ publish one raw binary32 result in ACC0; the Python and
-hosted paths clear ACC1--ACC3. `TDOTACC` instead publishes four binary32 chunk
-results across ACC0--ACC3.
+hosted paths clear ACC1--ACC3, while RTL keeps them on ACC_ACC. `TDOTACC`
+publishes four binary32 chunk results across ACC0--ACC3.
 
 The reduction order is not yet one backend-independent FP32 algorithm. Python
 and the hosted simulator use host-language `sum` for each SUM/SUMSQ tile and
 pack once to binary32; the native accelerator currently routes those functions
-back to Python, though its direct C++ body uses sequential binary32. RTL uses a
-balanced binary32 tree. TDOT uses a binary64 loop in Python/native before its
-binary32 pack, while RTL has its own tree. Cancellation and signed-zero results
-can differ, so “FP32 accumulation” names the output/intent rather than a bitwise
-cross-backend guarantee.
+back to Python, though its direct C++ body uses sequential binary32. RTL uses
+the balanced binary32 tree that `docs/floating-point.md` adopts. TDOT uses a
+binary64 loop in Python/native before its binary32 pack. Cancellation and
+signed-zero results can differ.
 For ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds it
-to the tile subtotal in binary64, and repacks; that pack is the inter-tile
-rounding point.
+to the tile subtotal in binary64, and repacks.  FP TRED MIN/MAX ignore
+ACC_ACC in Python/hosted execution, while RTL adds their result to ACC0.
+
+No backend fuses `TMAC` or `TFMA`: Python rounds a binary64 result through
+binary32 to the lane format, native C++ computes in binary32, and RTL rounds
+the product and the sum separately.  RTL flushes subnormal FP16/BF16 products
+to zero, and its BF16 add and multiply appear to truncate rather than round.
 
 There is also a known executable conversion discrepancy: the exact FP16
 product `0x0017 * 0x5190` lies at the largest-subnormal/minimum-normal tie.
 Python/C++ and the hosted compatibility model currently encode it as zero,
-where IEEE round-to-nearest-even would produce `0x0400`. Reserved EW 6/7 are
-not formats: hosted execution rejects them, while existing Python/C++ and RTL
-paths alias them differently. These discrepancies remain open.
+where IEEE round-to-nearest-even would produce `0x0400`.  EW 6/7 are not yet
+implemented formats: hosted execution rejects them, while existing Python/C++
+treat them as BF16 and RTL treats them as FP16.
 
 ---
 
@@ -553,10 +602,15 @@ other field describes the physical engine.
 | `[2]` | `VALID` | `CLEAR` or `LOAD` established value and format |
 | `[3]` | `DIRTY` | State changed since the last successful `LOAD` or `STORE` |
 | `[4]` | `BUSY` | A TACC operation is in flight |
-| `[7:5]` | `FORMAT_EW` | Latched element-width code; zero when invalid |
-| `[8]` | `FORMAT_SIGNED` | Latched integer signedness |
-| `[9]` | `FORCE_PENDING` | Privileged recovery is queued behind active work |
+| `[8:5]` | `FORMAT_EW` | Latched 4-bit element-width code; zero when invalid |
+| `[9]` | `FORMAT_SIGNED` | Latched integer signedness |
+| `[10]` | `FORCE_PENDING` | Privileged recovery is queued behind active work |
 | `[20:16]` | `OWNER` | Absolute core ID; 31 means no owner |
+
+> **Implementation status:** this packing, with the 4-bit format field, lands
+> in Phase 3 of `docs/megapad-full-float-plan.md`.  Until then, backends pack
+> `FORMAT_EW` in `[7:5]`, `FORMAT_SIGNED` in `[8]`, and `FORCE_PENDING` in
+> `[9]`.
 
 `TACC_CTL` at `0x1E` reads as zero.  A supervisor write of bit 0 pulses
 `FORCE_RELEASE`; a user write with bit 0 set raises `IVEC_PRIV_FAULT`.
@@ -583,8 +637,15 @@ part of the TACC format and do not affect accumulation.
 | 2 — U32/S32 | 16 | 64-bit integer | 128 bytes |
 | 4 — FP16 | 32 | binary32 | 128 bytes |
 | 5 — BF16 | 32 | binary32 | 128 bytes |
+| 6 — FP32 | 16 | binary64 | 128 bytes |
+| 7 — FP64 | 8 | binary64 | 64 bytes |
 
-EW 3, 6, and 7 are illegal for `CLEAR`, `LOAD`, and `TAMAC`.  Integer
+EW 3 and the reserved codes 8–15 are illegal for `CLEAR`, `LOAD`, and
+`TAMAC`.  The FP32 and FP64 formats are specified in
+`docs/floating-point.md` §7 and land in Phase 5 of the full-float plan; until
+then EW 6 and 7 are illegal as well.  FP32 products are exact in binary64 and
+enter one round-to-nearest-even addition per lane; FP64 `TAMAC` is a fused
+multiply-add per lane.  Their canonical NaN is `0x7FF8000000000000`.  Integer
 products are exact, extended according to signedness, and accumulated modulo
 the lane width without saturation.  Broadcast uses only the low active-width
 bits of its GPR.  FP16/BF16 products enter binary32 before one
@@ -599,7 +660,8 @@ initialization or accumulation.
 `TACC.LOAD` and `TACC.STORE` transfer exactly 256 bytes aligned to 64 bytes as
 four consecutive 64-byte beats.  Lanes and bytes within each lane are
 little-endian.  U8/S8 and U16/S16 use the full image.  U32/S32, FP16, and BF16
-use bytes 0–127; `STORE` writes zeros to bytes 128–255 and `LOAD` ignores them
+use bytes 0–127, and FP32 uses bytes 0–127 and FP64 bytes 0–63 once
+implemented; `STORE` writes zeros to inactive bytes and `LOAD` ignores them
 and commits zeros.  Transfers do not advance or rewrite source, destination,
 or cursor CSRs.  A saved context therefore consists of the 256-byte image plus
 its format.
@@ -676,6 +738,10 @@ Other uncontended full-core base totals are:
 | Integer broadcast `TAMAC`, U8/U16/U32 | 6 / 4 / 3 |
 | FP16/BF16 tile×tile or in-place `TAMAC` | 7 |
 | FP16/BF16 broadcast `TAMAC` | 6 |
+| FP32 tile×tile or in-place `TAMAC` (specified) | 11 |
+| FP32 broadcast `TAMAC` (specified) | 10 |
+| FP64 tile×tile or in-place `TAMAC` (specified) | 7 |
+| FP64 broadcast `TAMAC` (specified) | 6 |
 
 ---
 
@@ -795,6 +861,23 @@ long to retry:
 | `TALIGN` | `( -- )` | Align HERE to next 64-byte boundary |
 | `TLOAD2D` | `( -- )` | Strided 2D gather using stride CSRs |
 | `TSTORE2D` | `( -- )` | Strided 2D scatter using stride CSRs |
+
+### Floating-Point Words
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `FP16-MODE` | `( -- )` | Set TMODE = 4 |
+| `BF16-MODE` | `( -- )` | Set TMODE = 5 |
+| `FP32-MODE` | `( -- )` | Set TMODE = 6 (Phase 3) |
+| `FP64-MODE` | `( -- )` | Set TMODE = 7 (Phase 3) |
+| `TCVT` | `( ew -- )` | Convert from the current format to `ew` (Phase 6) |
+| `TCMP` | `( pred -- )` | Compare to lane mask, predicate 0–7 (Phase 6) |
+| `TVSEL` | `( -- )` | Select lanes by the mask in `[TDST]` (Phase 6) |
+| `TDIV` | `( -- )` | Lane divide (Phase 8) |
+| `TSQRT` | `( -- )` | Lane square root (Phase 8) |
+
+The scalar floating-point words (`F32+`, `F64*`, `S>F64`, `FPCSR@`, and so
+on) are listed in `docs/floating-point.md` §11.
 
 ### Stride / 2D CSRs
 

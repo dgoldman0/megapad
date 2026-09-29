@@ -2,8 +2,10 @@
 
 **Started:** 2026-09-29
 
-**Status:** Planning. No implementation has started. Section 4 lists the
-decisions that must be confirmed before Phase 2 begins.
+**Status:** Phase 1 complete. Decisions D1–D18 were confirmed on
+2026-09-29 and are recorded in `docs/floating-point.md`, which is now the
+normative floating-point specification. Phase 2 is next. No backend code has
+changed yet.
 
 **Branch:** `feature/megapad-fp64`
 
@@ -151,10 +153,31 @@ open production item that must be closed before parity is claimed.
 5. **The RTL describes the chip we want.** Physical unit counts are ordinary
    build parameters. FPGA board fit is not a design gate.
 
-## 4. Decisions to confirm
+## 4. Decisions (confirmed 2026-09-29)
 
-Each item has a recommendation. Phase 1 records the confirmed answers in the
-normative documents.
+Every recommendation below was confirmed, including changing integer
+MIN/MAX under ACC_ACC. `docs/floating-point.md` is the normative record.
+Where it adds detail or refines a decision, it wins. Writing it produced
+these refinements:
+
+- **D8.** The cycle table is fixed in §10 of the spec. Divide and
+  square-root latencies are fixed as data-independent constants by the phase
+  that chooses their algorithm (Phase 7 for scalar, Phase 8 for tiles).
+- **D9.** `TCVT` converts a contiguous region rather than a
+  `TSRC0`/`TSRC1` pair. Widening by ratio `k` writes `k` tiles from `TDST`,
+  and narrowing reads `k` tiles from `TSRC0`, so every source lane is
+  converted for any width ratio. Only SS=0 is legal. Integer-to-integer and
+  same-format conversions trap, because PACK/UNPACK cover the integer cases.
+- **D10.** VSEL is unfinished in every backend today, and the backends
+  disagree: Python and native return A, while RTL returns `msb(B) ? A : 0`.
+  The spec defines it as `msb(M) ? A : B`, with M the old `[TDST]`. It is
+  built in Phase 6 with `TCMP`.
+- **D12.** Opcode numbers are assigned in spec §8.3. Static rounding modes
+  are encoded in the low three bits of the FRND and FCVT-to-integer
+  opcodes.
+- **D15.** `FPCSR` is CSR `0x0D`.
+- **D17.** The converted immediate is operand A and the tile is operand B, as
+  the existing docs and Python already arrange integer splats.
 
 **D1. TMODE.** `EW` becomes a 4-bit field in `[3:0]`, taking the reserved
 bit 3.
@@ -209,10 +232,10 @@ every float format.
 - With ACC_ACC, the result is `RN_A(ACC0 + tree)`. When ACC_ZERO is set, the
   tree result is written directly with no add, so a -0 result survives.
 - Floating DOT, SUM, SUMSQ, and L1 always clear ACC1-3.
-- For MIN and MAX with ACC_ACC, the recommendation is a running minimum or
-  maximum against ACC0. Integer TRED MIN/MAX currently add under ACC_ACC too
-  (`emulator/megapad64.py:4876-4879`), which is not useful. Changing the
-  integer rule is a separate call.
+- MIN and MAX with ACC_ACC keep a running minimum or maximum against ACC0.
+  Integer TRED MIN/MAX currently add under ACC_ACC
+  (`emulator/megapad64.py:4876-4879`), which is not useful, so they change to
+  a running minimum or maximum as well (confirmed).
 
 **D5. NaN, zero, and subnormals.**
 
@@ -343,20 +366,24 @@ FP64. VSHR, VSHL, and VCLZ trap in float formats.
 Each phase ends with a commit that has a full multi-paragraph message. A phase
 may land in several commits, one per coherent green slice.
 
-### Phase 1 — Specification
+### Phase 1 — Specification (complete)
 
-Record D1-D18 as confirmed in the normative documents:
-
-- `docs/tile-engine.md`: formats, per-op float semantics table, canonical
-  tree, conversion and compare ops, timing table;
-- `docs/isa-reference.md`: TMODE, TACC_STATUS, the `FC` engine, `FPCSR`,
-  the opcode table;
-- `docs/simulator-contract.md`: remove the recorded FP compatibility choices
-  once they are superseded;
-- `docs/extended-tpu-spec.md`: replace §3.2 and fix the stale §8 encoding
-  table.
-
-There is no code in this phase. It gates everything else.
+- **Normative specification.** Added `docs/floating-point.md`. It covers
+  formats, general rules, the canonical tree, per-operation tables, the new
+  extended tile operations, TACC float formats, the `FC` engine, `FPCSR`,
+  the timing model, the BIOS words, and an implementation status table.
+- **`docs/tile-engine.md`.** Updated with the 4-bit TMODE, the new extended
+  operations, a floating-point summary, and the TACC tables and status
+  layout. The current-behaviour record stays under "Current implementation
+  status" until Phase 2.
+- **`docs/isa-reference.md`.** Updated with FLAGS/FCMP, the MEX float note,
+  the extended operations, the TACC status and formats, the EXT prefix table
+  (`FC`; F7 and FD–FF illegal), the new EXT.FP section, the condition-code
+  note, and `FPCSR` in the CSR map.
+- **`docs/extended-tpu-spec.md`.** Updated the status row, the EW table, and
+  §3.2, which is now superseded. The stale §8 encoding table is corrected.
+- **`docs/simulator-contract.md`.** The FP compatibility paragraph is marked
+  as superseded, to be removed when Phase 2 lands.
 
 ### Phase 2 — Exact oracle and FP16/BF16 unification
 
@@ -457,7 +484,8 @@ tile, but some expected values in their tests change.
 
 ### Phase 6 — Conversions and compares
 
-- Implement `TCVT` (D9) and, if confirmed, `TCMP` (D10) in all backends.
+- Implement `TCVT` (D9), `TCMP` (D10), and the new `VSEL` definition in all
+  backends.
 - Remove float PACK and UNPACK.
 - Add BIOS and KDOS words for buffer conversion between formats.
 
@@ -534,3 +562,14 @@ without fixing them.
   but nothing sets it.
 - **Unmasked CSRs in C++.** Native C++ does not mask SB, SR, SC, or SW on
   write.
+- **Integer immediate splat.** Every backend copies the immediate into every
+  byte, so a 16-bit lane receives `0x0505` for immediate 5. The docs say it
+  adds a small constant to every element. RTL also places the splat in
+  operand B, where Python and the docs place it in operand A. That only
+  matters for non-commutative functions, and the forced function 0 is
+  commutative for TALU and TMUL. Float formats get their own exact rule
+  (D17).
+- **Unassigned extended functions.** `F8` with TALU functions 4–7 does not
+  trap in Python, which writes zero lanes. The other backends were not
+  checked. Phases 6 and 8 give those functions
+  meanings.

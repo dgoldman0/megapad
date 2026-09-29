@@ -753,6 +753,11 @@ accumulator is narrower; both remain explicit discrepancies.
 The service makes no MEX encoding, CSR, scratchpad, latency, flag, pipeline, or
 hardware-throughput claim.
 
+The floating-point compatibility choices in the next paragraph are
+superseded by the normative `docs/floating-point.md`.  The hosted service
+moves to that definition in Phase 2 of `docs/megapad-full-float-plan.md`,
+and the paragraph is removed then.
+
 For FP SUM/SUMSQ the hosted service deliberately follows the executable Python
 oracle: one host-language `sum` over a tile followed by one binary32 pack.
 TDOT uses an explicit binary64 loop followed by the same pack. The native

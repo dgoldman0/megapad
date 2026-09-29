@@ -83,9 +83,14 @@ Bit:   7    6    5    4    3    2    1    0
 | 2 | **N** (Negative) | Bit 63 of result is set | Most ALU/IMM ops |
 | 3 | **V** (oVerflow) | Signed overflow occurred | ADD, SUB |
 | 4 | **P** (Parity) | Even parity of low 8 bits | Most ALU/IMM ops |
-| 5 | **G** (Greater) | Unsigned greater (set by CMP) | CMP, CMPI |
+| 5 | **G** (Greater) | Unsigned greater (set by CMP); float greater (FCMP) | CMP, CMPI, FCMP |
 | 6 | **I** (Interrupt) | Interrupts enabled globally | EI, DI, RTI |
 | 7 | **S** (Saturation) | Sticky saturation indicator | Tile ops |
+
+`FCMP` (EXT.FP, `FC`) sets Z = equal, N = less, G = greater, and V =
+unordered, and clears C and P (`docs/floating-point.md` §8.5).  Other
+floating-point instructions leave FLAGS unchanged; their IEEE exception
+flags live in `FPCSR`.
 
 ---
 
@@ -537,6 +542,11 @@ The low nibble `n` decodes as `[SS:2][OP:2]`:
   - 2 = TRED (reduction → accumulator)
   - 3 = TSYS (tile system operations)
 
+In the float formats (TMODE EW 4–7) each function below has the
+floating-point meaning defined in `docs/floating-point.md` §5; the
+immediate-splat operand is the immediate converted exactly to the lane
+format.
+
 ### TALU Sub-Functions (OP=0)
 
 | Funct | Name | Semantics |
@@ -604,8 +614,21 @@ instead of `0xE`, it accesses extended operations:
 |-------|------|-----------|
 | 0 | **VSHR** | `dst[i] = srcA[i] >> srcB[i]` (per-lane right shift; rounds if TMODE bit 6) |
 | 1 | **VSHL** | `dst[i] = srcA[i] << srcB[i]` (per-lane left shift) |
-| 2 | **VSEL** | `dst[i] = mask[i] ? srcA[i] : srcB[i]` (conditional select) |
+| 2 | **VSEL** | `dst[i] = msb(M[i]) ? srcA[i] : srcB[i]`, M = old `[TDST]`; SS=0/1 only |
 | 3 | **VCLZ** | `dst[i] = clz(srcA[i])` (count leading zeros per lane) |
+| 4 | **TDIV** | `dst[i] = RN(srcA[i] / srcB[i])`; float formats only |
+| 5 | **TSQRT** | `dst[i] = RN(√srcA[i])`; float formats only; SS=0 only |
+| 6 | **TCVT** | Convert region from `TMODE.EW` to function bits `[7:4]`; SS=0 only |
+| 7 | **TCMP** | Lane mask from predicate in function bits `[5:3]` |
+
+VSHR, VSHL, and VCLZ are illegal in float formats.  With SS=2 the function
+byte is the immediate and the function is forced to 0, so functions 4–7 need
+another selector.  The definitions, including the legal function-byte bits,
+the TCVT multi-tile rule, and the TCMP predicates, are in
+`docs/floating-point.md` §6.  VSEL's definition replaces the unfinished,
+inconsistent backend placeholders.  VSEL, TCVT, and TCMP are implemented in
+Phase 6, and TDIV and TSQRT in Phase 8, of
+`docs/megapad-full-float-plan.md`.
 
 **Extended TSYS** (EXT.8 prefix + TSYS):
 
@@ -656,10 +679,10 @@ fields describe the physical engine.
 | `[2]` | `VALID` | `CLEAR` or `LOAD` established value and format |
 | `[3]` | `DIRTY` | State changed since the last successful `LOAD` or `STORE` |
 | `[4]` | `BUSY` | A TACC operation is in flight |
-| `[7:5]` | `FORMAT_EW` | Latched `TMODE.EW`; zero when invalid |
-| `[8]` | `FORMAT_SIGNED` | Latched integer signedness |
-| `[9]` | `FORCE_PENDING` | Privileged release is queued behind active work |
-| `[15:10]` | reserved | Read as zero |
+| `[8:5]` | `FORMAT_EW` | Latched 4-bit `TMODE.EW`; zero when invalid |
+| `[9]` | `FORMAT_SIGNED` | Latched integer signedness |
+| `[10]` | `FORCE_PENDING` | Privileged release is queued behind active work |
+| `[15:11]` | reserved | Read as zero |
 | `[20:16]` | `OWNER` | Absolute core ID; 31 means no owner |
 | `[63:21]` | reserved | Read as zero |
 
@@ -698,8 +721,17 @@ format.  Legal formats are:
 | 2 — U32/S32 | 16 | 64-bit integer | 128 bytes |
 | 4 — FP16 | 32 | binary32 | 128 bytes |
 | 5 — BF16 | 32 | binary32 | 128 bytes |
+| 6 — FP32 | 16 | binary64 | 128 bytes |
+| 7 — FP64 | 8 | binary64 | 64 bytes |
 
-EW 3, 6, and 7 are illegal.  Physical lane `i` begins at bit `i × lane_width`;
+EW 3 and the reserved codes 8–15 are illegal.  The repacked status layout
+above, the FP32 and FP64 formats, and the 4-bit format field are specified in
+`docs/floating-point.md` and land in Phases 3 and 5 of
+`docs/megapad-full-float-plan.md`; until then backends use the previous
+packing (`FORMAT_EW [7:5]`, `FORMAT_SIGNED [8]`, `FORCE_PENDING [9]`) and
+reject EW 6 and 7.  FP32 products are exact in binary64 and FP64 `TAMAC` is
+fused; both round once per lane and use canonical NaN
+`0x7FF8000000000000`.  Physical lane `i` begins at bit `i × lane_width`;
 inactive high bits are zero.  Integer products are exact, sign- or
 zero-extended, and accumulated modulo the TACC lane width without saturation.
 Broadcast consumes only the low active-width bits of the selected GPR.
@@ -788,7 +820,8 @@ value is stored and consumed by the following instruction.
 | `F9 ss DR` | **EXT.STRING** | Forth-aware string engine (3-byte self-contained). See below. |
 | `FA ss DR` | **EXT.DICT** | Dictionary search engine (3-byte self-contained). See below. |
 | `FB ss [operand]` | **EXT.CRYPTO** | Crypto ISA (2–3 byte self-contained; topology depends on unit/core). See below. |
-| `Fn` | **EXT.n** | General modifier *n* stored; consumed by next instruction. |
+| `FC op DR [T]` | **EXT.FP** | Scalar FP32/FP64 engine (3–4 byte self-contained). See below. |
+| `F7`, `FD`–`FF` | — | Illegal; raise `IVEC_ILLEGAL_OP`. |
 
 **Double EXT is illegal** — triggers `IVEC_ILLEGAL_OP`.
 
@@ -1060,6 +1093,56 @@ a complete Field execution route. CRC remains available through the
 cluster-shared engine described above; other EXT.CRYPTO availability is
 implementation-specific.
 
+### EXT.FP — Scalar Floating-Point Engine (FC)
+
+> **Implementation status:** specified in `docs/floating-point.md` §8–§9 and
+> implemented in Phase 7 of `docs/megapad-full-float-plan.md`.  Until then,
+> `FC`, `F7`, and `FD`–`FF` still latch as silent modifiers in current
+> backends.
+
+Self-contained scalar IEEE 754 binary32/binary64 instructions operating on
+raw values in the 64-bit GPRs.  There is no separate floating-point register
+file.
+
+**Encoding:** `FC <op> <reg-byte> [T]`
+
+- `<op>` — `[7:6]` format: `00` = S (binary32, low 32 bits of the register),
+  `01` = D (binary64); `10`/`11` reserved.  `[5:0]` operation.
+- `<reg-byte>` — `[Rd:4][Rs:4]`; a REX prefix extends Rd and Rs as for
+  EXT.STRING.
+- `T` — present only for FMA and FMS: `[7:5]` zero, `[4:0]` Rt.
+
+| `op[5:0]` | Mnemonic | Operation |
+|---|---|---|
+| `0x00`–`0x04` | **FADD, FSUB, FMUL, FDIV** Rd, Rs; **FSQRT** Rd, Rs | `Rd ← Rd op Rs`; FSQRT `Rd ← √Rs` |
+| `0x05`, `0x06` | **FMIN, FMAX** Rd, Rs | NaN-propagating minimum/maximum, −0 < +0 |
+| `0x07` | **FMA** Rd, Rs, Rt | `Rd ← Rs × Rt + Rd`, one rounding |
+| `0x08` | **FMS** Rd, Rs, Rt | `Rd ← Rd − Rs × Rt`, one rounding |
+| `0x10` | **FCMP** Rd, Rs | Set Z/N/G/V; no register write |
+| `0x11`–`0x13` | **FEQ, FLT, FLE** Rd, Rs | `Rd ← −1` if true, else 0 |
+| `0x14` | **FCLASS** Rd, Rs | One-hot class mask of Rs |
+| `0x20`–`0x27` | **FRND.rm** Rd, Rs | Round to integral value |
+| `0x28`–`0x2F` | **FCVT.L.rm** Rd, Rs | Float → signed int64, saturating |
+| `0x30`–`0x37` | **FCVT.LU.rm** Rd, Rs | Float → unsigned int64, saturating |
+| `0x38`, `0x39` | **FCVT.f.L, FCVT.f.LU** Rd, Rs | Signed/unsigned int64 → float |
+| `0x3A` | **FCVT.f.F** Rd, Rs | Convert from the other of S/D |
+| `0x3B`, `0x3C` | **FCVT.H.f, FCVT.f.H** Rd, Rs | To/from binary16 bits |
+| `0x3D`, `0x3E` | **FCVT.B.f, FCVT.f.B** Rd, Rs | To/from bfloat16 bits |
+| others | *(reserved)* | Trap as `ILLEGAL_OP` |
+
+In `rm` forms, `op[2:0]` selects 0 RNE, 1 RTZ, 2 RDN, 3 RUP, 4 RMM, or 7
+dynamic (`FPCSR.RM`); 5 and 6 trap.  Other rounding operations use
+`FPCSR.RM`.  Every NaN result is the canonical quiet NaN; exceptions set the
+sticky flags in `FPCSR` (CSR `0x0D`) and never trap.  An S result writes zero
+to bits `[63:32]`.
+
+**Micro-cores:** execute EXT.FP through one cluster-shared FP unit, reached
+like MUL/DIV, with the same +3-cycle admission cost.
+
+**Cycle counts:** base 1 plus 3 for arithmetic, FMA, rounding, and
+conversions, or plus 1 for min/max, compares, and FCLASS.  FDIV and FSQRT
+take a data-independent constant fixed in Phase 7.
+
 ---
 
 ## Condition Codes
@@ -1086,6 +1169,10 @@ low nibble of the opcode byte.
 | 0xE | EF | **External Flags** | Any EF ≠ 0 |
 | 0xF | NV | **Never** | Always false (useful as NOP) |
 
+After `FCMP`, EQ/NE, GT, MI (less), PL (not less), and VS/VC (unordered)
+read as their names say.  LE tests only G = 0 and is therefore also taken
+when the operands are unordered; test VS first or use `FLE`.
+
 ---
 
 ## CSR Register Map
@@ -1105,12 +1192,13 @@ low nibble of the opcode byte.
 | `0x0A` | **PRIV** | 1 | RW | Privilege level: 0=supervisor, 1=user.  Write is **supervisor-only**. |
 | `0x0B` | **MPU_BASE** | 64 | RW | MPU base address (inclusive).  Write is **supervisor-only**. |
 | `0x0C` | **MPU_LIMIT** | 64 | RW | MPU limit address (exclusive).  Write is **supervisor-only**. |
+| `0x0D` | **FPCSR** | 9 | RW | Scalar FP rounding mode `[2:0]` and sticky flags NX UF OF DZ NV `[8:4]` (`docs/floating-point.md` §9) |
 | | | | | |
 | `0x10` | **SB** | 4 | RW | Tile bank selector |
 | `0x11` | **SR** | 20 | RW | Tile row cursor |
 | `0x12` | **SC** | 20 | RW | Tile column cursor |
 | `0x13` | **SW** | 20 | RW | Tile stride width (default 1) |
-| `0x14` | **TMODE** | 8 | RW | Tile element mode (see Tile Engine doc) |
+| `0x14` | **TMODE** | 8 | RW | Tile element mode: EW `[3:0]`, signed `[4]`, saturate `[5]`, rounding `[6]`; bit 7 reads zero (4-bit EW lands in Phase 3 of the full-float plan) |
 | `0x15` | **TCTRL** | 8 | RW | Tile control register |
 | `0x16` | **TSRC0** | 64 | RW | Tile source 0 address |
 | `0x17` | **TSRC1** | 64 | RW | Tile source 1 address |
