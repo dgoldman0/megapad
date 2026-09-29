@@ -20,9 +20,12 @@ from simulator.memory import SparseAddressSpace
 TILE_BYTES = 64
 ACCUMULATOR_WORDS = 4
 _ACCUMULATOR_MASK = (1 << (ACCUMULATOR_WORDS * 64)) - 1
-# FP32 and FP64 are defined formats whose operations land in Phases 4 and 5
-# of docs/megapad-full-float-plan.md; until then they fail closed here.
-_PENDING_FORMATS = frozenset((tile_formats.EW_FP32, tile_formats.EW_FP64))
+_REDUCTION_FUNCTIONS = {
+    "sum": tile_formats.TRED_SUM,
+    "minimum": tile_formats.TRED_MIN,
+    "maximum": tile_formats.TRED_MAX,
+    "sum_squares": tile_formats.TRED_SUMSQ,
+}
 _TALU_FUNCTIONS = {
     "add": tile_float.ADD,
     "subtract": tile_float.SUB,
@@ -56,12 +59,12 @@ class _LegacyRegisterFile(Protocol):
 
 
 class UnsupportedTileModeError(ExecutionError):
-    """An operation reached a tile format outside the admitted format set."""
+    """A tile operation reached a format that does not admit it."""
 
     def __init__(self, mode: int) -> None:
         self.mode = mode
         super().__init__(
-            f"tile mode 0x{mode:02x} is not admitted by the hosted tile service"
+            f"tile mode 0x{mode:02x} does not admit this hosted tile operation"
         )
 
 
@@ -107,8 +110,9 @@ def tile_sum_u8(tile: bytes) -> int:
 class HostedTileService:
     """One runtime-local semantic legacy tile engine.
 
-    The service accepts all four integer element widths, FP16, and BF16; the
-    defined FP32 and FP64 formats and the reserved codes fail closed.  It
+    The service accepts every defined format and fails closed on the reserved
+    codes and on operations a format does not admit (``tile_formats.admits``).
+    It
     implements the legacy and extended BIOS operations reached by ordinary
     source.  The separately owned full-width TACC family remains unsupported.
     """
@@ -230,7 +234,9 @@ class HostedTileService:
         self._binary("multiply")
 
     def widening_multiply(self) -> None:
-        element_bytes, signed, _saturating, floating_format = self._mode_format()
+        element_bytes, signed, _saturating, floating_format = self._mode_format(
+            tile_formats.TMUL, tile_formats.TMUL_WMUL
+        )
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         output0 = bytearray(TILE_BYTES)
@@ -280,7 +286,9 @@ class HostedTileService:
         self._multiply_add()
 
     def dot(self) -> None:
-        element_bytes, signed, _saturating, floating_format = self._mode_format()
+        element_bytes, signed, _saturating, floating_format = self._mode_format(
+            tile_formats.TMUL, tile_formats.TMUL_DOT
+        )
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
 
@@ -325,7 +333,7 @@ class HostedTileService:
 
     def popcount(self) -> None:
         element_bytes, _signed, _saturating, _floating_format = (
-            self._mode_format()
+            self._mode_format(tile_formats.TRED, tile_formats.TRED_POPCNT)
         )
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
         result = sum(
@@ -339,7 +347,9 @@ class HostedTileService:
         self._account()
 
     def l1_norm(self) -> None:
-        element_bytes, signed, _saturating, floating_format = self._mode_format()
+        element_bytes, signed, _saturating, floating_format = self._mode_format(
+            tile_formats.TRED, tile_formats.TRED_L1
+        )
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
         if floating_format is not None:
             self._publish_float_sum(
@@ -373,7 +383,7 @@ class HostedTileService:
         self._index_reduce(minimum=False)
 
     def transpose(self) -> None:
-        self._mode_format()  # unimplemented formats fail closed
+        self._mode_format(tile_formats.TSYS, tile_formats.TSYS_TRANS)
         tile = self._memory.read_bytes(self.destination, TILE_BYTES)
         output = bytearray(TILE_BYTES)
         for row in range(8):
@@ -383,7 +393,13 @@ class HostedTileService:
         self._account()
 
     def _binary(self, operation: str) -> None:
-        element_bytes, signed, saturating, floating_format = self._mode_format()
+        if operation == "multiply":
+            op, funct = tile_formats.TMUL, tile_formats.TMUL_MUL
+        else:
+            op, funct = tile_formats.TALU, _TALU_FUNCTIONS[operation]
+        element_bytes, signed, saturating, floating_format = self._mode_format(
+            op, funct
+        )
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         bits = element_bytes * 8
@@ -474,7 +490,9 @@ class HostedTileService:
         self._account()
 
     def _multiply_add(self) -> None:
-        element_bytes, signed, _saturating, floating_format = self._mode_format()
+        element_bytes, signed, _saturating, floating_format = self._mode_format(
+            tile_formats.TMUL, tile_formats.TMUL_MAC
+        )
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         existing = self._memory.read_bytes(self.destination, TILE_BYTES)
@@ -523,7 +541,9 @@ class HostedTileService:
         self._account()
 
     def _reduce(self, operation: str) -> None:
-        element_bytes, signed, _saturating, floating_format = self._mode_format()
+        element_bytes, signed, _saturating, floating_format = self._mode_format(
+            tile_formats.TRED, _REDUCTION_FUNCTIONS[operation]
+        )
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
         raw_values = [
             int.from_bytes(tile[offset : offset + element_bytes], "little")
@@ -580,7 +600,10 @@ class HostedTileService:
         self._account()
 
     def _index_reduce(self, *, minimum: bool) -> None:
-        element_bytes, signed, _saturating, floating_format = self._mode_format()
+        element_bytes, signed, _saturating, floating_format = self._mode_format(
+            tile_formats.TRED,
+            tile_formats.TRED_MINIDX if minimum else tile_formats.TRED_MAXIDX,
+        )
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
         raw_values = [
             int.from_bytes(tile[offset : offset + element_bytes], "little")
@@ -743,9 +766,11 @@ class HostedTileService:
 
     def _mode_format(
         self,
+        op: int,
+        funct: int,
     ) -> tuple[int, bool, bool, ieee_fp.Format | None]:
         lane_format = tile_formats.decode(self._mode)
-        if lane_format is None or lane_format.ew in _PENDING_FORMATS:
+        if not tile_formats.admits(lane_format, op, funct):
             raise UnsupportedTileModeError(self._mode)
         if lane_format.is_float:
             return lane_format.lane_bytes, False, False, lane_format.float_format

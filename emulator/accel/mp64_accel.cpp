@@ -230,11 +230,69 @@ static constexpr bool tile_format_is_float(int ew) {
            TILE_FORMATS[ew].is_float();
 }
 
-// FP32 and FP64 are defined formats whose tile operations land in Phases 4
-// and 5 of docs/megapad-full-float-plan.md.  Until then their MEX operations
-// return to Python, which traps, so the native path fails closed.
-static constexpr bool tile_format_pending(int ew) {
-    return ew == EW_FP32 || ew == EW_FP64;
+// Whether a MEX operation may run in a format (shared/tile_formats.py
+// admits).  funct is the effective function (0 for the immediate form) and
+// extended marks the EXT.8 forms.  docs/floating-point.md §5.2 makes PACK,
+// UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL illegal in
+// FP64; the EXT.8 functions 4-7 land in Phases 6 and 8.  FP32 and FP64
+// reductions and dot products land in Phase 5, and their VSEL in Phase 6.
+static constexpr bool tile_op_admitted(
+        int ew,
+        int op,
+        int funct,
+        bool extended) {
+    const TileFormat& format = TILE_FORMATS[ew];
+    if (!format.defined())
+        return false;
+    if (extended && op == 0x0) {
+        if (!format.is_float())
+            return true;
+        return (ew == EW_FP16 || ew == EW_BF16) && funct == 2;
+    }
+    if (extended && op == 0x3)
+        return true;
+    if (ew != EW_FP32 && ew != EW_FP64)
+        return true;
+    switch (op) {
+        case 0x0:
+            return true;
+        case 0x1:
+            return funct == 0 || funct == 3 || funct == 4 ||
+                   (funct == 2 && ew == EW_FP32);
+        case 0x2:
+            return funct == 3;
+        default:
+            return funct != 5 && funct != 6;
+    }
+}
+
+// docs/floating-point.md §10: extra cycles of float tile operations in
+// FP16/BF16, FP32, and FP64 (emulator/megapad64.py _FLOAT_EXTRA_CYCLES).
+// Unlisted float operations cost nothing extra.
+static constexpr int tile_float_extra_cycles(int ew, int op, int funct) {
+    const int column = ew == EW_FP32 ? 1 : ew == EW_FP64 ? 2 : 0;
+    constexpr int talu_add_sub[3] = {0, 4, 4};
+    constexpr int tmul[6][3] = {
+        {1, 4, 4},    // MUL
+        {3, 13, 9},   // DOT
+        {2, 5, 0},    // WMUL (illegal in FP64)
+        {2, 4, 4},    // MAC
+        {2, 4, 4},    // FMA
+        {3, 12, 8},   // DOTACC
+    };
+    constexpr int tred_sum_l1[3] = {0, 9, 5};
+    constexpr int tred_sumsq[3] = {0, 13, 9};
+    if (op == 0x0)
+        return funct <= 1 ? talu_add_sub[column] : 0;
+    if (op == 0x1)
+        return funct <= 5 ? tmul[funct][column] : 0;
+    if (op == 0x2) {
+        if (funct == 0 || funct == 4)
+            return tred_sum_l1[column];
+        if (funct == 5)
+            return tred_sumsq[column];
+    }
+    return 0;
 }
 
 // TACC.CLEAR, LOAD, and TAMAC formats (docs/tile-engine.md).  FP32 and FP64
@@ -7932,6 +7990,8 @@ static inline uint64_t tile_float_from_double(
     if (std::isnan(value))
         return tile_float_canonical_nan(f);
     const uint64_t raw = double_bits(value);
+    if (f.width == 64)
+        return raw;
     const uint64_t sign_bits = (raw >> 63) ? tile_float_sign(f) : 0;
     const uint64_t biased64 = (raw >> 52) & 0x7FF;
     if (biased64 == 0x7FF)
@@ -8016,17 +8076,25 @@ static inline uint64_t tile_float_product(
         dst, tile_float_to_double(src, a) * tile_float_to_double(src, b));
 }
 
-// RN_dst(a * b + c) with a, b in src and c in dst, rounded once.
+// RN_dst(a * b + c) with a, b in src and c in dst, rounded once.  Products
+// of precision <= 26 operands are exact in binary64, and the round-to-odd
+// sum rounds once more correctly for dst precision <= 51.  Binary64 operands
+// use the host's correctly rounded fused multiply-add.
 static inline uint64_t tile_float_fma(
         const TileFloatFormat& dst,
         const TileFloatFormat& src,
         uint64_t a,
         uint64_t b,
         uint64_t c) {
-    const double product =
-        tile_float_to_double(src, a) * tile_float_to_double(src, b);
-    return tile_float_from_double(
-        dst, round_to_odd_sum(product, tile_float_to_double(dst, c)));
+    const double x = tile_float_to_double(src, a);
+    const double y = tile_float_to_double(src, b);
+    const double z = tile_float_to_double(dst, c);
+    if (src.width == 64)
+        return tile_float_from_double(dst, std::fma(x, y, z));
+    const double product = x * y;
+    if (dst.width == 64)
+        return tile_float_from_double(dst, product + z);
+    return tile_float_from_double(dst, round_to_odd_sum(product, z));
 }
 
 static inline uint64_t tile_float_convert(
@@ -9578,14 +9646,15 @@ static int exec_mex(
         funct = 0;
 
     // Python owns the 256-bit integer accumulator semantics, the current
-    // TSYS instruction map, and the trap for reserved formats and for the
-    // FP32/FP64 formats whose operations have not landed.  Decide this before
+    // TSYS instruction map, the EXT.8 ALU in float formats, and every trap
+    // for an operation the format does not admit.  Decide this before
     // reading sources or changing ACC/TCTRL/destination state so
     // rewind-and-fallback is transactional.  FP POPCNT counts raw bits into
     // the integer accumulator.
     const bool fp_bit_reduction = is_fp && op == 0x2 && funct == 3;
-    if (!lane_format.defined() ||
-        tile_format_pending(ew_bits) ||
+    const bool extended = s.ext_modifier == 8;
+    if (!tile_op_admitted(ew_bits, op, funct, extended) ||
+        (is_fp && extended) ||
         (op == 0x1 && !is_fp && funct != 0) ||
         (op == 0x2 && (!is_fp || fp_bit_reduction)) ||
         op == 0x3) {
@@ -9615,7 +9684,7 @@ static int exec_mex(
             const uint64_t immediate = tile_float_from_double(
                 tile_float_format(ew_bits), static_cast<double>(funct_byte));
             for (int lane = 0; lane < num_lanes; lane++)
-                tile_set_elem(src_a, lane, 2, immediate);
+                tile_set_elem(src_a, lane, elem_bytes, immediate);
         } else {
             src_a.fill(funct_byte);
         }
@@ -9671,8 +9740,8 @@ static int exec_mex(
             const uint64_t magnitude =
                 tile_float_mask(fmt) ^ tile_float_sign(fmt);
             for (int lane = 0; lane < num_lanes; lane++) {
-                const uint64_t a = tile_get_elem(src_a, lane, 2);
-                const uint64_t b = tile_get_elem(src_b, lane, 2);
+                const uint64_t a = tile_get_elem(src_a, lane, elem_bytes);
+                const uint64_t b = tile_get_elem(src_b, lane, elem_bytes);
                 uint64_t r = 0;
                 switch (funct) {
                     case 0: r = tile_float_add(fmt, a, b); break;
@@ -9684,10 +9753,10 @@ static int exec_mex(
                     case 6: r = tile_float_extreme2(fmt, a, b, true); break;
                     default: r = a & magnitude; break;  // ABS
                 }
-                tile_set_elem(dst, lane, 2, r);
+                tile_set_elem(dst, lane, elem_bytes, r);
             }
             tile_write_64bytes(s, cb, s.tdst, dst);
-            return 0;
+            return tile_float_extra_cycles(ew_bits, op, funct);
         }
 
         // ---- Integer TALU ----
@@ -9788,15 +9857,16 @@ static int exec_mex(
         if (is_fp) {
             // ---- Floating-point TMUL ----
             const TileFloatFormat& fmt = tile_float_format(ew_bits);
+            const int cycles = tile_float_extra_cycles(ew_bits, op, funct);
             if (funct == 0) {  // MUL
                 for (int lane = 0; lane < num_lanes; lane++) {
-                    tile_set_elem(dst, lane, 2, tile_float_product(
+                    tile_set_elem(dst, lane, elem_bytes, tile_float_product(
                         fmt, fmt,
-                        tile_get_elem(src_a, lane, 2),
-                        tile_get_elem(src_b, lane, 2)));
+                        tile_get_elem(src_a, lane, elem_bytes),
+                        tile_get_elem(src_b, lane, elem_bytes)));
                 }
                 tile_write_64bytes(s, cb, s.tdst, dst);
-                return 1;
+                return cycles;
             }
             if (funct == 1 || funct == 5) {  // DOT, DOTACC
                 double products[32];
@@ -9820,36 +9890,39 @@ static int exec_mex(
                     }
                     publish_float_sums(s, results, 4);
                 }
-                return 3;
+                return cycles;
             }
-            if (funct == 2) {  // WMUL — products rounded once to binary32
+            if (funct == 2) {  // WMUL — products rounded once to format A
+                const TileFloatFormat& wide = *lane_format.accumulation;
+                const int wide_bytes = 2 * elem_bytes;
+                const int half = num_lanes / 2;
                 Tile dst0{}, dst1{};
                 for (int lane = 0; lane < num_lanes; lane++) {
                     const uint64_t product = tile_float_product(
-                        TILE_FP32, fmt,
-                        tile_get_elem(src_a, lane, 2),
-                        tile_get_elem(src_b, lane, 2));
-                    if (lane < 16)
-                        tile_set_elem(dst0, lane, 4, product);
+                        wide, fmt,
+                        tile_get_elem(src_a, lane, elem_bytes),
+                        tile_get_elem(src_b, lane, elem_bytes));
+                    if (lane < half)
+                        tile_set_elem(dst0, lane, wide_bytes, product);
                     else
-                        tile_set_elem(dst1, lane - 16, 4, product);
+                        tile_set_elem(dst1, lane - half, wide_bytes, product);
                 }
                 tile_write_64bytes(s, cb, s.tdst, dst0);
                 tile_write_64bytes(s, cb, s.tdst + 64, dst1);
-                return 2;
+                return cycles;
             }
             if (funct == 3 || funct == 4) {  // MAC, FMA — fused, addend [TDST]
                 Tile addend{};
                 tile_read_64bytes(s, cb, s.tdst, addend);
                 for (int lane = 0; lane < num_lanes; lane++) {
-                    tile_set_elem(dst, lane, 2, tile_float_fma(
+                    tile_set_elem(dst, lane, elem_bytes, tile_float_fma(
                         fmt, fmt,
-                        tile_get_elem(src_a, lane, 2),
-                        tile_get_elem(src_b, lane, 2),
-                        tile_get_elem(addend, lane, 2)));
+                        tile_get_elem(src_a, lane, elem_bytes),
+                        tile_get_elem(src_b, lane, elem_bytes),
+                        tile_get_elem(addend, lane, elem_bytes)));
                 }
                 tile_write_64bytes(s, cb, s.tdst, dst);
-                return 2;
+                return cycles;
             }
             return 1;  // unknown FP TMUL funct
         }
@@ -9902,7 +9975,7 @@ static int exec_mex(
             }
             const uint64_t result = tile_float_tree32(leaves, num_lanes);
             publish_float_sums(s, &result, 1);
-            return 0;
+            return tile_float_extra_cycles(ew_bits, op, funct);
         }
 
         // MIN, MAX, MINIDX, MAXIDX: NaN-skipping, -0 below +0, lowest index.

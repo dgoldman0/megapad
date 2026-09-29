@@ -271,18 +271,23 @@ def test_integer_widths_signed_saturation_and_unready_formats_fail_closed() -> N
     runtime.tile.maximum()
     assert runtime.tile.accumulator == (1234, 0, 0, 0)
 
-    # FP32 and FP64 fail closed until their operations land; EW 8-15 are
+    # FP32 and FP64 reductions fail closed until Phase 5; EW 8-15 are
     # reserved.  TMODE keeps bits [6:0], so 0x88 selects EW 8.
     before = runtime.memory.read_bytes(DESTINATION, 64)
     operations = runtime.diagnostics.perf_tileops
-    for written, mode in ((6, 0x06), (7, 0x07), (0x88, 0x08), (0x1F, 0x1F)):
+    for written, mode, operation in (
+        (6, 0x06, "sum"),
+        (7, 0x07, "sum_squares"),
+        (0x88, 0x08, "add"),
+        (0x1F, 0x1F, "add"),
+    ):
         runtime.tile.set_mode(written)
         assert runtime.tile.mode == mode
         with pytest.raises(
             UnsupportedTileModeError,
             match=f"tile mode 0x{mode:02x}",
         ):
-            runtime.tile.add()
+            getattr(runtime.tile, operation)()
     assert runtime.memory.read_bytes(DESTINATION, 64) == before
     assert runtime.diagnostics.perf_tileops == operations
 

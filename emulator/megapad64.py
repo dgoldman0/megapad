@@ -237,10 +237,30 @@ def _signed_divmod_trunc(dividend: int, divisor: int) -> tuple[int, int]:
 #  Floating-point tile formats (values come from shared.ieee_fp)
 # ---------------------------------------------------------------------------
 
-# FP32 (EW 6) and FP64 (EW 7) are defined formats whose tile operations land
-# in Phases 4 and 5 of docs/megapad-full-float-plan.md.  Until then every MEX
-# operation in them traps, so the emulator fails closed.
-_PENDING_TILE_FORMATS = frozenset((EW_FP32, EW_FP64))
+# docs/floating-point.md §10: extra cycles of float tile operations in
+# FP16/BF16, FP32, and FP64.  Unlisted float operations cost nothing extra.
+# FP64 WMUL is illegal, so its entry is never charged.
+_FLOAT_EXTRA_CYCLES = {
+    (tile_formats.TALU, tile_float.ADD): (0, 4, 4),
+    (tile_formats.TALU, tile_float.SUB): (0, 4, 4),
+    (tile_formats.TMUL, tile_formats.TMUL_MUL): (1, 4, 4),
+    (tile_formats.TMUL, tile_formats.TMUL_DOT): (3, 13, 9),
+    (tile_formats.TMUL, tile_formats.TMUL_WMUL): (2, 5, 0),
+    (tile_formats.TMUL, tile_formats.TMUL_MAC): (2, 4, 4),
+    (tile_formats.TMUL, tile_formats.TMUL_FMA): (2, 4, 4),
+    (tile_formats.TMUL, tile_formats.TMUL_DOTACC): (3, 12, 8),
+    (tile_formats.TRED, tile_formats.TRED_SUM): (0, 9, 5),
+    (tile_formats.TRED, tile_formats.TRED_L1): (0, 9, 5),
+    (tile_formats.TRED, tile_formats.TRED_SUMSQ): (0, 13, 9),
+}
+_FLOAT_CYCLE_COLUMN = {EW_FP32: 1, EW_FP64: 2}
+
+
+def _float_extra_cycles(lane_format, op: int, funct: int) -> int:
+    row = _FLOAT_EXTRA_CYCLES.get((op, funct))
+    if row is None:
+        return 0
+    return row[_FLOAT_CYCLE_COLUMN.get(lane_format.ew, 0)]
 
 
 def sign_extend(val: int, bits: int) -> int:
@@ -4006,16 +4026,21 @@ class Megapad64:
             )
             return self._exec_tacc_lifecycle(ss, funct_byte)
 
-        # A reserved format, or one whose operations have not landed yet,
+        # A reserved format, or an operation the format does not admit,
         # traps before any source, destination, or accumulator access.
         lane_format = tile_formats.decode(self.tmode)
-        if lane_format is None or lane_format.ew in _PENDING_TILE_FORMATS:
+        if not tile_formats.admits(
+            lane_format,
+            op,
+            0 if ss == 0x2 else funct,
+            self._ext_modifier == 8,
+        ):
             self._ext_modifier = -1
             ew_bits = tile_formats.element_width(self.tmode)
             raise TrapError(
                 IVEC_ILLEGAL_OP,
-                f"tile format EW {ew_bits} is "
-                + ("reserved" if lane_format is None else "not implemented"),
+                f"tile format EW {ew_bits} does not admit MEX op {op} "
+                f"function {funct}",
             )
         is_fp = lane_format.is_float
         fmt = lane_format.float_format
@@ -4125,7 +4150,7 @@ class Megapad64:
                         tile_float.unpack_lanes(fmt, src_b),
                     ),
                 ))
-                return 0
+                return _float_extra_cycles(lane_format, op, funct)
 
             # ---- Integer TALU ----
             saturate = (self.tmode >> 5) & 1
@@ -4189,14 +4214,15 @@ class Megapad64:
             if is_fp:
                 a_lanes = tile_float.unpack_lanes(fmt, src_a)
                 b_lanes = tile_float.unpack_lanes(fmt, src_b)
+                cycles = _float_extra_cycles(lane_format, op, funct)
                 if funct == 0:  # MUL
                     write_tile(self.tdst, tile_float.pack_lanes(
                         fmt, tile_float.multiply(fmt, a_lanes, b_lanes)))
-                    return 1
+                    return cycles
                 if funct == 1:  # DOT — canonical tree in the accumulation format
                     self._publish_float_sums(
                         wide, [tile_float.dot(fmt, a_lanes, b_lanes)])
-                    return 3
+                    return cycles
                 if funct == 2:  # WMUL — products in the accumulation format
                     products = tile_float.pack_lanes(
                         wide,
@@ -4204,7 +4230,7 @@ class Megapad64:
                     )
                     write_tile(self.tdst, products[:64])
                     write_tile(u64(self.tdst + 64), products[64:])
-                    return 2
+                    return cycles
                 if funct in (3, 4):  # MAC, FMA — fused; the addend is [TDST]
                     c_lanes = tile_float.unpack_lanes(fmt, read_tile(self.tdst))
                     write_tile(self.tdst, tile_float.pack_lanes(
@@ -4212,11 +4238,11 @@ class Megapad64:
                         tile_float.fused_multiply_add(
                             fmt, a_lanes, b_lanes, c_lanes),
                     ))
-                    return 2
+                    return cycles
                 if funct == 5:  # DOTACC — four quarter subtrees
                     self._publish_float_sums(
                         wide, tile_float.dot_chunks(fmt, a_lanes, b_lanes))
-                    return 3
+                    return cycles
                 return 1  # unknown fp TMUL funct
 
             if funct == 0:  # MUL
@@ -4360,7 +4386,7 @@ class Megapad64:
                     index, value = tile_float.extreme_index(
                         fmt, lanes_a, largest)
                     self._publish_float_index(wide, index, value, largest)
-                return 0
+                return _float_extra_cycles(lane_format, op, funct)
 
             # ---- Integer TRED ----
             values = [tile_get_elem(tile, lane, elem_bytes) for lane in range(num_lanes)]

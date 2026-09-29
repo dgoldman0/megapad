@@ -34,6 +34,8 @@ from megapad64 import (
     CSR_TMODE,
     EW_BF16,
     EW_FP16,
+    EW_FP32,
+    EW_FP64,
     EW_U16,
     EW_U32,
     EW_U64,
@@ -408,22 +410,44 @@ def test_tmode_and_tctrl_keep_only_their_defined_bits(
     assert (cpu.regs[2], cpu.regs[3]) == (0x08, 0x00)
 
 
-@pytest.mark.parametrize("instruction", ["t.add", "t.dot", "t.sum", "t.zero",
-                                         "t.shuffle", "t.load2d"])
-@pytest.mark.parametrize(
-    "tmode",
-    [
-        pytest.param(0x06, id="fp32-pending"),
-        pytest.param(0x07, id="fp64-pending"),
-        pytest.param(0x08, id="reserved-8"),
-        pytest.param(0x1F, id="reserved-15-signed"),
-    ],
+_RESERVED_MODE_INSTRUCTIONS = (
+    "t.add", "t.dot", "t.sum", "t.zero", "t.shuffle", "t.load2d",
 )
-def test_unready_tile_formats_trap_before_any_access(
+# Operations FP32/FP64 do not admit yet (reductions and dot products land in
+# Phase 5, VSEL and the EXT.8 functions 4-7 in Phases 6 and 8) or at all
+# (PACK, UNPACK, VSHR, VSHL, VCLZ).
+_WIDE_FLOAT_UNADMITTED = (
+    "t.dot", "t.dotacc", "t.sum", "t.rmin", "t.rmax", "t.l1", "t.sumsq",
+    "t.minidx", "t.maxidx", "t.pack", "t.unpack", "t.vshr", "t.vshl",
+    "t.vclz", "t.vsel", ".db 0xF8, 0xE0, 0x04", ".db 0xF8, 0xE0, 0x07",
+)
+_UNADMITTED_CASES = (
+    [
+        pytest.param(mode, instruction, id=f"{name}-{instruction}")
+        for mode, name in ((0x08, "reserved-8"), (0x1F, "reserved-15-signed"))
+        for instruction in _RESERVED_MODE_INSTRUCTIONS
+    ]
+    + [
+        pytest.param(mode, instruction, id=f"{name}-{instruction}")
+        for mode, name in ((0x06, "fp32"), (0x07, "fp64"))
+        for instruction in _WIDE_FLOAT_UNADMITTED
+    ]
+    + [pytest.param(0x07, "t.wmul", id="fp64-t.wmul")]
+    + [
+        pytest.param(mode, instruction, id=f"{name}-{instruction}")
+        for mode, name in ((0x04, "fp16"), (0x05, "bf16"))
+        for instruction in ("t.vshr", "t.vshl", "t.vclz",
+                            ".db 0xF8, 0xE0, 0x05")
+    ]
+)
+
+
+@pytest.mark.parametrize(("tmode", "instruction"), _UNADMITTED_CASES)
+def test_unadmitted_tile_operations_trap_before_any_access(
     tmode: int,
     instruction: str,
 ) -> None:
-    """Reserved EW codes, and FP32/FP64 until their operations land, trap
+    """Reserved EW codes and every operation a format does not admit trap
     IVEC_ILLEGAL_OP before memory, ACC, or TCTRL changes."""
     reads: list[int] = []
 
@@ -3217,6 +3241,121 @@ def test_fp_mex_native_matches_oracle_on_seeded_tiles(
             _assert_native_matches_oracle(
                 instruction, setup, expected_dispatch="native"
             )
+
+
+_WIDE_FP_DIFFERENTIAL_INSTRUCTIONS = (
+    "t.add", "t.sub", "t.and", "t.or", "t.xor", "t.min", "t.max", "t.abs",
+    "t.mul", "t.wmul", "t.mac", "t.fma",
+    "t.add r3", "t.mul r3", "t.fma r3",
+    ".db 0xE8, 0x07",  # immediate ADD
+    ".db 0xE9, 0xFF",  # immediate MUL
+    ".db 0xEC, 0x01",  # in-place SUB
+    ".db 0xED, 0x04",  # in-place FMA
+)
+
+
+@pytest.mark.parametrize("instruction", _WIDE_FP_DIFFERENTIAL_INSTRUCTIONS)
+@pytest.mark.parametrize(
+    "ew",
+    [pytest.param(EW_FP32, id="fp32"), pytest.param(EW_FP64, id="fp64")],
+)
+def test_wide_fp_elementwise_native_matches_oracle_on_seeded_tiles(
+    instruction: str,
+    ew: int,
+) -> None:
+    """FP32/FP64 element-wise operations run natively and bit-exactly."""
+    if ew == EW_FP64 and instruction == "t.wmul":
+        pytest.skip("FP64 WMUL is illegal (covered by the trap test)")
+    fmt = ieee_fp.FORMAT_BY_EW[ew]
+    lanes = 64 // (fmt.width // 8)
+    rng = random.Random(f"{instruction}/{ew}")
+    for _ in range(24):
+        src0 = bytes(tile_float.pack_lanes(
+            fmt, _random_float_lanes(rng, fmt, lanes)))
+        src1 = bytes(tile_float.pack_lanes(
+            fmt, _random_float_lanes(rng, fmt, lanes)))
+        dst0 = bytes(tile_float.pack_lanes(
+            fmt, _random_float_lanes(rng, fmt, lanes)))
+        register = rng.getrandbits(64)
+        tctrl = rng.randrange(4)
+
+        def setup(cpu: Any) -> Watchers:
+            watchers = _seed_common_state(
+                cpu,
+                tmode=ew,
+                src0=src0,
+                src1=src1,
+                dst0=dst0,
+                tctrl=tctrl,
+            )
+            cpu.regs[3] = register
+            return watchers
+
+        _assert_native_matches_oracle(
+            instruction, setup, expected_dispatch="native"
+        )
+
+
+@pytest.mark.parametrize(
+    "instruction",
+    ["t.zero", "t.trans", "t.shuffle", "t.movbank", "t.loadc", "t.load2d",
+     "t.store2d", "t.popcnt", ".db 0xE3, 0x07, 0x05"],
+)
+@pytest.mark.parametrize(
+    "ew",
+    [pytest.param(EW_FP32, id="fp32"), pytest.param(EW_FP64, id="fp64")],
+)
+def test_wide_fp_raw_lane_operations_match_oracle(
+    instruction: str,
+    ew: int,
+) -> None:
+    """Raw lane operations run in FP32/FP64 at the format's lane width."""
+    rng = random.Random(f"raw/{instruction}/{ew}")
+    src0 = bytes(rng.getrandbits(8) for _ in range(64))
+    src1 = bytes(rng.getrandbits(8) for _ in range(64))
+
+    def setup(cpu: Any) -> Watchers:
+        watchers = _seed_common_state(
+            cpu,
+            tmode=ew,
+            src0=src0,
+            src1=src1,
+            tctrl=0x1,
+        )
+        # Keep the LOADC/LOAD2D/STORE2D cursor clear of the program at 0.
+        cpu.sc = 48
+        return watchers
+
+    _assert_native_matches_oracle(
+        instruction, setup, expected_dispatch="fallback"
+    )
+
+
+@pytest.mark.parametrize("cpu_type", [PythonMegapad64, NativeMegapad64])
+def test_float_tile_extra_cycles_follow_the_timing_table(
+    cpu_type: CPUFactory,
+) -> None:
+    """docs/floating-point.md §10, measured against the zero-cost AND."""
+    expected = {
+        EW_FP16: {"t.add": 0, "t.sub": 0, "t.min": 0, "t.mul": 1,
+                  "t.mac": 2, "t.fma": 2, "t.wmul": 2},
+        EW_FP32: {"t.add": 4, "t.sub": 4, "t.min": 0, "t.mul": 4,
+                  "t.mac": 4, "t.fma": 4, "t.wmul": 5},
+        EW_FP64: {"t.add": 4, "t.sub": 4, "t.min": 0, "t.mul": 4,
+                  "t.mac": 4, "t.fma": 4},
+    }
+
+    def cycles(ew: int, instruction: str) -> int:
+        cpu = cpu_type(mem_size=MEM_SIZE)
+        _seed_common_state(cpu, tmode=ew, src0=bytes(64), src1=bytes(64))
+        cpu.load_bytes(0, assemble(instruction))
+        cpu.pc = 0
+        return cpu.step()
+
+    for ew, table in expected.items():
+        base = cycles(ew, "t.and")
+        for instruction, extra in table.items():
+            assert cycles(ew, instruction) - base == extra, (ew, instruction)
 
 
 @pytest.mark.parametrize(

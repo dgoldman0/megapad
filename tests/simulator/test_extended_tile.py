@@ -11,10 +11,13 @@ from shared.cells import MASK64
 from shared import ieee_fp
 from simulator.memory import MemoryAccessError
 from simulator.runtime import MegaForthRuntime
+from simulator.tile import UnsupportedTileModeError
 
 
 FP16_FORMAT = ieee_fp.FP16.ew
 BF16_FORMAT = ieee_fp.BF16.ew
+FP32_FORMAT = ieee_fp.FP32.ew
+FP64_FORMAT = ieee_fp.FP64.ew
 
 
 def encode_tile_float(value: float, format_code: int) -> int:
@@ -564,3 +567,101 @@ def test_mode_words_and_register_widths() -> None:
     context.data.push(MASK64)
     runtime.execute("TCTRL!", step_budget=10_000)
     assert (runtime.tile.mode, runtime.tile.control) == (0x7F, 0x03)
+
+
+def _wide_float_tile(format_code: int, values: tuple[float, ...]) -> bytes:
+    fmt = ieee_fp.FORMAT_BY_EW[format_code]
+    return _lane_tile(
+        fmt.width // 8,
+        tuple(ieee_fp.from_double(fmt, value) for value in values),
+    )
+
+
+@pytest.mark.parametrize(
+    "format_code",
+    (pytest.param(FP32_FORMAT, id="fp32"), pytest.param(FP64_FORMAT, id="fp64")),
+)
+@pytest.mark.parametrize(
+    ("operation", "instruction"),
+    (
+        ("add", "t.add"),
+        ("subtract", "t.sub"),
+        ("bitwise_and", "t.and"),
+        ("bitwise_or", "t.or"),
+        ("bitwise_xor", "t.xor"),
+        ("elementwise_minimum", "t.min"),
+        ("elementwise_maximum", "t.max"),
+        ("absolute", "t.abs"),
+        ("multiply", "t.mul"),
+        ("multiply_accumulate", "t.mac"),
+        ("fused_multiply_add", "t.fma"),
+    ),
+)
+def test_fp32_fp64_elementwise_operations_match_the_executable_machine(
+    format_code: int,
+    operation: str,
+    instruction: str,
+) -> None:
+    """FP32 and FP64 element-wise results come from the shared reference."""
+    tiny = 2.0 ** -1074 if format_code == FP64_FORMAT else 2.0 ** -149
+    _assert_matches_oracle(
+        operation,
+        instruction,
+        mode=format_code,
+        source0=_wide_float_tile(
+            format_code, (1.5, -0.0, float("inf"), float("nan"), tiny, 3.25)),
+        source1=_wide_float_tile(
+            format_code, (2.0 ** -30, 0.0, 0.0, 1.0, tiny, -3.25)),
+        destination=_wide_float_tile(
+            format_code, (1.0, -0.0, 5.0, 2.0, -tiny, 1e30)),
+    )
+
+
+def test_fp32_widening_multiply_writes_exact_binary64_products() -> None:
+    left = _wide_float_tile(
+        FP32_FORMAT, tuple(1.0 + index * 2.0 ** -23 for index in range(16)))
+    right = _wide_float_tile(FP32_FORMAT, (3.0,) * 15 + (-(2.0 ** -149),))
+    runtime = _assert_matches_oracle(
+        "widening_multiply",
+        "t.wmul",
+        mode=FP32_FORMAT,
+        source0=left,
+        source1=right,
+        destination=bytes((0xA5,)) * TILE_BYTES,
+    )
+    last = int.from_bytes(runtime.memory.read_bytes(DESTINATION + 120, 8),
+                          "little")
+    assert ieee_fp.to_double(ieee_fp.FP64, last) == -(
+        (1.0 + 15 * 2.0 ** -23) * 2.0 ** -149)
+
+
+@pytest.mark.parametrize(
+    ("format_code", "operation"),
+    (
+        (FP64_FORMAT, "widening_multiply"),
+        (FP32_FORMAT, "dot"),
+        (FP32_FORMAT, "sum"),
+        (FP64_FORMAT, "sum_squares"),
+        (FP64_FORMAT, "minimum"),
+        (FP32_FORMAT, "maximum_index"),
+        (FP64_FORMAT, "l1_norm"),
+    ),
+)
+def test_fp32_fp64_unadmitted_operations_fail_closed(
+    format_code: int,
+    operation: str,
+) -> None:
+    """FP64 WMUL is illegal; FP32/FP64 reductions land in Phase 5."""
+    runtime = MegaForthRuntime()
+    runtime.memory.write_bytes(DESTINATION, bytes((0x5A,)) * 2 * TILE_BYTES)
+    runtime.tile.set_mode(format_code)
+    runtime.tile.set_source0(SOURCE0)
+    runtime.tile.set_source1(SOURCE1)
+    runtime.tile.set_destination(DESTINATION)
+    runtime.field.replace_accumulator_words(0, (11, 22, 33, 44))
+    with pytest.raises(UnsupportedTileModeError):
+        getattr(runtime.tile, operation)()
+    assert runtime.memory.read_bytes(DESTINATION, 2 * TILE_BYTES) == bytes(
+        (0x5A,)) * 2 * TILE_BYTES
+    assert runtime.tile.accumulator == (11, 22, 33, 44)
+    assert runtime.diagnostics.perf_tileops == 0

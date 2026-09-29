@@ -37,6 +37,14 @@ EW_BF16 = 5
 EW_FP32 = 6
 EW_FP64 = 7
 
+# MEX major operations and the function codes the admission rule names.
+TALU, TMUL, TRED, TSYS = range(4)
+TMUL_MUL, TMUL_DOT, TMUL_WMUL, TMUL_MAC, TMUL_FMA, TMUL_DOTACC = range(6)
+TRED_SUM, TRED_MIN, TRED_MAX, TRED_POPCNT, TRED_L1, TRED_SUMSQ = range(6)
+TRED_MINIDX, TRED_MAXIDX = 6, 7
+TSYS_TRANS, TSYS_PACK, TSYS_UNPACK = 0, 5, 6
+EXT_TALU_VSEL = 2
+
 
 @dataclass(frozen=True)
 class TileFormat:
@@ -107,6 +115,46 @@ def decode(tmode: int) -> TileFormat | None:
     return _BY_CODE[tmode & TMODE_EW_MASK]
 
 
+def admits(
+    lane_format: TileFormat | None,
+    op: int,
+    funct: int,
+    extended: bool = False,
+) -> bool:
+    """Whether a MEX operation may run in ``lane_format``.
+
+    ``funct`` is the effective function (0 for the immediate form) and
+    ``extended`` marks the EXT.8 forms.  docs/floating-point.md §5.2 makes
+    PACK, UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL
+    illegal in FP64.  The EXT.8 functions 4-7 are float operations that land
+    in Phases 6 and 8, so float formats reject them until then.  FP32 and
+    FP64 reductions and dot products land in Phase 5, and their VSEL in
+    Phase 6.  TACC operations follow their own format rule.
+    """
+
+    if lane_format is None:
+        return False
+    if extended and op == TALU:
+        if not lane_format.is_float:
+            return True
+        return (
+            lane_format.ew in (EW_FP16, EW_BF16) and funct == EXT_TALU_VSEL
+        )
+    if extended and op == TSYS:
+        return True
+    if lane_format.ew not in (EW_FP32, EW_FP64):
+        return True
+    if op == TALU:
+        return True
+    if op == TMUL:
+        return funct in (TMUL_MUL, TMUL_MAC, TMUL_FMA) or (
+            funct == TMUL_WMUL and lane_format.ew == EW_FP32
+        )
+    if op == TRED:
+        return funct == TRED_POPCNT
+    return funct not in (TSYS_PACK, TSYS_UNPACK)
+
+
 __all__ = [
     "EW_BF16",
     "EW_FP16",
@@ -127,6 +175,7 @@ __all__ = [
     "TMODE_SIGNED",
     "TMODE_WRITE_MASK",
     "TileFormat",
+    "admits",
     "decode",
     "element_width",
 ]

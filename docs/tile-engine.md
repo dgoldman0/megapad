@@ -111,9 +111,11 @@ accumulator, or `TCTRL`. The TACC lifecycle follows its own format rules:
 format, and `TRY`, `STORE`, and `RELEASE` do not read `TMODE`.
 
 > **Implementation status:** FP32 (EW 6) and FP64 (EW 7) are decoded as
-> defined formats in every backend, but their operations land in Phases 4
-> and 5 of `docs/megapad-full-float-plan.md`. Until then every MEX tile
-> operation in them traps exactly as a reserved format does.
+> defined formats in every backend. Their element-wise and raw lane
+> operations run in the Python emulator, native accelerator, and hosted
+> simulator; the RTL traps them until its slice of Phase 4 of
+> `docs/megapad-full-float-plan.md` lands. Their reductions and dot products
+> trap until Phase 5.
 
 **Common TMODE values:**
 
@@ -522,12 +524,12 @@ For FP16 and BF16, the Python emulator, native accelerator, hosted simulator,
 and RTL implement these rules.  The software backends take their values from
 `shared/ieee_fp.py`, a seeded differential test holds the native accelerator
 to the Python results, and the RTL replays emulator-generated golden vectors
-(`rtl/sim/tile_fp_vectors.vec`).  Every backend decodes FP32 and FP64 as
-defined formats, but their operations arrive in Phases 4 and 5 of
-`docs/megapad-full-float-plan.md` and the new operations in Phases 6 and 8.
-Until then every MEX tile operation in EW 6 or 7 traps `IVEC_ILLEGAL_OP`
-before any access, in all four backends.  Float PACK and UNPACK remain until
-`TCVT` replaces them.
+(`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 element-wise and raw lane
+operations run in the software backends; the RTL, FP32/FP64 reductions and
+dot products (Phase 5), and the new operations (Phases 6 and 8) follow the
+schedule in `docs/megapad-full-float-plan.md`.  Until an operation lands in a
+backend, it traps `IVEC_ILLEGAL_OP` there before any access.  Float PACK and
+UNPACK remain in FP16 and BF16 until `TCVT` replaces them.
 
 
 ---
