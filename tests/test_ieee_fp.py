@@ -600,3 +600,66 @@ def test_minimum_maximum_and_nan_skipping_extremes():
 def test_narrow_formats_constant_matches_precision_bound():
     for fmt in NARROW_FORMATS:
         assert 53 >= 2 * fmt.precision + 2
+
+
+FP32_OVERFLOW_MIDPOINT = float.fromhex("0x1.ffffffp+127")
+
+
+@pytest.mark.parametrize(
+    ("fmt", "value", "expected"),
+    [
+        pytest.param(FP16, -0.0, 0x8000, id="fp16-negative-zero"),
+        pytest.param(FP16, 65504.0, 0x7BFF, id="fp16-maximum-finite"),
+        pytest.param(FP16, 65520.0, 0x7C00, id="fp16-overflow-midpoint"),
+        pytest.param(FP16, -1e300, 0xFC00, id="fp16-large-overflow"),
+        pytest.param(FP16, 1.0 + 2.0**-11, 0x3C00, id="fp16-tie-down"),
+        pytest.param(FP16, 1.0 + 3.0 * 2.0**-11, 0x3C02, id="fp16-tie-up"),
+        pytest.param(FP16, 2.0**-25, 0x0000, id="fp16-subnormal-tie-down"),
+        pytest.param(FP16, 3.0 * 2.0**-25, 0x0002, id="fp16-subnormal-tie-up"),
+        pytest.param(FP16, 2.0**-14 - 2.0**-25, 0x0400,
+                     id="fp16-subnormal-carry"),
+        pytest.param(FP16, float("nan"), 0x7E00, id="fp16-nan"),
+        pytest.param(BF16, 1.0 + 2.0**-8, 0x3F80, id="bf16-tie-down"),
+        pytest.param(BF16, 1.0 + 3.0 * 2.0**-8, 0x3F82, id="bf16-tie-up"),
+        pytest.param(BF16, 2.0**-134, 0x0000, id="bf16-subnormal-tie-down"),
+        pytest.param(BF16, 3.0 * 2.0**-134, 0x0002,
+                     id="bf16-subnormal-tie-up"),
+        pytest.param(BF16, fp.to_double(FP32, 0x7F7F_7FFF), 0x7F7F,
+                     id="bf16-maximum-finite-round-down"),
+        pytest.param(BF16, fp.to_double(FP32, 0x7F7F_8000), 0x7F80,
+                     id="bf16-overflow-midpoint"),
+        pytest.param(BF16, fp.to_double(FP32, 0xFF7F_8000), 0xFF80,
+                     id="bf16-negative-overflow-midpoint"),
+        # Rounding through binary32 first would give 0x3F80 and 0x3F82.
+        pytest.param(BF16, float.fromhex("0x1.0100004p0"), 0x3F81,
+                     id="bf16-no-binary32-staging-up"),
+        pytest.param(BF16, float.fromhex("0x1.02ffffcp0"), 0x3F81,
+                     id="bf16-no-binary32-staging-down"),
+        pytest.param(BF16, fp.to_double(FP32, 0x7FCD_0000), 0x7FC0,
+                     id="bf16-nan-is-canonical"),
+        pytest.param(FP32, float.fromhex("0x1.fffffep+127"), 0x7F7F_FFFF,
+                     id="fp32-maximum-finite"),
+        pytest.param(FP32, math.nextafter(FP32_OVERFLOW_MIDPOINT, 0.0),
+                     0x7F7F_FFFF, id="fp32-just-below-overflow"),
+        pytest.param(FP32, FP32_OVERFLOW_MIDPOINT, 0x7F80_0000,
+                     id="fp32-overflow-midpoint"),
+        pytest.param(FP32, -FP32_OVERFLOW_MIDPOINT, 0xFF80_0000,
+                     id="fp32-negative-overflow-midpoint"),
+        pytest.param(FP32, 1.0 + 2.0**-24, 0x3F80_0000, id="fp32-tie-down"),
+        pytest.param(FP32, 1.0 + 3.0 * 2.0**-24, 0x3F80_0002,
+                     id="fp32-tie-up"),
+    ],
+)
+def test_named_conversions_from_binary64(fmt, value, expected):
+    assert fp.from_double(fmt, value) == expected
+    exact = fp.encode(fmt, fp.decode(FP64, fp.double_bits(value)))[0]
+    assert exact == expected
+
+
+def test_decoding_keeps_subnormals_signed_zero_and_specials():
+    assert fp.to_double(FP16, 0x0001) == 2.0**-24
+    assert fp.to_double(BF16, 0x0001) == 2.0**-133
+    for fmt in NARROW_FORMATS:
+        assert math.copysign(1.0, fp.to_double(fmt, fmt.sign_bit)) == -1.0
+        assert math.isinf(fp.to_double(fmt, fmt.infinity))
+        assert math.isnan(fp.to_double(fmt, fmt.infinity | 1))

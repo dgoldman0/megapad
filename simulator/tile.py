@@ -8,20 +8,11 @@ scratchpad arbitration, or a physical datapath.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Iterable
 from typing import Protocol
 
+from shared import ieee_fp, tile_float
 from shared.cells import MASK64, u64
-from shared.fp import (
-    BF16_FORMAT,
-    FP16_FORMAT,
-    bits_to_fp32,
-    decode_tile_float,
-    encode_tile_float,
-    fp32_to_bits,
-    tile_float_is_nan,
-)
 from simulator.errors import ExecutionError
 from simulator.memory import SparseAddressSpace
 
@@ -29,6 +20,17 @@ from simulator.memory import SparseAddressSpace
 TILE_BYTES = 64
 ACCUMULATOR_WORDS = 4
 _ACCUMULATOR_MASK = (1 << (ACCUMULATOR_WORDS * 64)) - 1
+_FLOAT_FORMATS = {4: ieee_fp.FP16, 5: ieee_fp.BF16}
+_TALU_FUNCTIONS = {
+    "add": tile_float.ADD,
+    "subtract": tile_float.SUB,
+    "bitwise_and": tile_float.AND,
+    "bitwise_or": tile_float.OR,
+    "bitwise_xor": tile_float.XOR,
+    "minimum": tile_float.MIN,
+    "maximum": tile_float.MAX,
+    "absolute": tile_float.ABS,
+}
 
 
 class _LegacyRegisterFile(Protocol):
@@ -227,27 +229,16 @@ class HostedTileService:
         output1 = bytearray(TILE_BYTES)
 
         if floating_format is not None:
-            output_bytes = 4
-            for lane, offset in enumerate(range(0, TILE_BYTES, element_bytes)):
-                raw_left = int.from_bytes(
-                    left[offset : offset + element_bytes],
-                    "little",
-                )
-                raw_right = int.from_bytes(
-                    right[offset : offset + element_bytes],
-                    "little",
-                )
-                result = fp32_to_bits(
-                    float(decode_tile_float(raw_left, floating_format))
-                    * float(decode_tile_float(raw_right, floating_format))
-                )
-                self._set_wide_lane(
-                    output0,
-                    output1,
-                    lane,
-                    output_bytes,
-                    result,
-                )
+            products = tile_float.pack_lanes(
+                ieee_fp.accumulation_format(floating_format),
+                tile_float.widening_multiply(
+                    floating_format,
+                    tile_float.unpack_lanes(floating_format, left),
+                    tile_float.unpack_lanes(floating_format, right),
+                ),
+            )
+            output0[:] = products[:TILE_BYTES]
+            output1[:] = products[TILE_BYTES:]
         else:
             bits = element_bytes * 8
             output_bytes = element_bytes * 2
@@ -286,20 +277,14 @@ class HostedTileService:
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
 
         if floating_format is not None:
-            total = 0.0
-            for offset in range(0, TILE_BYTES, element_bytes):
-                raw_left = int.from_bytes(
-                    left[offset : offset + element_bytes],
-                    "little",
-                )
-                raw_right = int.from_bytes(
-                    right[offset : offset + element_bytes],
-                    "little",
-                )
-                total += float(decode_tile_float(raw_left, floating_format)) * float(
-                    decode_tile_float(raw_right, floating_format)
-                )
-            self._publish_float_reduction(total, accumulate=True)
+            self._publish_float_sum(
+                floating_format,
+                tile_float.dot(
+                    floating_format,
+                    tile_float.unpack_lanes(floating_format, left),
+                    tile_float.unpack_lanes(floating_format, right),
+                ),
+            )
         else:
             bits = element_bytes * 8
             total = 0
@@ -347,13 +332,18 @@ class HostedTileService:
 
     def l1_norm(self) -> None:
         element_bytes, signed, _saturating, floating_format = self._mode_format()
-        if floating_format is not None:
-            # The executable machine retains its integer fallback for this
-            # otherwise unsupported FP reduction.  TMODE.SIGNED therefore
-            # selects two's-complement interpretation of raw 16-bit lanes.
-            signed = bool(self._mode & 0x10)
-        bits = element_bytes * 8
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
+        if floating_format is not None:
+            self._publish_float_sum(
+                floating_format,
+                tile_float.l1_norm(
+                    floating_format,
+                    tile_float.unpack_lanes(floating_format, tile),
+                ),
+            )
+            self._account()
+            return
+        bits = element_bytes * 8
         raw_values = (
             int.from_bytes(
                 tile[offset : offset + element_bytes],
@@ -375,6 +365,7 @@ class HostedTileService:
         self._index_reduce(minimum=False)
 
     def transpose(self) -> None:
+        self._mode_format()  # unimplemented formats fail closed
         tile = self._memory.read_bytes(self.destination, TILE_BYTES)
         output = bytearray(TILE_BYTES)
         for row in range(8):
@@ -393,72 +384,33 @@ class HostedTileService:
         high = (1 << (bits - 1)) - 1
         output = bytearray(TILE_BYTES)
 
+        if floating_format is not None:
+            left_lanes = tile_float.unpack_lanes(floating_format, left)
+            right_lanes = tile_float.unpack_lanes(floating_format, right)
+            if operation == "multiply":
+                lanes = tile_float.multiply(
+                    floating_format, left_lanes, right_lanes
+                )
+            else:
+                lanes = tile_float.elementwise(
+                    floating_format,
+                    _TALU_FUNCTIONS[operation],
+                    left_lanes,
+                    right_lanes,
+                )
+            self._memory.write_bytes(
+                self.destination,
+                tile_float.pack_lanes(floating_format, lanes),
+            )
+            self._account()
+            return
+
         for offset in range(0, TILE_BYTES, element_bytes):
             raw_left = int.from_bytes(left[offset : offset + element_bytes], "little")
             raw_right = int.from_bytes(
                 right[offset : offset + element_bytes],
                 "little",
             )
-            if floating_format is not None:
-                if operation == "bitwise_and":
-                    encoded = raw_left & raw_right
-                elif operation == "bitwise_or":
-                    encoded = raw_left | raw_right
-                elif operation == "bitwise_xor":
-                    encoded = raw_left ^ raw_right
-                elif operation == "absolute":
-                    encoded = raw_left & 0x7FFF
-                elif operation in ("minimum", "maximum"):
-                    if tile_float_is_nan(
-                        raw_left,
-                        floating_format,
-                    ) or tile_float_is_nan(raw_right, floating_format):
-                        encoded = (
-                            0x7E00
-                            if floating_format == FP16_FORMAT
-                            else 0x7FC0
-                        )
-                    else:
-                        lane_left_float = decode_tile_float(
-                            raw_left,
-                            floating_format,
-                        )
-                        lane_right_float = decode_tile_float(
-                            raw_right,
-                            floating_format,
-                        )
-                        encoded = encode_tile_float(
-                            min(lane_left_float, lane_right_float)
-                            if operation == "minimum"
-                            else max(lane_left_float, lane_right_float),
-                            floating_format,
-                        )
-                else:
-                    lane_left_float = decode_tile_float(
-                        raw_left,
-                        floating_format,
-                    )
-                    lane_right_float = decode_tile_float(
-                        raw_right,
-                        floating_format,
-                    )
-                    if operation == "add":
-                        result = lane_left_float + lane_right_float
-                    elif operation == "subtract":
-                        result = lane_left_float - lane_right_float
-                    elif operation == "multiply":
-                        result = lane_left_float * lane_right_float
-                    else:  # pragma: no cover - private callers constrain this value
-                        raise AssertionError(
-                            f"unknown tile binary operation {operation!r}"
-                        )
-                    encoded = encode_tile_float(result, floating_format)
-                output[offset : offset + element_bytes] = encoded.to_bytes(
-                    element_bytes,
-                    "little",
-                )
-                continue
-
             if operation in ("minimum", "maximum", "absolute") or (
                 saturating and signed
             ):
@@ -522,6 +474,22 @@ class HostedTileService:
         lane_mask = (1 << bits) - 1
         output = bytearray(TILE_BYTES)
 
+        if floating_format is not None:
+            self._memory.write_bytes(
+                self.destination,
+                tile_float.pack_lanes(
+                    floating_format,
+                    tile_float.fused_multiply_add(
+                        floating_format,
+                        tile_float.unpack_lanes(floating_format, left),
+                        tile_float.unpack_lanes(floating_format, right),
+                        tile_float.unpack_lanes(floating_format, existing),
+                    ),
+                ),
+            )
+            self._account()
+            return
+
         for offset in range(0, TILE_BYTES, element_bytes):
             raw_left = int.from_bytes(left[offset : offset + element_bytes], "little")
             raw_right = int.from_bytes(
@@ -532,20 +500,12 @@ class HostedTileService:
                 existing[offset : offset + element_bytes],
                 "little",
             )
-            if floating_format is not None:
-                result = (
-                    float(decode_tile_float(raw_left, floating_format))
-                    * float(decode_tile_float(raw_right, floating_format))
-                    + float(decode_tile_float(raw_existing, floating_format))
-                )
-                encoded = encode_tile_float(result, floating_format)
-            else:
-                lane_left = self._signed(raw_left, bits) if signed else raw_left
-                lane_right = self._signed(raw_right, bits) if signed else raw_right
-                lane_existing = (
-                    self._signed(raw_existing, bits) if signed else raw_existing
-                )
-                encoded = (lane_left * lane_right + lane_existing) & lane_mask
+            lane_left = self._signed(raw_left, bits) if signed else raw_left
+            lane_right = self._signed(raw_right, bits) if signed else raw_right
+            lane_existing = (
+                self._signed(raw_existing, bits) if signed else raw_existing
+            )
+            encoded = (lane_left * lane_right + lane_existing) & lane_mask
             output[offset : offset + element_bytes] = encoded.to_bytes(
                 element_bytes,
                 "little",
@@ -563,26 +523,25 @@ class HostedTileService:
         ]
 
         if floating_format is not None:
-            values = [
-                decode_tile_float(value, floating_format) for value in raw_values
-            ]
             if operation == "sum":
-                result = sum(float(value) for value in values)
-                accumulate = True
-            elif operation == "minimum":
-                non_nan = [value for value in values if not math.isnan(value)]
-                result = min(non_nan) if non_nan else float("nan")
-                accumulate = False
-            elif operation == "maximum":
-                non_nan = [value for value in values if not math.isnan(value)]
-                result = max(non_nan) if non_nan else float("nan")
-                accumulate = False
+                self._publish_float_sum(
+                    floating_format,
+                    tile_float.sum_lanes(floating_format, raw_values),
+                )
             elif operation == "sum_squares":
-                result = sum(float(value) * float(value) for value in values)
-                accumulate = True
+                self._publish_float_sum(
+                    floating_format,
+                    tile_float.sum_squares(floating_format, raw_values),
+                )
+            elif operation in ("minimum", "maximum"):
+                largest = operation == "maximum"
+                self._publish_float_extreme(
+                    floating_format,
+                    tile_float.extreme(floating_format, raw_values, largest),
+                    largest,
+                )
             else:  # pragma: no cover - private callers constrain this value
                 raise AssertionError(f"unknown tile reduction {operation!r}")
-            self._publish_float_reduction(result, accumulate=accumulate)
             self._account()
             return
 
@@ -602,7 +561,14 @@ class HostedTileService:
         else:  # pragma: no cover - private callers constrain this value
             raise AssertionError(f"unknown tile reduction {operation!r}")
 
-        self._publish_integer_reduction(result)
+        if operation in ("minimum", "maximum"):
+            self._publish_integer_extreme(
+                result,
+                signed=signed,
+                largest=operation == "maximum",
+            )
+        else:
+            self._publish_integer_reduction(result)
         self._account()
 
     def _index_reduce(self, *, minimum: bool) -> None:
@@ -614,25 +580,20 @@ class HostedTileService:
         ]
 
         if floating_format is not None:
-            values = [
-                decode_tile_float(value, floating_format) for value in raw_values
-            ]
-            best_index = 0
-            best_value = values[0]
-            for index, value in enumerate(values[1:], start=1):
-                if math.isnan(value):
-                    continue
-                if math.isnan(best_value) or (
-                    value < best_value if minimum else value > best_value
-                ):
-                    best_index = index
-                    best_value = value
+            wide = ieee_fp.accumulation_format(floating_format)
+            index, value = tile_float.extreme_index(
+                floating_format, raw_values, not minimum
+            )
+            _zero, accumulate = self._take_accumulator_controls()
+            words = list(self.accumulator)
+            if accumulate and not tile_float.index_replaces(
+                wide, value, words[1] & wide.mask, not minimum
+            ):
+                index, value = words[0], words[1]
             self._registers.replace_accumulator_words(
                 self._core_id,
-                (best_index, fp32_to_bits(best_value), 0, 0),
+                (index, value, 0, 0),
             )
-            if self._control & 0x02:
-                self._control &= ~0x02
             self._account()
             return
 
@@ -707,24 +668,74 @@ class HostedTileService:
         if control & 0x02:
             self._control &= ~0x02
 
-    def _publish_float_reduction(
+    def _publish_integer_extreme(
         self,
-        result: float,
+        result: int,
         *,
-        accumulate: bool,
+        signed: bool,
+        largest: bool,
     ) -> None:
-        control = self._control
-        if accumulate and control & 0x01:
-            old_bits = 0 if control & 0x02 else self.accumulator[0]
-            result = bits_to_fp32(old_bits) + result
+        """Integer MIN/MAX keep a running extreme against ACC0 (§4.6)."""
+
+        _zero, accumulate = self._take_accumulator_controls()
+        if accumulate:
+            old = self.accumulator[0]
+            if signed:
+                old = self._signed(old, 64)
+            result = max(old, result) if largest else min(old, result)
+        result &= _ACCUMULATOR_MASK
         self._registers.replace_accumulator_words(
             self._core_id,
-            (fp32_to_bits(result), 0, 0, 0),
+            tuple(
+                (result >> (index * 64)) & MASK64
+                for index in range(ACCUMULATOR_WORDS)
+            ),
         )
-        if control & 0x02:
-            self._control &= ~0x02
 
-    def _mode_format(self) -> tuple[int, bool, bool, int | None]:
+    def _publish_float_sum(self, floating_format, result: int) -> None:
+        """Publish DOT, SUM, SUMSQ, or L1 (docs/floating-point.md §4.4)."""
+
+        wide = ieee_fp.accumulation_format(floating_format)
+        _zero, accumulate = self._take_accumulator_controls()
+        if accumulate:
+            result = tile_float.accumulate_sum(
+                wide, self.accumulator[0] & wide.mask, result
+            )
+        self._registers.replace_accumulator_words(
+            self._core_id,
+            (result, 0, 0, 0),
+        )
+
+    def _publish_float_extreme(
+        self,
+        floating_format,
+        result: int,
+        largest: bool,
+    ) -> None:
+        """Publish TRED MIN or MAX (docs/floating-point.md §4.4)."""
+
+        wide = ieee_fp.accumulation_format(floating_format)
+        _zero, accumulate = self._take_accumulator_controls()
+        if accumulate:
+            result = tile_float.accumulate_extreme(
+                wide, self.accumulator[0] & wide.mask, result, largest
+            )
+        self._registers.replace_accumulator_words(
+            self._core_id,
+            (result, 0, 0, 0),
+        )
+
+    def _take_accumulator_controls(self) -> tuple[bool, bool]:
+        """Consume ACC_ZERO; it takes priority over ACC_ACC."""
+
+        zero = bool(self._control & 0x02)
+        if zero:
+            self._control &= ~0x02
+        return zero, bool(self._control & 0x01) and not zero
+
+    def _mode_format(
+        self,
+    ) -> tuple[int, bool, bool, ieee_fp.Format | None]:
         element_width = self._mode & 0x07
         if element_width <= 3:
             return (
@@ -733,8 +744,9 @@ class HostedTileService:
                 bool(self._mode & 0x20),
                 None,
             )
-        if element_width in (FP16_FORMAT, BF16_FORMAT):
-            return 2, False, False, element_width
+        floating_format = _FLOAT_FORMATS.get(element_width)
+        if floating_format is not None:
+            return floating_format.width // 8, False, False, floating_format
         raise UnsupportedTileModeError(self._mode)
 
     def _accumulator_value(self) -> int:

@@ -1381,18 +1381,11 @@ hard-coded zero instead of restoring the caller's mode, and reductions leave
 TCTRL at one. A tile-loop memory fault or budget fault before the final
 `0 TMODE!` leaves FP16/BF16 mode active.
 
-The hosted path follows the decoded Python emulator while the legacy FP
-contract is unresolved. Python/hosted SUM and SUMSQ use the host `sum`
-algorithm for one tile and then pack once to binary32; the native accelerator
-currently falls back to that path, while its direct C++ body is sequential
-binary32 and RTL uses a balanced binary32 tree. Cancellation can differ. The
-Python and active native TDOT paths instead use an explicit binary64 loop
-before one binary32 pack, while RTL again uses its own tree. The
-ACC_ACC path widens the existing binary32 ACC0, adds it to the tile subtotal
-in binary64, and repacks; that pack is the inter-tile rounding point. The
-executable FP16 encoder also maps the exact product `0x0017 * 0x5190` to zero
-where IEEE round-to-even would carry into minimum-normal `0x0400`. These are
-recorded discrepancies, not KDOS requirements.
+Results follow `docs/floating-point.md`: lanes or products enter binary32,
+one pairwise tree in lane order sums each tile, and with ACC_ACC each tile adds
+to the binary32 ACC0 with one more rounding. The Python emulator, native
+accelerator, and hosted simulator implement that definition; the RTL datapath
+converges in Phase 2 of `docs/megapad-full-float-plan.md`.
 
 ---
 

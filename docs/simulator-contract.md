@@ -753,30 +753,11 @@ accumulator is narrower; both remain explicit discrepancies.
 The service makes no MEX encoding, CSR, scratchpad, latency, flag, pipeline, or
 hardware-throughput claim.
 
-The floating-point compatibility choices in the next paragraph are
-superseded by the normative `docs/floating-point.md`.  The hosted service
-moves to that definition in Phase 2 of `docs/megapad-full-float-plan.md`,
-and the paragraph is removed then.
-
-For FP SUM/SUMSQ the hosted service deliberately follows the executable Python
-oracle: one host-language `sum` over a tile followed by one binary32 pack.
-TDOT uses an explicit binary64 loop followed by the same pack. The native
-accelerator currently falls back to Python for SUM/SUMSQ, although its bypassed
-direct C++ implementation is sequential binary32; RTL uses a balanced binary32
-tree.
-With ACC_ACC, hosted execution decodes the existing binary32 value in ACC0,
-widens it, adds it to that tile's subtotal in binary64, and packs once again;
-that final pack is the inter-tile rounding point.
-Results can therefore differ under cancellation, and Python's `sum` algorithm
-is itself interpreter-version-sensitive. This is a recorded compatibility
-choice, not a resolution of the hardware contract. Python/C++ conversion also
-maps the FP16 product `0x0017 * 0x5190` to zero when an IEEE round-to-even carry
-would produce minimum-normal `0x0400`; the shared hosted value model preserves
-that executable behavior. Reserved EW 6/7 fail closed here even though current
-Python/C++ and RTL implementations alias them differently. RTL scalar FP TRED
-retains ACC1--ACC3 on overwrite or accumulate whenever ACC_ZERO is not taken,
-and FP DOT retains them on ACC_ACC; Python and hosted operations always clear
-them.
+Floating-point tile results follow the normative `docs/floating-point.md`.
+The hosted service takes its values from `shared/ieee_fp.py` and
+`shared/tile_float.py`, as the Python emulator does and the native accelerator
+reproduces. EW 6/7 fail closed here until FP32 and FP64 are implemented; RTL
+convergence is tracked in `docs/megapad-full-float-plan.md`.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal

@@ -13,6 +13,8 @@ an ordinary, diagnostic pytest failure rather than taking down the test worker.
 
 from __future__ import annotations
 
+import random
+
 import json
 import subprocess
 import sys
@@ -43,9 +45,8 @@ from megapad64 import (
     TACC_OWNER_NONE,
     Megapad64 as PythonMegapad64,
     TrapError,
-    _float_to_bf16,
-    _float_to_fp16,
 )
+from shared import ieee_fp, tile_float
 
 
 MEM_SIZE = 4096
@@ -98,10 +99,13 @@ def _fp_accumulator_image(values: list[int]) -> bytes:
 
 
 def _floating_tile(ew: int, values: list[float]) -> bytes:
-    encode = _float_to_fp16 if ew == EW_FP16 else _float_to_bf16
+    fmt = ieee_fp.FORMAT_BY_EW[ew]
     lanes = _lane_count(ew)
     repeated = [values[i % len(values)] for i in range(lanes)]
-    return b"".join(encode(value).to_bytes(2, "little") for value in repeated)
+    return b"".join(
+        ieee_fp.from_double(fmt, value).to_bytes(2, "little")
+        for value in repeated
+    )
 
 
 def _floating_tile_exact(ew: int, values: list[float]) -> bytes:
@@ -1051,7 +1055,7 @@ def test_integer_tacc_tamac_dispatches_natively_with_exact_widening(
         ),
     ],
 )
-def test_fp_tacc_tamac_retains_bit_exact_transactional_fallback(
+def test_fp_tacc_tamac_is_native_and_bit_exact(
     ew: int,
     instruction: str,
     source_a_values: list[int],
@@ -1089,7 +1093,7 @@ def test_fp_tacc_tamac_retains_bit_exact_transactional_fallback(
     result = _assert_tacc_sequence_matches_oracle(
         instruction,
         setup,
-        expected_dispatch="fallback",
+        expected_dispatch="native",
     )
     before = result["before"]
     after = result["states"][0]
@@ -1869,12 +1873,12 @@ def test_fp_wmul_writes_every_lane_across_both_destination_tiles(ew: int) -> Non
         pytest.param(EW_BF16, 8192.0, id="bf16"),
     ],
 )
-def test_finite_fp_dot_uses_oracle_precision_on_adversarial_order(
+def test_finite_fp_dot_uses_the_canonical_tree_on_adversarial_order(
     ew: int,
     large: float,
 ) -> None:
-    # A float accumulator loses the middle 1.0; Python's double-precision
-    # evaluation preserves it before the architectural FP32 conversion.
+    # The canonical pairwise tree rounds (large^2 + 1) to large^2 in binary32
+    # before -large^2 arrives, so the middle 1.0 is lost exactly as RTL does.
     source_a = _floating_tile_exact(ew, [large, 1.0, -large])
     source_b = _floating_tile_exact(ew, [large, 1.0, large])
 
@@ -1890,7 +1894,7 @@ def test_finite_fp_dot_uses_oracle_precision_on_adversarial_order(
     oracle = _assert_native_matches_oracle(
         "t.dot", setup, expected_dispatch="native"
     )
-    assert oracle["after_mex"]["acc"] == (0x3F80_0000, 0, 0, 0)
+    assert oracle["after_mex"]["acc"] == (0, 0, 0, 0)
 
 
 @pytest.mark.parametrize(
@@ -1900,7 +1904,7 @@ def test_finite_fp_dot_uses_oracle_precision_on_adversarial_order(
         pytest.param(EW_BF16, 8192.0, id="bf16"),
     ],
 )
-def test_finite_fp_dotacc_uses_all_distinct_chunks_at_oracle_precision(
+def test_finite_fp_dotacc_uses_each_chunk_subtree(
     ew: int,
     large: float,
 ) -> None:
@@ -1924,12 +1928,8 @@ def test_finite_fp_dotacc_uses_all_distinct_chunks_at_oracle_precision(
     oracle = _assert_native_matches_oracle(
         "t.dotacc", setup, expected_dispatch="native"
     )
-    assert oracle["after_mex"]["acc"] == (
-        0x3F80_0000,
-        0x4000_0000,
-        0x4040_0000,
-        0x4080_0000,
-    )
+    # Every chunk's residual is absorbed by large^2 at the first tree level.
+    assert oracle["after_mex"]["acc"] == (0, 0, 0, 0)
 
 
 @pytest.mark.parametrize(
@@ -1939,38 +1939,39 @@ def test_finite_fp_dotacc_uses_all_distinct_chunks_at_oracle_precision(
             "t.sum",
             EW_FP16,
             [65504.0, 2 ** -24, -65504.0],
-            0x3380_0000,
+            0x0000_0000,
             id="fp16-sum-cancellation",
         ),
         pytest.param(
             "t.sum",
             EW_BF16,
             [float(2 ** 30), 1.0, float(-(2 ** 30))],
-            0x3F80_0000,
+            0x0000_0000,
             id="bf16-sum-cancellation",
         ),
         pytest.param(
             "t.sumsq",
             EW_FP16,
             [4096.0, 1.0, 1.0, 1.0],
-            0x4B80_0002,
+            0x4B80_0001,
             id="fp16-sumsq-rounding",
         ),
         pytest.param(
             "t.sumsq",
             EW_BF16,
             [4096.0, 1.0, 1.0, 1.0],
-            0x4B80_0002,
+            0x4B80_0001,
             id="bf16-sumsq-rounding",
         ),
     ],
 )
-def test_fp_sum_and_sumsq_use_transactional_python_fallback(
+def test_fp_sum_and_sumsq_use_the_canonical_tree(
     instruction: str,
     ew: int,
     values: list[float],
     expected_acc0: int,
 ) -> None:
+    # Pairwise in lane order: (2^24 + 1) ties to 2^24, then + (1 + 1) = 2^24 + 2.
     source = _floating_tile_exact(ew, values)
 
     def setup(cpu: Any) -> Watchers:
@@ -1983,7 +1984,7 @@ def test_fp_sum_and_sumsq_use_transactional_python_fallback(
         )
 
     oracle = _assert_native_matches_oracle(
-        instruction, setup, expected_dispatch="fallback"
+        instruction, setup, expected_dispatch="native"
     )
     assert oracle["after_mex"]["acc"][0] == expected_acc0
 
@@ -2040,7 +2041,7 @@ def test_finite_fp_min_max_reductions_remain_native(
         pytest.param(EW_BF16, 0x7F95, id="bf16-payload-nan"),
     ],
 )
-def test_nonfinite_fp_min_max_reductions_use_transactional_fallback(
+def test_nonfinite_fp_min_max_reductions_are_native(
     instruction: str,
     ew: int,
     nan_bits: int,
@@ -2057,7 +2058,7 @@ def test_nonfinite_fp_min_max_reductions_use_transactional_fallback(
         )
 
     _assert_native_matches_oracle(
-        instruction, setup, expected_dispatch="fallback"
+        instruction, setup, expected_dispatch="native"
     )
 
 
@@ -2070,14 +2071,15 @@ def test_nonfinite_fp_min_max_reductions_use_transactional_fallback(
             (EW_FP16, 0x8000, "fp16"),
             (EW_BF16, 0x8000, "bf16"),
         )
-        for first, second, expected, order_name in (
-            (0.0, -0.0, 0x0000, "positive-first"),
-            (-0.0, 0.0, sign_bit, "negative-first"),
+        for first, second, order_name in (
+            (0.0, -0.0, "positive-first"),
+            (-0.0, 0.0, "negative-first"),
         )
+        for expected in (sign_bit if op == "t.min" else 0x0000,)
         for case_id in (f"{width_name}-{op[2:]}-{order_name}",)
     ],
 )
-def test_fp_min_max_preserve_first_operand_signed_zero(
+def test_fp_min_max_order_negative_zero_below_positive_zero(
     instruction: str,
     ew: int,
     first: float,
@@ -2166,7 +2168,7 @@ def test_fp_min_max_canonicalize_nan_without_fallback(
         for ew, width_name in ((EW_FP16, "fp16"), (EW_BF16, "bf16"))
     ],
 )
-def test_nonfinite_fp_arithmetic_source_fallbacks_exactly_once(
+def test_nonfinite_fp_arithmetic_sources_are_native(
     instruction: str,
     ew: int,
 ) -> None:
@@ -2183,7 +2185,7 @@ def test_nonfinite_fp_arithmetic_source_fallbacks_exactly_once(
         )
 
     _assert_native_matches_oracle(
-        instruction, setup, expected_dispatch="fallback"
+        instruction, setup, expected_dispatch="native"
     )
 
 
@@ -2205,7 +2207,7 @@ def test_nonfinite_fp_arithmetic_source_fallbacks_exactly_once(
         ),
     ],
 )
-def test_fp32_range_bf16_overflow_fallback_completes_as_infinity(
+def test_fp32_range_bf16_overflow_is_native_infinity(
     instruction: str,
     source_b_bits: int,
     result_kind: str,
@@ -2228,7 +2230,7 @@ def test_fp32_range_bf16_overflow_fallback_completes_as_infinity(
     oracle = _assert_native_matches_oracle(
         instruction,
         setup,
-        expected_dispatch="fallback",
+        expected_dispatch="native",
     )
     after_mex = oracle["after_mex"]
     bf16_infinity_tile = (0x7F80).to_bytes(2, "little") * 32
@@ -2246,7 +2248,7 @@ def test_fp32_range_bf16_overflow_fallback_completes_as_infinity(
         assert after_mex["acc"] == (0x7F80_0000,) * 4
 
 
-def test_bf16_dotacc_later_chunk_overflow_completes_every_chunk() -> None:
+def test_bf16_dotacc_later_chunk_overflow_is_native_for_every_chunk() -> None:
     one = (0x3F80).to_bytes(2, "little")
     max_finite = (0x7F7F).to_bytes(2, "little")
     source = one * 8 + max_finite * 8 + one * 16
@@ -2263,7 +2265,7 @@ def test_bf16_dotacc_later_chunk_overflow_completes_every_chunk() -> None:
     oracle = _assert_native_matches_oracle(
         "t.dotacc",
         setup,
-        expected_dispatch="fallback",
+        expected_dispatch="native",
     )
     assert oracle["after_mex"]["acc"] == (
         0x4100_0000,
@@ -2318,7 +2320,7 @@ def test_native_bf16_rounding_overflow_produces_signed_infinity(
         for ew, width_name in ((EW_FP16, "fp16"), (EW_BF16, "bf16"))
     ],
 )
-def test_nonfinite_fp_mac_destination_fallbacks_exactly_once(
+def test_nonfinite_fp_mac_destination_is_native(
     instruction: str,
     ew: int,
 ) -> None:
@@ -2336,11 +2338,11 @@ def test_nonfinite_fp_mac_destination_fallbacks_exactly_once(
         )
 
     _assert_native_matches_oracle(
-        instruction, setup, expected_dispatch="fallback"
+        instruction, setup, expected_dispatch="native"
     )
 
 
-def test_bf16_add_nan_payload_uses_python_fallback_encoding() -> None:
+def test_bf16_add_nan_result_is_canonical() -> None:
     source_a = (0x7F8D).to_bytes(2, "little") + bytes(62)
     source_b = (0x7FDF).to_bytes(2, "little") + bytes(62)
 
@@ -2353,11 +2355,11 @@ def test_bf16_add_nan_payload_uses_python_fallback_encoding() -> None:
         )
 
     oracle = _assert_native_matches_oracle(
-        "t.add", setup, expected_dispatch="fallback"
+        "t.add", setup, expected_dispatch="native"
     )
     assert int.from_bytes(
         oracle["after_mex"]["memory:dst0"][:2], "little"
-    ) == 0x7FCD
+    ) == 0x7FC0
 
 
 @pytest.mark.parametrize(
@@ -2372,7 +2374,7 @@ def test_bf16_add_nan_payload_uses_python_fallback_encoding() -> None:
         for ew, width_name in ((EW_FP16, "fp16"), (EW_BF16, "bf16"))
     ],
 )
-def test_nonfinite_fp_accacc_fallbacks_exactly_once(
+def test_nonfinite_fp_accacc_is_native(
     instruction: str,
     ew: int,
 ) -> None:
@@ -2390,7 +2392,7 @@ def test_nonfinite_fp_accacc_fallbacks_exactly_once(
         )
 
     _assert_native_matches_oracle(
-        instruction, setup, expected_dispatch="fallback"
+        instruction, setup, expected_dispatch="native"
     )
 
 
@@ -2990,3 +2992,93 @@ def test_halt_exception_class_is_the_public_oracle() -> None:
         cpu.step()
         with pytest.raises(HaltError):
             cpu.step()
+
+
+# ---------------------------------------------------------------------------
+# Seeded native/oracle differential over FP16/BF16 tile operations
+# ---------------------------------------------------------------------------
+
+_FP_DIFFERENTIAL_INSTRUCTIONS = (
+    "t.add", "t.sub", "t.and", "t.or", "t.xor", "t.min", "t.max", "t.abs",
+    "t.mul", "t.dot", "t.wmul", "t.mac", "t.fma", "t.dotacc",
+    "t.sum", "t.rmin", "t.rmax", "t.l1", "t.sumsq", "t.minidx", "t.maxidx",
+    "t.add r3", "t.mul r3", "t.fma r3", "t.dot r3",
+    ".db 0xE8, 0x07",  # immediate ADD
+    ".db 0xE9, 0x05",  # immediate MUL
+    ".db 0xEC, 0x01",  # in-place SUB
+    ".db 0xED, 0x04",  # in-place FMA
+)
+
+
+def _random_float_lanes(rng: random.Random, fmt: Any, count: int) -> list[int]:
+    specials = (
+        0, fmt.sign_bit, fmt.infinity, fmt.infinity | fmt.sign_bit,
+        fmt.canonical_nan, fmt.infinity | 1, fmt.sign_bit | fmt.infinity | 5,
+        1, fmt.sign_bit | 1, fmt.max_finite, fmt.max_finite | fmt.sign_bit,
+        (1 << fmt.fraction_bits) - 1, 1 << fmt.fraction_bits,
+    )
+    anchor_exponent = rng.randrange(1, fmt.exponent_field_max)
+    lanes = []
+    for _ in range(count):
+        choice = rng.random()
+        if choice < 0.12:
+            lanes.append(rng.choice(specials))
+        elif choice < 0.45:
+            lanes.append(rng.getrandbits(fmt.width))
+        else:
+            exponent = min(
+                fmt.exponent_field_max - 1,
+                max(0, anchor_exponent + rng.randint(-3, 3)),
+            )
+            lanes.append(
+                (rng.getrandbits(1) << (fmt.width - 1))
+                | (exponent << fmt.fraction_bits)
+                | rng.getrandbits(fmt.fraction_bits)
+            )
+    return lanes
+
+
+@pytest.mark.parametrize("instruction", _FP_DIFFERENTIAL_INSTRUCTIONS)
+@pytest.mark.parametrize(
+    "ew",
+    [pytest.param(EW_FP16, id="fp16"), pytest.param(EW_BF16, id="bf16")],
+)
+def test_fp_mex_native_matches_oracle_on_seeded_tiles(
+    instruction: str,
+    ew: int,
+) -> None:
+    fmt = ieee_fp.FORMAT_BY_EW[ew]
+    rng = random.Random(f"{instruction}/{ew}")
+    for tctrl in (0, 1, 2, 3):
+        for _ in range(6):
+            src0 = bytes(tile_float.pack_lanes(
+                fmt, _random_float_lanes(rng, fmt, 32)))
+            src1 = bytes(tile_float.pack_lanes(
+                fmt, _random_float_lanes(rng, fmt, 32)))
+            dst0 = bytes(tile_float.pack_lanes(
+                fmt, _random_float_lanes(rng, fmt, 32)))
+            acc = tuple(
+                ieee_fp.from_double(
+                    ieee_fp.FP32,
+                    ieee_fp.to_double(fmt, _random_float_lanes(rng, fmt, 1)[0]),
+                ) | (rng.getrandbits(32) << 32 if rng.random() < 0.3 else 0)
+                for _ in range(4)
+            )
+            register = rng.getrandbits(64)
+
+            def setup(cpu: Any) -> Watchers:
+                watchers = _seed_common_state(
+                    cpu,
+                    tmode=ew,
+                    src0=src0,
+                    src1=src1,
+                    dst0=dst0,
+                    tctrl=tctrl,
+                    acc=acc,
+                )
+                cpu.regs[3] = register
+                return watchers
+
+            _assert_native_matches_oracle(
+                instruction, setup, expected_dispatch="native"
+            )

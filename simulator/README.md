@@ -986,15 +986,11 @@ width, an even byte count, or compatible sizes. Zero counts enter `0 DO`; a
 tile-loop memory fault or budget fault before the final `0 TMODE!` leaves
 FP16/BF16 mode active.
 
-The hosted result path provisionally follows the decoded Python emulator,
-including host-language per-tile SUM/SUMSQ before one binary32 pack and the
-current FP16 subnormal-carry encoding defect. The native accelerator currently
-falls back to Python for those reductions; its bypassed direct C++ arithmetic
-and RTL use different orders. Python and active native TDOT use a binary64 loop
-before packing, unlike RTL. With ACC_ACC the existing binary32 ACC0 is widened,
-added to the tile subtotal in binary64, and repacked at the inter-tile rounding
-point. Reserved-mode aliases and high-accumulator-word behavior also differ.
-These remain recorded discrepancies rather than claims of hardware parity.
+Hosted results follow `docs/floating-point.md` through `shared/ieee_fp.py`
+and `shared/tile_float.py`, the same values the Python emulator uses and the
+native accelerator reproduces. EW 6/7 fail closed until FP32 and FP64 are
+implemented. The RTL datapath converges in Phase 2 of
+`docs/megapad-full-float-plan.md`.
 The source example `0 1 64 BUFFER` has the right physical byte count but does
 not describe 32 two-byte elements; `0 2 32 BUFFER` does.
 

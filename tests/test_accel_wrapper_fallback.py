@@ -10,7 +10,6 @@ from asm import assemble
 from megapad64 import (
     CSR_TACC_CTL,
     CSR_TACC_STATUS,
-    EW_BF16,
     EW_U8,
     IVEC_BUS_FAULT,
     TACC_OWNER_NONE,
@@ -54,17 +53,18 @@ def test_cached_python_fallback_tracks_replacement_memory_geometry(
     assert cached_fallback.mem_size == replacement_size
 
 
-def _bf16_overflow_reduction_cpu(
+def _integer_reduction_cpu(
     instruction_name: str = "t.sum",
 ) -> tuple[Megapad64, bytes]:
+    """Integer reductions always run on the Python oracle, which owns the
+    256-bit accumulator, so they exercise the fallback synchronization."""
     cpu = Megapad64(mem_size=1024)
     src0 = 0x100
-    max_finite_bf16 = (0x7F7F).to_bytes(2, "little")
 
-    cpu.mem[src0:src0 + 64] = max_finite_bf16 * 32
+    cpu.mem[src0:src0 + 64] = bytes([0xFF]) * 64
     instruction = assemble(instruction_name)
     cpu.load_bytes(0, instruction)
-    cpu.tmode = EW_BF16
+    cpu.tmode = EW_U8
     cpu.tctrl = 0x2
     cpu.tsrc0 = src0
     cpu.acc = [
@@ -80,13 +80,14 @@ def _bf16_overflow_reduction_cpu(
 def test_exceptional_python_fallback_synchronizes_faulting_state_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cpu, instruction = _bf16_overflow_reduction_cpu()
-    injected_error = ValueError("injected FP32 conversion failure")
+    cpu, instruction = _integer_reduction_cpu()
+    initial_acc = list(cpu.acc)
+    injected_error = ValueError("injected reduction failure")
 
-    def fail_conversion(_value: float) -> int:
+    def fail_reduction(*_args: object) -> int:
         raise injected_error
 
-    monkeypatch.setattr(python_oracle, "_fp32_to_bits", fail_conversion)
+    monkeypatch.setattr(python_oracle, "sum", fail_reduction, raising=False)
 
     with pytest.raises(ValueError) as raised:
         cpu.step()
@@ -96,24 +97,25 @@ def test_exceptional_python_fallback_synchronizes_faulting_state_back(
     assert cpu.pc == len(instruction)
     assert cpu.pc == fallback.pc
     assert cpu.cycle_count == fallback.cycle_count == 0
-    assert list(cpu.acc) == list(fallback.acc) == [0, 0, 0, 0]
-    assert cpu.tctrl == fallback.tctrl == 0
+    assert list(cpu.acc) == list(fallback.acc) == initial_acc
+    assert cpu.tctrl == fallback.tctrl == 0x2
 
 
 @pytest.mark.parametrize(
-    ("instruction_name", "batched"),
+    ("instruction_name", "batched", "expected"),
     [
-        pytest.param("t.sum", False, id="sum-step"),
-        pytest.param("t.sum", True, id="sum-run-steps"),
-        pytest.param("t.sumsq", False, id="sumsq-step"),
-        pytest.param("t.sumsq", True, id="sumsq-run-steps"),
+        pytest.param("t.sum", False, 64 * 0xFF, id="sum-step"),
+        pytest.param("t.sum", True, 64 * 0xFF, id="sum-run-steps"),
+        pytest.param("t.sumsq", False, 64 * 0xFF * 0xFF, id="sumsq-step"),
+        pytest.param("t.sumsq", True, 64 * 0xFF * 0xFF, id="sumsq-run-steps"),
     ],
 )
-def test_bf16_overflow_fallback_synchronizes_infinity_result(
+def test_integer_reduction_fallback_synchronizes_result(
     instruction_name: str,
     batched: bool,
+    expected: int,
 ) -> None:
-    cpu, instruction = _bf16_overflow_reduction_cpu(instruction_name)
+    cpu, instruction = _integer_reduction_cpu(instruction_name)
 
     if batched:
         assert cpu.run_steps(max_steps=1) == (1, 0)
@@ -123,7 +125,7 @@ def test_bf16_overflow_fallback_synchronizes_infinity_result(
     fallback = cpu._get_fallback()
     assert cpu.pc == fallback.pc == len(instruction)
     assert cpu.cycle_count == fallback.cycle_count == 1
-    assert list(cpu.acc) == list(fallback.acc) == [0x7F80_0000, 0, 0, 0]
+    assert list(cpu.acc) == list(fallback.acc) == [expected, 0, 0, 0]
     assert cpu.tctrl == fallback.tctrl == 0
 
 

@@ -2,10 +2,11 @@
 
 **Started:** 2026-09-29
 
-**Status:** Phase 1 complete. Decisions D1–D18 were confirmed on
-2026-09-29 and are recorded in `docs/floating-point.md`, which is now the
-normative floating-point specification. Phase 2 is next. No backend code has
-changed yet.
+**Status:** Phase 1 complete; Phase 2 in progress. Decisions D1–D18 were
+confirmed on 2026-09-29 and are recorded in `docs/floating-point.md`, the
+normative floating-point specification. The exact reference and the Python
+emulator, native accelerator, and hosted simulator slices of Phase 2 are
+done; the RTL slice is next.
 
 **Branch:** `feature/megapad-fp64`
 
@@ -389,6 +390,22 @@ may land in several commits, one per coherent green slice.
 
 This phase fixes the existing divergence before any new format is added.
 
+Progress:
+
+- **Exact reference.** `shared/ieee_fp.py` and `tests/test_ieee_fp.py` are
+  done.
+- **Python emulator, hosted simulator, and native accelerator.** These are
+  done. `shared/tile_float.py` holds the tile-shaped float values both Python
+  backends call, and the native accelerator reproduces them with integer
+  rounding and a round-to-odd two-sum. A seeded differential test now covers
+  every FP16/BF16 tile operation, every accumulator control, and the
+  broadcast, immediate, and in-place forms, and it requires native dispatch.
+  FP TAMAC is native too.
+- **Folded in.** The FP16/BF16 immediate-operand rule (D17) was done here
+  rather than in Phase 4. EW 6 and 7 now trap in the emulator ahead of
+  Phase 3.
+- **RTL.** Not started.
+
 1. **Shared exact module.** `shared/ieee_fp.py` covers binary16, bfloat16,
    binary32, and binary64. It provides:
    - decode and classify;
@@ -569,6 +586,12 @@ without fixing them.
   matters for non-commutative functions, and the forced function 0 is
   commutative for TALU and TMUL. Float formats get their own exact rule
   (D17).
+- **KDOS file-abstraction test.**
+  `tests/simulator/test_kdos_file_abstraction.py::test_signed_capacity_and_eof_guards_reject_safe_high_bit_cases`
+  fails on the base commit `0cfece4`, independently of this work.
+- **Non-asserting emulator tests.** `tests/test_megapad64.py` reports every
+  check through a `check()` helper that never fails the test. Only
+  `test_tile_fp` now asserts.
 - **Unassigned extended functions.** `F8` with TALU functions 4–7 does not
   trap in Python, which writes zero lanes. The other backends were not
   checked. Phases 6 and 8 give those functions

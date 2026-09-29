@@ -9,14 +9,7 @@ import pytest
 
 from asm import assemble
 from emulator.megapad64 import Megapad64 as PythonMegapad64
-from shared.fp import (
-    BF16_FORMAT,
-    FP16_FORMAT,
-    decode_tile_float,
-    encode_tile_float,
-    fp16_to_float,
-    fp32_to_bits,
-)
+from shared import ieee_fp
 from simulator.errors import StepBudgetExceeded
 from simulator.memory import CrossRegionAccessError, HBW_BASE
 from simulator.platform import create_one_core_address_space
@@ -32,6 +25,8 @@ from tests.simulator.test_kdos_x25519 import _execute
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+FP16_FORMAT = ieee_fp.FP16.ew
+BF16_FORMAT = ieee_fp.BF16.ew
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = Path(__file__).with_name("fixtures") / "kdos-buffer-fp-3110-3216.f"
 
@@ -105,20 +100,26 @@ def _raw_float_tile(values: tuple[int, ...]) -> bytes:
     )
 
 
+def fp32_to_bits(value: float) -> int:
+    return ieee_fp.from_double(ieee_fp.FP32, value)
+
+
 def _float_tile(format_code: int, values: tuple[float, ...]) -> bytes:
     padded = values + (0.0,) * (32 - len(values))
     assert len(padded) == 32
+    fmt = ieee_fp.FORMAT_BY_EW[format_code]
     return b"".join(
-        encode_tile_float(value, format_code).to_bytes(2, "little")
+        ieee_fp.from_double(fmt, value).to_bytes(2, "little")
         for value in padded
     )
 
 
 def _decode_float_tile(format_code: int, tile: bytes) -> tuple[float, ...]:
+    fmt = ieee_fp.FORMAT_BY_EW[format_code]
     return tuple(
-        decode_tile_float(
+        ieee_fp.to_double(
+            fmt,
             int.from_bytes(tile[offset : offset + 2], "little"),
-            format_code,
         )
         for offset in range(0, 64, 2)
     )
@@ -246,7 +247,7 @@ def test_hosted_fp_tiles_match_decoded_architectural_emulator(
     assert runtime.diagnostics.perf_tileops == len(hosted_operations)
 
 
-def test_fp16_multiply_preserves_the_executable_subnormal_carry_behavior() -> None:
+def test_fp16_multiply_rounds_the_subnormal_carry_to_minimum_normal() -> None:
     runtime = MegaForthRuntime()
     left = (0x0017).to_bytes(2, "little") * 32
     right = (0x5190).to_bytes(2, "little") * 32
@@ -269,12 +270,16 @@ def test_fp16_multiply_preserves_the_executable_subnormal_carry_behavior() -> No
     emulator.tdst = 0x180
     emulator.step()
 
-    assert fp16_to_float(0x0017) * fp16_to_float(0x5190) == 2.0**-14 - 2.0**-25
-    assert runtime.memory.read_bytes(DESTINATION, 64) == bytes(64)
-    assert bytes(emulator.mem[0x180:0x1C0]) == bytes(64)
+    exact = ieee_fp.to_double(ieee_fp.FP16, 0x0017) * ieee_fp.to_double(
+        ieee_fp.FP16, 0x5190
+    )
+    assert exact == 2.0**-14 - 2.0**-25  # a tie; RNE carries to 0x0400
+    expected = (0x0400).to_bytes(2, "little") * 32
+    assert runtime.memory.read_bytes(DESTINATION, 64) == expected
+    assert bytes(emulator.mem[0x180:0x1C0]) == expected
 
 
-def test_fp16_sum_uses_the_pinned_python_builtin_sum_oracle() -> None:
+def test_fp16_sum_uses_the_canonical_pairwise_tree() -> None:
     runtime = MegaForthRuntime()
     source = _float_tile(
         FP16_FORMAT,
@@ -296,8 +301,11 @@ def test_fp16_sum_uses_the_pinned_python_builtin_sum_oracle() -> None:
     emulator.tsrc1 = 0x140
     emulator.step()
 
+    # Pairwise in lane order, 65504 absorbs every small partial sum before it
+    # meets -65504, so the tree gives exactly zero; a sequential or
+    # compensated sum would keep 30 * 2**-24.
     assert runtime.tile.accumulator == tuple(emulator.acc)
-    assert runtime.tile.accumulator[1:] == (0, 0, 0)
+    assert runtime.tile.accumulator == (0, 0, 0, 0)
     assert runtime.tile.control == 0
 
 
@@ -308,7 +316,7 @@ def test_fp16_sum_uses_the_pinned_python_builtin_sum_oracle() -> None:
         pytest.param(BF16_FORMAT, 0x7FC1, 0xC000, 0x4040, id="bf16"),
     ),
 )
-def test_fp_extrema_skip_nan_and_ignore_accumulate(
+def test_fp_extrema_skip_nan_and_keep_a_running_extreme(
     format_code: int,
     nan_raw: int,
     negative_raw: int,
@@ -327,17 +335,21 @@ def test_fp_extrema_skip_nan_and_ignore_accumulate(
         (fp32_to_bits(100.0), 22, 33, 44),
     )
 
+    runtime.tile.maximum()
+    assert runtime.tile.accumulator == (fp32_to_bits(100.0), 0, 0, 0)
     runtime.tile.minimum()
     assert runtime.tile.accumulator == (fp32_to_bits(-2.0), 0, 0, 0)
     runtime.tile.maximum()
     assert runtime.tile.accumulator == (fp32_to_bits(3.0), 0, 0, 0)
 
+    # An all-NaN tile is skipped against the running value.
     runtime.memory.write_bytes(SOURCE0, nan_raw.to_bytes(2, "little") * 32)
     runtime.tile.maximum()
-    assert runtime.tile.accumulator[0] & 0x7F80_0000 == 0x7F80_0000
-    assert runtime.tile.accumulator[0] & 0x007F_FFFF
-    assert runtime.tile.accumulator[1:] == (0, 0, 0)
-    assert runtime.tile.control == 1
+    assert runtime.tile.accumulator == (fp32_to_bits(3.0), 0, 0, 0)
+    runtime.tile.set_control(0)
+    runtime.tile.maximum()
+    assert runtime.tile.accumulator == (0x7FC0_0000, 0, 0, 0)
+    assert runtime.tile.control == 0
 
 
 @pytest.mark.parametrize(

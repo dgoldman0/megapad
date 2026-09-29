@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Generate exact FP product and add-product RTL oracle vectors.
 
-The expected results come directly from the Phase-1 integer IEEE oracle.
+The expected results come directly from the shared exact IEEE reference
+(shared/ieee_fp.py).
 Each row exercises both the product-only binary32 result used by WMUL and the
 single-round ``binary32 accumulator + exact FP16/BF16 product`` operation used
 by TAMAC.
@@ -22,42 +23,24 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from megapad64 import (  # noqa: E402
-    EW_BF16,
-    EW_FP16,
-    TACC_CANONICAL_NAN,
-    _decode_ieee_exact,
-    _round_exact_to_fp32,
-    _tacc_fp32_add_product,
-)
+from shared import ieee_fp  # noqa: E402
+
+EW_FP16 = ieee_fp.FP16.ew
+EW_BF16 = ieee_fp.BF16.ew
 
 
 def _product_to_fp32(a_raw: int, b_raw: int, ew: int) -> int:
-    if ew == EW_FP16:
-        a = _decode_ieee_exact(a_raw & 0xFFFF, 5, 10, 15)
-        b = _decode_ieee_exact(b_raw & 0xFFFF, 5, 10, 15)
-    elif ew == EW_BF16:
-        a = _decode_ieee_exact(a_raw & 0xFFFF, 8, 7, 127)
-        b = _decode_ieee_exact(b_raw & 0xFFFF, 8, 7, 127)
-    else:
-        raise ValueError(f"not a half-precision format: {ew}")
+    """WMUL: the exact product rounded once to binary32."""
+    return ieee_fp.product(
+        ieee_fp.FP32, ieee_fp.FORMAT_BY_EW[ew], a_raw, b_raw
+    )[0]
 
-    if a[0] == "nan" or b[0] == "nan":
-        return TACC_CANONICAL_NAN
 
-    sign = a[1] ^ b[1]
-    if ((a[0] == "inf" and b[0] == "zero")
-            or (a[0] == "zero" and b[0] == "inf")):
-        return TACC_CANONICAL_NAN
-    if a[0] == "inf" or b[0] == "inf":
-        return (sign << 31) | 0x7F80_0000
-    if a[0] == "zero" or b[0] == "zero":
-        return sign << 31
-    return _round_exact_to_fp32(
-        sign,
-        a[2] * b[2],
-        a[3] + b[3],
-    )
+def _add_product_to_fp32(acc: int, a_raw: int, b_raw: int, ew: int) -> int:
+    """TAMAC: binary32 accumulator plus exact product, rounded once."""
+    return ieee_fp.mixed_fma(
+        ieee_fp.FP32, ieee_fp.FORMAT_BY_EW[ew], a_raw, b_raw, acc
+    )[0]
 
 
 # Named vectors pin the boundaries that are easiest to implement incorrectly.
@@ -119,7 +102,7 @@ def main() -> None:
     print("# name is_bf16 a b acc expected_product expected_add_product")
     for name, ew, a, b, acc in (*NAMED_CASES, *_random_cases()):
         product = _product_to_fp32(a, b, ew)
-        feedback = _tacc_fp32_add_product(acc, a, b, ew)
+        feedback = _add_product_to_fp32(acc, a, b, ew)
         print(
             f"{name} {int(ew == EW_BF16)} {a:04x} {b:04x} "
             f"{acc:08x} {product:08x} {feedback:08x}"

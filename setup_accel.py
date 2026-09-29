@@ -36,6 +36,8 @@ if _SANITIZER not in _SANITIZER_FLAGS:
 _compile_args = [
     "-std=c++17",
     "-march=native",
+    # Floating-point tile lanes depend on separately rounded binary64 steps.
+    "-ffp-contract=off",
     "-Wall",
     "-Wextra",
     "-Wno-unused-parameter",

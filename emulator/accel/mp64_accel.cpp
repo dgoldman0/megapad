@@ -7767,140 +7767,237 @@ static int next_instruction_size(CPUState& s) {
 }
 
 // ---------------------------------------------------------------------------
-//  FP16 / BF16 conversion helpers (matches megapad64.py _fp16_to_float etc.)
+//  Floating-point tile lanes.  docs/floating-point.md defines every result and
+//  shared/ieee_fp.py is the executable reference.  Host binary64 is used only
+//  where it is provably identical to that reference: FP16/BF16/FP32 values and
+//  their products are exact in binary64; one binary64 addition or
+//  multiplication rounded once to a format of precision p <= 24 is correctly
+//  rounded (53 >= 2p + 2); and a fused multiply-add rounds the round-to-odd
+//  binary64 sum once (53 >= p + 2).  Rounding to a tile format uses integer
+//  arithmetic on the binary64 encoding, and the build disables floating-point
+//  contraction so the two-sum steps stay separate.
 // ---------------------------------------------------------------------------
 
-static inline float fp16_to_float(uint16_t h) {
-    uint32_t sign = (h >> 15) & 1;
-    uint32_t exp  = (h >> 10) & 0x1F;
-    uint32_t frac = h & 0x3FF;
-    if (exp == 0) {
-        if (frac == 0) {
-            // ±0
-            uint32_t bits = sign << 31;
-            float f; std::memcpy(&f, &bits, 4); return f;
+struct TileFloatFormat {
+    int width;
+    int exponent_bits;
+    int fraction_bits;
+};
+
+static constexpr TileFloatFormat TILE_FP16{16, 5, 10};
+static constexpr TileFloatFormat TILE_BF16{16, 8, 7};
+static constexpr TileFloatFormat TILE_FP32{32, 8, 23};
+
+static constexpr uint64_t tile_float_mask(const TileFloatFormat& f) {
+    return (1ULL << f.width) - 1;
+}
+
+static constexpr uint64_t tile_float_sign(const TileFloatFormat& f) {
+    return 1ULL << (f.width - 1);
+}
+
+static constexpr uint64_t tile_float_infinity(const TileFloatFormat& f) {
+    return ((1ULL << f.exponent_bits) - 1) << f.fraction_bits;
+}
+
+static constexpr uint64_t tile_float_canonical_nan(const TileFloatFormat& f) {
+    return tile_float_infinity(f) | (1ULL << (f.fraction_bits - 1));
+}
+
+static_assert(tile_float_canonical_nan(TILE_FP16) == 0x7E00);
+static_assert(tile_float_canonical_nan(TILE_BF16) == 0x7FC0);
+static_assert(tile_float_canonical_nan(TILE_FP32) == 0x7FC0'0000);
+
+static inline const TileFloatFormat& tile_float_format(int ew) {
+    return ew == EW_FP16 ? TILE_FP16 : TILE_BF16;
+}
+
+static inline bool tile_float_is_nan(
+        const TileFloatFormat& f,
+        uint64_t bits) {
+    return (bits & tile_float_mask(f) & ~tile_float_sign(f)) >
+           tile_float_infinity(f);
+}
+
+static inline uint64_t tile_float_order_key(
+        const TileFloatFormat& f,
+        uint64_t bits) {
+    bits &= tile_float_mask(f);
+    return (bits & tile_float_sign(f))
+        ? (tile_float_mask(f) ^ bits)
+        : (bits | tile_float_sign(f));
+}
+
+static inline double tile_float_to_double(
+        const TileFloatFormat& f,
+        uint64_t bits) {
+    bits &= tile_float_mask(f);
+    const int bias = (1 << (f.exponent_bits - 1)) - 1;
+    const uint64_t exponent_max = (1ULL << f.exponent_bits) - 1;
+    const uint64_t exponent = (bits >> f.fraction_bits) & exponent_max;
+    const uint64_t fraction = bits & ((1ULL << f.fraction_bits) - 1);
+    double magnitude;
+    if (exponent == exponent_max) {
+        magnitude = fraction
+            ? std::numeric_limits<double>::quiet_NaN()
+            : std::numeric_limits<double>::infinity();
+    } else if (exponent == 0) {
+        magnitude = std::ldexp(
+            static_cast<double>(fraction),
+            1 - bias - f.fraction_bits);
+    } else {
+        magnitude = std::ldexp(
+            static_cast<double>(fraction | (1ULL << f.fraction_bits)),
+            static_cast<int>(exponent) - bias - f.fraction_bits);
+    }
+    return (bits & tile_float_sign(f)) ? -magnitude : magnitude;
+}
+
+static inline uint64_t double_bits(double value) {
+    uint64_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+// Round a binary64 value once to a tile format: RNE, canonical NaN.
+static inline uint64_t tile_float_from_double(
+        const TileFloatFormat& f,
+        double value) {
+    if (std::isnan(value))
+        return tile_float_canonical_nan(f);
+    const uint64_t raw = double_bits(value);
+    const uint64_t sign_bits = (raw >> 63) ? tile_float_sign(f) : 0;
+    const uint64_t biased64 = (raw >> 52) & 0x7FF;
+    if (biased64 == 0x7FF)
+        return sign_bits | tile_float_infinity(f);
+    // Zero, or a binary64 subnormal far below every tile format's range.
+    if (biased64 == 0)
+        return sign_bits;
+    const int precision = f.fraction_bits + 1;
+    const int bias = (1 << (f.exponent_bits - 1)) - 1;
+    const int emin = 1 - bias;
+    const uint64_t significand =
+        (raw & ((1ULL << 52) - 1)) | (1ULL << 52);
+    const int exponent = static_cast<int>(biased64) - 1075;
+    int quantum = std::max(
+        exponent + 52 - (precision - 1),
+        emin - (precision - 1));
+    const int shift = quantum - exponent;  // at least 53 - precision
+    if (shift > 63)
+        return sign_bits;
+    uint64_t mantissa = significand >> shift;
+    const uint64_t remainder = significand & ((1ULL << shift) - 1);
+    const uint64_t half = 1ULL << (shift - 1);
+    if (remainder > half || (remainder == half && (mantissa & 1))) {
+        mantissa++;
+        if (mantissa >> precision) {
+            mantissa >>= 1;
+            quantum++;
         }
-        // Subnormal → normalise
-        float val = ldexpf((float)frac / 1024.0f, -14);
-        return sign ? -val : val;
     }
-    if (exp == 0x1F) {
-        if (frac == 0) {
-            uint32_t bits = (sign << 31) | 0x7F800000u;
-            float f; std::memcpy(&f, &bits, 4); return f;  // ±inf
+    const uint64_t hidden = 1ULL << (precision - 1);
+    if (mantissa >= hidden) {
+        const int biased = quantum + (precision - 1) + bias;
+        if (biased >= (1 << f.exponent_bits) - 1)
+            return sign_bits | tile_float_infinity(f);
+        return sign_bits |
+               (static_cast<uint64_t>(biased) << f.fraction_bits) |
+               (mantissa - hidden);
+    }
+    return sign_bits | mantissa;
+}
+
+// The round-to-odd binary64 value of the exact sum of two binary64 values.
+static inline double round_to_odd_sum(double product, double addend) {
+    double total = product + addend;
+    if (!std::isfinite(total))
+        return total;
+    const double partial = total - addend;
+    const double error =
+        (product - partial) + (addend - (total - partial));
+    if (error != 0.0 && !(double_bits(total) & 1)) {
+        total = std::nextafter(
+            total,
+            error > 0.0
+                ? std::numeric_limits<double>::infinity()
+                : -std::numeric_limits<double>::infinity());
+    }
+    return total;
+}
+
+static inline uint64_t tile_float_add(
+        const TileFloatFormat& f,
+        uint64_t a,
+        uint64_t b) {
+    return tile_float_from_double(
+        f, tile_float_to_double(f, a) + tile_float_to_double(f, b));
+}
+
+static inline uint64_t tile_float_sub(
+        const TileFloatFormat& f,
+        uint64_t a,
+        uint64_t b) {
+    return tile_float_from_double(
+        f, tile_float_to_double(f, a) - tile_float_to_double(f, b));
+}
+
+static inline uint64_t tile_float_product(
+        const TileFloatFormat& dst,
+        const TileFloatFormat& src,
+        uint64_t a,
+        uint64_t b) {
+    return tile_float_from_double(
+        dst, tile_float_to_double(src, a) * tile_float_to_double(src, b));
+}
+
+// RN_dst(a * b + c) with a, b in src and c in dst, rounded once.
+static inline uint64_t tile_float_fma(
+        const TileFloatFormat& dst,
+        const TileFloatFormat& src,
+        uint64_t a,
+        uint64_t b,
+        uint64_t c) {
+    const double product =
+        tile_float_to_double(src, a) * tile_float_to_double(src, b);
+    return tile_float_from_double(
+        dst, round_to_odd_sum(product, tile_float_to_double(dst, c)));
+}
+
+static inline uint64_t tile_float_convert(
+        const TileFloatFormat& dst,
+        const TileFloatFormat& src,
+        uint64_t bits) {
+    return tile_float_from_double(dst, tile_float_to_double(src, bits));
+}
+
+// IEEE 754-2019 minimum/maximum: NaN propagates and -0 orders below +0.
+static inline uint64_t tile_float_extreme2(
+        const TileFloatFormat& f,
+        uint64_t a,
+        uint64_t b,
+        bool largest) {
+    if (tile_float_is_nan(f, a) || tile_float_is_nan(f, b))
+        return tile_float_canonical_nan(f);
+    const uint64_t key_a = tile_float_order_key(f, a);
+    const uint64_t key_b = tile_float_order_key(f, b);
+    if (largest)
+        return (key_a >= key_b ? a : b) & tile_float_mask(f);
+    return (key_a <= key_b ? a : b) & tile_float_mask(f);
+}
+
+// The canonical pairwise tree over binary32 leaves held as exact doubles.
+static inline uint64_t tile_float_tree32(double* values, int count) {
+    while (count > 1) {
+        for (int j = 0; j < count / 2; j++) {
+            values[j] = tile_float_to_double(
+                TILE_FP32,
+                tile_float_from_double(
+                    TILE_FP32,
+                    values[2 * j] + values[2 * j + 1]));
         }
-        uint32_t bits = (sign << 31) | 0x7FC00000u;  // qNaN
-        float f; std::memcpy(&f, &bits, 4); return f;
+        count /= 2;
     }
-    float val = ldexpf(1.0f + (float)frac / 1024.0f, (int)exp - 15);
-    return sign ? -val : val;
-}
-
-static inline uint16_t float_to_fp16(float f) {
-    uint32_t bits;
-    std::memcpy(&bits, &f, 4);
-    uint32_t sign   = (bits >> 31) & 1;
-    uint32_t exp32  = (bits >> 23) & 0xFF;
-    uint32_t frac32 = bits & 0x7FFFFF;
-
-    // NaN
-    if (exp32 == 0xFF && frac32 != 0)
-        return 0x7E00;  // qNaN
-    // Inf
-    if (exp32 == 0xFF)
-        return (uint16_t)((sign << 15) | 0x7C00);
-    // Zero
-    if (exp32 == 0 && frac32 == 0)
-        return (uint16_t)(sign << 15);
-
-    int new_exp = (int)exp32 - 127 + 15;
-    if (new_exp >= 0x1F)
-        return (uint16_t)((sign << 15) | 0x7C00);  // overflow → ±inf
-    if (new_exp <= 0) {
-        if (new_exp < -10)
-            return (uint16_t)(sign << 15);  // underflow → ±0
-        // Subnormal
-        frac32 |= 0x800000;
-        int shift = 1 - new_exp;
-        uint32_t round_bit = (frac32 >> (12 + shift)) & 1;
-        uint32_t sticky    = (frac32 & ((1u << (12 + shift)) - 1)) ? 1 : 0;
-        uint32_t result    = frac32 >> (13 + shift);
-        if (round_bit && (sticky || (result & 1)))
-            result++;
-        return (uint16_t)((sign << 15) | (result & 0x3FF));
-    }
-    // Normal: round mantissa from 23 bits to 10 bits
-    uint32_t round_bit = (frac32 >> 12) & 1;
-    uint32_t sticky    = (frac32 & 0xFFF) ? 1 : 0;
-    uint32_t frac16    = frac32 >> 13;
-    if (round_bit && (sticky || (frac16 & 1))) {
-        frac16++;
-        if (frac16 >= 0x400) {
-            frac16 = 0;
-            new_exp++;
-            if (new_exp >= 0x1F)
-                return (uint16_t)((sign << 15) | 0x7C00);
-        }
-    }
-    return (uint16_t)((sign << 15) | (new_exp << 10) | (frac16 & 0x3FF));
-}
-
-static inline float bf16_to_float(uint16_t b) {
-    uint32_t bits32 = (uint32_t)b << 16;
-    float f; std::memcpy(&f, &bits32, 4); return f;
-}
-
-static constexpr uint16_t fp32_bits_to_bf16(uint32_t bits) {
-    if ((bits & 0x7F800000U) == 0x7F800000U &&
-        (bits & 0x007FFFFFU) != 0) {
-        // Preserve sign and the representable payload while forcing the BF16
-        // quiet bit.  Numeric rounding can carry a maximal NaN payload into
-        // a zero encoding, so NaNs must bypass the rounding path.
-        return static_cast<uint16_t>((bits >> 16) | 0x0040U);
-    }
-    uint32_t round_bit = (bits >> 15) & 1;
-    uint32_t sticky    = (bits & 0x7FFF) ? 1 : 0;
-    uint32_t result    = bits >> 16;
-    if (round_bit && (sticky || (result & 1)))
-        result++;
-    return static_cast<uint16_t>(result & 0xFFFFU);
-}
-
-static_assert(fp32_bits_to_bf16(0x7FFFFFFFU) == 0x7FFF);
-static_assert(fp32_bits_to_bf16(0xFFFFFFFFU) == 0xFFFF);
-static_assert(fp32_bits_to_bf16(0x7F800001U) == 0x7FC0);
-static_assert(fp32_bits_to_bf16(0xFF800001U) == 0xFFC0);
-static_assert(fp32_bits_to_bf16(0x7FCD0000U) == 0x7FCD);
-
-static inline uint16_t float_to_bf16(float f) {
-    uint32_t bits;
-    std::memcpy(&bits, &f, 4);
-    return fp32_bits_to_bf16(bits);
-}
-
-static inline float fp_decode(uint16_t raw, int ew) {
-    return (ew == EW_FP16) ? fp16_to_float(raw) : bf16_to_float(raw);
-}
-
-static inline uint16_t fp_encode(float val, int ew) {
-    return (ew == EW_FP16) ? float_to_fp16(val) : float_to_bf16(val);
-}
-
-static inline bool fp_is_nan(uint16_t raw, int ew) {
-    if (ew == EW_FP16)
-        return ((raw >> 10) & 0x1F) == 0x1F && (raw & 0x3FF) != 0;
-    else  // BF16
-        return ((raw >> 7) & 0xFF) == 0xFF && (raw & 0x7F) != 0;
-}
-
-static inline bool fp_is_finite(uint16_t raw, int ew) {
-    if (ew == EW_FP16)
-        return ((raw >> 10) & 0x1F) != 0x1F;
-    return ((raw >> 7) & 0xFF) != 0xFF;
-}
-
-static inline bool fp32_bits_are_finite(uint64_t raw) {
-    return ((static_cast<uint32_t>(raw) >> 23) & 0xFF) != 0xFF;
+    return tile_float_from_double(TILE_FP32, values[0]);
 }
 
 static inline uint32_t fp32_to_bits(float f) {
@@ -7915,16 +8012,6 @@ static_assert(sizeof(float) == 4 &&
               std::numeric_limits<float>::is_iec559);
 static_assert(sizeof(double) == 8 &&
               std::numeric_limits<double>::is_iec559);
-static constexpr double FP32_PACK_OVERFLOW_THRESHOLD =
-    0x1.ffffffp+127;
-
-static inline bool fp32_pack_overflows(double value) {
-    // The executable oracle rounds finite results at or beyond this midpoint
-    // to signed FP32 infinity.  Compare in double precision so identifying
-    // that boundary does not itself narrow or overflow the value.
-    return std::isfinite(value) &&
-           std::fabs(value) >= FP32_PACK_OVERFLOW_THRESHOLD;
-}
 
 struct StepCallbacks {
     struct ExternalPhyResponse {
@@ -9072,10 +9159,9 @@ static int exec_native_tacc_tamac(
         return -1;
     }
 
-    // The Python integer oracle remains authoritative for every floating
-    // TACC form until a later landing supplies a bit-exact native FP path.
-    if (ew == EW_FP16 || ew == EW_BF16)
-        return -1;
+    // FP16/BF16 lanes accumulate RN32(acc + a * b) with one rounding.
+    const bool floating = ew == EW_FP16 || ew == EW_BF16;
+    const int source_bits = floating ? 16 : 8 << ew;
 
     uint64_t source_addresses[2]{};
     int source_count = 0;
@@ -9134,7 +9220,6 @@ static int exec_native_tacc_tamac(
         throw;
     }
     if (source_selector == 1) {
-        const int source_bits = 8 << ew;
         const int source_bytes = source_bits / 8;
         const uint64_t source_mask =
             source_bits == 64
@@ -9175,10 +9260,9 @@ static int exec_native_tacc_tamac(
 
     std::array<uint8_t, TACC_IMAGE_BYTES>
         staged = s.tacc;
-    const int source_bits = 8 << ew;
     const int source_bytes = source_bits / 8;
     const int accumulator_bits =
-        ew == EW_U8 ? 32 : 64;
+        (floating || ew == EW_U8) ? 32 : 64;
     const int lane_count =
         static_cast<int>(TILE_BYTES * 8) /
         source_bits;
@@ -9197,7 +9281,10 @@ static int exec_native_tacc_tamac(
                 lane,
                 accumulator_bits);
         uint64_t result = 0;
-        if (signed_mode) {
+        if (floating) {
+            result = tile_float_fma(
+                TILE_FP32, tile_float_format(ew), a, b, old);
+        } else if (signed_mode) {
             const __int128 product =
                 static_cast<__int128>(
                     native_tacc_sign_extend(
@@ -9238,7 +9325,7 @@ static int exec_native_tacc_tamac(
     const int source_cycles =
         source_selector == 1 ? 1 : 2;
     const int arithmetic_cycles =
-        ew == EW_U8 ? 4 :
+        (floating || ew == EW_U8) ? 4 :
         ew == EW_U16 ? 2 : 1;
     return source_cycles + arithmetic_cycles;
 }
@@ -9247,6 +9334,64 @@ static int exec_native_tacc_tamac(
 //  MEX core — native only where behavior is exact and mutation-free fallback
 //  is possible.  Returning -1 asks the Python oracle to execute the operation.
 // ---------------------------------------------------------------------------
+
+// ACC_ZERO takes priority over ACC_ACC (docs/floating-point.md §4.4).
+static inline bool take_accumulator_controls(CPUState& s) {
+    const bool zero = (s.tctrl & 0x2) != 0;
+    if (zero)
+        s.tctrl &= ~0x2ULL;
+    return (s.tctrl & 0x1) != 0 && !zero;
+}
+
+// Publish DOT/DOTACC/SUM/SUMSQ/L1 binary32 results to ACC0..ACC{count-1}.
+static void publish_float_sums(
+        CPUState& s,
+        const uint64_t* results,
+        int count) {
+    const bool accumulate = take_accumulator_controls(s);
+    uint64_t words[4]{};
+    bool all_zero = true;
+    for (int index = 0; index < count; index++) {
+        uint64_t result = results[index];
+        if (accumulate) {
+            result = tile_float_add(
+                TILE_FP32, s.acc[index] & 0xFFFF'FFFFULL, result);
+        }
+        words[index] = result;
+        all_zero = all_zero && (result & 0x7FFF'FFFFULL) == 0;
+    }
+    for (int index = 0; index < 4; index++)
+        s.acc[index] = words[index];
+    s.flag_z = all_zero ? 1 : 0;
+}
+
+static inline uint64_t tile_float_skip_nan_extreme32(
+        uint64_t old_value,
+        uint64_t value,
+        bool largest) {
+    if (tile_float_is_nan(TILE_FP32, old_value))
+        return tile_float_is_nan(TILE_FP32, value)
+            ? tile_float_canonical_nan(TILE_FP32) : value;
+    if (tile_float_is_nan(TILE_FP32, value))
+        return old_value;
+    const uint64_t old_key = tile_float_order_key(TILE_FP32, old_value);
+    const uint64_t key = tile_float_order_key(TILE_FP32, value);
+    return (largest ? key > old_key : key < old_key) ? value : old_value;
+}
+
+static inline bool tile_float_index_replaces32(
+        uint64_t candidate,
+        uint64_t old_value,
+        bool largest) {
+    if (tile_float_is_nan(TILE_FP32, candidate))
+        return false;
+    if (tile_float_is_nan(TILE_FP32, old_value))
+        return true;
+    const uint64_t candidate_key =
+        tile_float_order_key(TILE_FP32, candidate);
+    const uint64_t old_key = tile_float_order_key(TILE_FP32, old_value);
+    return largest ? candidate_key > old_key : candidate_key < old_key;
+}
 
 static int exec_mex(
         CPUState& s,
@@ -9379,15 +9524,15 @@ static int exec_mex(
     if (ss == 0x2)
         funct = 0;
 
-    // Python owns the 256-bit integer accumulator semantics and the current
-    // TSYS instruction map.  Decide this before reading sources or changing
+    // Python owns the 256-bit integer accumulator semantics, the current
+    // TSYS instruction map, and the trap for the unimplemented FP32/FP64
+    // formats (EW 6/7).  Decide this before reading sources or changing
     // ACC/TCTRL/destination state so rewind-and-fallback is transactional.
-    const bool fp_bit_reduction = is_fp && op == 0x2 &&
-                                  (funct == 3 || funct == 4);
-    const bool fp_sum_reduction = is_fp && op == 0x2 &&
-                                  (funct == 0 || funct == 5);
-    if ((op == 0x1 && !is_fp && funct != 0) ||
-        (op == 0x2 && (!is_fp || fp_bit_reduction || fp_sum_reduction)) ||
+    // FP POPCNT counts raw bits into the integer accumulator.
+    const bool fp_bit_reduction = is_fp && op == 0x2 && funct == 3;
+    if ((is_fp && ew_bits > EW_BF16) ||
+        (op == 0x1 && !is_fp && funct != 0) ||
+        (op == 0x2 && (!is_fp || fp_bit_reduction)) ||
         op == 0x3) {
         return -1;
     }
@@ -9406,139 +9551,18 @@ static int exec_mex(
             tile_set_elem(src_b, lane, elem_bytes, bval);
     } else if (ss == 0x2) {  // imm8 splat
         src_b = src_a;
-        src_a.fill(funct_byte);
+        if (is_fp) {
+            // The unsigned immediate converted exactly to the lane format.
+            const uint64_t immediate = tile_float_from_double(
+                tile_float_format(ew_bits), static_cast<double>(funct_byte));
+            for (int lane = 0; lane < num_lanes; lane++)
+                tile_set_elem(src_a, lane, 2, immediate);
+        } else {
+            src_a.fill(funct_byte);
+        }
     } else {  // ss == 3, in-place
         tile_read_64bytes(s, cb, s.tdst, src_a);
         tile_read_64bytes(s, cb, s.tsrc0, src_b);
-    }
-
-    // Python's floating-point helpers own NaN payload/sign propagation and
-    // non-finite arithmetic semantics.  These checks are deliberately after
-    // safe source reads but before ACC_ZERO, TCTRL, accumulator, or memory
-    // mutation, so step_one can rewind and retry transactionally.
-    Tile fp_existing{};
-    bool fp_existing_loaded = false;
-    if (is_fp) {
-        const bool fp_talu_arithmetic =
-            op == 0x0 && (funct == 0 || funct == 1);
-        const bool fp_tmul_arithmetic =
-            op == 0x1 && funct >= 0 && funct <= 5;
-        const bool fp_tred_ordering =
-            op == 0x2 &&
-            (funct == 1 || funct == 2 || funct == 6 || funct == 7);
-        if (fp_talu_arithmetic || fp_tmul_arithmetic || fp_tred_ordering) {
-            auto tile_is_finite = [&](const Tile& tile) {
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    const uint16_t raw = static_cast<uint16_t>(
-                        tile_get_elem(tile, lane, 2));
-                    if (!fp_is_finite(raw, ew_bits))
-                        return false;
-                }
-                return true;
-            };
-
-            if (!tile_is_finite(src_a) ||
-                (!fp_tred_ordering && !tile_is_finite(src_b))) {
-                return -1;
-            }
-
-            if (op == 0x1 && (funct == 3 || funct == 4)) {
-                tile_read_64bytes(s, cb, s.tdst, fp_existing);
-                fp_existing_loaded = true;
-                if (!tile_is_finite(fp_existing))
-                    return -1;
-            }
-
-            const bool consumes_acc =
-                op == 0x1 && (funct == 1 || funct == 5) &&
-                (s.tctrl & 0x1) && !(s.tctrl & 0x2);
-            if (consumes_acc) {
-                const int acc_count = funct == 1 ? 1 : 4;
-                for (int index = 0; index < acc_count; index++) {
-                    if (!fp32_bits_are_finite(s.acc[index]))
-                        return -1;
-                }
-            }
-
-            // BF16 spans essentially the full FP32 exponent range.  Preflight
-            // results at the FP32 overflow boundary in double precision and
-            // fall back transactionally so the executable oracle owns the
-            // exact infinity encoding and architectural post-state.  This
-            // also avoids relying on native intermediate-rounding details at
-            // the edge of the accelerated format.
-            if (ew_bits == EW_BF16) {
-                auto lane_value = [&](const Tile& tile, int lane) {
-                    return static_cast<double>(fp_decode(
-                        static_cast<uint16_t>(
-                            tile_get_elem(tile, lane, 2)),
-                        ew_bits));
-                };
-
-                if (fp_talu_arithmetic) {
-                    for (int lane = 0; lane < num_lanes; lane++) {
-                        const double a = lane_value(src_a, lane);
-                        const double b = lane_value(src_b, lane);
-                        const double result =
-                            funct == 0 ? a + b : a - b;
-                        if (fp32_pack_overflows(result))
-                            return -1;
-                    }
-                } else if (fp_tmul_arithmetic) {
-                    if (funct == 0 || funct == 2) {
-                        for (int lane = 0; lane < num_lanes; lane++) {
-                            const double result =
-                                lane_value(src_a, lane) *
-                                lane_value(src_b, lane);
-                            if (fp32_pack_overflows(result))
-                                return -1;
-                        }
-                    } else if (funct == 3 || funct == 4) {
-                        for (int lane = 0; lane < num_lanes; lane++) {
-                            const double result =
-                                lane_value(src_a, lane) *
-                                    lane_value(src_b, lane) +
-                                lane_value(fp_existing, lane);
-                            if (fp32_pack_overflows(result))
-                                return -1;
-                        }
-                    } else if (funct == 1) {
-                        double total = 0.0;
-                        for (int lane = 0; lane < num_lanes; lane++) {
-                            total += lane_value(src_a, lane) *
-                                     lane_value(src_b, lane);
-                        }
-                        if (consumes_acc) {
-                            total =
-                                static_cast<double>(bits_to_fp32(
-                                    static_cast<uint32_t>(s.acc[0]))) +
-                                total;
-                        }
-                        if (fp32_pack_overflows(total))
-                            return -1;
-                    } else if (funct == 5) {
-                        const int chunk_size = num_lanes / 4;
-                        for (int chunk = 0; chunk < 4; chunk++) {
-                            double total = 0.0;
-                            for (int lane = 0; lane < chunk_size; lane++) {
-                                const int index =
-                                    chunk * chunk_size + lane;
-                                total += lane_value(src_a, index) *
-                                         lane_value(src_b, index);
-                            }
-                            if (consumes_acc) {
-                                total =
-                                    static_cast<double>(bits_to_fp32(
-                                        static_cast<uint32_t>(
-                                            s.acc[chunk]))) +
-                                    total;
-                            }
-                            if (fp32_pack_overflows(total))
-                                return -1;
-                        }
-                    }
-                }
-            }
-        }
     }
 
     // Extended Tile ALU (EXT modifier 8)
@@ -9584,45 +9608,22 @@ static int exec_mex(
 
     if (op == 0x0) {  // TALU
         if (is_fp) {
-            // ---- Floating-point TALU ----
-            uint16_t qnan = (ew_bits == EW_FP16) ? 0x7E00 : 0x7FC0;
+            const TileFloatFormat& fmt = tile_float_format(ew_bits);
+            const uint64_t magnitude =
+                tile_float_mask(fmt) ^ tile_float_sign(fmt);
             for (int lane = 0; lane < num_lanes; lane++) {
-                uint16_t ea  = (uint16_t)tile_get_elem(src_a, lane, 2);
-                uint16_t eb_val = (uint16_t)tile_get_elem(src_b, lane, 2);
-                uint16_t r = 0;
+                const uint64_t a = tile_get_elem(src_a, lane, 2);
+                const uint64_t b = tile_get_elem(src_b, lane, 2);
+                uint64_t r = 0;
                 switch (funct) {
-                    case 2: r = ea & eb_val; break;  // AND — bitwise
-                    case 3: r = ea | eb_val; break;  // OR
-                    case 4: r = ea ^ eb_val; break;  // XOR
-                    case 7: r = ea & 0x7FFF; break;  // ABS — clear sign bit
-                    case 5: {  // MIN — NaN-propagating
-                        if (fp_is_nan(ea, ew_bits) || fp_is_nan(eb_val, ew_bits))
-                            r = qnan;
-                        else {
-                            float fa = fp_decode(ea, ew_bits);
-                            float fb = fp_decode(eb_val, ew_bits);
-                            // Python min/max preserve the first operand on
-                            // equality, including the sign of zero.
-                            r = fp_encode(fb < fa ? fb : fa, ew_bits);
-                        }
-                        break;
-                    }
-                    case 6: {  // MAX — NaN-propagating
-                        if (fp_is_nan(ea, ew_bits) || fp_is_nan(eb_val, ew_bits))
-                            r = qnan;
-                        else {
-                            float fa = fp_decode(ea, ew_bits);
-                            float fb = fp_decode(eb_val, ew_bits);
-                            r = fp_encode(fb > fa ? fb : fa, ew_bits);
-                        }
-                        break;
-                    }
-                    default: {  // ADD (0) / SUB (1)
-                        float fa = fp_decode(ea, ew_bits);
-                        float fb = fp_decode(eb_val, ew_bits);
-                        r = fp_encode(funct == 0 ? fa + fb : fa - fb, ew_bits);
-                        break;
-                    }
+                    case 0: r = tile_float_add(fmt, a, b); break;
+                    case 1: r = tile_float_sub(fmt, a, b); break;
+                    case 2: r = a & b; break;
+                    case 3: r = a | b; break;
+                    case 4: r = a ^ b; break;
+                    case 5: r = tile_float_extreme2(fmt, a, b, false); break;
+                    case 6: r = tile_float_extreme2(fmt, a, b, true); break;
+                    default: r = a & magnitude; break;  // ABS
                 }
                 tile_set_elem(dst, lane, 2, r);
             }
@@ -9727,101 +9728,69 @@ static int exec_mex(
     if (op == 0x1) {  // TMUL
         if (is_fp) {
             // ---- Floating-point TMUL ----
+            const TileFloatFormat& fmt = tile_float_format(ew_bits);
             if (funct == 0) {  // MUL
                 for (int lane = 0; lane < num_lanes; lane++) {
-                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
-                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
-                    tile_set_elem(dst, lane, 2, fp_encode(fa * fb, ew_bits));
+                    tile_set_elem(dst, lane, 2, tile_float_product(
+                        fmt, fmt,
+                        tile_get_elem(src_a, lane, 2),
+                        tile_get_elem(src_b, lane, 2)));
                 }
                 tile_write_64bytes(s, cb, s.tdst, dst);
                 return 1;
             }
-            if (funct == 1) {  // DOT — FP16/BF16 → FP32 accumulate
-                if (s.tctrl & 0x2) {
-                    s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
-                    s.tctrl &= ~0x2ULL;
-                }
-                double total = 0.0;
+            if (funct == 1 || funct == 5) {  // DOT, DOTACC
+                double products[32];
                 for (int lane = 0; lane < num_lanes; lane++) {
-                    double fa = fp_decode(
-                        (uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
-                    double fb = fp_decode(
-                        (uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
-                    total += fa * fb;
+                    products[lane] = tile_float_to_double(
+                        TILE_FP32,
+                        tile_float_product(
+                            TILE_FP32, fmt,
+                            tile_get_elem(src_a, lane, 2),
+                            tile_get_elem(src_b, lane, 2)));
                 }
-                if (s.tctrl & 0x1)  // ACC_ACC
-                    total = static_cast<double>(
-                                bits_to_fp32((uint32_t)s.acc[0])) + total;
-                s.acc[0] = fp32_to_bits(static_cast<float>(total));
-                s.acc[1] = s.acc[2] = s.acc[3] = 0;
-                s.flag_z = (total == 0.0f) ? 1 : 0;
+                uint64_t results[4]{};
+                if (funct == 1) {
+                    results[0] = tile_float_tree32(products, num_lanes);
+                    publish_float_sums(s, results, 1);
+                } else {
+                    const int chunk = num_lanes / 4;
+                    for (int k = 0; k < 4; k++) {
+                        results[k] =
+                            tile_float_tree32(products + k * chunk, chunk);
+                    }
+                    publish_float_sums(s, results, 4);
+                }
                 return 3;
             }
-            if (funct == 2) {  // WMUL — fp16/bf16 → fp32 widening multiply
+            if (funct == 2) {  // WMUL — products rounded once to binary32
                 Tile dst0{}, dst1{};
                 for (int lane = 0; lane < num_lanes; lane++) {
-                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
-                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
-                    uint32_t fp32bits = fp32_to_bits(fa * fb);
+                    const uint64_t product = tile_float_product(
+                        TILE_FP32, fmt,
+                        tile_get_elem(src_a, lane, 2),
+                        tile_get_elem(src_b, lane, 2));
                     if (lane < 16)
-                        tile_set_elem(dst0, lane, 4, fp32bits);
+                        tile_set_elem(dst0, lane, 4, product);
                     else
-                        tile_set_elem(dst1, lane - 16, 4, fp32bits);
+                        tile_set_elem(dst1, lane - 16, 4, product);
                 }
                 tile_write_64bytes(s, cb, s.tdst, dst0);
                 tile_write_64bytes(s, cb, s.tdst + 64, dst1);
                 return 2;
             }
-            if (funct == 3) {  // MAC — fp mul-accumulate: dst += a*b
-                // Preloaded by the transactional finite-input check above.
-                if (!fp_existing_loaded)
-                    tile_read_64bytes(s, cb, s.tdst, fp_existing);
+            if (funct == 3 || funct == 4) {  // MAC, FMA — fused, addend [TDST]
+                Tile addend{};
+                tile_read_64bytes(s, cb, s.tdst, addend);
                 for (int lane = 0; lane < num_lanes; lane++) {
-                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
-                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
-                    float fc = fp_decode((uint16_t)tile_get_elem(fp_existing, lane, 2), ew_bits);
-                    tile_set_elem(dst, lane, 2, fp_encode(fc + fa * fb, ew_bits));
+                    tile_set_elem(dst, lane, 2, tile_float_fma(
+                        fmt, fmt,
+                        tile_get_elem(src_a, lane, 2),
+                        tile_get_elem(src_b, lane, 2),
+                        tile_get_elem(addend, lane, 2)));
                 }
                 tile_write_64bytes(s, cb, s.tdst, dst);
                 return 2;
-            }
-            if (funct == 4) {  // FMA — dst = a*b + dst
-                // Preloaded by the transactional finite-input check above.
-                if (!fp_existing_loaded)
-                    tile_read_64bytes(s, cb, s.tdst, fp_existing);
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    float fa = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
-                    float fb = fp_decode((uint16_t)tile_get_elem(src_b, lane, 2), ew_bits);
-                    float fc = fp_decode((uint16_t)tile_get_elem(fp_existing, lane, 2), ew_bits);
-                    tile_set_elem(dst, lane, 2, fp_encode(fa * fb + fc, ew_bits));
-                }
-                tile_write_64bytes(s, cb, s.tdst, dst);
-                return 2;
-            }
-            if (funct == 5) {  // DOTACC — 4-way chunked dot, FP32 accumulate
-                int chunk_size = num_lanes / 4;
-                if (s.tctrl & 0x2) {
-                    s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
-                    s.tctrl &= ~0x2ULL;
-                }
-                for (int k = 0; k < 4; k++) {
-                    double dot = 0.0;
-                    for (int lane = 0; lane < chunk_size; lane++) {
-                        int idx = k * chunk_size + lane;
-                        double fa = fp_decode(
-                            (uint16_t)tile_get_elem(src_a, idx, 2), ew_bits);
-                        double fb = fp_decode(
-                            (uint16_t)tile_get_elem(src_b, idx, 2), ew_bits);
-                        dot += fa * fb;
-                    }
-                    if (s.tctrl & 0x1)  // ACC_ACC
-                        dot = static_cast<double>(
-                                  bits_to_fp32((uint32_t)s.acc[k])) + dot;
-                    s.acc[k] = fp32_to_bits(static_cast<float>(dot));
-                }
-                s.flag_z = (s.acc[0] == 0 && s.acc[1] == 0 &&
-                            s.acc[2] == 0 && s.acc[3] == 0) ? 1 : 0;
-                return 3;
             }
             return 1;  // unknown FP TMUL funct
         }
@@ -9853,100 +9822,69 @@ static int exec_mex(
     }
 
     if (op == 0x2) {  // TRED (reductions)
-        // Keep this guard adjacent to ACC_ZERO as a transactional invariant,
-        // even though the same cases are routed before source reads above.
-        if (!is_fp || funct == 0 || funct == 3 ||
-            funct == 4 || funct == 5)
+        // Keep this guard adjacent to the accumulator update as a
+        // transactional invariant; the same cases are routed before source
+        // reads above.
+        if (!is_fp || funct == 3)
             return -1;
 
-        // Handle ACC_ZERO (TCTRL bit 1): clear accumulator, one-shot
-        if (s.tctrl & 0x2) {
-            s.acc[0] = s.acc[1] = s.acc[2] = s.acc[3] = 0;
-            s.tctrl &= ~0x2;  // clear the one-shot bit
-        }
-        bool acc_acc = (s.tctrl & 0x1) != 0;  // ACC_ACC is bit 0
-
-        if (is_fp) {
-            // ---- Floating-point TRED ----
-            // Decode all lanes
-            float fp_vals[32] = {0};
-            for (int lane = 0; lane < num_lanes; lane++)
-                fp_vals[lane] = fp_decode((uint16_t)tile_get_elem(src_a, lane, 2), ew_bits);
-
-            if (funct == 0) {  // SUM — FP32 accumulate
-                float total = 0.0f;
-                for (int lane = 0; lane < num_lanes; lane++)
-                    total += fp_vals[lane];
-                if (acc_acc)
-                    total += bits_to_fp32((uint32_t)s.acc[0]);
-                s.acc[0] = fp32_to_bits(total);
-                s.acc[1] = s.acc[2] = s.acc[3] = 0;
-                s.flag_z = (total == 0.0f) ? 1 : 0;
-                return 0;
+        const TileFloatFormat& fmt = tile_float_format(ew_bits);
+        if (funct == 0 || funct == 4 || funct == 5) {  // SUM, L1, SUMSQ
+            const uint64_t magnitude =
+                tile_float_mask(fmt) ^ tile_float_sign(fmt);
+            double leaves[32];
+            for (int lane = 0; lane < num_lanes; lane++) {
+                const uint64_t x = tile_get_elem(src_a, lane, 2);
+                const uint64_t leaf =
+                    funct == 5 ? tile_float_product(TILE_FP32, fmt, x, x)
+                    : tile_float_convert(
+                          TILE_FP32, fmt, funct == 4 ? (x & magnitude) : x);
+                leaves[lane] = tile_float_to_double(TILE_FP32, leaf);
             }
-            if (funct == 1) {  // MIN
-                float best = fp_vals[0];
-                for (int lane = 1; lane < num_lanes; lane++) {
-                    if (!std::isnan(fp_vals[lane]) && (std::isnan(best) || fp_vals[lane] < best))
-                        best = fp_vals[lane];
-                }
-                s.acc[0] = fp32_to_bits(best);
-                s.acc[1] = s.acc[2] = s.acc[3] = 0;
-                return 0;
-            }
-            if (funct == 2) {  // MAX
-                float best = fp_vals[0];
-                for (int lane = 1; lane < num_lanes; lane++) {
-                    if (!std::isnan(fp_vals[lane]) && (std::isnan(best) || fp_vals[lane] > best))
-                        best = fp_vals[lane];
-                }
-                s.acc[0] = fp32_to_bits(best);
-                s.acc[1] = s.acc[2] = s.acc[3] = 0;
-                return 0;
-            }
-            if (funct == 5) {  // SUMSQ — FP32 accumulate
-                float total = 0.0f;
-                for (int lane = 0; lane < num_lanes; lane++)
-                    total += fp_vals[lane] * fp_vals[lane];
-                if (acc_acc)
-                    total += bits_to_fp32((uint32_t)s.acc[0]);
-                s.acc[0] = fp32_to_bits(total);
-                s.acc[1] = s.acc[2] = s.acc[3] = 0;
-                s.flag_z = (total == 0.0f) ? 1 : 0;
-                return 0;
-            }
-            if (funct == 6) {  // MINIDX
-                int best_idx = 0;
-                float best_val = fp_vals[0];
-                for (int i = 1; i < num_lanes; i++) {
-                    if (!std::isnan(fp_vals[i]) && (std::isnan(best_val) || fp_vals[i] < best_val)) {
-                        best_val = fp_vals[i];
-                        best_idx = i;
-                    }
-                }
-                s.acc[0] = (uint64_t)best_idx;
-                s.acc[1] = fp32_to_bits(best_val);
-                s.acc[2] = s.acc[3] = 0;
-                return 0;
-            }
-            if (funct == 7) {  // MAXIDX
-                int best_idx = 0;
-                float best_val = fp_vals[0];
-                for (int i = 1; i < num_lanes; i++) {
-                    if (!std::isnan(fp_vals[i]) && (std::isnan(best_val) || fp_vals[i] > best_val)) {
-                        best_val = fp_vals[i];
-                        best_idx = i;
-                    }
-                }
-                s.acc[0] = (uint64_t)best_idx;
-                s.acc[1] = fp32_to_bits(best_val);
-                s.acc[2] = s.acc[3] = 0;
-                return 0;
-            }
-            // funct is masked to three bits; FP POPCNT/L1 were routed before
-            // ACC_ZERO, and every other value returned above.
+            const uint64_t result = tile_float_tree32(leaves, num_lanes);
+            publish_float_sums(s, &result, 1);
             return 0;
         }
+
+        // MIN, MAX, MINIDX, MAXIDX: NaN-skipping, -0 below +0, lowest index.
+        const bool largest = funct == 2 || funct == 7;
+        int best_index = -1;
+        uint64_t best_key = 0;
+        for (int lane = 0; lane < num_lanes; lane++) {
+            const uint64_t x = tile_get_elem(src_a, lane, 2);
+            if (tile_float_is_nan(fmt, x))
+                continue;
+            const uint64_t key = tile_float_order_key(fmt, x);
+            if (best_index < 0 ||
+                (largest ? key > best_key : key < best_key)) {
+                best_index = lane;
+                best_key = key;
+            }
+        }
+        const uint64_t value = best_index < 0
+            ? tile_float_canonical_nan(TILE_FP32)
+            : tile_float_convert(
+                  TILE_FP32, fmt, tile_get_elem(src_a, best_index, 2));
+        const int index = best_index < 0 ? 0 : best_index;
+        const bool accumulate = take_accumulator_controls(s);
+        if (funct == 1 || funct == 2) {
+            const uint64_t result = accumulate
+                ? tile_float_skip_nan_extreme32(
+                      s.acc[0] & 0xFFFF'FFFFULL, value, largest)
+                : value;
+            s.acc[0] = result;
+            s.acc[1] = s.acc[2] = s.acc[3] = 0;
+            s.flag_z = (result & 0x7FFF'FFFFULL) == 0 ? 1 : 0;
+            return 0;
+        }
+        if (!accumulate ||
+            tile_float_index_replaces32(
+                value, s.acc[1] & 0xFFFF'FFFFULL, largest)) {
+            s.acc[0] = static_cast<uint64_t>(index);
+            s.acc[1] = value;
+        }
+        s.acc[2] = s.acc[3] = 0;
+        s.flag_z = s.acc[0] == 0 ? 1 : 0;
         return 0;
     }
 

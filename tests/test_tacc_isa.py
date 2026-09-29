@@ -26,8 +26,8 @@ from megapad64 import (
     TACC_OWNER_NONE,
     Megapad64,
     TrapError,
-    _tacc_fp32_add_product,
 )
+from shared import ieee_fp
 
 
 CODE_BASE = 0
@@ -438,7 +438,9 @@ def test_exact_fp_oracle_edges(
     ew: int,
     expected: int,
 ) -> None:
-    assert _tacc_fp32_add_product(acc, a, b, ew) == expected
+    fmt = ieee_fp.FORMAT_BY_EW[ew]
+    assert ieee_fp.lane_mixed_fma(ieee_fp.FP32, fmt, a, b, acc) == expected
+    assert ieee_fp.mixed_fma(ieee_fp.FP32, fmt, a, b, acc)[0] == expected
 
 
 def test_fp_tamac_canonicalizes_nan_and_preserves_inactive_zeroes() -> None:

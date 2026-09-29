@@ -1045,19 +1045,12 @@ memory regions (e.g., extracting an 8×8 patch from a 640-wide framebuffer).
 ## FP16 / BF16 Modes (2 words)
 
 Half-precision floating-point tile operations. Reductions publish raw binary32
-bits in ACC0. “FP32 accumulation” is the intended operation family, not yet a
-bitwise cross-backend ordering guarantee: Python/hosted SUM and SUMSQ perform a
-host-language per-tile sum before one binary32 pack. The native accelerator
-currently falls back to Python for those reductions; its bypassed direct C++
-bodies use sequential binary32, and RTL uses a balanced binary32 tree. Python
-and active native TDOT use a binary64 loop before packing, while RTL uses its
-own tree.
-With ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds
-it to the tile subtotal in binary64, and repacks; that pack is the inter-tile
-rounding point.
-With ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds
-it to the tile subtotal in binary64, and repacks; that pack is the inter-tile
-rounding point.
+bits in ACC0. `docs/floating-point.md` defines every result: lanes or their
+products enter binary32 and are summed by one pairwise tree in lane order, and
+with ACC_ACC each tile adds to ACC0 with one more rounding. The Python
+emulator, native accelerator, and hosted simulator implement that definition;
+the RTL datapath still differs until its slice of Phase 2 of
+`docs/megapad-full-float-plan.md` lands.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|

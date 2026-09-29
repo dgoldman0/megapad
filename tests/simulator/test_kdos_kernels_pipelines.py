@@ -8,7 +8,7 @@ import re
 
 import pytest
 
-from shared.fp import FP16_FORMAT, fp32_to_bits
+from shared import ieee_fp
 from simulator.errors import ExecutionError, StepBudgetExceeded
 from simulator.runtime import MegaForthRuntime
 from simulator.stacks import StackUnderflow
@@ -23,6 +23,13 @@ from tests.simulator.test_kdos_buffer_fp import (
     _load_buffer_fp,
 )
 from tests.simulator.test_kdos_x25519 import _execute
+
+
+FP16_FORMAT = ieee_fp.FP16.ew
+
+
+def fp32_to_bits(value: float) -> int:
+    return ieee_fp.from_double(ieee_fp.FP32, value)
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]

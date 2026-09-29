@@ -10,10 +10,33 @@ import traceback
 
 from megapad64 import (Megapad64, HaltError, TrapError, IVEC_ILLEGAL_OP,
                        u64, sign_extend,
-                       EW_FP16, EW_BF16, _float_to_fp16, _fp16_to_float,
-                       _float_to_bf16, _bf16_to_float, _fp32_to_bits,
-                       _bits_to_fp32)
+                       EW_FP16, EW_BF16)
 from asm import assemble
+from shared import ieee_fp
+
+
+def _float_to_fp16(value: float) -> int:
+    return ieee_fp.from_double(ieee_fp.FP16, value)
+
+
+def _fp16_to_float(bits: int) -> float:
+    return ieee_fp.to_double(ieee_fp.FP16, bits)
+
+
+def _float_to_bf16(value: float) -> int:
+    return ieee_fp.from_double(ieee_fp.BF16, value)
+
+
+def _bf16_to_float(bits: int) -> float:
+    return ieee_fp.to_double(ieee_fp.BF16, bits)
+
+
+def _fp32_to_bits(value: float) -> int:
+    return ieee_fp.from_double(ieee_fp.FP32, value)
+
+
+def _bits_to_fp32(bits: int) -> float:
+    return ieee_fp.to_double(ieee_fp.FP32, bits)
 
 PASS = 0
 FAIL = 0
@@ -1341,6 +1364,7 @@ def test_strided_2d():
 def test_tile_fp():
     """Tile engine FP16/bfloat16 operations"""
     print("\n== Tile FP16 / bfloat16 ==")
+    failures_before = FAIL
     import struct, math
 
     # Helper: write fp16 value to tile lane
@@ -1817,6 +1841,7 @@ def test_tile_fp():
         pass
     check("u8 regression: 1+2=3 still works",
           all(cpu20.mem_read8(0x3000 + i) == 3 for i in range(64)))
+    assert FAIL == failures_before, "tile FP checks failed"
 
 
 def test_tile_kernels():

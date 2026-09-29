@@ -7,9 +7,17 @@ import pytest
 from asm import assemble
 from emulator.megapad64 import Megapad64 as PythonMegapad64
 from shared.cells import MASK64
-from shared.fp import BF16_FORMAT, FP16_FORMAT, encode_tile_float
+from shared import ieee_fp
 from simulator.memory import MemoryAccessError
 from simulator.runtime import MegaForthRuntime
+
+
+FP16_FORMAT = ieee_fp.FP16.ew
+BF16_FORMAT = ieee_fp.BF16.ew
+
+
+def encode_tile_float(value: float, format_code: int) -> int:
+    return ieee_fp.from_double(ieee_fp.FORMAT_BY_EW[format_code], value)
 
 
 SOURCE0 = 0x100
@@ -204,13 +212,13 @@ def test_fp_elementwise_operations_preserve_raw_and_nan_semantics(
         elif operation == "absolute":
             assert first == nan_bits & 0x7FFF
 
-    # Python min/max return the first of equal signed zeros; the executable
-    # tile implementation consequently preserves the first operand's sign.
+    # IEEE 754-2019 minimum/maximum order -0 below +0 whichever operand
+    # carries it (docs/floating-point.md §3.8).
     signed_zero = _lane_tile(2, (0x8000,))
     positive_zero = _lane_tile(2, (0x0000,))
-    for operation, instruction in (
-        ("elementwise_minimum", "t.min"),
-        ("elementwise_maximum", "t.max"),
+    for operation, instruction, expected in (
+        ("elementwise_minimum", "t.min", b"\x00\x80"),
+        ("elementwise_maximum", "t.max", b"\x00\x00"),
     ):
         runtime = _assert_matches_oracle(
             operation,
@@ -220,7 +228,16 @@ def test_fp_elementwise_operations_preserve_raw_and_nan_semantics(
             source1=positive_zero,
             destination=destination,
         )
-        assert runtime.memory.read_bytes(DESTINATION, 2) == b"\x00\x80"
+        assert runtime.memory.read_bytes(DESTINATION, 2) == expected
+        runtime = _assert_matches_oracle(
+            operation,
+            instruction,
+            mode=format_code,
+            source0=positive_zero,
+            source1=signed_zero,
+            destination=destination,
+        )
+        assert runtime.memory.read_bytes(DESTINATION, 2) == expected
 
 
 def test_transpose_is_an_in_place_byte_matrix_operation() -> None:
@@ -228,7 +245,7 @@ def test_transpose_is_an_in_place_byte_matrix_operation() -> None:
     runtime = _assert_matches_oracle(
         "transpose",
         "t.trans",
-        mode=7,
+        mode=3,
         source0=bytes((0x11,)) * TILE_BYTES,
         source1=bytes((0x22,)) * TILE_BYTES,
         destination=original,

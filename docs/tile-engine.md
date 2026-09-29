@@ -512,37 +512,18 @@ FP64-MODE   \ Sets TMODE = 7
 
 ### Current implementation status
 
-The rules above are specified, not yet implemented.  FP16/BF16 converge on
-them in Phase 2 of `docs/megapad-full-float-plan.md`; FP32 and FP64 arrive in
-Phases 3–5, and the new operations in Phases 6 and 8.  Until then, current
-FP16/BF16 code behaves as follows.
+For FP16 and BF16, the Python emulator, native accelerator, and hosted
+simulator implement these rules; all three take their values from
+`shared/ieee_fp.py`, and a seeded differential test holds the native
+accelerator to the Python results.  FP32 and FP64 arrive in Phases 3–5 of
+`docs/megapad-full-float-plan.md` and the new operations in Phases 6 and 8;
+until then EW 6 and 7 trap in the emulator and are rejected by the hosted
+simulator.  Float PACK and UNPACK remain until `TCVT` replaces them.
 
-DOT, SUM, and SUMSQ publish one raw binary32 result in ACC0; the Python and
-hosted paths clear ACC1--ACC3, while RTL keeps them on ACC_ACC. `TDOTACC`
-publishes four binary32 chunk results across ACC0--ACC3.
-
-The reduction order is not yet one backend-independent FP32 algorithm. Python
-and the hosted simulator use host-language `sum` for each SUM/SUMSQ tile and
-pack once to binary32; the native accelerator currently routes those functions
-back to Python, though its direct C++ body uses sequential binary32. RTL uses
-the balanced binary32 tree that `docs/floating-point.md` adopts. TDOT uses a
-binary64 loop in Python/native before its binary32 pack. Cancellation and
-signed-zero results can differ.
-For ACC_ACC, Python/hosted execution widens the existing binary32 ACC0, adds it
-to the tile subtotal in binary64, and repacks.  FP TRED MIN/MAX ignore
-ACC_ACC in Python/hosted execution, while RTL adds their result to ACC0.
-
-No backend fuses `TMAC` or `TFMA`: Python rounds a binary64 result through
-binary32 to the lane format, native C++ computes in binary32, and RTL rounds
-the product and the sum separately.  RTL flushes subnormal FP16/BF16 products
-to zero, and its BF16 add and multiply appear to truncate rather than round.
-
-There is also a known executable conversion discrepancy: the exact FP16
-product `0x0017 * 0x5190` lies at the largest-subnormal/minimum-normal tie.
-Python/C++ and the hosted compatibility model currently encode it as zero,
-where IEEE round-to-nearest-even would produce `0x0400`.  EW 6/7 are not yet
-implemented formats: hosted execution rejects them, while existing Python/C++
-treat them as BF16 and RTL treats them as FP16.
+The RTL datapath converges in the RTL slice of Phase 2.  Until then it still
+rounds TMAC/TFMA twice, flushes subnormal FP16/BF16 products to zero, appears
+to truncate BF16 add and multiply, adds FP TRED MIN/MAX results to ACC0 under
+ACC_ACC, keeps ACC1--ACC3 on floating ACC_ACC, and treats EW 6/7 as FP16.
 
 ---
 

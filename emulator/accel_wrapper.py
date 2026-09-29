@@ -68,9 +68,6 @@ from .megapad64 import (
     NUM_FULL_CORES, NUM_CLUSTERS, MICRO_PER_CLUSTER, NUM_ALL_CORES,
     MICRO_ID_BASE, CLUSTER_SPAD_BYTES, CLUSTER_SPAD_ADDR, CPUID_MICRO,
     TACC_OWNER_NONE,
-    # FP helpers (needed for Python fallback in MEX FP)
-    _fp16_to_float, _float_to_fp16, _bf16_to_float, _float_to_bf16,
-    _fp_decode, _fp_encode, _fp_is_nan,
 )
 
 # ---------------------------------------------------------------------------

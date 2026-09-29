@@ -155,17 +155,18 @@ for DOTACC the four chunk results `r0`–`r3`.
 - **Otherwise.** ACC0 = `r` (ACCk = `rk` for DOTACC).
 
 For every operation except DOTACC, ACC1–ACC3 become zero in all three cases.
-Z is set when the published ACC0 value is ±0.
+Z is set when the published ACC0 value is ±0; for DOTACC, when all four
+published values are ±0.
 
 **4.5 MINIDX and MAXIDX.** Within a tile, the result is the lane index `i` and
 value `v` of the NaN-skipping extreme (§3.8). An all-NaN tile gives `i = 0`
 and `v` = the canonical NaN.
 
 - With `ACC_ACC` (and not `ACC_ZERO`), the tile result replaces ACC0 = `i` and
-  ACC1 = `v` only when `v` is strictly better than the old ACC1 value, or the
-  old ACC1 value is NaN and `v` is not.
-- Otherwise ACC0 = `i` and ACC1 = the raw bits of `v`; `ACC_ZERO`, when
-  set, auto-clears.
+  ACC1 = `v` only when `v` is strictly better than the old ACC1 value (compared
+  in `A`), or the old ACC1 value is NaN and `v` is not.
+- Otherwise ACC0 = `i` and ACC1 = `v` widened exactly to `A` (the canonical
+  NaN of `A` for an all-NaN tile); `ACC_ZERO`, when set, auto-clears.
 - ACC2 and ACC3 become zero, and Z is set when ACC0 is zero.
 
 **4.6 Integer MIN and MAX.** Under `ACC_ACC`, integer TRED MIN and MAX now keep
@@ -556,7 +557,9 @@ models no instruction encodings.
 | Area | Phase | Status |
 |---|---|---|
 | This specification | 1 | Adopted |
-| Exact reference oracle; FP16/BF16 unification in all backends, including §3, §4, fused MAC/FMA, and integer running MIN/MAX | 2 | Specified |
+| Exact reference oracle (`shared/ieee_fp.py`) | 2 | Implemented |
+| FP16/BF16 unification, including §3, §4, §5.1, fused MAC/FMA, and integer running MIN/MAX: Python emulator, native accelerator, hosted simulator | 2 | Implemented |
+| FP16/BF16 unification: RTL | 2 | Specified |
 | 4-bit `TMODE.EW`, `TACC_STATUS` repack, format descriptors, `FP32-MODE`, `FP64-MODE` | 3 | Specified |
 | FP32/FP64 element-wise operations and the FMA unit | 4 | Specified |
 | FP32/FP64 reductions and TACC formats | 5 | Specified |

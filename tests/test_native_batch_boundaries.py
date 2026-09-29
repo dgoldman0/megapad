@@ -267,7 +267,7 @@ def test_tacc_batch_crosses_native_lifecycle_and_tamac_without_a_boundary():
     ) == (cpu.core_id, True, True, EW_U8, 0, False, False, 0)
 
 
-def test_exceptional_fp_tacc_fallback_is_one_explicit_batch_boundary():
+def test_fp_tacc_tamac_runs_natively_inside_a_batch():
     cpu = NativeMegapad64(mem_size=4096)
     source0 = 0x400
     source1 = 0x440
@@ -302,32 +302,22 @@ def test_exceptional_fp_tacc_fallback_is_one_explicit_batch_boundary():
 
     cpu._step_python_fallback = counted_fallback
 
-    first = cpu.run_steps_stats(max_steps=3)
+    stats = cpu.run_steps_stats(max_steps=3)
 
     assert (
-        first.steps_executed,
-        first.total_cycles,
-        first.stop_reason,
-    ) == (2, 8, 0)
-    assert fallback_calls == 1
-    assert cpu.pc == len(assemble("nop\nt.amac"))
-    assert cpu.cycle_count == 8
-    assert cpu.perf_cycles == 8
-    assert cpu.perf_tileops == 1
-    assert int.from_bytes(bytes(cpu.tacc[:4]), "little") == TACC_CANONICAL_NAN
-    assert cpu.tacc_dirty
-    assert not cpu.tacc_busy
-
-    second = cpu.run_steps_stats(max_steps=1)
-
-    assert (
-        second.steps_executed,
-        second.total_cycles,
-        second.stop_reason,
-    ) == (1, 1, 0)
-    assert fallback_calls == 1
+        stats.steps_executed,
+        stats.total_cycles,
+        stats.stop_reason,
+    ) == (3, 9, 0)
+    assert fallback_calls == 0
     assert cpu.pc == len(program)
     assert cpu.cycle_count == 9
+    assert cpu.perf_tileops == 1
+    assert int.from_bytes(bytes(cpu.tacc[:4]), "little") == TACC_CANONICAL_NAN
+    # Every other lane accumulates 1.0 * 1.0 once.
+    assert int.from_bytes(bytes(cpu.tacc[4:8]), "little") == 0x3F80_0000
+    assert cpu.tacc_dirty
+    assert not cpu.tacc_busy
 
 
 def test_tacc_batch_preflight_trap_preserves_native_prefix_metadata():

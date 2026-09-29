@@ -889,16 +889,11 @@ leaves FP16/BF16 mode active. The source example `0 1 64 BUFFER` has the right
 physical byte count for 32 half lanes but describes 64 one-byte elements; `0 2
 32 BUFFER` matches the descriptor model.
 
-Floating reduction order is not yet uniform across backends. The Python
-executable model and hosted simulator use host-language per-tile SUM/SUMSQ;
-the native accelerator currently falls back to Python, while its bypassed
-direct C++ bodies use sequential binary32 and RTL uses a balanced binary32
-tree. Python and active native TDOT use a binary64 loop before one binary32
-pack; RTL again uses its own tree. With ACC_ACC, the existing binary32 ACC0 is
-widened, added to the tile subtotal in binary64, and repacked at the inter-tile
-rounding point. The current executable FP16 encoder also has a carry-boundary
-discrepancy at the largest-subnormal/minimum-normal transition. These behaviors
-are tracked explicitly rather than treated as a settled hardware contract.
+Floating reductions follow `docs/floating-point.md`: lanes or products enter
+binary32, one pairwise tree in lane order sums each tile, and with ACC_ACC each
+tile adds to the binary32 ACC0 with one more rounding. The Python executable
+model, native accelerator, and hosted simulator implement it; the RTL datapath
+converges in Phase 2 of `docs/megapad-full-float-plan.md`.
 
 ### 6.5 Performance
 
