@@ -302,14 +302,22 @@ def test_signed_capacity_and_eof_guards_reject_safe_high_bit_cases() -> None:
     assert runtime.storage.completion == 0
 
     assert _execute(runtime, "FTRUNCATE", 1 << 63, descriptor) == ()
-    # The signed `<` EOF guard treats high-bit used length as negative.
+    # FTRUNCATE clamps the cursor with signed MIN, and 2**63 is INT64_MIN as
+    # a cell, so the cursor becomes 2**63 too.  The signed `<` EOF guard then
+    # sees cursor == used and FREAD returns 0 without touching storage.
+    assert _file_fields(runtime, descriptor) == (
+        0,
+        1 << 54,
+        1 << 63,
+        1 << 63,
+    )
     assert _execute(runtime, "FREAD", destination, 1, descriptor) == (0,)
     assert runtime.memory.read8(destination) == 0xA5
     assert _file_fields(runtime, descriptor) == (
         0,
         1 << 54,
         1 << 63,
-        0,
+        1 << 63,
     )
     assert runtime.storage.completion == 0
 
