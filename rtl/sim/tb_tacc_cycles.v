@@ -824,8 +824,8 @@ module tb_tacc_cycles;
             end
         end
         $fclose(vector_fd);
-        check("all six floating TAMAC fixtures executed",
-              vector_case_count == 6);
+        check("all twelve floating TAMAC fixtures executed",
+              vector_case_count == 12);
 
         // Cancel after the first exact-product group has crossed its timing
         // register.  Neither that group nor a later group may become visible,

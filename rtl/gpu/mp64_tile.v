@@ -437,7 +437,7 @@ module mp64_tile #(
     // instantiated.
     reg [3:0]   tamac_ew_reg;
     reg         tamac_signed_reg;
-    reg [1:0]   tamac_beat_reg;
+    reg [3:0]   tamac_beat_reg;
     reg [63:0]  tamac_src_a_addr_reg;
     reg [63:0]  tamac_src_b_addr_reg;
     reg [63:0]  tacc_image_addr_reg;
@@ -1452,6 +1452,11 @@ module mp64_tile #(
     reg [2:0]    tree_target;      // 1, or 4 for DOTACC
     reg          tree_accumulate;  // ACC_ACC without ACC_ZERO
     wire tree_add_phase  = (state == S_TREE) && (tree_phase != TREE_PRODUCTS);
+    // FP32/FP64 TAMAC: each unit adds one exact product to one binary64
+    // accumulator lane per beat (docs/floating-point.md §7).
+    wire tamac_fma_phase = (state == S_TACC_INT) &&
+        ((tamac_ew_reg == TMODE_FP32) || (tamac_ew_reg == TMODE_FP64));
+    wire tamac_fma_fp64  = (tamac_ew_reg == TMODE_FP64);
     wire tree_square     = (op_reg == MEX_TRED);  // SUMSQ squares operand A
 
 `ifndef SYNTHESIS
@@ -1525,12 +1530,25 @@ module mp64_tile #(
                 tree_v[node*64 +: 64] :
                 tree_v[(2*node + 1)*64 +: 64];
 
+            wire [3:0]  tamac_lane = tamac_beat_reg * FMA_UNITS + fmu;
+            wire [63:0] tamac_a = tamac_fma_fp64 ?
+                tile_a[tamac_lane[2:0]*64 +: 64] :
+                {32'd0, tile_a[tamac_lane*32 +: 32]};
+            wire [63:0] tamac_b = tamac_fma_fp64 ?
+                src_b_selected[tamac_lane[2:0]*64 +: 64] :
+                {32'd0, src_b_selected[tamac_lane*32 +: 32]};
+            wire [63:0] tamac_c = tacc_bank_state[tamac_lane*64 +: 64];
+
             mp64_fma_unit u_fma (
-                .in64 (tree_add_phase ? 1'b1 : mode_fp64),
-                .out64(fma_out64),
-                .a0   (tree_add_phase ? tree_a : a0_lane),
-                .b0   (tree_add_phase ? 64'h3FF0_0000_0000_0000 : b0),
-                .c0   (tree_add_phase ? tree_c : c0),
+                .in64 (tamac_fma_phase ? tamac_fma_fp64 :
+                       tree_add_phase  ? 1'b1 : mode_fp64),
+                .out64(tamac_fma_phase || fma_out64),
+                .a0   (tamac_fma_phase ? tamac_a :
+                       tree_add_phase  ? tree_a : a0_lane),
+                .b0   (tamac_fma_phase ? tamac_b :
+                       tree_add_phase  ? 64'h3FF0_0000_0000_0000 : b0),
+                .c0   (tamac_fma_phase ? tamac_c :
+                       tree_add_phase  ? tree_c : c0),
                 .a1   (a1_lane),
                 .b1   (b1),
                 .c1   (c1),
@@ -2164,7 +2182,12 @@ module mp64_tile #(
          (tamac_beat_reg == 2'd0)) ||
         (((tamac_ew_reg == TMODE_FP16) ||
           (tamac_ew_reg == TMODE_BF16)) &&
-         (tamac_beat_reg == 2'd3));
+         (tamac_beat_reg == 2'd3)) ||
+        // FP32 and FP64 run one binary64 lane per FMA unit per beat.
+        ((tamac_ew_reg == TMODE_FP32) &&
+         (tamac_beat_reg == 16 / FMA_UNITS - 1)) ||
+        ((tamac_ew_reg == TMODE_FP64) &&
+         (tamac_beat_reg == 8 / FMA_UNITS - 1));
     wire tamac_source_ack =
         tamac_read_ext_reg ? ext_tile_ack : tile_ack;
     wire tamac_source_error =
@@ -2196,8 +2219,11 @@ module mp64_tile #(
         (tamac_ew_reg == TMODE_32) ?
             {1024'd0, result2, result} :
         ((tamac_ew_reg == TMODE_FP16) ||
-         (tamac_ew_reg == TMODE_BF16)) ?
+         (tamac_ew_reg == TMODE_BF16) ||
+         (tamac_ew_reg == TMODE_FP32)) ?
             {1024'd0, result2, result} :
+        (tamac_ew_reg == TMODE_FP64) ?
+            {1536'd0, result} :
             2048'd0;
 
     // ========================================================================
@@ -2939,7 +2965,7 @@ module mp64_tile #(
             caller_slot_reg  <= 2'd0;
             tamac_ew_reg      <= TMODE_8;
             tamac_signed_reg  <= 1'b0;
-            tamac_beat_reg    <= 2'd0;
+            tamac_beat_reg    <= 4'd0;
             fma_beat          <= 4'd0;
             tree_v            <= 1024'd0;
             tree_phase        <= TREE_PRODUCTS;
@@ -3061,7 +3087,7 @@ module mp64_tile #(
                         caller_slot_reg  <= mex_caller_slot;
                         tamac_ew_reg      <= mode_ew;
                         tamac_signed_reg  <= mode_signed;
-                        tamac_beat_reg    <= 2'd0;
+                        tamac_beat_reg    <= 4'd0;
                         tamac_src_a_addr_reg <=
                             (mex_ss == 2'd3) ? tdst : tsrc0;
                         tamac_src_b_addr_reg <=
@@ -3774,7 +3800,7 @@ module mp64_tile #(
                     end else begin
                         tile_a <= tamac_read_ext_reg ?
                                   ext_tile_rdata : tile_rdata;
-                        tamac_beat_reg <= 2'd0;
+                        tamac_beat_reg <= 4'd0;
                         if (ss_reg == 2'd1) begin
                             state <= S_TACC_INT;
                         end else begin
@@ -3802,7 +3828,7 @@ module mp64_tile #(
                     end else begin
                         tile_b <= tamac_read_ext_reg ?
                                   ext_tile_rdata : tile_rdata;
-                        tamac_beat_reg <= 2'd0;
+                        tamac_beat_reg <= 4'd0;
                         state <= S_TACC_INT;
                     end
                 end
@@ -3864,6 +3890,20 @@ module mp64_tile #(
                         end
                     end
 
+                    TMODE_FP32, TMODE_FP64: begin
+                        // Lane j = beat * FMA_UNITS + unit accumulates in
+                        // binary64: lanes 0-7 in result, 8-15 in result2.
+                        for (fma_i = 0; fma_i < FMA_UNITS; fma_i = fma_i + 1) begin
+                            fma_j = tamac_beat_reg * FMA_UNITS + fma_i;
+                            if (fma_j < 8)
+                                result[fma_j*64 +: 64] <=
+                                    fma_r0_bus[fma_i*64 +: 64];
+                            else
+                                result2[(fma_j - 8)*64 +: 64] <=
+                                    fma_r0_bus[fma_i*64 +: 64];
+                        end
+                    end
+
                     default: begin
                     end
                 endcase
@@ -3871,7 +3911,7 @@ module mp64_tile #(
                 if (tamac_last_beat)
                     state <= S_TACC_WAIT;
                 else
-                    tamac_beat_reg <= tamac_beat_reg + 2'd1;
+                    tamac_beat_reg <= tamac_beat_reg + 4'd1;
             end
 
             // ================================================================
@@ -3967,7 +4007,7 @@ module mp64_tile #(
                     // live CPU buses are intentionally ignored here.
                     tamac_src_b_ext_reg <= tamac_src_b_ext;
                     tamac_read_ext_reg  <= tamac_src_a_ext;
-                    tamac_beat_reg      <= 2'd0;
+                    tamac_beat_reg      <= 4'd0;
                     if (tamac_src_a_ext) begin
                         ext_tile_req  <= 1'b1;
                         ext_tile_addr <= tamac_src_a_addr_reg;

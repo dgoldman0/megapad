@@ -110,9 +110,10 @@ accumulator, or `TCTRL`. The TACC lifecycle follows its own format rules:
 `CLEAR`, `LOAD`, and `TAMAC` trap on any format that is not a legal TACC
 format, and `TRY`, `STORE`, and `RELEASE` do not read `TMODE`.
 
-> **Implementation status:** FP32 (EW 6) and FP64 (EW 7) element-wise and
-> raw lane operations run in every backend. Their reductions and dot
-> products trap until Phase 5 of `docs/megapad-full-float-plan.md`.
+> **Implementation status:** FP32 (EW 6) and FP64 (EW 7) element-wise
+> operations, reductions, dot products, and TACC formats run in every
+> backend. Their VSEL and the new `EXT.8` operations follow in Phases 6 and 8
+> of `docs/megapad-full-float-plan.md`.
 
 **Common TMODE values:**
 
@@ -521,14 +522,16 @@ For FP16 and BF16, the Python emulator, native accelerator, hosted simulator,
 and RTL implement these rules.  The software backends take their values from
 `shared/ieee_fp.py`, a seeded differential test holds the native accelerator
 to the Python results, and the RTL replays emulator-generated golden vectors
-(`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 element-wise and raw lane
-operations run in all four backends; the RTL computes their arithmetic on two
-multi-format FMA units per engine (`rtl/core/mp64_fma.v`) over four beats,
-the §10 timing model.  FP32/FP64 reductions and dot products (Phase 5) and
-the new operations (Phases 6 and 8) follow the schedule in
-`docs/megapad-full-float-plan.md`; until then they trap `IVEC_ILLEGAL_OP`
-before any access.  Float PACK and UNPACK remain in FP16 and BF16 until
-`TCVT` replaces them.
+(`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 element-wise operations,
+reductions, dot products, and TACC formats run in all four backends.  The RTL
+computes their arithmetic on two multi-format FMA units per engine
+(`rtl/core/mp64_fma.v`): element-wise operations take four beats, the
+canonical tree schedules its products, levels, and reserved `ACC_ACC` beats
+over the same units, and `TAMAC` gives each unit one binary64 lane per beat,
+all at the §10 costs.  FP32/FP64 VSEL and the new operations (Phases 6 and 8)
+follow the schedule in `docs/megapad-full-float-plan.md`; until then they
+trap `IVEC_ILLEGAL_OP` before any access.  Float PACK and UNPACK remain in
+FP16 and BF16 until `TCVT` replaces them.
 
 
 ---
@@ -624,8 +627,7 @@ part of the TACC format and do not affect accumulation.
 
 EW 3 and the reserved codes 8–15 are illegal for `CLEAR`, `LOAD`, and
 `TAMAC`.  The FP32 and FP64 formats are specified in
-`docs/floating-point.md` §7 and land in Phase 5 of the full-float plan; until
-then EW 6 and 7 are illegal as well.  FP32 products are exact in binary64 and
+`docs/floating-point.md` §7.  FP32 products are exact in binary64 and
 enter one round-to-nearest-even addition per lane; FP64 `TAMAC` is a fused
 multiply-add per lane.  Their canonical NaN is `0x7FF8000000000000`.  Integer
 products are exact, extended according to signedness, and accumulated modulo

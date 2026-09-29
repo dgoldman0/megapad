@@ -758,8 +758,7 @@ The hosted service takes its values from `shared/ieee_fp.py` and
 `shared/tile_float.py`, as the Python emulator does and the native accelerator
 reproduces. `TMODE` keeps bits `[6:0]` and `TCTRL` keeps bits `[1:0]`. The
 reserved codes 8–15, and every operation `shared/tile_formats.admits`
-rejects (including FP32/FP64 reductions until Phase 5 of
-`docs/megapad-full-float-plan.md`), fail closed here.
+rejects, fail closed here.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal

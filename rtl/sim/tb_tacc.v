@@ -386,13 +386,13 @@ module tb_tacc;
         lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
                         5'd4, 2'd0, TMODE_64, 1'b0,
                         MEX_FAULT_ILLEGAL);
-        // FP32 and FP64 TACC formats land in Phase 5, and codes 8-15 are
-        // reserved; the full 4-bit code is decoded, so 8 is not EW 0.
+        // Codes 8-15 are reserved; the full 4-bit code is decoded, so 8 is
+        // not EW 0, 9 is not EW 1, and 14 is not FP32.
         lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
-                        5'd4, 2'd0, TMODE_FP32, 1'b0,
+                        5'd4, 2'd0, 4'd9, 1'b0,
                         MEX_FAULT_ILLEGAL);
         lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
-                        5'd4, 2'd0, TMODE_FP64, 1'b0,
+                        5'd4, 2'd0, 4'd14, 1'b0,
                         MEX_FAULT_ILLEGAL);
         lifecycle_fault(1'b0, ETSYS_TACC_CLEAR, 1'b1,
                         5'd4, 2'd0, 4'd8, 1'b0,

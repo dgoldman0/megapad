@@ -485,6 +485,48 @@ module tb_tacc_transfer;
               done == 7'b0100000 && result_image == expected_image);
         finish_and_release(5);
 
+        // An FP64 image is 64 bytes: LOAD keeps only the first beat, and
+        // STORE emits zeros after it (docs/floating-point.md §7).
+        load_beat[0] = {64{8'hB1}};
+        load_beat[1] = {64{8'hC2}};
+        load_beat[2] = {64{8'hD3}};
+        load_beat[3] = {64{8'hE4}};
+        expected_image = {1536'd0, load_beat[0]};
+        set_request(
+            5, 1'b0, 1'b1, 64'h0000_0001_0000_5800,
+            TMODE_FP64, 8'hC6, 2048'd0
+        );
+        tick;
+        req[5] = 1'b0;
+        for (beat_number = 0;
+             beat_number < 4;
+             beat_number = beat_number + 1) begin
+            expect_load_beat(
+                5, beat_number, 64'h0000_0001_0000_5800, 1'b1
+            );
+            tick;
+            ext_rdata = load_beat[beat_number];
+            port_ack[5] = 1'b1;
+            tick;
+            port_ack[5] = 1'b0;
+        end
+        check("inactive FP64 LOAD bytes commit as zeros",
+              done == 7'b0100000 && result_image == expected_image);
+        finish_and_release(5);
+
+        source_image[3] = {{192{8'h77}}, {64{8'h33}}};
+        expected_image = {1536'd0, {64{8'h33}}};
+        set_request(
+            3, 1'b1, 1'b1, 64'h0000_0001_0000_3000,
+            TMODE_FP64, 8'hA3, source_image[3]
+        );
+        tick;
+        complete_store(
+            3, 64'h0000_0001_0000_3000, 1'b1,
+            expected_image, 8'hA3
+        );
+        finish_and_release(3);
+
         // ------------------------------------------------------------------
         // A transport error terminates at the exact beat, routes its fault
         // address and token, exposes no partial LOAD, and emits no later beat.

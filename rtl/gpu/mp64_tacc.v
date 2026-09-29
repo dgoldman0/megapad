@@ -144,7 +144,7 @@ module mp64_tacc #(
         begin
             case (ew)
                 TMODE_8, TMODE_16, TMODE_32,
-                TMODE_FP16, TMODE_BF16:
+                TMODE_FP16, TMODE_BF16, TMODE_FP32, TMODE_FP64:
                     format_is_legal = 1'b1;
                 default:
                     format_is_legal = 1'b0;
@@ -157,7 +157,7 @@ module mp64_tacc #(
         input       signed_mode;
         begin
             case (ew)
-                TMODE_FP16, TMODE_BF16:
+                TMODE_FP16, TMODE_BF16, TMODE_FP32, TMODE_FP64:
                     // Integer signedness is ignored for floating formats.
                     format_signed_is_known = 1'b1;
                 TMODE_8, TMODE_16, TMODE_32:
@@ -178,7 +178,7 @@ module mp64_tacc #(
         input       signed_mode;
         begin
             case (ew)
-                TMODE_FP16, TMODE_BF16:
+                TMODE_FP16, TMODE_BF16, TMODE_FP32, TMODE_FP64:
                     normalized_signed = 1'b0;
                 default:
                     normalized_signed = signed_mode;
@@ -191,7 +191,7 @@ module mp64_tacc #(
         begin
             case (ew)
                 TMODE_8, TMODE_16, TMODE_32,
-                TMODE_FP16, TMODE_BF16:
+                TMODE_FP16, TMODE_BF16, TMODE_FP32, TMODE_FP64:
                     tamac_format_is_legal = 1'b1;
                 default:
                     tamac_format_is_legal = 1'b0;

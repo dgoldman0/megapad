@@ -88,6 +88,27 @@ module mp64_tacc_transfer #(
     reg                    owner_ext;
     reg [63:0]             owner_base;
     reg [3:0]              owner_format_ew;
+
+    // Active 64-byte beats of a TACC image (docs/tile-engine.md): U8 and U16
+    // use all four, FP64 one, and every other format two.  Inactive bytes
+    // load as ignored input that commits as zero and store as zero.
+    function [2:0] active_beats;
+        input [3:0] ew;
+        case (ew)
+            TMODE_8, TMODE_16: active_beats = 3'd4;
+            TMODE_FP64:        active_beats = 3'd1;
+            default:           active_beats = 3'd2;
+        endcase
+    endfunction
+
+    function [2047:0] active_mask;
+        input [3:0] ew;
+        case (ew)
+            TMODE_8, TMODE_16: active_mask = {2048{1'b1}};
+            TMODE_FP64:        active_mask = {1536'd0, {512{1'b1}}};
+            default:           active_mask = {1024'd0, {1024{1'b1}}};
+        endcase
+    endfunction
     reg [TOKEN_BITS-1:0]   owner_token;
 
     // This is the sole chip-wide canonical transfer image.
@@ -277,9 +298,8 @@ module mp64_tacc_transfer #(
                             ];
                         end else begin
                             if (!owner_store) begin
-                                if ((owner_format_ew == TMODE_8) ||
-                                    (owner_format_ew == TMODE_16) ||
-                                    (beat_index < 2'd2))
+                                if ({1'b0, beat_index} <
+                                    active_beats(owner_format_ew))
                                     stage_image[
                                         beat_index*512 +: 512
                                     ] <= owner_ext
@@ -331,19 +351,10 @@ module mp64_tacc_transfer #(
                 last_grant       <= next_owner;
 
                 if (req_store[next_owner]) begin
-                    if ((req_format_ew[next_owner*4 +: 4] == TMODE_8) ||
-                        (req_format_ew[next_owner*4 +: 4] == TMODE_16))
-                        stage_image <=
-                            req_store_image[
-                                next_owner*2048 +: 2048
-                            ];
-                    else
-                        stage_image <= {
-                            1024'd0,
-                            req_store_image[
-                                next_owner*2048 +: 1024
-                            ]
-                        };
+                    // Inactive image bytes store as zero.
+                    stage_image <=
+                        req_store_image[next_owner*2048 +: 2048] &
+                        active_mask(req_format_ew[next_owner*4 +: 4]);
                 end else begin
                     // A LOAD is assembled from an all-zero staging image so
                     // ignored inactive bytes are canonical by construction.
