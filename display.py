@@ -134,6 +134,15 @@ class Theme:
 # Glyph-cache entry holding, per cell size, whether each character's raster
 # fits inside one cell.  Distinct from the (character, colour) glyph keys.
 _GLYPH_FITS_KEY = object()
+# Glyph-cache entry holding the widest and tallest glyph, in pixels, that
+# was drawn with that cache.
+_GLYPH_EXTENT_KEY = object()
+
+
+def glyph_extent(cache: dict) -> tuple[int, int]:
+    """The widest and tallest glyph, in pixels, drawn with a glyph cache."""
+
+    return cache.get(_GLYPH_EXTENT_KEY, (0, 0))
 
 
 class VirtualTerminal:
@@ -965,84 +974,8 @@ class VirtualTerminal:
             cache = _cache if _cache is not None else {}
             if covered is not None and len(covered) != self.cols * self.rows:
                 covered = None
-            fits = cache.setdefault((_GLYPH_FITS_KEY, cell_w, cell_h), {})
-
-            for y in range(self.rows):
-                row = self.grid[y]
-                row_start = y * self.cols
-                py = y * cell_h
-                # One item per character: its column, its cells, its colors.
-                # Backgrounds are all painted before any glyph, so a wide
-                # glyph is not cut by the background of its own right half.
-                items = []
-                for x in range(self.cols):
-                    cell = row[x]
-                    attrs = cell[3] if len(cell) > 3 else 0
-                    if attrs & ATTR_CONTINUATION and x and row[x - 1][3] & ATTR_WIDE:
-                        continue
-                    span = 2 if attrs & ATTR_WIDE and x + 1 < self.cols else 1
-                    ch = cell[0]
-                    if covered is not None and all(
-                        covered[row_start + x + i] for i in range(span)
-                    ):
-                        if not ch or ch == ' ':
-                            continue
-                        fit = fits.get((ch, span))
-                        if fit is None:
-                            width, height = font.render(
-                                ch, True, (255, 255, 255)).get_size()
-                            fit = width <= span * cell_w and height <= cell_h
-                            fits[(ch, span)] = fit
-                        if fit:
-                            continue
-                    fg_rgb = cell[1]
-                    bg_rgb = cell[2]
-
-                    # Apply reverse video (swap fg/bg)
-                    if attrs & 32:
-                        fg_rgb, bg_rgb = bg_rgb, fg_rgb
-
-                    # Apply bold — brighten foreground by ~40%
-                    if attrs & 1:
-                        fg_rgb = (min(255, int(fg_rgb[0] * 1.4)),
-                                  min(255, int(fg_rgb[1] * 1.4)),
-                                  min(255, int(fg_rgb[2] * 1.4)))
-
-                    # Apply dim — darken foreground by ~50%
-                    if attrs & 2:
-                        fg_rgb = (fg_rgb[0] // 2,
-                                  fg_rgb[1] // 2,
-                                  fg_rgb[2] // 2)
-                    items.append((x * cell_w, span * cell_w, ch, fg_rgb, bg_rgb, attrs))
-
-                for px, width, _ch, _fg, bg_rgb, _attrs in items:
-                    if bg_rgb != self._DEFAULT_BG:
-                        pygame_module.draw.rect(
-                            surface, bg_rgb, (px, py, width, cell_h))
-
-                for px, width, ch, fg_rgb, _bg, attrs in items:
-                    # Draw character (skip if hidden, space, or empty)
-                    if ch and ch != ' ' and not (attrs & 64):
-                        key = (ch, fg_rgb)
-                        glyph = cache.get(key)
-                        if glyph is None:
-                            glyph = font.render(ch, True, fg_rgb)
-                            cache[key] = glyph
-                        surface.blit(glyph, (px, py))
-
-                    # Draw underline
-                    if attrs & 8:
-                        pygame_module.draw.line(
-                            surface, fg_rgb,
-                            (px, py + cell_h - 1),
-                            (px + width - 1, py + cell_h - 1))
-
-                    # Draw strikethrough
-                    if attrs & 128:
-                        mid_y = py + cell_h // 2
-                        pygame_module.draw.line(
-                            surface, fg_rgb,
-                            (px, mid_y), (px + width - 1, mid_y))
+            self._paint_cells(pygame_module, surface, font, cell_w, cell_h,
+                              cache, covered, range(self.rows), 0, self.cols)
 
             # Draw cursor
             if show_cursor and self.cursor_visible:
@@ -1054,6 +987,125 @@ class VirtualTerminal:
 
             self._dirty = False
         return surface
+
+    def paint_area(self, pygame_module, surface, font, cell_w: int,
+                   cell_h: int, area, *, _cache: dict,
+                   covered: bytes | bytearray | None = None) -> None:
+        """Repaint every cell whose pixels can reach AREA of SURFACE.
+
+        SURFACE holds a frame ``render`` drew with the same ``_cache``.  The
+        caller clips SURFACE to AREA, a pixel rectangle, and fills it with
+        the default background; inside AREA this then paints exactly what
+        ``render`` paints there.  Rows above and columns to the left are
+        included as far as any glyph drawn with this cache has reached, and
+        a wide character from its lead cell.  The cursor is not painted.
+        """
+        with self._lock:
+            if covered is not None and len(covered) != self.cols * self.rows:
+                covered = None
+            widest, tallest = glyph_extent(_cache)
+            # A cell paints from its own top-left corner: its box spans at
+            # most two cells, and its glyph at most WIDEST by TALLEST.
+            reach_right = max(2 * cell_w, widest)
+            reach_down = max(cell_h, tallest)
+            first_row = max(0, (area.top - reach_down) // cell_h + 1)
+            last_row = min(self.rows, -(-area.bottom // cell_h))
+            first_col = max(0, (area.left - reach_right) // cell_w + 1)
+            last_col = min(self.cols, -(-area.right // cell_w))
+            if first_row < last_row and first_col < last_col:
+                self._paint_cells(pygame_module, surface, font, cell_w, cell_h,
+                                  _cache, covered, range(first_row, last_row),
+                                  first_col, last_col)
+
+    def _paint_cells(self, pygame_module, surface, font, cell_w: int,
+                     cell_h: int, cache: dict, covered, rows,
+                     first_col: int, last_col: int) -> None:
+        """Paint ROWS in order, each from column FIRST_COL to LAST_COL: all
+        of a row's backgrounds, then its glyphs and decorations."""
+
+        fits = cache.setdefault((_GLYPH_FITS_KEY, cell_w, cell_h), {})
+
+        for y in rows:
+            row = self.grid[y]
+            row_start = y * self.cols
+            py = y * cell_h
+            # One item per character: its column, its cells, its colors.
+            # Backgrounds are all painted before any glyph, so a wide
+            # glyph is not cut by the background of its own right half.
+            items = []
+            for x in range(first_col, last_col):
+                cell = row[x]
+                attrs = cell[3] if len(cell) > 3 else 0
+                if attrs & ATTR_CONTINUATION and x and row[x - 1][3] & ATTR_WIDE:
+                    continue
+                span = 2 if attrs & ATTR_WIDE and x + 1 < self.cols else 1
+                ch = cell[0]
+                if covered is not None and all(
+                    covered[row_start + x + i] for i in range(span)
+                ):
+                    if not ch or ch == ' ':
+                        continue
+                    fit = fits.get((ch, span))
+                    if fit is None:
+                        width, height = font.render(
+                            ch, True, (255, 255, 255)).get_size()
+                        fit = width <= span * cell_w and height <= cell_h
+                        fits[(ch, span)] = fit
+                    if fit:
+                        continue
+                fg_rgb = cell[1]
+                bg_rgb = cell[2]
+
+                # Apply reverse video (swap fg/bg)
+                if attrs & 32:
+                    fg_rgb, bg_rgb = bg_rgb, fg_rgb
+
+                # Apply bold — brighten foreground by ~40%
+                if attrs & 1:
+                    fg_rgb = (min(255, int(fg_rgb[0] * 1.4)),
+                              min(255, int(fg_rgb[1] * 1.4)),
+                              min(255, int(fg_rgb[2] * 1.4)))
+
+                # Apply dim — darken foreground by ~50%
+                if attrs & 2:
+                    fg_rgb = (fg_rgb[0] // 2,
+                              fg_rgb[1] // 2,
+                              fg_rgb[2] // 2)
+                items.append((x * cell_w, span * cell_w, ch, fg_rgb, bg_rgb, attrs))
+
+            for px, width, _ch, _fg, bg_rgb, _attrs in items:
+                if bg_rgb != self._DEFAULT_BG:
+                    pygame_module.draw.rect(
+                        surface, bg_rgb, (px, py, width, cell_h))
+
+            for px, width, ch, fg_rgb, _bg, attrs in items:
+                # Draw character (skip if hidden, space, or empty)
+                if ch and ch != ' ' and not (attrs & 64):
+                    key = (ch, fg_rgb)
+                    glyph = cache.get(key)
+                    if glyph is None:
+                        glyph = font.render(ch, True, fg_rgb)
+                        cache[key] = glyph
+                        widest, tallest = cache.get(_GLYPH_EXTENT_KEY, (0, 0))
+                        cache[_GLYPH_EXTENT_KEY] = (
+                            max(widest, glyph.get_width()),
+                            max(tallest, glyph.get_height()),
+                        )
+                    surface.blit(glyph, (px, py))
+
+                # Draw underline
+                if attrs & 8:
+                    pygame_module.draw.line(
+                        surface, fg_rgb,
+                        (px, py + cell_h - 1),
+                        (px + width - 1, py + cell_h - 1))
+
+                # Draw strikethrough
+                if attrs & 128:
+                    mid_y = py + cell_h // 2
+                    pygame_module.draw.line(
+                        surface, fg_rgb,
+                        (px, mid_y), (px + width - 1, mid_y))
 
 
 # Build the 256-color palette once at import time

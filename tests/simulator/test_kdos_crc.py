@@ -10,8 +10,11 @@ import pytest
 from shared.cells import MASK64, TRUE, u64
 from shared.crc import (
     CRC_MODE_IDS,
+    CRC_MODE_PARAMETERS,
     crc_feed_byte,
     crc_feed_bytes,
+    crc_feed_cell,
+    crc_update_byte,
     crc_width_mask,
 )
 from simulator.crc import (
@@ -230,6 +233,31 @@ def test_batched_crc_matches_byte_recurrence_for_every_mode_and_seed() -> None:
                 expected = crc_feed_byte(mode, expected, byte)
             assert crc_feed_bytes(mode, seed, payload) == expected
             assert crc_feed_bytes(mode, seed, memoryview(payload)) == expected
+
+
+def test_table_feeds_match_the_bit_recurrence_for_every_mode_byte_and_accumulator() -> None:
+    accumulators = (
+        0, 1, 0x8000_0000, 0xFFFF_FFFF, 0x1_0000_0000, 0x0123_4567_89AB_CDEF,
+        0xFEDC_BA98_7654_3210, MASK64, -1,
+    )
+    bytes_fed = (*range(256), 0x100, 0x1FF, MASK64, -1)
+    for mode, (polynomial, width, reflected) in CRC_MODE_PARAMETERS.items():
+        for accumulator in accumulators:
+            for byte in bytes_fed:
+                assert crc_feed_byte(mode, accumulator, byte) == crc_update_byte(
+                    accumulator, byte, polynomial, width, reflected
+                )
+            for cell in (0, MASK64, u64(accumulator * 0x9E37_79B9_7F4A_7C15 + mode), -2):
+                expected = accumulator
+                for byte in u64(cell).to_bytes(8, "little"):
+                    expected = crc_update_byte(expected, byte, polynomial, width, reflected)
+                assert crc_feed_cell(mode, accumulator, cell) == expected
+    # An empty batch leaves even out-of-width accumulator bits unchanged, as
+    # the byte loop always did outside the zlib-backed mode.
+    for mode in CRC_MODE_IDS - {4}:
+        assert crc_feed_bytes(mode, MASK64, b"") == MASK64
+    with pytest.raises(ValueError, match="unsupported CRC mode 3"):
+        crc_feed_cell(3, 0, 0)
 
 
 def test_crc_slice_is_exact_and_publishes_the_complete_definition_ledger(

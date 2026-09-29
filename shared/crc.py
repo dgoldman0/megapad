@@ -77,6 +77,55 @@ def crc_update_byte(
     return accumulator & mask
 
 
+def _byte_table(polynomial: int, width: int, reflected: bool) -> tuple[int, ...]:
+    """Each byte's contribution from a zero accumulator, by the recurrence."""
+
+    return tuple(
+        crc_update_byte(0, byte, polynomial, width, reflected)
+        for byte in range(256)
+    )
+
+
+# mode -> (byte table, width, reflected).  The recurrence is linear, so one
+# byte's update is the accumulator shifted by eight bits XOR the table entry
+# of the byte meeting the accumulator's outgoing byte.  This gives exactly
+# the recurrence's value without repeating its eight steps for every byte.
+_CRC_TABLES: Mapping[int, tuple[tuple[int, ...], int, bool]] = MappingProxyType(
+    {
+        mode: (_byte_table(*parameters), parameters[1], parameters[2])
+        for mode, parameters in CRC_MODE_PARAMETERS.items()
+    }
+)
+
+
+def _mode_table(mode: int) -> tuple[tuple[int, ...], int, bool]:
+    try:
+        return _CRC_TABLES[mode]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"unsupported CRC mode {mode!r}") from exc
+
+
+def _feed_table(
+    table: tuple[int, ...],
+    width: int,
+    reflected: bool,
+    accumulator: int,
+    data,
+) -> int:
+    mask = MASK64 if width == 64 else 0xFFFF_FFFF
+    accumulator &= mask
+    if reflected:
+        for byte in data:
+            accumulator = (accumulator >> 8) ^ table[(accumulator ^ byte) & 0xFF]
+        return accumulator
+    top = width - 8
+    for byte in data:
+        accumulator = ((accumulator << 8) & mask) ^ table[
+            ((accumulator >> top) ^ byte) & 0xFF
+        ]
+    return accumulator
+
+
 def crc_reset_value(mode: int) -> int:
     """Return the selected mode's all-ones initial accumulator."""
 
@@ -92,24 +141,17 @@ def crc_seed_value(mode: int, seed: int) -> int:
 def crc_feed_byte(mode: int, accumulator: int, byte: int) -> int:
     """Feed exactly the low byte into the selected mode."""
 
-    polynomial, width, reflected = _mode_parameters(mode)
-    return crc_update_byte(
-        accumulator,
-        byte,
-        polynomial,
-        width,
-        reflected,
-    )
+    table, width, reflected = _mode_table(mode)
+    return _feed_table(table, width, reflected, accumulator, (byte,))
 
 
 def crc_feed_cell(mode: int, accumulator: int, cell: int) -> int:
     """Feed one cell as eight bytes in least-significant-byte-first order."""
 
-    value = u64(cell)
-    result = accumulator
-    for index in range(8):
-        result = crc_feed_byte(mode, result, value >> (index * 8))
-    return result
+    table, width, reflected = _mode_table(mode)
+    return _feed_table(
+        table, width, reflected, accumulator, u64(cell).to_bytes(8, "little")
+    )
 
 
 def crc_feed_bytes(
@@ -127,11 +169,10 @@ def crc_feed_bytes(
         # caller's raw architectural accumulator on entry and exit.
         seed = (accumulator & 0xFFFF_FFFF) ^ 0xFFFF_FFFF
         return zlib.crc32(data, seed) ^ 0xFFFF_FFFF
-
-    result = accumulator
-    for byte in data:
-        result = crc_feed_byte(mode, result, byte)
-    return result
+    if not data:
+        return accumulator
+    table, width, reflected = _mode_table(mode)
+    return _feed_table(table, width, reflected, accumulator, data)
 
 
 def crc_raw_value(mode: int, accumulator: int) -> int:

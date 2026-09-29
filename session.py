@@ -652,7 +652,7 @@ class MachineSession:
         self._displayed_composite_output: CompositeTerminalView | None = None
         self._display_offer: TerminalDisplayOffer | None = None
         self._display_offer_composite: CompositeTerminalView | None = None
-        self._last_acknowledged_display_offer: tuple[int, DisplayScope] | None = None
+        self._acknowledged_display_offer: TerminalDisplayOffer | None = None
         self._next_display_offer_id = 1
         self._display_cadence = (
             None
@@ -812,7 +812,14 @@ class MachineSession:
     def last_acknowledged_display_offer(self) -> tuple[int, DisplayScope] | None:
         """Exact immutable proof token for the currently owned physical sink."""
 
-        return self._last_acknowledged_display_offer
+        offer = self._acknowledged_display_offer
+        return None if offer is None else (offer.offer_id, offer.scope)
+
+    @property
+    def acknowledged_display_offer(self) -> TerminalDisplayOffer | None:
+        """The offer the physical sink presented last, while it still owns it."""
+
+        return self._acknowledged_display_offer
 
     @property
     def rich_terminal_state(self) -> TerminalState | None:
@@ -894,7 +901,7 @@ class MachineSession:
     def _clear_display_offer_tokens(self) -> None:
         self._display_offer = None
         self._display_offer_composite = None
-        self._last_acknowledged_display_offer = None
+        self._acknowledged_display_offer = None
 
     def _discard_retained_display_cadence(self) -> None:
         """Discard every rich-display scope after a bare-CELL fallback."""
@@ -1287,7 +1294,7 @@ class MachineSession:
             raise TypeError("scope must be DisplayScope")
         offer = self._display_offer
         if offer is None or offer.offer_id != normalized or offer.scope != scope:
-            if self._last_acknowledged_display_offer == (normalized, scope):
+            if self.last_acknowledged_display_offer == (normalized, scope):
                 return False
             raise TerminalUpdateError("display ACK is stale or outside the active scope")
         cadence = self._display_cadence
@@ -1315,7 +1322,7 @@ class MachineSession:
         self._output_view_selected = True
         self._display_offer = None
         self._display_offer_composite = None
-        self._last_acknowledged_display_offer = (normalized, scope)
+        self._acknowledged_display_offer = offer
         self.revision += 1
         return True
 
@@ -1376,7 +1383,7 @@ class MachineSession:
             cadence.revoke_presented(presented)
             self._displayed_composite_output = None
             changed = True
-        self._last_acknowledged_display_offer = None
+        self._acknowledged_display_offer = None
         return changed
 
     def _acknowledged_output_scope(self) -> DisplayScope | None:
@@ -1405,7 +1412,7 @@ class MachineSession:
         displayed = self._displayed_composite_output
         logical = self._logical_composite_output
         current = driver.core.output_view
-        acknowledged = self._last_acknowledged_display_offer
+        acknowledged = self._acknowledged_display_offer
         if (
             displayed is None
             or logical is None
@@ -1436,7 +1443,7 @@ class MachineSession:
         if not (
             retained.retained_initialized
             and retained.retained_visible
-            and acknowledged[1] == scope
+            and acknowledged.scope == scope
             and self._display_cadence_scope
             == (
                 scope.attachment_epoch,

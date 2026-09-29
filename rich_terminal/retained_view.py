@@ -1218,6 +1218,29 @@ def _draw_order_key(draw: RetainedDraw) -> tuple[int, int, int]:
     return draw.z_order, 1, draw.control_id
 
 
+def retained_draw_key(draw: RetainedDraw) -> tuple[str, int]:
+    """The identity a draw keeps from one plane to the next in its region."""
+
+    if isinstance(draw, _OBJECT_DRAW_TYPES):
+        return "object", draw.object_id
+    return "control", draw.control_id
+
+
+def retained_draw_control_ids(draw: RetainedDraw) -> frozenset[int]:
+    """The control IDs a draw carries: none for an object, else its own and
+    those of its menus, menu entries or tabs."""
+
+    if isinstance(draw, _OBJECT_DRAW_TYPES):
+        return frozenset()
+    return frozenset(_semantic_draw_control_ids(draw))
+
+
+def retained_draw_order(draws) -> tuple[RetainedDraw, ...]:
+    """Draws in the back-to-front order a region requires."""
+
+    return tuple(sorted(draws, key=_draw_order_key))
+
+
 @dataclass(frozen=True, slots=True)
 class RetainedRegionDraw:
     """One visible region and its ordered generic draw values."""
@@ -2298,4 +2321,7 @@ __all__ = [
     "TextGridDraw",
     "WaveformDraw",
     "project_composite_draw_plane",
+    "retained_draw_control_ids",
+    "retained_draw_key",
+    "retained_draw_order",
 ]

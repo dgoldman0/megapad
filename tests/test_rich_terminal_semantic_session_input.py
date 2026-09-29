@@ -144,7 +144,7 @@ def _ready_session(
     session._display_offer_composite = None
     session._displayed_composite_output = view
     session._logical_composite_output = view
-    session._last_acknowledged_display_offer = (41, scope)
+    session._acknowledged_display_offer = SimpleNamespace(offer_id=41, scope=scope)
     session._display_cadence_scope = (
         scope.attachment_epoch,
         scope.session_id,
@@ -260,7 +260,7 @@ def test_raw_pointer_waits_for_the_acknowledged_current_display():
 def test_control_event_does_not_delegate_before_physical_ack():
     session, driver, view, _ = _ready_session()
     session._displayed_composite_output = None
-    session._last_acknowledged_display_offer = None
+    session._acknowledged_display_offer = None
     session._display_cadence.offered_revision = view.revision
     session._display_offer = object()
     session._display_offer_composite = view

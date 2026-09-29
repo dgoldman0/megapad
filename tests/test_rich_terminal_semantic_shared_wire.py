@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import base64
+import json
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
 from rich_terminal.retained_scene import ControlState, ObjectBounds, Point, RGBA, Sample
 from rich_terminal.retained_view import (
+    DisplayScope,
     GlyphRunDraw,
     MenuBarDraw,
     MenuDraw,
@@ -27,6 +30,7 @@ from rich_terminal.retained_view import (
     TextAreaDraw,
     TextGridDraw,
     WaveformDraw,
+    retained_draw_order,
 )
 from rich_terminal.semantic_content import (
     SemanticContentFlag,
@@ -36,7 +40,13 @@ from rich_terminal.semantic_content import (
     SemanticTextState,
     encode_semantic_text_content,
 )
-from shared_session import retained_draw_plane_from_wire, retained_draw_plane_to_wire
+from session import TerminalCell, TerminalDisplayOffer, TerminalSnapshot
+from shared_session import (
+    display_offer_from_wire,
+    display_offer_to_wire,
+    retained_draw_plane_from_wire,
+    retained_draw_plane_to_wire,
+)
 
 
 VISIBLE = ControlState.VISIBLE
@@ -806,3 +816,106 @@ def test_collection_encoder_rejects_a_mislabeled_content_family() -> None:
 
     with pytest.raises(ValueError, match="TEXT_AREA"):
         retained_draw_plane_to_wire(plane)
+
+
+def _offer(offer_id: int, plane: RetainedDrawPlane) -> TerminalDisplayOffer:
+    cell = TerminalCell("a", (1, 2, 3), (4, 5, 6), 0)
+    return TerminalDisplayOffer(
+        offer_id,
+        DisplayScope(1, 2, 3, offer_id, 0, offer_id, offer_id),
+        TerminalSnapshot(2, 1, ((cell, cell),), 0, 0, False, False),
+        plane,
+    )
+
+
+def _changed_offers() -> tuple[TerminalDisplayOffer, TerminalDisplayOffer]:
+    collection = _collection_plane().regions[0]
+    tabset, area, grid = collection.draws
+    base_region = replace(
+        collection, draws=retained_draw_order((*collection.draws, _glyph()))
+    )
+    removed_region = RetainedRegionDraw(
+        1, 2, 4, 0, 0, 80, 25, 0, 0, 0, 0, 1, False, (_polyline(),)
+    )
+    base = _offer(7, RetainedDrawPlane(True, True, (base_region, removed_region)))
+
+    typed = replace(area, content=replace(area.content, content_revision=4))
+    renamed = replace(_glyph(), text="Desk*")
+    added = _glyph(object_id=13, z_order=0)
+    # The server projects every draw afresh: an unchanged draw is an equal
+    # value, not the same object.
+    region = replace(
+        base_region,
+        logical_rows=24,
+        draws=retained_draw_order((replace(tabset), typed, renamed, added)),
+    )
+    new_region = RetainedRegionDraw(
+        1, 2, 5, 0, 0, 80, 25, 0, 0, 0, 0, 2, False, (_menu_bar(),)
+    )
+    return base, _offer(8, RetainedDrawPlane(True, True, (region, new_region)))
+
+
+def test_offer_changes_carry_only_changed_draws_and_rebuild_the_exact_plane() -> None:
+    base, offer = _changed_offers()
+    wire = display_offer_to_wire(offer, base=base)
+
+    assert wire["base_offer_id"] == 7
+    kept, added_region = wire["retained"]["regions"]
+    assert "draws" not in kept and kept["logical_rows"] == 24
+    assert kept["removed"] == [["control", 50]]
+    assert {(draw["kind"], draw.get("object_id") or draw.get("control_id"))
+            for draw in kept["changed"]} == {
+        ("text_area", 40), ("glyph_run", 11), ("glyph_run", 13)
+    }
+    assert [draw["control_id"] for draw in added_region["draws"]] == [20]
+
+    rebuilt = display_offer_from_wire(json.loads(json.dumps(wire)), base)
+    assert rebuilt == offer
+    # A draw that did not change is the base's own decoded value.
+    tabset = next(draw for draw in rebuilt.retained.regions[0].draws
+                  if isinstance(draw, TabSetDraw))
+    assert tabset is next(draw for draw in base.retained.regions[0].draws
+                          if isinstance(draw, TabSetDraw))
+    assert rebuilt.cell.cells[0] is base.cell.cells[0]
+
+    # Without the base it names, the offer cannot be rebuilt.
+    with pytest.raises(ValueError, match="does not hold"):
+        display_offer_from_wire(wire)
+    with pytest.raises(ValueError, match="does not hold"):
+        display_offer_from_wire(wire, _offer(6, base.retained))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda region: region["removed"].append(["object", 99]),
+         "does not have"),
+        (lambda region: region["removed"].append(["glyph", 11]),
+         "object or a control"),
+        (lambda region: region["changed"].append(deepcopy(region["changed"][0])),
+         "twice"),
+        (lambda region: region.update(
+            removed=[*region["removed"], ["control", 40]]),
+         "twice"),
+        (lambda region: region.update(region_id=9), "no base region"),
+        (lambda region: region.pop("removed"), "fields are not exact"),
+    ],
+)
+def test_offer_changes_reject_draws_their_base_cannot_explain(mutate, match) -> None:
+    base, offer = _changed_offers()
+    wire = display_offer_to_wire(offer, base=base)
+    mutate(wire["retained"]["regions"][0])
+    with pytest.raises(ValueError, match=match):
+        display_offer_from_wire(wire, base)
+
+
+def test_offer_changes_need_a_base_with_the_same_cell_geometry() -> None:
+    base, offer = _changed_offers()
+    cell = TerminalCell("a", (1, 2, 3), (4, 5, 6), 0)
+    wider = replace(
+        offer, cell=TerminalSnapshot(3, 1, ((cell, cell, cell),), 0, 0, False, False)
+    )
+    wire = display_offer_to_wire(wider, base=base)
+    assert "base_offer_id" not in wire
+    assert display_offer_from_wire(wire) == wider
+

@@ -1615,6 +1615,7 @@ def test_display_holder_disconnect_requeues_for_a_successor(tmp_path):
             *,
             since_offer=0,
             display_authorized=False,
+            base_offer=0,
         ):
             result = {"changed": False, "revision": 0}
             if display_authorized:
@@ -2223,6 +2224,49 @@ def test_ping_reports_only_liveness():
     assert isinstance(result["time"], float)
 
 
+def test_screen_sends_changes_only_against_the_session_presented_offer():
+    presented = TerminalDisplayOffer(
+        4,
+        DisplayScope(1, 2, 3, 4, 0, 4, 4),
+        TerminalSnapshot(1, 2, ((TerminalCell("a", (1, 2, 3), (4, 5, 6), 0),),
+                                (TerminalCell("b", (1, 2, 3), (4, 5, 6), 0),)),
+                         0, 0, False, False),
+        RetainedDrawPlane(False, False, ()),
+    )
+    offer = replace(
+        presented,
+        offer_id=5,
+        cell=replace(presented.cell, cells=(
+            presented.cell.cells[0],
+            (TerminalCell("c", (1, 2, 3), (4, 5, 6), 0),),
+        )),
+    )
+    session = SimpleNamespace(
+        revision=9, display_offer=offer, acknowledged_display_offer=presented
+    )
+    machine = SharedMachine(session)
+
+    def screen(base_offer):
+        return machine.screen(
+            since=9,
+            since_offer=presented.offer_id,
+            display_authorized=True,
+            base_offer=base_offer,
+        )["display_offer"]
+
+    changes = screen(presented.offer_id)
+    assert changes["base_offer_id"] == presented.offer_id
+    assert [row for row, _runs in changes["cell"]["changed_rows"]] == [1]
+    assert display_offer_from_wire(changes, presented) == offer
+    for base_offer in (0, presented.offer_id - 1):
+        complete = screen(base_offer)
+        assert "base_offer_id" not in complete
+        assert display_offer_from_wire(complete) == offer
+    # A revoked presentation is no longer a base, whatever the viewer names.
+    session.acknowledged_display_offer = None
+    assert "base_offer_id" not in screen(presented.offer_id)
+
+
 def test_screen_encodes_snapshot_outside_machine_lock(monkeypatch):
     with MachineSession.from_bios(BIOS, cols=40, rows=12) as session:
         machine = SharedMachine(session)
@@ -2277,10 +2321,10 @@ def test_screen_encodes_display_offer_outside_machine_lock(monkeypatch):
         allow_conversion = threading.Event()
         original = display_offer_to_wire
 
-        def blocking_conversion(offer, rows=None):
+        def blocking_conversion(offer, rows=None, base=None):
             conversion_started.set()
             assert allow_conversion.wait(timeout=2.0)
-            return original(offer, rows)
+            return original(offer, rows, base)
 
         monkeypatch.setattr(
             "shared_session.display_offer_to_wire",

@@ -432,6 +432,8 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
     assert state.pending_offer is None
     assert state.retained_plane is first.retained
     assert state.frame_plane is first.retained
+    assert state.presented_offer is first
+    assert state.base_offer_id == first.offer_id
 
     second = _display_offer(2, char="Y")
     state.stage(second, 9)
@@ -444,6 +446,7 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
     assert state.since_offer == first.offer_id
     assert state.pending_offer is None
     assert state.retained_plane is None
+    assert state.base_offer_id == 0
 
     state.stage(second, 9)
     state.stage_frame_hit_map(second, ())
@@ -456,6 +459,7 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
     state.reset()
     assert state.since_offer == second.offer_id
     assert state.retained_plane is None
+    assert state.base_offer_id == 0
     with pytest.raises(RuntimeError, match="did not advance"):
         state.stage(_display_offer(second.offer_id), 10)
     with pytest.raises(RuntimeError, match="did not advance"):
@@ -671,6 +675,50 @@ def test_retained_display_reset_clears_fallback_and_input_context():
     assert keyboard.text_input(SimpleNamespace(text="stale"))
     assert client.requests == requests_before_waiting_input
     assert "waiting" in keyboard.last_error
+
+
+def test_screen_offer_changes_rebuild_from_the_presented_offer():
+    pygame = _FakePygame()
+    keyboard = _GuestKeyboardForwarder(
+        pygame, _RecordingClient(), generation=3, display_required=True
+    )
+    terminal = VirtualTerminal(cols=1, rows=1)
+    state = _RetainedDisplayState()
+    presented = _display_offer(1, char="A")
+    state.stage(presented, 3)
+    state.stage_frame_hit_map(presented, ())
+    state.finish_presentation({"status": "presented", "presented": True, "revision": 4})
+    offered = _display_offer(3, char="B")
+    update = {
+        "changed": True,
+        "generation": 3,
+        "revision": 4,
+        "display_offer": display_offer_to_wire(offered, base=presented),
+    }
+    assert update["display_offer"]["base_offer_id"] == presented.offer_id
+
+    _accept_screen_update(
+        update,
+        display_holder=True,
+        terminal=terminal,
+        keyboard=keyboard,
+        display_state=state,
+        revision=4,
+    )
+
+    assert state.pending_offer == offered
+    assert terminal.grid[0][0][0] == "B"
+    # A viewer that dropped its presented offer cannot rebuild the changes.
+    state.reset()
+    with pytest.raises(ValueError, match="does not hold"):
+        _accept_screen_update(
+            update,
+            display_holder=True,
+            terminal=terminal,
+            keyboard=keyboard,
+            display_state=state,
+            revision=4,
+        )
 
 
 def test_screen_cell_fallback_clears_plane_but_offer_cell_wins_when_present():
@@ -1349,6 +1397,101 @@ def test_status_line_reports_state_errors_and_view_only():
     text, color = _status_line(dict(status, state="paused"), keyboard, False)
     assert text.endswith("  VIEW ONLY  stale")
     assert color == (245, 95, 95)
+
+
+def test_viewer_presents_only_the_rectangles_a_frame_changed(monkeypatch):
+    pygame = pytest.importorskip("pygame")
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+
+    def snapshot(char):
+        return TerminalSnapshot(
+            cols=12,
+            rows=4,
+            cells=tuple(
+                tuple(
+                    TerminalCell(char if (row, col) == (2, 5) else "A",
+                                 (200, 200, 200), (0, 0, 0), 0)
+                    for col in range(12)
+                )
+                for row in range(4)
+            ),
+            cursor_col=0,
+            cursor_row=0,
+            cursor_visible=False,
+            alternate_screen=False,
+        )
+
+    screens = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def connect(self):
+            pass
+
+        def request(self, method, **params):
+            if method == "claim_display":
+                return {"status": "claimed", "claimed": True}
+            if method == "status":
+                return {
+                    "generation": 1,
+                    "state": "idle",
+                    "steps": 7,
+                    "revision": 1 if len(screens) >= 4 else 0,
+                    "rich_terminal": {"display_required": False},
+                }
+            if method == "screen":
+                screens.append(params)
+                if len(screens) == 1:
+                    return {"changed": True, "generation": 1, "revision": 0,
+                            "snapshot": snapshot_to_wire(snapshot("A"))}
+                if len(screens) == 4:
+                    return {"changed": True, "generation": 1, "revision": 1,
+                            "snapshot": snapshot_to_wire(snapshot("Z"))}
+                return {"changed": False, "generation": 1,
+                        "revision": 1 if len(screens) > 4 else 0}
+            raise AssertionError(method)
+
+        def close(self):
+            pass
+
+    frames = []
+    compose = session_viewer.compose_terminal_frame_changes
+
+    def recording_compose(*args, **kwargs):
+        frames.append(compose(*args, **kwargs))
+        return frames[-1]
+
+    presented = []
+
+    def check_window(changed):
+        frame = frames[-1].surface
+        window = pygame.display.get_surface().subsurface(frame.get_rect())
+        assert pygame.image.tobytes(window, "RGBA") == pygame.image.tobytes(frame, "RGBA")
+        presented.append(changed)
+
+    flip, update = pygame.display.flip, pygame.display.update
+    monkeypatch.setattr(session_viewer, "SessionClient", Client)
+    monkeypatch.setattr(session_viewer, "compose_terminal_frame_changes", recording_compose)
+    monkeypatch.setattr(pygame.display, "flip",
+                        lambda: (flip(), check_window(None))[0])
+    monkeypatch.setattr(pygame.display, "update",
+                        lambda rects: (update(rects), check_window(list(rects)))[0])
+    monkeypatch.setattr(
+        sys, "argv", ["session_viewer.py", "--exit-after", "0.6", "--fps", "30"]
+    )
+
+    assert session_viewer.main() == 0
+    # The first frame flips the whole window; the changed cell is then
+    # repainted and only its rectangles are copied and updated.
+    assert presented[0] is None
+    partial = [changed for changed in presented[1:] if changed is not None]
+    assert partial and frames[-1].damage is not None
+    width = frames[-1].surface.get_width()
+    assert all(rect.width <= width for changed in partial for rect in changed)
+    assert any(rect.collidepoint(5 * frames[-1].geometry[2], 2 * frames[-1].geometry[3])
+               for changed in partial for rect in changed)
 
 
 def test_idle_viewer_neither_recomposes_nor_flips_an_unchanged_window(monkeypatch):
