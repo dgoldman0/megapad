@@ -107,6 +107,8 @@ module mp64_cpu_micro (
     output reg  [3:0]  mex_ext_mod,   // EXT prefix modifier
     output reg         mex_ext_active,// EXT prefix active
     input  wire        mex_done,      // tile op complete (from arbiter)
+    input  wire        mex_zero_valid,// completion updates FLAGS.Z
+    input  wire        mex_zero,
     input  wire        mex_busy,      // tile engine busy (stall)
     input  wire [2:0]  mex_fault,
     input  wire [63:0] mex_fault_addr,
@@ -195,6 +197,8 @@ module mp64_cpu_micro (
     reg        fetch_pending;
     reg        skip_fetch_pending;
     reg        skip_has_rex;
+    reg        skip_is_mex;       // lookahead is a MEX function byte
+    reg [3:0]  skip_mex_len;      // skipped MEX length without a control byte
 
     wire [3:0] fam = ibuf[0][7:4];
     wire [3:0] nib = ibuf[0][3:0];
@@ -310,6 +314,8 @@ module mp64_cpu_micro (
             fetch_pending <= 1'b0;
             skip_fetch_pending <= 1'b0;
             skip_has_rex <= 1'b0;
+            skip_is_mex <= 1'b0;
+            skip_mex_len <= 4'd0;
             ibuf_len      <= 4'd0;
             ibuf_need     <= 4'd1;
 
@@ -483,6 +489,13 @@ module mp64_cpu_micro (
                         // byte zero. Bare sub-ops complete after byte one.
                         ibuf_need <= 4'd2;
                         cpu_state <= CPU_DECODE;
+                    end else if (ibuf_len == 4'd1 &&
+                                 mex_has_control_byte(
+                                     ibuf[0], bus_rdata[7:0],
+                                     ext_active && ext_mod == EXT_ETALU)) begin
+                        // RROT's control byte follows its function byte and
+                        // any broadcast register byte.
+                        ibuf_need <= ibuf_need + 4'd1;
                     end else if (ibuf_len + 4'd1 >= ibuf_need) begin
                         cpu_state <= CPU_DECODE;
                     end
@@ -1055,12 +1068,14 @@ module mp64_cpu_micro (
                     mex_funct_byte <= ibuf[1];
                     ext_active     <= 1'b0;
                     if (
+                        // Immediate TMUL traps only for 0x06 (no immediate
+                        // TAMAC); other forms as the full core.
                         (ibuf[0][1:0] == MEX_TMUL &&
-                         ibuf[1][2:0] == TMUL_TAMAC &&
-                         (ibuf[0][3:2] == 2'd2 ||
-                          ibuf[1][7:3] != 5'd0)) ||
-                        (ibuf[0][1:0] == MEX_TMUL &&
-                         ibuf[1][2:0] == 3'd7) ||
+                         ((ibuf[0][3:2] == 2'd2) ?
+                          (ibuf[1] == 8'h06) :
+                          ((ibuf[1][2:0] == TMUL_TAMAC &&
+                            ibuf[1][7:3] != 5'd0) ||
+                           ibuf[1][2:0] == 3'd7))) ||
                         (ext_active && ext_mod == EXT_ETALU &&
                          ibuf[0][1:0] == MEX_TSYS &&
                          (((ibuf[1][2:0] >= 3'd2) &&
@@ -1083,9 +1098,17 @@ module mp64_cpu_micro (
                         mex_req        <= 1'b1;
                         mex_ss         <= ibuf[0][3:2];
                         mex_op         <= ibuf[0][1:0];
-                        mex_funct      <= ibuf[1][2:0];
+                        // An immediate source (SS=2) uses the function
+                        // byte as its data and forces function zero.
+                        mex_funct      <= (ibuf[0][3:2] == 2'd2) ?
+                                          3'd0 : ibuf[1][2:0];
                         mex_gpr_val    <= (ibuf[0][3:2] == 2'd1) ? R[ibuf[2][3:0]] : 64'd0;
-                        mex_imm8       <= ibuf[2];
+                        // SS=2: the function byte is the immediate.
+                        // Otherwise imm8 is RROT's control byte, after the
+                        // broadcast register byte when SS=1.
+                        mex_imm8       <= (ibuf[0][3:2] == 2'd2) ? ibuf[1] :
+                                          (ibuf[0][3:2] == 2'd1) ? ibuf[3] :
+                                          ibuf[2];
                         mex_ext_mod    <= ext_mod;
                         mex_ext_active <= ext_active;
                         cpu_state      <= CPU_MEX_WAIT;
@@ -1315,6 +1338,9 @@ module mp64_cpu_micro (
                 if (mex_done) begin
                     mex_req <= 1'b0;
                     if (mex_fault == MEX_FAULT_NONE) begin
+                        // Accumulator publications update FLAGS.Z.
+                        if (mex_zero_valid)
+                            flags[0] <= mex_zero;
                         cpu_state <= CPU_FETCH;
                     end else begin
                         if (mex_fault == MEX_FAULT_ALIGN ||
@@ -1498,6 +1524,12 @@ module mp64_cpu_micro (
                         cpu_state <= CPU_SKIP_REX;
                     end else if (bus_rdata[7:0] == 8'hFB) begin
                         skip_has_rex <= 1'b0;
+                        skip_is_mex <= 1'b0;
+                        cpu_state <= CPU_SKIP_CRYPTO;
+                    end else if (mex_may_have_control_byte(bus_rdata[7:0])) begin
+                        skip_has_rex <= 1'b0;
+                        skip_is_mex <= 1'b1;
+                        skip_mex_len <= instr_len(bus_rdata[7:0], 1'b0);
                         cpu_state <= CPU_SKIP_CRYPTO;
                     end else begin
                         R[psel] <= R[psel]
@@ -1522,6 +1554,11 @@ module mp64_cpu_micro (
                 if (bus_ready && skip_fetch_pending) begin
                     skip_fetch_pending <= 1'b0;
                     if (bus_rdata[7:0] == 8'hFB) begin
+                        skip_is_mex <= 1'b0;
+                        cpu_state <= CPU_SKIP_CRYPTO;
+                    end else if (mex_may_have_control_byte(bus_rdata[7:0])) begin
+                        skip_is_mex <= 1'b1;
+                        skip_mex_len <= instr_len(bus_rdata[7:0], 1'b1);
                         cpu_state <= CPU_SKIP_CRYPTO;
                     end else begin
                         R[psel] <= R[psel] + 64'd1
@@ -1546,10 +1583,18 @@ module mp64_cpu_micro (
 
                 if (bus_ready && skip_fetch_pending) begin
                     skip_fetch_pending <= 1'b0;
-                    R[psel] <= R[psel]
-                               + (skip_has_rex ? 64'd1 : 64'd0)
-                               + (crypto_is_bare(bus_rdata[7:0])
-                                  ? 64'd2 : 64'd3);
+                    // The second byte is a MEX function byte or an
+                    // EXT.CRYPTO sub-op.
+                    if (skip_is_mex)
+                        R[psel] <= R[psel]
+                                   + (skip_has_rex ? 64'd1 : 64'd0)
+                                   + {60'd0, skip_mex_len}
+                                   + ((bus_rdata[2:0] == 3'd7) ? 64'd1 : 64'd0);
+                    else
+                        R[psel] <= R[psel]
+                                   + (skip_has_rex ? 64'd1 : 64'd0)
+                                   + (crypto_is_bare(bus_rdata[7:0])
+                                      ? 64'd2 : 64'd3);
                     cpu_state <= CPU_FETCH;
                 end
             end

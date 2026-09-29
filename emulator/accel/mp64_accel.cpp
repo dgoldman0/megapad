@@ -7759,7 +7759,18 @@ static int next_instruction_size(CPUState& s) {
             return (sub == 0xE) ? 3 : 2;  // MULDIV; RORI is 3 bytes
         }
         case 0xD: return 2;  // CSR
-        case 0xE: return 2;  // MEX
+        case 0xE: {  // MEX
+            // Broadcast adds a register byte; RROT (TSYS function 7) adds a
+            // control byte except in the immediate form, whose function is
+            // forced to zero.
+            const int ss = (peek >> 2) & 0x3;
+            const int op = peek & 0x3;
+            int length = ss == 1 ? 3 : 2;
+            if (op == 3 && ss != 2 &&
+                (icache_read_byte(s, address + 1) & 0x7) == 7)
+                length++;
+            return length;
+        }
         case 0xF:
             return 1;
         default: return 1;

@@ -141,6 +141,11 @@ module tb_cpu_smoke;
     wire [3:0]  mex_ext_mod_w;
     wire        mex_ext_active_w;
     reg         mex_done_r;
+    reg         mex_zero_valid_r;
+    reg         mex_zero_r;
+    reg         next_mex_zero_valid;
+    reg         next_mex_zero;
+    reg  [7:0]  captured_mex_imm8;
     reg         mex_busy_r;
     reg  [2:0]  mex_fault_r;
     reg  [63:0] mex_fault_addr_r;
@@ -187,9 +192,12 @@ module tb_cpu_smoke;
             captured_mex_funct_byte = mex_funct_byte_w;
             captured_mex_ext_mod = mex_ext_mod_w;
             captured_mex_ext_active = mex_ext_active_w;
+            captured_mex_imm8 = mex_imm8_w;
             if (mex_ack_enable) begin
                 mex_fault_r <= next_mex_fault;
                 mex_fault_addr_r <= next_mex_fault_addr;
+                mex_zero_valid_r <= next_mex_zero_valid;
+                mex_zero_r <= next_mex_zero;
                 mex_done_r <= 1'b1;
             end
         end
@@ -251,6 +259,8 @@ module tb_cpu_smoke;
         .mex_ext_mod(mex_ext_mod_w),
         .mex_ext_active(mex_ext_active_w),
         .mex_done  (mex_done_r),
+        .mex_zero_valid(mex_zero_valid_r),
+        .mex_zero(mex_zero_r),
         .mex_busy  (mex_busy_r),
         .mex_fault (mex_fault_r),
         .mex_fault_addr(mex_fault_addr_r),
@@ -453,6 +463,104 @@ module tb_cpu_smoke;
         end
     endtask
 
+    // Immediate TMUL (E9 imm) followed by HALT.
+    task run_immediate_mex_case;
+        input [7:0] immediate;
+        begin
+            clear_mem;
+            mem[0] = 8'hE9; mem[1] = immediate; mem[2] = 8'h02;
+            install_vector(IRQX_ILLEGAL_OP, 8'h40);
+            mem[8'h40] = 8'h02;
+            next_mex_fault = MEX_FAULT_NONE;
+            next_mex_fault_addr = 64'd0;
+            mex_dispatch_count = 0;
+            reset_cpu;
+            run_to_halt;
+            check64("immediate TMUL dispatches once",
+                    mex_dispatch_count, 64'd1);
+            check64("immediate TMUL forces function zero",
+                    captured_mex_funct, 64'd0);
+            check64("immediate TMUL carries the function byte as data",
+                    captured_mex_imm8, immediate);
+            check64("immediate TMUL retires to the next instruction",
+                    uut.R[uut.psel], 64'd3);
+        end
+    endtask
+
+    // RROT with control byte 0x02, then HALT.
+    task run_rrot_case;
+        input [7:0] opcode;
+        input [7:0] register_byte;
+        input [2:0] length;
+        begin
+            clear_mem;
+            mem[0] = opcode; mem[1] = 8'h07;
+            if (length == 3'd4) begin
+                mem[2] = register_byte; mem[3] = 8'h02;
+            end else
+                mem[2] = 8'h02;
+            mem[length] = 8'h02;
+            next_mex_fault = MEX_FAULT_NONE;
+            next_mex_fault_addr = 64'd0;
+            mex_dispatch_count = 0;
+            reset_cpu;
+            run_to_halt;
+            check64("RROT dispatches once", mex_dispatch_count, 64'd1);
+            check64("RROT function", captured_mex_funct, 64'd7);
+            check64("RROT control byte", captured_mex_imm8, 64'h02);
+            check64("RROT consumes its control byte",
+                    uut.R[uut.psel], {61'd0, length} + 64'd1);
+        end
+    endtask
+
+    // SKIP.AL (F6 30) over a MEX encoding of the given length, then HALT.
+    task run_skip_mex_case;
+        input [7:0] raw0;
+        input [7:0] raw1;
+        input [7:0] raw2;
+        input [7:0] raw3;
+        input [2:0] length;
+        begin
+            clear_mem;
+            mem[0] = 8'hF6; mem[1] = 8'h30;
+            mem[2] = raw0; mem[3] = raw1; mem[4] = raw2; mem[5] = raw3;
+            mem[2 + length] = 8'h02;
+            install_vector(IRQX_ILLEGAL_OP, 8'h40);
+            mem[8'h40] = 8'h02;
+            mex_dispatch_count = 0;
+            reset_cpu;
+            run_to_halt;
+            check64("SKIP over MEX dispatches nothing",
+                    mex_dispatch_count, 64'd0);
+            check64("SKIP lands on the next instruction",
+                    uut.R[uut.psel], {61'd0, length} + 64'd3);
+        end
+    endtask
+
+    // TSUM (E2 00) with a preset FLAGS.Z and a scripted Z report.
+    task run_zero_flag_case;
+        input        report_valid;
+        input        report_zero;
+        input        initial_zero;
+        input [63:0] expected_zero;
+        begin
+            clear_mem;
+            mem[0] = 8'hE2; mem[1] = 8'h00; mem[2] = 8'h02;
+            next_mex_fault = MEX_FAULT_NONE;
+            next_mex_fault_addr = 64'd0;
+            next_mex_zero_valid = report_valid;
+            next_mex_zero = report_zero;
+            reset_cpu;
+            @(negedge clk);
+            uut.flags[0] = initial_zero;
+            run_to_halt;
+            check64("completion Z update", {63'd0, uut.flags[0]},
+                    expected_zero);
+            next_mex_zero_valid = 1'b0;
+            next_mex_zero = 1'b0;
+        end
+    endtask
+
     task wait_state;
         input [4:0] target_state;
         input integer max_cycles;
@@ -519,6 +627,10 @@ module tb_cpu_smoke;
         pass_count = 0;
         fail_count = 0;
         mex_done_r = 1'b0;
+        mex_zero_valid_r = 1'b0;
+        mex_zero_r = 1'b0;
+        next_mex_zero_valid = 1'b0;
+        next_mex_zero = 1'b0;
         mex_busy_r = 1'b0;
         mex_fault_r = MEX_FAULT_NONE;
         mex_fault_addr_r = 64'd0;
@@ -1036,6 +1148,37 @@ module tb_cpu_smoke;
         run_illegal_mex_case(8'hF8, 8'hE7, 8'h02, 8'h00, 3'd4);
         run_illegal_mex_case(8'hF8, 8'hE3, 8'h22, 8'h00, 3'd3);
         run_illegal_mex_case(8'hF8, 8'hE3, 8'h07, 8'h00, 3'd3);
+
+        // -----------------------------------------------------------------
+        // Test 15b: an immediate source makes the function byte data.  Only
+        // 0x06 (the absent immediate TAMAC) traps; other bytes, including
+        // ones ending in 6 or 7, dispatch function 0 with that immediate.
+        // -----------------------------------------------------------------
+        run_immediate_mex_case(8'h07);
+        run_immediate_mex_case(8'h16);
+        run_immediate_mex_case(8'hFF);
+
+        // -----------------------------------------------------------------
+        // Test 15d: RROT carries a control byte after its function byte and
+        // any broadcast register byte; SKIP steps over the whole encoding.
+        // -----------------------------------------------------------------
+        // The control byte 0x02 would be HALT if the CPU executed it as the
+        // next instruction, so a short length stops early and fails the PC.
+        run_rrot_case(8'hE3, 8'h00, 3'd3);          // E3 07 02
+        run_rrot_case(8'hE7, 8'h03, 3'd4);          // E7 07 03 02
+        run_skip_mex_case(8'hE3, 8'h07, 8'h02, 8'h00, 3'd3);
+        run_skip_mex_case(8'hE7, 8'h07, 8'h03, 8'h02, 3'd4);
+        run_skip_mex_case(8'hE5, 8'h00, 8'h03, 8'h00, 3'd3);
+        run_skip_mex_case(8'hEB, 8'h07, 8'h00, 8'h00, 3'd2);
+
+        // -----------------------------------------------------------------
+        // Test 15c: a completion updates FLAGS.Z only when the engine
+        // reports a Z update.
+        // -----------------------------------------------------------------
+        run_zero_flag_case(1'b1, 1'b1, 1'b0, 64'd1);
+        run_zero_flag_case(1'b1, 1'b0, 1'b1, 64'd0);
+        run_zero_flag_case(1'b0, 1'b0, 1'b1, 64'd1);
+        run_zero_flag_case(1'b0, 1'b1, 1'b0, 64'd0);
 
         // -----------------------------------------------------------------
         // Test 16: precise MEX completion faults.

@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Generate FP16/BF16 tile-operation golden vectors for tb_tile_fp.v.
+"""Generate tile-operation golden vectors for tb_tile_fp.v.
 
 Every expected value comes from executing the instruction on the Python
 emulator, whose floating-point results come from the shared exact reference
 (shared/ieee_fp.py, docs/floating-point.md).  The vectors cover TALU, TMUL,
-and TRED in FP16 and BF16 with tile, broadcast, and immediate sources and all
-four TCTRL states, float PACK/UNPACK, and integer MIN/MAX under ACC_ACC.
-
-In-place sources, immediate-source reductions, and immediate TMUL bytes whose
-low bits are 6 or 7 are left out: the RTL still decodes or routes those
-encodings differently from the specification for every format, which is
-tracked in docs/megapad-full-float-plan.md.
+and TRED in FP16 and BF16 with tile, broadcast, immediate, and in-place
+sources and all four TCTRL states; float PACK/UNPACK; integer operand routing
+for immediate and in-place sources; integer MIN/MAX under ACC_ACC; and the
+FLAGS.Z update of every case.  The immediate byte 0x06 is left out because
+it is the illegal immediate TAMAC form, which the TACC benches cover.
 
 Regenerate from the repository root with:
 
@@ -45,7 +43,8 @@ CHECK_DST = 1 << 0
 CHECK_DST2 = 1 << 1
 CHECK_ACC = (1 << 2, 1 << 3, 1 << 4, 1 << 5)
 CHECK_TCTRL = 1 << 6
-CHECK_ALL = CHECK_DST | CHECK_DST2 | sum(CHECK_ACC) | CHECK_TCTRL
+CHECK_Z = 1 << 7
+CHECK_ALL = CHECK_DST | CHECK_DST2 | sum(CHECK_ACC) | CHECK_TCTRL | CHECK_Z
 
 
 def _lanes(rng: random.Random, fmt: ieee_fp.Format) -> list[int]:
@@ -78,8 +77,10 @@ def _tile(fmt: ieee_fp.Format, lanes: list[int]) -> bytes:
 
 def _execute(ss: int, op: int, funct_byte: int, tmode: int, tctrl: int,
              gpr: int, acc: tuple[int, int, int, int], src0: bytes,
-             src1: bytes, dst: bytes, dst2: bytes) -> Megapad64:
+             src1: bytes, dst: bytes, dst2: bytes,
+             flag_z: int = 0) -> Megapad64:
     cpu = Megapad64(mem_size=0x400)
+    cpu.flag_z = flag_z
     program = bytes([0xE0 | (ss << 2) | op, funct_byte])
     if ss == 1:
         program += bytes([GPR])
@@ -105,6 +106,11 @@ def _row(name: str, ss: int, op: int, funct_byte: int, tmode: int,
          src1: bytes, dst: bytes, dst2: bytes, check: int) -> str:
     cpu = _execute(ss, op, funct_byte, tmode, tctrl, gpr, acc, src0, src1,
                    dst, dst2)
+    other = _execute(ss, op, funct_byte, tmode, tctrl, gpr, acc, src0, src1,
+                     dst, dst2, flag_z=1)
+    # An operation updates Z when its result no longer depends on the old Z.
+    z_valid = int(cpu.flag_z == other.flag_z)
+    z_value = cpu.flag_z if z_valid else 0
 
     def word(data: bytes) -> str:
         return f"{int.from_bytes(bytes(data), 'little'):0128x}"
@@ -116,7 +122,8 @@ def _row(name: str, ss: int, op: int, funct_byte: int, tmode: int,
         word(src0), word(src1), word(dst), word(dst2),
         word(cpu.mem[DST:DST + 64]), word(cpu.mem[DST2:DST2 + 64]),
         *(f"{value:016x}" for value in cpu.acc),
-        f"{cpu.tctrl & 0xFF:02x}", f"{check:02x}",
+        f"{cpu.tctrl & 0xFF:02x}", f"{z_valid:x}", f"{z_value:x}",
+        f"{check:02x}",
     ]
     return " ".join(fields)
 
@@ -143,32 +150,73 @@ def _float_rows(rng: random.Random) -> list[str]:
             ))
 
         for funct in range(8):
-            for ss in (0, 1):
-                for index in range(6):
+            for ss in (0, 1, 3):
+                for index in range(6 if ss < 3 else 3):
                     case(f"talu{funct}_ss{ss}_{index}", ss, OP_TALU, funct,
                          rng.randrange(4))
-        for index in range(6):
-            imm = rng.getrandbits(8)
-            case(f"talu_imm_{index}", 2, OP_TALU, imm, rng.randrange(4))
-            # Immediate TMUL bytes ending in 6 or 7 reach the RTL TACC
-            # decoder; that encoding difference is tracked separately.
-            while imm & 0x7 in (6, 7):
-                imm = rng.getrandbits(8)
-            case(f"tmul_imm_{index}", 2, OP_TMUL, imm, rng.randrange(4))
+        for index in range(8):
+            case(f"talu_imm_{index}", 2, OP_TALU, _immediate(rng),
+                 rng.randrange(4))
+            case(f"tmul_imm_{index}", 2, OP_TMUL, _immediate(rng),
+                 rng.randrange(4))
+            case(f"tred_imm_{index}", 2, OP_TRED, _immediate(rng),
+                 rng.randrange(4))
         for funct in range(6):
-            for ss in (0, 1):
+            for ss in (0, 1, 3):
                 for tctrl in range(4):
-                    for index in range(2):
+                    for index in range(2 if ss < 3 else 1):
                         case(f"tmul{funct}_ss{ss}_c{tctrl}_{index}", ss,
                              OP_TMUL, funct, tctrl)
         for funct in (0, 1, 2, 4, 5, 6, 7):
-            for tctrl in range(4):
-                for index in range(3):
-                    case(f"tred{funct}_c{tctrl}_{index}", 0, OP_TRED, funct,
-                         tctrl)
+            for ss in (0, 3):
+                for tctrl in range(4):
+                    for index in range(3 if ss == 0 else 1):
+                        case(f"tred{funct}_ss{ss}_c{tctrl}_{index}", ss,
+                             OP_TRED, funct, tctrl)
         for funct in (5, 6):
             for index in range(6):
                 case(f"tsys{funct}_{index}", 0, OP_TSYS, funct, 0)
+    return rows
+
+
+def _immediate(rng: random.Random) -> int:
+    """A random immediate, avoiding the illegal immediate TAMAC byte."""
+
+    value = rng.getrandbits(8)
+    while value == 0x06:
+        value = rng.getrandbits(8)
+    return value
+
+
+def _integer_routing_rows(rng: random.Random) -> list[str]:
+    """Integer immediate and in-place operand routing.
+
+    Accumulators start at zero and reductions take ACC_ZERO, so the RTL's
+    64-bit integer accumulator publishes the same words as the oracle.
+    """
+
+    rows = []
+    for tmode in (0x00, 0x10, 0x01, 0x11, 0x02):
+        width = 1 << (tmode & 0x3)
+        for ss in (2, 3):
+            for op, functs in ((OP_TALU, range(8)), (OP_TMUL, (0, 3, 4)),
+                               (OP_TRED, (0, 1, 2, 3, 6, 7))):
+                for funct in functs:
+                    funct_byte = _immediate(rng) if ss == 2 else funct
+                    if ss == 2 and op == OP_TMUL:
+                        while funct_byte & 0x7 in (6, 7):
+                            funct_byte = _immediate(rng)
+                    tiles = [bytes(rng.getrandbits(8) for _ in range(64))
+                             for _ in range(3)]
+                    tctrl = 2 if op == OP_TRED else rng.randrange(4)
+                    rows.append(_row(
+                        f"int_t{tmode:02x}_ss{ss}_op{op}_f{funct}",
+                        ss, op, funct_byte, tmode, tctrl,
+                        rng.getrandbits(8 * width), (0, 0, 0, 0),
+                        tiles[0], tiles[1], tiles[2], bytes([0x5A]) * 64,
+                        CHECK_DST | CHECK_DST2 | CHECK_ACC[0] | CHECK_TCTRL
+                        | CHECK_Z,
+                    ))
     return rows
 
 
@@ -245,11 +293,12 @@ def _integer_extreme_rows(rng: random.Random) -> list[str]:
 
 def main() -> None:
     rng = random.Random(0x7F16_0002)
-    rows = _named_rows() + _float_rows(rng) + _integer_extreme_rows(rng)
+    rows = (_named_rows() + _float_rows(rng) + _integer_extreme_rows(rng)
+            + _integer_routing_rows(rng))
     print("# Generated by rtl/sim/gen_tile_fp_vectors.py; do not edit.")
     print("# name ss op funct_byte tmode tctrl gpr acc0 acc1 acc2 acc3 "
           "src0 src1 dst dst2 exp_dst exp_dst2 exp_acc0 exp_acc1 exp_acc2 "
-          "exp_acc3 exp_tctrl check")
+          "exp_acc3 exp_tctrl exp_z_valid exp_z check")
     print(f"# count {len(rows)}")
     for row in rows:
         print(row)

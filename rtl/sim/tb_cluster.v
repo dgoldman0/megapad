@@ -768,6 +768,79 @@ module tb_cluster;
         end
 
         // -----------------------------------------------------------------
+        // Test 8b: MEX immediate and in-place operands and FLAGS.Z on
+        // micro-cores through the shared engine.  Every micro-core runs the
+        // program; each step is idempotent so the final state does not
+        // depend on arbitration order.
+        //   T.ADD #5 (E8 05): [0x80] = 5 + [TSRC0] = 0x06.  The immediate is
+        //     the function byte; the old decode used the following byte.
+        //   T.MAX in place (EC 06): [0xC0] = max([TDST]=7, [TSRC0]=1) = 7.
+        //     The old routing computed max([TSRC0], [TSRC0]) = 1.
+        //   TSUM with ACC_ZERO over [0x00] then [0x40] (all zero): Z = 0
+        //     then Z = 1, read back through CSRR FLAGS into R6 and R5.
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+        begin : operand_fill
+            integer ti;
+            for (ti = 0; ti < 256; ti = ti + 1) tile_mem_model[ti] = 512'd0;
+            tile_mem_model[0] = {64{8'h01}};
+            tile_mem_model[3] = {64{8'h07}};
+        end
+        // LDI R4, 0 ; CSRW TMODE ; CSRW TSRC0
+        mem[0]  = 8'h60; mem[1]  = 8'h40; mem[2]  = 8'h00;
+        mem[3]  = 8'hDC; mem[4]  = 8'h14;
+        mem[5]  = 8'hDC; mem[6]  = 8'h16;
+        // LDI R4, 0x80 ; CSRW TDST ; T.ADD #5
+        mem[7]  = 8'h60; mem[8]  = 8'h40; mem[9]  = 8'h80;
+        mem[10] = 8'hDC; mem[11] = 8'h18;
+        mem[12] = 8'hE8; mem[13] = 8'h05;
+        // LDI R4, 0xC0 ; CSRW TDST ; T.MAX in place
+        mem[14] = 8'h60; mem[15] = 8'h40; mem[16] = 8'hC0;
+        mem[17] = 8'hDC; mem[18] = 8'h18;
+        mem[19] = 8'hEC; mem[20] = 8'h06;
+        // LDI R4, 2 ; CSRW TCTRL ; TSUM ; CSRR R6, FLAGS
+        mem[21] = 8'h60; mem[22] = 8'h40; mem[23] = 8'h02;
+        mem[24] = 8'hDC; mem[25] = 8'h15;
+        mem[26] = 8'hE2; mem[27] = 8'h00;
+        mem[28] = 8'hD6; mem[29] = 8'h00;
+        // LDI R4, 0x40 ; CSRW TSRC0 ; LDI R4, 2 ; CSRW TCTRL ; TSUM
+        mem[30] = 8'h60; mem[31] = 8'h40; mem[32] = 8'h40;
+        mem[33] = 8'hDC; mem[34] = 8'h16;
+        mem[35] = 8'h60; mem[36] = 8'h40; mem[37] = 8'h02;
+        mem[38] = 8'hDC; mem[39] = 8'h15;
+        mem[40] = 8'hE2; mem[41] = 8'h00;
+        // CSRR R5, FLAGS ; HALT
+        mem[42] = 8'hD5; mem[43] = 8'h00;
+        mem[44] = 8'h02;
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        wait_all_halt(50000);
+        check_mc0_state("MEX operands: mc0 halted", CPU_HALT);
+        if (tile_mem_model[2] === {64{8'h06}})
+            pass_count = pass_count + 1;
+        else begin
+            $display("FAIL [MEX immediate ADD uses the function byte]: got=%h",
+                     tile_mem_model[2]);
+            fail_count = fail_count + 1;
+        end
+        if (tile_mem_model[3] === {64{8'h07}})
+            pass_count = pass_count + 1;
+        else begin
+            $display("FAIL [MEX in-place MAX reads [TDST] as operand A]: got=%h",
+                     tile_mem_model[3]);
+            fail_count = fail_count + 1;
+        end
+        check64("TSUM of a nonzero tile clears Z",
+                uut.mc[0].u_micro.R[6] & 64'd1, 64'd0);
+        check64("TSUM of a zero tile sets Z",
+                uut.mc[0].u_micro.R[5] & 64'd1, 64'd1);
+        check64("mc3 sees the same Z update",
+                uut.mc[3].u_micro.R[5] & 64'd1, 64'd1);
+
+        // -----------------------------------------------------------------
         // Test 9: CSRR tile CSR readback on micro-core 0
         // After test 8, CSR_TDST should still be 128 (0x80).
         //   CSRR R1, CSR_TDST (0x18)  →  D1 18

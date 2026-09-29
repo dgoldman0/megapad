@@ -55,7 +55,33 @@ function cond_eval;
     end
 endfunction
 
-// EXT.CRYPTO is the only family whose length depends on its second byte.
+// A MEX system operation that is not an immediate form may be RROT
+// (function 7), which carries a control byte after its function byte and any
+// broadcast register byte.  Fetchers and SKIP read the function byte before
+// they know the complete length.  EXT.8 (ETALU) makes TSYS function 7 a
+// reserved TACC encoding without a control byte.
+function mex_may_have_control_byte;
+    input [7:0] byte0;
+    begin
+        mex_may_have_control_byte =
+            (byte0[7:4] == 4'hE) && (byte0[1:0] == 2'b11) &&
+            (byte0[3:2] != 2'd2);
+    end
+endfunction
+
+function mex_has_control_byte;
+    input [7:0] byte0;
+    input [7:0] funct_byte;
+    input       etalu_prefix;
+    begin
+        mex_has_control_byte =
+            mex_may_have_control_byte(byte0) && !etalu_prefix &&
+            (funct_byte[2:0] == 3'd7);
+    end
+endfunction
+
+// EXT.CRYPTO is the only other family whose length depends on its second
+// byte.
 // CPU fetchers initially reserve the three-byte maximum, then use this
 // predicate after fetching the sub-op.
 function crypto_is_bare;

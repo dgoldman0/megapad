@@ -601,25 +601,8 @@ without fixing them.
   write.
 - **Integer immediate splat.** Every backend copies the immediate into every
   byte, so a 16-bit lane receives `0x0505` for immediate 5. The docs say it
-  adds a small constant to every element. RTL also places the splat in
-  operand B, where Python and the docs place it in operand A. That only
-  matters for non-commutative functions, and the forced function 0 is
-  commutative for TALU and TMUL. Float formats get their own exact rule
-  (D17).
-- **RTL in-place sources.** For SS=3 the RTL uses `[TSRC0]` as both operands.
-  The specification and Python use `[TDST] op [TSRC0]`. This affects every
-  format.
-- **RTL immediate decode.** The CPU passes byte 2 as `mex_imm8` and does not
-  force the function to 0 for SS=2. The immediate is the function byte.
-  RROT's control byte really is byte 2, which may be why this went unnoticed.
-- **Immediate TMUL and the TACC namespace.** The RTL sends any TMUL whose
-  function byte ends in 6 or 7 to the TACC decoder, even for SS=2. Python
-  does so only for the exact byte `0x06`.
-- **Tile Z flag in RTL.** The RTL CPU never updates FLAGS.Z after a tile
-  operation.
-- **KDOS file-abstraction test.**
-  `tests/simulator/test_kdos_file_abstraction.py::test_signed_capacity_and_eof_guards_reject_safe_high_bit_cases`
-  fails on the base commit `0cfece4`, independently of this work.
+  adds a small constant to every element. Float formats get their own exact
+  rule (D17).
 - **Non-asserting emulator tests.** `tests/test_megapad64.py` reports every
   check through a `check()` helper that never fails the test. Only
   `test_tile_fp` now asserts.

@@ -86,6 +86,8 @@ module mp64_cpu #(
     output reg  [3:0]  mex_ext_mod,
     output reg         mex_ext_active,
     input  wire        mex_done,
+    input  wire        mex_zero_valid,  // completion updates FLAGS.Z
+    input  wire        mex_zero,
     input  wire        mex_busy,
     input  wire [2:0]  mex_fault,
     input  wire [63:0] mex_fault_addr,
@@ -216,6 +218,8 @@ module mp64_cpu #(
 
     reg [4:0] cpu_state;
     reg       skip_has_rex;
+    reg       skip_is_mex;       // lookahead is a MEX function byte
+    reg [3:0] skip_mex_len;      // skipped MEX length without a control byte
 
     function [7:0] mex_fault_vector;
         input [2:0] fault;
@@ -542,6 +546,8 @@ module mp64_cpu #(
             ibuf_len       <= 5'd0;
             ibuf_need      <= 4'd1;
             skip_has_rex   <= 1'b0;
+            skip_is_mex    <= 1'b0;
+            skip_mex_len   <= 4'd0;
 
             icache_enabled <= 1'b1;
             icache_inv_all <= 1'b0;
@@ -764,6 +770,14 @@ module mp64_cpu #(
                     // EXT.CRYPTO length is selected by its second byte.
                     // Correct the initial three-byte maximum before decode.
                     ibuf_need <= 4'd2;
+                end else if (ibuf_len >= 5'd2 &&
+                             mex_has_control_byte(
+                                 ibuf[0], ibuf[1],
+                                 ext_active && ext_mod == EXT_ETALU) &&
+                             ibuf_need == instr_len(ibuf[0], ext_active)) begin
+                    // RROT's control byte follows its function byte and any
+                    // broadcast register byte.
+                    ibuf_need <= instr_len(ibuf[0], ext_active) + 4'd1;
                 end else if (ibuf_len >= {1'b0, ibuf_need}) begin
                     cpu_state <= CPU_DECODE;
                 end else begin
@@ -1587,15 +1601,16 @@ module mp64_cpu #(
                     mex_funct_byte <= ibuf[1];
                     ext_active     <= 1'b0;
                     if (
-                        // TAMAC has no immediate-splat form and its function
-                        // byte is canonical only when the upper bits are zero.
+                        // An immediate source makes the function byte data,
+                        // so only 0x06, the absent immediate TAMAC form,
+                        // traps there.  Otherwise TAMAC is canonical only
+                        // with zero upper bits and function 7 is reserved.
                         (ibuf[0][1:0] == MEX_TMUL &&
-                         ibuf[1][2:0] == TMUL_TAMAC &&
-                         (ibuf[0][3:2] == 2'd2 ||
-                          ibuf[1][7:3] != 5'd0)) ||
-                        // TMUL function 7 remains reserved in every form.
-                        (ibuf[0][1:0] == MEX_TMUL &&
-                         ibuf[1][2:0] == 3'd7) ||
+                         ((ibuf[0][3:2] == 2'd2) ?
+                          (ibuf[1] == 8'h06) :
+                          ((ibuf[1][2:0] == TMUL_TAMAC &&
+                            ibuf[1][7:3] != 5'd0) ||
+                           ibuf[1][2:0] == 3'd7))) ||
                         // EXT.8 TSYS functions 2-6 are the lifecycle
                         // namespace. They require selector zero and an exact
                         // function byte; function 7 remains reserved.
@@ -1622,9 +1637,17 @@ module mp64_cpu #(
                         mex_valid      <= 1'b1;
                         mex_ss         <= ibuf[0][3:2];
                         mex_op         <= ibuf[0][1:0];
-                        mex_funct      <= ibuf[1][2:0];
+                        // An immediate source (SS=2) uses the function
+                        // byte as its data and forces function zero.
+                        mex_funct      <= (ibuf[0][3:2] == 2'd2) ?
+                                          3'd0 : ibuf[1][2:0];
                         mex_gpr_val    <= (ibuf[0][3:2] == 2'd1) ? R[ibuf[2][3:0]] : 64'd0;
-                        mex_imm8       <= ibuf[2];
+                        // SS=2: the function byte is the immediate.
+                        // Otherwise imm8 is RROT's control byte, after the
+                        // broadcast register byte when SS=1.
+                        mex_imm8       <= (ibuf[0][3:2] == 2'd2) ? ibuf[1] :
+                                          (ibuf[0][3:2] == 2'd1) ? ibuf[3] :
+                                          ibuf[2];
                         mex_ext_mod    <= ext_mod;
                         mex_ext_active <= ext_active;
                         cpu_state      <= CPU_MEX_WAIT;
@@ -2141,6 +2164,9 @@ module mp64_cpu #(
                 if (mex_done) begin
                     mex_valid <= 1'b0;
                     if (mex_fault == MEX_FAULT_NONE) begin
+                        // Accumulator publications update FLAGS.Z.
+                        if (mex_zero_valid)
+                            flags[0] <= mex_zero;
                         cpu_state <= CPU_FETCH;
                     end else begin
                         if (mex_fault == MEX_FAULT_ALIGN ||
@@ -2234,6 +2260,14 @@ module mp64_cpu #(
                             cpu_state   <= CPU_SKIP_REX;
                         end else if (skip_byte == 8'hFB) begin
                             skip_has_rex <= 1'b0;
+                            skip_is_mex <= 1'b0;
+                            icache_req  <= 1'b1;
+                            icache_addr <= R[psel] + 64'd1;
+                            cpu_state   <= CPU_SKIP_CRYPTO;
+                        end else if (mex_may_have_control_byte(skip_byte)) begin
+                            skip_has_rex <= 1'b0;
+                            skip_is_mex <= 1'b1;
+                            skip_mex_len <= instr_len(skip_byte, 1'b0);
                             icache_req  <= 1'b1;
                             icache_addr <= R[psel] + 64'd1;
                             cpu_state   <= CPU_SKIP_CRYPTO;
@@ -2266,6 +2300,13 @@ module mp64_cpu #(
                         skip_byte = select_icache_byte(icache_data,
                                                        icache_addr[2:0]);
                         if (skip_byte == 8'hFB) begin
+                            skip_is_mex <= 1'b0;
+                            icache_req  <= 1'b1;
+                            icache_addr <= R[psel] + 64'd2;
+                            cpu_state   <= CPU_SKIP_CRYPTO;
+                        end else if (mex_may_have_control_byte(skip_byte)) begin
+                            skip_is_mex <= 1'b1;
+                            skip_mex_len <= instr_len(skip_byte, 1'b1);
                             icache_req  <= 1'b1;
                             icache_addr <= R[psel] + 64'd2;
                             cpu_state   <= CPU_SKIP_CRYPTO;
@@ -2294,9 +2335,17 @@ module mp64_cpu #(
                         reg [3:0] skip_len;
                         crypto_sub_op = select_icache_byte(
                             icache_data, icache_addr[2:0]);
-                        skip_len = (skip_has_rex ? 4'd1 : 4'd0)
-                                 + (crypto_is_bare(crypto_sub_op)
-                                    ? 4'd2 : 4'd3);
+                        // The second byte is a MEX function byte or an
+                        // EXT.CRYPTO sub-op.
+                        if (skip_is_mex)
+                            skip_len = (skip_has_rex ? 4'd1 : 4'd0)
+                                     + skip_mex_len
+                                     + (crypto_sub_op[2:0] == 3'd7
+                                        ? 4'd1 : 4'd0);
+                        else
+                            skip_len = (skip_has_rex ? 4'd1 : 4'd0)
+                                     + (crypto_is_bare(crypto_sub_op)
+                                        ? 4'd2 : 4'd3);
                         icache_req <= 1'b0;
                         R[psel]  <= R[psel] + {60'd0, skip_len};
                         fetch_pc <= R[psel] + {60'd0, skip_len};

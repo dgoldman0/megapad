@@ -137,6 +137,12 @@ module tb_cpu_micro;
     reg  [2:0]  next_mex_fault;
     reg  [63:0] next_mex_fault_addr;
     reg         mex_ack_enable;
+    reg         mex_zero_valid_r;
+    reg         mex_zero_r;
+    reg         next_mex_zero_valid;
+    reg         next_mex_zero;
+    reg  [2:0]  captured_mex_funct;
+    reg  [7:0]  captured_mex_imm8;
     reg  [63:0] tacc_status;
     wire        tacc_ctl_valid;
     wire [63:0] tacc_ctl_wdata;
@@ -187,8 +193,12 @@ module tb_cpu_micro;
         tile_csr_done <= 1'b0;
         if (mex_req && mex_ack_enable) begin
             mex_dispatch_count = mex_dispatch_count + 1;
+            captured_mex_funct = mex_funct;
+            captured_mex_imm8 = mex_imm8;
             mex_fault <= next_mex_fault;
             mex_fault_addr <= next_mex_fault_addr;
+            mex_zero_valid_r <= next_mex_zero_valid;
+            mex_zero_r <= next_mex_zero;
             mex_done <= 1'b1;
         end
         if (tacc_ctl_valid && tacc_ctl_ack_enable) begin
@@ -285,6 +295,8 @@ module tb_cpu_micro;
         .mex_ext_mod(mex_ext_mod),
         .mex_ext_active(mex_ext_active),
         .mex_done  (mex_done),
+        .mex_zero_valid(mex_zero_valid_r),
+        .mex_zero(mex_zero_r),
         .mex_busy  (mex_busy),
         .mex_fault (mex_fault),
         .mex_fault_addr(mex_fault_addr),
@@ -403,6 +415,18 @@ module tb_cpu_micro;
         end
     endtask
 
+    // Run a program at address 0 that ends in HALT and report its end PC.
+    task run_mex_program;
+        input integer max_cycles;
+        begin
+            next_mex_fault = MEX_FAULT_NONE;
+            next_mex_fault_addr = 64'd0;
+            mex_dispatch_count = 0;
+            reset_cpu;
+            wait_halt(max_cycles);
+        end
+    endtask
+
     task run_mex_fault_case;
         input [2:0] fault_code;
         input [7:0] expected_vector;
@@ -485,6 +509,10 @@ module tb_cpu_micro;
         next_mex_fault = MEX_FAULT_NONE;
         next_mex_fault_addr = 64'd0;
         mex_ack_enable = 1'b1;
+        mex_zero_valid_r = 1'b0;
+        mex_zero_r = 1'b0;
+        next_mex_zero_valid = 1'b0;
+        next_mex_zero = 1'b0;
         tacc_status = {43'd0, TACC_OWNER_NONE, 16'd0};
         tacc_ctl_done = 1'b0;
         tacc_ctl_fault = MEX_FAULT_NONE;
@@ -998,6 +1026,55 @@ module tb_cpu_micro;
                       "noncanonical lifecycle emits no MEX");
         check_mem_qword_le(13'h070, 64'd6,
                            "noncanonical lifecycle saved end PC");
+
+        // ============================================================
+        // TEST 14b: immediate operands, RROT control bytes, SKIP over MEX,
+        // and completion Z updates.  Each control byte is 0x02, which would
+        // be HALT if a short length executed it.
+        // ============================================================
+        $display("Test 14b: MEX operand bytes, lengths, and Z");
+        clear_mem;
+        mem[0] = 8'hE9; mem[1] = 8'h07; mem[2] = 8'h02;
+        run_mex_program(2000);
+        check64_value(mex_dispatch_count, 64'd1, "immediate TMUL dispatches");
+        check64_value({61'd0, captured_mex_funct}, 64'd0,
+                      "immediate TMUL forces function zero");
+        check64_value({56'd0, captured_mex_imm8}, 64'h07,
+                      "immediate TMUL carries the function byte");
+        check64_value(u_cpu.R[u_cpu.psel], 64'd3, "immediate TMUL length");
+
+        clear_mem;
+        mem[0] = 8'hE3; mem[1] = 8'h07; mem[2] = 8'h02; mem[3] = 8'h02;
+        run_mex_program(2000);
+        check64_value({56'd0, captured_mex_imm8}, 64'h02, "RROT control byte");
+        check64_value(u_cpu.R[u_cpu.psel], 64'd4, "RROT length");
+
+        clear_mem;
+        mem[0] = 8'hE7; mem[1] = 8'h07; mem[2] = 8'h03; mem[3] = 8'h02;
+        mem[4] = 8'h02;
+        run_mex_program(2000);
+        check64_value({56'd0, captured_mex_imm8}, 64'h02,
+                      "broadcast RROT control byte");
+        check64_value(u_cpu.R[u_cpu.psel], 64'd5, "broadcast RROT length");
+
+        clear_mem;
+        mem[0] = 8'hF6; mem[1] = 8'h30;
+        mem[2] = 8'hE7; mem[3] = 8'h07; mem[4] = 8'h03; mem[5] = 8'h02;
+        mem[6] = 8'h02;
+        run_mex_program(2000);
+        check64_value(mex_dispatch_count, 64'd0, "SKIP over RROT dispatches nothing");
+        check64_value(u_cpu.R[u_cpu.psel], 64'd7, "SKIP over broadcast RROT");
+
+        clear_mem;
+        mem[0] = 8'hE2; mem[1] = 8'h00; mem[2] = 8'h02;
+        next_mex_zero_valid = 1'b1;
+        next_mex_zero = 1'b1;
+        run_mex_program(2000);
+        check64_value({63'd0, u_cpu.flags[0]}, 64'd1, "completion sets Z");
+        next_mex_zero = 1'b0;
+        run_mex_program(2000);
+        check64_value({63'd0, u_cpu.flags[0]}, 64'd0, "completion clears Z");
+        next_mex_zero_valid = 1'b0;
 
         // ============================================================
         // TEST 15: all precise MEX completion faults.

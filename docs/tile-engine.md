@@ -398,7 +398,9 @@ float format and any other format.
 
 **RROT** rotates or mirrors the tile treated as a 2D matrix. The geometry
 depends on element width: 8-bit = 8×8, 16-bit = 4×8, 32-bit = 4×4,
-64-bit = 2×4. Controlled by the `imm8` byte (byte 1 of the MEX insn):
+64-bit = 2×4. Controlled by a control byte that follows the function byte
+(and the broadcast register byte, if any), so RROT is one byte longer than
+other TSYS encodings (`E3 07 ctl`):
 
 | Bits | Field | Values |
 |------|-------|--------|
@@ -522,11 +524,6 @@ until then EW 6 and 7 trap in the emulator and are rejected by the hosted
 simulator, while the RTL still treats them as FP16.  Float PACK and UNPACK
 remain until `TCVT` replaces them.
 
-Three RTL encoding differences affect every format and are tracked in the
-plan: in-place sources use `[TSRC0]` for both operands, the CPU passes byte 2
-rather than the function byte as the immediate operand, and an immediate
-TMUL whose function byte ends in 6 or 7 reaches the TACC decoder.  The RTL
-also does not update the Z flag after tile operations.
 
 ---
 
@@ -738,11 +735,11 @@ For assembler authors and low-level debugging, here is every MEX byte:
 | `0xE0` | 0 | 0 | TALU tile×tile | 2B |
 | `0xE1` | 0 | 1 | TMUL tile×tile | 2B |
 | `0xE2` | 0 | 2 | TRED tile×tile | 2B |
-| `0xE3` | 0 | 3 | TSYS tile×tile | 2B |
+| `0xE3` | 0 | 3 | TSYS tile×tile | 2B (3B for RROT) |
 | `0xE4` | 1 | 0 | TALU broadcast | 3B |
 | `0xE5` | 1 | 1 | TMUL broadcast | 3B |
 | `0xE6` | 1 | 2 | TRED broadcast | 3B |
-| `0xE7` | 1 | 3 | TSYS broadcast | 3B |
+| `0xE7` | 1 | 3 | TSYS broadcast | 3B (4B for RROT) |
 | `0xE8` | 2 | 0 | TALU imm8 splat | 2B |
 | `0xE9` | 2 | 1 | TMUL imm8 splat | 2B |
 | `0xEA` | 2 | 2 | TRED imm8 splat | 2B |
@@ -750,7 +747,7 @@ For assembler authors and low-level debugging, here is every MEX byte:
 | `0xEC` | 3 | 0 | TALU in-place | 2B |
 | `0xED` | 3 | 1 | TMUL in-place | 2B |
 | `0xEE` | 3 | 2 | TRED in-place | 2B |
-| `0xEF` | 3 | 3 | TSYS in-place | 2B |
+| `0xEF` | 3 | 3 | TSYS in-place | 2B (3B for RROT) |
 
 ---
 

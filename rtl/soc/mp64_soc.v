@@ -185,6 +185,8 @@ module mp64_soc #(
     wire [3:0]  core_mex_ext_mod   [0:NUM_CORES-1];
     wire        core_mex_ext_active[0:NUM_CORES-1];
     wire        core_mex_done      [0:NUM_CORES-1];
+    wire        core_mex_zero_valid[0:NUM_CORES-1];
+    wire        core_mex_zero      [0:NUM_CORES-1];
     wire        core_mex_busy      [0:NUM_CORES-1];
     wire [2:0]  core_mex_fault     [0:NUM_CORES-1];
     wire [63:0] core_mex_fault_addr[0:NUM_CORES-1];
@@ -314,6 +316,8 @@ module mp64_soc #(
                 .mex_ext_mod     (core_mex_ext_mod[ci]),
                 .mex_ext_active  (core_mex_ext_active[ci]),
                 .mex_done        (core_mex_done[ci]),
+                .mex_zero_valid  (core_mex_zero_valid[ci]),
+                .mex_zero        (core_mex_zero[ci]),
                 .mex_busy        (core_mex_busy[ci]),
                 .mex_fault       (core_mex_fault[ci]),
                 .mex_fault_addr  (core_mex_fault_addr[ci]),
@@ -1349,6 +1353,8 @@ module mp64_soc #(
                     .mex_caller_slot(2'd0),
                     .mex_retire    (1'b1),
                     .mex_done      (core_mex_done[fti]),
+                    .mex_zero_valid(core_mex_zero_valid[fti]),
+                    .mex_zero      (core_mex_zero[fti]),
                     .mex_busy      (core_mex_busy[fti]),
                     .mex_fault     (core_mex_fault[fti]),
                     .mex_fault_addr(core_mex_fault_addr[fti]),

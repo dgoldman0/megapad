@@ -601,7 +601,7 @@ upper five function bits trap rather than aliasing function 6.
 | 4 | **ZERO** | 1 | Zero 64 bytes at TDST |
 | 5 | **PACK** | 2 | Narrow elements: 32→16, 16→8, etc. (saturating if TMODE bit 5) |
 | 6 | **UNPACK** | 2 | Widen elements: 8→16, 16→32, etc. (sign-extend if TMODE bit 4) |
-| 7 | **RROT** | 2 | Row/column rotate or mirror (controlled by imm8) |
+| 7 | **RROT** | 2 | Row/column rotate or mirror, controlled by a byte after the function byte (and any broadcast register byte) |
 
 ### Extended Tile Operations (via EXT prefix, 0xF_)
 

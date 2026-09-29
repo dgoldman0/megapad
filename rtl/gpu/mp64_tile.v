@@ -56,6 +56,8 @@ module mp64_tile #(
     output reg  [7:0]  engine_epoch,
     input  wire        mex_retire,     // receiver accepts terminal response
     output wire        mex_done,       // operation complete
+    output wire        mex_zero_valid, // completion also updates FLAGS.Z
+    output wire        mex_zero,       // the new FLAGS.Z value
     output wire        mex_busy,       // engine busy (stall CPU)
     output wire [2:0]  mex_fault,
     output wire [63:0] mex_fault_addr,
@@ -317,6 +319,14 @@ module mp64_tile #(
 
     reg [4:0]   state;
     reg         mex_done_reg;
+    reg [2:0]   z_kind_reg;
+    reg         mex_zero_valid_reg;
+    reg         mex_zero_reg;
+    localparam [2:0] Z_NONE      = 3'd0;  // FLAGS.Z unchanged
+    localparam [2:0] Z_ALL_WORDS = 3'd1;  // ACC0-ACC3 all zero
+    localparam [2:0] Z_ACC0      = 3'd2;  // ACC0 (an index) zero
+    localparam [2:0] Z_FP_ACC0   = 3'd3;  // ACC0 binary32 is +-0
+    localparam [2:0] Z_FP_ALL    = 3'd4;  // ACC0-ACC3 binary32 all +-0
     reg         mex_busy_reg;
     reg [2:0]   mex_fault_reg;
     reg [63:0]  mex_fault_addr_reg;
@@ -410,11 +420,16 @@ module mp64_tile #(
     // Catch the complete assigned/reserved TACC namespaces using both
     // transports so no malformed variant can fall through to a legacy
     // low-three-bit operation and touch memory or legacy ACC.
+    // With an immediate source the function byte is data and the function is
+    // forced to zero, so only the exact TAMAC byte reaches the TACC decoder
+    // (where it traps as a non-canonical source form).
     wire intercept_tacc_tmul =
         (mex_op == MEX_TMUL) &&
-        ((mex_funct == 3'd6) || (mex_funct == 3'd7) ||
-         (mex_funct_byte[2:0] == 3'd6) ||
-         (mex_funct_byte[2:0] == 3'd7));
+        ((mex_ss == 2'd2) ?
+         (mex_funct_byte == 8'h06) :
+         ((mex_funct == 3'd6) || (mex_funct == 3'd7) ||
+          (mex_funct_byte[2:0] == 3'd6) ||
+          (mex_funct_byte[2:0] == 3'd7)));
     wire intercept_tacc_lifecycle =
         (mex_op == MEX_TSYS) && mex_ext_active &&
         (mex_ext_mod == 4'd8) &&
@@ -754,6 +769,10 @@ module mp64_tile #(
         (mex_done_reg ? mex_fault_reg : MEX_FAULT_NONE);
 
     assign mex_done = mex_done_internal;
+    // Accumulator publications update FLAGS.Z at completion; element-wise,
+    // system, and TACC operations leave it unchanged.
+    assign mex_zero_valid = mex_done_reg && mex_zero_valid_reg;
+    assign mex_zero = mex_zero_reg;
     assign mex_busy = mex_busy_reg && !tacc_req_done;
     assign mex_fault = mex_fault_internal;
     assign mex_fault_addr =
@@ -795,6 +814,14 @@ module mp64_tile #(
     reg [6:0]   ld2d_w;          // bytes per row
     reg [63:0]  ld2d_row_addr;   // computed row address (cached)
 
+    // Operand A comes from [TDST] for in-place sources and from [TSRC0]
+    // otherwise; system operations keep their own addressing.  An immediate
+    // source replaces operand A with the splat after [TSRC0] is read into B
+    // (docs/tile-engine.md, "Source Selection Modes").
+    wire in_place_source = (mex_ss == 2'd3) && (mex_op != MEX_TSYS);
+    wire [63:0] mex_src_a_addr = in_place_source ? tdst : tsrc0;
+    wire mex_src_a_internal = in_place_source ? dst_internal : src0_internal;
+
     // Source B selection
     reg [511:0] src_b_selected;
     reg [511:0] gpr_broadcast;
@@ -825,6 +852,7 @@ module mp64_tile #(
     endfunction
 
     wire [15:0] fp_imm_lane = fp_half_from_u8(mode_bf16, imm8_reg);
+    wire [511:0] imm_splat = mode_fp ? {32{fp_imm_lane}} : {64{imm8_reg}};
 
     always @(*) begin
         case (broadcast_mode_ew)
@@ -849,9 +877,8 @@ module mp64_tile #(
             case (ss_reg)
                 2'd0: src_b_selected = tile_b;
                 2'd1: src_b_selected = gpr_broadcast;
-                2'd2: src_b_selected = mode_fp ?
-                                       {32{fp_imm_lane}} : {64{imm8_reg}};
-                2'd3: src_b_selected = tile_a;      // ordinary in-place
+                2'd2: src_b_selected = tile_b;      // [TSRC0]; A is the splat
+                2'd3: src_b_selected = tile_b;      // [TSRC0]; A is [TDST]
                 default: src_b_selected = 512'd0;
             endcase
         end
@@ -2501,6 +2528,9 @@ module mp64_tile #(
         if (!rst_n) begin
             state         <= S_IDLE;
             mex_done_reg  <= 1'b0;
+            z_kind_reg    <= Z_NONE;
+            mex_zero_valid_reg <= 1'b0;
+            mex_zero_reg  <= 1'b0;
             mex_busy_reg  <= 1'b0;
             mex_fault_reg <= MEX_FAULT_NONE;
             mex_fault_addr_reg <= 64'd0;
@@ -2665,6 +2695,7 @@ module mp64_tile #(
                             tdst : tsrc0;
                         tctrl_accumulate_reg <= tctrl[0];
                         tctrl_acc_zero_reg   <= tctrl[1];
+                        z_kind_reg    <= Z_NONE;
                         mex_busy_reg  <= 1'b1;
                         mex_fault_reg <= MEX_FAULT_NONE;
                         mex_fault_addr_reg <= 64'd0;
@@ -2725,15 +2756,15 @@ module mp64_tile #(
                         tile_addr <= (tile_row[31:0] * tile_stride[31:0] + tile_col[31:0]) * 32'd64;
                         state     <= S_LOAD_A;
                     end
-                    // TRED — load TSRC0 only
+                    // TRED — reduce operand A only
                     else if (mex_op == MEX_TRED) begin
-                        if (src0_internal) begin
+                        if (mex_src_a_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc0[31:0];
+                            tile_addr <= mex_src_a_addr[31:0];
                             state     <= S_LOAD_A;
                         end else begin
                             ext_tile_req  <= 1'b1;
-                            ext_tile_addr <= tsrc0;
+                            ext_tile_addr <= mex_src_a_addr;
                             state         <= S_EXT_LOAD_A;
                         end
                     end
@@ -2741,13 +2772,13 @@ module mp64_tile #(
                     else if (mex_op == MEX_TMUL &&
                              (mex_funct == TMUL_MAC || mex_funct == TMUL_FMA)) begin
                         needs_load_c <= 1'b1;
-                        if (src0_internal) begin
+                        if (mex_src_a_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc0[31:0];
+                            tile_addr <= mex_src_a_addr[31:0];
                             state     <= S_LOAD_A;
                         end else begin
                             ext_tile_req  <= 1'b1;
-                            ext_tile_addr <= tsrc0;
+                            ext_tile_addr <= mex_src_a_addr;
                             state         <= S_EXT_LOAD_A;
                         end
                     end
@@ -2782,15 +2813,15 @@ module mp64_tile #(
                         end else
                             state <= S_DONE;  // unknown ext TSYS funct
                     end
-                    // Everything else: load TSRC0
+                    // Everything else: load operand A
                     else begin
-                        if (src0_internal) begin
+                        if (mex_src_a_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc0[31:0];
+                            tile_addr <= mex_src_a_addr[31:0];
                             state     <= S_LOAD_A;
                         end else begin
                             ext_tile_req  <= 1'b1;
-                            ext_tile_addr <= tsrc0;
+                            ext_tile_addr <= mex_src_a_addr;
                             state         <= S_EXT_LOAD_A;
                         end
                     end
@@ -2802,6 +2833,8 @@ module mp64_tile #(
                 if (tile_ack) begin
                     tile_a <= tile_rdata;
                     if (op_reg == MEX_TRED) begin
+                        if (ss_reg == 2'd2)
+                            tile_a <= imm_splat;
                         state <= S_REDUCE;
                     end
                     else if (op_reg == MEX_TSYS) begin
@@ -2822,18 +2855,24 @@ module mp64_tile #(
                         end else
                             state <= S_COMPUTE;
                     end
-                    else if (ss_reg == 2'd0) begin
-                        if (src1_internal) begin
+                    else if (ss_reg == 2'd0 || ss_reg == 2'd3) begin
+                        // Operand B: [TSRC1] tile x tile, [TSRC0] in place.
+                        if ((ss_reg == 2'd0) ? src1_internal : src0_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc1[31:0];
+                            tile_addr <= (ss_reg == 2'd0) ?
+                                         tsrc1[31:0] : tsrc0[31:0];
                             state     <= S_LOAD_B;
                         end else begin
                             ext_tile_req  <= 1'b1;
-                            ext_tile_addr <= tsrc1;
+                            ext_tile_addr <= (ss_reg == 2'd0) ? tsrc1 : tsrc0;
                             state         <= S_EXT_LOAD_B;
                         end
                     end
                     else begin
+                        if (ss_reg == 2'd2) begin
+                            tile_a <= imm_splat;
+                            tile_b <= tile_rdata;
+                        end
                         if (needs_load_c) begin
                             tile_req  <= 1'b1;
                             tile_addr <= tdst[31:0];
@@ -2904,6 +2943,7 @@ module mp64_tile #(
                 // DOT/DOTACC → accumulator, then done (no tile store)
                 if (op_reg == MEX_TMUL && funct_reg == TMUL_DOT) begin
                     tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
+                    z_kind_reg <= mode_fp ? Z_FP_ACC0 : Z_ALL_WORDS;
                     if (mode_fp) begin
                         // FP DOT: result is FP32 in low 32 bits of acc[0]
                         if (tctrl_acc_zero_reg) begin
@@ -2931,6 +2971,7 @@ module mp64_tile #(
                 end
                 else if (op_reg == MEX_TMUL && funct_reg == TMUL_DOTACC) begin
                     tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
+                    z_kind_reg <= mode_fp ? Z_FP_ALL : Z_ALL_WORDS;
                     if (mode_fp) begin
                         if (tctrl_acc_zero_reg) begin
                             acc[0] <= {32'd0, fp_dotacc_result[0]};
@@ -3014,6 +3055,12 @@ module mp64_tile #(
 
             S_REDUCE: begin
                 tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
+                if (funct_reg == TRED_MINIDX || funct_reg == TRED_MAXIDX)
+                    z_kind_reg <= Z_ACC0;
+                else if (mode_fp && funct_reg != TRED_POPC)
+                    z_kind_reg <= Z_FP_ACC0;
+                else
+                    z_kind_reg <= Z_ALL_WORDS;
                 if (mode_fp && (funct_reg != TRED_POPC)) begin
                     // Floating reductions publish binary32 in ACC0
                     // (docs/floating-point.md §4.4-§4.5).
@@ -3087,7 +3134,11 @@ module mp64_tile #(
             S_EXT_LOAD_A: begin
                 if (ext_tile_ack) begin
                     tile_a <= ext_tile_rdata;
-                    if (op_reg == MEX_TRED) state <= S_REDUCE;
+                    if (op_reg == MEX_TRED) begin
+                        if (ss_reg == 2'd2)
+                            tile_a <= imm_splat;
+                        state <= S_REDUCE;
+                    end
                     else if (op_reg == MEX_TSYS && funct_reg == TSYS_SHUFFLE) begin
                         if (src1_internal) begin
                             tile_req  <= 1'b1;
@@ -3099,17 +3150,22 @@ module mp64_tile #(
                             state         <= S_EXT_LOAD_B;
                         end
                     end
-                    else if (ss_reg == 2'd0) begin
-                        if (src1_internal) begin
+                    else if (ss_reg == 2'd0 || ss_reg == 2'd3) begin
+                        if ((ss_reg == 2'd0) ? src1_internal : src0_internal) begin
                             tile_req  <= 1'b1;
-                            tile_addr <= tsrc1[31:0];
+                            tile_addr <= (ss_reg == 2'd0) ?
+                                         tsrc1[31:0] : tsrc0[31:0];
                             state     <= S_LOAD_B;
                         end else begin
                             ext_tile_req  <= 1'b1;
-                            ext_tile_addr <= tsrc1;
+                            ext_tile_addr <= (ss_reg == 2'd0) ? tsrc1 : tsrc0;
                             state         <= S_EXT_LOAD_B;
                         end
                     end else begin
+                        if (ss_reg == 2'd2) begin
+                            tile_a <= imm_splat;
+                            tile_b <= ext_tile_rdata;
+                        end
                         if (needs_load_c) begin
                             tile_req <= 1'b1; tile_addr <= tdst[31:0]; state <= S_LOAD_C;
                         end else state <= S_COMPUTE;
@@ -3378,6 +3434,23 @@ module mp64_tile #(
             S_DONE: begin
                 mex_done_reg <= 1'b1;
                 mex_busy_reg <= 1'b0;
+                mex_zero_valid_reg <= (z_kind_reg != Z_NONE);
+                case (z_kind_reg)
+                    Z_ACC0:
+                        mex_zero_reg <= (acc[0] == 64'd0);
+                    Z_FP_ACC0:
+                        mex_zero_reg <= (acc[0][30:0] == 31'd0);
+                    Z_FP_ALL:
+                        mex_zero_reg <= (acc[0][30:0] == 31'd0) &&
+                                        (acc[1][30:0] == 31'd0) &&
+                                        (acc[2][30:0] == 31'd0) &&
+                                        (acc[3][30:0] == 31'd0);
+                    default:
+                        mex_zero_reg <= (acc[0] == 64'd0) &&
+                                        (acc[1] == 64'd0) &&
+                                        (acc[2] == 64'd0) &&
+                                        (acc[3] == 64'd0);
+                endcase
                 state        <= S_IDLE;
             end
             default: state <= S_IDLE;

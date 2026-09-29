@@ -4799,16 +4799,17 @@ class Megapad64:
         if f == 0xC:  # MUL/DIV / Bitfield ALU
             return 3 if n == 0xE else 2  # RORI is 3 bytes
         if f == 0xD:  return 2  # CSR
-        if f == 0xE:  # MEX — 2 bytes + optional broadcast reg or RROT ctrl
+        if f == 0xE:  # MEX — 2 bytes + optional broadcast reg and RROT ctrl
             ss = (n >> 2) & 0x3
             op = n & 0x3
-            if ss == 1:
-                return 3  # broadcast: opcode + funct + reg
-            if op == 3:   # TSYS
+            length = 3 if ss == 1 else 2  # broadcast adds a register byte
+            # RROT (TSYS function 7) adds a control byte.  An immediate
+            # source forces function 0, so it never carries one.
+            if op == 3 and ss != 2:
                 funct_b = self._icache_read_byte(u64(addr + 1))
-                if (funct_b & 0x07) == 7:  # RROT: opcode + funct + ctrl
-                    return 3
-            return 2
+                if (funct_b & 0x07) == 7:
+                    length += 1
+            return length
         return 1  # fallback
 
     # -- Run loop --

@@ -3082,3 +3082,34 @@ def test_fp_mex_native_matches_oracle_on_seeded_tiles(
             _assert_native_matches_oracle(
                 instruction, setup, expected_dispatch="native"
             )
+
+
+@pytest.mark.parametrize(
+    ("encoding", "length"),
+    [
+        pytest.param(bytes((0xE3, 0x07, 0x02)), 3, id="rrot"),
+        pytest.param(bytes((0xE7, 0x07, 0x03, 0x02)), 4, id="broadcast-rrot"),
+        pytest.param(bytes((0xEF, 0x07, 0x02)), 3, id="in-place-rrot"),
+        pytest.param(bytes((0xE5, 0x00, 0x03)), 3, id="broadcast-mul"),
+        pytest.param(bytes((0xEB, 0x07)), 2, id="immediate-tsys"),
+        pytest.param(bytes((0xE0, 0x00)), 2, id="talu"),
+    ],
+)
+def test_skip_steps_over_the_complete_mex_encoding(
+    encoding: bytes,
+    length: int,
+) -> None:
+    """RROT carries a control byte after any broadcast register byte; the
+    immediate form forces function 0 and never does.  Each encoding is
+    followed by 0x02 so a short skip would halt one byte early."""
+
+    program = bytes((0xF6, 0x30)) + encoding + bytes((0x02,))
+    assert len(encoding) == length
+    for cpu_type in (PythonMegapad64, NativeMegapad64):
+        cpu = cpu_type(mem_size=MEM_SIZE)
+        cpu.load_bytes(0, program)
+        cpu.pc = 0
+        with pytest.raises(HaltError):
+            for _ in range(8):
+                cpu.step()
+        assert cpu.pc == 2 + length + 1, cpu_type.__name__

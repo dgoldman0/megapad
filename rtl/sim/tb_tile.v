@@ -544,7 +544,8 @@ module tb_tile;
         csr_write(CSR_TSRC0, 64'h140);  // tile 5
         csr_write(CSR_TDST,  64'h80);
         csr_write(CSR_TMODE, 64'h10);   // signed, 8-bit
-        mex_dispatch(2'd3, MEX_TALU, TALU_ABS, 64'd0, 8'd0);  // ss=3 (in-place)
+        // ABS reads operand A only; tile x tile takes A from [TSRC0].
+        mex_dispatch(2'd0, MEX_TALU, TALU_ABS, 64'd0, 8'd0);
         expected_tile = {64{8'h05}};
         check512(tile_mem[2], expected_tile, "TALU.ABS signed");
 
@@ -751,7 +752,8 @@ module tb_tile;
         csr_write(CSR_TSRC0, 64'h00);
         csr_write(CSR_TDST,  64'h80);
         csr_write(CSR_TMODE, 64'd4);
-        mex_dispatch(2'd3, MEX_TALU, TALU_ABS, 64'd0, 8'd0);  // ss=3 in-place
+        // ABS reads operand A only; tile x tile takes A from [TSRC0].
+        mex_dispatch(2'd0, MEX_TALU, TALU_ABS, 64'd0, 8'd0);
         expected_tile = {32{16'h4000}};  // 2.0
         check512(tile_mem[2], expected_tile, "FP16 TALU.ABS abs(-2)=2");
 

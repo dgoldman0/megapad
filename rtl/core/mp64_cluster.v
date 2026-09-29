@@ -170,6 +170,8 @@ module mp64_cluster #(
     wire [N*64-1:0]     mc_tacc_ctl_wdata;
     wire [N-1:0]        mc_tacc_priv_fault;
     reg                 mex_done_reg;
+    reg                 mex_zero_valid_reg;
+    reg                 mex_zero_reg;
     reg                 mex_busy_reg;
     reg  [1:0]          mex_state;
     reg  [2:0]          mex_fault_reg;
@@ -340,6 +342,8 @@ module mp64_cluster #(
                 .mex_ext_mod   (mc_mex_ext_mod  [gi*4  +: 4]),
                 .mex_ext_active(mc_mex_ext_active[gi]),
                 .mex_done      (mex_done_reg && (mex_grant == gi[ARB_BITS-1:0])),
+                .mex_zero_valid(mex_zero_valid_reg),
+                .mex_zero      (mex_zero_reg),
                 .mex_busy      (mex_busy_reg && (mex_grant != gi[ARB_BITS-1:0])),
                 .mex_fault     (mex_fault_reg),
                 .mex_fault_addr(mex_fault_addr_reg),
@@ -1737,6 +1741,8 @@ module mp64_cluster #(
     reg  [TACC_EPOCH_BITS-1:0] te_mex_caller_epoch;
     reg  [1:0]  te_mex_caller_slot;
     wire        te_mex_done;
+    wire        te_mex_zero_valid;
+    wire        te_mex_zero;
     wire        te_mex_busy;
     wire [2:0]  te_mex_fault;
     wire [63:0] te_mex_fault_addr;
@@ -2021,6 +2027,8 @@ module mp64_cluster #(
             mex_grant      <= {ARB_BITS{1'b0}};
             mex_last       <= {ARB_BITS{1'b0}};
             mex_done_reg   <= 1'b0;
+            mex_zero_valid_reg <= 1'b0;
+            mex_zero_reg   <= 1'b0;
             mex_busy_reg   <= 1'b0;
             mex_fault_reg  <= MEX_FAULT_NONE;
             mex_fault_addr_reg <= 64'd0;
@@ -2095,6 +2103,8 @@ module mp64_cluster #(
                     end else if (te_mex_done) begin
                         mex_done_reg <= 1'b1;
                         mex_busy_reg <= 1'b0;
+                        mex_zero_valid_reg <= te_mex_zero_valid;
+                        mex_zero_reg <= te_mex_zero;
                         mex_fault_reg <= te_mex_fault;
                         mex_fault_addr_reg <= te_mex_fault_addr;
                         mex_last     <= mex_grant;
@@ -2252,6 +2262,8 @@ module mp64_cluster #(
         .mex_caller_slot(te_mex_caller_slot),
         .mex_retire    (te_mex_retire),
         .mex_done      (te_mex_done),
+        .mex_zero_valid(te_mex_zero_valid),
+        .mex_zero      (te_mex_zero),
         .mex_busy      (te_mex_busy),
         .mex_fault     (te_mex_fault),
         .mex_fault_addr(te_mex_fault_addr),

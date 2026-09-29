@@ -166,6 +166,8 @@ module tb_dict;
         .mex_ext_mod(mex_ext_mod_w),
         .mex_ext_active(mex_ext_active_w),
         .mex_done  (1'b0),
+        .mex_zero_valid(1'b0),
+        .mex_zero(1'b0),
         .mex_busy  (1'b0),
         .mex_fault (MEX_FAULT_NONE),
         .mex_fault_addr(64'd0),
