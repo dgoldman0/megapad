@@ -419,6 +419,12 @@ Progress:
   Python emulator, and `tb_tile_fp.v` replays them in `make -C rtl/sim tile`.
   All pass, along with the tile, TACC, cluster, and SoC benches and SoC
   elaboration.
+- **Regression gate.** The hosted simulator changed, so the canonical
+  physical Desktop journey ran once. It used
+  `akashic/local_testing/physical_desktop_acceptance.py` with Akashic
+  `f2f06799` and this branch at `1471dbb`, after merging `main` for the
+  viewer code that Akashic now imports. It passed in 199 s, with a peak
+  aggregate RSS of 531 MB, clean trees, and the native simulator executor.
 
 1. **Shared exact module.** `shared/ieee_fp.py` covers binary16, bfloat16,
    binary32, and binary64. It provides:
