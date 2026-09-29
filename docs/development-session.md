@@ -197,6 +197,24 @@ screen transaction must populate that bounded representation for Desk, Pad,
 and Daybook. The offer never contains a `CompositeTerminalView`, a hidden
 retained rebuild target, or model authority.
 
+A holder may also pass `base_offer=<offer ID>`, naming the offer it last
+presented and still holds, or zero when it holds none. When that is the
+session's presented offer and the CELL geometry is unchanged, the server sends
+the new offer as its changes against that base, which is usually a small part
+of the screen. Such an offer also carries `base_offer_id`. Its `cell` carries
+`changed_rows` in place of `runs`: one `[row, runs]` pair for each row that
+differs from the base, whose runs cover exactly that row's columns. Its
+retained plane lists every region with its complete header. A region with the
+same owner, generation and region ID as a base region may carry `removed` and
+`changed` in place of `draws`: the keys of base draws it no longer has, each
+`["object", object_id]` or `["control", control_id]`, and every draw that is
+new or differs from the base draw with its key. Series histories and IMAGE
+manifests are always complete. Rows and draws that are not sent are the
+base's. The viewer rebuilds the complete immutable offer from its base before
+staging it, so composition, hit maps and `present` see exactly what a
+complete offer carries. Without that base, after a reconnect, reclaim, reset,
+refused presentation or geometry change, the offer is complete.
+
 After drawing the complete offer, the holder calls `present` with the current
 reset `generation`, exact `display_offer_id`, and full `display_scope` returned
 by `screen`. `presented` promotes that physical view and returns its new session

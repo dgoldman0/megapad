@@ -497,7 +497,8 @@ class _RetainedDisplayState:
         self.since_offer = 0
         self.pending_offer: TerminalDisplayOffer | None = None
         self.pending_generation: int | None = None
-        self.retained_plane: RetainedDrawPlane | None = None
+        # The offer the sink presented last: the base of changes-only offers.
+        self.presented_offer: TerminalDisplayOffer | None = None
         self._pending_resource_token: tuple[int, DisplayScope] | None = None
         self._pending_resources_ready = False
         self._pending_hit_token: tuple[int, DisplayScope] | None = None
@@ -505,6 +506,20 @@ class _RetainedDisplayState:
         self._pending_hit_map_rendered = False
         self._hit_map_token: tuple[int, DisplayScope] | None = None
         self._hit_entries: tuple[HitMapEntry, ...] = ()
+
+    @property
+    def retained_plane(self) -> RetainedDrawPlane | None:
+        """The plane of the offer the sink presented last."""
+
+        offer = self.presented_offer
+        return None if offer is None else offer.retained
+
+    @property
+    def base_offer_id(self) -> int:
+        """The presented offer a changes-only offer may name, or zero."""
+
+        offer = self.presented_offer
+        return 0 if offer is None else offer.offer_id
 
     @property
     def frame_plane(self) -> RetainedDrawPlane | None:
@@ -565,7 +580,7 @@ class _RetainedDisplayState:
 
         self.pending_offer = None
         self.pending_generation = None
-        self.retained_plane = None
+        self.presented_offer = None
         self._clear_pending_resources()
         self._clear_hit_maps()
 
@@ -730,7 +745,7 @@ class _RetainedDisplayState:
                 "was not rendered for the exact offer"
             )
         self.since_offer = offer.offer_id
-        self.retained_plane = offer.retained
+        self.presented_offer = offer
         self._hit_map_token = token
         self._hit_entries = self._pending_hit_entries
         self.pending_offer = None
@@ -1693,7 +1708,9 @@ def _accept_screen_update(
     if "display_offer" in update:
         if not display_holder:
             raise RuntimeError("nonholder received a retained display offer")
-        offer = display_offer_from_wire(update["display_offer"])
+        offer = display_offer_from_wire(
+            update["display_offer"], display_state.presented_offer
+        )
         display_state.stage(offer, update["generation"])
         if resource_cache is not None:
             resource_cache.stage(offer, update["generation"])
@@ -2372,6 +2389,7 @@ def main() -> int:
                     "screen",
                     since=revision,
                     since_offer=display_state.poll_offer_cursor,
+                    base_offer=display_state.base_offer_id,
                 )
                 if accept_screen_update(update):
                     screen = make_window()

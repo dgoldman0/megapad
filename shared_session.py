@@ -46,6 +46,8 @@ from rich_terminal.retained_view import (
     TextAreaDraw,
     TextGridDraw,
     WaveformDraw,
+    retained_draw_key,
+    retained_draw_order,
 )
 from rich_terminal.retained_scene import (
     ControlKind,
@@ -335,18 +337,11 @@ def snapshot_to_wire(
     }
 
 
-def snapshot_from_wire(data: dict) -> TerminalSnapshot:
-    """Decode a strict wire snapshot into the immutable public snapshot type."""
-
-    wire = _wire_object(
-        data,
-        "snapshot",
-        ("cols", "rows", "cursor", "alternate_screen", "runs"),
-    )
-    cols = _wire_integer(wire["cols"], "snapshot cols", minimum=1)
-    rows = _wire_integer(wire["rows"], "snapshot rows", minimum=1)
-    expected = cols * rows
-
+def _snapshot_cursor_from_wire(
+    wire: Mapping[str, Any],
+    cols: int,
+    rows: int,
+) -> tuple[int, int, bool, bool]:
     cursor = wire["cursor"]
     if not isinstance(cursor, (list, tuple)) or len(cursor) != 3:
         raise TypeError("snapshot cursor must be a three-item array")
@@ -362,42 +357,69 @@ def snapshot_from_wire(data: dict) -> TerminalSnapshot:
     alternate_screen = _wire_boolean(
         wire["alternate_screen"], "snapshot alternate_screen"
     )
+    return cursor_row, cursor_col, cursor_visible, alternate_screen
+
+
+def _snapshot_run_from_wire(run, name: str) -> tuple[int, TerminalCell]:
+    if not isinstance(run, (list, tuple)) or len(run) != 5:
+        raise TypeError(f"{name} must be a five-item array")
+    count = _wire_integer(run[0], f"{name} count", minimum=1)
+    char = _wire_text(run[1], f"{name} char")
+    fg = _wire_integer(run[2], f"{name} foreground", minimum=0, maximum=0xFFFFFF)
+    bg = _wire_integer(run[3], f"{name} background", minimum=0, maximum=0xFFFFFF)
+    attrs = _wire_integer(run[4], f"{name} attrs", minimum=0, maximum=0x3FF)
+    # A lead cell shows one whole character, which may hold several
+    # scalars; the continuation of a wide character shows none.
+    if attrs & ATTR_CONTINUATION:
+        if char or attrs & ATTR_WIDE:
+            raise ValueError(f"{name} continuation must be empty and not wide")
+    elif not char:
+        raise ValueError(f"{name} char must not be empty")
+    return count, TerminalCell(
+        char=char,
+        fg=_rgb_unpack(fg),
+        bg=_rgb_unpack(bg),
+        attrs=attrs,
+    )
+
+
+def _snapshot_row_pairs_valid(row: tuple[TerminalCell, ...], row_index: int) -> None:
+    cols = len(row)
+    for column, cell in enumerate(row):
+        wide = cell.attrs & ATTR_WIDE
+        if wide and (
+            column + 1 == cols or not row[column + 1].attrs & ATTR_CONTINUATION
+        ) or cell.attrs & ATTR_CONTINUATION and (
+            column == 0 or not row[column - 1].attrs & ATTR_WIDE
+        ):
+            raise ValueError(
+                f"snapshot row {row_index} column {column} breaks a wide pair"
+            )
+
+
+def snapshot_from_wire(data: dict) -> TerminalSnapshot:
+    """Decode a strict wire snapshot into the immutable public snapshot type."""
+
+    wire = _wire_object(
+        data,
+        "snapshot",
+        ("cols", "rows", "cursor", "alternate_screen", "runs"),
+    )
+    cols = _wire_integer(wire["cols"], "snapshot cols", minimum=1)
+    rows = _wire_integer(wire["rows"], "snapshot rows", minimum=1)
+    expected = cols * rows
+    cursor_row, cursor_col, cursor_visible, alternate_screen = (
+        _snapshot_cursor_from_wire(wire, cols, rows)
+    )
 
     runs = wire["runs"]
     if not isinstance(runs, (list, tuple)):
         raise TypeError("snapshot runs must be an array")
     flat: list[TerminalCell] = []
     for index, run in enumerate(runs):
-        if not isinstance(run, (list, tuple)) or len(run) != 5:
-            raise TypeError(f"snapshot run {index} must be a five-item array")
-        count = _wire_integer(run[0], f"snapshot run {index} count", minimum=1)
-        char = _wire_text(run[1], f"snapshot run {index} char")
-        fg = _wire_integer(
-            run[2], f"snapshot run {index} foreground", minimum=0, maximum=0xFFFFFF
-        )
-        bg = _wire_integer(
-            run[3], f"snapshot run {index} background", minimum=0, maximum=0xFFFFFF
-        )
-        attrs = _wire_integer(
-            run[4], f"snapshot run {index} attrs", minimum=0, maximum=0x3FF
-        )
-        # A lead cell shows one whole character, which may hold several
-        # scalars; the continuation of a wide character shows none.
-        if attrs & ATTR_CONTINUATION:
-            if char or attrs & ATTR_WIDE:
-                raise ValueError(
-                    f"snapshot run {index} continuation must be empty and not wide"
-                )
-        elif not char:
-            raise ValueError(f"snapshot run {index} char must not be empty")
+        count, cell = _snapshot_run_from_wire(run, f"snapshot run {index}")
         if len(flat) + count > expected:
             raise ValueError("snapshot runs exceed the declared geometry")
-        cell = TerminalCell(
-            char=char,
-            fg=_rgb_unpack(fg),
-            bg=_rgb_unpack(bg),
-            attrs=attrs,
-        )
         flat.extend([cell] * count)
     if len(flat) != expected:
         raise ValueError(f"snapshot has {len(flat)} cells, expected {expected}")
@@ -406,20 +428,99 @@ def snapshot_from_wire(data: dict) -> TerminalSnapshot:
         for row in range(rows)
     )
     for row_index, row in enumerate(cells):
-        for column, cell in enumerate(row):
-            wide = cell.attrs & ATTR_WIDE
-            if wide and (
-                column + 1 == cols or not row[column + 1].attrs & ATTR_CONTINUATION
-            ) or cell.attrs & ATTR_CONTINUATION and (
-                column == 0 or not row[column - 1].attrs & ATTR_WIDE
-            ):
-                raise ValueError(
-                    f"snapshot row {row_index} column {column} breaks a wide pair"
-                )
+        _snapshot_row_pairs_valid(row, row_index)
     return TerminalSnapshot(
         cols=cols,
         rows=rows,
         cells=cells,
+        cursor_col=cursor_col,
+        cursor_row=cursor_row,
+        cursor_visible=cursor_visible,
+        alternate_screen=alternate_screen,
+    )
+
+
+def _snapshot_changes_to_wire(
+    snapshot: TerminalSnapshot,
+    base: TerminalSnapshot,
+    rows: WireRowRuns | None,
+) -> dict:
+    """The rows of ``snapshot`` that differ from ``base``, each run-length
+    encoded on its own."""
+
+    by_row = None if rows is None else rows.runs(snapshot.cells)
+    changed = []
+    for index, (row, previous) in enumerate(zip(snapshot.cells, base.cells)):
+        if row is previous or row == previous:
+            continue
+        row_runs = _row_runs(row) if by_row is None else by_row[index]
+        changed.append([index, [[count, *value] for count, value in row_runs]])
+    return {
+        "cols": snapshot.cols,
+        "rows": snapshot.rows,
+        "cursor": [
+            snapshot.cursor_row,
+            snapshot.cursor_col,
+            snapshot.cursor_visible,
+        ],
+        "alternate_screen": snapshot.alternate_screen,
+        "changed_rows": changed,
+    }
+
+
+def _snapshot_changes_from_wire(data, base: TerminalSnapshot) -> TerminalSnapshot:
+    """Rebuild a snapshot from its changed rows and the base's other rows."""
+
+    wire = _wire_object(
+        data,
+        "snapshot changes",
+        ("cols", "rows", "cursor", "alternate_screen", "changed_rows"),
+    )
+    cols = _wire_integer(wire["cols"], "snapshot cols", minimum=1)
+    rows = _wire_integer(wire["rows"], "snapshot rows", minimum=1)
+    if (cols, rows) != (base.cols, base.rows):
+        raise ValueError("snapshot changes do not have their base's geometry")
+    cursor_row, cursor_col, cursor_visible, alternate_screen = (
+        _snapshot_cursor_from_wire(wire, cols, rows)
+    )
+    changed = wire["changed_rows"]
+    if not isinstance(changed, (list, tuple)):
+        raise TypeError("snapshot changed rows must be an array")
+    cells = list(base.cells)
+    previous = -1
+    for position, item in enumerate(changed):
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise TypeError(f"snapshot changed row {position} must be a two-item array")
+        row_index = _wire_integer(
+            item[0],
+            f"snapshot changed row {position} index",
+            minimum=0,
+            maximum=rows - 1,
+        )
+        if row_index <= previous:
+            raise ValueError("snapshot changed rows must be in increasing order")
+        previous = row_index
+        runs = item[1]
+        if not isinstance(runs, (list, tuple)):
+            raise TypeError(f"snapshot row {row_index} runs must be an array")
+        row: list[TerminalCell] = []
+        for index, run in enumerate(runs):
+            count, cell = _snapshot_run_from_wire(
+                run, f"snapshot row {row_index} run {index}"
+            )
+            if len(row) + count > cols:
+                raise ValueError(f"snapshot row {row_index} runs exceed its columns")
+            row.extend([cell] * count)
+        if len(row) != cols:
+            raise ValueError(
+                f"snapshot row {row_index} has {len(row)} cells, expected {cols}"
+            )
+        cells[row_index] = tuple(row)
+        _snapshot_row_pairs_valid(cells[row_index], row_index)
+    return TerminalSnapshot(
+        cols=cols,
+        rows=rows,
+        cells=tuple(cells),
         cursor_col=cursor_col,
         cursor_row=cursor_row,
         cursor_visible=cursor_visible,
@@ -685,7 +786,7 @@ _TAB_WIRE_FIELDS = (
     "label",
     "shortcut",
 )
-_REGION_WIRE_FIELDS = (
+_REGION_HEADER_FIELDS = (
     "owner_id",
     "owner_generation",
     "region_id",
@@ -699,8 +800,10 @@ _REGION_WIRE_FIELDS = (
     "clip_rows",
     "z_order",
     "clipped",
-    "draws",
 )
+_REGION_WIRE_FIELDS = _REGION_HEADER_FIELDS + ("draws",)
+# A region carried as changes against the base region with its identity.
+_REGION_CHANGE_FIELDS = _REGION_HEADER_FIELDS + ("removed", "changed")
 
 
 def _semantic_content_to_wire(content: SemanticTextContent) -> str:
@@ -1193,6 +1296,24 @@ def _retained_draw_to_wire(
     raise TypeError("retained draw is outside the shared-viewer vocabulary")
 
 
+def _region_header_to_wire(region: RetainedRegionDraw) -> dict:
+    return {
+        "owner_id": region.owner_id,
+        "owner_generation": region.owner_generation,
+        "region_id": region.region_id,
+        "logical_x": region.logical_x,
+        "logical_y": region.logical_y,
+        "logical_cols": region.logical_cols,
+        "logical_rows": region.logical_rows,
+        "clip_x": region.clip_x,
+        "clip_y": region.clip_y,
+        "clip_cols": region.clip_cols,
+        "clip_rows": region.clip_rows,
+        "z_order": region.z_order,
+        "clipped": region.clipped,
+    }
+
+
 def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
     """Encode only the immutable renderer-facing draw plane."""
 
@@ -1207,23 +1328,62 @@ def retained_draw_plane_to_wire(plane: RetainedDrawPlane) -> dict:
         ],
         "regions": [
             {
-                "owner_id": region.owner_id,
-                "owner_generation": region.owner_generation,
-                "region_id": region.region_id,
-                "logical_x": region.logical_x,
-                "logical_y": region.logical_y,
-                "logical_cols": region.logical_cols,
-                "logical_rows": region.logical_rows,
-                "clip_x": region.clip_x,
-                "clip_y": region.clip_y,
-                "clip_cols": region.clip_cols,
-                "clip_rows": region.clip_rows,
-                "z_order": region.z_order,
-                "clipped": region.clipped,
+                **_region_header_to_wire(region),
                 "draws": [_retained_draw_to_wire(draw) for draw in region.draws],
             }
             for region in plane.regions
         ],
+    }
+
+
+def _draws_by_key(draws) -> dict | None:
+    """Each draw by its identity, or None when one identity names two draws."""
+
+    by_key = {}
+    for draw in draws:
+        key = retained_draw_key(draw)
+        if key in by_key:
+            return None
+        by_key[key] = draw
+    return by_key
+
+
+def _retained_plane_changes_to_wire(
+    plane: RetainedDrawPlane,
+    base: RetainedDrawPlane,
+) -> dict:
+    """``plane`` with each region that has a base carried as its changes."""
+
+    base_regions = {
+        (region.owner_id, region.owner_generation, region.region_id): region
+        for region in base.regions
+    }
+    regions = []
+    for region in plane.regions:
+        entry = _region_header_to_wire(region)
+        previous = base_regions.get(
+            (region.owner_id, region.owner_generation, region.region_id)
+        )
+        before = None if previous is None else _draws_by_key(previous.draws)
+        after = None if before is None else _draws_by_key(region.draws)
+        if after is None:
+            entry["draws"] = [_retained_draw_to_wire(draw) for draw in region.draws]
+        else:
+            entry["removed"] = [list(key) for key in before if key not in after]
+            entry["changed"] = [
+                _retained_draw_to_wire(draw)
+                for key, draw in after.items()
+                if before.get(key) != draw
+            ]
+        regions.append(entry)
+    return {
+        "retained_initialized": plane.retained_initialized,
+        "retained_visible": plane.retained_visible,
+        "series": [_series_history_to_wire(history) for history in plane.series],
+        "resources": [
+            _image_resource_to_wire(resource) for resource in plane.resources
+        ],
+        "regions": regions,
     }
 
 
@@ -1829,9 +1989,9 @@ def _retained_draw_from_wire(
     raise ValueError(f"{name} kind is not a retained draw kind")
 
 
-def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
-    """Decode the complete draw plane with strict scalar types."""
-
+def _plane_parts_from_wire(
+    data,
+) -> tuple[bool, bool, tuple[SeriesHistoryDraw, ...], tuple[ImageResourceManifest, ...], Any]:
     wire = _wire_object(
         data,
         "retained draw plane",
@@ -1863,109 +2023,197 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
     regions_wire = wire["regions"]
     if not isinstance(regions_wire, (list, tuple)):
         raise TypeError("retained draw regions must be an array")
+    return (
+        _wire_boolean(wire["retained_initialized"], "retained draw initialized"),
+        _wire_boolean(wire["retained_visible"], "retained draw visible"),
+        series,
+        resources,
+        regions_wire,
+    )
+
+
+def _region_header_from_wire(region: Mapping[str, Any], prefix: str) -> dict:
+    return {
+        "owner_id": _wire_integer(
+            region["owner_id"],
+            f"{prefix} owner_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        "owner_generation": _wire_integer(
+            region["owner_generation"],
+            f"{prefix} owner_generation",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        "region_id": _wire_integer(
+            region["region_id"],
+            f"{prefix} region_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        "logical_x": _wire_integer(
+            region["logical_x"],
+            f"{prefix} logical_x",
+            minimum=INT32_MIN,
+            maximum=INT32_MAX,
+        ),
+        "logical_y": _wire_integer(
+            region["logical_y"],
+            f"{prefix} logical_y",
+            minimum=INT32_MIN,
+            maximum=INT32_MAX,
+        ),
+        "logical_cols": _wire_integer(
+            region["logical_cols"],
+            f"{prefix} logical_cols",
+            minimum=1,
+            maximum=UINT32_MAX,
+        ),
+        "logical_rows": _wire_integer(
+            region["logical_rows"],
+            f"{prefix} logical_rows",
+            minimum=1,
+            maximum=UINT32_MAX,
+        ),
+        "clip_x": _wire_integer(
+            region["clip_x"],
+            f"{prefix} clip_x",
+            minimum=0,
+            maximum=UINT32_MAX,
+        ),
+        "clip_y": _wire_integer(
+            region["clip_y"],
+            f"{prefix} clip_y",
+            minimum=0,
+            maximum=UINT32_MAX,
+        ),
+        "clip_cols": _wire_integer(
+            region["clip_cols"],
+            f"{prefix} clip_cols",
+            minimum=0,
+            maximum=UINT32_MAX,
+        ),
+        "clip_rows": _wire_integer(
+            region["clip_rows"],
+            f"{prefix} clip_rows",
+            minimum=0,
+            maximum=UINT32_MAX,
+        ),
+        "z_order": _wire_integer(
+            region["z_order"],
+            f"{prefix} z_order",
+            minimum=INT32_MIN,
+            maximum=INT32_MAX,
+        ),
+        "clipped": _wire_boolean(region["clipped"], f"{prefix} clipped"),
+    }
+
+
+def _region_draws_from_wire(region: Mapping[str, Any], prefix: str) -> tuple:
+    draws_wire = region["draws"]
+    if not isinstance(draws_wire, (list, tuple)):
+        raise TypeError(f"{prefix} draws must be an array")
+    return tuple(
+        _retained_draw_from_wire(raw_draw, f"{prefix} draw {draw_index}")
+        for draw_index, raw_draw in enumerate(draws_wire)
+    )
+
+
+def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
+    """Decode the complete draw plane with strict scalar types."""
+
+    initialized, visible, series, resources, regions_wire = _plane_parts_from_wire(
+        data
+    )
     regions: list[RetainedRegionDraw] = []
     for region_index, raw_region in enumerate(regions_wire):
-        region = _wire_object(
-            raw_region,
-            f"retained region {region_index}",
-            _REGION_WIRE_FIELDS,
-        )
-        draws_wire = region["draws"]
-        if not isinstance(draws_wire, (list, tuple)):
-            raise TypeError(f"retained region {region_index} draws must be an array")
-        draws = [
-            _retained_draw_from_wire(
-                raw_draw,
-                f"retained region {region_index} draw {draw_index}",
-            )
-            for draw_index, raw_draw in enumerate(draws_wire)
-        ]
         prefix = f"retained region {region_index}"
+        region = _wire_object(raw_region, prefix, _REGION_WIRE_FIELDS)
         regions.append(
             RetainedRegionDraw(
-                owner_id=_wire_integer(
-                    region["owner_id"],
-                    f"{prefix} owner_id",
-                    minimum=1,
-                    maximum=UINT64_MAX,
-                ),
-                owner_generation=_wire_integer(
-                    region["owner_generation"],
-                    f"{prefix} owner_generation",
-                    minimum=1,
-                    maximum=UINT64_MAX,
-                ),
-                region_id=_wire_integer(
-                    region["region_id"],
-                    f"{prefix} region_id",
-                    minimum=1,
-                    maximum=UINT64_MAX,
-                ),
-                logical_x=_wire_integer(
-                    region["logical_x"],
-                    f"{prefix} logical_x",
-                    minimum=INT32_MIN,
-                    maximum=INT32_MAX,
-                ),
-                logical_y=_wire_integer(
-                    region["logical_y"],
-                    f"{prefix} logical_y",
-                    minimum=INT32_MIN,
-                    maximum=INT32_MAX,
-                ),
-                logical_cols=_wire_integer(
-                    region["logical_cols"],
-                    f"{prefix} logical_cols",
-                    minimum=1,
-                    maximum=UINT32_MAX,
-                ),
-                logical_rows=_wire_integer(
-                    region["logical_rows"],
-                    f"{prefix} logical_rows",
-                    minimum=1,
-                    maximum=UINT32_MAX,
-                ),
-                clip_x=_wire_integer(
-                    region["clip_x"],
-                    f"{prefix} clip_x",
-                    minimum=0,
-                    maximum=UINT32_MAX,
-                ),
-                clip_y=_wire_integer(
-                    region["clip_y"],
-                    f"{prefix} clip_y",
-                    minimum=0,
-                    maximum=UINT32_MAX,
-                ),
-                clip_cols=_wire_integer(
-                    region["clip_cols"],
-                    f"{prefix} clip_cols",
-                    minimum=0,
-                    maximum=UINT32_MAX,
-                ),
-                clip_rows=_wire_integer(
-                    region["clip_rows"],
-                    f"{prefix} clip_rows",
-                    minimum=0,
-                    maximum=UINT32_MAX,
-                ),
-                z_order=_wire_integer(
-                    region["z_order"],
-                    f"{prefix} z_order",
-                    minimum=INT32_MIN,
-                    maximum=INT32_MAX,
-                ),
-                clipped=_wire_boolean(region["clipped"], f"{prefix} clipped"),
-                draws=tuple(draws),
+                **_region_header_from_wire(region, prefix),
+                draws=_region_draws_from_wire(region, prefix),
             )
         )
     return RetainedDrawPlane(
-        retained_initialized=_wire_boolean(
-            wire["retained_initialized"], "retained draw initialized"
-        ),
-        retained_visible=_wire_boolean(
-            wire["retained_visible"], "retained draw visible"
-        ),
+        retained_initialized=initialized,
+        retained_visible=visible,
+        regions=tuple(regions),
+        series=series,
+        resources=resources,
+    )
+
+
+def _draw_key_from_wire(value, name: str) -> tuple[str, int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise TypeError(f"{name} must be a two-item array")
+    kind = value[0]
+    if kind not in ("object", "control"):
+        raise ValueError(f"{name} must name an object or a control")
+    return kind, _wire_integer(value[1], f"{name} id", minimum=1, maximum=UINT64_MAX)
+
+
+def _retained_plane_changes_from_wire(
+    data,
+    base: RetainedDrawPlane,
+) -> RetainedDrawPlane:
+    """Rebuild a plane whose regions may be carried as changes to ``base``."""
+
+    initialized, visible, series, resources, regions_wire = _plane_parts_from_wire(
+        data
+    )
+    base_regions = {
+        (region.owner_id, region.owner_generation, region.region_id): region
+        for region in base.regions
+    }
+    regions: list[RetainedRegionDraw] = []
+    for region_index, raw_region in enumerate(regions_wire):
+        prefix = f"retained region {region_index}"
+        if not isinstance(raw_region, Mapping) or "draws" in raw_region:
+            region = _wire_object(raw_region, prefix, _REGION_WIRE_FIELDS)
+            regions.append(
+                RetainedRegionDraw(
+                    **_region_header_from_wire(region, prefix),
+                    draws=_region_draws_from_wire(region, prefix),
+                )
+            )
+            continue
+        region = _wire_object(raw_region, prefix, _REGION_CHANGE_FIELDS)
+        header = _region_header_from_wire(region, prefix)
+        previous = base_regions.get(
+            (header["owner_id"], header["owner_generation"], header["region_id"])
+        )
+        draws = None if previous is None else _draws_by_key(previous.draws)
+        if draws is None:
+            raise ValueError(f"{prefix} changes name no base region with keyed draws")
+        removed_wire = region["removed"]
+        changed_wire = region["changed"]
+        if not isinstance(removed_wire, (list, tuple)):
+            raise TypeError(f"{prefix} removed draws must be an array")
+        if not isinstance(changed_wire, (list, tuple)):
+            raise TypeError(f"{prefix} changed draws must be an array")
+        removed = set()
+        for index, raw_key in enumerate(removed_wire):
+            key = _draw_key_from_wire(raw_key, f"{prefix} removed draw {index}")
+            if key not in draws:
+                raise ValueError(f"{prefix} removes a draw its base does not have")
+            del draws[key]
+            removed.add(key)
+        changed = set()
+        for index, raw_draw in enumerate(changed_wire):
+            draw = _retained_draw_from_wire(raw_draw, f"{prefix} changed draw {index}")
+            key = retained_draw_key(draw)
+            if key in changed or key in removed:
+                raise ValueError(f"{prefix} changes one draw twice")
+            changed.add(key)
+            draws[key] = draw
+        regions.append(
+            RetainedRegionDraw(**header, draws=retained_draw_order(draws.values()))
+        )
+    return RetainedDrawPlane(
+        retained_initialized=initialized,
+        retained_visible=visible,
         regions=tuple(regions),
         series=series,
         resources=resources,
@@ -1975,22 +2223,64 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
 def display_offer_to_wire(
     offer: TerminalDisplayOffer,
     rows: WireRowRuns | None = None,
+    base: TerminalDisplayOffer | None = None,
 ) -> dict:
-    """Encode one immutable physical offer without model authority objects."""
+    """Encode one immutable physical offer without model authority objects.
+
+    With ``base``, the viewer's presented offer, an offer with the same CELL
+    geometry is encoded as its changes against that base.
+    """
 
     if not isinstance(offer, TerminalDisplayOffer):
         raise TypeError("offer must be TerminalDisplayOffer")
+    if base is not None and not isinstance(base, TerminalDisplayOffer):
+        raise TypeError("base must be TerminalDisplayOffer")
+    if base is None or (base.cell.cols, base.cell.rows) != (
+        offer.cell.cols,
+        offer.cell.rows,
+    ):
+        return {
+            "offer_id": offer.offer_id,
+            "scope": display_scope_to_wire(offer.scope),
+            "cell": snapshot_to_wire(offer.cell, rows),
+            "retained": retained_draw_plane_to_wire(offer.retained),
+        }
     return {
         "offer_id": offer.offer_id,
+        "base_offer_id": base.offer_id,
         "scope": display_scope_to_wire(offer.scope),
-        "cell": snapshot_to_wire(offer.cell, rows),
-        "retained": retained_draw_plane_to_wire(offer.retained),
+        "cell": _snapshot_changes_to_wire(offer.cell, base.cell, rows),
+        "retained": _retained_plane_changes_to_wire(offer.retained, base.retained),
     }
 
 
-def display_offer_from_wire(data: dict) -> TerminalDisplayOffer:
-    """Decode an exact immutable physical offer from the display wire."""
+def display_offer_from_wire(
+    data: dict,
+    base: TerminalDisplayOffer | None = None,
+) -> TerminalDisplayOffer:
+    """Decode an exact immutable physical offer from the display wire.
 
+    An offer carried as changes is rebuilt from ``base``, which must be the
+    offer it names.
+    """
+
+    if isinstance(data, Mapping) and "base_offer_id" in data:
+        wire = _wire_object(
+            data,
+            "display offer",
+            ("offer_id", "base_offer_id", "scope", "cell", "retained"),
+        )
+        base_offer_id = _wire_integer(
+            wire["base_offer_id"], "display offer base id", minimum=1
+        )
+        if not isinstance(base, TerminalDisplayOffer) or base.offer_id != base_offer_id:
+            raise ValueError("display offer changes name a base this viewer does not hold")
+        return TerminalDisplayOffer(
+            offer_id=_wire_integer(wire["offer_id"], "display offer id", minimum=1),
+            scope=display_scope_from_wire(wire["scope"]),
+            cell=_snapshot_changes_from_wire(wire["cell"], base.cell),
+            retained=_retained_plane_changes_from_wire(wire["retained"], base.retained),
+        )
     wire = _wire_object(
         data,
         "display offer",
@@ -3233,11 +3523,13 @@ class SharedMachine:
         *,
         since_offer: int = 0,
         display_authorized: bool = False,
+        base_offer: int = 0,
     ) -> dict:
         since = _wire_integer(since, "screen since", minimum=-1)
         since_offer = _wire_integer(
             since_offer, "screen since_offer", minimum=0
         )
+        base_offer = _wire_integer(base_offer, "screen base_offer", minimum=0)
         if not isinstance(display_authorized, bool):
             raise TypeError("display_authorized must be bool")
         with self.lock:
@@ -3247,6 +3539,13 @@ class SharedMachine:
             offer = self.session.display_offer if display_authorized else None
             if offer is not None and offer.offer_id == since_offer:
                 offer = None
+            # The holder's presented offer is the base it names only while the
+            # session still holds that same presentation.
+            base = None
+            if offer is not None and base_offer:
+                presented = self.session.acknowledged_display_offer
+                if presented is not None and presented.offer_id == base_offer:
+                    base = presented
 
         # Both renderer DTOs are immutable.  Keep the machine lock only for a
         # coherent capture; RLE and rich-plane conversion proceed while the
@@ -3261,7 +3560,7 @@ class SharedMachine:
             result["generation"] = generation
             if offer is not None:
                 result["display_offer"] = display_offer_to_wire(
-                    offer, self._wire_rows
+                    offer, self._wire_rows, base
                 )
         return result
 
@@ -3809,6 +4108,7 @@ class SessionServer:
                 params.get("since", -1),
                 since_offer=params.get("since_offer", 0),
                 display_authorized=authorized,
+                base_offer=params.get("base_offer", 0),
             )
             offer = result.get("display_offer")
             if authorized and offer is not None:

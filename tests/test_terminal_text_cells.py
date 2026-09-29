@@ -20,8 +20,15 @@ from rich_terminal.cell_model import (
     TerminalView,
 )
 from rich_terminal.pygame_view import _glyph_slots
-from session import OutputSnapshotRows, TerminalCell, TerminalSnapshot
-from shared_session import WireRowRuns, snapshot_from_wire, snapshot_to_wire
+from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
+from session import OutputSnapshotRows, TerminalCell, TerminalDisplayOffer, TerminalSnapshot
+from shared_session import (
+    WireRowRuns,
+    display_offer_from_wire,
+    display_offer_to_wire,
+    snapshot_from_wire,
+    snapshot_to_wire,
+)
 
 
 def _row(terminal: VirtualTerminal, row: int = 0) -> list[tuple[str, int]]:
@@ -266,3 +273,67 @@ def test_glyph_run_characters_take_their_width_in_slots() -> None:
     assert total == 6
     slots, total = _glyph_slots("ab")
     assert (list(slots), total) == ([("a", 0, 1), ("b", 1, 1)], 2)
+
+
+def _cells_offer(offer_id: int, *rows, cursor=(0, 0, False)) -> TerminalDisplayOffer:
+    return TerminalDisplayOffer(
+        offer_id,
+        DisplayScope(1, 2, 3, offer_id, 0, offer_id, offer_id),
+        TerminalSnapshot(len(rows[0]), len(rows), rows, cursor_col=cursor[1],
+                         cursor_row=cursor[0], cursor_visible=cursor[2],
+                         alternate_screen=False),
+        RetainedDrawPlane(False, False, ()),
+    )
+
+
+def _text_row(*cells) -> tuple[TerminalCell, ...]:
+    return tuple(TerminalCell(char, (1, 2, 3), (4, 5, 6), attrs) for char, attrs in cells)
+
+
+def test_offer_changes_carry_only_the_cell_rows_that_differ() -> None:
+    top = _text_row(("a", 0), ("b", 0), (" ", 0), (" ", 0))
+    wide = _text_row(("\u4e2d", W), ("", C), ("x", 0), (" ", 0))
+    blank = _text_row(*[(" ", 0)] * 4)
+    base = _cells_offer(4, top, blank, blank)
+    moved = _text_row((" ", 0), ("\u4e2d", W), ("", C), ("e\u0301", 0))
+    offer = _cells_offer(5, top, moved, _text_row(*[(" ", 0)] * 4),
+                         cursor=(1, 3, True))
+
+    for memo in (None, WireRowRuns()):
+        wire = display_offer_to_wire(offer, memo, base)
+        blue, red = 0x010203, 0x040506
+        # The equal third row is a different object but is not sent.
+        assert wire["cell"]["changed_rows"] == [[1, [
+            [1, " ", blue, red, 0], [1, "\u4e2d", blue, red, W],
+            [1, "", blue, red, C], [1, "e\u0301", blue, red, 0],
+        ]]]
+        assert wire["cell"]["cursor"] == [1, 3, True]
+        rebuilt = display_offer_from_wire(wire, base)
+        assert rebuilt == offer
+        assert rebuilt.cell.cells[0] is top and rebuilt.cell.cells[2] is blank
+
+    wire = display_offer_to_wire(_cells_offer(6, top, wide, blank), base=base)
+    assert display_offer_from_wire(wire, base).cell.cells[1] == wide
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda cell: cell["changed_rows"].append([0, cell["changed_rows"][0][1]]),
+         "increasing order"),
+        (lambda cell: cell["changed_rows"][0].__setitem__(0, 3), "snapshot changed row 0 index"),
+        (lambda cell: cell["changed_rows"][0][1].pop(), "has 3 cells"),
+        (lambda cell: cell["changed_rows"][0][1][1].__setitem__(4, 0), "breaks a wide pair"),
+        (lambda cell: cell.update(cols=5), "base's geometry"),
+    ],
+)
+def test_offer_changes_reject_rows_that_cannot_rebuild_the_screen(mutate, match) -> None:
+    top = _text_row(("a", 0), ("b", 0), (" ", 0), (" ", 0))
+    blank = _text_row(*[(" ", 0)] * 4)
+    base = _cells_offer(4, top, blank, blank)
+    moved = _text_row((" ", 0), ("\u4e2d", W), ("", C), ("y", 0))
+    wire = display_offer_to_wire(_cells_offer(5, top, moved, blank), base=base)
+    mutate(wire["cell"])
+    with pytest.raises((ValueError, TypeError), match=match):
+        display_offer_from_wire(wire, base)
+

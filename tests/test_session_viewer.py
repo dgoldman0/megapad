@@ -432,6 +432,8 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
     assert state.pending_offer is None
     assert state.retained_plane is first.retained
     assert state.frame_plane is first.retained
+    assert state.presented_offer is first
+    assert state.base_offer_id == first.offer_id
 
     second = _display_offer(2, char="Y")
     state.stage(second, 9)
@@ -444,6 +446,7 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
     assert state.since_offer == first.offer_id
     assert state.pending_offer is None
     assert state.retained_plane is None
+    assert state.base_offer_id == 0
 
     state.stage(second, 9)
     state.stage_frame_hit_map(second, ())
@@ -456,6 +459,7 @@ def test_retained_display_state_promotes_only_an_accepted_offer():
     state.reset()
     assert state.since_offer == second.offer_id
     assert state.retained_plane is None
+    assert state.base_offer_id == 0
     with pytest.raises(RuntimeError, match="did not advance"):
         state.stage(_display_offer(second.offer_id), 10)
     with pytest.raises(RuntimeError, match="did not advance"):
@@ -671,6 +675,50 @@ def test_retained_display_reset_clears_fallback_and_input_context():
     assert keyboard.text_input(SimpleNamespace(text="stale"))
     assert client.requests == requests_before_waiting_input
     assert "waiting" in keyboard.last_error
+
+
+def test_screen_offer_changes_rebuild_from_the_presented_offer():
+    pygame = _FakePygame()
+    keyboard = _GuestKeyboardForwarder(
+        pygame, _RecordingClient(), generation=3, display_required=True
+    )
+    terminal = VirtualTerminal(cols=1, rows=1)
+    state = _RetainedDisplayState()
+    presented = _display_offer(1, char="A")
+    state.stage(presented, 3)
+    state.stage_frame_hit_map(presented, ())
+    state.finish_presentation({"status": "presented", "presented": True, "revision": 4})
+    offered = _display_offer(3, char="B")
+    update = {
+        "changed": True,
+        "generation": 3,
+        "revision": 4,
+        "display_offer": display_offer_to_wire(offered, base=presented),
+    }
+    assert update["display_offer"]["base_offer_id"] == presented.offer_id
+
+    _accept_screen_update(
+        update,
+        display_holder=True,
+        terminal=terminal,
+        keyboard=keyboard,
+        display_state=state,
+        revision=4,
+    )
+
+    assert state.pending_offer == offered
+    assert terminal.grid[0][0][0] == "B"
+    # A viewer that dropped its presented offer cannot rebuild the changes.
+    state.reset()
+    with pytest.raises(ValueError, match="does not hold"):
+        _accept_screen_update(
+            update,
+            display_holder=True,
+            terminal=terminal,
+            keyboard=keyboard,
+            display_state=state,
+            revision=4,
+        )
 
 
 def test_screen_cell_fallback_clears_plane_but_offer_cell_wins_when_present():
