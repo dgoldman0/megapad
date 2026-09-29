@@ -2,12 +2,12 @@
 
 **Started:** 2026-09-29
 
-**Status:** Phases 1–4 complete. Decisions D1–D18 were confirmed on
+**Status:** Phases 1–5 complete. Decisions D1–D18 were confirmed on
 2026-09-29 and are recorded in `docs/floating-point.md`, the normative
-floating-point specification. FP16 and BF16, and the FP32 and FP64
-element-wise operations, give the same bit-exact results in all four
-backends. FP32 and FP64 reductions fail closed until Phase 5, which is
-next.
+floating-point specification. Every FP16, BF16, FP32, and FP64 tile
+operation the spec defines outside Phases 6–8 (element-wise operations,
+reductions, dot products, and TACC formats) gives the same bit-exact result
+in all four backends. Phase 6 (conversions and compares) is next.
 
 **Branch:** `feature/megapad-fp64`
 
@@ -586,7 +586,49 @@ Progress:
     beat logic (`tamac_beat_reg`, `mp64_tile.v:1733-1896`).
 - **Timing.** Add the D8 cycle table to Python and C++.
 
-### Phase 5 — FP32/FP64 reductions and TACC formats
+### Phase 5 — FP32/FP64 reductions and TACC formats (complete)
+
+Progress:
+
+- **Software backends.** The Python reductions were already
+  format-generic. The native ones (tree, publication, extremes, lane width)
+  now take the accumulation format instead of assuming binary32. The
+  admission rule refuses in FP32/FP64 only what §5.2 makes illegal and
+  FP32/FP64 VSEL (Phase 6). TACC accepts FP32 (16 binary64 lanes, 128-byte
+  image) and FP64 (8 lanes, 64-byte image), and the TAMAC arithmetic costs
+  join the §10 table in both CPUs.
+- **RTL tree.** `S_TREE` runs the canonical tree on the FMA units over
+  binary64 values:
+  - a product phase for DOT, DOTACC, and SUMSQ (WMUL-shaped for FP32,
+    MUL-shaped for FP64);
+  - exact widening for SUM and L1;
+  - one group of `ceil(nodes / FMA_UNITS)` beats per level, written in
+    place;
+  - reserved `ACC_ACC` beats that also publish.
+
+  MIN, MAX, MINIDX, and MAXIDX are combinational over the lanes widened to
+  binary64. The extra cycles are exactly the §10 costs, and `tb_tile`
+  checks each one.
+- **RTL TACC.** Each FMA unit adds one exact product to one binary64
+  accumulator lane per beat (8 beats for FP32, 4 for FP64). The transfer
+  module derives the active beats and store mask from the format.
+- **Vectors.** `tile_fp_vectors.vec` gains 240 FP32/FP64 reduction and dot
+  rows under all four `TCTRL` states (1,504 rows). `tamac_fp_vectors.vec`
+  gains six FP32/FP64 cases whose boundary values are hand-derived and
+  checked against the emulator (12 cases). `tb_tacc_transfer` checks FP64
+  staging.
+- **Regression.** Passing:
+  - the full RTL list;
+  - the Python/native suites, including seeded native differentials for
+    every FP32/FP64 reduction and TAMAC form;
+  - the hosted suite (2,313);
+  - the worker-spawning `test_tacc_contention.py` gate (1, 2, and 4
+    workers).
+
+  The hosted simulator changed, so the canonical physical Desktop journey
+  ran once, with Akashic `f2f06799` and this branch at `565c9c4`. It passed
+  in 203 s, with a peak aggregate RSS of 512 MB, clean trees, and the native
+  simulator executor.
 
 - **Reductions.** TRED SUM, SUMSQ, L1, MIN, MAX, MINIDX, and MAXIDX, and TMUL
   DOT and DOTACC, publishing binary64. Reductions use the canonical tree
