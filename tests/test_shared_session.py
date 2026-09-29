@@ -2230,10 +2230,10 @@ def test_screen_encodes_snapshot_outside_machine_lock(monkeypatch):
         allow_conversion = threading.Event()
         original = snapshot_to_wire
 
-        def blocking_conversion(snapshot):
+        def blocking_conversion(snapshot, rows=None):
             conversion_started.set()
             assert allow_conversion.wait(timeout=2.0)
-            return original(snapshot)
+            return original(snapshot, rows)
 
         monkeypatch.setattr(
             "shared_session.snapshot_to_wire",
@@ -2277,10 +2277,10 @@ def test_screen_encodes_display_offer_outside_machine_lock(monkeypatch):
         allow_conversion = threading.Event()
         original = display_offer_to_wire
 
-        def blocking_conversion(offer):
+        def blocking_conversion(offer, rows=None):
             conversion_started.set()
             assert allow_conversion.wait(timeout=2.0)
-            return original(offer)
+            return original(offer, rows)
 
         monkeypatch.setattr(
             "shared_session.display_offer_to_wire",

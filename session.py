@@ -245,6 +245,62 @@ class TerminalDisplayOffer:
             raise TypeError("retained must be RetainedDrawPlane")
 
 
+def _output_snapshot_row(row) -> tuple[TerminalCell, ...]:
+    palette = VirtualTerminal.COLORS
+    # CELL-1 style bits 0 to 5 match; its strike bit 6 is the grid's
+    # 0x80, and its WIDE and CONTINUATION bits 7 and 8 are one higher.
+    return tuple(
+        TerminalCell(
+            char="".join(map(chr, (cell.codepoint, *cell.extras)))
+            if cell.codepoint else "",
+            fg=palette[cell.foreground],
+            bg=palette[cell.background],
+            attrs=(cell.attributes & 0x3F)
+            | ((cell.attributes & 0x1C0) << 1),
+        )
+        for cell in row
+    )
+
+
+class OutputSnapshotRows:
+    """Renderer snapshots of CELL views that convert only replaced rows.
+
+    A CELL publication keeps every row it did not change as the same
+    immutable tuple of immutable cells.  A row object from the previous
+    snapshot therefore converts to exactly the renderer row made for it
+    then, and only rows the model replaced are converted.  Entries are keyed
+    by row identity and hold their rows, so no other object can share a key
+    while its entry exists, and a matching key is always the same row.
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self) -> None:
+        self._rows: dict[int, tuple[tuple, tuple[TerminalCell, ...]]] = {}
+
+    def snapshot(self, view: TerminalView) -> TerminalSnapshot:
+        previous = self._rows
+        current: dict[int, tuple[tuple, tuple[TerminalCell, ...]]] = {}
+        cells = []
+        for row in view.cells:
+            key = id(row)
+            entry = current.get(key) or previous.get(key)
+            if entry is None:
+                entry = (row, _output_snapshot_row(row))
+            current[key] = entry
+            cells.append(entry[1])
+        self._rows = current
+        return TerminalSnapshot(
+            cols=view.cols,
+            rows=view.rows,
+            cells=tuple(cells),
+            cursor_col=view.cursor.column,
+            cursor_row=view.cursor.row,
+            cursor_visible=view.cursor.visible,
+            alternate_screen=False,
+        )
+
+
 @dataclass(frozen=True)
 class RunReport:
     reason: str
@@ -591,6 +647,7 @@ class MachineSession:
         self._rich_terminal_driver: RichTerminalDriver | None = None
         self._output_view: TerminalView | None = None
         self._output_view_selected = False
+        self._output_snapshot_rows = OutputSnapshotRows()
         self._logical_composite_output: CompositeTerminalView | None = None
         self._displayed_composite_output: CompositeTerminalView | None = None
         self._display_offer: TerminalDisplayOffer | None = None
@@ -1178,7 +1235,7 @@ class MachineSession:
             )
         try:
             scope, retained = project_composite_draw_plane(offered)
-            cell_snapshot = self._snapshot_output_view(cell)
+            cell_snapshot = self._output_snapshot_rows.snapshot(cell)
             display_offer = TerminalDisplayOffer(
                 offer_id=self._next_display_offer_id,
                 scope=scope,
@@ -1940,7 +1997,7 @@ class MachineSession:
             else None
         )
         if view is not None:
-            return self._snapshot_output_view(view)
+            return self._output_snapshot_rows.snapshot(view)
         terminal = self.terminal
         with terminal._lock:
             cells = tuple(
@@ -1964,35 +2021,6 @@ class MachineSession:
                 cursor_visible=terminal.cursor_visible,
                 alternate_screen=terminal._in_alt_screen,
             )
-
-    @staticmethod
-    def _snapshot_output_view(view: TerminalView) -> TerminalSnapshot:
-        palette = VirtualTerminal.COLORS
-        # CELL-1 style bits 0 to 5 match; its strike bit 6 is the grid's
-        # 0x80, and its WIDE and CONTINUATION bits 7 and 8 are one higher.
-        cells = tuple(
-            tuple(
-                TerminalCell(
-                    char="".join(map(chr, (cell.codepoint, *cell.extras)))
-                    if cell.codepoint else "",
-                    fg=palette[cell.foreground],
-                    bg=palette[cell.background],
-                    attrs=(cell.attributes & 0x3F)
-                    | ((cell.attributes & 0x1C0) << 1),
-                )
-                for cell in row
-            )
-            for row in view.cells
-        )
-        return TerminalSnapshot(
-            cols=view.cols,
-            rows=view.rows,
-            cells=cells,
-            cursor_col=view.cursor.column,
-            cursor_row=view.cursor.row,
-            cursor_visible=view.cursor.visible,
-            alternate_screen=False,
-        )
 
 
 def _load_bios(path: Path) -> tuple[bytes, dict[str, int]]:

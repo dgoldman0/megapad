@@ -247,28 +247,81 @@ def _rgb_unpack(value: int) -> tuple[int, int, int]:
     return ((value >> 16) & 0xFF, (value >> 8) & 0xFF, value & 0xFF)
 
 
-def snapshot_to_wire(snapshot: TerminalSnapshot) -> dict:
-    """Run-length encode a terminal snapshot for the local viewer protocol."""
-    runs: list[list[Any]] = []
+def _row_runs(row) -> tuple[tuple[int, tuple], ...]:
+    runs: list[tuple[int, tuple]] = []
     current = None
     count = 0
-    for row in snapshot.cells:
-        for cell in row:
-            value = (
-                cell.char,
-                _rgb_pack(cell.fg),
-                _rgb_pack(cell.bg),
-                cell.attrs,
-            )
-            if value == current:
-                count += 1
-                continue
-            if current is not None:
-                runs.append([count, *current])
-            current = value
-            count = 1
+    for cell in row:
+        value = (
+            cell.char,
+            _rgb_pack(cell.fg),
+            _rgb_pack(cell.bg),
+            cell.attrs,
+        )
+        if value == current:
+            count += 1
+            continue
+        if current is not None:
+            runs.append((count, current))
+        current = value
+        count = 1
     if current is not None:
-        runs.append([count, *current])
+        runs.append((count, current))
+    return tuple(runs)
+
+
+class WireRowRuns:
+    """The runs of each row of the last snapshot encoded with this memo.
+
+    Renderer snapshots share every unchanged row, an immutable tuple of
+    immutable cells, between offers.  A row object met in the previous
+    snapshot therefore has exactly the runs recorded for it then, and only
+    new rows are encoded.  Entries are keyed by row identity and hold their
+    rows, so no other object can share a key while its entry exists, and a
+    matching key is always the same row.  Each call replaces the whole memo,
+    so concurrent callers can only lose entries, never share a wrong one.
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self) -> None:
+        self._rows: dict[int, tuple[tuple, tuple[tuple[int, tuple], ...]]] = {}
+
+    def runs(self, rows) -> list[tuple[tuple[int, tuple], ...]]:
+        previous = self._rows
+        current: dict[int, tuple[tuple, tuple[tuple[int, tuple], ...]]] = {}
+        result = []
+        for row in rows:
+            key = id(row)
+            entry = current.get(key) or previous.get(key)
+            if entry is None:
+                entry = (row, _row_runs(row))
+            current[key] = entry
+            result.append(entry[1])
+        self._rows = current
+        return result
+
+
+def snapshot_to_wire(
+    snapshot: TerminalSnapshot,
+    rows: WireRowRuns | None = None,
+) -> dict:
+    """Run-length encode a terminal snapshot for the local viewer protocol.
+
+    Runs continue across row ends.  ``rows`` keeps each row's runs between
+    snapshots that share rows.
+    """
+    runs: list[list[Any]] = []
+    last = None
+    for row_runs in (rows if rows is not None else WireRowRuns()).runs(
+        snapshot.cells
+    ):
+        for count, value in row_runs:
+            if value == last:
+                runs[-1][0] += count
+            else:
+                runs.append([count, *value])
+                last = value
     return {
         "cols": snapshot.cols,
         "rows": snapshot.rows,
@@ -1919,7 +1972,10 @@ def retained_draw_plane_from_wire(data: dict) -> RetainedDrawPlane:
     )
 
 
-def display_offer_to_wire(offer: TerminalDisplayOffer) -> dict:
+def display_offer_to_wire(
+    offer: TerminalDisplayOffer,
+    rows: WireRowRuns | None = None,
+) -> dict:
     """Encode one immutable physical offer without model authority objects."""
 
     if not isinstance(offer, TerminalDisplayOffer):
@@ -1927,7 +1983,7 @@ def display_offer_to_wire(offer: TerminalDisplayOffer) -> dict:
     return {
         "offer_id": offer.offer_id,
         "scope": display_scope_to_wire(offer.scope),
-        "cell": snapshot_to_wire(offer.cell),
+        "cell": snapshot_to_wire(offer.cell, rows),
         "retained": retained_draw_plane_to_wire(offer.retained),
     }
 
@@ -1965,6 +2021,8 @@ class SharedMachine:
         self.idle_tick_cycles = int(idle_tick_cycles)
         self.idle_sleep_s = float(idle_sleep_s)
         self._host_profile_enabled = host_profile
+        # Screen encodings reuse the runs of rows unchanged since the last.
+        self._wire_rows = WireRowRuns()
         self.lock = threading.RLock()
         self.condition = threading.Condition(self.lock)
         self.paused = False
@@ -3198,11 +3256,13 @@ class SharedMachine:
             "revision": revision,
         }
         if snapshot is not None:
-            result["snapshot"] = snapshot_to_wire(snapshot)
+            result["snapshot"] = snapshot_to_wire(snapshot, self._wire_rows)
         if display_authorized:
             result["generation"] = generation
             if offer is not None:
-                result["display_offer"] = display_offer_to_wire(offer)
+                result["display_offer"] = display_offer_to_wire(
+                    offer, self._wire_rows
+                )
         return result
 
     @staticmethod

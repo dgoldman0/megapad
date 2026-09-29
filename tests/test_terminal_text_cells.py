@@ -20,8 +20,8 @@ from rich_terminal.cell_model import (
     TerminalView,
 )
 from rich_terminal.pygame_view import _glyph_slots
-from session import MachineSession, TerminalCell, TerminalSnapshot
-from shared_session import snapshot_from_wire, snapshot_to_wire
+from session import OutputSnapshotRows, TerminalCell, TerminalSnapshot
+from shared_session import WireRowRuns, snapshot_from_wire, snapshot_to_wire
 
 
 def _row(terminal: VirtualTerminal, row: int = 0) -> list[tuple[str, int]]:
@@ -114,7 +114,7 @@ def test_cell_view_snapshots_carry_whole_characters_and_true_columns() -> None:
         Cell(ord("o"), 7, 0),
         Cell(ord("k"), 7, 0),
     ]])
-    snapshot = MachineSession._snapshot_output_view(view)
+    snapshot = OutputSnapshotRows().snapshot(view)
     assert [(cell.char, cell.attrs) for cell in snapshot.cells[0]] == [
         ("\u4e2d", 0x80 | ATTR_WIDE),
         ("", 0x80 | ATTR_CONTINUATION),
@@ -126,6 +126,98 @@ def test_cell_view_snapshots_carry_whole_characters_and_true_columns() -> None:
     assert snapshot.find("ok") == [(0, 3)]
     assert snapshot.find("\u0301") == [(0, 2)]
     assert snapshot.row_text(0, 2, 4) == "e\u0301o"
+
+
+def _view_of_rows(rows) -> TerminalView:
+    """A view holding exactly these row objects, as a publication shares them."""
+
+    return TerminalView(
+        attachment_epoch=1,
+        session_id=1,
+        presentation_epoch=1,
+        revision=1,
+        cols=len(rows[0]),
+        rows=len(rows),
+        cells=tuple(rows),
+        dirty_spans=(),
+        cursor=Cursor(0, 0, False),
+    )
+
+
+def test_cell_view_snapshots_convert_only_rows_the_model_replaced() -> None:
+    top = (
+        Cell(0x4E2D, 7, 0, ATTRIBUTE_WIDE),
+        Cell(0, 7, 0, ATTRIBUTE_CONTINUATION),
+        Cell(ord("e"), 2, 4, ATTRIBUTE_CLUSTER | 1, (0x301,)),
+    )
+    blank = tuple(Cell(ord(" "), 7, 0) for _ in range(3))
+    typed = (Cell(ord("x"), 1, 0, 0x40), Cell(ord(" "), 7, 0), Cell(ord(" "), 7, 0))
+    rows = OutputSnapshotRows()
+
+    first = rows.snapshot(_view_of_rows((top, blank, blank)))
+    assert first.cells[1] is first.cells[2]
+    second = rows.snapshot(_view_of_rows((top, typed, blank)))
+    assert second == OutputSnapshotRows().snapshot(_view_of_rows((top, typed, blank)))
+    assert second.cells[0] is first.cells[0]
+    assert second.cells[2] is first.cells[2]
+    assert second.cells[1] != first.cells[1]
+
+    # Only the same row object is reused; an equal row is converted anew.
+    equal = tuple(
+        Cell(cell.codepoint, cell.foreground, cell.background, cell.attributes, cell.extras)
+        for cell in top
+    )
+    third = rows.snapshot(_view_of_rows((equal, typed, blank)))
+    assert third == second
+    assert third.cells[0] is not second.cells[0]
+    assert third.cells[1] is second.cells[1]
+
+
+def test_snapshot_wire_reuses_row_runs_and_joins_runs_across_rows(monkeypatch) -> None:
+    import shared_session
+
+    def row(text: str):
+        return tuple(TerminalCell(char, (1, 2, 3), (4, 5, 6), 0) for char in text)
+
+    def snapshot(*rows) -> TerminalSnapshot:
+        return TerminalSnapshot(3, len(rows), rows, cursor_col=0, cursor_row=0,
+                                cursor_visible=False, alternate_screen=False)
+
+    encoded = []
+    original = shared_session._row_runs
+
+    def counting(cells):
+        encoded.append(cells)
+        return original(cells)
+
+    monkeypatch.setattr(shared_session, "_row_runs", counting)
+    ends, spaces, begins = row("a  "), row("   "), row("  b")
+    memo = WireRowRuns()
+
+    first = snapshot(ends, spaces, begins)
+    wire = snapshot_to_wire(first, memo)
+    blue, red = 0x010203, 0x040506
+    assert wire["runs"] == [[1, "a", blue, red, 0], [7, " ", blue, red, 0],
+                            [1, "b", blue, red, 0]]
+    assert snapshot_from_wire(wire) == first
+
+    # Only the replaced row is encoded; the others keep their runs, and runs
+    # still join across row ends exactly as a fresh encoding joins them.
+    typed = row("x  ")
+    second = snapshot(ends, typed, begins, spaces)
+    encoded.clear()
+    wire = snapshot_to_wire(second, memo)
+    assert [id(cells) for cells in encoded] == [id(typed)]
+    assert wire == snapshot_to_wire(second)
+    assert wire["runs"][2:4] == [[1, "x", blue, red, 0], [4, " ", blue, red, 0]]
+
+    # Only the same row object is reused; an equal row is encoded anew.
+    equal = row("a  ")
+    third = snapshot(equal, typed, begins, spaces)
+    encoded.clear()
+    wire = snapshot_to_wire(third, memo)
+    assert [id(cells) for cells in encoded] == [id(equal)]
+    assert wire == snapshot_to_wire(third)
 
 
 def _snapshot(chars_and_attrs) -> TerminalSnapshot:
