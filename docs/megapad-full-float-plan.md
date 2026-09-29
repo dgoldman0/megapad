@@ -2,11 +2,10 @@
 
 **Started:** 2026-09-29
 
-**Status:** Phase 1 complete; Phase 2 in progress. Decisions D1–D18 were
-confirmed on 2026-09-29 and are recorded in `docs/floating-point.md`, the
-normative floating-point specification. The exact reference and the Python
-emulator, native accelerator, and hosted simulator slices of Phase 2 are
-done; the RTL slice is next.
+**Status:** Phases 1 and 2 complete. Decisions D1–D18 were confirmed on
+2026-09-29 and are recorded in `docs/floating-point.md`, the normative
+floating-point specification. FP16 and BF16 now give the same bit-exact
+results in all four backends. Phase 3 is next.
 
 **Branch:** `feature/megapad-fp64`
 
@@ -404,7 +403,22 @@ Progress:
 - **Folded in.** The FP16/BF16 immediate-operand rule (D17) was done here
   rather than in Phase 4. EW 6 and 7 now trap in the emulator ahead of
   Phase 3.
-- **RTL.** Not started.
+- **RTL.** Done. `rtl/core/mp64_fp_half.v` replaces `mp64_fp16_alu.v`. Each
+  lane computes through the verified binary32 exact modules: add, subtract,
+  and multiply round to binary32 and then once more, and FMA/MAC uses a new
+  round-to-odd binary32 sum. A correct binary32→FP16/BF16 narrowing is
+  added. The changes also cover:
+  - the MIN/MAX winner is widened exactly and gives the canonical NaN;
+  - L1 is a float reduction;
+  - MIN/MAX under ACC_ACC, float and integer, keep a running extreme;
+  - floating ACC_ACC clears ACC1–3;
+  - the float immediate is converted exactly;
+  - FP16/BF16 SHUFFLE, RROT, and extended TALU use 16-bit lanes.
+
+  `rtl/sim/gen_tile_fp_vectors.py` generates 656 golden vectors from the
+  Python emulator, and `tb_tile_fp.v` replays them in `make -C rtl/sim tile`.
+  All pass, along with the tile, TACC, cluster, and SoC benches and SoC
+  elaboration.
 
 1. **Shared exact module.** `shared/ieee_fp.py` covers binary16, bfloat16,
    binary32, and binary64. It provides:
@@ -586,6 +600,17 @@ without fixing them.
   matters for non-commutative functions, and the forced function 0 is
   commutative for TALU and TMUL. Float formats get their own exact rule
   (D17).
+- **RTL in-place sources.** For SS=3 the RTL uses `[TSRC0]` as both operands.
+  The specification and Python use `[TDST] op [TSRC0]`. This affects every
+  format.
+- **RTL immediate decode.** The CPU passes byte 2 as `mex_imm8` and does not
+  force the function to 0 for SS=2. The immediate is the function byte.
+  RROT's control byte really is byte 2, which may be why this went unnoticed.
+- **Immediate TMUL and the TACC namespace.** The RTL sends any TMUL whose
+  function byte ends in 6 or 7 to the TACC decoder, even for SS=2. Python
+  does so only for the exact byte `0x06`.
+- **Tile Z flag in RTL.** The RTL CPU never updates FLAGS.Z after a tile
+  operation.
 - **KDOS file-abstraction test.**
   `tests/simulator/test_kdos_file_abstraction.py::test_signed_capacity_and_eof_guards_reject_safe_high_bit_cases`
   fails on the base commit `0cfece4`, independently of this work.

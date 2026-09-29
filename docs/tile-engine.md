@@ -512,18 +512,21 @@ FP64-MODE   \ Sets TMODE = 7
 
 ### Current implementation status
 
-For FP16 and BF16, the Python emulator, native accelerator, and hosted
-simulator implement these rules; all three take their values from
-`shared/ieee_fp.py`, and a seeded differential test holds the native
-accelerator to the Python results.  FP32 and FP64 arrive in Phases 3–5 of
+For FP16 and BF16, the Python emulator, native accelerator, hosted simulator,
+and RTL implement these rules.  The software backends take their values from
+`shared/ieee_fp.py`, a seeded differential test holds the native accelerator
+to the Python results, and the RTL replays emulator-generated golden vectors
+(`rtl/sim/tile_fp_vectors.vec`).  FP32 and FP64 arrive in Phases 3–5 of
 `docs/megapad-full-float-plan.md` and the new operations in Phases 6 and 8;
 until then EW 6 and 7 trap in the emulator and are rejected by the hosted
-simulator.  Float PACK and UNPACK remain until `TCVT` replaces them.
+simulator, while the RTL still treats them as FP16.  Float PACK and UNPACK
+remain until `TCVT` replaces them.
 
-The RTL datapath converges in the RTL slice of Phase 2.  Until then it still
-rounds TMAC/TFMA twice, flushes subnormal FP16/BF16 products to zero, appears
-to truncate BF16 add and multiply, adds FP TRED MIN/MAX results to ACC0 under
-ACC_ACC, keeps ACC1--ACC3 on floating ACC_ACC, and treats EW 6/7 as FP16.
+Three RTL encoding differences affect every format and are tracked in the
+plan: in-place sources use `[TSRC0]` for both operands, the CPU passes byte 2
+rather than the function byte as the immediate operand, and an immediate
+TMUL whose function byte ends in 6 or 7 reaches the TACC decoder.  The RTL
+also does not update the Z flag after tile operations.
 
 ---
 

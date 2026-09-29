@@ -35,6 +35,10 @@
 //       Add a binary32 accumulator to an exact product descriptor with one
 //       final binary32 rounding point.  This is the TACC feedback operation.
 //
+//   mp64_fp32_add_exact_product_rto
+//       The same sum rounded to odd, for the FP16/BF16 fused multiply-add
+//       lanes that round it once more to the lane format.
+//
 // Internal modules are intentionally kept in this file so every consumer uses
 // the same decoder and final rounding rules.
 
@@ -97,7 +101,13 @@ endmodule
 // two exact zeros produces -0 only when both zero signs are negative.
 // ============================================================================
 
-module mp64_fp32_exact_add_terms (
+// ROUND_TO_ODD selects round-to-odd instead of round-to-nearest-even: the
+// retained significand is truncated and its last bit is set when any
+// discarded bit was nonzero.  A round-to-odd binary32 value rounds correctly
+// once more to any format with at most 22 significand bits (FP16, BF16).
+module mp64_fp32_exact_add_terms #(
+    parameter ROUND_TO_ODD = 0
+) (
     input  wire         a_nan,
     input  wire         a_inf,
     input  wire         a_zero,
@@ -367,11 +377,18 @@ module mp64_fp32_exact_add_terms (
                     end else begin
                         retained_significand =
                             work_significand[26:3];
-                        round_up =
-                            work_significand[2] &&
-                            (work_significand[1] ||
-                             work_significand[0] ||
-                             retained_significand[0]);
+                        if (ROUND_TO_ODD) begin
+                            retained_significand[0] =
+                                retained_significand[0] |
+                                (|work_significand[2:0]);
+                            round_up = 1'b0;
+                        end else begin
+                            round_up =
+                                work_significand[2] &&
+                                (work_significand[1] ||
+                                 work_significand[0] ||
+                                 retained_significand[0]);
+                        end
                         rounded_significand =
                             {1'b0, retained_significand} +
                             {{24{1'b0}}, round_up};
@@ -748,7 +765,9 @@ endmodule
 // Tile engines instantiate this module directly so reduction and TACC modes
 // share one final-rounding cone rather than relying on synthesis to merge two
 // separately elaborated adders.
-module mp64_fp32_feedback_rne (
+module mp64_fp32_feedback_rne #(
+    parameter ROUND_TO_ODD = 0
+) (
     input  wire        use_exact_product,
     input  wire [31:0] a,
     input  wire [31:0] b,
@@ -814,7 +833,9 @@ module mp64_fp32_feedback_rne (
         .value_exponent     (b_exponent)
     );
 
-    mp64_fp32_exact_add_terms u_add (
+    mp64_fp32_exact_add_terms #(
+        .ROUND_TO_ODD   (ROUND_TO_ODD)
+    ) u_add (
         .a_nan          (a_nan),
         .a_inf          (a_inf),
         .a_zero         (a_zero),
@@ -909,6 +930,44 @@ module mp64_fp32_add_exact_product_rne (
     output wire [31:0] result
 );
     mp64_fp32_feedback_rne u_feedback (
+        .use_exact_product  (1'b1),
+        .a                  (accumulator),
+        .b                  (32'd0),
+        .product_nan        (product_nan),
+        .product_inf        (product_inf),
+        .product_zero       (product_zero),
+        .product_finite     (product_finite),
+        .product_sign       (product_sign),
+        .product_significand(product_significand),
+        .product_exponent   (product_exponent),
+        .result             (result)
+    );
+endmodule
+
+// ============================================================================
+// Round-to-odd binary32 accumulator + exact FP16/BF16 product.
+//
+// The FP16/BF16 fused multiply-add lanes add an exact product to a widened
+// addend here and round the binary32 result once more to the lane format.
+// Round-to-odd makes that second rounding exact: 24 >= p + 2 for p <= 11.
+// ============================================================================
+
+module mp64_fp32_add_exact_product_rto (
+    input  wire [31:0] accumulator,
+
+    input  wire        product_nan,
+    input  wire        product_inf,
+    input  wire        product_zero,
+    input  wire        product_finite,
+    input  wire        product_sign,
+    input  wire [21:0] product_significand,
+    input  wire signed [10:0] product_exponent,
+
+    output wire [31:0] result
+);
+    mp64_fp32_feedback_rne #(
+        .ROUND_TO_ODD       (1)
+    ) u_feedback (
         .use_exact_product  (1'b1),
         .a                  (accumulator),
         .b                  (32'd0),

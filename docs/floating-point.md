@@ -559,7 +559,7 @@ models no instruction encodings.
 | This specification | 1 | Adopted |
 | Exact reference oracle (`shared/ieee_fp.py`) | 2 | Implemented |
 | FP16/BF16 unification, including §3, §4, §5.1, fused MAC/FMA, and integer running MIN/MAX: Python emulator, native accelerator, hosted simulator | 2 | Implemented |
-| FP16/BF16 unification: RTL | 2 | Specified |
+| FP16/BF16 unification: RTL | 2 | Implemented |
 | 4-bit `TMODE.EW`, `TACC_STATUS` repack, format descriptors, `FP32-MODE`, `FP64-MODE` | 3 | Specified |
 | FP32/FP64 element-wise operations and the FMA unit | 4 | Specified |
 | FP32/FP64 reductions and TACC formats | 5 | Specified |

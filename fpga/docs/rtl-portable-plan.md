@@ -177,7 +177,7 @@ The largest rewrite — the 512-bit SIMD tile engine.
 
 | Step | Deliverable | Tests |
 |------|-------------|-------|
-| 5.1 | `mp64_fp16_alu.v` — FP16/BF16 ALU | `tb_tile` subset |
+| 5.1 | `mp64_fp_half.v` — FP16/BF16 ALU | `tb_tile` subset |
 | 5.2 | `mp64_tile.v` — tile engine (pipelined, not monolithic) | `tb_tile` |
 | 5.3 | `mp64_cpu_micro.v` — micro-core (cluster scalar core) | `tb_cpu_micro` |
 | 5.4 | `mp64_cluster.v` — cluster (N micro-cores + scratchpad) | `tb_cluster` |
@@ -280,7 +280,7 @@ fpga/
 │   │   ├── mp64_cpu.v               — CPU top (fetch/decode/exec/wb)
 │   │   └── mp64_icache.v            — I-cache
 │   ├── tile/
-│   │   ├── mp64_fp16_alu.v          — FP16/BF16 arithmetic
+│   │   ├── mp64_fp_half.v          — FP16/BF16 arithmetic
 │   │   ├── mp64_tile.v              — 512-bit SIMD tile engine
 │   │   └── mp64_tile_acc.v          — accumulator + adder tree
 │   ├── cluster/

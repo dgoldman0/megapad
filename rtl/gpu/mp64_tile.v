@@ -283,6 +283,9 @@ module mp64_tile #(
     wire       mode_rounding = tmode[6];
     wire       mode_fp       = mode_ew[2];          // EW >= 4 → FP mode
     wire       mode_bf16     = (mode_ew == TMODE_BF16);  // 0 = FP16, 1 = BF16
+    // Raw lane operations (SHUFFLE, RROT, extended TALU) use the format's
+    // lane width; FP16 and BF16 lanes are 16 bits (docs/floating-point.md §5).
+    wire [1:0] lane_ew       = mode_fp ? 2'd1 : mode_ew[1:0];
 
     // ========================================================================
     // State machine
@@ -798,6 +801,31 @@ module mp64_tile #(
     wire tamac_datapath_active = state == S_TACC_INT;
     wire [2:0] broadcast_mode_ew =
         tamac_datapath_active ? tamac_ew_reg : mode_ew;
+    // Float formats take the unsigned immediate converted exactly to the lane
+    // format (docs/floating-point.md §5.1); every value 0-255 is exact.
+    function [15:0] fp_half_from_u8;
+        input       is_bf16;
+        input [7:0] value;
+        integer lead;
+        integer k;
+        begin
+            lead = -1;
+            for (k = 0; k < 8; k = k + 1)
+                if (value[k])
+                    lead = k;
+            if (lead < 0)
+                fp_half_from_u8 = 16'd0;
+            else if (is_bf16)
+                fp_half_from_u8 = ((127 + lead) << 7) |
+                                  (({8'd0, value} << (7 - lead)) & 16'h007F);
+            else
+                fp_half_from_u8 = ((15 + lead) << 10) |
+                                  (({8'd0, value} << (10 - lead)) & 16'h03FF);
+        end
+    endfunction
+
+    wire [15:0] fp_imm_lane = fp_half_from_u8(mode_bf16, imm8_reg);
+
     always @(*) begin
         case (broadcast_mode_ew)
             TMODE_8:
@@ -821,7 +849,8 @@ module mp64_tile #(
             case (ss_reg)
                 2'd0: src_b_selected = tile_b;
                 2'd1: src_b_selected = gpr_broadcast;
-                2'd2: src_b_selected = {64{imm8_reg}};
+                2'd2: src_b_selected = mode_fp ?
+                                       {32{fp_imm_lane}} : {64{imm8_reg}};
                 2'd3: src_b_selected = tile_a;      // ordinary in-place
                 default: src_b_selected = 512'd0;
             endcase
@@ -1066,133 +1095,11 @@ module mp64_tile #(
         endcase
     end
 
-    // ========================================================================
-    // FP16/BF16 Lane ALU — 32 lanes × 16-bit (via mp64_fp16_alu)
-    // ========================================================================
+    // FP16/BF16 lane results (assembled below the exact-product array).
     reg [511:0] fp_alu_result;
-    wire [15:0] fp_alu_out [0:31];
-    wire        fp_nan_a   [0:31];
-    wire        fp_nan_b   [0:31];
-
+    reg [511:0] fp_mul_result;
+    reg [511:0] fp_mac_result;
     genvar fpl;
-    generate
-        for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_alu_lanes
-            mp64_fp16_alu u_fp_alu (
-                .is_bf16  (mode_bf16),
-                .a        (tile_a[fpl*16 +: 16]),
-                .b        (src_b_selected[fpl*16 +: 16]),
-                .op_add   (funct_reg == TALU_ADD),
-                .op_sub   (funct_reg == TALU_SUB),
-                .op_mul   (1'b0),
-                .op_min   (funct_reg == TALU_MIN),
-                .op_max   (funct_reg == TALU_MAX),
-                .op_abs   (funct_reg == TALU_ABS),
-                .op_cmp_lt(1'b0),
-                .op_cmp_gt(1'b0),
-                .result   (fp_alu_out[fpl]),
-                .is_nan_a (fp_nan_a[fpl]),
-                .is_nan_b (fp_nan_b[fpl])
-            );
-        end
-    endgenerate
-
-    // FP ALU result assembly (handles bitwise ops directly)
-    integer fp_alu_i;
-    always @(*) begin
-        fp_alu_result = 512'd0;
-        for (fp_alu_i = 0; fp_alu_i < 32; fp_alu_i = fp_alu_i + 1) begin
-            case (funct_reg)
-                TALU_ADD, TALU_SUB, TALU_MIN, TALU_MAX, TALU_ABS:
-                    fp_alu_result[fp_alu_i*16 +: 16] = fp_alu_out[fp_alu_i];
-                // Bitwise ops: operate on raw bits (no FP decode needed)
-                TALU_AND:
-                    fp_alu_result[fp_alu_i*16 +: 16] = tile_a[fp_alu_i*16 +: 16] & src_b_selected[fp_alu_i*16 +: 16];
-                TALU_OR:
-                    fp_alu_result[fp_alu_i*16 +: 16] = tile_a[fp_alu_i*16 +: 16] | src_b_selected[fp_alu_i*16 +: 16];
-                TALU_XOR:
-                    fp_alu_result[fp_alu_i*16 +: 16] = tile_a[fp_alu_i*16 +: 16] ^ src_b_selected[fp_alu_i*16 +: 16];
-                default:
-                    fp_alu_result[fp_alu_i*16 +: 16] = 16'd0;
-            endcase
-        end
-    end
-
-    // ========================================================================
-    // FP16/BF16 TMUL.MUL — 32 lanes × 16-bit multiply
-    // ========================================================================
-    reg  [511:0] fp_mul_result;
-    wire [15:0]  fp_mul_out [0:31];
-
-    generate
-        for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_mul_lanes
-            mp64_fp16_alu u_fp_mul (
-                .is_bf16  (mode_bf16),
-                .a        (tile_a[fpl*16 +: 16]),
-                .b        (src_b_selected[fpl*16 +: 16]),
-                .op_add   (1'b0),
-                .op_sub   (1'b0),
-                .op_mul   (1'b1),
-                .op_min   (1'b0),
-                .op_max   (1'b0),
-                .op_abs   (1'b0),
-                .op_cmp_lt(1'b0),
-                .op_cmp_gt(1'b0),
-                .result   (fp_mul_out[fpl]),
-                .is_nan_a (),
-                .is_nan_b ()
-            );
-        end
-    endgenerate
-
-    integer fp_ml;
-    always @(*) begin
-        fp_mul_result = 512'd0;
-        for (fp_ml = 0; fp_ml < 32; fp_ml = fp_ml + 1)
-            fp_mul_result[fp_ml*16 +: 16] = fp_mul_out[fp_ml];
-    end
-
-    // ========================================================================
-    // FP16/BF16 TMUL.MAC / FMA — fp_mul × lanes + fp_add with tile_c
-    // ========================================================================
-    reg  [511:0] fp_mac_result;
-    wire [15:0]  fp_mac_out [0:31];
-
-    generate
-        for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_mac_lanes
-            wire [15:0] fp_prod;
-            // Multiply a × b
-            mp64_fp16_alu u_fp_mac_mul (
-                .is_bf16  (mode_bf16),
-                .a        (tile_a[fpl*16 +: 16]),
-                .b        (src_b_selected[fpl*16 +: 16]),
-                .op_add   (1'b0), .op_sub(1'b0),
-                .op_mul   (1'b1),
-                .op_min   (1'b0), .op_max(1'b0), .op_abs(1'b0),
-                .op_cmp_lt(1'b0), .op_cmp_gt(1'b0),
-                .result   (fp_prod),
-                .is_nan_a (), .is_nan_b ()
-            );
-            // Add product + tile_c
-            mp64_fp16_alu u_fp_mac_add (
-                .is_bf16  (mode_bf16),
-                .a        (tile_c[fpl*16 +: 16]),
-                .b        (fp_prod),
-                .op_add   (1'b1), .op_sub(1'b0),
-                .op_mul   (1'b0),
-                .op_min   (1'b0), .op_max(1'b0), .op_abs(1'b0),
-                .op_cmp_lt(1'b0), .op_cmp_gt(1'b0),
-                .result   (fp_mac_out[fpl]),
-                .is_nan_a (), .is_nan_b ()
-            );
-        end
-    endgenerate
-
-    integer fp_mac_i;
-    always @(*) begin
-        fp_mac_result = 512'd0;
-        for (fp_mac_i = 0; fp_mac_i < 32; fp_mac_i = fp_mac_i + 1)
-            fp_mac_result[fp_mac_i*16 +: 16] = fp_mac_out[fp_mac_i];
-    end
 
     // ========================================================================
     // Exact FP16/BF16 product array
@@ -1253,6 +1160,85 @@ module mp64_tile #(
     end
 
     // ========================================================================
+    // FP16/BF16 TALU/TMUL lanes (docs/floating-point.md §5)
+    // ========================================================================
+    //
+    // One IEEE-correct lane per 16-bit element.  Products come from the exact
+    // array above; MAC and FMA are the same fused operation with [TDST] as
+    // the addend.
+    localparam [2:0] FP_LANE_ADD = 3'd0;
+    localparam [2:0] FP_LANE_SUB = 3'd1;
+    localparam [2:0] FP_LANE_MUL = 3'd2;
+    localparam [2:0] FP_LANE_FMA = 3'd3;
+    localparam [2:0] FP_LANE_MIN = 3'd4;
+    localparam [2:0] FP_LANE_MAX = 3'd5;
+    localparam [2:0] FP_LANE_ABS = 3'd6;
+
+    reg [2:0] fp_lane_op;
+    always @(*) begin
+        if (op_reg == MEX_TMUL)
+            fp_lane_op = (funct_reg == TMUL_MAC || funct_reg == TMUL_FMA) ?
+                         FP_LANE_FMA : FP_LANE_MUL;
+        else case (funct_reg)
+            TALU_SUB: fp_lane_op = FP_LANE_SUB;
+            TALU_MIN: fp_lane_op = FP_LANE_MIN;
+            TALU_MAX: fp_lane_op = FP_LANE_MAX;
+            TALU_ABS: fp_lane_op = FP_LANE_ABS;
+            default:  fp_lane_op = FP_LANE_ADD;
+        endcase
+    end
+
+    wire [15:0] fp_lane_out [0:31];
+    generate
+        for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_half_lanes
+            mp64_fp_half_lane u_lane (
+                .is_bf16            (mode_bf16),
+                .op                 (fp_lane_op),
+                .a                  (tile_a[fpl*16 +: 16]),
+                .b                  (src_b_selected[fpl*16 +: 16]),
+                .c                  (tile_c[fpl*16 +: 16]),
+                .product_nan        (fp_product_nan[fpl]),
+                .product_inf        (fp_product_inf[fpl]),
+                .product_zero       (fp_product_zero[fpl]),
+                .product_finite     (fp_product_finite[fpl]),
+                .product_sign       (fp_product_sign[fpl]),
+                .product_significand(fp_product_significand[fpl]),
+                .product_exponent   (fp_product_exponent[fpl]),
+                .product_fp32       (fp_wmul_fp32[fpl]),
+                .result             (fp_lane_out[fpl])
+            );
+        end
+    endgenerate
+
+    integer fp_lane_i;
+    always @(*) begin
+        fp_alu_result = 512'd0;
+        fp_mul_result = 512'd0;
+        fp_mac_result = 512'd0;
+        for (fp_lane_i = 0; fp_lane_i < 32; fp_lane_i = fp_lane_i + 1) begin
+            fp_mul_result[fp_lane_i*16 +: 16] = fp_lane_out[fp_lane_i];
+            fp_mac_result[fp_lane_i*16 +: 16] = fp_lane_out[fp_lane_i];
+            case (funct_reg)
+                TALU_AND:
+                    fp_alu_result[fp_lane_i*16 +: 16] =
+                        tile_a[fp_lane_i*16 +: 16] &
+                        src_b_selected[fp_lane_i*16 +: 16];
+                TALU_OR:
+                    fp_alu_result[fp_lane_i*16 +: 16] =
+                        tile_a[fp_lane_i*16 +: 16] |
+                        src_b_selected[fp_lane_i*16 +: 16];
+                TALU_XOR:
+                    fp_alu_result[fp_lane_i*16 +: 16] =
+                        tile_a[fp_lane_i*16 +: 16] ^
+                        src_b_selected[fp_lane_i*16 +: 16];
+                default:
+                    fp_alu_result[fp_lane_i*16 +: 16] =
+                        fp_lane_out[fp_lane_i];
+            endcase
+        end
+    end
+
+    // ========================================================================
     // Shared FP32 reduction/TACC feedback bank
     // ========================================================================
     //
@@ -1272,8 +1258,13 @@ module mp64_tile #(
         end
     endgenerate
 
+    // SUM and L1 sum widened lanes (L1 after clearing the sign); DOT and
+    // SUMSQ sum products rounded once to binary32.
     wire fp_reduction_sum_mode =
-        (op_reg == MEX_TRED) && (funct_reg == TRED_SUM);
+        (op_reg == MEX_TRED) &&
+        (funct_reg == TRED_SUM || funct_reg == TRED_L1);
+    wire fp_reduction_abs_mode =
+        (op_reg == MEX_TRED) && (funct_reg == TRED_L1);
     wire [31:0] fp_reduction_leaf [0:31];
     wire [31:0] fp_shared_l1 [0:15];
     wire [31:0] fp_shared_l2 [0:7];
@@ -1380,8 +1371,10 @@ module mp64_tile #(
     generate
         for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_reduce_leaf_mux
             assign fp_reduction_leaf[fpl] =
-                fp_reduction_sum_mode ?
-                fp_tile_a_fp32[fpl] : fp_wmul_fp32[fpl];
+                !fp_reduction_sum_mode ? fp_wmul_fp32[fpl] :
+                fp_reduction_abs_mode ?
+                {1'b0, fp_tile_a_fp32[fpl][30:0]} :
+                fp_tile_a_fp32[fpl];
         end
 
         for (fpl = 0; fpl < 16; fpl = fpl + 1) begin : fp_feedback_bank
@@ -1452,165 +1445,83 @@ module mp64_tile #(
     wire [31:0] fp_sumsq_l5 = fp_shared_l5;
 
     // ========================================================================
-    // FP16/BF16 TRED — reductions (SUM, MIN, MAX, SUMSQ, MINIDX, MAXIDX)
+    // FP16/BF16 TRED — reductions (docs/floating-point.md §4)
     // ========================================================================
-    // POPC/L1 fall through to integer path (operate on raw bits)
-    reg [31:0] fp_red_result;      // FP32 for SUM/SUMSQ, raw for MIN/MAX
+    // SUM, L1, and SUMSQ come from the shared tree.  MIN, MAX, MINIDX, and
+    // MAXIDX scan for the NaN-skipping extreme (-0 below +0, lowest index on
+    // ties); the winner is widened exactly to binary32, and an all-NaN tile
+    // gives the canonical binary32 NaN.  POPCNT stays on the integer path.
+    reg [31:0] fp_red_result;
     reg [63:0] fp_red_idx;
-    reg [31:0] fp_red_val;         // FP32 for MINIDX/MAXIDX value
+    reg [15:0] fp_red_best_raw;
+    wire [31:0] fp_red_val;
+    wire fp_red_largest =
+        (funct_reg == TRED_MAX) || (funct_reg == TRED_MAXIDX);
 
-    // FP MIN / MAX / MINIDX / MAXIDX — sequential scan with comparators
-    wire fp_cmp_lt [0:31];
-    wire fp_cmp_gt [0:31];
-
-    generate
-        for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_cmp_lanes
-            mp64_fp16_alu u_fp_cmp (
-                .is_bf16(mode_bf16),
-                .a(tile_a[fpl*16 +: 16]),
-                .b(16'd0),  // unused for cmp
-                .op_add(1'b0), .op_sub(1'b0), .op_mul(1'b0),
-                .op_min(1'b0), .op_max(1'b0), .op_abs(1'b0),
-                .op_cmp_lt(1'b0), .op_cmp_gt(1'b0),
-                .result(),
-                .is_nan_a(fp_cmp_lt[fpl]),  // reuse NaN detect
-                .is_nan_b()
-            );
+    function [15:0] fp_half_order_key;
+        input [15:0] bits;
+        begin
+            fp_half_order_key = bits[15] ? ~bits : {1'b1, bits[14:0]};
         end
-    endgenerate
+    endfunction
 
-    // Combinational FP min/max/minidx/maxidx reduction
+    function [31:0] fp32_order_key;
+        input [31:0] bits;
+        begin
+            fp32_order_key = bits[31] ? ~bits : {1'b1, bits[30:0]};
+        end
+    endfunction
+
+    function fp32_is_nan;
+        input [31:0] bits;
+        begin
+            fp32_is_nan = (bits[30:23] == 8'hFF) && (bits[22:0] != 23'd0);
+        end
+    endfunction
+
     integer fp_ri;
     always @(*) begin : fp_red_block
-        reg [15:0] best_raw;
-        reg [31:0] best_fp32;
-        reg [63:0] best_idx;
-        reg        cur_nan, best_nan;
-        reg [31:0] cur_fp32;
+        reg [15:0] cur_raw;
+        reg        cur_is_nan;
+        reg        best_is_nan;
+        reg        better;
 
-        fp_red_result = 32'd0;
-        fp_red_idx    = 64'd0;
-        fp_red_val    = 32'd0;
+        fp_red_best_raw = tile_a[15:0];
+        fp_red_idx      = 64'd0;
+        for (fp_ri = 1; fp_ri < 32; fp_ri = fp_ri + 1) begin
+            cur_raw = tile_a[fp_ri*16 +: 16];
+            if (mode_bf16) begin
+                cur_is_nan  = (cur_raw[14:7] == 8'hFF) && |cur_raw[6:0];
+                best_is_nan = (fp_red_best_raw[14:7] == 8'hFF) &&
+                              |fp_red_best_raw[6:0];
+            end else begin
+                cur_is_nan  = (cur_raw[14:10] == 5'h1F) && |cur_raw[9:0];
+                best_is_nan = (fp_red_best_raw[14:10] == 5'h1F) &&
+                              |fp_red_best_raw[9:0];
+            end
+            better = fp_red_largest ?
+                (fp_half_order_key(cur_raw) >
+                 fp_half_order_key(fp_red_best_raw)) :
+                (fp_half_order_key(cur_raw) <
+                 fp_half_order_key(fp_red_best_raw));
+            if (!cur_is_nan && (best_is_nan || better)) begin
+                fp_red_best_raw = cur_raw;
+                fp_red_idx      = fp_ri;
+            end
+        end
+    end
 
+    mp64_fp16_to_fp32 u_red_widen (
+        .is_bf16 (mode_bf16),
+        .fp16_in (fp_red_best_raw),
+        .fp32_out(fp_red_val)
+    );
+
+    always @(*) begin
         case (funct_reg)
-            TRED_SUM: fp_red_result = fp_sum_l5;
-            TRED_SUMSQ: fp_red_result = fp_sumsq_l5;
-            TRED_MIN, TRED_MINIDX: begin
-                best_raw = tile_a[15:0];
-                best_idx = 64'd0;
-                for (fp_ri = 1; fp_ri < 32; fp_ri = fp_ri + 1) begin : fpmin_loop
-                    reg [15:0] cur_raw;
-                    reg        cur_is_nan, best_is_nan;
-                    reg        cur_lt;
-                    // NaN detection inline
-                    cur_raw = tile_a[fp_ri*16 +: 16];
-                    if (mode_bf16) begin
-                        cur_is_nan  = (cur_raw[14:7] == 8'hFF) && |cur_raw[6:0];
-                        best_is_nan = (best_raw[14:7] == 8'hFF) && |best_raw[6:0];
-                    end else begin
-                        cur_is_nan  = (cur_raw[14:10] == 5'h1F) && |cur_raw[9:0];
-                        best_is_nan = (best_raw[14:10] == 5'h1F) && |best_raw[9:0];
-                    end
-                    // Skip NaNs; take first non-NaN or update if cur < best
-                    // NOTE: This is NaN-*skipping*, not NaN-propagating.
-                    // TALU lane-wise MIN (mp64_fp16_alu) propagates NaN;
-                    // TRED reduction MIN skips NaN values.
-                    if (!cur_is_nan) begin
-                        if (best_is_nan) begin
-                            best_raw = cur_raw;
-                            best_idx = fp_ri;
-                        end else begin
-                            // Signed-magnitude FP comparison using
-                            // unsigned operators on the magnitude bits.
-                            // The sign bit directs the comparison sense:
-                            // Both positive: smaller mag = smaller val
-                            // Both negative: larger mag = smaller val
-                            // Different sign: negative is smaller
-                            if (cur_raw[15] != best_raw[15]) begin
-                                cur_lt = cur_raw[15]; // cur negative → cur < best
-                            end else if (cur_raw[15]) begin
-                                cur_lt = (cur_raw[14:0] > best_raw[14:0]); // both neg
-                            end else begin
-                                cur_lt = (cur_raw[14:0] < best_raw[14:0]); // both pos
-                            end
-                            if (cur_lt) begin
-                                best_raw = cur_raw;
-                                best_idx = fp_ri;
-                            end
-                        end
-                    end
-                end
-                // Convert best to FP32 for storage
-                if (mode_bf16)
-                    fp_red_val = {best_raw, 16'd0};
-                else begin
-                    // Inline FP16→FP32 for the winner
-                    if (best_raw[14:10] == 5'd0 && best_raw[9:0] == 10'd0)
-                        fp_red_val = {best_raw[15], 31'd0};
-                    else if (best_raw[14:10] == 5'd31)
-                        fp_red_val = {best_raw[15], 8'hFF, best_raw[9:0], 13'd0};
-                    else
-                        fp_red_val = {best_raw[15], {3'd0, best_raw[14:10]} + 8'd112, best_raw[9:0], 13'd0};
-                end
-                fp_red_result = fp_red_val;
-                fp_red_idx    = best_idx;
-            end
-            TRED_MAX, TRED_MAXIDX: begin
-                best_raw = tile_a[15:0];
-                best_idx = 64'd0;
-                for (fp_ri = 1; fp_ri < 32; fp_ri = fp_ri + 1) begin : fpmax_loop
-                    reg [15:0] cur_raw;
-                    reg        cur_is_nan, best_is_nan;
-                    reg        cur_gt;
-                    cur_raw = tile_a[fp_ri*16 +: 16];
-                    if (mode_bf16) begin
-                        cur_is_nan  = (cur_raw[14:7] == 8'hFF) && |cur_raw[6:0];
-                        best_is_nan = (best_raw[14:7] == 8'hFF) && |best_raw[6:0];
-                    end else begin
-                        cur_is_nan  = (cur_raw[14:10] == 5'h1F) && |cur_raw[9:0];
-                        best_is_nan = (best_raw[14:10] == 5'h1F) && |best_raw[9:0];
-                    end
-                    // Skip NaNs; take first non-NaN or update if cur > best
-                    // NOTE: This is NaN-*skipping*, not NaN-propagating.
-                    // TALU lane-wise MAX (mp64_fp16_alu) propagates NaN;
-                    // TRED reduction MAX skips NaN values.
-                    if (!cur_is_nan) begin
-                        if (best_is_nan) begin
-                            best_raw = cur_raw;
-                            best_idx = fp_ri;
-                        end else begin
-                            // Signed-magnitude FP comparison using
-                            // unsigned operators on the magnitude bits.
-                            // The sign bit directs the comparison sense.
-                            if (cur_raw[15] != best_raw[15]) begin
-                                cur_gt = best_raw[15]; // best negative → cur > best
-                            end else if (cur_raw[15]) begin
-                                cur_gt = (cur_raw[14:0] < best_raw[14:0]); // both neg
-                            end else begin
-                                cur_gt = (cur_raw[14:0] > best_raw[14:0]); // both pos
-                            end
-                            if (cur_gt) begin
-                                best_raw = cur_raw;
-                                best_idx = fp_ri;
-                            end
-                        end
-                    end
-                end
-                if (mode_bf16)
-                    fp_red_val = {best_raw, 16'd0};
-                else begin
-                    if (best_raw[14:10] == 5'd0 && best_raw[9:0] == 10'd0)
-                        fp_red_val = {best_raw[15], 31'd0};
-                    else if (best_raw[14:10] == 5'd31)
-                        fp_red_val = {best_raw[15], 8'hFF, best_raw[9:0], 13'd0};
-                    else
-                        fp_red_val = {best_raw[15], {3'd0, best_raw[14:10]} + 8'd112, best_raw[9:0], 13'd0};
-                end
-                fp_red_result = fp_red_val;
-                fp_red_idx    = best_idx;
-            end
-            // POPC, L1: fall through to integer path (raw bit operations)
-            default: ;
+            TRED_SUM, TRED_L1: fp_red_result = fp_sum_l5;
+            TRED_SUMSQ:        fp_red_result = fp_sumsq_l5;
+            default:           fp_red_result = fp_red_val;
         endcase
     end
 
@@ -1622,14 +1533,11 @@ module mp64_tile #(
 
     generate
         for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_pack_lanes
-            wire [31:0] widened;
-            // Widen to FP32 from source format
-            mp64_fp16_to_fp32 u_pk_widen (
-                .is_bf16(mode_bf16), .fp16_in(tile_a[fpl*16 +: 16]), .fp32_out(widened)
-            );
-            // Convert FP32 to target format (opposite of source)
-            mp64_fp32_to_fp16 u_pk_cvt (
-                .is_bf16(!mode_bf16), .fp32_in(widened), .fp16_out(fp_pack_out[fpl])
+            // The exact binary32 value rounds once to the other format.
+            mp64_fp32_to_half_rne u_pk_cvt (
+                .is_bf16(!mode_bf16),
+                .value  (fp_tile_a_fp32[fpl]),
+                .result (fp_pack_out[fpl])
             );
         end
     endgenerate
@@ -2269,7 +2177,7 @@ module mp64_tile #(
     integer sl;
     always @(*) begin
         shuffle_result = 512'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: for (sl=0; sl<64; sl=sl+1) begin : shuf8
                 shuffle_result[sl*8 +: 8] = tile_a[src_b_selected[sl*8 +: 6]*8 +: 8];
             end
@@ -2369,7 +2277,7 @@ module mp64_tile #(
     integer rr, rc, rrot_src;
     always @(*) begin
         rrot_result = 512'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: // 8-bit: 8 rows × 8 cols
                 for (rr = 0; rr < 8; rr = rr + 1)
                     for (rc = 0; rc < 8; rc = rc + 1) begin
@@ -2467,7 +2375,7 @@ module mp64_tile #(
     integer el;
     always @(*) begin
         ext_talu_result = 512'd0;
-        case (mode_ew[1:0])
+        case (lane_ew)
             2'd0: for (el=0; el<64; el=el+1) begin : ex8
                 reg [7:0] ea8, eb8, shr8;
                 reg [2:0] sh;
@@ -2560,11 +2468,31 @@ module mp64_tile #(
         end
     endgenerate
 
-    // TRED SUM/SUMSQ ACC_ACC: acc[0] + fp_red_result
+    // TRED SUM/SUMSQ/L1 ACC_ACC: acc[0] + fp_red_result
     wire [31:0] fp_red_acc_result;
     mp64_fp32_add_rne u_red_acc_add (
         .a(acc[0][31:0]), .b(fp_red_result), .result(fp_red_acc_result)
     );
+
+    // TRED MIN/MAX ACC_ACC: running NaN-skipping extreme against ACC0; the
+    // old value wins ties.  MINIDX/MAXIDX replace ACC0/ACC1 only for a
+    // strictly better non-NaN value, or any non-NaN value over an old NaN.
+    wire [31:0] fp_acc0_value = acc[0][31:0];
+    wire [31:0] fp_acc1_value = acc[1][31:0];
+    wire fp_red_beats_acc0 = fp_red_largest ?
+        (fp32_order_key(fp_red_result) > fp32_order_key(fp_acc0_value)) :
+        (fp32_order_key(fp_red_result) < fp32_order_key(fp_acc0_value));
+    wire [31:0] fp_red_extreme_acc =
+        fp32_is_nan(fp_acc0_value) ?
+            (fp32_is_nan(fp_red_result) ? 32'h7FC0_0000 : fp_red_result) :
+        (fp32_is_nan(fp_red_result) || !fp_red_beats_acc0) ?
+            fp_acc0_value : fp_red_result;
+    wire fp_red_index_replaces =
+        !fp32_is_nan(fp_red_val) &&
+        (fp32_is_nan(fp_acc1_value) ||
+         (fp_red_largest ?
+          (fp32_order_key(fp_red_val) > fp32_order_key(fp_acc1_value)) :
+          (fp32_order_key(fp_red_val) < fp32_order_key(fp_acc1_value))));
 
     // ========================================================================
     // Main state machine
@@ -2982,12 +2910,10 @@ module mp64_tile #(
                             acc[0] <= {32'd0, fp_dot_result};
                             acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
                         end else if (tctrl_accumulate_reg) begin
-                            // ACC_ACC: add new FP32 dot to existing FP32 acc
-                            // Use an inline FP32 add (can't instantiate in sequential)
-                            // Store raw — the emulator does acc[0] = fp32_to_bits(old + new)
-                            // For RTL, we need a registered FP32 adder.
-                            // Workaround: pre-compute in combinational, select here.
+                            // ACC_ACC adds the tile's tree result to the
+                            // binary32 ACC0 with one rounding.
                             acc[0] <= {32'd0, fp_dot_acc_result};
+                            acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
                         end else begin
                             acc[0] <= {32'd0, fp_dot_result};
                             acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
@@ -3088,55 +3014,30 @@ module mp64_tile #(
 
             S_REDUCE: begin
                 tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
-                if (mode_fp && (funct_reg != TRED_POPC) && (funct_reg != TRED_L1)) begin
-                    // FP reductions: result is FP32 stored in acc[0][31:0]
+                if (mode_fp && (funct_reg != TRED_POPC)) begin
+                    // Floating reductions publish binary32 in ACC0
+                    // (docs/floating-point.md §4.4-§4.5).
                     if (funct_reg == TRED_MINIDX || funct_reg == TRED_MAXIDX) begin
-                        if (tctrl_acc_zero_reg) begin
-                            acc[0] <= fp_red_idx;
-                            acc[1] <= {32'd0, fp_red_val};
-                            acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl_accumulate_reg) begin
-                            // Compare new vs old best
-                            if (funct_reg == TRED_MINIDX) begin
-                                // If new FP value < old acc[1] FP32 value
-                                if (fp_red_val[31] && !acc[1][31])  // new neg, old pos → new < old
-                                    begin acc[0] <= fp_red_idx; acc[1] <= {32'd0, fp_red_val}; end
-                                else if (!fp_red_val[31] && acc[1][31]) ;  // new pos, old neg → keep old
-                                else if (fp_red_val[31]) begin  // both negative
-                                    if (fp_red_val[30:0] > acc[1][30:0])
-                                        begin acc[0] <= fp_red_idx; acc[1] <= {32'd0, fp_red_val}; end
-                                end else begin  // both positive
-                                    if (fp_red_val[30:0] < acc[1][30:0])
-                                        begin acc[0] <= fp_red_idx; acc[1] <= {32'd0, fp_red_val}; end
-                                end
-                            end else begin
-                                if (!fp_red_val[31] && acc[1][31])
-                                    begin acc[0] <= fp_red_idx; acc[1] <= {32'd0, fp_red_val}; end
-                                else if (fp_red_val[31] && !acc[1][31]) ;
-                                else if (fp_red_val[31]) begin
-                                    if (fp_red_val[30:0] < acc[1][30:0])
-                                        begin acc[0] <= fp_red_idx; acc[1] <= {32'd0, fp_red_val}; end
-                                end else begin
-                                    if (fp_red_val[30:0] > acc[1][30:0])
-                                        begin acc[0] <= fp_red_idx; acc[1] <= {32'd0, fp_red_val}; end
-                                end
-                            end
-                        end else begin
+                        if (tctrl_acc_zero_reg || !tctrl_accumulate_reg ||
+                            fp_red_index_replaces) begin
                             acc[0] <= fp_red_idx;
                             acc[1] <= {32'd0, fp_red_val};
                         end
+                        acc[2] <= 64'd0; acc[3] <= 64'd0;
                     end else begin
-                        // SUM, MIN, MAX, SUMSQ → FP32 in acc[0]
-                        if (tctrl_acc_zero_reg) begin
+                        if (tctrl_acc_zero_reg)
                             acc[0] <= {32'd0, fp_red_result};
-                            acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl_accumulate_reg)
-                            acc[0] <= {32'd0, fp_red_acc_result};
+                        else if (tctrl_accumulate_reg)
+                            acc[0] <= {32'd0,
+                                ((funct_reg == TRED_MIN) ||
+                                 (funct_reg == TRED_MAX)) ?
+                                fp_red_extreme_acc : fp_red_acc_result};
                         else
                             acc[0] <= {32'd0, fp_red_result};
+                        acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
                     end
                 end else begin
-                    // Integer reductions (unchanged)
+                    // Integer reductions
                     if (funct_reg == TRED_MINIDX || funct_reg == TRED_MAXIDX) begin
                         if (tctrl_acc_zero_reg) begin
                             acc[0] <= red_idx; acc[1] <= red_val; acc[2] <= 64'd0; acc[3] <= 64'd0;
@@ -3160,9 +3061,22 @@ module mp64_tile #(
                     end else begin
                         if (tctrl_acc_zero_reg) begin
                             acc[0] <= red_result; acc[1] <= 64'd0; acc[2] <= 64'd0; acc[3] <= 64'd0;
-                        end else if (tctrl_accumulate_reg)
-                            acc[0] <= acc[0] + red_result;
-                        else
+                        end else if (tctrl_accumulate_reg) begin
+                            // MIN/MAX keep a running extreme against ACC0
+                            // (docs/floating-point.md §4.6).
+                            if (funct_reg == TRED_MIN)
+                                acc[0] <= (mode_signed ?
+                                    ($signed(red_result) < $signed(acc[0])) :
+                                    (red_result < acc[0])) ?
+                                    red_result : acc[0];
+                            else if (funct_reg == TRED_MAX)
+                                acc[0] <= (mode_signed ?
+                                    ($signed(red_result) > $signed(acc[0])) :
+                                    (red_result > acc[0])) ?
+                                    red_result : acc[0];
+                            else
+                                acc[0] <= acc[0] + red_result;
+                        end else
                             acc[0] <= red_result;
                     end
                 end

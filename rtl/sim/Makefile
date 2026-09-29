@@ -234,7 +234,7 @@ cluster: tb_cluster.vvp
 tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
                 $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v $(PRIM)/mp64_mul.v \
                 $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-                $(CORE)/mp64_fp16_alu.v $(CORE)/mp64_fp_exact.v \
+                $(CORE)/mp64_fp_half.v $(CORE)/mp64_fp_exact.v \
                 $(CRYPTO)/mp64_crc_isa.v $(CRYPTO)/mp64_sha2_isa.v \
                 ../pkg/mp64_pkg.vh $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
@@ -454,28 +454,44 @@ tacc_cycles: tamac_integer_vectors_check tamac_fp_vectors_check \
 tacc_vectors: tacc_cycles
 
 tb_tacc_cycles.vvp: tb_tacc_cycles.v $(GPU)/mp64_tacc.v \
-                    $(GPU)/mp64_tile.v $(CORE)/mp64_fp16_alu.v \
+                    $(GPU)/mp64_tile.v $(CORE)/mp64_fp_half.v \
                     $(CORE)/mp64_fp_exact.v \
                     ../pkg/mp64_pkg.vh tamac_integer_vectors.vec \
                     tamac_fp_vectors.vec
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 	    tb_tacc_cycles.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-	    $(CORE)/mp64_fp16_alu.v $(CORE)/mp64_fp_exact.v \
+	    $(CORE)/mp64_fp_half.v $(CORE)/mp64_fp_exact.v \
 	    ../pkg/mp64_pkg.vh
 
 # --- Tile engine ---
-tile: fp_exact tb_tile.vvp tb_tile_write_ack.vvp
+tile: fp_exact tile_fp tb_tile.vvp tb_tile_write_ack.vvp
 	$(VVP) tb_tile.vvp
 	$(VVP) tb_tile_write_ack.vvp
 
+# FP16/BF16 golden vectors from the Python emulator and shared exact reference.
+tile_fp: tile_fp_vectors_check tb_tile_fp.vvp
+	$(VVP) tb_tile_fp.vvp
+
+tile_fp_vectors_check: gen_tile_fp_vectors.py tile_fp_vectors.vec
+	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	    python3 gen_tile_fp_vectors.py > "$$tmp" && \
+	    cmp "$$tmp" tile_fp_vectors.vec
+
+tb_tile_fp.vvp: tb_tile_fp.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
+                $(CORE)/mp64_fp_half.v $(CORE)/mp64_fp_exact.v \
+                ../pkg/mp64_pkg.vh tile_fp_vectors.vec
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+	    tb_tile_fp.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
+	    $(CORE)/mp64_fp_half.v $(CORE)/mp64_fp_exact.v
+
 tb_tile.vvp: tb_tile.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-             $(CORE)/mp64_fp16_alu.v $(CORE)/mp64_fp_exact.v \
+             $(CORE)/mp64_fp_half.v $(CORE)/mp64_fp_exact.v \
              ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tacc.v \
                        $(GPU)/mp64_tile.v \
-                       $(CORE)/mp64_fp16_alu.v \
+                       $(CORE)/mp64_fp_half.v \
                        $(CORE)/mp64_fp_exact.v ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 

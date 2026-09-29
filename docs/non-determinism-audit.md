@@ -434,6 +434,7 @@
 - **Cycle-accuracy impact:** Not a timing issue but a **data divergence** —
   tile WMUL results differ between RTL and emulator for non-trivial inputs.
 - **Severity:** **HIGH** (correctness)
+- **Status:** Resolved 2026-09-29 by Phase 2 of `docs/megapad-full-float-plan.md`. Every backend rounds the exact product once to binary32 (`docs/floating-point.md` §5.2).
 
 ### H-3. FP32 Accumulator Adder Tree Ordering
 - **File:** `rtl/gpu/mp64_tile.v` lines 1510–1570 (5-level binary tree),
@@ -445,6 +446,7 @@
 - **Cycle-accuracy impact:** Not a timing issue but a **data divergence** —
   DOT/DOTACC/SUM reductions produce different FP32 results.
 - **Severity:** **HIGH** (correctness)
+- **Status:** Resolved 2026-09-29 by Phase 2 of `docs/megapad-full-float-plan.md`. The RTL pairwise tree is the canonical order in every backend (`docs/floating-point.md` §4.3).
 
 ### H-4. FP NaN Propagation in Reductions
 - **File:** `rtl/gpu/mp64_tile.v` lines 750–820 (RTL MIN/MAX),
@@ -460,6 +462,7 @@
 - **Cycle-accuracy impact:** Data divergence for inputs containing NaN, -0.0, or
   subnormal values.
 - **Severity:** **MEDIUM**
+- **Status:** Resolved 2026-09-29 by Phase 2 of `docs/megapad-full-float-plan.md`. TALU MIN/MAX propagate NaN and TRED MIN/MAX skip it, both ordering -0 below +0, in every backend (`docs/floating-point.md` §3.8).
 
 ### H-5. LOAD2D / STORE2D Variable Cycle Count
 - **File:** `rtl/gpu/mp64_tile.v` lines 1800–1900 (S_LOAD2D_REQ/WAIT,
@@ -583,6 +586,7 @@
 - **Cycle-accuracy impact:** Not timing but **data divergence**. Accumulates
   over chains of FP operations.
 - **Severity:** **HIGH** (correctness)
+- **Status:** Resolved 2026-09-29 by Phase 2 of `docs/megapad-full-float-plan.md`. Every result rounds once from the exact value; `shared/ieee_fp.py` is the reference and the RTL is checked against its golden vectors.
 
 ### J-6. SHA-256 Operator Precedence Bug
 - **File:** `emulator/megapad64.py` lines 165–175 (`_sha256_compress`)
@@ -855,7 +859,8 @@
 
 1. **A-1** — Bus arbitration is the root cause of most timing non-determinism
 2. **J-1/J-2/J-3/J-12** — Emulator completely lacks bus, concurrency, and cache models
-3. **H-2/H-3/J-5/J-6** — FP precision and SHA-256 data correctness bugs
+3. **J-6** — SHA-256 data correctness bug (the FP items H-2/H-3/J-5 are
+   resolved)
 4. **E-1/E-3/H-1** — Multi-core shared-resource contention
 5. **B-1** — Dual-port SRAM collision behavior is target-dependent
 6. **F-3/K-1/K-2** — Missing CDC synchronizers (synthesis-blocking)
