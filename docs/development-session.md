@@ -134,7 +134,10 @@ The viewer polls the session at `--fps` (30 by default) but redraws only
 when something it draws changes: a new display offer, the screen revision,
 hover or press, a visible cursor's blink, the window, or the status line.
 An unchanged window is neither recomposed nor flipped, so an idle viewer
-uses little CPU. A status-only change reuses the last composed frame.
+uses little CPU. A status-only change reuses the last composed frame. A
+frame that does change is repainted only where it changed, exactly as a
+full composition would paint it, and only those rectangles of the window
+are updated (`docs/viewer-partial-repaint.md`).
 
 Control or inspect that same machine from another process:
 

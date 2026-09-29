@@ -1399,6 +1399,101 @@ def test_status_line_reports_state_errors_and_view_only():
     assert color == (245, 95, 95)
 
 
+def test_viewer_presents_only_the_rectangles_a_frame_changed(monkeypatch):
+    pygame = pytest.importorskip("pygame")
+    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
+
+    def snapshot(char):
+        return TerminalSnapshot(
+            cols=12,
+            rows=4,
+            cells=tuple(
+                tuple(
+                    TerminalCell(char if (row, col) == (2, 5) else "A",
+                                 (200, 200, 200), (0, 0, 0), 0)
+                    for col in range(12)
+                )
+                for row in range(4)
+            ),
+            cursor_col=0,
+            cursor_row=0,
+            cursor_visible=False,
+            alternate_screen=False,
+        )
+
+    screens = []
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def connect(self):
+            pass
+
+        def request(self, method, **params):
+            if method == "claim_display":
+                return {"status": "claimed", "claimed": True}
+            if method == "status":
+                return {
+                    "generation": 1,
+                    "state": "idle",
+                    "steps": 7,
+                    "revision": 1 if len(screens) >= 4 else 0,
+                    "rich_terminal": {"display_required": False},
+                }
+            if method == "screen":
+                screens.append(params)
+                if len(screens) == 1:
+                    return {"changed": True, "generation": 1, "revision": 0,
+                            "snapshot": snapshot_to_wire(snapshot("A"))}
+                if len(screens) == 4:
+                    return {"changed": True, "generation": 1, "revision": 1,
+                            "snapshot": snapshot_to_wire(snapshot("Z"))}
+                return {"changed": False, "generation": 1,
+                        "revision": 1 if len(screens) > 4 else 0}
+            raise AssertionError(method)
+
+        def close(self):
+            pass
+
+    frames = []
+    compose = session_viewer.compose_terminal_frame_changes
+
+    def recording_compose(*args, **kwargs):
+        frames.append(compose(*args, **kwargs))
+        return frames[-1]
+
+    presented = []
+
+    def check_window(changed):
+        frame = frames[-1].surface
+        window = pygame.display.get_surface().subsurface(frame.get_rect())
+        assert pygame.image.tobytes(window, "RGBA") == pygame.image.tobytes(frame, "RGBA")
+        presented.append(changed)
+
+    flip, update = pygame.display.flip, pygame.display.update
+    monkeypatch.setattr(session_viewer, "SessionClient", Client)
+    monkeypatch.setattr(session_viewer, "compose_terminal_frame_changes", recording_compose)
+    monkeypatch.setattr(pygame.display, "flip",
+                        lambda: (flip(), check_window(None))[0])
+    monkeypatch.setattr(pygame.display, "update",
+                        lambda rects: (update(rects), check_window(list(rects)))[0])
+    monkeypatch.setattr(
+        sys, "argv", ["session_viewer.py", "--exit-after", "0.6", "--fps", "30"]
+    )
+
+    assert session_viewer.main() == 0
+    # The first frame flips the whole window; the changed cell is then
+    # repainted and only its rectangles are copied and updated.
+    assert presented[0] is None
+    partial = [changed for changed in presented[1:] if changed is not None]
+    assert partial and frames[-1].damage is not None
+    width = frames[-1].surface.get_width()
+    assert all(rect.width <= width for changed in partial for rect in changed)
+    assert any(rect.collidepoint(5 * frames[-1].geometry[2], 2 * frames[-1].geometry[3])
+               for changed in partial for rect in changed)
+
+
 def test_idle_viewer_neither_recomposes_nor_flips_an_unchanged_window(monkeypatch):
     pygame = pytest.importorskip("pygame")
     monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")

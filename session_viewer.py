@@ -2434,9 +2434,12 @@ def draw_flip_and_present(
 ) -> dict | None:
     """Cross the synchronous SDL reference-sink boundary, then attest it.
 
-    A successful ``pygame.display.flip()`` is the documented completion
-    boundary for this software reference sink.  It is not evidence of e-paper
-    controller completion or panel settling.
+    DRAW_FRAME returns the window rectangles it changed, or None when it
+    drew the whole window.  A successful ``pygame.display.update`` of those
+    rectangles, or ``pygame.display.flip()`` of the whole window, is the
+    documented completion boundary for this software reference sink: the
+    window then shows exactly the composed frame.  It is not evidence of
+    e-paper controller completion or panel settling.
     """
 
     if not isinstance(active, bool):
@@ -2445,8 +2448,11 @@ def draw_flip_and_present(
         return None
     if offer is not None and not isinstance(offer, TerminalDisplayOffer):
         raise TypeError("offer must be TerminalDisplayOffer or None")
-    draw_frame()
-    pygame_module.display.flip()
+    changed = draw_frame()
+    if changed is None:
+        pygame_module.display.flip()
+    else:
+        pygame_module.display.update(changed)
     if offer is None:
         return None
     return client.request(
@@ -2737,6 +2743,10 @@ def main() -> int:
         if hasattr(pygame, name)
     }
     composed_frame = None
+    # Whether the window still shows exactly the last presented frame and
+    # status line, so only what changes need be copied into it.
+    window_intact = False
+    presented_status = None
 
     try:
         while running:
@@ -2826,6 +2836,7 @@ def main() -> int:
                         guest_keyboard.reset()
                 elif event.type in repaint_events:
                     redraw.force()
+                    window_intact = False
 
             if not running:
                 break
@@ -2870,6 +2881,7 @@ def main() -> int:
                 if accept_screen_update(update):
                     screen = make_window()
                     redraw.force()
+                    window_intact = False
                 screen_refresh_required = False
                 last_poll = now
 
@@ -2953,11 +2965,11 @@ def main() -> int:
             if composed_frame is None:
                 compose = flip = True
 
-            def draw_frame() -> None:
+            def draw_frame() -> list | None:
                 nonlocal rendered_hit_entries, composed_frame
-                screen.fill((0, 0, 0))
+                nonlocal window_intact, presented_status
                 if compose:
-                    composed_frame = compose_terminal_frame_result(
+                    composed_frame = compose_terminal_frame_changes(
                         pygame,
                         terminal,
                         font,
@@ -2970,22 +2982,36 @@ def main() -> int:
                         hovered=pointer.hovered,
                         pressed=pointer.pressed,
                         resource_surfaces=resource_surfaces,
+                        previous=composed_frame,
                     )
                     rendered_hit_entries = composed_frame.hit_entries
-                screen.blit(composed_frame.surface, (0, 0))
+                changed = None
+                if window_intact and (not compose or composed_frame.damage is not None):
+                    changed = [] if not compose else [
+                        pygame.Rect(rect.left, rect.top, rect.width, rect.height)
+                        for rect in composed_frame.damage
+                    ]
+                    for rect in changed:
+                        screen.blit(composed_frame.surface, rect, rect)
+                else:
+                    screen.fill((0, 0, 0))
+                    screen.blit(composed_frame.surface, (0, 0))
                 y = terminal.rows * cell_h
-                pygame.draw.rect(
-                    screen,
-                    (28, 30, 34),
-                    (0, y, screen.get_width(), status_h),
-                )
-                label = status_font.render(status_text, True, state_color)
-                screen.blit(label, (8, y + (status_h - label.get_height()) // 2))
+                if changed is None or presented_status != (status_text, state_color):
+                    status_rect = pygame.Rect(0, y, screen.get_width(), status_h)
+                    pygame.draw.rect(screen, (28, 30, 34), status_rect)
+                    label = status_font.render(status_text, True, state_color)
+                    screen.blit(label, (8, y + (status_h - label.get_height()) // 2))
+                    presented_status = (status_text, state_color)
+                    if changed is not None:
+                        changed.append(status_rect)
+                window_intact = True
                 if frame_offer is not None:
                     display_state.stage_frame_hit_map(
                         frame_offer,
                         rendered_hit_entries,
                     )
+                return changed
             presentation = draw_flip_and_present(
                 pygame,
                 client,

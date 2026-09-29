@@ -1,6 +1,8 @@
 # Repainting only what a frame changes
 
-Status: design, not built. 2026-09-29.
+Status: built on 2026-09-29. The shared-session viewer composes and
+presents this way; `tests/test_viewer_partial_repaint.py` holds it to the
+full composition.
 
 The shared-session viewer composes every display offer from scratch: it
 renders all 23,520 CELL cells of the 280x84 Desktop, then paints every
