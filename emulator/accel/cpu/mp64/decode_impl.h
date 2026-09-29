@@ -33,7 +33,11 @@ private:
 };
 
 bool is_extension_engine(uint8_t subop) noexcept {
-    return subop == 0x9 || subop == 0xA || subop == 0xB;
+    return subop >= 0x9 && subop <= 0xC;
+}
+
+bool is_unassigned_prefix(uint8_t subop) noexcept {
+    return subop == 0x7 || subop >= 0xD;
 }
 
 void add_trait(
@@ -118,6 +122,11 @@ inline InstructionHeader decode_instruction_header(
             InstructionHeaderStatus::EXTENSION_ENGINE;
         return header;
     }
+    if (is_unassigned_prefix(header.subop)) {
+        header.status =
+            InstructionHeaderStatus::ILLEGAL_PREFIX;
+        return header;
+    }
     if (!prefix_admission(header.subop)) {
         header.status =
             InstructionHeaderStatus::PREFIX_REJECTED;
@@ -186,6 +195,13 @@ DecodeResult decode_instruction(
         InstructionHeaderStatus::ILLEGAL_DOUBLE_PREFIX
     ) {
         result.status = DecodeStatus::ILLEGAL_DOUBLE_PREFIX;
+        return result;
+    }
+    if (
+        header.status ==
+        InstructionHeaderStatus::ILLEGAL_PREFIX
+    ) {
+        result.status = DecodeStatus::ILLEGAL_PREFIX;
         return result;
     }
     if (

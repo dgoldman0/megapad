@@ -16,7 +16,7 @@ from typing import Callable, Optional
 
 from shared.cells import MASK64, SIGN64, s64, u64
 from shared.crc import CRC_MODE_PARAMETERS, crc_update_byte
-from shared import ieee_fp, tile_float, tile_formats
+from shared import ieee_fp, scalar_fp, tile_float, tile_formats
 from shared.tile_formats import (
     EW_BF16, EW_FP16, EW_FP32, EW_FP64, EW_U16, EW_U32, EW_U64, EW_U8,
 )
@@ -57,6 +57,7 @@ CSR_IE          = 0x09  # Interrupt enable (alias of flag_i)
 CSR_PRIV        = 0x0A  # Privilege level (0=supervisor, 1=user)
 CSR_MPU_BASE    = 0x0B  # MPU lower bound (inclusive)
 CSR_MPU_LIMIT   = 0x0C  # MPU upper bound (exclusive)
+CSR_FPCSR       = 0x0D  # Scalar FP rounding mode and sticky flags
 CSR_SB          = 0x10
 CSR_SR          = 0x11
 CSR_SC          = 0x12
@@ -575,6 +576,9 @@ class Megapad64:
         # MPU window (user-mode data access bounds)
         self.mpu_base: int = 0
         self.mpu_limit: int = 0
+
+        # Scalar FP control and status (docs/floating-point.md §9)
+        self.fpcsr: int = 0
 
         # Tile / MEX CSRs
         self.sb: int  = 0
@@ -1726,6 +1730,7 @@ class Megapad64:
             CSR_PRIV:       lambda: self.priv_level,
             CSR_MPU_BASE:   lambda: self.mpu_base,
             CSR_MPU_LIMIT:  lambda: self.mpu_limit,
+            CSR_FPCSR:      lambda: self.fpcsr,
             CSR_SB:         lambda: self.sb,
             CSR_SR:         lambda: self.sr,
             CSR_SC:         lambda: self.sc,
@@ -1804,6 +1809,8 @@ class Megapad64:
             CSR_PRIV:     lambda v: setattr(self, 'priv_level', v & 1),
             CSR_MPU_BASE: lambda v: setattr(self, 'mpu_base', v),
             CSR_MPU_LIMIT:lambda v: setattr(self, 'mpu_limit', v),
+            CSR_FPCSR:    lambda v: setattr(
+                self, 'fpcsr', v & scalar_fp.FPCSR_WRITE_MASK),
             CSR_SB:       lambda v: setattr(self, 'sb', v & 0xF),
             CSR_SR:       lambda v: setattr(self, 'sr', v & 0xFFFFF),
             CSR_SC:       lambda v: setattr(self, 'sc', v & 0xFFFFF),
@@ -2493,6 +2500,42 @@ class Megapad64:
         self.flag_v = 0
         return cycles
 
+    # -- EXT.FP (prefix FC) --
+
+    def _exec_fp(self) -> int:
+        """Execute EXT.FP (FC), docs/floating-point.md §8.
+
+        Encoding: FC op DR [T].  The complete instruction is fetched before
+        any reserved encoding traps, so the trap PC is its end.
+        """
+        op = self.fetch8()
+        reg_byte = self.fetch8()
+        t_byte = self.fetch8() if scalar_fp.instruction_length(op) == 4 else 0
+        rd = (self._rex_d << 4) | ((reg_byte >> 4) & 0xF)
+        rs = (self._rex_s << 4) | (reg_byte & 0xF)
+        try:
+            scalar_fp.validate(op, t_byte, self.fpcsr)
+        except scalar_fp.IllegalOperation as exc:
+            raise TrapError(IVEC_ILLEGAL_OP, f"EXT.FP: {exc}") from None
+        return self._fp_execute(op, rd, rs, t_byte & 0x1F)
+
+    def _fp_execute(self, op: int, rd: int, rs: int, rt: int) -> int:
+        """Run one legal FC operation; return its §10 extra cycles."""
+        outcome = scalar_fp.execute(
+            op, self.regs[rd], self.regs[rs], self.regs[rt], self.fpcsr)
+        self.fpcsr |= outcome.flags
+        if outcome.relation is not None:
+            relation = outcome.relation
+            self.flag_z = int(relation == ieee_fp.EQUAL)
+            self.flag_g = int(relation == ieee_fp.GREATER)
+            self.flag_n = int(relation == ieee_fp.LESS)
+            self.flag_v = int(relation == ieee_fp.UNORDERED)
+            self.flag_c = 0
+            self.flag_p = 0
+        else:
+            self.regs[rd] = outcome.value
+        return scalar_fp.extra_cycles(op)
+
     # -- EXT.CRYPTO (prefix FB) --
 
     # Complete CRC modes: polynomial used by the selected recurrence, width,
@@ -3038,6 +3081,17 @@ class Megapad64:
                 if self.perf_enable:
                     self.perf_cycles += cycles
                 return cycles
+            if n == 0xC:
+                # EXT.FP — self-contained 3-or-4-byte instruction
+                cycles += self._exec_fp()
+                self._ext_modifier = -1
+                self.cycle_count += cycles
+                if self.perf_enable:
+                    self.perf_cycles += cycles
+                return cycles
+            if n in (0x7, 0xD, 0xE, 0xF):
+                raise TrapError(IVEC_ILLEGAL_OP,
+                                f"unassigned prefix {byte0:#04x}")
             self._ext_modifier = n
             # Re-fetch the actual instruction
             byte0 = self.fetch8()
@@ -3063,6 +3117,14 @@ class Megapad64:
             # REX + FB: EXT.CRYPTO with REX prefix
             if f == 0xF and n == 0xB:
                 cycles += self._exec_crypto()
+                self._ext_modifier = -1
+                self.cycle_count += cycles
+                if self.perf_enable:
+                    self.perf_cycles += cycles
+                return cycles
+            # REX + FC: EXT.FP with REX prefix
+            if f == 0xF and n == 0xC:
+                cycles += self._exec_fp()
                 self._ext_modifier = -1
                 self.cycle_count += cycles
                 if self.perf_enable:
@@ -4769,6 +4831,7 @@ class Megapad64:
         self.priv_level = 0
         self.mpu_base = 0
         self.mpu_limit = 0
+        self.fpcsr = 0
         self.sb = self.sr = self.sc = 0
         self.sw = 1
         self.tmode = self.tctrl = 0
@@ -4818,6 +4881,11 @@ class Megapad64:
             if n == 0xB:  # EXT.CRYPTO: selected 2- or 3-byte form
                 sub_op = self._icache_read_byte(u64(self.pc + 1))
                 return self._crypto_instruction_size(sub_op)
+            if n == 0xC:  # EXT.FP: 3 bytes, or 4 for FMA and FMS
+                op = self._icache_read_byte(u64(self.pc + 1))
+                return scalar_fp.instruction_length(op)
+            if n in (0x7, 0xD, 0xE, 0xF):  # unassigned: traps at one byte
+                return 1
             b1 = self._icache_read_byte(u64(self.pc + 1))
             f2 = (b1 >> 4) & 0xF
             n2 = b1 & 0xF
@@ -4834,6 +4902,9 @@ class Megapad64:
             if f2 == 0xF and n2 == 0xB:  # REX + FB
                 sub_op = self._icache_read_byte(u64(self.pc + 2))
                 return 1 + self._crypto_instruction_size(sub_op)
+            if f2 == 0xF and n2 == 0xC:  # REX + FC
+                op = self._icache_read_byte(u64(self.pc + 2))
+                return 1 + scalar_fp.instruction_length(op)
             return 1 + self._family_size(f2, n2, u64(self.pc + 1))
         return self._family_size(f, n, self.pc)
 
@@ -5174,6 +5245,24 @@ class Megapad64Micro(Megapad64):
         cycles = super()._exec_muldiv(sub)
         return cycles + 3  # shared unit overhead
 
+    # -- EXT.FP — the cluster-shared FP unit --
+
+    def _exec_fp(self) -> int:
+        """EXT.FP runs on the cluster's shared FP unit (§8.7).
+
+        Each microcore keeps its own FPCSR.  Like MUL/DIV, the unit pays the
+        +3-cycle cluster admission cost and is absent from a standalone
+        microcore, where the complete instruction traps.
+        """
+        if self._cluster is None:
+            op = self.fetch8()
+            self.fetch8()
+            if scalar_fp.instruction_length(op) == 4:
+                self.fetch8()
+            raise TrapError(IVEC_ILLEGAL_OP,
+                            "EXT.FP not available on standalone micro-core")
+        return super()._exec_fp() + 3
+
     # -- CRC — delegated to the cluster-shared engine --
 
     def _exec_crc(self, op: int) -> int:
@@ -5262,7 +5351,7 @@ class Megapad64Micro(Megapad64):
         if addr == CSR_CRC_MODE:
             return self._cluster.crc_mode if self._cluster else 0
         if addr in (CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL,
-                    CSR_IVT_BASE, CSR_IE, CSR_PRIV,
+                    CSR_IVT_BASE, CSR_IE, CSR_PRIV, CSR_FPCSR,
                     CSR_COREID, CSR_NCORES, CSR_MBOX, CSR_IPIACK,
                     CSR_IVEC_ID, CSR_TRAP_ADDR, CSR_MEGAPAD_SZ,
                     CSR_PERF_CYCLES, CSR_PERF_STALLS,
@@ -5315,7 +5404,7 @@ class Megapad64Micro(Megapad64):
         if addr in (CSR_CRC_ACC, CSR_CRC_MODE):
             return
         if addr in (CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL,
-                    CSR_IVT_BASE, CSR_IE, CSR_PRIV,
+                    CSR_IVT_BASE, CSR_IE, CSR_PRIV, CSR_FPCSR,
                     CSR_IVEC_ID, CSR_PERF_CTRL,
                     CSR_MBOX, CSR_IPIACK):
             return super().csr_write(addr, val)

@@ -107,6 +107,11 @@ def disasm_one(mem: bytearray | bytes, addr: int, mem_size: int) -> tuple[str, i
         b1 = rb(addr + 1)
         f2 = (b1 >> 4) & 0xF
         n2 = b1 & 0xF
+        if n == 0xC:
+            return _disasm_fp(rb, addr + 1, 0)
+        if 1 <= n <= 5 and b1 == 0xFC:
+            text, length = _disasm_fp(rb, addr + 2, n)
+            return text, 1 + length
         if n == 0x8 and f2 == 0xE and n2 == 0x3:
             funct = rb(addr + 2)
             lifecycle_names = {
@@ -122,6 +127,44 @@ def disasm_one(mem: bytearray | bytes, addr: int, mem_size: int) -> tuple[str, i
         return f"EXT.{n} {inner}", 1 + inner_len
 
     return _disasm_core(mem, addr, mem_size, f, n)
+
+
+_FP_NAMES = {
+    0x00: "FADD", 0x01: "FSUB", 0x02: "FMUL", 0x03: "FDIV", 0x04: "FSQRT",
+    0x05: "FMIN", 0x06: "FMAX", 0x07: "FMA", 0x08: "FMS", 0x10: "FCMP",
+    0x11: "FEQ", 0x12: "FLT", 0x13: "FLE", 0x14: "FCLASS",
+}
+_FP_MODES = {0: "RNE", 1: "RTZ", 2: "RDN", 3: "RUP", 4: "RMM", 7: "DYN"}
+
+
+def _disasm_fp(rb, addr, rex) -> tuple[str, int]:
+    """Disassemble EXT.FP (FC); ``addr`` is the operation byte."""
+    op = rb(addr)
+    dr = rb(addr + 1)
+    rd = ((rex >> 1) & 1) << 4 | dr >> 4
+    rs = (rex & 1) << 4 | dr & 0xF
+    fmt = {0: "S", 1: "D"}.get(op >> 6)
+    other = {"S": "D", "D": "S"}.get(fmt)
+    code = op & 0x3F
+    mode = _FP_MODES.get(code & 7, f"RM{code & 7}")
+    if code in (0x07, 0x08):
+        name = f"{_FP_NAMES[code]}.{fmt}"
+        return f"{name} R{rd}, R{rs}, R{rb(addr + 2) & 0x1F}", 4
+    name = (
+        f"{_FP_NAMES[code]}.{fmt}" if code in _FP_NAMES
+        else f"FRND.{fmt}.{mode}" if 0x20 <= code < 0x28
+        else f"FCVT.L.{fmt}.{mode}" if 0x28 <= code < 0x30
+        else f"FCVT.LU.{fmt}.{mode}" if 0x30 <= code < 0x38
+        else {
+            0x38: f"FCVT.{fmt}.L", 0x39: f"FCVT.{fmt}.LU",
+            0x3A: f"FCVT.{fmt}.{other}", 0x3B: f"FCVT.H.{fmt}",
+            0x3C: f"FCVT.{fmt}.H", 0x3D: f"FCVT.B.{fmt}",
+            0x3E: f"FCVT.{fmt}.B",
+        }.get(code)
+    )
+    if fmt is None or name is None:
+        return f"FC.{op:#04x} R{rd}, R{rs}", 3
+    return f"{name} R{rd}, R{rs}", 3
 
 
 def _disasm_core(mem, addr, mem_size, f, n) -> tuple[str, int]:

@@ -27,6 +27,7 @@ import sys
 from typing import Optional
 
 from shared.tile_formats import TCTRL_WRITE_MASK, TMODE_WRITE_MASK
+from shared.scalar_fp import FPCSR_WRITE_MASK
 
 # Always import the pure-Python module — we need its constants and
 # exception classes regardless of whether the accelerator is available.
@@ -42,7 +43,7 @@ from .megapad64 import (
     # CSR addresses
     CSR_FLAGS, CSR_PSEL, CSR_XSEL, CSR_SPSEL, CSR_IVT_BASE,
     CSR_D, CSR_DF, CSR_Q, CSR_T, CSR_IE, CSR_PRIV,
-    CSR_MPU_BASE, CSR_MPU_LIMIT,
+    CSR_MPU_BASE, CSR_MPU_LIMIT, CSR_FPCSR,
     CSR_SB, CSR_SR, CSR_SC, CSR_SW,
     CSR_TMODE, CSR_TCTRL, CSR_TSRC0, CSR_TSRC1, CSR_TDST,
     CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
@@ -382,7 +383,7 @@ class Megapad64:
         'tile_selftest', 'tile_st_detail',
         'icache_enabled', 'icache_hits', 'icache_misses',
         'priv_level',
-        'mpu_base', 'mpu_limit',
+        'mpu_base', 'mpu_limit', 'fpcsr',
         'ext_modifier',
         'crc_acc', 'crc_mode',
         'sha_mode', 'sha_msglen_lo', 'sha_msglen_hi',
@@ -1071,6 +1072,7 @@ def {_attr}(self, v):
         self._cs.priv_level = 0
         self._cs.mpu_base = 0
         self._cs.mpu_limit = 0
+        self._cs.fpcsr = 0
         self._cs.ext_modifier = -1
         self._cs.crc_acc = 0xFFFF_FFFF
         self._cs.crc_mode = 0
@@ -1469,6 +1471,7 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.priv_level = cs.priv_level
     py_cpu.mpu_base = cs.mpu_base
     py_cpu.mpu_limit = cs.mpu_limit
+    py_cpu.fpcsr = cs.fpcsr
     # EXT.CRYPTO state
     py_cpu.crc_acc = cs.crc_acc
     py_cpu.crc_mode = (
@@ -1616,6 +1619,7 @@ def _sync_py_to_cs(
     cs.priv_level = py_cpu.priv_level
     cs.mpu_base = py_cpu.mpu_base
     cs.mpu_limit = py_cpu.mpu_limit
+    cs.fpcsr = py_cpu.fpcsr
     # EXT.CRYPTO state
     cs.crc_acc = py_cpu.crc_acc
     cs.crc_mode = (
@@ -1648,6 +1652,7 @@ def _csr_read_py(cpu, addr: int) -> int:
         CSR_PRIV: lambda: cs.priv_level,
         CSR_MPU_BASE: lambda: cs.mpu_base,
         CSR_MPU_LIMIT: lambda: cs.mpu_limit,
+        CSR_FPCSR: lambda: cs.fpcsr,
         CSR_SB: lambda: cs.sb,
         CSR_SR: lambda: cs.sr,
         CSR_SC: lambda: cs.sc,
@@ -1725,6 +1730,7 @@ def _csr_write_py(cpu, addr: int, val: int):
     elif addr == CSR_PRIV:    cs.priv_level = val & 1
     elif addr == CSR_MPU_BASE: cs.mpu_base = val
     elif addr == CSR_MPU_LIMIT: cs.mpu_limit = val
+    elif addr == CSR_FPCSR:   cs.fpcsr = val & FPCSR_WRITE_MASK
     elif addr == CSR_SB:      cs.sb = val
     elif addr == CSR_SR:      cs.sr = val
     elif addr == CSR_SC:      cs.sc = val

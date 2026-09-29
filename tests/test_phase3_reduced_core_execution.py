@@ -1044,7 +1044,7 @@ def test_mmio_instruction_fetch_is_explicitly_unsupported(
     assert arbiter["grant_sequence"] == 0
 
 
-def _nonengine_f_modifier_signature(
+def _f_prefix_store_signature(
     worker_count: int,
     modifier: int,
 ) -> tuple:
@@ -1079,13 +1079,15 @@ def _nonengine_f_modifier_signature(
     )
 
 
-@pytest.mark.parametrize("modifier", (0xC, 0xF))
-def test_nonengine_f_modifier_cannot_bypass_bus_arbitration(
+@pytest.mark.parametrize("modifier", (0x7, 0xD, 0xE, 0xF))
+def test_unassigned_f_prefix_traps_before_bus_arbitration(
     modifier: int,
 ) -> None:
+    # F7 and FD-FF trap at the prefix byte (docs/floating-point.md §8.1), so
+    # the store never reaches the bus under any worker count.
     signatures = {
         worker_count:
-            _nonengine_f_modifier_signature(
+            _f_prefix_store_signature(
                 worker_count,
                 modifier,
             )
@@ -1099,11 +1101,11 @@ def test_nonengine_f_modifier_cannot_bypass_bus_arbitration(
         (0, 1, 0, 0, 0),
         1,
         2,
-        0x103,
-        0xA5,
-        1,
+        0x101,
         0,
-        1,
+        0,
+        0,
+        0,
     )
 
 

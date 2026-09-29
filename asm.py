@@ -122,6 +122,50 @@ CRYPTO_BARE_OPS = {"crc.init", "sha.round", "sha.pad", "sha.final",
 # Combined
 CRYPTO_SUB = {**CRYPTO_CRC_SUB, **CRYPTO_SHA_SUB, **CRYPTO_GF_SUB}
 
+# EXT.FP operations (prefix FC), docs/floating-point.md §8.3.  Mnemonics
+# carry the format: fadd.s, fma.d, frnd.s.rtz, fcvt.l.d.rne, fcvt.s.d, ...
+FP_FORMATS = {"s": 0x00, "d": 0x40}
+FP_BINARY = {
+    "fadd": 0x00, "fsub": 0x01, "fmul": 0x02, "fdiv": 0x03, "fsqrt": 0x04,
+    "fmin": 0x05, "fmax": 0x06, "fcmp": 0x10, "feq": 0x11, "flt": 0x12,
+    "fle": 0x13, "fclass": 0x14,
+}
+FP_TERNARY = {"fma": 0x07, "fms": 0x08}
+FP_ROUNDING = {"rne": 0, "rtz": 1, "rdn": 2, "rup": 3, "rmm": 4, "dyn": 7}
+
+
+def _fp_opcode(mnem: str) -> int | None:
+    """Return the FC operation byte for an EXT.FP mnemonic, else None."""
+    parts = mnem.split(".")
+    head = parts[0]
+    if head in FP_BINARY or head in FP_TERNARY:
+        if len(parts) != 2 or parts[1] not in FP_FORMATS:
+            return None
+        return FP_FORMATS[parts[1]] | FP_BINARY.get(head, FP_TERNARY.get(head))
+    if head == "frnd":
+        if len(parts) not in (2, 3) or parts[1] not in FP_FORMATS:
+            return None
+        rm = FP_ROUNDING.get(parts[2]) if len(parts) == 3 else 7
+        return None if rm is None else FP_FORMATS[parts[1]] | 0x20 | rm
+    if head != "fcvt" or len(parts) not in (3, 4):
+        return None
+    to, frm = parts[1], parts[2]
+    rm = FP_ROUNDING.get(parts[3]) if len(parts) == 4 else 7
+    if rm is None:
+        return None
+    if to in ("l", "lu") and frm in FP_FORMATS:
+        return FP_FORMATS[frm] | (0x28 if to == "l" else 0x30) | rm
+    if len(parts) == 4:
+        return None  # only float-to-integer conversions take a mode
+    if to in FP_FORMATS:
+        code = {"l": 0x38, "lu": 0x39, "h": 0x3C, "b": 0x3E}.get(frm)
+        if frm in FP_FORMATS and frm != to:
+            code = 0x3A
+        return None if code is None else FP_FORMATS[to] | code
+    if to in ("h", "b") and frm in FP_FORMATS:
+        return FP_FORMATS[frm] | (0x3B if to == "h" else 0x3D)
+    return None
+
 # ---------------------------------------------------------------------------
 #  Parser helpers
 # ---------------------------------------------------------------------------
@@ -558,6 +602,14 @@ def _instruction_size(lineno: int, text: str) -> int:
     if mnem_lower in STRING_SUB:
         return 3 + (1 if hi else 0)  # [REX] + F9 + sub-op + reg-byte
 
+    # -- EXT.FP (FC) --
+    fp_op = _fp_opcode(mnem_lower)
+    if fp_op is not None:
+        ops = _split_ops(rest)
+        rex = len(ops) >= 2 and _rex_byte(
+            rd=_parse_reg(ops[0]), rs=_parse_reg(ops[1])) is not None
+        return (4 if fp_op & 0x3F in (0x07, 0x08) else 3) + (1 if rex else 0)
+
     # -- EXT.DICT (FA) --
     if mnem_lower in DICT_SUB:
         return 3 + (1 if hi else 0)  # [REX] + FA + sub-op + reg-byte
@@ -908,6 +960,25 @@ def _emit_instruction(lineno: int, text: str, pc: int,
         n_nibble = 0x8 | rn
         out.append(0xD0 | n_nibble)
         out.append(csr_addr & 0xFF)
+        return out
+
+    # ---- EXT.FP (0xFC) ----
+    fp_op = _fp_opcode(mnem_lower)
+    if fp_op is not None:
+        ternary = fp_op & 0x3F in (0x07, 0x08)
+        if len(ops) != (3 if ternary else 2):
+            raise AsmError(lineno, f"{mnem} takes {3 if ternary else 2} "
+                                   "register operands")
+        rd = _parse_reg(ops[0])
+        rs = _parse_reg(ops[1])
+        rex = _rex_byte(rd=rd, rs=rs)
+        if rex is not None:
+            out.append(rex)
+        out.append(0xFC)
+        out.append(fp_op)
+        out.append(((rd & 0xF) << 4) | (rs & 0xF))
+        if ternary:
+            out.append(_parse_reg(ops[2]) & 0x1F)
         return out
 
     # ---- EXT.STRING (0xF9) ----

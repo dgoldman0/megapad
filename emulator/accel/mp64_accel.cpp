@@ -140,7 +140,7 @@ enum CSR {
     CSR_FLAGS=0x00, CSR_PSEL=0x01, CSR_XSEL=0x02, CSR_SPSEL=0x03,
     CSR_IVT_BASE=0x04, CSR_D=0x05, CSR_DF=0x06, CSR_Q=0x07,
     CSR_T=0x08, CSR_IE=0x09, CSR_PRIV=0x0A,
-    CSR_MPU_BASE=0x0B, CSR_MPU_LIMIT=0x0C,
+    CSR_MPU_BASE=0x0B, CSR_MPU_LIMIT=0x0C, CSR_FPCSR=0x0D,
     CSR_SB=0x10, CSR_SR=0x11, CSR_SC=0x12, CSR_SW=0x13,
     CSR_TMODE=0x14, CSR_TCTRL=0x15,
     CSR_TSRC0=0x16, CSR_TSRC1=0x17, CSR_TDST=0x18,
@@ -179,6 +179,7 @@ enum EW {
 // keeps ACC_ACC [0] and ACC_ZERO [1].  Every other bit reads as zero.
 static constexpr uint64_t TMODE_EW_MASK = 0x0F;
 static constexpr uint64_t TMODE_WRITE_MASK = 0x7F;
+static constexpr uint64_t FPCSR_WRITE_MASK = 0x1F7;  // RM[2:0], flags[8:4]
 static constexpr uint64_t TCTRL_WRITE_MASK = 0x03;
 
 // One binary interchange format (docs/floating-point.md §2).
@@ -1848,6 +1849,10 @@ struct CPUState {
     uint64_t mpu_base;   // inclusive lower bound
     uint64_t mpu_limit;  // exclusive upper bound
 
+    // Scalar FP control and status (docs/floating-point.md §9).  EXT.FP
+    // itself executes in the Python oracle; the CSR is native state.
+    uint64_t fpcsr = 0;
+
     // EXT prefix
     int ext_modifier;   // -1 = none
 
@@ -2297,6 +2302,7 @@ struct CPUState {
     X(uint8_t, priv_level) \
     X(uint64_t, mpu_base) \
     X(uint64_t, mpu_limit) \
+    X(uint64_t, fpcsr) \
     X(int, ext_modifier) \
     X(uint64_t, crc_acc) \
     X(uint8_t, crc_mode) \
@@ -7659,6 +7665,7 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_PRIV:      return s.priv_level;
         case CSR_MPU_BASE:  return s.mpu_base;
         case CSR_MPU_LIMIT: return s.mpu_limit;
+        case CSR_FPCSR:     return s.fpcsr;
         case CSR_SB:        return s.sb;
         case CSR_SR:        return s.sr;
         case CSR_SC:        return s.sc;
@@ -7727,6 +7734,7 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
         case CSR_PRIV:      s.priv_level = val & 1; break;
         case CSR_MPU_BASE:  s.mpu_base = val; break;
         case CSR_MPU_LIMIT: s.mpu_limit = val; break;
+        case CSR_FPCSR:     s.fpcsr = val & FPCSR_WRITE_MASK; break;
         case CSR_SB:        s.sb = val; break;
         case CSR_SR:        s.sr = val; break;
         case CSR_SC:        s.sc = val; break;
@@ -7795,6 +7803,12 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
 //  _next_instruction_size — for SKIP mode
 // ---------------------------------------------------------------------------
 
+// EXT.FP is FC op DR, plus the T byte for FMA and FMS.
+static int fp_instruction_size(uint8_t op) {
+    const uint8_t code = op & 0x3F;
+    return code == 0x07 || code == 0x08 ? 4 : 3;
+}
+
 static int crypto_instruction_size(uint8_t sub_op) {
     switch (sub_op) {
         case 0x01: case 0x02: case 0x03:
@@ -7858,7 +7872,16 @@ static int next_instruction_size(CPUState& s) {
                 header.prefix_size +
                 crypto_instruction_size(crypto_sub);
         }
+        if (header.subop == 0xC) {
+            const uint8_t fp_op =
+                icache_read_byte(
+                    s,
+                    address + header.bytes_consumed);
+            return header.prefix_size + fp_instruction_size(fp_op);
+        }
     }
+    if (header.status == InstructionHeaderStatus::ILLEGAL_PREFIX)
+        return 1;
     if (header.has_prefix())
         return 1;  // retain the existing shallow estimate otherwise
 
@@ -13024,6 +13047,10 @@ static int step_one(
         throw std::runtime_error(
             "TRAP:ILLEGAL_OP:Double EXT prefix");
     }
+    if (decode.status == DecodeStatus::ILLEGAL_PREFIX) {
+        throw std::runtime_error(
+            "TRAP:ILLEGAL_OP:unassigned prefix");
+    }
     if (decode.status == DecodeStatus::DECODED) {
         const int decoded_cycles =
             execute_authoritative_decoded_instruction(
@@ -13051,6 +13078,14 @@ static int step_one(
             cycles += exec_dict(s, cb);
         else if (n == 0xB)
             cycles += exec_crypto(s, cb);
+        else if (n == 0xC) {
+            // EXT.FP executes in the Python oracle, which owns its exact
+            // rounding and flags. Rewind the complete instruction.
+            pc(s) = pc_start;
+            s.ext_modifier = -1;
+            icache_rollback_instruction(s);
+            throw std::runtime_error("EXT_ISA_FALLBACK");
+        }
         else
             throw std::logic_error(
                 "shared MP64 decoder deferred an invalid extension");
@@ -30092,6 +30127,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("priv_level", &CPUState::priv_level)
         .def_readwrite("mpu_base", &CPUState::mpu_base)
         .def_readwrite("mpu_limit", &CPUState::mpu_limit)
+        .def_readwrite("fpcsr", &CPUState::fpcsr)
         .def_readwrite("ext_modifier", &CPUState::ext_modifier)
         .def_readwrite("crc_acc", &CPUState::crc_acc)
         .def_readwrite("crc_mode", &CPUState::crc_mode)

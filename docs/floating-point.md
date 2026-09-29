@@ -359,7 +359,10 @@ Operations other than FCMP leave FLAGS unchanged.
 **8.3 Operations.** `RM` means the static mode in the opcode or, when that is
 7, `FPCSR.RM`. The static modes are 0 RNE, 1 RTZ, 2 RDN, 3 RUP, 4 RMM, and 7
 dynamic. The values 5 and 6 are reserved and trap. Operations without a mode
-field use `FPCSR.RM`.
+field that round use `FPCSR.RM`: `0x00`–`0x04`, `0x07`, `0x08`, `0x38`–`0x3B`,
+and `0x3D`. The rule depends on `op[5:0]` alone, so `FCVT.D.S` uses
+`FPCSR.RM` although its result is always exact. The other operations never
+round and ignore `FPCSR.RM`.
 
 | `op[5:0]` | Mnemonic | Operation | Flags |
 |---|---|---|---|
@@ -506,12 +509,16 @@ Scalar `FC` extra cycles are:
 |---|---:|
 | FADD, FSUB, FMUL, FMA, FMS, FRND, all FCVT | 3 |
 | FMIN, FMAX, FCMP, FEQ, FLT, FLE, FCLASS | 1 |
-| FDIV, FSQRT | a data-independent constant per format, fixed in Phase 7 |
+| FDIV, FSQRT on S | 15 |
+| FDIV, FSQRT on D | 30 |
 
 Microcores add the +3-cycle cluster admission cost.
 
-Divide and square-root latencies must not depend on operand values. The phase
-that chooses their algorithm records the constants here.
+Divide and square-root latencies do not depend on operand values, including
+zeros, infinities, and NaNs. The unit runs a digit recurrence that retires two
+result bits per cycle: 26 bits for S and 56 for D, which leaves a guard bit
+and a sticky remainder for every rounding mode. One cycle prepares the
+operands and one rounds the result.
 
 ## 11. BIOS Forth words
 

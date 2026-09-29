@@ -145,14 +145,18 @@ enum class DecodeStatus : uint8_t {
     DEFERRED,
     UNAVAILABLE,
     ILLEGAL_DOUBLE_PREFIX,
+    ILLEGAL_PREFIX,
 };
 
+// ILLEGAL_PREFIX is an unassigned F7 or FD-FF first byte, which traps
+// after that one byte instead of latching as a modifier.
 enum class InstructionHeaderStatus : uint8_t {
     ORDINARY = 0,
     EXTENSION_ENGINE,
     UNAVAILABLE,
     PREFIX_REJECTED,
     ILLEGAL_DOUBLE_PREFIX,
+    ILLEGAL_PREFIX,
 };
 
 // The header stage owns only opcode-family and modifier interpretation. It
