@@ -671,7 +671,10 @@ Progress:
   already converts any tile region. A KDOS wrapper belongs to the software
   consumers' own vertical (Phase 9 handoff note).
 - **Regression.** The full RTL list and SoC elaboration, the Python and
-  native suites, the BIOS system tests, and the hosted suite pass.
+  native suites, the BIOS system tests, and the hosted suite pass. The
+  hosted simulator changed, so the physical Desktop journey ran once, with
+  Akashic `f2f06799` and this branch at `9adbd94`. It passed in 232 s, with
+  a peak aggregate RSS of 512 MB and the native simulator executor.
 
 ### Phase 7 — Scalar FP unit
 
