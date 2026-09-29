@@ -42,6 +42,7 @@ set rtl_files [list \
     ${RTL_DIR}/core/mp64_bitfield.v                \
     ${RTL_DIR}/core/mp64_dict.v                    \
     ${RTL_DIR}/core/mp64_fp_half.v                \
+    ${RTL_DIR}/core/mp64_fma.v                    \
     ${RTL_DIR}/core/mp64_fp_exact.v                \
     ${RTL_DIR}/core/mp64_string.v                  \
     ${RTL_DIR}/core/mp64_cpu.v                     \
