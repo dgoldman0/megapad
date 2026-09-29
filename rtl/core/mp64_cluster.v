@@ -621,7 +621,12 @@ module mp64_cluster #(
             arb_cand = {1'b0, arb_last} + ai[ARB_BITS:0];
             if (arb_cand >= N_VAL)
                 arb_cand = arb_cand - N_VAL;
-            if (!arb_any && mc_bus_valid[arb_cand[ARB_BITS-1:0]]) begin
+            // A core whose ready pulse is being delivered still presents the
+            // request it is just completing; granting it again would repeat
+            // the old address and return that stale data for its next
+            // request (a lone fetching core then reads a byte twice).
+            if (!arb_any && mc_bus_valid[arb_cand[ARB_BITS-1:0]] &&
+                !mc_bus_ready[arb_cand[ARB_BITS-1:0]]) begin
                 arb_next = arb_cand[ARB_BITS-1:0];
                 arb_any  = 1'b1;
             end
