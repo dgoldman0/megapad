@@ -34,6 +34,7 @@ from .retained_view import (
     TextAreaDraw,
     TextGridDraw,
     WaveformDraw,
+    retained_draw_key,
 )
 from .semantic_content import (
     SemanticContentFlag,
@@ -641,6 +642,42 @@ def resolve_pointer(
 
 
 @dataclass(frozen=True, slots=True)
+class PaintedDraw:
+    """One draw of a composed frame, as a later partial repaint needs it.
+
+    ``key`` is the draw's identity in its region.  ``extent`` holds every
+    pixel the draw may change, or is None when it changes none.  ``entries``
+    are its hit entries and ``popup_entries`` those of the popups it opened,
+    which the region's popup pass adds after all of its draws.
+    """
+
+    key: tuple[str, int]
+    extent: PixelRect | None
+    entries: tuple[HitMapEntry, ...] = ()
+    popup_entries: tuple[HitMapEntry, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PaintedRegion:
+    """One region of a composed frame: its full viewport, its occlusion
+    entry, and its draws in painter order."""
+
+    key: tuple[int, int, int]
+    viewport: PixelRect | None
+    occlusion: tuple[HitMapEntry, ...]
+    draws: tuple[PaintedDraw, ...]
+
+    def entries(self) -> tuple[HitMapEntry, ...]:
+        """The region's hit entries in the composition's painter order."""
+
+        return (
+            *self.occlusion,
+            *(entry for draw in self.draws for entry in draw.entries),
+            *(entry for draw in self.draws for entry in draw.popup_entries),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CompositeDrawResult:
     """One completed paint pass and its immutable semantic hit map.
 
@@ -654,6 +691,9 @@ class CompositeDrawResult:
 
     surface: object
     hit_entries: tuple[HitMapEntry, ...]
+    # How the retained plane was painted, region by region, for a partial
+    # repaint of the next frame; empty when no plane was composed.
+    regions: tuple[PaintedRegion, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -661,6 +701,10 @@ class CompositeDrawResult:
             "hit_entries",
             _validated_hit_entries(self.hit_entries),
         )
+        regions = tuple(self.regions)
+        if any(not isinstance(region, PaintedRegion) for region in regions):
+            raise TypeError("regions must contain only PaintedRegion values")
+        object.__setattr__(self, "regions", regions)
 
     @property
     def hit_targets(self) -> tuple[ControlHitTarget, ...]:
@@ -783,6 +827,66 @@ def _region_viewport(pygame_module, surface, region, region_rect):
         region.clip_rows * cell_height,
     )
     return _bounded_pygame_rect(pygame_module, physical_clip, viewport)
+
+
+_OBJECT_DRAWS = (
+    GlyphRunDraw,
+    PolylineDraw,
+    ImageDraw,
+    ReadoutDraw,
+    MeterDraw,
+    StatusDraw,
+    PlotDraw,
+    WaveformDraw,
+)
+_ROOT_CONTROLS = (TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw)
+
+
+def _draw_extent(
+    pygame_module,
+    region,
+    region_rect,
+    viewport,
+    draw,
+    cell_width: int,
+    cell_height: int,
+    control_font,
+) -> PixelRect | None:
+    """Every pixel DRAW may change, from the rules its painter clips by.
+
+    VIEWPORT is the region's viewport on the full frame.  An object paints
+    within its object rectangle and a root control within its anchor.  A
+    menu bar paints its anchor and the shadow below it, and while one of its
+    menus is open, popups anywhere in the viewport.
+    """
+
+    if isinstance(draw, _OBJECT_DRAWS):
+        painted = _object_rect(pygame_module, region, region_rect, draw)
+    elif isinstance(draw, _ROOT_CONTROLS):
+        painted = _bounds_rect(
+            pygame_module,
+            region_rect,
+            draw.bounds,
+            region_rect.width // region.logical_cols,
+            region_rect.height // region.logical_rows,
+        )
+    elif isinstance(draw, MenuBarDraw):
+        if any(menu.state & ControlState.OPEN for menu in draw.menus):
+            painted = viewport
+        else:
+            anchor = _bounds_rect(
+                pygame_module, region_rect, draw.bounds, cell_width, cell_height
+            )
+            shadow = _menu_metrics(control_font, cell_width, cell_height).shadow_offset
+            painted = _WideRect(
+                anchor.left, anchor.top, anchor.width, anchor.height + shadow
+            )
+    else:  # Legitimate newer kinds remain fail-closed until implemented.
+        raise TypeError("unsupported retained draw value")
+    visible = _bounded_pygame_rect(pygame_module, painted, viewport)
+    if visible.width <= 0 or visible.height <= 0:
+        return None
+    return _pixel_rect(visible)
 
 
 def _font_height(font, fallback: int) -> int:
@@ -3687,6 +3791,9 @@ def composite_draw_plane_result(
     series_by_key = {history.key: history.samples for history in plane.series}
     hit_entries: list[HitMapEntry] = []
     glyphs = {}
+    # The record describes the full frame, whatever the surface's clip.
+    full_frame = _FullSurfaceBounds(pygame_module, *surface.get_size())
+    painted_regions: list[PaintedRegion] = []
     for region in plane.regions:
         region_rect = _WideRect(
             region.logical_x * cell_w,
@@ -3694,6 +3801,8 @@ def composite_draw_plane_result(
             region.logical_cols * cell_w,
             region.logical_rows * cell_h,
         )
+        full_viewport = _region_viewport(pygame_module, full_frame, region, region_rect)
+        occlusion_start = len(hit_entries)
         region_coverage = _bounded_pygame_rect(
             pygame_module,
             region_rect,
@@ -3713,8 +3822,13 @@ def composite_draw_plane_result(
                     ),
                 )
             )
+        occlusion = tuple(hit_entries[occlusion_start:])
         region_popups: list[_MenuPopup] = []
+        popup_owners: list[int] = []
+        draw_records: list[list] = []
         for draw in region.draws:
+            entries_start = len(hit_entries)
+            popups_start = len(region_popups)
             if isinstance(draw, GlyphRunDraw):
                 _paint_glyph_run(
                     pygame_module,
@@ -3862,11 +3976,30 @@ def composite_draw_plane_result(
                 )
             else:  # Legitimate newer kinds remain fail-closed until implemented.
                 raise TypeError("unsupported retained draw value")
+            popup_owners.extend(
+                [len(draw_records)] * (len(region_popups) - popups_start)
+            )
+            draw_records.append([
+                retained_draw_key(draw),
+                _draw_extent(
+                    pygame_module,
+                    region,
+                    region_rect,
+                    full_viewport,
+                    draw,
+                    cell_w,
+                    cell_h,
+                    control_font,
+                ),
+                tuple(hit_entries[entries_start:]),
+                [],
+            ])
         # A popup is a renderer-owned foreground surface above this region's
         # ordinary controls and objects.  Keep both its pixels and item targets
         # here so a later collection cannot cover the popup while its old hits
         # remain active.  Higher regions still paint and occlude afterward.
-        for popup in region_popups:
+        for popup, owner in zip(region_popups, popup_owners):
+            entries_start = len(hit_entries)
             prior_clip = surface.get_clip()
             try:
                 surface.set_clip(popup.viewport)
@@ -3888,7 +4021,21 @@ def composite_draw_plane_result(
                 )
             finally:
                 surface.set_clip(prior_clip)
-    return CompositeDrawResult(surface, tuple(hit_entries))
+            draw_records[owner][3].extend(hit_entries[entries_start:])
+        painted_regions.append(
+            PaintedRegion(
+                (region.owner_id, region.owner_generation, region.region_id),
+                None
+                if full_viewport.width <= 0 or full_viewport.height <= 0
+                else _pixel_rect(full_viewport),
+                occlusion,
+                tuple(
+                    PaintedDraw(key, extent, entries, tuple(popup_entries))
+                    for key, extent, entries, popup_entries in draw_records
+                ),
+            )
+        )
+    return CompositeDrawResult(surface, tuple(hit_entries), tuple(painted_regions))
 
 
 def composite_draw_plane(
@@ -3921,6 +4068,8 @@ def composite_draw_plane(
 
 __all__ = [
     "CompositeDrawResult",
+    "PaintedDraw",
+    "PaintedRegion",
     "ControlHitTarget",
     "ControlIdentity",
     "ControlSurface",

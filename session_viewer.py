@@ -1892,6 +1892,7 @@ def compose_terminal_frame_result(
         ),
     )
     hit_entries: tuple[HitMapEntry, ...] = ()
+    painted_regions = ()
     if retained_plane is not None:
         compositor_kwargs = {
             "control_font": control_font,
@@ -1910,6 +1911,7 @@ def compose_terminal_frame_result(
             **compositor_kwargs,
         )
         hit_entries = retained_result.hit_entries
+        painted_regions = retained_result.regions
     _paint_terminal_cursor(
         pygame_module,
         surface,
@@ -1918,7 +1920,7 @@ def compose_terminal_frame_result(
         cell_height,
         show_cursor=show_cursor,
     )
-    return CompositeDrawResult(surface, hit_entries)
+    return CompositeDrawResult(surface, hit_entries, painted_regions)
 
 
 def capture_final_terminal_raster(pygame_module, surface) -> FinalRaster:
