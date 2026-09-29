@@ -1342,12 +1342,16 @@ module tb_tile;
                                      8'd0, 4'd8);
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
                            "LOAD2D in a reserved EW traps");
-                end else begin
-                    // FP32/FP64 reductions and DOT land in Phase 5; PACK,
-                    // VSHR, and VCLZ are illegal in float formats.
-                    mex_dispatch(2'd0, MEX_TMUL, TMUL_DOT, 64'd0, 8'd0);
+                    mex_dispatch(2'd0, MEX_TRED, TRED_SUM, 64'd0, 8'd0);
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
-                           "FP32/FP64 DOT traps until Phase 5");
+                           "TRED SUM in a reserved EW traps");
+                end else begin
+                    // FP32/FP64 VSEL lands in Phase 6; PACK, VSHR, and FP64
+                    // WMUL are illegal.
+                    mex_dispatch_ext(2'd0, MEX_TALU, ETALU_VSEL, 64'd0,
+                                     8'd0, 4'd8);
+                    check3(mex_fault, MEX_FAULT_ILLEGAL,
+                           "FP32/FP64 VSEL traps");
                     mex_dispatch(2'd0, MEX_TSYS, TSYS_PACK, 64'd0, 8'd0);
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
                            "float PACK traps");
@@ -1355,10 +1359,12 @@ module tb_tile;
                                      8'd0, 4'd8);
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
                            "float VSHR traps");
+                    if (k == 1) begin
+                        mex_dispatch(2'd0, MEX_TMUL, TMUL_WMUL, 64'd0, 8'd0);
+                        check3(mex_fault, MEX_FAULT_ILLEGAL,
+                               "FP64 WMUL traps");
+                    end
                 end
-                mex_dispatch(2'd0, MEX_TRED, TRED_SUM, 64'd0, 8'd0);
-                check3(mex_fault, MEX_FAULT_ILLEGAL,
-                       "TRED SUM in an unadmitting EW traps");
                 tacc_monitor = 1'b0;
                 check64(tacc_mem_req_count, 64'd0,
                         "an unadmitted operation makes no memory request");
@@ -1410,6 +1416,45 @@ module tb_tile;
                 mex_timed(sched_op[ops], sched_funct[ops], wide_cycles);
                 check64(wide_cycles - half_cycles, sched_extra[ops],
                         "FP64 extra cycles over FP16");
+            end
+            // Reductions and dot products run the canonical tree: products,
+            // levels, and the reserved ACC_ACC beats (§10).  The RTL's FP16
+            // reductions spend no extra cycles, so the difference is the
+            // FP32/FP64 table cost.
+            begin : tree_schedule
+                reg [1:0]  red_op [0:6];
+                reg [2:0]  red_funct [0:6];
+                reg [63:0] red_fp32 [0:6];
+                reg [63:0] red_fp64 [0:6];
+                integer    r;
+                red_op[0] = MEX_TRED; red_funct[0] = TRED_SUM;
+                red_fp32[0] = 9;  red_fp64[0] = 5;
+                red_op[1] = MEX_TRED; red_funct[1] = TRED_L1;
+                red_fp32[1] = 9;  red_fp64[1] = 5;
+                red_op[2] = MEX_TRED; red_funct[2] = TRED_SUMSQ;
+                red_fp32[2] = 13; red_fp64[2] = 9;
+                red_op[3] = MEX_TMUL; red_funct[3] = TMUL_DOT;
+                red_fp32[3] = 13; red_fp64[3] = 9;
+                red_op[4] = MEX_TMUL; red_funct[4] = TMUL_DOTACC;
+                red_fp32[4] = 12; red_fp64[4] = 8;
+                red_op[5] = MEX_TRED; red_funct[5] = TRED_MIN;
+                red_fp32[5] = 0;  red_fp64[5] = 0;
+                red_op[6] = MEX_TRED; red_funct[6] = TRED_MAXIDX;
+                red_fp32[6] = 0;  red_fp64[6] = 0;
+                for (r = 0; r < 7; r = r + 1) begin
+                    csr_write(CSR_TCTRL, 64'd1);
+                    csr_write(CSR_TMODE, {60'd0, TMODE_FP16});
+                    mex_timed(red_op[r], red_funct[r], half_cycles);
+                    csr_write(CSR_TMODE, {60'd0, TMODE_FP32});
+                    mex_timed(red_op[r], red_funct[r], wide_cycles);
+                    check64(wide_cycles - half_cycles, red_fp32[r],
+                            "FP32 tree cycles over FP16");
+                    csr_write(CSR_TMODE, {60'd0, TMODE_FP64});
+                    mex_timed(red_op[r], red_funct[r], wide_cycles);
+                    check64(wide_cycles - half_cycles, red_fp64[r],
+                            "FP64 tree cycles over FP16");
+                end
+                csr_write(CSR_TCTRL, 64'd0);
             end
             // ADD and MUL move the same tiles as the zero-cost AND.
             csr_write(CSR_TMODE, {60'd0, TMODE_FP32});

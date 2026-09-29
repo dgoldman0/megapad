@@ -2484,9 +2484,9 @@ module tb_cluster;
         check64("reserved EW 8 traps in the shared engine",
                 tb_private_mex_fault, MEX_FAULT_ILLEGAL);
         drive_private_tile_csr(1, CSR_TMODE, {60'd0, TMODE_FP64});
-        drive_private_mex(1, 2'd0, MEX_TMUL, TMUL_DOT, {5'd0, TMUL_DOT},
+        drive_private_mex(1, 2'd0, MEX_TMUL, TMUL_WMUL, {5'd0, TMUL_WMUL},
                           4'd0, 1'b0, tb_private_mex_fault);
-        check64("FP64 DOT traps until Phase 5",
+        check64("FP64 WMUL is illegal",
                 tb_private_mex_fault, MEX_FAULT_ILLEGAL);
         if (tile_mem_model[2] === {64{8'hD5}})
             pass_count = pass_count + 1;

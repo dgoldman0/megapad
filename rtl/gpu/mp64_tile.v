@@ -311,9 +311,9 @@ module mp64_tile #(
     // admits).  funct is the effective function (0 for the immediate form)
     // and ext8 marks the EXT.8 forms.  docs/floating-point.md §5.2 makes
     // PACK, UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL
-    // illegal in FP64; the EXT.8 functions 4-7 land in Phases 6 and 8.
-    // FP32/FP64 reductions and dot products land in Phase 5 of
-    // docs/megapad-full-float-plan.md, and their VSEL in Phase 6.
+    // illegal in FP64; the EXT.8 functions 4-7 land in Phases 6 and 8 of
+    // docs/megapad-full-float-plan.md, and FP32/FP64 VSEL in Phase 6.
+    // FP16/BF16 PACK and UNPACK remain until TCVT replaces them.
     function tile_op_admitted;
         input [3:0] ew;
         input [1:0] op;
@@ -331,18 +331,14 @@ module mp64_tile #(
             else if ((ew != TMODE_FP32) && (ew != TMODE_FP64))
                 tile_op_admitted = 1'b1;
             else case (op)
-                MEX_TALU:
-                    tile_op_admitted = 1'b1;
                 MEX_TMUL:
                     tile_op_admitted =
-                        (funct == TMUL_MUL) || (funct == TMUL_MAC) ||
-                        (funct == TMUL_FMA) ||
-                        ((funct == TMUL_WMUL) && (ew == TMODE_FP32));
-                MEX_TRED:
-                    tile_op_admitted = (funct == TRED_POPC);
-                default:
+                        (funct != TMUL_WMUL) || (ew == TMODE_FP32);
+                MEX_TSYS:
                     tile_op_admitted =
                         (funct != TSYS_PACK) && (funct != TSYS_UNPACK);
+                default:
+                    tile_op_admitted = 1'b1;
             endcase
         end
     endfunction
@@ -387,6 +383,7 @@ module mp64_tile #(
     localparam S_TAMAC_LOAD_B= 5'd22;  // wait second TAMAC source
     localparam S_TACC_INT    = 5'd23;  // one 16-lane feedback slice
     localparam S_FMA         = 5'd24;  // one FP32/FP64 FMA beat
+    localparam S_TREE        = 5'd25;  // one FP32/FP64 reduction beat
 
     reg [4:0]   state;
     reg         mex_done_reg;
@@ -398,6 +395,8 @@ module mp64_tile #(
     localparam [2:0] Z_ACC0      = 3'd2;  // ACC0 (an index) zero
     localparam [2:0] Z_FP_ACC0   = 3'd3;  // ACC0 binary32 is +-0
     localparam [2:0] Z_FP_ALL    = 3'd4;  // ACC0-ACC3 binary32 all +-0
+    localparam [2:0] Z_FP64_ACC0 = 3'd5;  // ACC0 binary64 is +-0
+    localparam [2:0] Z_FP64_ALL  = 3'd6;  // ACC0-ACC3 binary64 all +-0
     reg         mex_busy_reg;
     reg [2:0]   mex_fault_reg;
     reg [63:0]  mex_fault_addr_reg;
@@ -466,7 +465,7 @@ module mp64_tile #(
         !active_cancelled &&
         (((state == S_COMPUTE) && (op_reg == MEX_TMUL) &&
           ((funct_reg == TMUL_DOT) || (funct_reg == TMUL_DOTACC))) ||
-         (state == S_REDUCE));
+         (state == S_REDUCE) || (state == S_TREE));
 
 `ifndef SYNTHESIS
     // The cluster/common-ACC admission point must prevent simultaneous
@@ -1434,7 +1433,26 @@ module mp64_tile #(
     // a * 1 + b, SUB is a * 1 + (-b), MUL and WMUL are a * b + (-0), and MAC
     // and FMA are a * b + [TDST].  WMUL multiplies binary32 lanes into exact
     // binary64 products: lanes 0-7 go to [TDST] and 8-15 to [TDST+64].
+    //
+    // SUM, L1, SUMSQ, DOT, and DOTACC run the canonical tree (§4.3) on the
+    // same units in S_TREE, over binary64 values in tree_v.  The product
+    // phase forms the DOT/SUMSQ leaves as WMUL-shaped (FP32) or MUL-shaped
+    // (FP64) beats; SUM and L1 leaves are the lanes widened exactly.  Each
+    // tree level then takes ceil(nodes / FMA_UNITS) beats of binary64
+    // a * 1 + b adds, pairing in lane order, down to one value (four DOTACC
+    // chunk values).  A final phase reserves ceil(values / FMA_UNITS) beats
+    // for the ACC_ACC adds whether or not ACC_ACC is set (§10).
     localparam integer FMA_BEATS = 8 / FMA_UNITS;
+    localparam [1:0] TREE_PRODUCTS = 2'd0;
+    localparam [1:0] TREE_LEVELS   = 2'd1;
+    localparam [1:0] TREE_ACC      = 2'd2;
+    reg [1023:0] tree_v;
+    reg [1:0]    tree_phase;
+    reg [4:0]    tree_count;       // values in the current level
+    reg [2:0]    tree_target;      // 1, or 4 for DOTACC
+    reg          tree_accumulate;  // ACC_ACC without ACC_ZERO
+    wire tree_add_phase  = (state == S_TREE) && (tree_phase != TREE_PRODUCTS);
+    wire tree_square     = (op_reg == MEX_TRED);  // SUMSQ squares operand A
 
 `ifndef SYNTHESIS
     initial begin
@@ -1451,7 +1469,7 @@ module mp64_tile #(
     wire fma_is_talu     = (op_reg == MEX_TALU);
     wire fma_uses_addend = (op_reg == MEX_TMUL) &&
                            ((funct_reg == TMUL_MAC) || (funct_reg == TMUL_FMA));
-    wire fma_out64       = mode_fp64 || fma_is_wmul;
+    wire fma_out64       = mode_fp64 || fma_is_wmul || (state == S_TREE);
     wire fma_op = mode_wide_fp &&
         !(ext_active_reg && (ext_mod_reg == 4'd8)) &&
         ((fma_is_talu &&
@@ -1470,13 +1488,14 @@ module mp64_tile #(
 
             wire [63:0] a0_lane = mode_fp64 ? tile_a[lane64[2:0]*64 +: 64]
                                             : {32'd0, tile_a[lane32*32 +: 32]};
-            wire [63:0] b0_lane = mode_fp64 ?
-                src_b_selected[lane64[2:0]*64 +: 64] :
+            wire [63:0] b0_lane = tree_square ? a0_lane :
+                mode_fp64 ? src_b_selected[lane64[2:0]*64 +: 64] :
                 {32'd0, src_b_selected[lane32*32 +: 32]};
             wire [63:0] c0_lane = mode_fp64 ? tile_c[lane64[2:0]*64 +: 64]
                                             : {32'd0, tile_c[lane32*32 +: 32]};
             wire [31:0] a1_lane = tile_a[(lane32 + 1)*32 +: 32];
-            wire [31:0] b1_lane = src_b_selected[(lane32 + 1)*32 +: 32];
+            wire [31:0] b1_lane = tree_square ? a1_lane :
+                                  src_b_selected[(lane32 + 1)*32 +: 32];
             wire [31:0] c1_lane = tile_c[(lane32 + 1)*32 +: 32];
 
             wire [63:0] one0      = mode_fp64 ? 64'h3FF0_0000_0000_0000
@@ -1496,12 +1515,22 @@ module mp64_tile #(
                                                 : b1_lane) :
                 fma_uses_addend ? c1_lane : 32'h8000_0000;
 
+            // Tree node lane64 adds tree_v[2j] and tree_v[2j+1]; the ACC_ACC
+            // phase adds ACC[j] and tree_v[j].
+            wire [2:0]  node   = lane64[2:0];
+            wire [63:0] tree_a = (tree_phase == TREE_ACC) ?
+                legacy_acc_state[node[1:0]*64 +: 64] :
+                tree_v[(2*node)*64 +: 64];
+            wire [63:0] tree_c = (tree_phase == TREE_ACC) ?
+                tree_v[node*64 +: 64] :
+                tree_v[(2*node + 1)*64 +: 64];
+
             mp64_fma_unit u_fma (
-                .in64 (mode_fp64),
+                .in64 (tree_add_phase ? 1'b1 : mode_fp64),
                 .out64(fma_out64),
-                .a0   (a0_lane),
-                .b0   (b0),
-                .c0   (c0),
+                .a0   (tree_add_phase ? tree_a : a0_lane),
+                .b0   (tree_add_phase ? 64'h3FF0_0000_0000_0000 : b0),
+                .c0   (tree_add_phase ? tree_c : c0),
                 .a1   (a1_lane),
                 .b1   (b1),
                 .c1   (c1),
@@ -1510,6 +1539,101 @@ module mp64_tile #(
             );
         end
     endgenerate
+
+    // FP32/FP64 TRED MIN, MAX, MINIDX, and MAXIDX are combinational: the
+    // NaN-skipping extreme (-0 below +0, lowest index on ties) widened
+    // exactly to binary64, or index 0 and the canonical NaN for an all-NaN
+    // tile (§3.8, §4.5).  Under ACC_ACC, MIN and MAX keep a running extreme
+    // against ACC0, and MINIDX/MAXIDX replace ACC0/ACC1 only for a strictly
+    // better value or a value over an old NaN.
+    function fp64_is_nan;
+        input [63:0] bits;
+        fp64_is_nan = (bits[62:52] == 11'h7FF) && (bits[51:0] != 52'd0);
+    endfunction
+
+    function [63:0] fp64_order_key;
+        input [63:0] bits;
+        fp64_order_key = bits[63] ? ~bits : {1'b1, bits[62:0]};
+    endfunction
+
+    // Exact binary32 to binary64 widening; a NaN becomes the canonical NaN.
+    function [63:0] fp32_to_fp64;
+        input [31:0] bits;
+        integer lead;
+        integer k;
+        reg [10:0] biased;
+        reg [51:0] fraction;
+        begin
+            if (bits[30:23] == 8'hFF) begin
+                fp32_to_fp64 = (bits[22:0] != 23'd0) ?
+                    64'h7FF8_0000_0000_0000 : {bits[31], 11'h7FF, 52'd0};
+            end else if (bits[30:23] == 8'd0) begin
+                if (bits[22:0] == 23'd0) begin
+                    fp32_to_fp64 = {bits[31], 63'd0};
+                end else begin
+                    lead = 0;
+                    for (k = 0; k < 23; k = k + 1)
+                        if (bits[k])
+                            lead = k;
+                    // bits * 2**-149 = 1.f * 2**(lead - 149)
+                    biased   = 874 + lead;
+                    fraction = {29'd0, bits[22:0]} << (52 - lead);
+                    fp32_to_fp64 = {bits[31], biased, fraction};
+                end
+            end else begin
+                fp32_to_fp64 = {bits[31], {3'd0, bits[30:23]} + 11'd896,
+                                bits[22:0], 29'd0};
+            end
+        end
+    endfunction
+
+    reg [63:0] fpw_red_best;
+    reg [63:0] fpw_red_idx;
+    reg        fpw_red_found;
+    integer    fpw_ri;
+    always @(*) begin : fpw_red_block
+        reg [63:0] candidate;
+        reg        better;
+        fpw_red_best  = 64'd0;
+        fpw_red_idx   = 64'd0;
+        fpw_red_found = 1'b0;
+        candidate     = 64'd0;
+        better        = 1'b0;
+        for (fpw_ri = 0; fpw_ri < 16; fpw_ri = fpw_ri + 1) begin
+            if (mode_fp64 && fpw_ri < 8)
+                candidate = tile_a[fpw_ri*64 +: 64];
+            else
+                candidate = fp32_to_fp64(tile_a[fpw_ri*32 +: 32]);
+            if ((!mode_fp64 || fpw_ri < 8) && !fp64_is_nan(candidate)) begin
+                better = !fpw_red_found || (fp_red_largest ?
+                    (fp64_order_key(candidate) > fp64_order_key(fpw_red_best)) :
+                    (fp64_order_key(candidate) < fp64_order_key(fpw_red_best)));
+                if (better) begin
+                    fpw_red_best  = candidate;
+                    fpw_red_idx   = fpw_ri;
+                    fpw_red_found = 1'b1;
+                end
+            end
+        end
+    end
+
+    wire [63:0] fpw_red_val = fpw_red_found ?
+        fpw_red_best : 64'h7FF8_0000_0000_0000;
+    wire fpw_red_beats_acc0 = fp_red_largest ?
+        (fp64_order_key(fpw_red_val) > fp64_order_key(acc[0])) :
+        (fp64_order_key(fpw_red_val) < fp64_order_key(acc[0]));
+    wire [63:0] fpw_red_extreme_acc =
+        fp64_is_nan(acc[0]) ?
+            (fp64_is_nan(fpw_red_val) ? 64'h7FF8_0000_0000_0000
+                                       : fpw_red_val) :
+        (fp64_is_nan(fpw_red_val) || !fpw_red_beats_acc0) ?
+            acc[0] : fpw_red_val;
+    wire fpw_red_index_replaces =
+        !fp64_is_nan(fpw_red_val) &&
+        (fp64_is_nan(acc[1]) ||
+         (fp_red_largest ?
+          (fp64_order_key(fpw_red_val) > fp64_order_key(acc[1])) :
+          (fp64_order_key(fpw_red_val) < fp64_order_key(acc[1]))));
 
     // ========================================================================
     // Shared FP32 reduction/TACC feedback bank
@@ -2817,6 +2941,11 @@ module mp64_tile #(
             tamac_signed_reg  <= 1'b0;
             tamac_beat_reg    <= 2'd0;
             fma_beat          <= 4'd0;
+            tree_v            <= 1024'd0;
+            tree_phase        <= TREE_PRODUCTS;
+            tree_count        <= 5'd0;
+            tree_target       <= 3'd0;
+            tree_accumulate   <= 1'b0;
             tamac_src_a_addr_reg <= 64'd0;
             tamac_src_b_addr_reg <= 64'd0;
             tacc_image_addr_reg  <= 64'd0;
@@ -3197,8 +3326,19 @@ module mp64_tile #(
                     endcase
                 end
 
+                // FP32/FP64 DOT and DOTACC run the tree from its products.
+                if (mode_wide_fp && op_reg == MEX_TMUL &&
+                    (funct_reg == TMUL_DOT || funct_reg == TMUL_DOTACC)) begin
+                    fma_beat        <= 4'd0;
+                    tree_phase      <= TREE_PRODUCTS;
+                    tree_count      <= mode_fp64 ? 5'd8 : 5'd16;
+                    tree_target     <= (funct_reg == TMUL_DOTACC) ? 3'd4 : 3'd1;
+                    tree_accumulate <= tctrl_accumulate_reg &&
+                                       !tctrl_acc_zero_reg;
+                    state           <= S_TREE;
+                end
                 // DOT/DOTACC → accumulator, then done (no tile store)
-                if (op_reg == MEX_TMUL && funct_reg == TMUL_DOT) begin
+                else if (op_reg == MEX_TMUL && funct_reg == TMUL_DOT) begin
                     tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
                     z_kind_reg <= mode_fp ? Z_FP_ACC0 : Z_ALL_WORDS;
                     if (mode_fp) begin
@@ -3348,6 +3488,52 @@ module mp64_tile #(
             end
 
             S_REDUCE: begin
+                if (mode_wide_fp && (funct_reg == TRED_SUM ||
+                                     funct_reg == TRED_L1 ||
+                                     funct_reg == TRED_SUMSQ)) begin
+                    // SUM and L1 leaves are the lanes widened exactly;
+                    // SUMSQ starts from its products.
+                    for (fma_i = 0; fma_i < 16; fma_i = fma_i + 1) begin
+                        if (mode_fp64 && fma_i < 8)
+                            tree_v[fma_i*64 +: 64] <=
+                                (funct_reg == TRED_L1) ?
+                                {1'b0, tile_a[fma_i*64 +: 63]} :
+                                tile_a[fma_i*64 +: 64];
+                        else if (!mode_fp64)
+                            tree_v[fma_i*64 +: 64] <= fp32_to_fp64(
+                                (funct_reg == TRED_L1) ?
+                                {1'b0, tile_a[fma_i*32 +: 31]} :
+                                tile_a[fma_i*32 +: 32]);
+                    end
+                    fma_beat        <= 4'd0;
+                    tree_phase      <= (funct_reg == TRED_SUMSQ) ?
+                                       TREE_PRODUCTS : TREE_LEVELS;
+                    tree_count      <= mode_fp64 ? 5'd8 : 5'd16;
+                    tree_target     <= 3'd1;
+                    tree_accumulate <= tctrl_accumulate_reg &&
+                                       !tctrl_acc_zero_reg;
+                    state           <= S_TREE;
+                end else if (mode_wide_fp && funct_reg != TRED_POPC) begin
+                    // FP32/FP64 MIN, MAX, MINIDX, MAXIDX publish binary64.
+                    tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
+                    if (funct_reg == TRED_MINIDX ||
+                        funct_reg == TRED_MAXIDX) begin
+                        z_kind_reg <= Z_ACC0;
+                        if (tctrl_acc_zero_reg || !tctrl_accumulate_reg ||
+                            fpw_red_index_replaces) begin
+                            acc[0] <= fpw_red_found ? fpw_red_idx : 64'd0;
+                            acc[1] <= fpw_red_val;
+                        end
+                    end else begin
+                        z_kind_reg <= Z_FP64_ACC0;
+                        acc[0] <= (!tctrl_acc_zero_reg && tctrl_accumulate_reg) ?
+                                  fpw_red_extreme_acc : fpw_red_val;
+                        acc[1] <= 64'd0;
+                    end
+                    acc[2] <= 64'd0;
+                    acc[3] <= 64'd0;
+                    state  <= S_DONE;
+                end else begin
                 tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
                 if (funct_reg == TRED_MINIDX || funct_reg == TRED_MAXIDX)
                     z_kind_reg <= Z_ACC0;
@@ -3422,6 +3608,81 @@ module mp64_tile #(
                     end
                 end
                 state <= S_DONE;
+                end
+            end
+
+            // One beat of the FP32/FP64 canonical tree (docs/floating-point.md
+            // §4.3): products, then the levels, then the reserved ACC_ACC
+            // beats, which also publish the result.
+            S_TREE: begin
+                case (tree_phase)
+                    TREE_PRODUCTS: begin
+                        for (fma_i = 0; fma_i < FMA_UNITS; fma_i = fma_i + 1) begin
+                            if (mode_fp64) begin
+                                fma_j = fma_beat * FMA_UNITS + fma_i;
+                                tree_v[fma_j*64 +: 64] <=
+                                    fma_r0_bus[fma_i*64 +: 64];
+                            end else begin
+                                fma_j = fma_beat * (2 * FMA_UNITS) + 2 * fma_i;
+                                tree_v[fma_j*64 +: 64] <=
+                                    fma_r0_bus[fma_i*64 +: 64];
+                                tree_v[(fma_j + 1)*64 +: 64] <=
+                                    fma_r1_bus[fma_i*64 +: 64];
+                            end
+                        end
+                        if (fma_beat == FMA_BEATS - 1) begin
+                            fma_beat   <= 4'd0;
+                            tree_phase <= TREE_LEVELS;
+                        end else begin
+                            fma_beat <= fma_beat + 4'd1;
+                        end
+                    end
+                    TREE_LEVELS: begin
+                        for (fma_i = 0; fma_i < FMA_UNITS; fma_i = fma_i + 1) begin
+                            fma_j = fma_beat * FMA_UNITS + fma_i;
+                            if (fma_j < tree_count / 2)
+                                tree_v[fma_j*64 +: 64] <=
+                                    fma_r0_bus[fma_i*64 +: 64];
+                        end
+                        if ((fma_beat + 1) * FMA_UNITS >= tree_count / 2) begin
+                            fma_beat   <= 4'd0;
+                            tree_count <= tree_count / 2;
+                            if (tree_count / 2 == tree_target)
+                                tree_phase <= TREE_ACC;
+                        end else begin
+                            fma_beat <= fma_beat + 4'd1;
+                        end
+                    end
+                    default: begin  // TREE_ACC
+                        for (fma_i = 0; fma_i < FMA_UNITS; fma_i = fma_i + 1) begin
+                            fma_j = fma_beat * FMA_UNITS + fma_i;
+                            if (tree_accumulate && fma_j < tree_target)
+                                tree_v[fma_j*64 +: 64] <=
+                                    fma_r0_bus[fma_i*64 +: 64];
+                        end
+                        if ((fma_beat + 1) * FMA_UNITS >= tree_target) begin
+                            // Publish: this beat's sums come from the units,
+                            // earlier ones from tree_v.
+                            for (fma_j = 0; fma_j < 4; fma_j = fma_j + 1) begin
+                                if (fma_j >= tree_target)
+                                    acc[fma_j] <= 64'd0;
+                                else if (tree_accumulate &&
+                                         fma_j >= fma_beat * FMA_UNITS)
+                                    acc[fma_j] <= fma_r0_bus[
+                                        (fma_j - fma_beat * FMA_UNITS)*64 +: 64];
+                                else
+                                    acc[fma_j] <= tree_v[fma_j*64 +: 64];
+                            end
+                            tctrl_acc_zero_clear <= tctrl_acc_zero_reg;
+                            z_kind_reg <= (tree_target == 3'd4) ?
+                                          Z_FP64_ALL : Z_FP64_ACC0;
+                            fma_beat   <= 4'd0;
+                            state      <= S_DONE;
+                        end else begin
+                            fma_beat <= fma_beat + 4'd1;
+                        end
+                    end
+                endcase
             end
 
             // External memory paths
@@ -3739,6 +4000,13 @@ module mp64_tile #(
                                         (acc[1][30:0] == 31'd0) &&
                                         (acc[2][30:0] == 31'd0) &&
                                         (acc[3][30:0] == 31'd0);
+                    Z_FP64_ACC0:
+                        mex_zero_reg <= (acc[0][62:0] == 63'd0);
+                    Z_FP64_ALL:
+                        mex_zero_reg <= (acc[0][62:0] == 63'd0) &&
+                                        (acc[1][62:0] == 63'd0) &&
+                                        (acc[2][62:0] == 63'd0) &&
+                                        (acc[3][62:0] == 63'd0);
                     default:
                         mex_zero_reg <= (acc[0] == 64'd0) &&
                                         (acc[1] == 64'd0) &&

@@ -294,7 +294,8 @@ def _wide_lanes(rng: random.Random, fmt: ieee_fp.Format) -> list[int]:
 
 
 def _wide_float_rows(rng: random.Random) -> list[str]:
-    """FP32/FP64 element-wise operations on the FMA units (Phase 4)."""
+    """FP32/FP64 operations on the FMA units: element-wise (Phase 4), and
+    binary64 reductions and dot products under every TCTRL (Phase 5)."""
 
     rows = []
     for fmt in (ieee_fp.FP32, ieee_fp.FP64):
@@ -330,6 +331,21 @@ def _wide_float_rows(rng: random.Random) -> list[str]:
         # (docs/megapad-full-float-plan.md §7).
         for index in range(4):
             case(f"tred_popcnt_{index}", 0, OP_TRED, 3, tctrl=2)
+        # Phase 5: binary64 reductions and dot products on the tree.
+        for funct in (0, 1, 2, 4, 5, 6, 7):
+            for ss in (0, 3):
+                for tctrl in range(4):
+                    for index in range(2 if ss == 0 else 1):
+                        case(f"tred{funct}_ss{ss}_c{tctrl}_{index}", ss,
+                             OP_TRED, funct, tctrl=tctrl)
+        for funct in (1, 5):
+            for ss in (0, 1, 3):
+                for tctrl in range(4):
+                    for index in range(2 if ss == 0 else 1):
+                        case(f"tmul{funct}_ss{ss}_c{tctrl}_{index}", ss,
+                             OP_TMUL, funct, tctrl=tctrl)
+        for index in range(4):
+            case(f"tred_imm_{index}", 2, OP_TRED, _immediate(rng))
     return rows
 
 
