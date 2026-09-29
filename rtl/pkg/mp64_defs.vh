@@ -275,6 +275,10 @@ parameter [2:0] ETALU_VSHR = 3'd0;
 parameter [2:0] ETALU_VSHL = 3'd1;
 parameter [2:0] ETALU_VSEL = 3'd2;
 parameter [2:0] ETALU_VCLZ = 3'd3;
+parameter [2:0] ETALU_TDIV = 3'd4;
+parameter [2:0] ETALU_TSQRT = 3'd5;
+parameter [2:0] ETALU_TCVT = 3'd6;
+parameter [2:0] ETALU_TCMP = 3'd7;
 
 // TMUL functions
 parameter [2:0] TMUL_MUL    = 3'd0;

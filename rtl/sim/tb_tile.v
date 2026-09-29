@@ -1105,14 +1105,15 @@ module tb_tile;
             end
         end
 
-        // ====== TEST 49: VSEL 8-bit — MSB-based conditional select ======
+        // ====== TEST 49: VSEL 8-bit — msb(M) ? A : B, M = old [TDST] ======
         $display("\n=== TEST 49: VSEL 8-bit ===");
-        // tile A (src0) = 0x42 in every lane
-        // tile B (src1) = alternating 0x80 (MSB set → select A) and 0x01 (MSB clear → 0)
+        // A (src0) = 0x42, B (src1) = 0x17; the mask in [TDST] alternates
+        // 0x80 (MSB set → A) and 0x01 (MSB clear → B).
         tile_mem[0] = {64{8'h42}};
+        tile_mem[1] = {64{8'h17}};
         begin
             for (i = 0; i < 64; i = i + 1)
-                tile_mem[1][i*8 +: 8] = (i & 1) ? 8'h80 : 8'h01;
+                tile_mem[2][i*8 +: 8] = (i & 1) ? 8'h80 : 8'h01;
         end
         csr_write(CSR_TSRC0, 64'h00);      // tile 0
         csr_write(CSR_TSRC1, 64'h40);      // tile 1  (addr = 1 * 64 = 64 = 0x40)
@@ -1124,11 +1125,11 @@ module tb_tile;
             ok = 1;
             for (i = 0; i < 64; i = i + 1) begin
                 if (i & 1) begin
-                    // B MSB set → result = A = 0x42
+                    // mask MSB set → A
                     if (tile_mem[2][i*8 +: 8] !== 8'h42) ok = 0;
                 end else begin
-                    // B MSB clear → result = 0
-                    if (tile_mem[2][i*8 +: 8] !== 8'h00) ok = 0;
+                    // mask MSB clear → B
+                    if (tile_mem[2][i*8 +: 8] !== 8'h17) ok = 0;
                 end
             end
             if (ok) begin
@@ -1143,12 +1144,12 @@ module tb_tile;
 
         // ====== TEST 50: VSEL 16-bit ======
         $display("\n=== TEST 50: VSEL 16-bit ===");
-        // tile A = 0x1234 in every 16-bit lane
+        // A = 0x1234, B = 0xBEEF; mask: even lanes MSB set, odd clear.
         tile_mem[0] = {32{16'h1234}};
-        // tile B: even lanes MSB set (0x8000), odd lanes MSB clear (0x0001)
+        tile_mem[1] = {32{16'hBEEF}};
         begin
             for (i = 0; i < 32; i = i + 1)
-                tile_mem[1][i*16 +: 16] = (i & 1) ? 16'h0001 : 16'h8000;
+                tile_mem[2][i*16 +: 16] = (i & 1) ? 16'h0001 : 16'h8000;
         end
         csr_write(CSR_TSRC0, 64'h00);
         csr_write(CSR_TSRC1, 64'h40);
@@ -1160,7 +1161,7 @@ module tb_tile;
             ok = 1;
             for (i = 0; i < 32; i = i + 1) begin
                 if (i & 1) begin
-                    if (tile_mem[2][i*16 +: 16] !== 16'h0000) ok = 0;
+                    if (tile_mem[2][i*16 +: 16] !== 16'hBEEF) ok = 0;
                 end else begin
                     if (tile_mem[2][i*16 +: 16] !== 16'h1234) ok = 0;
                 end
@@ -1247,7 +1248,8 @@ module tb_tile;
         // ====== TEST 53: VSEL 64-bit — all MSB set ======
         $display("\n=== TEST 53: VSEL 64-bit all-select ===");
         tile_mem[0] = {8{64'hDEAD_BEEF_CAFE_F00D}};
-        tile_mem[1] = {8{64'h8000_0000_0000_0001}};  // MSB set → select A
+        tile_mem[1] = {8{64'h0123_4567_89AB_CDEF}};
+        tile_mem[2] = {8{64'h8000_0000_0000_0001}};  // mask MSB set → A
         csr_write(CSR_TSRC0, 64'h00);
         csr_write(CSR_TSRC1, 64'h40);
         csr_write(CSR_TDST,  64'h80);
@@ -1346,12 +1348,12 @@ module tb_tile;
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
                            "TRED SUM in a reserved EW traps");
                 end else begin
-                    // FP32/FP64 VSEL lands in Phase 6; PACK, VSHR, and FP64
-                    // WMUL are illegal.
-                    mex_dispatch_ext(2'd0, MEX_TALU, ETALU_VSEL, 64'd0,
+                    // TDIV lands in Phase 8; PACK, VSHR, and FP64 WMUL are
+                    // illegal.
+                    mex_dispatch_ext(2'd0, MEX_TALU, ETALU_TDIV, 64'd0,
                                      8'd0, 4'd8);
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
-                           "FP32/FP64 VSEL traps");
+                           "FP32/FP64 TDIV traps");
                     mex_dispatch(2'd0, MEX_TSYS, TSYS_PACK, 64'd0, 8'd0);
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
                            "float PACK traps");

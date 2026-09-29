@@ -220,6 +220,10 @@ localparam [2:0] ETALU_VSHR = 3'd0;
 localparam [2:0] ETALU_VSHL = 3'd1;
 localparam [2:0] ETALU_VSEL = 3'd2;
 localparam [2:0] ETALU_VCLZ = 3'd3;
+localparam [2:0] ETALU_TDIV = 3'd4;   // docs/floating-point.md §6.1
+localparam [2:0] ETALU_TSQRT = 3'd5;  // §6.2
+localparam [2:0] ETALU_TCVT = 3'd6;   // §6.3
+localparam [2:0] ETALU_TCMP = 3'd7;   // §6.5
 
 // TMUL functions
 localparam [2:0] TMUL_MUL    = 3'd0;

@@ -5,7 +5,7 @@ Every expected value comes from executing the instruction on the Python
 emulator, whose floating-point results come from the shared exact reference
 (shared/ieee_fp.py, docs/floating-point.md).  The vectors cover TALU, TMUL,
 and TRED in FP16 and BF16 with tile, broadcast, immediate, and in-place
-sources and all four TCTRL states; float PACK/UNPACK; integer operand routing
+sources and all four TCTRL states; integer operand routing
 for immediate and in-place sources; integer MIN/MAX under ACC_ACC; the
 FP32/FP64 element-wise operations (TALU, MUL, MAC, FMA, FP32 WMUL) and raw
 POPCNT that run on the FMA units; and the FLAGS.Z update of every case.  The
@@ -175,9 +175,6 @@ def _float_rows(rng: random.Random) -> list[str]:
                     for index in range(3 if ss == 0 else 1):
                         case(f"tred{funct}_ss{ss}_c{tctrl}_{index}", ss,
                              OP_TRED, funct, tctrl)
-        for funct in (5, 6):
-            for index in range(6):
-                case(f"tsys{funct}_{index}", 0, OP_TSYS, funct, 0)
     return rows
 
 

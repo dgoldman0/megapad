@@ -312,28 +312,45 @@ module mp64_tile #(
     // and ext8 marks the EXT.8 forms.  docs/floating-point.md §5.2 makes
     // PACK, UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL
     // illegal in FP64; the EXT.8 functions 4-7 land in Phases 6 and 8 of
-    // docs/megapad-full-float-plan.md, and FP32/FP64 VSEL in Phase 6.
-    // FP16/BF16 PACK and UNPACK remain until TCVT replaces them.
+    // docs/megapad-full-float-plan.md.  EXT.8 VSEL, TCVT, and TCMP also
+    // restrict their sources and function-byte bits (§6).
     function tile_op_admitted;
         input [3:0] ew;
         input [1:0] op;
         input [2:0] funct;
         input       ext8;
+        input [1:0] ss;
+        input [7:0] funct_byte;
         begin
             if (ew > TMODE_FP64)
                 tile_op_admitted = 1'b0;
             else if (ext8 && (op == MEX_TALU))
-                tile_op_admitted = !tile_format_is_float(ew) ||
-                    (((ew == TMODE_FP16) || (ew == TMODE_BF16)) &&
-                     (funct == ETALU_VSEL));
+                case (funct)
+                    ETALU_VSHR, ETALU_VSHL, ETALU_VCLZ:
+                        tile_op_admitted = !tile_format_is_float(ew);
+                    ETALU_VSEL:
+                        tile_op_admitted = (ss != 2'd3);
+                    ETALU_TCVT:
+                        tile_op_admitted =
+                            (ss == 2'd0) && !funct_byte[3] &&
+                            (funct_byte[7:4] <= TMODE_FP64) &&
+                            (funct_byte[7:4] != ew) &&
+                            (tile_format_is_float(ew) ||
+                             tile_format_is_float(funct_byte[7:4]));
+                    ETALU_TCMP:
+                        tile_op_admitted =
+                            (ss != 2'd2) && (funct_byte[7:6] == 2'b00);
+                    default:  // TDIV and TSQRT land in Phase 8
+                        tile_op_admitted = 1'b0;
+                endcase
             else if (ext8 && (op == MEX_TSYS))
                 tile_op_admitted = 1'b1;
-            else if ((ew != TMODE_FP32) && (ew != TMODE_FP64))
+            else if (!tile_format_is_float(ew))
                 tile_op_admitted = 1'b1;
             else case (op)
                 MEX_TMUL:
                     tile_op_admitted =
-                        (funct != TMUL_WMUL) || (ew == TMODE_FP32);
+                        (funct != TMUL_WMUL) || (ew != TMODE_FP64);
                 MEX_TSYS:
                     tile_op_admitted =
                         (funct != TSYS_PACK) && (funct != TSYS_UNPACK);
@@ -384,6 +401,10 @@ module mp64_tile #(
     localparam S_TACC_INT    = 5'd23;  // one 16-lane feedback slice
     localparam S_FMA         = 5'd24;  // one FP32/FP64 FMA beat
     localparam S_TREE        = 5'd25;  // one FP32/FP64 reduction beat
+    localparam S_CVT_READ_WAIT  = 5'd26;  // TCVT source tile read
+    localparam S_CVT_CONVERT    = 5'd27;  // one sixteen-lane TCVT beat
+    localparam S_CVT_WRITE_WAIT = 5'd28;  // TCVT destination tile write
+    localparam S_CVT_PAD        = 5'd29;  // idle TCVT beats to 4 + (k - 1)
 
     reg [4:0]   state;
     reg         mex_done_reg;
@@ -863,6 +884,8 @@ module mp64_tile #(
                 S_EXT_LOAD_A, S_EXT_LOAD_B, S_EXT_STORE,
                 S_EXT_STORE2_WAIT:
                     mex_stall_cycle = !ext_tile_ack;
+                S_CVT_READ_WAIT, S_CVT_WRITE_WAIT:
+                    mex_stall_cycle = cvt_ext ? !ext_tile_ack : !tile_ack;
                 S_TAMAC_LOAD_A, S_TAMAC_LOAD_B:
                     mex_stall_cycle =
                         tamac_read_ext_reg ?
@@ -1941,42 +1964,6 @@ module mp64_tile #(
     end
 
     // ========================================================================
-    // FP PACK — format conversion (FP16↔BF16), not narrowing
-    // ========================================================================
-    reg [511:0] fp_pack_result;
-    wire [15:0] fp_pack_out [0:31];
-
-    generate
-        for (fpl = 0; fpl < 32; fpl = fpl + 1) begin : fp_pack_lanes
-            // The exact binary32 value rounds once to the other format.
-            mp64_fp32_to_half_rne u_pk_cvt (
-                .is_bf16(!mode_bf16),
-                .value  (fp_tile_a_fp32[fpl]),
-                .result (fp_pack_out[fpl])
-            );
-        end
-    endgenerate
-
-    integer fp_pk;
-    always @(*) begin
-        fp_pack_result = 512'd0;
-        for (fp_pk = 0; fp_pk < 32; fp_pk = fp_pk + 1)
-            fp_pack_result[fp_pk*16 +: 16] = fp_pack_out[fp_pk];
-    end
-
-    // ========================================================================
-    // FP UNPACK — widen FP16/BF16 → FP32 (first 16 lanes → 16 × 32-bit)
-    // ========================================================================
-    reg [511:0] fp_unpack_result;
-
-    integer fp_ul;
-    always @(*) begin
-        fp_unpack_result = 512'd0;
-        for (fp_ul = 0; fp_ul < 16; fp_ul = fp_ul + 1)
-            fp_unpack_result[fp_ul*32 +: 32] = fp_tile_a_fp32[fp_ul];
-    end
-
-    // ========================================================================
     // TMUL.MUL — lane-wise multiply (truncated to element width)
     // ========================================================================
     reg [511:0] mul_result;
@@ -2872,6 +2859,351 @@ module mp64_tile #(
     end
 
     // ========================================================================
+    // EXT.8 VSEL, TCMP, and TCVT (docs/floating-point.md §6.3-§6.5)
+    // ========================================================================
+    // Every operation works at the format's real lane width.  VSEL takes its
+    // mask M from the old [TDST], loaded as tile_c.
+
+    function [63:0] lane_width_mask;
+        input [1:0] log2;
+        case (log2)
+            2'd0:    lane_width_mask = 64'h0000_0000_0000_00FF;
+            2'd1:    lane_width_mask = 64'h0000_0000_0000_FFFF;
+            2'd2:    lane_width_mask = 64'h0000_0000_FFFF_FFFF;
+            default: lane_width_mask = 64'hFFFF_FFFF_FFFF_FFFF;
+        endcase
+    endfunction
+
+    function [63:0] float_infinity;
+        input [3:0] ew;
+        case (ew)
+            TMODE_FP16: float_infinity = 64'h0000_0000_0000_7C00;
+            TMODE_BF16: float_infinity = 64'h0000_0000_0000_7F80;
+            TMODE_FP32: float_infinity = 64'h0000_0000_7F80_0000;
+            default:    float_infinity = 64'h7FF0_0000_0000_0000;
+        endcase
+    endfunction
+
+    // {unordered, less, equal} for two zero-extended lanes of format ew.
+    function [2:0] lane_order;
+        input [3:0]  ew;
+        input        signed_ints;
+        input [63:0] a;
+        input [63:0] b;
+        reg   [63:0] mask;
+        reg   [63:0] top;
+        reg   [63:0] key_a;
+        reg   [63:0] key_b;
+        begin
+            mask = lane_width_mask(tile_format_lane_log2(ew));
+            top  = (mask >> 1) + 64'd1;
+            if (tile_format_is_float(ew)) begin
+                if (((a & (mask ^ top)) > float_infinity(ew)) ||
+                    ((b & (mask ^ top)) > float_infinity(ew)))
+                    lane_order = 3'b100;
+                else if (((a | b) & (mask ^ top)) == 64'd0)
+                    lane_order = 3'b001;  // -0 equals +0
+                else begin
+                    key_a = (a & top) ? (mask ^ a) : (a | top);
+                    key_b = (b & top) ? (mask ^ b) : (b | top);
+                    lane_order = {1'b0, key_a < key_b, a == b};
+                end
+            end else if (signed_ints) begin
+                lane_order = {1'b0, (a ^ top) < (b ^ top), a == b};
+            end else begin
+                lane_order = {1'b0, a < b, a == b};
+            end
+        end
+    endfunction
+
+    function compare_holds;
+        input [2:0] predicate;
+        input [2:0] order;
+        reg greater;
+        begin
+            greater = !order[2] && !order[1] && !order[0];
+            case (predicate)
+                3'd0: compare_holds = order[0];
+                3'd1: compare_holds = !order[0];
+                3'd2: compare_holds = order[1];
+                3'd3: compare_holds = order[1] || order[0];
+                3'd4: compare_holds = greater;
+                3'd5: compare_holds = greater || order[0];
+                3'd6: compare_holds = order[2];
+                default: compare_holds = !order[2];
+            endcase
+        end
+    endfunction
+
+    reg [511:0] ext_select_result;
+    reg [511:0] ext_compare_result;
+    integer scl;
+    always @(*) begin : ext_select_compare
+        reg [63:0] la;
+        reg [63:0] lb;
+        reg [63:0] lm;
+        reg [63:0] mask;
+        integer    width;
+        integer    lanes;
+        ext_select_result  = 512'd0;
+        ext_compare_result = 512'd0;
+        mask  = lane_width_mask(lane_ew);
+        width = 8 << lane_ew;
+        lanes = 64 >> lane_ew;
+        for (scl = 0; scl < 64; scl = scl + 1) begin
+            if (scl < lanes) begin
+                la = (tile_a >> (scl * width)) & {448'd0, mask};
+                lb = (src_b_selected >> (scl * width)) & {448'd0, mask};
+                lm = (tile_c >> (scl * width)) & {448'd0, mask};
+                ext_select_result = ext_select_result |
+                    ({448'd0, (lm & ((mask >> 1) + 64'd1)) ? la : lb}
+                     << (scl * width));
+                if (compare_holds(funct_byte_reg[5:3],
+                                  lane_order(mode_ew, mode_signed, la, lb)))
+                    ext_compare_result = ext_compare_result |
+                        ({448'd0, mask} << (scl * width));
+            end
+        end
+    end
+
+    // One TCVT lane: the zero-extended lane x of format src converted to
+    // format dst (§6.3).  Float results round to nearest-even once.  Float to
+    // integer maps NaN to 0, rounds toward zero or (nearest) to nearest-even,
+    // and saturates.  Integer signedness comes from TMODE[4].
+    function [63:0] tcvt_lane;
+        input [3:0]  src;
+        input [3:0]  dst;
+        input        signed_ints;
+        input        nearest;
+        input [63:0] x;
+        integer src_ebits;
+        integer src_fbits;
+        integer p;
+        integer emin;
+        integer bias;
+        integer ebits;
+        integer width;
+        integer exponent;
+        integer lead;
+        integer quantum;
+        integer shift;
+        integer biased;
+        integer k;
+        reg        negative;
+        reg        is_nan;
+        reg        is_inf;
+        reg [63:0] sig;
+        reg [63:0] kept;
+        reg [63:0] below;
+        reg        round_bit;
+        reg        sticky;
+        reg        overflow;
+        reg [63:0] sign_bit;
+        reg [63:0] limit;
+        reg [63:0] result;
+        begin
+            negative = 1'b0;
+            is_nan   = 1'b0;
+            is_inf   = 1'b0;
+            sig      = 64'd0;
+            exponent = 0;
+            overflow = 1'b0;
+            round_bit = 1'b0;
+            sticky    = 1'b0;
+            result    = 64'd0;
+            // Decode the source into (-1)**negative * sig * 2**exponent.
+            if (!tile_format_is_float(src)) begin
+                width = 8 << src;
+                sig = x & lane_width_mask(src[1:0]);
+                if (signed_ints && sig[width - 1]) begin
+                    negative = 1'b1;
+                    sig = (~sig + 64'd1) & lane_width_mask(src[1:0]);
+                    if (sig == 64'd0)  // the most negative value
+                        sig = 64'd1 << (width - 1);
+                end
+            end else begin
+                case (src)
+                    TMODE_FP16: begin src_ebits = 5;  src_fbits = 10; end
+                    TMODE_BF16: begin src_ebits = 8;  src_fbits = 7;  end
+                    TMODE_FP32: begin src_ebits = 8;  src_fbits = 23; end
+                    default:    begin src_ebits = 11; src_fbits = 52; end
+                endcase
+                width    = 1 + src_ebits + src_fbits;
+                negative = x[width - 1];
+                k        = (x >> src_fbits) & ((64'd1 << src_ebits) - 1);
+                sig      = x & ((64'd1 << src_fbits) - 1);
+                if (k == (1 << src_ebits) - 1) begin
+                    is_nan = (sig != 64'd0);
+                    is_inf = (sig == 64'd0);
+                end else if (k == 0) begin
+                    exponent = 2 - (1 << (src_ebits - 1)) - src_fbits;
+                end else begin
+                    sig = sig | (64'd1 << src_fbits);
+                    exponent = k - ((1 << (src_ebits - 1)) - 1) - src_fbits;
+                end
+            end
+
+            lead = -1;
+            for (k = 0; k < 64; k = k + 1)
+                if (sig[k])
+                    lead = k;
+
+            if (tile_format_is_float(dst)) begin
+                case (dst)
+                    TMODE_FP16: begin p = 11; ebits = 5;  end
+                    TMODE_BF16: begin p = 8;  ebits = 8;  end
+                    TMODE_FP32: begin p = 24; ebits = 8;  end
+                    default:    begin p = 53; ebits = 11; end
+                endcase
+                bias     = (1 << (ebits - 1)) - 1;
+                emin     = 1 - bias;
+                sign_bit = 64'd1 << (p + ebits - 1);
+                if (is_nan) begin
+                    result = float_infinity(dst) | (64'd1 << (p - 2));
+                end else if (is_inf) begin
+                    result = float_infinity(dst) | (negative ? sign_bit : 64'd0);
+                end else if (lead < 0) begin
+                    result = negative ? sign_bit : 64'd0;
+                end else begin
+                    quantum = exponent + lead - (p - 1);
+                    if (quantum < emin - (p - 1))
+                        quantum = emin - (p - 1);
+                    shift = quantum - exponent;
+                    if (shift <= 0) begin
+                        kept = sig << (-shift);
+                    end else if (shift > 64) begin
+                        kept   = 64'd0;
+                        sticky = 1'b1;
+                    end else begin
+                        kept      = (shift == 64) ? 64'd0 : (sig >> shift);
+                        round_bit = sig[shift - 1];
+                        below     = (shift == 1) ? 64'd0 :
+                                    ((64'd1 << (shift - 1)) - 64'd1);
+                        sticky    = |(sig & below);
+                    end
+                    if (round_bit && (sticky || kept[0]))
+                        kept = kept + 64'd1;
+                    if (kept[p]) begin
+                        kept    = kept >> 1;
+                        quantum = quantum + 1;
+                    end
+                    if (kept[p - 1]) begin
+                        biased = quantum + (p - 1) + bias;
+                        if (biased >= (1 << ebits) - 1)
+                            result = float_infinity(dst);
+                        else
+                            result = ({52'd0, biased[11:0]} << (p - 1)) |
+                                     (kept & ((64'd1 << (p - 1)) - 1));
+                    end else begin
+                        result = kept;
+                    end
+                    if (negative)
+                        result = result | sign_bit;
+                end
+            end else begin
+                width = 8 << dst;
+                if (is_inf) begin
+                    overflow = 1'b1;
+                    kept = 64'd0;
+                end else if (is_nan || lead < 0) begin
+                    kept = 64'd0;
+                end else if (exponent >= 0) begin
+                    overflow = (lead + exponent >= 64);
+                    kept = overflow ? 64'd0 : (sig << exponent);
+                end else begin
+                    shift = -exponent;
+                    kept      = (shift >= 64) ? 64'd0 : (sig >> shift);
+                    round_bit = (shift <= 64) ? sig[shift - 1] : 1'b0;
+                    below     = (shift == 1) ? 64'd0 :
+                                (shift > 64) ? 64'hFFFF_FFFF_FFFF_FFFF :
+                                ((64'd1 << (shift - 1)) - 64'd1);
+                    sticky    = |(sig & below);
+                    if (nearest && round_bit && (sticky || kept[0]))
+                        kept = kept + 64'd1;
+                end
+                if (signed_ints) begin
+                    limit = 64'd1 << (width - 1);  // |most negative|
+                    if (negative)
+                        result = (overflow || kept > limit) ? limit :
+                                 (~kept + 64'd1);
+                    else
+                        result = (overflow || kept >= limit) ?
+                                 (limit - 64'd1) : kept;
+                end else begin
+                    limit = lane_width_mask(dst[1:0]);
+                    if (negative)
+                        result = 64'd0;
+                    else
+                        result = (overflow || kept > limit) ? limit : kept;
+                end
+                result = result & lane_width_mask(dst[1:0]);
+            end
+            tcvt_lane = result;
+        end
+    endfunction
+
+    // TCVT schedule: sixteen lane converters, one beat per sixteen lanes of
+    // the current tile, then idle beats so the conversion takes exactly
+    // 4 + (k - 1) cycles (§10).  Narrowing converts each of k source tiles
+    // into its lanes of result and writes once; widening reads one source
+    // tile and converts and writes each of k destination tiles in turn.
+    reg [3:0]  cvt_target;
+    reg [3:0]  cvt_k;
+    reg [3:0]  cvt_tile;       // current source (narrowing) or target tile
+    reg [1:0]  cvt_beat;       // sixteen-lane group within the tile
+    reg [3:0]  cvt_cycles;     // conversion cycles spent
+    reg        cvt_ext;        // the pending access uses the external port
+    wire [1:0] cvt_src_log2 = lane_ew;
+    wire [1:0] cvt_dst_log2 = tile_format_lane_log2(cvt_target);
+    wire       cvt_narrow   = cvt_dst_log2 < cvt_src_log2;
+    wire       cvt_widen    = cvt_dst_log2 > cvt_src_log2;
+    // Lanes converted in the current tile: the source tile's lanes when
+    // narrowing or equal, the target tile's lanes when widening.
+    wire [6:0] cvt_tile_lanes = cvt_widen ? (7'd64 >> cvt_dst_log2)
+                                          : (7'd64 >> cvt_src_log2);
+    wire       cvt_last_beat  = ({cvt_beat, 4'd0} + 7'd16) >= cvt_tile_lanes;
+    // Narrowing reads the next source tile; every write goes to the current
+    // destination tile (TDST for narrowing and equal widths).
+    wire [63:0] cvt_next_src_addr = tsrc0 + {cvt_tile + 4'd1, 6'd0};
+    wire [63:0] cvt_dst_addr      = tdst + {cvt_widen ? cvt_tile : 4'd0, 6'd0};
+
+    function address_internal;  // Bank 0 or the HBW banks
+        input [63:0] address;
+        address_internal = (address[63:20] == 44'd0) ||
+            ((address[63:32] == 32'd0) && (address[31:20] >= 12'hFFD));
+    endfunction
+
+    reg [511:0] cvt_result_next;
+    integer cvl;
+    always @(*) begin : tcvt_lanes
+        integer src_lane;
+        integer dst_lane;
+        reg [63:0] lane_in;
+        reg [63:0] lane_out;
+        cvt_result_next = result;
+        for (cvl = 0; cvl < 16; cvl = cvl + 1) begin
+            if ({cvt_beat, 4'd0} + cvl < cvt_tile_lanes) begin
+                if (cvt_widen) begin
+                    dst_lane = {cvt_beat, 4'd0} + cvl;
+                    src_lane = cvt_tile * cvt_tile_lanes + dst_lane;
+                end else begin
+                    src_lane = {cvt_beat, 4'd0} + cvl;
+                    dst_lane = cvt_tile * cvt_tile_lanes + src_lane;
+                end
+                lane_in = (tile_a >> (src_lane * (8 << cvt_src_log2))) &
+                          {448'd0, lane_width_mask(cvt_src_log2)};
+                lane_out = tcvt_lane(mode_ew, cvt_target, mode_signed,
+                                     mode_rounding, lane_in);
+                cvt_result_next =
+                    (cvt_result_next &
+                     ~({448'd0, lane_width_mask(cvt_dst_log2)} <<
+                       (dst_lane * (8 << cvt_dst_log2)))) |
+                    ({448'd0, lane_out} << (dst_lane * (8 << cvt_dst_log2)));
+            end
+        end
+    end
+
+    // ========================================================================
     // FP32 ACC_ACC adders (pre-computed for sequential assignment)
     // ========================================================================
     // DOT ACC_ACC: acc[0] + fp_dot_result
@@ -2972,6 +3304,12 @@ module mp64_tile #(
             tree_count        <= 5'd0;
             tree_target       <= 3'd0;
             tree_accumulate   <= 1'b0;
+            cvt_target        <= 4'd0;
+            cvt_k             <= 4'd1;
+            cvt_tile          <= 4'd0;
+            cvt_beat          <= 2'd0;
+            cvt_cycles        <= 4'd0;
+            cvt_ext           <= 1'b0;
             tamac_src_a_addr_reg <= 64'd0;
             tamac_src_b_addr_reg <= 64'd0;
             tacc_image_addr_reg  <= 64'd0;
@@ -3129,13 +3467,41 @@ module mp64_tile #(
                         end
                     // A reserved format, or an operation the format does not
                     // admit, retires as an illegal operation before any
-                    // memory, accumulator, or TCTRL side effect.
+                    // memory, accumulator, or TCTRL side effect.  TCVT is
+                    // admitted below, after this check.
                     else if (!tile_op_admitted(
                                  mode_ew, mex_op,
                                  (mex_ss == 2'd2) ? 3'd0 : mex_funct,
-                                 mex_ext_active && (mex_ext_mod == 4'd8))) begin
+                                 mex_ext_active && (mex_ext_mod == 4'd8),
+                                 mex_ss, mex_funct_byte)) begin
                         mex_fault_reg <= MEX_FAULT_ILLEGAL;
                         state         <= S_DONE;
+                    end
+                    // EXT.8 TCVT — convert a multi-tile region (§6.3)
+                    else if (mex_ext_active && mex_ext_mod == 4'd8 &&
+                             mex_op == MEX_TALU &&
+                             mex_funct == ETALU_TCVT) begin
+                        cvt_target <= mex_funct_byte[7:4];
+                        cvt_k      <= 4'd1 << (
+                            (tile_format_lane_log2(mex_funct_byte[7:4]) >
+                             tile_format_lane_log2(mode_ew)) ?
+                            (tile_format_lane_log2(mex_funct_byte[7:4]) -
+                             tile_format_lane_log2(mode_ew)) :
+                            (tile_format_lane_log2(mode_ew) -
+                             tile_format_lane_log2(mex_funct_byte[7:4])));
+                        cvt_tile   <= 4'd0;
+                        cvt_beat   <= 2'd0;
+                        cvt_cycles <= 4'd0;
+                        result     <= 512'd0;
+                        cvt_ext    <= !src0_internal;
+                        if (src0_internal) begin
+                            tile_req  <= 1'b1;
+                            tile_addr <= tsrc0[31:0];
+                        end else begin
+                            ext_tile_req  <= 1'b1;
+                            ext_tile_addr <= tsrc0;
+                        end
+                        state <= S_CVT_READ_WAIT;
                     end
                     // TSYS.ZERO — write zeros
                     else if (mex_op == MEX_TSYS && mex_funct == TSYS_ZERO &&
@@ -3225,8 +3591,12 @@ module mp64_tile #(
                         end else
                             state <= S_DONE;  // unknown ext TSYS funct
                     end
-                    // Everything else: load operand A
+                    // Everything else: load operand A.  VSEL also needs the
+                    // old [TDST] as its mask (§6.4), loaded like MAC's addend.
                     else begin
+                        needs_load_c <= mex_ext_active && (mex_ext_mod == 4'd8) &&
+                                        (mex_op == MEX_TALU) &&
+                                        (mex_funct == ETALU_VSEL);
                         if (mex_src_a_internal) begin
                             tile_req  <= 1'b1;
                             tile_addr <= mex_src_a_addr[31:0];
@@ -3317,7 +3687,9 @@ module mp64_tile #(
             S_COMPUTE: begin
                 // Select result
                 if (ext_active_reg && ext_mod_reg == 4'd8 && op_reg == MEX_TALU)
-                    result <= ext_talu_result;
+                    result <= (funct_reg == ETALU_VSEL) ? ext_select_result :
+                              (funct_reg == ETALU_TCMP) ? ext_compare_result :
+                              ext_talu_result;
                 else if (op_reg == MEX_TALU)
                     result <= alu_result_muxed;
                 else if (op_reg == MEX_TMUL) begin
@@ -3344,8 +3716,8 @@ module mp64_tile #(
                         TSYS_TRANS:   result <= trans_result;
                         TSYS_MOVBANK: result <= tile_a;
                         TSYS_LOADC:   result <= tile_a;
-                        TSYS_PACK:    result <= mode_fp ? fp_pack_result : pack_result;
-                        TSYS_UNPACK:  result <= mode_fp ? fp_unpack_result : unpack_result;
+                        TSYS_PACK:    result <= pack_result;
+                        TSYS_UNPACK:  result <= unpack_result;
                         TSYS_SHUFFLE: result <= shuffle_result;
                         TSYS_RROT:    result <= rrot_result;
                         default:      result <= 512'd0;
@@ -3635,6 +4007,70 @@ module mp64_tile #(
                 end
                 state <= S_DONE;
                 end
+            end
+
+            // TCVT (§6.3): read, convert sixteen lanes per beat, write, then
+            // idle until the conversion has taken 4 + (k - 1) cycles.
+            S_CVT_READ_WAIT: begin
+                if (cvt_ext ? ext_tile_ack : tile_ack) begin
+                    tile_a <= cvt_ext ? ext_tile_rdata : tile_rdata;
+                    state  <= S_CVT_CONVERT;
+                end
+            end
+
+            S_CVT_CONVERT: begin
+                result     <= cvt_result_next;
+                cvt_cycles <= cvt_cycles + 4'd1;
+                if (!cvt_last_beat) begin
+                    cvt_beat <= cvt_beat + 2'd1;
+                end else begin
+                    cvt_beat <= 2'd0;
+                    if (cvt_narrow && (cvt_tile != cvt_k - 4'd1)) begin
+                        cvt_tile <= cvt_tile + 4'd1;
+                        cvt_ext  <= !address_internal(cvt_next_src_addr);
+                        if (address_internal(cvt_next_src_addr)) begin
+                            tile_req  <= 1'b1;
+                            tile_addr <= cvt_next_src_addr[31:0];
+                        end else begin
+                            ext_tile_req  <= 1'b1;
+                            ext_tile_addr <= cvt_next_src_addr;
+                        end
+                        state <= S_CVT_READ_WAIT;
+                    end else begin
+                        cvt_ext <= !address_internal(cvt_dst_addr);
+                        if (address_internal(cvt_dst_addr)) begin
+                            tile_req   <= 1'b1;
+                            tile_addr  <= cvt_dst_addr[31:0];
+                            tile_wen   <= 1'b1;
+                            tile_wdata <= cvt_result_next;
+                        end else begin
+                            ext_tile_req   <= 1'b1;
+                            ext_tile_addr  <= cvt_dst_addr;
+                            ext_tile_wen   <= 1'b1;
+                            ext_tile_wdata <= cvt_result_next;
+                        end
+                        state <= S_CVT_WRITE_WAIT;
+                    end
+                end
+            end
+
+            S_CVT_WRITE_WAIT: begin
+                if (cvt_ext ? ext_tile_ack : tile_ack) begin
+                    if (cvt_widen && (cvt_tile != cvt_k - 4'd1)) begin
+                        cvt_tile <= cvt_tile + 4'd1;
+                        state    <= S_CVT_CONVERT;
+                    end else if (cvt_cycles == 4'd3 + cvt_k) begin
+                        state <= S_DONE;
+                    end else begin
+                        state <= S_CVT_PAD;
+                    end
+                end
+            end
+
+            S_CVT_PAD: begin
+                cvt_cycles <= cvt_cycles + 4'd1;
+                if (cvt_cycles + 4'd1 == 4'd3 + cvt_k)
+                    state <= S_DONE;
             end
 
             // One beat of the FP32/FP64 canonical tree (docs/floating-point.md

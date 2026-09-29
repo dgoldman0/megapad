@@ -53,7 +53,7 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals disk_controller disk_bus_dma disk_lint crypto sha3_keccak wots aes ntt kem nic \
-        nic_lint nic_bus mailbox trng tile fp_exact fma_unit tacc tacc_cycles \
+        nic_lint nic_bus mailbox trng tile tile_ext fp_exact fma_unit tacc tacc_cycles \
         tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
         tacc_transfer tacc_soc soc_smoke soc_wots soc_tile_icache soc_elaborate
@@ -475,8 +475,24 @@ fma_vectors_check: gen_fma_vectors.py fma_vectors.vec
 tb_fma_unit.vvp: tb_fma_unit.v $(CORE)/mp64_fma.v fma_vectors.vec
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ tb_fma_unit.v $(CORE)/mp64_fma.v
 
+# EXT.8 VSEL, TCMP, and TCVT golden vectors from the Python emulator.
+tile_ext: tile_ext_vectors_check tb_tile_ext.vvp
+	$(VVP) tb_tile_ext.vvp
+
+tile_ext_vectors_check: gen_tile_ext_vectors.py tile_ext_vectors.vec
+	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	    python3 gen_tile_ext_vectors.py > "$$tmp" && \
+	    cmp "$$tmp" tile_ext_vectors.vec
+
+tb_tile_ext.vvp: tb_tile_ext.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
+                 $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v \
+                 $(CORE)/mp64_fp_exact.v ../pkg/mp64_pkg.vh tile_ext_vectors.vec
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+	    tb_tile_ext.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
+	    $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_exact.v
+
 # --- Tile engine ---
-tile: fp_exact fma_unit tile_fp tb_tile.vvp tb_tile_write_ack.vvp
+tile: fp_exact fma_unit tile_fp tile_ext tb_tile.vvp tb_tile_write_ack.vvp
 	$(VVP) tb_tile.vvp
 	$(VVP) tb_tile_write_ack.vvp
 
