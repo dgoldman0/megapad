@@ -163,6 +163,47 @@ def test_flowing_selected_tab_respects_disabled_parent_and_shortcut_contrast(ena
     assert bool(result.hit_targets) is enabled
 
 
+@pytest.mark.parametrize("kind", ("tab", "menu"))
+def test_button_selection_leaves_container_dividers_and_hit_geometry_intact(kind):
+    pygame = pytest.importorskip("pygame")
+    from rich_terminal.pygame_view import composite_draw_plane_result
+    from rich_terminal.retained_scene import ControlState, ObjectBounds
+    from rich_terminal.retained_view import (
+        MenuBarDraw, MenuDraw, RetainedDrawPlane, RetainedRegionDraw, TabDraw, TabSetDraw,
+    )
+
+    active = ControlState.VISIBLE | ControlState.ENABLED
+    height = 40 if kind == "tab" else 7
+
+    def render(selected):
+        state = active | (ControlState.SELECTED if selected else ControlState(0))
+        bounds = ObjectBounds(0, 0, 10, 1)
+        if kind == "tab":
+            draw = TabSetDraw(1, active, 0, 0, bounds, (TabDraw(2, state, 0, "One", ""),))
+        else:
+            if selected:
+                state |= ControlState.OPEN
+            draw = MenuBarDraw(1, active, 0, 0, bounds, (MenuDraw(2, state, 0, "One", ()),))
+        region = RetainedRegionDraw(1, 1, 1, 0, 0, 10, 1, 0, 0, 0, 0, 0, False, (draw,))
+        surface = pygame.Surface((100, height))
+        font = _RecordingFont(pygame)
+        result = composite_draw_plane_result(
+            pygame, surface, RetainedDrawPlane(True, True, (region,)), font, 10, height,
+            appearance=FLOWING_APPEARANCE,
+        )
+        return surface, result
+
+    idle, idle_result = render(False)
+    selected, selected_result = render(True)
+    assert selected_result.hit_entries == idle_result.hit_entries
+    assert pygame.image.tobytes(selected, "RGBA") != pygame.image.tobytes(idle, "RGBA")
+    edge_rows = (0, 1, height - 2, height - 1) if kind == "tab" else (0, height - 1)
+    assert all(selected.get_at((x, y)) == idle.get_at((x, y))
+               for y in edge_rows for x in range(100))
+    assert all(selected.get_at((x, y)) == idle.get_at((x, y))
+               for x in (0, 1, 98, 99) for y in range(height))
+
+
 class _EdgeFont:
     """Full-height glyphs expose material gaps otherwise hidden by font margins."""
 

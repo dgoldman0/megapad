@@ -137,6 +137,10 @@ boundary. Menus, tabs, grid cells, readouts, and cards limit their corner radius
 to the inset already reserved by their layout, leaving a pixel for the border.
 This changes the material geometry without adding padding, shifting text, or
 changing input coordinates. Meters without numeric labels can retain full caps.
+Menu and tab surfaces also leave up to two pixels of paint clearance inside
+their existing label padding. Selection fills and open-menu accents stay off
+the container dividers; label positions and the full activation bounds remain
+unchanged.
 
 The existing focused checks are `tests/test_viewer_partial_repaint.py`,
 `tests/test_rich_terminal_compositor_replay.py`,

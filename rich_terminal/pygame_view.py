@@ -1026,6 +1026,16 @@ def _flow_text_radius(inset):
     return max(0, inset - 1)
 
 
+def _flow_button_material(rect, metrics):
+    """Separate button paint from its container without moving text or hits."""
+    inset_x = min(2, max(0, metrics.horizontal_padding - 1),
+                  max(0, (rect.width - 1) // 2))
+    inset_y = min(2, max(0, (rect.height - metrics.font_height) // 2))
+    material = _WideRect(rect.left + inset_x, rect.top + inset_y,
+                         rect.width - 2 * inset_x, rect.height - 2 * inset_y)
+    return material, _flow_text_radius(metrics.horizontal_padding - inset_x)
+
+
 def _flow_pill(pygame_module, surface, rect, appearance, *, selected=False, bright=False,
                radius=24):
     paint_channel(
@@ -1792,10 +1802,11 @@ def _paint_menu_bar(
             if fill is None and effectively_enabled:
                 fill = _TITLE_IDLE
             if appearance.flowing:
+                material, radius = _flow_button_material(title, metrics)
                 if effectively_enabled and (menu.state & (ControlState.OPEN | ControlState.SELECTED)
                         or _matches(identity, hovered) or _matches(identity, pressed)):
-                    _flow_pill(pygame_module, surface, title, appearance, selected=True,
-                               radius=_flow_text_radius(metrics.horizontal_padding))
+                    _flow_pill(pygame_module, surface, material, appearance, selected=True,
+                               radius=radius)
             else:
                 if fill is not None:
                     _rounded_rect(
@@ -1810,7 +1821,7 @@ def _paint_menu_bar(
                 and visible_title.width > 0
                 and visible_title.height > 0
             ):
-                accent_y = title.bottom - 1
+                accent_y = (material.bottom if appearance.flowing else title.bottom) - 1
                 _alpha_line(
                     pygame_module,
                     surface,
@@ -2847,12 +2858,13 @@ def _paint_tabset(
             flowing_selected = (appearance.flowing and effectively_enabled
                                 and bool(tab.state & ControlState.SELECTED))
             if appearance.flowing:
+                material, radius = _flow_button_material(tab_rect, metrics)
                 _flow_pill(
-                    pygame_module, surface, tab_rect, appearance,
+                    pygame_module, surface, material, appearance,
                     selected=flowing_selected or (effectively_enabled and
                              (_matches(identity, hovered) or _matches(identity, pressed))),
                     bright=flowing_selected,
-                    radius=_flow_text_radius(metrics.horizontal_padding),
+                    radius=radius,
                 )
             else:
                 _rounded_rect(
