@@ -47,6 +47,7 @@ from .semantic_content import (
     SemanticTextState,
 )
 from .semantic_items import ItemRole, ItemViewContent, ViewItem, card_row_count
+from .semantic_fields import FieldContent
 
 
 INT32_MIN = -(1 << 31)
@@ -113,6 +114,16 @@ class ObjectKind(IntEnum):
     STATUS = 7
     PLOT = 8
     WAVEFORM = 9
+    PANE = 10
+    STATUS_FIELD = 11
+
+
+class StatusSeverity(IntEnum):
+    NEUTRAL = 0
+    INFO = 1
+    SUCCESS = 2
+    WARNING = 3
+    ERROR = 4
 
 
 class ImageFit(IntEnum):
@@ -133,6 +144,10 @@ class ControlKind(IntEnum):
     TABSET = 7
     TAB = 8
     ITEM_VIEW = 9
+    TASKBAR = 10
+    TASK = 11
+    LAUNCHER = 12
+    FIELD = 13
 
 
 class ControlState(IntFlag):
@@ -143,6 +158,7 @@ class ControlState(IntFlag):
     OPEN = 1 << 2
     SELECTED = 1 << 3
     CHECKED = 1 << 4
+    MINIMIZED = 1 << 5
 
 
 CONTROL_STATE_MASK = (
@@ -151,6 +167,7 @@ CONTROL_STATE_MASK = (
     | ControlState.OPEN
     | ControlState.SELECTED
     | ControlState.CHECKED
+    | ControlState.MINIMIZED
 )
 
 
@@ -353,6 +370,87 @@ class RegionDefinition:
 @dataclass(frozen=True, slots=True)
 class GroupBody:
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class PaneBody:
+    """Explicit pane chrome and its same-owner content-region relationship."""
+
+    content_region_id: int
+    content_bounds: ObjectBounds
+    title: str
+    focused: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "content_region_id",
+            _integer("content_region_id", self.content_region_id,
+                     minimum=1, maximum=UINT64_MAX),
+        )
+        if not isinstance(self.content_bounds, ObjectBounds):
+            raise TypeError("content_bounds must be ObjectBounds")
+        _control_text_bytes("title", self.title)
+        if any(0x7F <= ord(character) <= 0x9F
+               or character in "\u2028\u2029" for character in self.title):
+            raise ValueError("title contains a control or line-separator character")
+        object.__setattr__(self, "focused", _boolean("focused", self.focused))
+
+
+def validate_pane_shape(
+    body: PaneBody, *, bounds: ObjectBounds, region_id: int,
+    parent_object_id: int, visible: bool,
+) -> None:
+    """Keep the immutable model and wire envelope's pane checks identical."""
+
+    if parent_object_id:
+        raise ValueError("PANE must be a root object")
+    if body.content_region_id == region_id:
+        raise ValueError("PANE content region must differ from its chrome region")
+    if body.focused and not visible:
+        raise ValueError("a focused PANE must be visible")
+    content = body.content_bounds
+    if (content.cell_x < 0 or content.cell_y < 0
+            or content.cell_right > bounds.cell_cols
+            or content.cell_bottom > bounds.cell_rows):
+        raise ValueError("PANE content bounds must lie inside its outer bounds")
+
+
+@dataclass(frozen=True, slots=True)
+class StatusFieldBody:
+    """Guest-authored label/value slots and descriptive status severity."""
+
+    label: str
+    value: str
+    label_cols: int
+    severity: StatusSeverity = StatusSeverity.NEUTRAL
+    emphasized: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("label", "value"):
+            text = getattr(self, name)
+            _control_text_bytes(name, text)
+            if any(0x7F <= ord(character) <= 0x9F
+                   or character in "\u2028\u2029" for character in text):
+                raise ValueError(f"{name} contains a control or line-separator character")
+        object.__setattr__(self, "label_cols", _integer(
+            "label_cols", self.label_cols, minimum=0, maximum=UINT32_MAX,
+        ))
+        severity = _integer("severity", self.severity, minimum=0, maximum=4)
+        object.__setattr__(self, "severity", StatusSeverity(severity))
+        object.__setattr__(self, "emphasized", _boolean("emphasized", self.emphasized))
+        if self.label and self.label_cols == 0:
+            raise ValueError("a nonempty STATUS_FIELD label requires label columns")
+
+
+def validate_status_field_shape(body: StatusFieldBody, *, bounds: ObjectBounds) -> None:
+    """Share fixed-slot geometry checks between wire and immutable model."""
+
+    if bounds.cell_rows != 1:
+        raise ValueError("STATUS_FIELD requires exactly one row")
+    if body.label_cols > bounds.cell_cols:
+        raise ValueError("STATUS_FIELD label columns exceed its bounds")
+    if body.value and body.label_cols == bounds.cell_cols:
+        raise ValueError("a nonempty STATUS_FIELD value requires value columns")
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,6 +722,8 @@ def _validate_series_consumer(body, *, include_zero_line: bool) -> None:
 
 ObjectBody = (
     GroupBody
+    | PaneBody
+    | StatusFieldBody
     | PolylineBody
     | ImageBody
     | GlyphRunBody
@@ -637,6 +737,8 @@ ObjectBody = (
 
 _BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
+    PaneBody: ObjectKind.PANE,
+    StatusFieldBody: ObjectKind.STATUS_FIELD,
     PolylineBody: ObjectKind.POLYLINE,
     ImageBody: ObjectKind.IMAGE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
@@ -676,6 +778,13 @@ class ObjectDefinition:
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         if type(self.body) not in _BODY_KIND:
             raise TypeError("body is not a supported retained object body")
+        if isinstance(self.body, StatusFieldBody):
+            validate_status_field_shape(self.body, bounds=self.bounds)
+        if isinstance(self.body, PaneBody):
+            validate_pane_shape(
+                self.body, bounds=self.bounds, region_id=self.region_id,
+                parent_object_id=self.parent_object_id, visible=self.visible,
+            )
 
     @property
     def kind(self) -> ObjectKind:
@@ -692,7 +801,7 @@ def validate_control_shape(
     bounds: ObjectBounds | None,
     label: str,
     shortcut: str,
-    content: SemanticTextContent | ItemViewContent | None,
+    content: SemanticTextContent | ItemViewContent | FieldContent | None,
 ) -> tuple[ControlKind, ControlState]:
     """Validate the common scene/wire shape of one semantic control.
 
@@ -723,9 +832,9 @@ def validate_control_shape(
     label_bytes = _control_text_bytes("label", label)
     shortcut_bytes = _control_text_bytes("shortcut", shortcut)
     if content is not None and not isinstance(
-        content, (SemanticTextContent, ItemViewContent)
+        content, (SemanticTextContent, ItemViewContent, FieldContent)
     ):
-        raise TypeError("content must be SemanticTextContent, ItemViewContent, or None")
+        raise TypeError("content must be SemanticTextContent, ItemViewContent, FieldContent, or None")
 
     allowed = {
         ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
@@ -755,6 +864,13 @@ def validate_control_shape(
         ControlKind.ITEM_VIEW: (
             ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
         ),
+        ControlKind.TASKBAR: ControlState.VISIBLE | ControlState.ENABLED,
+        ControlKind.TASK: (
+            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+            | ControlState.MINIMIZED
+        ),
+        ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
+        ControlKind.FIELD: ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED,
     }[normalized_kind]
     if int(normalized_state) & ~int(allowed):
         raise ValueError(
@@ -765,6 +881,9 @@ def validate_control_shape(
         and normalized_state & ControlState.ENABLED
     ):
         raise ValueError("open or selected controls must be visible and enabled")
+    if (normalized_state & ControlState.SELECTED
+            and normalized_state & ControlState.MINIMIZED):
+        raise ValueError("a TASK cannot be selected and minimized")
 
     root_kinds = {
         ControlKind.MENU_BAR,
@@ -772,21 +891,31 @@ def validate_control_shape(
         ControlKind.TEXT_GRID,
         ControlKind.TABSET,
         ControlKind.ITEM_VIEW,
+        ControlKind.TASKBAR,
+        ControlKind.FIELD,
     }
     if normalized_kind in root_kinds:
         if parent_control_id or order or bounds is None:
             raise ValueError(
                 f"{normalized_kind.name} requires root order zero and positive bounds"
             )
-        if label_bytes or shortcut_bytes:
+        if shortcut_bytes or (label_bytes and normalized_kind is not ControlKind.FIELD):
             raise ValueError(
                 f"{normalized_kind.name} carries no label or shortcut"
             )
-        if normalized_kind in (ControlKind.MENU_BAR, ControlKind.TABSET):
+        if normalized_kind is ControlKind.TASKBAR and bounds.cell_rows != 1:
+            raise ValueError("TASKBAR requires exactly one row")
+        if normalized_kind in (
+            ControlKind.MENU_BAR, ControlKind.TABSET, ControlKind.TASKBAR,
+        ):
             if content is not None:
                 raise ValueError(
                     f"{normalized_kind.name} carries no semantic text content"
                 )
+        elif normalized_kind is ControlKind.FIELD:
+            if not isinstance(content, FieldContent):
+                raise ValueError("FIELD requires FDC1 content")
+            content.validate_geometry(cols=bounds.cell_cols, rows=bounds.cell_rows, label=label)
         elif normalized_kind is ControlKind.ITEM_VIEW:
             if not isinstance(content, ItemViewContent):
                 raise ValueError("ITEM_VIEW requires an item collection")
@@ -816,6 +945,20 @@ def validate_control_shape(
                 raise ValueError("TEXT_GRID has more than one current item")
             if content.style_run_count:
                 raise ValueError("TEXT_GRID items carry no style runs")
+    elif normalized_kind in (ControlKind.TASK, ControlKind.LAUNCHER):
+        if (parent_control_id == 0 or z_order != 0 or bounds is None
+                or bounds.cell_x < 0 or bounds.cell_y != 0
+                or bounds.cell_rows != 1):
+            raise ValueError(
+                f"{normalized_kind.name} requires a parent and explicit single-row slots"
+            )
+        if not label_bytes:
+            raise ValueError(f"{normalized_kind.name} requires a nonempty label")
+        if content is not None:
+            raise ValueError(f"{normalized_kind.name} carries no semantic text content")
+        if any(0x7F <= ord(character) <= 0x9F or character in "\u2028\u2029"
+               for text in (label, shortcut) for character in text):
+            raise ValueError("task entry text contains a control or line-separator character")
     else:
         if parent_control_id == 0 or bounds is not None or z_order != 0:
             raise ValueError(
@@ -845,9 +988,10 @@ def validate_control_shape(
 class ControlDefinition:
     """One semantic control node whose visual representation belongs to the view.
 
-    Root controls carry an anchor rectangle and z order.  Descendants carry
-    semantic ordering and state, leaving typography, padding, clipping,
-    rasterization, and hit targets to the selected renderer.  TEXT_AREA and
+    Root controls carry an anchor rectangle and z order. Taskbar entries also
+    carry explicit parent-relative slots; other descendants carry semantic
+    ordering and state. Typography, padding, clipping, and rasterization
+    belong to the selected renderer. TEXT_AREA and
     TEXT_GRID roots use one immutable logical text collection; menu and tab
     controls carry no renderer-specific payload.
     """
@@ -863,7 +1007,7 @@ class ControlDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | None = None
+    content: SemanticTextContent | ItemViewContent | FieldContent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, OwnerIdentity):
@@ -1368,6 +1512,38 @@ class RetainedSceneModel:
             )
         return item
 
+    def require_field_control(
+        self, owner: OwnerIdentity, control_id: int, *,
+        content_revision: int | None = None, adjustable: bool = False,
+    ) -> ControlDefinition:
+        """Resolve one writable visible field at its committed content revision."""
+
+        if not self._owners.policy.features & RetainedFeature.FIELDS:
+            raise SceneModelError(SceneErrorCode.FEATURE, "FIELDS was not advertised")
+        _owner_scene, definition = self._active_control(owner, control_id)
+        if definition.kind is not ControlKind.FIELD or not isinstance(definition.content, FieldContent):
+            raise SceneModelError(SceneErrorCode.STATE, "control kind is not a FIELD")
+        if not definition.visible or not definition.enabled:
+            raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+        content = definition.content
+        if content.read_only:
+            raise SceneModelError(SceneErrorCode.STATE, "FIELD is read-only")
+        if not isinstance(adjustable, bool):
+            raise SceneModelError(SceneErrorCode.STATE, "adjustable must be bool")
+        if content_revision is not None:
+            try:
+                revision = _integer("content_revision", content_revision, minimum=1, maximum=UINT64_MAX)
+            except (TypeError, ValueError) as exc:
+                raise SceneModelError(SceneErrorCode.STATE, str(exc)) from exc
+            if revision != content.content_revision:
+                raise SceneModelError(SceneErrorCode.STATE, "field event names a superseded content revision")
+        if adjustable:
+            if content_revision is None:
+                raise SceneModelError(SceneErrorCode.STATE, "ADJUST requires an exact content revision")
+            if not content.is_adjustable:
+                raise SceneModelError(SceneErrorCode.STATE, "FIELD kind does not accept ADJUST")
+        return definition
+
     def require_interactable_control(
         self,
         owner: OwnerIdentity,
@@ -1376,6 +1552,18 @@ class RetainedSceneModel:
         """Resolve one exact active semantic target without mutating guest state."""
 
         owner_scene, definition = self._active_control(owner, control_id)
+        if definition.kind is ControlKind.FIELD:
+            return self.require_field_control(owner, control_id)
+        if definition.kind in (ControlKind.TASK, ControlKind.LAUNCHER):
+            parent = owner_scene.controls.get(definition.parent_control_id)
+            if (parent is None or parent.kind is not ControlKind.TASKBAR
+                    or not parent.visible or not parent.enabled):
+                raise SceneModelError(
+                    SceneErrorCode.GRAPH, "task entry parent is not an interactive TASKBAR"
+                )
+            if not definition.visible or not definition.enabled:
+                raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+            return definition
         if definition.kind is ControlKind.TAB:
             parent = owner_scene.controls.get(definition.parent_control_id)
             if (
@@ -1602,6 +1790,7 @@ class RetainedSceneModel:
             ControlKind.MENU_ITEM,
             ControlKind.MENU_SEPARATOR,
             ControlKind.TABSET,
+            ControlKind.TASKBAR,
         }:
             compatible = replace(definition, state=current.state) == current
             failure = "control replacement may change only the control state"
@@ -1609,6 +1798,7 @@ class RetainedSceneModel:
             ControlKind.TEXT_AREA,
             ControlKind.TEXT_GRID,
             ControlKind.ITEM_VIEW,
+            ControlKind.FIELD,
         }:
             compatible = (
                 replace(
@@ -1619,7 +1809,7 @@ class RetainedSceneModel:
                 == current
             )
             failure = (
-                "text control replacement may change only state and semantic content"
+                "content control replacement may change only state and semantic content"
             )
             if (
                 compatible
@@ -1633,7 +1823,7 @@ class RetainedSceneModel:
                     SceneErrorCode.STATE,
                     "changed semantic content requires a newer content revision",
                 )
-        else:  # TAB
+        else:  # TAB, TASK, LAUNCHER
             compatible = (
                 replace(
                     definition,
@@ -1643,7 +1833,9 @@ class RetainedSceneModel:
                 )
                 == current
             )
-            failure = "TAB replacement may change only state, label, and shortcut"
+            failure = (
+                f"{definition.kind.name} replacement may change only state, label, and shortcut"
+            )
         if not compatible:
             self._fail(SceneErrorCode.STATE, failure)
         self._validate_control_policy(definition)
@@ -1826,9 +2018,13 @@ class RetainedSceneModel:
         definition = owner_scene.objects.get(normalized_id)
         if definition is None:
             self._fail(SceneErrorCode.MISSING_ID, "object visibility target is absent")
+        try:
+            replacement_definition = replace(definition, visible=visible)
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
         usage = owner_scene.usage
         self._admit_operation(staging, owner_scene, usage)
-        owner_scene.objects[normalized_id] = replace(definition, visible=visible)
+        owner_scene.objects[normalized_id] = replacement_definition
         self._commit_operation(staging, owner_scene, usage)
 
     def append_series(
@@ -2230,6 +2426,10 @@ class RetainedSceneModel:
 
     def _object_utf8_bytes(self, definition: ObjectDefinition) -> int:
         body = definition.body
+        if isinstance(body, StatusFieldBody):
+            return len(body.label.encode("utf-8")) + len(body.value.encode("utf-8"))
+        if isinstance(body, PaneBody):
+            return len(_control_text_bytes("title", body.title))
         if isinstance(body, GlyphRunBody):
             return len(_text_bytes("text", body.text))
         if isinstance(body, ReadoutBody):
@@ -2243,6 +2443,8 @@ class RetainedSceneModel:
 
     @staticmethod
     def _control_object_slots(definition: ControlDefinition) -> int:
+        if isinstance(definition.content, FieldContent):
+            return definition.content.object_slots
         return 1 + (0 if definition.content is None else len(definition.content.items))
 
     @staticmethod
@@ -2409,6 +2611,10 @@ class RetainedSceneModel:
         kind = definition.kind
         if kind is ObjectKind.GLYPH_RUN:
             required = RetainedFeature.CORE
+        elif kind is ObjectKind.PANE:
+            required = RetainedFeature.PANES
+        elif kind is ObjectKind.STATUS_FIELD:
+            required = RetainedFeature.STATUS_FIELDS
         elif kind in (ObjectKind.GROUP, ObjectKind.POLYLINE):
             required = RetainedFeature.VECTOR
         elif kind is ObjectKind.IMAGE:
@@ -2419,6 +2625,16 @@ class RetainedSceneModel:
             required = RetainedFeature.INSTRUMENT
         if not policy.features & required:
             self._fail(SceneErrorCode.FEATURE, f"{kind.name} feature was not advertised")
+        if isinstance(definition.body, StatusFieldBody):
+            text_bytes = self._object_utf8_bytes(definition)
+            if (96 + text_bytes > policy.client_to_terminal_max_payload
+                    or 296 + text_bytes > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA, "STATUS_FIELD text exceeds payload or transaction capacity")
+        if isinstance(definition.body, PaneBody):
+            title_bytes = len(_control_text_bytes("title", definition.body.title))
+            if (104 + title_bytes > policy.client_to_terminal_max_payload
+                    or 304 + title_bytes > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA, "PANE title exceeds payload or transaction capacity")
         if isinstance(definition.body, PolylineBody) and len(definition.body.points) > policy.max_path_points:
             self._fail(SceneErrorCode.QUOTA, "polyline point count exceeds advertised maximum")
         if isinstance(definition.body, GlyphRunBody):
@@ -2451,6 +2667,25 @@ class RetainedSceneModel:
             and not features & RetainedFeature.CONTROL_ITEMS
         ):
             self._fail(SceneErrorCode.FEATURE, "CONTROL_ITEMS was not advertised")
+        if definition.kind is ControlKind.FIELD:
+            if not features & RetainedFeature.FIELDS:
+                self._fail(SceneErrorCode.FEATURE, "FIELDS was not advertised")
+            assert isinstance(definition.content, FieldContent)
+            policy = self._owners.policy
+            payload = 80 + len(definition.label.encode("utf-8")) + definition.content.wire_bytes
+            if (payload > policy.client_to_terminal_max_payload
+                    or 200 + payload > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA, "FIELD content exceeds payload or transaction capacity")
+        if definition.kind in {
+            ControlKind.TASKBAR, ControlKind.TASK, ControlKind.LAUNCHER,
+        }:
+            if not features & RetainedFeature.TASKBARS:
+                self._fail(SceneErrorCode.FEATURE, "TASKBARS was not advertised")
+            text_bytes = self._control_utf8_bytes(definition)
+            policy = self._owners.policy
+            if (80 + text_bytes > policy.client_to_terminal_max_payload
+                    or 280 + text_bytes > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA, "TASKBAR text exceeds payload or transaction capacity")
 
     def _validate_control_dependencies(
         self,
@@ -2468,6 +2703,8 @@ class RetainedSceneModel:
             ControlKind.TEXT_GRID,
             ControlKind.TABSET,
             ControlKind.ITEM_VIEW,
+            ControlKind.TASKBAR,
+            ControlKind.FIELD,
         }:
             return
         parent = owner_scene.controls.get(definition.parent_control_id)
@@ -2476,6 +2713,8 @@ class RetainedSceneModel:
             ControlKind.MENU_ITEM: ControlKind.MENU,
             ControlKind.MENU_SEPARATOR: ControlKind.MENU,
             ControlKind.TAB: ControlKind.TABSET,
+            ControlKind.TASK: ControlKind.TASKBAR,
+            ControlKind.LAUNCHER: ControlKind.TASKBAR,
         }[definition.kind]
         if parent is None or parent.kind is not expected:
             self._fail(
@@ -2484,6 +2723,11 @@ class RetainedSceneModel:
             )
         if parent.region_id != definition.region_id:
             self._fail(SceneErrorCode.GRAPH, "control parent belongs to another region")
+        if definition.kind in (ControlKind.TASK, ControlKind.LAUNCHER):
+            assert definition.bounds is not None and parent.bounds is not None
+            if (definition.bounds.cell_x + definition.bounds.cell_cols
+                    > parent.bounds.cell_cols):
+                self._fail(SceneErrorCode.GRAPH, "task entry bounds exceed TASKBAR slots")
 
     def _validate_object_dependencies(
         self,
@@ -2494,6 +2738,12 @@ class RetainedSceneModel:
             self._fail(
                 SceneErrorCode.GRAPH,
                 "object region must be defined before the dependent object",
+            )
+        if (isinstance(definition.body, PaneBody)
+                and definition.body.content_region_id not in owner_scene.regions):
+            self._fail(
+                SceneErrorCode.GRAPH,
+                "PANE content region must be defined before the pane",
             )
         if definition.parent_object_id:
             parent = owner_scene.objects.get(definition.parent_object_id)
@@ -2545,6 +2795,34 @@ class RetainedSceneModel:
         except OwnerLedgerError as exc:
             self._fail(SceneErrorCode.AUTHORITY, str(exc))
 
+    def _validate_pane_region(
+        self, owner_scene: OwnerScene | _MutableOwnerScene,
+        definition: ObjectDefinition,
+    ) -> None:
+        body = definition.body
+        assert isinstance(body, PaneBody)
+        content_region = owner_scene.regions.get(body.content_region_id)
+        if content_region is None or content_region.owner != definition.owner:
+            self._fail(SceneErrorCode.GRAPH, "PANE refers to an absent exact-owner content region")
+        chrome_region = owner_scene.regions[definition.region_id]
+        if (content_region.z_order, content_region.region_id) <= (
+                chrome_region.z_order, chrome_region.region_id):
+            self._fail(SceneErrorCode.GRAPH, "PANE content region must paint after its chrome region")
+        if not content_region.clipped:
+            self._fail(SceneErrorCode.GRAPH, "PANE content region requires an explicit clip")
+        # Region validation already makes all zero the only empty clip.  Its
+        # logical coordinates stay independent; only its physical viewport is
+        # constrained by the explicitly published pane content rectangle.
+        if content_region.clip_cols == 0:
+            return
+        content = body.content_bounds
+        left = chrome_region.logical_x + definition.bounds.cell_x + content.cell_x
+        top = chrome_region.logical_y + definition.bounds.cell_y + content.cell_y
+        if (content_region.clip_x < left or content_region.clip_y < top
+                or content_region.clip_x + content_region.clip_cols > left + content.cell_cols
+                or content_region.clip_y + content_region.clip_rows > top + content.cell_rows):
+            self._fail(SceneErrorCode.BOUNDS, "PANE content-region clip exceeds its content bounds")
+
     def _validate_scene(
         self,
         scene: RetainedScene,
@@ -2552,11 +2830,18 @@ class RetainedSceneModel:
     ) -> None:
         for owner_scene in scene.owners.values():
             self._validate_usage(owner_scene.owner, owner_scene.usage)
+            pane_content_regions: set[int] = set()
             for object_key, definition in owner_scene.objects.items():
                 if object_key != definition.object_id or definition.owner != owner_scene.owner:
                     self._fail(SceneErrorCode.GRAPH, "object map key or owner is invalid")
                 if definition.region_id not in owner_scene.regions:
                     self._fail(SceneErrorCode.GRAPH, "object refers to an absent region")
+                if isinstance(definition.body, PaneBody):
+                    self._validate_pane_region(owner_scene, definition)
+                    content_region_id = definition.body.content_region_id
+                    if content_region_id in pane_content_regions:
+                        self._fail(SceneErrorCode.GRAPH, "a content region has multiple panes")
+                    pane_content_regions.add(content_region_id)
                 parent_id = definition.parent_object_id
                 if parent_id:
                     parent = owner_scene.objects.get(parent_id)
@@ -2593,6 +2878,8 @@ class RetainedSceneModel:
             selected_menu_by_bar: set[int] = set()
             selected_item_by_menu: set[int] = set()
             selected_tab_by_tabset: set[int] = set()
+            selected_task_by_taskbar: set[int] = set()
+            taskbar_intervals: dict[int, list[tuple[int, int]]] = {}
             for control_key, definition in owner_scene.controls.items():
                 if (
                     control_key != definition.control_id
@@ -2609,12 +2896,24 @@ class RetainedSceneModel:
                     ControlKind.TEXT_GRID,
                     ControlKind.TABSET,
                     ControlKind.ITEM_VIEW,
+                    ControlKind.TASKBAR,
+                    ControlKind.FIELD,
                 }:
                     continue
                 order_key = (definition.parent_control_id, definition.order)
                 if order_key in sibling_orders:
                     self._fail(SceneErrorCode.GRAPH, "control sibling order is duplicated")
                 sibling_orders.add(order_key)
+                if definition.kind in (ControlKind.TASK, ControlKind.LAUNCHER):
+                    assert definition.bounds is not None
+                    start = definition.bounds.cell_x
+                    taskbar_intervals.setdefault(definition.parent_control_id, []).append(
+                        (start, start + definition.bounds.cell_cols)
+                    )
+                    if definition.state & ControlState.SELECTED:
+                        if definition.parent_control_id in selected_task_by_taskbar:
+                            self._fail(SceneErrorCode.GRAPH, "TASKBAR has multiple selected tasks")
+                        selected_task_by_taskbar.add(definition.parent_control_id)
                 if definition.kind is ControlKind.MENU:
                     if definition.state & ControlState.OPEN:
                         if definition.parent_control_id in open_menu_by_bar:
@@ -2644,6 +2943,12 @@ class RetainedSceneModel:
                             "TABSET has multiple selected tabs",
                         )
                     selected_tab_by_tabset.add(definition.parent_control_id)
+            for intervals in taskbar_intervals.values():
+                previous_end = 0
+                for start, end in sorted(intervals):
+                    if start < previous_end:
+                        self._fail(SceneErrorCode.GRAPH, "TASKBAR child bounds overlap")
+                    previous_end = end
 
     def _require_staging(self) -> _SceneStaging:
         if self._staging is None:
@@ -2686,6 +2991,7 @@ __all__ = [
     "ObjectDefinition",
     "ObjectKind",
     "OwnerScene",
+    "PaneBody",
     "PlotBody",
     "Point",
     "PolylineBody",
@@ -2706,8 +3012,12 @@ __all__ = [
     "SceneUsage",
     "SeriesDefinition",
     "StatusBody",
+    "StatusFieldBody",
+    "StatusSeverity",
     "TimestampMode",
     "UniformSamples",
     "validate_control_shape",
+    "validate_pane_shape",
+    "validate_status_field_shape",
     "WaveformBody",
 ]

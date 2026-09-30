@@ -500,6 +500,7 @@ The `docs/` directory contains comprehensive reference material:
 | [docs/extended-tpu-spec.md](docs/extended-tpu-spec.md) | Extended TPU specification — crypto, DMA, BIST, perf counters, FP16 |
 | [docs/tools.md](docs/tools.md) | CLI & debug monitor, assembler, disk utility, test suite, C++ accelerator |
 | [docs/development-session.md](docs/development-session.md) | Headless and shared live control, terminal snapshots, JSON scenarios, pygame viewing, and PNG capture |
+| [docs/rich-terminal/FLOWING-APPEARANCE.md](docs/rich-terminal/FLOWING-APPEARANCE.md) | Opt-in rounded-channel rendering, recorded-frame previews, and remaining desktop semantics |
 | [docs/audio-output.md](docs/audio-output.md) | One-shot PCM DMA contract, deterministic capture semantics, and hardware direction |
 
 > **Note:** Some details (e.g., the full multi-bank megapad architecture)

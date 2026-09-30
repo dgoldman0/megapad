@@ -1,0 +1,158 @@
+{
+  "format": "megapad-desk-pane-preview-1",
+  "preview_kind": "constructed pane publication over recorded Desk content",
+  "snapshot": "desktop-six-app-final.json.gz",
+  "snapshot_sha256": "ff4ca3f22e45ad47358e769a2ef969c010601461132e468c7f7ed1f76d29a55c",
+  "cells": [
+    280,
+    84
+  ],
+  "source": {
+    "repository": "https://github.com/dgoldman0/akashic",
+    "commit": "f2f067991bb51e0c90445f5338db69c826b4e908",
+    "layout": "akashic/tui/applets/desk/desk.f: _DESK-GRID, _DESK-TILE-SIZES, _DESK-ASSIGN-TILE, _DESK-DRAW-DIVIDERS",
+    "titles": "local_testing/rich_terminal_desktop_acceptance.py: DESKTOP_LAUNCHER_TITLES",
+    "rule": "Six visible apps, V preference: three columns, two rows, one-cell dividers, bottom taskbar. Divide 280 columns and 83 usable rows; put remainders in the final column and row."
+  },
+  "owner_id": 1,
+  "owner_generation": 1,
+  "chrome_region_id": 9000001,
+  "divider_bounds": [
+    [
+      92,
+      0,
+      1,
+      83
+    ],
+    [
+      185,
+      0,
+      1,
+      83
+    ],
+    [
+      0,
+      41,
+      280,
+      1
+    ]
+  ],
+  "notes": [
+    "Pane records and empty clipped content regions are authored preview additions. Existing Akashic producers have not been migrated.",
+    "Existing tile bounds, glyph slots, controls and hit targets stay fixed. Only glyph runs wholly inside the explicit divider rectangles are suppressed.",
+    "The tile menu bars already occupy the first row. Titles remain pane metadata; the preview allocates no additional title rows.",
+    "Adjacent panes share the existing vertical gutters. The focused pane paints last within the chrome region, so its gutter material wins.",
+    "Chrome and placeholder content regions sort below both recorded regions. The placeholders do not reparent or clip the recorded controls.",
+    "Bounds overrides adjust chrome around fixed recorded tile content and are restricted to the explicitly authored divider space."
+  ],
+  "panes": [
+    {
+      "slot": 1,
+      "title": "Akashic Pad",
+      "tile_bounds": [
+        0,
+        0,
+        92,
+        41
+      ],
+      "outer_bounds": [
+        0,
+        0,
+        93,
+        42
+      ],
+      "object_id": 9000101,
+      "content_region_id": 9000011
+    },
+    {
+      "slot": 2,
+      "title": "File Explorer",
+      "tile_bounds": [
+        93,
+        0,
+        92,
+        41
+      ],
+      "outer_bounds": [
+        92,
+        0,
+        94,
+        42
+      ],
+      "object_id": 9000102,
+      "content_region_id": 9000012
+    },
+    {
+      "slot": 3,
+      "title": "Daybook",
+      "tile_bounds": [
+        186,
+        0,
+        94,
+        41
+      ],
+      "outer_bounds": [
+        185,
+        0,
+        95,
+        42
+      ],
+      "object_id": 9000103,
+      "content_region_id": 9000013
+    },
+    {
+      "slot": 4,
+      "title": "Grid",
+      "tile_bounds": [
+        0,
+        42,
+        92,
+        41
+      ],
+      "outer_bounds": [
+        0,
+        42,
+        93,
+        41
+      ],
+      "object_id": 9000104,
+      "content_region_id": 9000014
+    },
+    {
+      "slot": 5,
+      "title": "Agent",
+      "tile_bounds": [
+        93,
+        42,
+        92,
+        41
+      ],
+      "outer_bounds": [
+        92,
+        42,
+        94,
+        41
+      ],
+      "object_id": 9000105,
+      "content_region_id": 9000015
+    },
+    {
+      "slot": 6,
+      "title": "Sound Lab",
+      "tile_bounds": [
+        186,
+        42,
+        94,
+        41
+      ],
+      "outer_bounds": [
+        185,
+        42,
+        95,
+        41
+      ],
+      "object_id": 9000106,
+      "content_region_id": 9000016
+    }
+  ]
+}

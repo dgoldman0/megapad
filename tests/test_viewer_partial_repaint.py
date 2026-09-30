@@ -17,6 +17,10 @@ import pytest
 
 pygame = pytest.importorskip("pygame")
 
+from rich_terminal.appearance import (  # noqa: E402
+    FLOWING_APPEARANCE,
+    REFERENCE_APPEARANCE,
+)
 from rich_terminal.pygame_view import (  # noqa: E402
     ATTR_BOLD,
     ATTR_UNDERLINE,
@@ -147,11 +151,13 @@ def test_the_painted_record_gives_the_hit_map_in_painter_order(font, name):
         ]
 
 
+@pytest.mark.parametrize("appearance", (REFERENCE_APPEARANCE, FLOWING_APPEARANCE),
+                         ids=("reference", "flowing"))
 @pytest.mark.parametrize("name", sorted(_planes()))
-def test_every_draw_paints_only_inside_its_recorded_extent(font, name):
+def test_every_draw_paints_only_inside_its_recorded_extent(font, name, appearance):
     plane = _planes()[name]
     surface = _surface(plane, font)
-    result = _compose(surface, plane, font)
+    result = _compose(surface, plane, font, appearance=appearance)
     checked = 0
     for region, painted in zip(plane.regions, result.regions):
         for index, (draw, record) in enumerate(zip(region.draws, painted.draws)):
@@ -170,7 +176,7 @@ def test_every_draw_paints_only_inside_its_recorded_extent(font, name):
             for identity in identities:
                 surface.fill(SENTINEL)
                 _compose(surface, _alone(plane, region, draw), font,
-                         hovered=identity, pressed=identity)
+                         hovered=identity, pressed=identity, appearance=appearance)
                 changed = _changed(surface)
                 if record.extent is None:
                     assert not changed, draw
@@ -197,7 +203,8 @@ def test_an_open_menu_bar_may_paint_its_whole_region(font):
 # ---------------------------------------------------------------------------
 
 
-def _full(offer_cell, plane, font, *, show_cursor=True, hovered=None, pressed=None):
+def _full(offer_cell, plane, font, *, show_cursor=True, hovered=None, pressed=None,
+          appearance=REFERENCE_APPEARANCE):
     """The reference: a full composition on a fresh terminal and glyph cache."""
 
     terminal = VirtualTerminal(cols=offer_cell.cols, rows=offer_cell.rows)
@@ -205,7 +212,7 @@ def _full(offer_cell, plane, font, *, show_cursor=True, hovered=None, pressed=No
     return compose_terminal_frame_result(
         pygame, terminal, font, *_cell_size(font), retained_plane=plane,
         show_cursor=show_cursor, glyph_cache={}, control_font=font,
-        hovered=hovered, pressed=pressed,
+        hovered=hovered, pressed=pressed, appearance=appearance,
     )
 
 
@@ -217,7 +224,9 @@ def _assert_frame(frame, reference):
     assert frame.hit_entries == reference.hit_entries
 
 
-def test_typing_frames_repaint_to_their_full_composition(font):
+@pytest.mark.parametrize("appearance", (REFERENCE_APPEARANCE, FLOWING_APPEARANCE),
+                         ids=("reference", "flowing"))
+def test_typing_frames_repaint_to_their_full_composition(font, appearance):
     offers = typing_offers()
     terminal = VirtualTerminal(cols=offers[0].cell.cols, rows=offers[0].cell.rows)
     cache = {}
@@ -228,13 +237,52 @@ def test_typing_frames_repaint_to_their_full_composition(font):
         frame = compose_terminal_frame_changes(
             pygame, terminal, font, *_cell_size(font), retained_plane=offer.retained,
             show_cursor=True, glyph_cache=cache, control_font=font, previous=frame,
+            appearance=appearance,
         )
-        _assert_frame(frame, _full(offer.cell, offer.retained, font))
+        _assert_frame(frame, _full(offer.cell, offer.retained, font, appearance=appearance))
         if frame.damage is not None:
             partial += 1
             width, height = frame.surface.get_size()
             assert sum(rect.width * rect.height for rect in frame.damage) < width * height // 4
     assert partial == len(offers) - 1
+
+
+@pytest.mark.parametrize("name", sorted(_planes()))
+def test_flowing_appearance_preserves_control_and_text_hit_geometry(font, name):
+    plane = _planes()[name]
+    reference = _compose(_surface(plane, font), plane, font)
+    flowing = _compose(_surface(plane, font), plane, font, appearance=FLOWING_APPEARANCE)
+    assert flowing.hit_entries == reference.hit_entries
+
+
+def test_appearance_changes_invalidate_composition_and_unchanged_frames_stay_idle(font):
+    offer = typing_offers()[0]
+    terminal = VirtualTerminal(cols=offer.cell.cols, rows=offer.cell.rows)
+    apply_terminal_snapshot(terminal, offer.cell)
+    cache = {}
+    previous = None
+    pixels = []
+    for appearance in (REFERENCE_APPEARANCE, FLOWING_APPEARANCE, REFERENCE_APPEARANCE):
+        frame = compose_terminal_frame_changes(
+            pygame, terminal, font, *_cell_size(font), retained_plane=offer.retained,
+            show_cursor=True, glyph_cache=cache, control_font=font, previous=previous,
+            appearance=appearance,
+        )
+        assert frame.damage is None
+        assert frame.appearance == appearance
+        _assert_frame(frame, _full(offer.cell, offer.retained, font, appearance=appearance))
+        pixels.append(pygame.image.tobytes(frame.surface, "RGBA"))
+        idle = compose_terminal_frame_changes(
+            pygame, terminal, font, *_cell_size(font), retained_plane=offer.retained,
+            show_cursor=True, glyph_cache=cache, control_font=font, previous=frame,
+            appearance=appearance,
+        )
+        assert idle.surface is frame.surface
+        assert idle.damage == ()
+        assert idle.hit_entries == frame.hit_entries
+        previous = idle
+    assert pixels[0] == pixels[2]
+    assert pixels[0] != pixels[1], "flowing appearance must visibly change semantic controls"
 
 
 # ---------------------------------------------------------------------------
@@ -369,8 +417,10 @@ def _edit(randomizer, draws_a, draws_b, header_b, history, terminal, state):
     return history
 
 
+@pytest.mark.parametrize("appearance", (REFERENCE_APPEARANCE, FLOWING_APPEARANCE),
+                         ids=("reference", "flowing"))
 @pytest.mark.parametrize("seed", range(4))
-def test_random_scene_edits_repaint_to_their_full_composition(font, seed):
+def test_random_scene_edits_repaint_to_their_full_composition(font, seed, appearance):
     randomizer = random.Random(seed)
     draws_a, draws_b, header_b, history = _initial_scene()
     terminal = _scene_terminal(randomizer)
@@ -386,6 +436,7 @@ def test_random_scene_edits_repaint_to_their_full_composition(font, seed):
             pygame, terminal, font, *_cell_size(font), retained_plane=plane,
             show_cursor=state["show_cursor"], glyph_cache=cache, control_font=font,
             hovered=state["hovered"], pressed=state["pressed"], previous=frame,
+            appearance=appearance,
         )
         reference_terminal = VirtualTerminal(cols=SCENE_COLS, rows=SCENE_ROWS)
         with terminal._lock:
@@ -396,6 +447,7 @@ def test_random_scene_edits_repaint_to_their_full_composition(font, seed):
             pygame, reference_terminal, font, *_cell_size(font), retained_plane=plane,
             show_cursor=state["show_cursor"], glyph_cache={}, control_font=font,
             hovered=state["hovered"], pressed=state["pressed"],
+            appearance=appearance,
         )
         _assert_frame(frame, reference)
         partial += frame.damage is not None

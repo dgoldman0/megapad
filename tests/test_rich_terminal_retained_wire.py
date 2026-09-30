@@ -17,6 +17,8 @@ from rich_terminal.retained_scene import (
     GlyphRunBody,
     ObjectBounds,
     ObjectKind,
+    PaneBody,
+    StatusFieldBody,
     Point,
     PolylineBody,
     RGBA,
@@ -825,6 +827,18 @@ def test_every_non_image_object_oracle_round_trips_through_typed_bodies():
     assert decode_object_definition(encode_object_definition(glyph_run)) == glyph_run
     kinds.add(glyph_run.kind)
 
+    pane = ObjectWireDefinition(
+        1, 1, 2, 1, 0, ObjectBounds(0, 0, 20, 10), 0, True,
+        PaneBody(2, ObjectBounds(1, 1, 18, 8), "Pane — 茶", True),
+    )
+    assert decode_object_definition(encode_object_definition(pane)) == pane
+    kinds.add(pane.kind)
+
+    status_field = ObjectWireDefinition(1, 1, 3, 1, 0, ObjectBounds(0, 0, 20, 1),
+                                        0, True, StatusFieldBody("State", "Ready", 8))
+    assert decode_object_definition(encode_object_definition(status_field)) == status_field
+    kinds.add(status_field.kind)
+
     assert kinds == set(ObjectKind) - {ObjectKind.IMAGE}
 
 
@@ -1038,7 +1052,7 @@ def test_object_decoders_reject_reserved_bits_enums_text_and_non_exact_bodies():
     assert reserved.value.code is RetainedWireErrorCode.RESERVED
 
     glyph_run[74:76] = bytes(2)
-    glyph_run[24:26] = (10).to_bytes(2, "little")
+    glyph_run[24:26] = (0xFFFF).to_bytes(2, "little")
     with pytest.raises(RetainedWireError) as unknown:
         decode_object_definition(glyph_run)
     assert unknown.value.code is RetainedWireErrorCode.ENUM

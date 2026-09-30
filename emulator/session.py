@@ -491,4 +491,3 @@ def _load_bios(path: Path) -> tuple[bytes, dict[str, int]]:
     _BIOS_CACHE.clear()
     _BIOS_CACHE[key] = (code, dict(labels))
     return code, labels
-

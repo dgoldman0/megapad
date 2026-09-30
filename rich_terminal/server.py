@@ -1089,6 +1089,7 @@ class RichTerminalCore:
         scalar_offset: int = 0,
         wheel_x: int = 0,
         wheel_y: int = 0,
+        adjustment: int = 0,
     ) -> OutboundBytes | None:
         """Encode one revision-attested semantic-control intent.
 
@@ -1139,14 +1140,18 @@ class RichTerminalCore:
             scalar_offset=scalar_offset,
             wheel_x=wheel_x,
             wheel_y=wheel_y,
+            adjustment=adjustment,
         )
         if (
-            event.event_kind is not ControlEventKind.ACTIVATE
+            event.event_kind not in (ControlEventKind.ACTIVATE, ControlEventKind.ADJUST)
             and not policy.features & RetainedFeature.CONTROL_COLLECTIONS
         ):
             raise TerminalSessionError(
                 "positioned control input requires active RET_CONTROL_COLLECTIONS"
             )
+        if (event.event_kind is ControlEventKind.ADJUST
+                and not policy.features & RetainedFeature.FIELDS):
+            raise TerminalSessionError("field input requires active RET_FIELDS")
         items_active = bool(policy.features & RetainedFeature.CONTROL_ITEMS)
         if event.names_item and not items_active:
             raise TerminalSessionError("item input requires active RET_CONTROL_ITEMS")
@@ -1160,6 +1165,11 @@ class RichTerminalCore:
         try:
             if event.event_kind is ControlEventKind.ACTIVATE:
                 scene.require_interactable_control(owner, event.control_id)
+            elif event.event_kind is ControlEventKind.ADJUST:
+                scene.require_field_control(
+                    owner, event.control_id,
+                    content_revision=event.content_revision, adjustable=True,
+                )
             elif event.event_kind is ControlEventKind.SCROLL:
                 scene.require_text_control(
                     owner,

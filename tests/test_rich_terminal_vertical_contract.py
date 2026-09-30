@@ -86,6 +86,8 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
         "STATUS",
         "PLOT",
         "WAVEFORM",
+        "PANE",
+        "STATUS_FIELD",
     ]
 
 

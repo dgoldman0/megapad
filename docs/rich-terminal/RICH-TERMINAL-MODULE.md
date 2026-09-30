@@ -254,6 +254,20 @@ PT-WAVEFORM-REPLACE ( owner generation object region parent
                       trace-red trace-green trace-blue trace-alpha zero-red
                       zero-green zero-blue zero-alpha zero-value waveform-flags
                       session -- status )
+PT-PANE-DEFINE    ( owner generation object region parent
+                      x y cols rows z visible content-region content-x
+                      content-y content-cols content-rows pane-state
+                      title-a title-u session -- status )
+PT-PANE-REPLACE   ( owner generation object region parent
+                      x y cols rows z visible content-region content-x
+                      content-y content-cols content-rows pane-state
+                      title-a title-u session -- status )
+PT-STATUS-FIELD-DEFINE ( owner generation object region parent
+                      x y cols rows z visible label-cols severity field-state
+                      label-a label-u value-a value-u session -- status )
+PT-STATUS-FIELD-REPLACE ( owner generation object region parent
+                      x y cols rows z visible label-cols severity field-state
+                      label-a label-u value-a value-u session -- status )
 PT-OBJECT-SET-VALUE ( owner generation object value session -- status )
 PT-OBJECT-SET-VISIBILITY ( owner generation object visible session -- status )
 PT-OBJECT-DROP      ( owner generation object session -- status )
@@ -281,6 +295,7 @@ PT-EVENT-POLL       ( event session -- status has-event )
 PT-CONTROL-EVENT-OWNER@      ( event -- owner )
 PT-CONTROL-EVENT-GENERATION@ ( event -- generation )
 PT-CONTROL-EVENT-ID@         ( event -- control )
+PT-CONTROL-EVENT-ADJUSTMENT@ ( event -- signed-step-count )
 PT-CONTROL-EVENT-KIND@       ( event -- kind )
 PT-CONTROL-EVENT-MODIFIERS@  ( event -- modifiers )
 PT-CONTROL-EVENT-CONTENT-REVISION@ ( event -- revision )
@@ -300,7 +315,9 @@ means fully clipped; otherwise the positive clip is within the selected
 surface and its intersection with the logical rectangle. Object and optional
 root-control `x y cols rows` use the same signed-origin/positive-extent cell
 contract, relative to the region logical origin or parent-object origin.
-Descendant controls pass the canonical all-zero absent tuple. PT does not
+Menu and tab descendants pass the canonical all-zero absent tuple. TASK and
+LAUNCHER descendants instead carry explicit one-row rectangles relative to
+their TASKBAR parent, preserving the guest's exact cell slots. PT does not
 normalize, clamp, or crop these values. POLYLINE's inner point coordinates and
 stroke width remain UNORM32 within the resolved object.
 
@@ -506,6 +523,69 @@ caller-provided TX scratch, exact negotiated payload and declared transaction
 bytes, plus the owner's terminal-side aggregate UTF-8 quota. No separate
 control-text capacity is introduced.
 
+`PT-CONTROL-TASKBAR`, `PT-CONTROL-TASK`, and `PT-CONTROL-LAUNCHER` (10–12)
+extend the existing typed `PT-CONTROL-DEFINE` and `PT-CONTROL-REPLACE` writers
+under the additive `RET_TASKBARS` feature (bit 13). TASKBARS depends on CONTROLS
+and inherits its 80-byte inbound payload and 280-byte retained-transaction
+minima; no new body format, input action, or private capacity is introduced.
+The writers return `PT-S-UNSUPPORTED` without output or accounting changes
+when this family is unavailable. `PT-CONTROL-DROP` keeps its existing tuple
+and terminal-side kind lookup.
+
+A TASKBAR is a root with parent and order zero, positive width and exactly one
+row, empty label/shortcut/content, and only VISIBLE and ENABLED state bits.
+TASK and LAUNCHER have a nonzero TASKBAR parent, zero z, u32 order, and explicit
+parent-local bounds with nonnegative x, y zero, positive width, and one row.
+Their label is nonempty, shortcut optional, and content empty. TASK accepts
+VISIBLE, ENABLED, SELECTED, and `PT-CONTROL-F-MINIMIZED` (bit 5); SELECTED
+requires VISIBLE and ENABLED and excludes MINIMIZED. LAUNCHER accepts only
+VISIBLE and ENABLED. The new family rejects C1 and U+2028/U+2029 in addition
+to existing label/shortcut UTF-8, C0, DEL, span-alias, and quota checks.
+Earlier control kinds keep their established text rules.
+
+The terminal validates same-owner/same-region parentage, child containment,
+nonoverlap, and at most one selected task in the final graph. PT keeps no
+parallel control table. Task and launcher activation uses the existing
+revision-bound `PT-CONTROL-ACTIVATE` event; the guest decides which application
+to activate or launch, then publishes the resulting state.
+
+`PT-CONTROL-FIELD` (13) uses the existing CONTROL writers with an exact
+canonical FDC1 content span. It requires `RET_FIELDS` (bit 14), which depends
+on CONTROLS independently of collections. Discovery requires a 176-byte
+inbound payload, a 376-byte retained transaction, and a 56-byte outbound
+payload; actual label/content bytes must fit the negotiated bounds. FIELD
+is a positive root rectangle with parent/order zero, optional label, empty
+shortcut, and VISIBLE/ENABLED/SELECTED state bits. Selected fields must be
+visible and enabled. The caller retains the complete CELL fallback whenever
+the feature is unavailable.
+
+The 96-byte FDC1 header carries a positive content revision, field kind,
+flags, explicit root-relative label/value rectangles, numeric value/range/
+step, choice count, and text byte count. `PT-FIELD-INTEGER` (1) requires an
+inclusive range containing the value and a positive step. `PT-FIELD-CHOICE`
+(2) requires unique signed values with nonempty labels and a declared current
+value; range and step are zero. `PT-FIELD-TEXT` (3) carries exact UTF-8 text
+and zero numeric fields. `PT-FIELD-F-READ-ONLY` is the sole flag. Label bounds
+are all-zero exactly when the CONTROL label is empty; otherwise both label
+and value slots are positive, contained in the root, and disjoint. FDC1
+strings and the FIELD label exclude C0/C1, DEL, U+2028, and U+2029.
+
+PT validates the complete borrowed FDC1 span, including reserved fields,
+canonical lengths, choice uniqueness, geometry, and string content, before
+emission. It allocates no persistent field state or choice table; duplicate
+choice detection rescans preceding records within the bounded input. Existing
+span-alias checks and terminal owner quotas apply, and temporary content
+pointers are cleared before return.
+
+`PT-CONTROL-ADJUST` (11) is the existing CONTROL_EVENT prefix plus a 16-byte
+tail containing content revision and a nonzero signed step count. It is
+gated by FIELDS independently of collections. `PT-CONTROL-EVENT-ADJUSTMENT@`
+returns that signed count only for an ADJUST descriptor with the exact tail;
+`PT-CONTROL-EVENT-CONTENT-REVISION@` accepts ADJUST's 16-byte tail and the
+existing positioned/item 24-byte tails. Other event types, wrong kinds, and
+wrong tail sizes return zero. An adjustment proposes a change; the guest
+retains value authority and publishes the accepted replacement and revision.
+
 `PT-SERIES-TIMESTAMP-EXPLICIT` and `PT-SERIES-TIMESTAMP-UNIFORM` select the
 two protocol timestamp modes. APPEND and REPLACE take an aligned borrowed span
 of native 64-bit semantic cells, not a packed wire body. UNIFORM interprets one
@@ -518,8 +598,61 @@ It then encodes every timestamp and value little-endian into private TX scratch.
 The upper engine retains per-series definitions/history and replay authority;
 PT introduces no series table or hard-coded history capacity of its own.
 
+`PT-PANE-DEFINE` and `PT-PANE-REPLACE` require the additive `RET_PANES`
+feature (bit 11) and use object kind `PT-OBJECT-PANE` (10). The standard
+64-byte OBJECT prefix is followed by the canonical PNE1 header and borrowed
+UTF-8 title. `parent` is zero; the content region is nonzero and distinct from
+the pane's own region. Content bounds are pane-local, positive, and contained
+by the outer rectangle. Title metadata never reserves or shifts guest cells.
+The renderer displays it one cell inside the first row only when content
+starts below that row and the pane has at least three columns; otherwise
+the title remains metadata and the guest retains the full content geometry.
+`PT-PANE-FOCUSED` is the sole pane-state bit and requires a visible object.
+Title bytes exclude C0/C1 controls, DEL, and U+2028/U+2029, and use canonical
+`0 0` for an empty title. The borrowed title must be disjoint from the session
+and TX scratch; it is copied before return and its address is then cleared.
+
+PANES requires CORE, capacity for at least two distinct regions, positive
+shared object and aggregate UTF-8 capacities, at least 104 inbound payload
+bytes, and a 304-byte retained transaction
+maximum. It adds no per-title capacity. A terminal without PANES can continue
+publishing its other retained families; a pane writer returns
+`PT-S-UNSUPPORTED` before emitting bytes or advancing transaction accounting.
+The caller keeps the complete CELL fallback. Existing guests that reject the
+new capability bit retain their established deterministic CELL-only outcome.
+The terminal validates final same-owner content-region binding, explicit clip
+containment, and unique binding at commit; the guest keeps no graph cache.
+
+`PT-STATUS-FIELD-DEFINE` and `PT-STATUS-FIELD-REPLACE` require the additive
+`RET_STATUS_FIELDS` feature (bit 12) and use `PT-OBJECT-STATUS-FIELD` (11).
+The standard OBJECT prefix is followed by the canonical 32-byte STF1 header
+and exact label then value bytes. `rows` must be one. `label-cols` fixes the
+label's share of the object width, from zero through `cols`; a nonempty label
+requires a positive label width and a nonempty value requires `label-cols`
+strictly below `cols`. Text clips to these declared slots without shifting
+either one. `parent` may identify a same-region GROUP under the ordinary
+OBJECT hierarchy rules, which the terminal validates at commit.
+
+Severity accepts `PT-SEVERITY-NEUTRAL`, `PT-SEVERITY-INFO`,
+`PT-SEVERITY-SUCCESS`, `PT-SEVERITY-WARNING`, or `PT-SEVERITY-ERROR` (0–4).
+`PT-STATUS-FIELD-EMPHASIZED` is the sole field-state bit. Both strings follow
+the pane title's canonical UTF-8 and control-character exclusions. Empty
+strings use `0 0`; nonempty borrowed spans must avoid session storage and TX
+scratch. Label and value may share read-only source storage. All borrowed
+addresses are cleared before return, including rejected calls. Fields are
+display objects, so they introduce no control or input identity. Replace
+the complete field to change its text, severity, emphasis, or width split.
+
+STATUS_FIELDS requires CORE, positive shared object and aggregate UTF-8
+capacities, an inbound payload limit of at least 96 bytes, and a retained
+transaction maximum of at least 296 bytes. Actual strings must fit the
+negotiated frame and transaction bounds. It adds no private string quota or
+local scene table. Unsupported writers return `PT-S-UNSUPPORTED` without
+emission or accounting changes, leaving the caller's CELL fallback intact.
+
 The object writers expose the protocol's renderer-neutral GROUP, POLYLINE,
-IMAGE, GLYPH_RUN, READOUT, METER, STATUS, PLOT, and WAVEFORM records. POLYLINE
+IMAGE, GLYPH_RUN, READOUT, METER, STATUS, PLOT, WAVEFORM, PANE, and STATUS_FIELD
+records. POLYLINE
 accepts an aligned borrowed span of native coordinate-cell pairs and derives
 the point count; READOUT accepts a borrowed canonical UTF-8 unit span. Both are
 range-checked and caller-bounded; scalar fields and coordinate cells are
