@@ -144,6 +144,7 @@ class _PrivateStackSeal:
         stack = self.stack
         return (
             type(stack) is self.stack_type
+            and (self.stack_type is not ReturnStack or stack._foreign_control is None)
             and stack._memory is self.memory and stack._memory_view is self.view
             and self.view._region is self.region and self.region.pages is self.pages
             and self.pages.get(0) is self.page
