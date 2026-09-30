@@ -131,6 +131,13 @@ and hit entries as full composition. Every decorative pixel must be covered
 by its recorded paint extent, and hover/press rendering must preserve the
 authoritative target geometry.
 
+Corners must fit the control's existing text clearance. Text viewports and
+ordinary item rows use square edges because their logical slots can reach the
+boundary. Menus, tabs, grid cells, readouts, and cards limit their corner radius
+to the inset already reserved by their layout, leaving a pixel for the border.
+This changes the material geometry without adding padding, shifting text, or
+changing input coordinates. Meters without numeric labels can retain full caps.
+
 The existing focused checks are `tests/test_viewer_partial_repaint.py`,
 `tests/test_rich_terminal_compositor_replay.py`,
 `tests/test_rich_terminal_semantic_pygame.py`, and the idle/partial-present

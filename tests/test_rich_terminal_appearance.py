@@ -161,3 +161,103 @@ def test_flowing_selected_tab_respects_disabled_parent_and_shortcut_contrast(ena
         FLOWING_APPEARANCE.surface if enabled else _DISABLED_TEXT
     }
     assert bool(result.hit_targets) is enabled
+
+
+class _EdgeFont:
+    """Full-height glyphs expose material gaps otherwise hidden by font margins."""
+
+    marker = (231, 7, 219)
+
+    def __init__(self, pygame, *, ink):
+        self.pygame = pygame
+        self.ink = ink
+        self.colors = []
+
+    def size(self, text):
+        return len(text) * 4, 20
+
+    def get_linesize(self):
+        return 20
+
+    def render(self, text, antialias, color):
+        self.colors.append(tuple(color)[:3])
+        glyph = self.pygame.Surface((max(1, len(text) * 4), 20),
+                                    flags=self.pygame.SRCALPHA)
+        if self.ink:
+            glyph.fill((*self.marker, 255))
+        return glyph
+
+
+def _edge_collection(kind, *, text=""):
+    from rich_terminal.retained_scene import ControlState, ObjectBounds
+    from rich_terminal.retained_view import ItemViewDraw, TextAreaDraw, TextGridDraw
+    from rich_terminal.semantic_content import (
+        SemanticContentFlag, SemanticTextContent, SemanticTextItem,
+        SemanticTextRole, SemanticTextState,
+    )
+    from rich_terminal.semantic_items import ItemColumn, ItemColumnKind, ItemViewContent, ItemViewRole
+
+    bounds = ObjectBounds(0, 0, 10, 1)
+    state = ControlState.VISIBLE | ControlState.ENABLED
+    if kind == "items":
+        content = ItemViewContent(1, ItemViewRole.LIST, 0,
+                                  (ItemColumn(ItemColumnKind.TEXT),), 0, 0, 0, ())
+        return ItemViewDraw(1, state, 0, 0, bounds, content)
+    items = (() if not text else
+             (SemanticTextItem(1, 0, 0, 1, 1, SemanticTextRole.CONTENT,
+                               SemanticTextState(0), text),))
+    content = SemanticTextContent(1, 1, 1, 0, 0, 1, 1,
+                                  SemanticContentFlag.READ_ONLY,
+                                  1 if items else 0, 0, 0, 0, items)
+    draw_type = TextAreaDraw if kind == "area" else TextGridDraw
+    return draw_type(1, state, 0, 0, bounds, content)
+
+
+def _render_edge_draw(pygame, draw, font):
+    from rich_terminal.pygame_view import composite_draw_plane_result
+    from rich_terminal.retained_view import RetainedDrawPlane, RetainedRegionDraw
+
+    surface = pygame.Surface((100, 20))
+    surface.fill(FLOWING_APPEARANCE.surface)
+    region = RetainedRegionDraw(1, 1, 1, 0, 0, 10, 1, 0, 0, 0, 0, 0, False, (draw,))
+    composite_draw_plane_result(pygame, surface, RetainedDrawPlane(True, True, (region,)),
+                                font, 10, 20, appearance=FLOWING_APPEARANCE)
+    return surface
+
+
+@pytest.mark.parametrize("kind", ("area", "grid", "items"))
+def test_zero_inset_collection_roots_keep_decoration_out_of_the_text_interior(kind):
+    pygame = pytest.importorskip("pygame")
+    surface = _render_edge_draw(pygame, _edge_collection(kind), _EdgeFont(pygame, ink=False))
+    # One perimeter pixel and the shallow top highlight may remain.  A curved
+    # outline must not occupy the interior of these unpadded text viewports.
+    assert all(tuple(surface.get_at((x, y)))[:3] == FLOWING_APPEARANCE.surface
+               for y in range(2, 19) for x in range(1, 99))
+
+
+@pytest.mark.parametrize("kind", ("selected_grid", "readout"))
+def test_edge_text_retains_contrasting_material_without_moving_its_slots(kind):
+    pygame = pytest.importorskip("pygame")
+    from rich_terminal.retained_scene import ObjectBounds, RGBA
+    from rich_terminal.retained_view import ReadoutDraw
+
+    text = "W" * 24
+    foreground = FLOWING_APPEARANCE.surface
+    if kind == "selected_grid":
+        draw = _edge_collection("grid", text=text)
+    else:
+        draw = ReadoutDraw(1, 0, ObjectBounds(0, 0, 10, 1),
+                           RGBA(*foreground, 255), RGBA(*FLOWING_APPEARANCE.accent, 255), text)
+    underlay = _render_edge_draw(pygame, draw, _EdgeFont(pygame, ink=False))
+    font = _EdgeFont(pygame, ink=True)
+    ink = _render_edge_draw(pygame, draw, font)
+    occupied = {(x, y) for y in range(20) for x in range(100)
+                if tuple(ink.get_at((x, y)))[:3] == font.marker}
+    assert occupied == {(x, y) for y in range(20) for x in range(2, 98)}
+    assert set(font.colors) == {foreground}
+    # Check the fill beneath every painted glyph pixel, including the top and
+    # bottom corners of both edge characters.  Transparent capsule corners
+    # previously exposed the same dark surface used for selected text.
+    assert all(sum(abs(channel - foreground[index])
+                   for index, channel in enumerate(tuple(underlay.get_at(point))[:3])) > 200
+               for point in occupied)
