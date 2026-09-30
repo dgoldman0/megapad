@@ -38,7 +38,9 @@ from simulator.rtc import (
     RTC_UPTIME,
     HostedRTCService,
 )
-from simulator.sha3 import SHA3_LIMIT, SHA3_OFFSET, HostedSHA3Service
+from simulator.sha3 import (
+    SHA3_LIMIT, SHA3_OFFSET, HostedSHA3Service, _register_input_platform_route,
+)
 
 
 SYSINFO_OFFSET = 0x300
@@ -342,6 +344,11 @@ class OneCorePlatformMMIO:
             width=width,
             write=write,
         )
+
+
+# Capture original route identities before any platform instance or caller
+# customization exists. SHA3 requalifies these identities for each submission.
+_register_input_platform_route(OneCorePlatformMMIO)
 
 
 def create_one_core_address_space(

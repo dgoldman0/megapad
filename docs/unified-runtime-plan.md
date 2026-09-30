@@ -4,7 +4,7 @@ Started: 2026-09-30
 
 Status: The unified emulator/simulator/hybrid application and bounded hybrid
 integer-routine v1 are implemented and qualified locally. Shared native scalar
-FP, Keccak and bulk audio are qualified; native tile extraction and remaining
+FP, Keccak, checked SHA3 input transfers and bulk audio are qualified; native tile extraction and remaining
 measured runtime costs are next. Kernel/source/captured-frame evidence and
 strict multicore FP/timing checks are recorded. Live Desktop acceptance,
 executor default promotion and expanded hybrid interoperability remain open.
@@ -313,6 +313,23 @@ They are later deliverables, not implied results of Phase 4.
 
 Gate: each new capability has functional cross-mode evidence and explicit
 limits. Machine-level claims continue to require the architectural oracle.
+
+### Continuation checkpoints — 2026-09-30
+
+- Removed the final root session import shim after migrating the benchmark's
+  current/legacy layout selection. Its ownership/provenance gates passed.
+- Added a MegaPad-owned bounded prepared-image Desktop harness. Its 28 checks
+  include small production simulator/Python, simulator/native and hybrid/native
+  journeys. The full prepared Desktop journey remains pending; direct dispatch
+  and SDL dummy do not qualify socket transport or physical output.
+- Locked the expanded interoperability plan and v2 callback value contract.
+  Ninety value checks plus 94 existing manifest checks passed. Callback
+  execution and v2 manifest admission are not enabled by those values.
+- Qualified checked SHA3 input routing: 59 new checks, 47 hosted checks per
+  executor and 86 native/differential checks passed. For 256 transactions of
+  256 bytes, median host wall time fell from 392.772 to 292.855 ms with Python
+  and from 220.225 to 116.830 ms with native semantic execution. See
+  [`performance/runtime-sha3-input-transfer-2026-09-30.md`](performance/runtime-sha3-input-transfer-2026-09-30.md).
 
 ## Validation and work discipline
 
