@@ -38322,7 +38322,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
             }, false);
         }, py::arg("token") = py::none());
 
-    // Task capability stays absent until nested transport and session gates pass.
+    // Internal adapter admission only: public task capability remains absent.
+    m.attr("_TASK_ROUTINE_TRANSPORT_REVISION") = py::int_(2);
     py::class_<mp64_task::Spec, std::shared_ptr<mp64_task::Spec>>(m, "TaskRoutineSpecV1")
         .def(py::init(&make_task_spec),
             py::arg("code_base"), py::arg("code"), py::arg("entry_offset"),
