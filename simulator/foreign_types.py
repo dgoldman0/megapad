@@ -49,4 +49,23 @@ class ForeignCallbackTarget:
     word: Word = field(repr=False)
 
 
-__all__ = ["ForeignDefinition", "ForeignResumeTarget", "ForeignDispatchReport"]
+@dataclass(frozen=True, slots=True, eq=False)
+class TaskSemanticReceiptV1:
+    """Cumulative task callback work; only the engine can issue its identity."""
+
+    root_token: object = field(repr=False)
+    root_id: int
+    sequence: int
+    semantic_steps: int
+
+    def __post_init__(self):
+        for value, label, minimum in ((self.root_id, "root ID", 1),
+                                      (self.sequence, "sequence", 1),
+                                      (self.semantic_steps, "semantic steps", 0)):
+            if type(value) is not int:
+                raise TypeError(f"task semantic receipt {label} must be an exact integer")
+            if not minimum <= value <= MASK64:
+                raise ValueError(f"task semantic receipt {label} is outside uint64 range")
+
+
+__all__ = ["ForeignDefinition", "ForeignResumeTarget", "ForeignDispatchReport", "TaskSemanticReceiptV1"]

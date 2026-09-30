@@ -25,7 +25,9 @@ from simulator.foreign_effects import TaskEffectGuard, TaskEffectScope, _EFFECT_
 from simulator.foreign_control import ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn
 from simulator.dictionary import BodyAllocationLease, Dictionary, Word
 from simulator.errors import ExecutionError
-from simulator.foreign_types import ForeignDefinition, ForeignResumeTarget, ForeignDispatchReport
+from simulator.foreign_types import (
+    ForeignDefinition, ForeignResumeTarget, ForeignDispatchReport, TaskSemanticReceiptV1,
+)
 from simulator.ir import (
     Branch, BranchZero, Call, CallSelf, Do, Literal, Loop, PlusLoop, QuestionDo,
     RestoreDataStackPointer, RestoreReturnStackPointer, Return, RPeek, RPeekPair,
@@ -80,7 +82,7 @@ _METADATA_ROUTES = tuple((kind, tuple(vars(kind).items())) for kind in (
     Word, BodyAllocationLease, PrimitiveDefinition, ColonDefinition, ConstantDefinition, ValueDefinition,
     CreatedDefinition, DoesBodyRef, *_OPERATION_FIELDS,
     ForeignSignatureV1, ForeignSpanV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1,
-    ExecutionContext, ForeignDefinition, ForeignResumeTarget,
+    ExecutionContext, ForeignDefinition, ForeignResumeTarget, TaskSemanticReceiptV1,
     _QualifiedOrdinarySpan, _SparseRegion, _DenseRegion, RegionSpec, _ResolvedSpan,
     Continuation, FaultAbort, ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn,
 )) + _EFFECT_ROUTES
@@ -90,6 +92,8 @@ _NAMESPACE_DESCRIPTORS = (
     (DataStack, vars(DataStack)["__dict__"]),
     (ReturnStack, vars(ReturnStack)["__dict__"]),
 )
+_SEMANTIC_RECEIPT_SLOTS = tuple(vars(TaskSemanticReceiptV1)[name] for name in (
+    "root_token", "root_id", "sequence", "semantic_steps"))
 
 
 class ForeignTaskError(ExecutionError):
@@ -300,29 +304,48 @@ class _AdapterSeal:
     kind: type
     methods: tuple = field(repr=False)
     namespace_descriptor: object = field(repr=False)
+    optional_functions: tuple[_FunctionSeal, ...] = field(default=(), repr=False)
 
     @classmethod
     def capture(cls, adapter):
         kind = type(adapter)
         if type(kind) is not type:
             raise TypeError("task adapter must have ordinary Python class ownership")
+        if any(type(key) is not str for key in vars(kind)):
+            raise TypeError("task adapter class namespace must have exact string keys")
         names = ("begin", "advance", "reply", "cancel_suffix", "cancel_all", "last_receipt")
         methods = tuple((name, vars(kind).get(name)) for name in names)
         if any(type(method) is not FunctionType for _, method in methods):
             raise TypeError("task adapter must implement exact Python transition methods")
-        result = cls(adapter, kind, methods, vars(kind).get("__dict__"))
+        optional = tuple((name, vars(kind).get(name)) for name in (
+            "validate_parked", "settle_semantic_receipt")
+            if type(vars(kind).get(name)) is FunctionType)
+        result = cls(adapter, kind, methods + optional, vars(kind).get("__dict__"),
+                     tuple(_FunctionSeal.capture(method) for _name, method in optional))
         result.verify()
         return result
 
-    def verify(self):
-        _namespace(self.adapter, self.kind, self.methods, descriptor=self.namespace_descriptor)
+    def verify(self, *, method=None):
+        routes = self.methods if method is None else self.methods[:6] + tuple(
+            (name, callback) for name, callback in self.methods[6:] if name == method)
+        _namespace(self.adapter, self.kind, routes, descriptor=self.namespace_descriptor)
+        for seal in self.optional_functions:
+            if method is None or any(name == method and callback is seal.callback
+                                     for name, callback in self.methods[6:]):
+                seal.verify()
+
+    def supports(self, name):
+        return any(method_name == name for method_name, _method in self.methods)
 
     def call(self, name, *args, **kwargs):
-        self.verify()
+        self.verify(method=name)
         method = next((method for method_name, method in self.methods if method_name == name), None)
         if method is None:
             raise ForeignTaskError("unknown owned adapter transition")
         return method(self.adapter, *args, **kwargs)
+
+
+_METADATA_ROUTES += ((_AdapterSeal, tuple(vars(_AdapterSeal).items())),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +359,16 @@ class _ForeignBinding:
     body_lease: BodyAllocationLease | None = field(default=None, repr=False)
     body_bytes: bytes = field(default=b"", repr=False)
     lease_evidence: tuple = field(default=(), repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _SemanticReceiptRecord:
+    adapter: object = field(repr=False)
+    root_token: object = field(repr=False)
+    root_id: int
+    sequence: int
+    semantic_steps: int
+    receipt: TaskSemanticReceiptV1 = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -463,6 +496,7 @@ class ForeignTaskEngine:
         self._limits = (MAX_ROOT_INSTRUCTIONS, MAX_CALLBACK_REQUESTS,
                         MAX_ROOT_ENTRIES, MAX_ROOT_CALLBACK_SEMANTIC_STEPS)
         self._last_dispatch = None
+        self._semantic_receipt = None
         self._publication_failure = None
         self._execution_failure = None
         self._memory_evidence = None
@@ -497,6 +531,12 @@ class ForeignTaskEngine:
         self._dispatch_namespace = vars(TaskDispatchRoot)["__dict__"]
         self._dispatch_functions = tuple(_FunctionSeal.capture(value)
             for _name, value in self._dispatch_routes if type(value) is FunctionType)
+        adapter_fields = vars(_AdapterSeal)
+        self._adapter_cleanup_routes = tuple((name, adapter_fields[name]) for name in (
+            "adapter", "kind", "methods", "namespace_descriptor", "optional_functions", "call", "verify",
+            "__setattr__", "__delattr__"))
+        self._adapter_cleanup_functions = tuple(_FunctionSeal.capture(adapter_fields[name])
+                                                 for name in ("call", "verify"))
         runtime._private_host_abort.install_task_issuers(self, TaskDispatchRoot)
 
     @property
@@ -549,6 +589,53 @@ class ForeignTaskEngine:
         root.adapter.verify()
         return TaskAdapterRootPolicy(root.ledger.instruction_limit, root.ledger.callback_limit,
                                      root.ledger.entry_limit)
+
+    def task_semantic_receipt(self, adapter, root_token, root_id):
+        """Return existing accounting evidence, including after failed close."""
+        _uint(root_id, "task root ID", minimum=1)
+        record = self._semantic_receipt
+        if (record is None or record.adapter is not adapter
+                or record.root_token is not root_token or record.root_id != root_id):
+            raise ForeignTaskError("task semantic receipt has a different original owner")
+        receipt = record.receipt
+        if type(receipt) is not TaskSemanticReceiptV1:
+            raise ForeignTaskError("task semantic receipt type changed")
+        values = tuple(descriptor.__get__(receipt, TaskSemanticReceiptV1)
+                       for descriptor in _SEMANTIC_RECEIPT_SLOTS)
+        if (values[0] is not record.root_token
+                or any(type(value) is not int for value in values[1:])
+                or values[1:] != (record.root_id, record.sequence, record.semantic_steps)):
+            raise ForeignTaskError("task semantic receipt changed after issuance")
+        return receipt
+
+    def _publish_semantic_receipt(self, root):
+        self._require_adapter_cleanup_routes()
+        ownership = self._restore_cleanup_owners(root)
+        ledger = dict(ownership[2])["ledger"]
+        if dict.get(ownership[1], "adapter") is None:
+            return None
+        adapter = ownership[3]
+        previous = self._semantic_receipt
+        sequence = 1
+        if previous is not None and previous.root_token is ledger.root_token:
+            self.task_semantic_receipt(adapter.adapter, ledger.root_token, ledger.root_id)
+            if ledger.semantic_steps < previous.semantic_steps:
+                raise ForeignTaskError("task semantic work cannot move backwards")
+            if ledger.semantic_steps == previous.semantic_steps:
+                return previous.receipt
+            sequence = previous.sequence + 1
+        if sequence > MASK64:
+            raise ForeignTaskError("task semantic receipt sequence exhausted")
+        # Allocate the value without invoking replaceable public constructors.
+        # The independently held record is the authority for these projections.
+        receipt = object.__new__(TaskSemanticReceiptV1)
+        for descriptor, value in zip(_SEMANTIC_RECEIPT_SLOTS,
+                (ledger.root_token, ledger.root_id, sequence, ledger.semantic_steps)):
+            descriptor.__set__(receipt, value)
+        record = _SemanticReceiptRecord(adapter.adapter, ledger.root_token,
+            ledger.root_id, sequence, ledger.semantic_steps, receipt)
+        self._semantic_receipt = record
+        return receipt
 
     def task_export_dependencies(self, export):
         capture = self.require_export(export)
@@ -661,9 +748,10 @@ class ForeignTaskEngine:
         self._require_batch(batch)
         return self._dictionary.acquire_body_lease(word)
 
-    def root_for(self, context, meter):
+    def root_for(self, context, meter, target):
         self._require_task(context)
         self.claim_machine_profile(meter, "task")
+        binding = self.require_definition(target)
         frames = [frame for frame in self._runtime._active_dispatches
                   if frame.context is context and frame.meter is meter and frame.closed_guard is None]
         if not frames:
@@ -675,7 +763,8 @@ class ForeignTaskEngine:
                 namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
                 self._root_ownership = (root, namespace, tuple((name, getattr(root, name)) for name in (
                     "engine", "context", "ledger", "issuer", "effects", "control", "frames",
-                    "_meter_namespace", "_meter_policy", "_effects_close", "_control_close", "_cleanup_functions")))
+                    "_meter_namespace", "_meter_policy", "_effects_close", "_control_close", "_cleanup_functions")),
+                    binding.adapter)
             except BaseException as failure:
                 # No host callback or machine instruction has run; release
                 # the exact constructor-owned control before publication.
@@ -692,20 +781,51 @@ class ForeignTaskEngine:
                 raise
         elif root.engine is not self:
             raise ForeignTaskError("task root belongs to a different engine")
+        elif self._root_ownership[3].adapter is not binding.adapter.adapter:
+            raise ForeignTaskError("task root requires one exact adapter owner")
         self._task_root = root
         for frame in frames:
             object.__setattr__(frame, "task_root", root)
         return root
 
-    def finish_root(self, root, *, completed):
+    def finish_root(self, root, *, completed, primary_error=None):
         ownership = self._restore_cleanup_owners(root)
         dict.__setitem__(ownership[1], "closed", False)
-        try:
-            self._root_cleanup_call(root, "close", completed=completed)
-        except BaseException as failure:
-            self._execution_failure = failure
+        if primary_error is not None:
+            dict.__setitem__(ownership[1], "_unwinding_error", primary_error)
             completed = False
-            raise
+        original = None
+        try:
+            try:
+                receipt = self._publish_semantic_receipt(root)
+                self._require_adapter_cleanup_routes()
+                methods_slot = next(value for name, value in self._adapter_cleanup_routes if name == "methods")
+                methods = methods_slot.__get__(ownership[3], _AdapterSeal)
+                if receipt is not None and any(name == "settle_semantic_receipt" for name, _method in methods):
+                    self._root_cleanup_call(root, "_owned_call", name="settle_semantic_receipt", receipt=receipt)
+            except BaseException as failure:
+                original = failure
+                self._execution_failure = failure
+                completed = False
+            try:
+                self._root_cleanup_call(root, "close", completed=completed)
+            except BaseException as failure:
+                self._execution_failure = failure
+                completed = False
+                if original is None:
+                    original = failure
+                else:
+                    try:
+                        BaseException.add_note(original, "task cleanup after semantic settlement also failed")
+                    except BaseException:
+                        pass
+            if original is not None:
+                if primary_error is None:
+                    raise original
+                try:
+                    BaseException.add_note(primary_error, "task semantic settlement or cleanup also failed")
+                except BaseException:
+                    pass
         finally:
             ledger = dict(ownership[2])["ledger"]
             namespace = ownership[1]
@@ -732,14 +852,19 @@ class ForeignTaskEngine:
         self._dispatch_namespace.__set__(root, namespace)
         for name, value in ownership[2]:
             dict.__setitem__(namespace, name, value)
+        ledger = dict(ownership[2])["ledger"]
+        if (dict.get(namespace, "adapter") is not None or ledger.entries
+                or dict.get(namespace, "pending_binding") is not None):
+            dict.__setitem__(namespace, "adapter", ownership[3])
         # Remove only shadowed host method routes. Guest stack/memory state is
         # never restored by this repair of host reference projections.
         for name, _value in self._dispatch_routes:
             dict.pop(namespace, name, None)
         return ownership
 
-    def _root_cleanup_call(self, root, name, **kwargs):
+    def _root_cleanup_call(self, root, route, **kwargs):
         self._restore_cleanup_owners(root)
+        self._require_adapter_cleanup_routes()
         fields = vars(self._dispatch_kind)
         if (any(type(key) is not str for key in fields)
                 or self._dispatch_kind.__getattribute__ is not object.__getattribute__
@@ -749,10 +874,20 @@ class ForeignTaskEngine:
                 or any(method not in ("close", "cleanup_safe", "mark_unsafe_cleanup")
                        and fields.get(method) is not value for method, value in self._dispatch_routes)):
             raise ForeignTaskError("task canonical cleanup implementation changed")
-        callback = next(value for method, value in self._dispatch_routes if method == name)
+        callback = next(value for method, value in self._dispatch_routes if method == route)
         seal = next(seal for seal in self._dispatch_functions if seal.callback is callback)
         seal.verify()
         return callback(root, **kwargs)
+
+    def _require_adapter_cleanup_routes(self):
+        fields = vars(_AdapterSeal)
+        if (any(type(key) is not str for key in fields)
+                or _AdapterSeal.__getattribute__ is not object.__getattribute__
+                or "__getattr__" in fields
+                or any(fields.get(name) is not value for name, value in self._adapter_cleanup_routes)):
+            raise ForeignTaskError("task adapter cleanup helper routes changed")
+        for seal in self._adapter_cleanup_functions:
+            seal.verify()
 
     def task_cleanup_safe(self, root):
         try:
@@ -788,16 +923,24 @@ class ForeignTaskEngine:
         _require_metadata()
         ownership = self._root_ownership
         if ownership is not None:
-            root, original_namespace, original_fields = ownership
+            root, original_namespace, original_fields, original_adapter = ownership
             _namespace(root, self._dispatch_kind, self._dispatch_routes,
                        descriptor=self._dispatch_namespace)
             for seal in self._dispatch_functions:
                 seal.verify()
             namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
             fields = vars(self._dispatch_kind)
+            current_adapter = dict.get(namespace, "adapter")
+            ledger = dict(original_fields)["ledger"]
+            adapter_owned = (current_adapter is None and ledger.entries == 0
+                             and dict.get(namespace, "pending_binding") is None) or any(
+                binding.adapter is current_adapter
+                and binding.adapter.adapter is original_adapter.adapter
+                for binding in self._bindings.values())
             if (root is not self._task_root or namespace is not original_namespace
                     or dict.get(namespace, "closed") is not False
                     or type(dict.get(namespace, "busy")) is not bool
+                    or not adapter_owned
                     or any(name in fields or dict.get(namespace, name) is not value
                                                  for name, value in original_fields)):
                 raise ForeignTaskError("task original dispatcher ownership changed")
