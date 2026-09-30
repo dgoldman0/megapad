@@ -35,11 +35,14 @@ class HybridSession(SimulatorMachineSession):
         if manifest_abi_version is not None:
             if type(manifest_abi_version) is not int:
                 raise TypeError("manifest ABI version must be an exact integer or None")
-            if not 1 <= manifest_abi_version <= 4:
-                raise ValueError("manifest ABI version must be in 1..4")
+            if not 1 <= manifest_abi_version <= 5:
+                raise ValueError("manifest ABI version must be in 1..5")
         if (manifest_abi_version == 4
                 and getattr(hybrid, "nested_callback_abi_available", False) is not True):
             raise RuntimeError("hybrid nested callbacks require full semantic profile v4 and native transport v3")
+        if (manifest_abi_version == 5
+                and getattr(hybrid, "service_callback_abi_available", False) is not True):
+            raise RuntimeError("hybrid scalar callbacks require qualified private scalar services and native transport v2")
         self.hybrid = hybrid
         self._manifest_abi_version = manifest_abi_version
         super().__init__(
@@ -80,7 +83,12 @@ class HybridSharedMachine(SimulatorSharedMachine):
             manifest_version = self.semantic_session.manifest_abi_version
             abi_version = max(registered_versions, default=(manifest_version or HYBRID_ABI_VERSION))
             nested_available = getattr(hybrid, "nested_callback_abi_available", False) is True
-            nested_profile = abi_version == 4
+            selected_versions = registered_versions or [manifest_version or HYBRID_ABI_VERSION]
+            nested_profile = 4 in selected_versions
+            service_profile = 5 in selected_versions
+            service_available = getattr(hybrid, "service_callback_abi_available", False) is True
+            transports = sorted({3 if version == 4 else 2 if version >= 2 else 1
+                                 for version in selected_versions})
             exports = sorted({
                 site.export.name
                 for image in registrations
@@ -95,6 +103,8 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 profiles.append("closed_integer_colon")
             if "closed_integer_nested" in effects:
                 profiles.append("closed_integer_nested")
+            if "scalar_fp_state" in effects:
+                profiles.append("scalar_fp_state")
             result["backend"] = "hybrid"
             result["runtime"]["mode"] = "hybrid"
             result["runtime"]["capabilities"].update(
@@ -106,6 +116,7 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 closed_integer_callbacks=closed_policies,
                 arbitrary_semantic_callbacks=False,
                 nested_machine_callbacks=nested_profile and nested_available,
+                private_scalar_fp_v1=service_profile and service_available,
                 callback_suspension=False,
                 native_bios_boot=False,
                 multicore=False,
@@ -117,7 +128,8 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 "abi_version": abi_version,
                 "manifest_abi_version": manifest_version,
                 "registered_abi_versions": registered_versions,
-                "native_transport_version": 3 if abi_version == 4 else 2 if abi_version >= 2 else 1,
+                "native_transport_version": max(transports),
+                "native_transport_versions": transports,
                 "instructions": hybrid.machine_instructions,
                 "cycles": hybrid.machine_cycles,
                 "transitions": hybrid.transitions,
@@ -126,9 +138,17 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 "callback_abi_available": hybrid.callback_abi_available,
                 "closed_callback_abi_available": hybrid.closed_callback_abi_available,
                 "nested_callback_abi_available": nested_available,
-                "max_machine_depth": hybrid.max_machine_depth if nested_available else 0,
+                "service_callback_abi_available": service_available,
+                "service_callback_profile": "private_scalar_fp_v1" if service_profile else None,
+                "service_value_executor": (getattr(hybrid, "service_callback_value_executor", None)
+                                           if service_profile and service_available else None),
+                "private_callback_executor": ("python_reference"
+                                              if closed_policies or "scalar_fp_state" in effects else None),
+                "service_parked_depth_limit": 1 if service_profile else 0,
+                "max_machine_depth": hybrid.max_machine_depth,
                 "callback_profile": ("closed_integer_nested" if "closed_integer_nested" in effects else
                                      "closed_integer_colon" if closed_policies else
+                                     "scalar_fp_state" if "scalar_fp_state" in effects else
                                      "canonical_integer_leaf" if exports else None),
                 "callback_profiles": profiles,
                 "closed_callback_executor": "python_reference" if closed_policies else None,

@@ -59,7 +59,10 @@ def image(operation="F64+", *, name="SERVICE", cap=1, tail="", buffered=False):
                                                    stub_offset=labels["stub"], export=export),))
 
 
-def publish(owner, value=None):
+def publish(owner, value=None, *, public=False):
+    if public:
+        word = owner.register_routine_v5(image() if value is None else value)
+        return word, word
     word = owner._publish_service_routine(image() if value is None else value)
     def enter(context):
         owner._invoke_published_service(word, context)
@@ -76,8 +79,9 @@ def push(owner, arguments):
 
 @pytest.mark.parametrize("operation,arguments,outputs,fpcsr", VECTORS,
                          ids=[row[0] for row in VECTORS])
-def test_catalog_runs_through_real_transport_with_independent_bits(owner, operation, arguments, outputs, fpcsr):
-    word, entry = publish(owner, image(operation))
+@pytest.mark.parametrize("public", (False, True))
+def test_catalog_runs_through_real_transport_with_independent_bits(owner, operation, arguments, outputs, fpcsr, public):
+    word, entry = publish(owner, image(operation), public=public)
     context = owner.semantic.main_context
     push(owner, (0xCAFE, *arguments))
     context.returns.push(19)
@@ -96,12 +100,16 @@ def test_catalog_runs_through_real_transport_with_independent_bits(owner, operat
     assert owner.semantic._callback_exports._closed_accounting is None
 
 
-def test_public_service_admission_remains_closed_until_qualified(owner):
+def test_public_service_admission_requires_its_qualified_owner(owner, monkeypatch):
+    assert owner.service_callback_abi_available is True
+    assert owner.service_callback_value_executor == (
+        "python_reference" if owner.executor == "python" else "shared_native_kernel")
+    monkeypatch.setattr(HybridRuntime, "service_callback_abi_available", property(lambda self: False))
     assert owner.service_callback_abi_available is False
     assert owner.service_callback_value_executor is None
-    with pytest.raises(RuntimeError, match="not yet qualified"):
+    with pytest.raises(RuntimeError, match="qualified"):
         owner.register_routine_v5(image())
-    with pytest.raises(RuntimeError, match="not yet qualified"):
+    with pytest.raises(RuntimeError, match="qualified"):
         HybridRuntime.create(require_service_callbacks=True)
     with pytest.raises(TypeError, match="exact boolean"):
         HybridRuntime.create(require_service_callbacks=1)
@@ -154,8 +162,9 @@ def test_invalid_rounding_is_exact_service_fault_without_guest_abort(owner, oper
 
 
 @pytest.mark.parametrize("kind", ("forth_abort", "instruction", "same_class", "memory", "budget"))
-def test_host_errors_never_acquire_service_fault_authority(owner, monkeypatch, kind):
-    _, entry = publish(owner)
+@pytest.mark.parametrize("public", (False, True))
+def test_host_errors_never_acquire_service_fault_authority(owner, monkeypatch, kind, public):
+    _, entry = publish(owner, public=public)
     context = owner.semantic.main_context
     push(owner, (7, 9))
     context.returns.push(19)

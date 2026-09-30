@@ -1,6 +1,6 @@
 """Explicit V5 service metadata loading, without startup or execution access.
 
-The generic manifest loader intentionally does not dispatch to this module.
+The generic manifest loader selects this module for version 5 documents.
 All independent metadata is checked before any bounded local image is read.
 Native publication remains responsible for instruction/encoding validation.
 """

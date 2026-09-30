@@ -527,8 +527,8 @@ class HybridRuntime:
     ) -> HybridRuntime:
         if type(require_service_callbacks) is not bool:
             raise TypeError("require_service_callbacks must be an exact boolean")
-        if require_service_callbacks:
-            raise RuntimeError("hybrid scalar service callbacks are not yet qualified")
+        if require_service_callbacks and cls is not HybridRuntime:
+            raise RuntimeError("hybrid scalar callbacks require a canonical qualified owner")
         if type(require_nested_callbacks) is not bool:
             raise TypeError("require_nested_callbacks must be an exact boolean")
         if require_nested_callbacks and (cls is not HybridRuntime or not cls._supports_nested_semantics()):
@@ -570,6 +570,8 @@ class HybridRuntime:
             raise RuntimeError("hybrid execution requires a matching _mp64_accel; run make build")
         if require_nested_callbacks and not cls._supports_nested_execution(native):
             raise RuntimeError("hybrid nested callbacks require fully qualified semantic V4 and native V3")
+        if require_service_callbacks and not cls._supports_callbacks(native):
+            raise RuntimeError("hybrid scalar callbacks require qualified native transport V2")
         if memory is None:
             memory = create_one_core_address_space(dense_backing=True, **(geometry or {}))
         # Validate and pin architectural geometry before the semantic runtime
@@ -586,6 +588,9 @@ class HybridRuntime:
             if require_nested_callbacks and not owner.nested_callback_abi_available:
                 owner.close()
                 raise RuntimeError("hybrid nested callbacks require fully qualified semantic V4 and native V3")
+            if require_service_callbacks and not owner.service_callback_abi_available:
+                owner.close()
+                raise RuntimeError("hybrid scalar callbacks require a canonical qualified service owner")
             return owner
         except BaseException:
             machine[1].close()
@@ -1163,8 +1168,14 @@ class HybridRuntime:
 
     @property
     def service_callback_abi_available(self) -> bool:
-        """V5 stays unavailable until its complete bridge gate is qualified."""
-        return False
+        """Qualified private scalar services on this exact native owner."""
+        if type(self) is not HybridRuntime or not self._callbacks_available:
+            return False
+        try:
+            self._require_service_profile()
+        except (RuntimeError, CallbackExportError):
+            return False
+        return True
 
     @property
     def service_callback_value_executor(self) -> str | None:
@@ -1265,7 +1276,7 @@ class HybridRuntime:
     def register_routine_v5(self, image: RoutineImageV5 | None = None, **values: Any) -> Word:
         """Publish service metadata only with its full executable capability."""
         if not self.service_callback_abi_available:
-            raise RuntimeError("hybrid scalar service callbacks are not yet qualified")
+            raise RuntimeError("hybrid scalar callbacks require a canonical qualified service owner")
         return self._publish_service_routine(image, **values)
 
     def _publish_service_routine(self, image: RoutineImageV5 | None = None, **values: Any) -> Word:

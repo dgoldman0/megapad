@@ -419,9 +419,29 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
 | 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
 | 5B2 — nested callbacks | Qualified through the generic unified application path | 302 native child/root/publication/legacy checks; 767 private composition checks; rebuilt isolated activation candidate passed all 1,977 checks, including all 11 formerly deferred application journeys |
-| 5C/5D — shared task callbacks | Capture, immutable ledger and bounded native task transport qualified; semantic dispatcher and production adapter in progress | Existing foundation gates; 541 one-frame transport checks and 567 child transport/regression checks after matching GCC rebuilds; no task capability exposed |
-| 5E — private scalar services | Metadata, canonical capture, private dispatcher and callback-owner integration qualified; bridge and application gate in progress | Existing metadata/capture gates; 426 private dispatcher checks and 754 registry/accounting checks; no service capability advertised |
+| 5C/5D — shared task callbacks | Synchronous semantic dispatcher and bounded native transport qualified; production adapter and composite suspension in progress | Existing foundation gates; 541 one-frame and 567 child transport checks; 136 dispatcher and 930 regression checks; no task capability exposed |
+| 5E — private scalar services | Fourteen scalar FP/FPCSR services qualified through the unified application; crossing benchmark pending | 426 private dispatcher, 754 initial registry, 613 retained construction and 448 private bridge checks; application selection passed 1,939 checks, followed by 58 passing affected-fixture and launcher checks after setup corrections |
 | Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
+
+### Private scalar service application — 2026-09-30
+
+The unified hybrid application now accepts strict version 5 manifests and
+public routine registration for the fourteen canonical scalar FP/FPCSR
+services. Capability requires the exact finalized semantic service owner and
+the original native V2 facade. Both outer semantic executors use private
+Python callback dispatch; scalar values use their already selected Python or
+shared native kernel. No second scalar owner is introduced.
+
+The isolated application selection passed 1,939 checks. Eight new fixture
+failures were corrected without product changes: the ordinary MP64 benchmark
+oracle used an obsolete MMIO constant name, and the mixed-profile session
+fixture needed to start paused. All 58 benchmark, service-session and launcher
+checks then passed, including every affected case. Exact IEEE bits, FPCSR
+effects, private failures, raw host errors, cumulative budgets, mixed V4/V5
+transport reporting and empty-profile startup were exercised. Generic loader
+validation still precedes owner publication and boot source. This qualifies
+the private scalar profile; task-stack services, suspension, bulk memory,
+crypto and audio callbacks remain separate effect gates.
 
 ### Native task transport and private host exceptions — 2026-09-30
 
