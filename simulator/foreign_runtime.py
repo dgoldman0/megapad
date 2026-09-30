@@ -7,8 +7,10 @@ capability. The ordinary dispatcher must explicitly own every transition.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from types import FunctionType, GetSetDescriptorType, MemberDescriptorType
+from types import FunctionType, GetSetDescriptorType, MemberDescriptorType, MethodType
+from weakref import WeakKeyDictionary
 
 from shared.cells import CELL_BYTES, MASK64
 from shared.foreign_abi import (
@@ -21,9 +23,11 @@ from simulator import foreign_effects as _effect_module
 from simulator import memory as _memory_module
 from simulator.foreign_effects import TaskEffectGuard, TaskEffectScope, _EFFECT_ROUTES
 from simulator.foreign_control import ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn
-from simulator.dictionary import Dictionary, Word
+from simulator.dictionary import BodyAllocationLease, Dictionary, Word
 from simulator.errors import ExecutionError
-from simulator.foreign_types import ForeignDefinition, ForeignResumeTarget, ForeignDispatchReport
+from simulator.foreign_types import (
+    ForeignDefinition, ForeignResumeTarget, ForeignDispatchReport, TaskSemanticReceiptV1,
+)
 from simulator.ir import (
     Branch, BranchZero, Call, CallSelf, Do, Literal, Loop, PlusLoop, QuestionDo,
     RestoreDataStackPointer, RestoreReturnStackPointer, Return, RPeek, RPeekPair,
@@ -59,7 +63,8 @@ _OPERATION_FIELDS = {
 _BRANCH_TYPES = (Branch, BranchZero, QuestionDo, Loop, PlusLoop)
 _MEMORY_ROUTES = tuple((name, value) for name, value in vars(SparseAddressSpace).items()
                        if type(value) is FunctionType or type(value) is property)
-_DICTIONARY_ROUTES = tuple((name, vars(Dictionary)[name]) for name in ("find", "resolve", "words"))
+_DICTIONARY_ROUTES = tuple((name, vars(Dictionary)[name]) for name in (
+    "find", "resolve", "words", "acquire_body_lease", "is_body_lease_live"))
 _STACK_ROUTES = tuple((kind, tuple((name, value) for name, value in vars(kind).items()
                                   if type(value) is FunctionType or type(value) is property))
                       for kind in (DataStack, ReturnStack))
@@ -74,10 +79,10 @@ _MEMORY_STRUCT = (_memory_module.struct.unpack_from, _memory_module.struct.pack_
 _CORE_HELPERS = tuple((name, value) for name, value in vars(core_words).items()
                      if type(value) is FunctionType)
 _METADATA_ROUTES = tuple((kind, tuple(vars(kind).items())) for kind in (
-    Word, PrimitiveDefinition, ColonDefinition, ConstantDefinition, ValueDefinition,
+    Word, BodyAllocationLease, PrimitiveDefinition, ColonDefinition, ConstantDefinition, ValueDefinition,
     CreatedDefinition, DoesBodyRef, *_OPERATION_FIELDS,
     ForeignSignatureV1, ForeignSpanV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1,
-    ExecutionContext, ForeignDefinition, ForeignResumeTarget,
+    ExecutionContext, ForeignDefinition, ForeignResumeTarget, TaskSemanticReceiptV1,
     _QualifiedOrdinarySpan, _SparseRegion, _DenseRegion, RegionSpec, _ResolvedSpan,
     Continuation, FaultAbort, ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn,
 )) + _EFFECT_ROUTES
@@ -87,6 +92,8 @@ _NAMESPACE_DESCRIPTORS = (
     (DataStack, vars(DataStack)["__dict__"]),
     (ReturnStack, vars(ReturnStack)["__dict__"]),
 )
+_SEMANTIC_RECEIPT_SLOTS = tuple(vars(TaskSemanticReceiptV1)[name] for name in (
+    "root_token", "root_id", "sequence", "semantic_steps"))
 
 
 class ForeignTaskError(ExecutionError):
@@ -297,29 +304,48 @@ class _AdapterSeal:
     kind: type
     methods: tuple = field(repr=False)
     namespace_descriptor: object = field(repr=False)
+    optional_functions: tuple[_FunctionSeal, ...] = field(default=(), repr=False)
 
     @classmethod
     def capture(cls, adapter):
         kind = type(adapter)
         if type(kind) is not type:
             raise TypeError("task adapter must have ordinary Python class ownership")
+        if any(type(key) is not str for key in vars(kind)):
+            raise TypeError("task adapter class namespace must have exact string keys")
         names = ("begin", "advance", "reply", "cancel_suffix", "cancel_all", "last_receipt")
         methods = tuple((name, vars(kind).get(name)) for name in names)
         if any(type(method) is not FunctionType for _, method in methods):
             raise TypeError("task adapter must implement exact Python transition methods")
-        result = cls(adapter, kind, methods, vars(kind).get("__dict__"))
+        optional = tuple((name, vars(kind).get(name)) for name in (
+            "validate_parked", "settle_semantic_receipt")
+            if type(vars(kind).get(name)) is FunctionType)
+        result = cls(adapter, kind, methods + optional, vars(kind).get("__dict__"),
+                     tuple(_FunctionSeal.capture(method) for _name, method in optional))
         result.verify()
         return result
 
-    def verify(self):
-        _namespace(self.adapter, self.kind, self.methods, descriptor=self.namespace_descriptor)
+    def verify(self, *, method=None):
+        routes = self.methods if method is None else self.methods[:6] + tuple(
+            (name, callback) for name, callback in self.methods[6:] if name == method)
+        _namespace(self.adapter, self.kind, routes, descriptor=self.namespace_descriptor)
+        for seal in self.optional_functions:
+            if method is None or any(name == method and callback is seal.callback
+                                     for name, callback in self.methods[6:]):
+                seal.verify()
+
+    def supports(self, name):
+        return any(method_name == name for method_name, _method in self.methods)
 
     def call(self, name, *args, **kwargs):
-        self.verify()
+        self.verify(method=name)
         method = next((method for method_name, method in self.methods if method_name == name), None)
         if method is None:
             raise ForeignTaskError("unknown owned adapter transition")
         return method(self.adapter, *args, **kwargs)
+
+
+_METADATA_ROUTES += ((_AdapterSeal, tuple(vars(_AdapterSeal).items())),)
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,6 +356,124 @@ class _ForeignBinding:
     metadata: ForeignOperationV1
     adapter: _AdapterSeal
     protected_spans: tuple[ForeignSpanV1, ...]
+    body_lease: BodyAllocationLease | None = field(default=None, repr=False)
+    body_bytes: bytes = field(default=b"", repr=False)
+    lease_evidence: tuple = field(default=(), repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _SemanticReceiptRecord:
+    adapter: object = field(repr=False)
+    root_token: object = field(repr=False)
+    root_id: int
+    sequence: int
+    semantic_steps: int
+    receipt: TaskSemanticReceiptV1 = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAdapterRootPolicy:
+    """Original ceilings only; this value issues no transition authority."""
+
+    instruction_limit: int
+    callback_limit: int
+    entry_limit: int
+
+    def __post_init__(self):
+        _uint(self.instruction_limit, "root instruction limit", maximum=MAX_ROOT_INSTRUCTIONS)
+        _uint(self.callback_limit, "root callback limit", maximum=MAX_CALLBACK_REQUESTS)
+        _uint(self.entry_limit, "root entry limit", maximum=MAX_ROOT_ENTRIES)
+
+
+class TaskRegistrationBatch:
+    """One engine-issued host publication transaction, never guest code."""
+
+    def __init__(self, engine):
+        self._engine = engine
+        self._closed = False
+
+    def _require(self):
+        engine = self._engine
+        if (type(self) is not TaskRegistrationBatch or self._closed is not False
+                or engine._batch is not self or not engine._registration_active
+                or engine._batch_calling or engine._batch_failure is not None):
+            raise ForeignTaskError("task registration batch is stale, foreign or reentrant")
+        return engine
+
+    def _call(self, callback, *args, **kwargs):
+        engine = self._require()
+        engine._batch_calling = True
+        try:
+            result = callback(*args, **kwargs)
+            if type(result) is Word:
+                if len(engine._batch_words) >= _MAX_REGISTRATIONS + _MAX_WORDS:
+                    raise ForeignTaskError("task batch publishes too many Words")
+                engine._batch_words += (result,)
+            return result
+        except BaseException as failure:
+            if engine._batch_failure is None:
+                engine._batch_failure = failure
+            raise
+        finally:
+            engine._batch_calling = False
+
+    def define_operation(self, name, adapter, operation, *, initial_body=b"", protected_spans=()):
+        engine = self._require()
+        return self._call(engine._define_operation, name, adapter, operation,
+                          initial_body=initial_body, protected_spans=protected_spans, batch=self)
+
+    def define_colon(self, name, operations):
+        engine = self._require()
+        return self._call(engine._batch_define_colon, self, name, operations)
+
+    def capture_export(self, target, signature, *, task_grants=(), dynamic_targets=(),
+                       fault_target=None, max_semantic_steps=4096):
+        engine = self._require()
+        return self._call(engine._capture_export, target, signature,
+                          task_grants=task_grants, dynamic_targets=dynamic_targets,
+                          fault_target=fault_target, max_semantic_steps=max_semantic_steps, batch=self)
+
+    def body_lease(self, word):
+        engine = self._require()
+        if type(word) is not Word or not any(item is word for item in engine._batch_words):
+            raise ForeignTaskError("body lease requires this batch's exact published Word")
+        return self._call(engine._batch_body_lease, self, word)
+
+    def task_export_dependencies(self, export):
+        engine = self._require()
+        return self._call(engine.task_export_dependencies, export)
+
+    def on_rollback(self, callback):
+        engine = self._require()
+        if engine._batch_rollback is not None:
+            raise ForeignTaskError("task batch already has its one rollback participant")
+        if type(callback) is FunctionType:
+            engine._batch_rollback = (_FunctionSeal.capture(callback), None, None)
+        elif type(callback) is MethodType and type(callback.__func__) is FunctionType:
+            owner, function = callback.__self__, callback.__func__
+            kind = type(owner)
+            if type(kind) is not type:
+                raise TypeError("rollback owner must be an ordinary Python class")
+            name = next((name for name, value in vars(kind).items() if value is function), None)
+            if type(name) is not str:
+                raise TypeError("rollback method must be defined by its exact owner class")
+            descriptor = vars(kind).get("__dict__")
+            _namespace(owner, kind, ((name, function),), descriptor=descriptor)
+            engine._batch_rollback = (_FunctionSeal.capture(function), owner, (kind, name, descriptor))
+        else:
+            raise TypeError("rollback participant must be an exact Python function or bound method")
+
+    def _rollback_owned(self, evidence):
+        if evidence is None:
+            return
+        seal, owner, route = evidence
+        seal.verify()
+        if route is None:
+            seal.callback()
+        else:
+            kind, name, descriptor = route
+            _namespace(owner, kind, ((name, seal.callback),), descriptor=descriptor)
+            seal.callback(owner)
 
 
 class ForeignTaskEngine:
@@ -352,17 +496,26 @@ class ForeignTaskEngine:
         self._limits = (MAX_ROOT_INSTRUCTIONS, MAX_CALLBACK_REQUESTS,
                         MAX_ROOT_ENTRIES, MAX_ROOT_CALLBACK_SEMANTIC_STEPS)
         self._last_dispatch = None
+        self._semantic_receipt = None
         self._publication_failure = None
         self._execution_failure = None
         self._memory_evidence = None
         self._registration_active = False
+        self._batch = None
+        self._batch_calling = False
+        self._batch_rollback = None
+        self._batch_adapter = None
+        self._batch_failure = None
+        self._batch_words = ()
+        self._batch_operation_count = 0
+        self._machine_profiles = WeakKeyDictionary()
         self._effect_functions = tuple(_FunctionSeal.capture(
             value.__func__ if type(value) in (classmethod, staticmethod) else value)
             for _kind, routes in _METADATA_ROUTES for _name, value in routes
             if type(value) in (FunctionType, classmethod, staticmethod))
         self._backing_functions = tuple(_FunctionSeal.capture(value)
             for _name, value in (*_MEMORY_ROUTES, *(_item for _kind, routes in _STACK_ROUTES for _item in routes),
-                                 *_MEMORY_GLOBALS) if type(value) is FunctionType)
+                                 *_MEMORY_GLOBALS, *_DICTIONARY_ROUTES) if type(value) is FunctionType)
         if core_installed:
             for name in _CORE_NAMES:
                 word = self._dictionary.find(name)
@@ -378,6 +531,12 @@ class ForeignTaskEngine:
         self._dispatch_namespace = vars(TaskDispatchRoot)["__dict__"]
         self._dispatch_functions = tuple(_FunctionSeal.capture(value)
             for _name, value in self._dispatch_routes if type(value) is FunctionType)
+        adapter_fields = vars(_AdapterSeal)
+        self._adapter_cleanup_routes = tuple((name, adapter_fields[name]) for name in (
+            "adapter", "kind", "methods", "namespace_descriptor", "optional_functions", "call", "verify",
+            "__setattr__", "__delattr__"))
+        self._adapter_cleanup_functions = tuple(_FunctionSeal.capture(adapter_fields[name])
+                                                 for name in ("call", "verify"))
         runtime._private_host_abort.install_task_issuers(self, TaskDispatchRoot)
 
     @property
@@ -399,8 +558,200 @@ class ForeignTaskEngine:
                 _uint(value, "task root limit", maximum=maximum)
             self._limits = values
 
-    def root_for(self, context, meter):
+    def claim_machine_profile(self, meter, profile):
+        """Exclude private/task mixing for the entire original meter lifetime.
+
+        This choice may outlive one guarded task root. It neither shares nor
+        renews that root's accounting ledger and grants no entry authority.
+        """
+        if self._publication_failure is not None or self._execution_failure is not None:
+            raise ForeignTaskError("task interop cleanup failed; further machine admission is disabled")
+        if (type(meter) is not _StepMeter or _StepMeter.__hash__ is not object.__hash__
+                or _StepMeter.__eq__ is not object.__eq__):
+            raise TypeError("machine profile requires the exact original meter")
+        if type(profile) is not str or profile not in ("private", "task"):
+            raise ValueError("machine profile must be private or task")
+        if not any(frame.meter is meter for frame in self._runtime._active_dispatches):
+            raise ForeignTaskError("machine profile has no active original dispatch")
+        previous = self._machine_profiles.get(meter)
+        if previous is not None and previous != profile:
+            raise ForeignTaskError("one original semantic meter cannot mix private and task machine profiles")
+        self._machine_profiles[meter] = profile
+
+    def adapter_root_policy(self, adapter, root_token, root_id):
+        self._require_task(self._context)
+        _uint(root_id, "task root ID", minimum=1)
+        root = self._task_root
+        if (root is None or root.adapter is None or root.adapter.adapter is not adapter
+                or root.ledger.root_token is not root_token or root.ledger.root_id != root_id
+                or root.busy is not True):
+            raise ForeignTaskError("adapter policy requires its exact active original task root")
+        root.adapter.verify()
+        return TaskAdapterRootPolicy(root.ledger.instruction_limit, root.ledger.callback_limit,
+                                     root.ledger.entry_limit)
+
+    def task_semantic_receipt(self, adapter, root_token, root_id):
+        """Return existing accounting evidence, including after failed close."""
+        _uint(root_id, "task root ID", minimum=1)
+        record = self._semantic_receipt
+        if (record is None or record.adapter is not adapter
+                or record.root_token is not root_token or record.root_id != root_id):
+            raise ForeignTaskError("task semantic receipt has a different original owner")
+        receipt = record.receipt
+        if type(receipt) is not TaskSemanticReceiptV1:
+            raise ForeignTaskError("task semantic receipt type changed")
+        values = tuple(descriptor.__get__(receipt, TaskSemanticReceiptV1)
+                       for descriptor in _SEMANTIC_RECEIPT_SLOTS)
+        if (values[0] is not record.root_token
+                or any(type(value) is not int for value in values[1:])
+                or values[1:] != (record.root_id, record.sequence, record.semantic_steps)):
+            raise ForeignTaskError("task semantic receipt changed after issuance")
+        return receipt
+
+    def _publish_semantic_receipt(self, root):
+        self._require_adapter_cleanup_routes()
+        ownership = self._restore_cleanup_owners(root)
+        ledger = dict(ownership[2])["ledger"]
+        if dict.get(ownership[1], "adapter") is None:
+            return None
+        adapter = ownership[3]
+        previous = self._semantic_receipt
+        sequence = 1
+        if previous is not None and previous.root_token is ledger.root_token:
+            self.task_semantic_receipt(adapter.adapter, ledger.root_token, ledger.root_id)
+            if ledger.semantic_steps < previous.semantic_steps:
+                raise ForeignTaskError("task semantic work cannot move backwards")
+            if ledger.semantic_steps == previous.semantic_steps:
+                return previous.receipt
+            sequence = previous.sequence + 1
+        if sequence > MASK64:
+            raise ForeignTaskError("task semantic receipt sequence exhausted")
+        # Allocate the value without invoking replaceable public constructors.
+        # The independently held record is the authority for these projections.
+        receipt = object.__new__(TaskSemanticReceiptV1)
+        for descriptor, value in zip(_SEMANTIC_RECEIPT_SLOTS,
+                (ledger.root_token, ledger.root_id, sequence, ledger.semantic_steps)):
+            descriptor.__set__(receipt, value)
+        record = _SemanticReceiptRecord(adapter.adapter, ledger.root_token,
+            ledger.root_id, sequence, ledger.semantic_steps, receipt)
+        self._semantic_receipt = record
+        return receipt
+
+    def task_export_dependencies(self, export):
+        capture = self.require_export(export)
+        dependencies = []
+        for evidence in capture.words:
+            if type(evidence.implementation) is ForeignDefinition:
+                operation = self.require_definition(evidence.word).operation
+                if not any(item is operation for item in dependencies):
+                    dependencies.append(operation)
+        return tuple(dependencies)
+
+    @contextmanager
+    def registration_batch(self):
+        """Publish exact host declarations under one rollback boundary."""
+        with self._runtime._session_owner_lock:
+            self._require_idle("begin task registration batch")
+            checkpoint = self._dictionary.checkpoint()
+            previous_bindings, previous_captures = self._bindings, self._capture_state
+            batch = TaskRegistrationBatch(self)
+            rollback_owned = TaskRegistrationBatch._rollback_owned
+            rollback_seal = _FunctionSeal.capture(rollback_owned)
+            try:
+                self._batch = batch
+                self._registration_active = True
+                yield batch
+                if self._batch_failure is not None:
+                    raise self._batch_failure
+                self._batch_calling = True
+                for key, binding in self._bindings.items():
+                    if previous_bindings.get(key) is not binding:
+                        self.require_definition(binding.word)
+                for key, capture in self._exports.items():
+                    if previous_captures[0].get(key) is not capture:
+                        self._verify_export(capture)
+            except BaseException as failure:
+                self._batch_calling = False
+                self._publication_failure = failure
+                clean = True
+                try:
+                    rollback_seal.verify()
+                    rollback_owned(batch, self._batch_rollback)
+                except BaseException:
+                    clean = False
+                    try:
+                        BaseException.add_note(failure, "task native publication rollback failed; further admission is disabled")
+                    except BaseException:
+                        pass
+                self._bindings, self._capture_state = previous_bindings, previous_captures
+                try:
+                    self._dictionary.rollback(checkpoint)
+                    self._runtime.dictionary_index.rebuild()
+                except BaseException:
+                    clean = False
+                    try:
+                        BaseException.add_note(failure, "task dictionary rollback failed; further admission is disabled")
+                    except BaseException:
+                        pass
+                if clean:
+                    self._publication_failure = None
+                raise
+            finally:
+                self._batch_calling = False
+                self._registration_active = False
+                self._batch = None
+                self._batch_rollback = None
+                self._batch_adapter = None
+                self._batch_failure = None
+                self._batch_words = ()
+                self._batch_operation_count = 0
+                batch._closed = True
+
+    def _require_batch(self, batch):
+        if (type(batch) is not TaskRegistrationBatch or self._batch is not batch
+                or batch._closed is not False or self._batch_calling is not True
+                or self._registration_active is not True):
+            raise ForeignTaskError("task publication requires the exact active batch")
+        self._require_task(self._context)
+
+    def _batch_define_colon(self, batch, name, operations):
+        self._require_batch(batch)
+        if type(operations) is not tuple or not operations:
+            raise TypeError("task batch colon requires a nonempty exact IR tuple")
+        if len(operations) + self._batch_operation_count > _MAX_OPERATIONS:
+            raise ForeignTaskError("task batch semantic IR exceeds 4096 operations")
+        for operation in operations:
+            kind = type(operation)
+            if kind not in _OPERATION_FIELDS:
+                raise ForeignTaskError("task batch colon contains an unsupported operation")
+            name_of_field = _OPERATION_FIELDS[kind]
+            if name_of_field is not None:
+                value = getattr(operation, name_of_field)
+                _uint(value, "task operation field")
+                if kind in _BRANCH_TYPES and value >= len(operations):
+                    raise ForeignTaskError("task batch branch escapes its exact IR tuple")
+                if kind is Call:
+                    self._word(value)
+        if type(operations[-1]) is not Return:
+            raise ForeignTaskError("task batch colon requires a final Return")
+        if type(name) not in (str, bytes):
+            raise TypeError("task name must be exact bytes or str")
+        width = self._dictionary.definition_size(name)
+        rejection = self._runtime._dictionary_growth_rejection(width, self._context)
+        if rejection is not None:
+            raise ForeignTaskError(f"task batch dictionary growth rejected: {rejection}")
+        word = self._runtime._define_public_dictionary_word(name, ColonDefinition(operations))
+        self._batch_operation_count += len(operations)
+        return word
+
+    def _batch_body_lease(self, batch, word):
+        self._require_batch(batch)
+        return self._dictionary.acquire_body_lease(word)
+
+    def root_for(self, context, meter, target):
         self._require_task(context)
+        self.claim_machine_profile(meter, "task")
+        binding = self.require_definition(target)
         frames = [frame for frame in self._runtime._active_dispatches
                   if frame.context is context and frame.meter is meter and frame.closed_guard is None]
         if not frames:
@@ -412,7 +763,8 @@ class ForeignTaskEngine:
                 namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
                 self._root_ownership = (root, namespace, tuple((name, getattr(root, name)) for name in (
                     "engine", "context", "ledger", "issuer", "effects", "control", "frames",
-                    "_meter_namespace", "_meter_policy", "_effects_close", "_control_close", "_cleanup_functions")))
+                    "_meter_namespace", "_meter_policy", "_effects_close", "_control_close", "_cleanup_functions")),
+                    binding.adapter)
             except BaseException as failure:
                 # No host callback or machine instruction has run; release
                 # the exact constructor-owned control before publication.
@@ -429,20 +781,51 @@ class ForeignTaskEngine:
                 raise
         elif root.engine is not self:
             raise ForeignTaskError("task root belongs to a different engine")
+        elif self._root_ownership[3].adapter is not binding.adapter.adapter:
+            raise ForeignTaskError("task root requires one exact adapter owner")
         self._task_root = root
         for frame in frames:
             object.__setattr__(frame, "task_root", root)
         return root
 
-    def finish_root(self, root, *, completed):
+    def finish_root(self, root, *, completed, primary_error=None):
         ownership = self._restore_cleanup_owners(root)
         dict.__setitem__(ownership[1], "closed", False)
-        try:
-            self._root_cleanup_call(root, "close", completed=completed)
-        except BaseException as failure:
-            self._execution_failure = failure
+        if primary_error is not None:
+            dict.__setitem__(ownership[1], "_unwinding_error", primary_error)
             completed = False
-            raise
+        original = None
+        try:
+            try:
+                receipt = self._publish_semantic_receipt(root)
+                self._require_adapter_cleanup_routes()
+                methods_slot = next(value for name, value in self._adapter_cleanup_routes if name == "methods")
+                methods = methods_slot.__get__(ownership[3], _AdapterSeal)
+                if receipt is not None and any(name == "settle_semantic_receipt" for name, _method in methods):
+                    self._root_cleanup_call(root, "_owned_call", name="settle_semantic_receipt", receipt=receipt)
+            except BaseException as failure:
+                original = failure
+                self._execution_failure = failure
+                completed = False
+            try:
+                self._root_cleanup_call(root, "close", completed=completed)
+            except BaseException as failure:
+                self._execution_failure = failure
+                completed = False
+                if original is None:
+                    original = failure
+                else:
+                    try:
+                        BaseException.add_note(original, "task cleanup after semantic settlement also failed")
+                    except BaseException:
+                        pass
+            if original is not None:
+                if primary_error is None:
+                    raise original
+                try:
+                    BaseException.add_note(primary_error, "task semantic settlement or cleanup also failed")
+                except BaseException:
+                    pass
         finally:
             ledger = dict(ownership[2])["ledger"]
             namespace = ownership[1]
@@ -469,14 +852,19 @@ class ForeignTaskEngine:
         self._dispatch_namespace.__set__(root, namespace)
         for name, value in ownership[2]:
             dict.__setitem__(namespace, name, value)
+        ledger = dict(ownership[2])["ledger"]
+        if (dict.get(namespace, "adapter") is not None or ledger.entries
+                or dict.get(namespace, "pending_binding") is not None):
+            dict.__setitem__(namespace, "adapter", ownership[3])
         # Remove only shadowed host method routes. Guest stack/memory state is
         # never restored by this repair of host reference projections.
         for name, _value in self._dispatch_routes:
             dict.pop(namespace, name, None)
         return ownership
 
-    def _root_cleanup_call(self, root, name, **kwargs):
+    def _root_cleanup_call(self, root, route, **kwargs):
         self._restore_cleanup_owners(root)
+        self._require_adapter_cleanup_routes()
         fields = vars(self._dispatch_kind)
         if (any(type(key) is not str for key in fields)
                 or self._dispatch_kind.__getattribute__ is not object.__getattribute__
@@ -486,10 +874,20 @@ class ForeignTaskEngine:
                 or any(method not in ("close", "cleanup_safe", "mark_unsafe_cleanup")
                        and fields.get(method) is not value for method, value in self._dispatch_routes)):
             raise ForeignTaskError("task canonical cleanup implementation changed")
-        callback = next(value for method, value in self._dispatch_routes if method == name)
+        callback = next(value for method, value in self._dispatch_routes if method == route)
         seal = next(seal for seal in self._dispatch_functions if seal.callback is callback)
         seal.verify()
         return callback(root, **kwargs)
+
+    def _require_adapter_cleanup_routes(self):
+        fields = vars(_AdapterSeal)
+        if (any(type(key) is not str for key in fields)
+                or _AdapterSeal.__getattribute__ is not object.__getattribute__
+                or "__getattr__" in fields
+                or any(fields.get(name) is not value for name, value in self._adapter_cleanup_routes)):
+            raise ForeignTaskError("task adapter cleanup helper routes changed")
+        for seal in self._adapter_cleanup_functions:
+            seal.verify()
 
     def task_cleanup_safe(self, root):
         try:
@@ -516,7 +914,7 @@ class ForeignTaskEngine:
         self._require_task(self._context)
 
     def _require_task(self, context):
-        if self._registration_active:
+        if self._registration_active and not (self._batch is not None and self._batch_calling is True):
             raise ForeignTaskError("task registration is already in progress")
         if self._publication_failure is not None:
             raise ForeignTaskError("task registration rollback failed; further admission is disabled")
@@ -525,16 +923,24 @@ class ForeignTaskEngine:
         _require_metadata()
         ownership = self._root_ownership
         if ownership is not None:
-            root, original_namespace, original_fields = ownership
+            root, original_namespace, original_fields, original_adapter = ownership
             _namespace(root, self._dispatch_kind, self._dispatch_routes,
                        descriptor=self._dispatch_namespace)
             for seal in self._dispatch_functions:
                 seal.verify()
             namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
             fields = vars(self._dispatch_kind)
+            current_adapter = dict.get(namespace, "adapter")
+            ledger = dict(original_fields)["ledger"]
+            adapter_owned = (current_adapter is None and ledger.entries == 0
+                             and dict.get(namespace, "pending_binding") is None) or any(
+                binding.adapter is current_adapter
+                and binding.adapter.adapter is original_adapter.adapter
+                for binding in self._bindings.values())
             if (root is not self._task_root or namespace is not original_namespace
                     or dict.get(namespace, "closed") is not False
                     or type(dict.get(namespace, "busy")) is not bool
+                    or not adapter_owned
                     or any(name in fields or dict.get(namespace, name) is not value
                                                  for name, value in original_fields)):
                 raise ForeignTaskError("task original dispatcher ownership changed")
@@ -707,14 +1113,25 @@ class ForeignTaskEngine:
         with self._runtime._session_owner_lock:
             return self._define_operation(name, adapter, operation, protected_spans=protected_spans)
 
-    def _define_operation(self, name, adapter, operation, *, protected_spans):
-        self._require_idle("define a task foreign operation")
+    def _define_operation(self, name, adapter, operation, *, protected_spans, initial_body=b"", batch=None):
+        if batch is None:
+            self._require_idle("define a task foreign operation")
+        else:
+            self._require_batch(batch)
+        if type(name) not in (str, bytes) or type(initial_body) is not bytes:
+            raise TypeError("task name and initial body must be exact values")
+        if len(initial_body) > (1 << 20) + 15:
+            raise ForeignTaskError("task initial body exceeds one padded machine image")
         _value(operation, ForeignOperationV1)
         if len(self._bindings) >= _MAX_REGISTRATIONS:
             raise ForeignTaskError("task machine registration table is full")
         seal = _AdapterSeal.capture(adapter)
+        if batch is not None:
+            if self._batch_adapter is not None and self._batch_adapter is not adapter:
+                raise ForeignTaskError("task batch requires one exact adapter owner")
+            self._batch_adapter = adapter
         self._check_grants(operation.machine_grants, machine=True)
-        if type(protected_spans) is not tuple or len(protected_spans) > 16:
+        if type(protected_spans) is not tuple or len(protected_spans) > 16 - bool(initial_body):
             raise TypeError("protected spans must be a bounded exact tuple")
         for span in protected_spans:
             _value(span, ForeignSpanV1)
@@ -730,22 +1147,31 @@ class ForeignTaskEngine:
         metadata = replace(operation, signature=replace(operation.signature),
                            machine_grants=tuple(replace(span) for span in operation.machine_grants))
         protected = tuple(replace(span) for span in protected_spans)
-        width = self._dictionary.definition_size(name)
+        width = self._dictionary.definition_size(name, initial_body=initial_body)
         rejection = self._runtime._dictionary_growth_rejection(width, self._context)
         if rejection is not None:
             raise ForeignTaskError(f"task registration dictionary growth rejected: {rejection}")
-        checkpoint = self._dictionary.checkpoint()
+        checkpoint = self._dictionary.checkpoint() if batch is None else None
         previous = self._bindings
         replacement = dict(previous)
-        self._registration_active = True
+        if batch is None:
+            self._registration_active = True
         try:
-            word = self._runtime._define_public_dictionary_word(name, definition)
+            word = self._runtime._define_public_dictionary_word(name, definition, initial_body=initial_body)
+            lease, lease_evidence = None, ()
+            if initial_body:
+                lease = self._dictionary.acquire_body_lease(word)
+                lease_evidence = (lease.word, lease.body_address, lease.body_limit,
+                                  lease.allocation_serial, lease._owner)
+                protected += (ForeignSpanV1(base=word.body_address, size=len(initial_body), access="read"),)
             replacement[id(definition)] = _ForeignBinding(
-                word, definition, operation, metadata, seal, protected,
+                word, definition, operation, metadata, seal, protected, lease, initial_body, lease_evidence,
             )
             self._bindings = replacement
             return word
         except BaseException as failure:
+            if batch is not None:
+                raise
             self._bindings = previous
             self._publication_failure = failure
             try:
@@ -760,7 +1186,8 @@ class ForeignTaskEngine:
                 self._publication_failure = None
             raise
         finally:
-            self._registration_active = False
+            if batch is None:
+                self._registration_active = False
 
     def require_definition(self, word):
         self._require_task(self._context)
@@ -779,6 +1206,18 @@ class ForeignTaskEngine:
                 or binding.operation.max_callbacks != metadata.max_callbacks):
             raise ForeignTaskError("task operation descriptor changed after registration")
         binding.adapter.verify()
+        if binding.body_lease is not None:
+            lease = binding.body_lease
+            if type(lease) is not BodyAllocationLease:
+                raise ForeignTaskError("task body lease type changed")
+            word_owner, base, limit, serial, owner = binding.lease_evidence
+            if (lease.word is not word_owner or lease._owner is not owner
+                    or type(lease.body_address) is not int or lease.body_address != base
+                    or type(lease.body_limit) is not int or lease.body_limit != limit
+                    or type(lease.allocation_serial) is not int or lease.allocation_serial != serial
+                    or not self._dictionary.is_body_lease_live(lease)
+                    or self._memory.read_bytes(base, len(binding.body_bytes)) != binding.body_bytes):
+                raise ForeignTaskError("task machine body was reclaimed or changed")
         self._check_grants(binding.operation.machine_grants, machine=True)
         return binding
 
@@ -791,8 +1230,11 @@ class ForeignTaskEngine:
             )
 
     def _capture_export(self, target, signature, *, task_grants, dynamic_targets,
-                        fault_target, max_semantic_steps):
-        self._require_idle("capture a task callback")
+                        fault_target, max_semantic_steps, batch=None):
+        if batch is None:
+            self._require_idle("capture a task callback")
+        else:
+            self._require_batch(batch)
         _value(signature, ForeignSignatureV1)
         if type(dynamic_targets) is not tuple or len(dynamic_targets) > _MAX_WORDS:
             raise TypeError("dynamic targets must be a bounded exact tuple")

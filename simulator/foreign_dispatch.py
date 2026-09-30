@@ -59,15 +59,17 @@ class _Invocation:
     scope: object = None
     cookie: object = None
     callback_pointer: int = 0
+    frontiers: tuple = ()
+    frontier_losses: int = 0
 
 
-@dataclass(slots=True)
+@dataclass(frozen=True, slots=True)
 class _Tail:
     capture: object
     scope: object
-    boundary: object
-    address: int
-    raw: int
+    frontiers: tuple
+    index: int = 0
+    losses: int = 0
 
 
 class TaskDispatchRoot:
@@ -360,10 +362,15 @@ class TaskDispatchRoot:
             data, returns = self.context.data, self.context.returns
             data.require_push_capacity(len(event.arguments))
             returns.require_push_capacity(1)
+            # Capture only already-active continuation authority, before any
+            # callback argument, foreign cookie or guest helper is pushed.
+            frontiers = self._capture_frontiers()
             scope = self.effects.scope(self.issuer, capture.metadata.task_grants)
             frame.capture, frame.scope = capture, scope
             frame.request = event
             frame.callback_pointer = data.pointer
+            frame.frontiers = frontiers
+            frame.frontier_losses = 0
             self.ledger.begin_callback(frame.invocation_id, capture.metadata.max_semantic_steps)
             self.effects.attach(self.issuer, scope)
             for value in event.arguments:
@@ -400,6 +407,8 @@ class TaskDispatchRoot:
         self.effects.detach(self.issuer)
         self.effects.release_scope(self.issuer, frame.scope)
         frame.capture = frame.scope = frame.cookie = frame.request = None
+        frame.frontiers = ()
+        frame.frontier_losses = 0
         event = self._transition("reply", request.request_token, outputs,
                                  budget=self._budget(frame.binding, quantum=0))
         return self._drive(event)
@@ -435,8 +444,13 @@ class TaskDispatchRoot:
             first = min(matches)
             removed = self.frames[first:]
             active_capture, active_scope = self._scope()
-            boundary = self._tail_boundary(max(frame.cookie.slot_address + CELL_BYTES
-                                               for frame in removed if frame.cookie is not None))
+            if prior_tail is not None:
+                frontiers, losses = prior_tail.frontiers, prior_tail.losses
+            else:
+                source = next(frame for frame in reversed(self.frames)
+                              if frame.capture is active_capture)
+                frontiers, losses = source.frontiers, source.frontier_losses
+            floor = max(item.slot_address + CELL_BYTES for item in retired)
             expected = tuple(frame.invocation_id for frame in reversed(removed))
             result = self._owned_call("cancel_suffix", removed[0].token)
             self._latest()
@@ -447,48 +461,95 @@ class TaskDispatchRoot:
             for frame in removed:
                 if frame.scope is not None and frame.scope is not active_scope:
                     self.effects.release_scope(self.issuer, frame.scope)
-            if prior_tail is not None:
-                # The first foundation owns one pre-unwind frontier. Retire
-                # native authority first, then fail closed rather than assign
-                # a newly created helper continuation that older role.
-                self.tail = prior_tail
-                self._attach()
-                raise ForeignTaskError("second task unwind destroyed the retained continuation authority")
             if active_capture is not None:
-                self.tail = _Tail(active_capture, active_scope, *boundary)
+                self.tail = _Tail(active_capture, active_scope, frontiers,
+                                  prior_tail.index if prior_tail is not None else 0, losses)
             self._attach()
+            # Cancellation and its real receipt are settled before a lost
+            # frontier can reject the remainder of the original semantic tail.
+            if self.tail is not None:
+                self._advance_tail(floor)
+        for frame in self.frames:
+            if frame.capture is not None:
+                frame.frontier_losses = self._frontier_losses(
+                    frame.frontiers, frame.frontier_losses, self.context.returns.pointer)
         if self.tail is not None:
-            tail = self.tail
-            self.engine._verify_export(tail.capture)
-            if tail.boundary is not None:
-                returns = self.context.returns
-                record = returns._continuations.get(tail.address)
-                if (returns.pointer > tail.address or type(record) is not tuple
-                        or record[0] is not tail.boundary or record[1] != tail.raw
-                        or returns._memory_view.read64(tail.address) != tail.raw):
-                    raise ForeignTaskError("retained task tail lost its pre-unwind continuation")
+            self.engine._verify_export(self.tail.capture)
+            # A later ordinary RP! or raw write may cross a frontier without
+            # retiring another machine. It still advances the same vector.
+            self._advance_tail(self.context.returns.pointer)
 
-    def _tail_boundary(self, floor):
+    def _capture_frontiers(self):
         returns = self.context.returns
-        floor = max(floor, returns.pointer)
-        # Search active slots only. Inactive continuation history never adds
-        # work, and the original root's finite semantic ceiling bounds probes.
+        self.control.reconcile(self.issuer)
+        floor = returns.pointer
         count = (returns.empty_pointer - floor) // CELL_BYTES
-        bound = self.ledger.semantic_limit - self.ledger.semantic_steps
-        for index in range(min(count, bound)):
+        # Use the original ceiling, not remaining fuel: inspecting evidence
+        # charges no guest work and a later callback cannot renew that fuel.
+        if count > self.ledger.semantic_limit:
+            raise ForeignTaskError("retained tail frontier exceeds its original finite scan allowance")
+        frontiers = []
+        for index in range(count):
             address = floor + index * CELL_BYTES
             record = dict.get(returns._continuations, address)
             if (type(record) is tuple and len(record) == 2
                     and type(record[0]) in (Continuation, ForeignContinuation)
                     and type(record[1]) is int
                     and returns._memory_view.read64(address) == record[1]):
-                return record[0], address, record[1]
-        if count > bound:
-            raise ForeignTaskError("retained tail frontier exceeds its original finite scan allowance")
-        return None, floor, 0
+                entry = record[0]
+                values = ((entry.xt, entry.ip, entry.root, entry.dispatch_id, entry.fault_abort)
+                          if type(entry) is Continuation else None)
+                frontier = (entry, address, record[1], values)
+                if self._frontier_live(frontier):
+                    frontiers.append(frontier)
+        return tuple(frontiers)
+
+    def _frontier_live(self, frontier):
+        entry, address, raw, values = frontier
+        returns = self.context.returns
+        record = dict.get(returns._continuations, address)
+        if (returns.pointer > address or type(record) is not tuple or len(record) != 2
+                or record[0] is not entry or type(record[1]) is not int
+                or record[1] != raw or returns._memory_view.read64(address) != raw):
+            return False
+        if type(entry) is ForeignContinuation:
+            # Matching bytes and metadata cannot revive a retired foreign
+            # cookie, even if its diagnostic retirement flag was repaired.
+            return any(live.entry is entry for live in self.control._live)
+        if type(entry) is not Continuation:
+            return False
+        return (type(entry.xt) is int and type(entry.ip) is int
+                and type(entry.root) is bool and type(entry.dispatch_id) is int
+                and entry.xt == values[0] and entry.ip == values[1]
+                and entry.root is values[2] and entry.dispatch_id == values[3]
+                and entry.fault_abort is values[4])
+
+    def _frontier_losses(self, frontiers, losses, floor):
+        # Check the entire original vector. A later row may be overwritten
+        # and repaired while a nearer boundary is still live; observing that
+        # loss permanently excludes it even before the callback is retired.
+        for index, frontier in enumerate(frontiers):
+            bit = 1 << index
+            if not losses & bit and (frontier[1] < floor or not self._frontier_live(frontier)):
+                losses |= bit
+        return losses
+
+    def _advance_tail(self, floor):
+        tail = self.tail
+        losses = self._frontier_losses(tail.frontiers, tail.losses, floor)
+        index = tail.index
+        while index < len(tail.frontiers) and losses & (1 << index):
+            index += 1
+        if index != tail.index or losses != tail.losses:
+            # Publish the monotonic loss before raising. Neither a subsequent
+            # raw repair nor a newly pushed helper can select an earlier row.
+            self.tail = _Tail(tail.capture, tail.scope, tail.frontiers, index, losses)
+        if index == len(tail.frontiers):
+            raise ForeignTaskError("retained task tail lost its pre-unwind continuation")
 
     def ordinary_return(self, continuation):
-        if self.tail is not None and continuation is self.tail.boundary:
+        if (self.tail is not None and self.tail.index < len(self.tail.frontiers)
+                and continuation is self.tail.frontiers[self.tail.index][0]):
             self.effects.detach(self.issuer)
             self.effects.release_scope(self.issuer, self.tail.scope)
             self.tail = None

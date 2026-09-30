@@ -1260,6 +1260,9 @@ class MegaForthRuntime:
 
     def _require_session_owner_access(self, operation: str) -> None:
         with self._session_owner_lock:
+            task_engine = getattr(self, "_foreign_tasks", None)
+            if task_engine is not None and task_engine._batch is not None:
+                raise ExecutionError(f"cannot {operation} during task registration batch")
             if (
                 self._session_owner_token is not None
                 and self._session_owner_thread != threading.get_ident()
@@ -2838,7 +2841,7 @@ class MegaForthRuntime:
                 blocked.context._release_suspension(handle.sequence)
             if blocked.task_root is not None and self._foreign_tasks._task_root is blocked.task_root:
                 try:
-                    self._foreign_tasks.finish_root(blocked.task_root, completed=False)
+                    self._foreign_tasks.finish_root(blocked.task_root, completed=False, primary_error=exc)
                 except BaseException:
                     try:
                         BaseException.add_note(exc, "task suspension cleanup also failed")
@@ -3570,6 +3573,7 @@ class MegaForthRuntime:
         frame = _DispatchFrame(context, meter, root_id)
         preserve_capture_evidence = False
         completed_successfully = False
+        primary_error = None
         suspended: _SuspendedExecution | None = None
         self._active_dispatches.append(frame)
         try:
@@ -3611,6 +3615,7 @@ class MegaForthRuntime:
                 self._suspended_execution = suspended
                 preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
+            primary_error = transfer
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3632,7 +3637,9 @@ class MegaForthRuntime:
             # root after RP! discarded its own Python dispatch boundary.  The
             # nested loop has already completed this semantic dispatch.
             completed_successfully = True
+            primary_error = None
         except _GuestFaultRequest as request:
+            primary_error = request
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3657,6 +3664,7 @@ class MegaForthRuntime:
             preserve_capture_evidence = True
             raise
         except ForthAbort as exc:
+            primary_error = exc
             host_abort_issue_leaf(exc)
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
@@ -3677,6 +3685,7 @@ class MegaForthRuntime:
                 context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:
+            primary_error = exc
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3694,7 +3703,8 @@ class MegaForthRuntime:
             try:
                 if (frame.task_root is not None and frame.task_root.ledger.root_id == frame.root_id
                         and suspended is None and self._foreign_tasks._task_root is frame.task_root):
-                    self._foreign_tasks.finish_root(frame.task_root, completed=completed_successfully)
+                    self._foreign_tasks.finish_root(frame.task_root, completed=completed_successfully,
+                                                    primary_error=primary_error)
             finally:
                 if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                     self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
@@ -3730,6 +3740,7 @@ class MegaForthRuntime:
         frame = _DispatchFrame(context, suspended.meter, suspended.root_id, task_root=suspended.task_root)
         preserve_capture_evidence = False
         completed_successfully = False
+        primary_error = None
         cursor: _DispatchCursor | None = None
         self._active_dispatches.append(frame)
         try:
@@ -3756,6 +3767,7 @@ class MegaForthRuntime:
             if cursor is not None:
                 preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
+            primary_error = transfer
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3780,8 +3792,10 @@ class MegaForthRuntime:
                 preserve_capture_evidence = True
                 raise
             completed_successfully = True
+            primary_error = None
             cursor = None
         except _GuestFaultRequest as request:
+            primary_error = request
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3806,6 +3820,7 @@ class MegaForthRuntime:
             preserve_capture_evidence = True
             raise
         except ForthAbort as exc:
+            primary_error = exc
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3829,6 +3844,7 @@ class MegaForthRuntime:
                 context.returns.restore(suspended.return_snapshot)
             raise
         except BaseException as exc:
+            primary_error = exc
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3852,7 +3868,8 @@ class MegaForthRuntime:
             try:
                 suspended.task_root = frame.task_root
                 if (frame.task_root is not None and cursor is None and self._foreign_tasks._task_root is frame.task_root):
-                    self._foreign_tasks.finish_root(frame.task_root, completed=completed_successfully)
+                    self._foreign_tasks.finish_root(frame.task_root, completed=completed_successfully,
+                                                    primary_error=primary_error)
             finally:
                 if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                     self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
@@ -4044,7 +4061,7 @@ class MegaForthRuntime:
             task = self._current_task_root(context)
             if task is not None:
                 try:
-                    self._foreign_tasks.finish_root(task, completed=False)
+                    self._foreign_tasks.finish_root(task, completed=False, primary_error=failure)
                 except BaseException:
                     try:
                         BaseException.add_note(failure, "task transport cleanup also failed")
@@ -4585,7 +4602,7 @@ class MegaForthRuntime:
                     task.tick(target)
                 else:
                     meter.tick()
-                task = self._foreign_tasks.root_for(context, meter)
+                task = self._foreign_tasks.root_for(context, meter, target)
                 # A directly selected machine callback retains the parent's
                 # completion role, rather than fabricating a semantic caller.
                 resume = ForeignCallbackTarget(None) if callback_entry else ForeignResumeTarget(caller, return_ip)

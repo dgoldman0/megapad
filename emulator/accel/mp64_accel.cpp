@@ -14000,6 +14000,34 @@ public:
         return drive_task(budget, &values);
     }
 
+    bool validate_task_parked(
+            const std::shared_ptr<mp64_task::RootToken>& root,
+            const std::shared_ptr<mp64_task::OperationToken>& operation,
+            const std::shared_ptr<mp64_task::RequestToken>& request) {
+        ActiveBoundary boundary(*this, this);
+        require_task_usable();
+        auto validate_authority = [&] {
+            validate_task_root(root);
+            validate_task_operation(operation, false);
+            if (task_frame_->phase == mp64_task::State::CALLBACK) {
+                validate_task_request(request);
+            } else if (task_frame_->phase == mp64_task::State::YIELDED) {
+                if (request)
+                    throw py::value_error("yielded task validation cannot carry a callback request");
+            } else {
+                throw py::value_error("task validation requires a resumable yielded or callback frame");
+            }
+        };
+        validate_authority();
+        auto guard = acquire_execution(this);
+        validate_authority();
+        // This is proof for a parked continuation, not another segment. In
+        // particular an admission-only child still has its parent's CPU view;
+        // validate_task_evidence observes that view without initializing it.
+        validate_task_evidence();
+        return true;
+    }
+
     mp64_task::Cancellation cancel_task(
             const std::shared_ptr<mp64_task::OperationToken>& token = nullptr,
             bool exact_token = false) {
@@ -15141,6 +15169,11 @@ public:
     mp64_task::Result reply(const std::shared_ptr<mp64_task::RequestToken>& token,
                             py::handle outputs, const mp64_task::Budget& budget) {
         return owner_->reply_task(token, outputs, budget);
+    }
+    bool validate_parked(const std::shared_ptr<mp64_task::RootToken>& root,
+                         const std::shared_ptr<mp64_task::OperationToken>& operation,
+                         const std::shared_ptr<mp64_task::RequestToken>& request) {
+        return owner_->validate_task_parked(root, operation, request);
     }
     mp64_task::Cancellation cancel_all() { return owner_->cancel_task(); }
     mp64_task::Cancellation cancel_suffix(const std::shared_ptr<mp64_task::OperationToken>& token) {
@@ -38322,7 +38355,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
             }, false);
         }, py::arg("token") = py::none());
 
-    // Task capability stays absent until nested transport and session gates pass.
+    // Internal adapter admission only: public task capability remains absent.
+    m.attr("_TASK_ROUTINE_TRANSPORT_REVISION") = py::int_(2);
     py::class_<mp64_task::Spec, std::shared_ptr<mp64_task::Spec>>(m, "TaskRoutineSpecV1")
         .def(py::init(&make_task_spec),
             py::arg("code_base"), py::arg("code"), py::arg("entry_offset"),
@@ -38483,6 +38517,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 const mp64_task::Budget& budget) {
             return marshal_task_result(runner, [&] { return runner.reply(token, outputs, budget); });
         }, py::arg("request_token").none(false), py::arg("outputs"), py::kw_only(), py::arg("budget"))
+        .def("validate_parked", &TaskRoutineRunnerV1::validate_parked,
+            py::arg("root_token").none(false), py::arg("operation_token").none(false),
+            py::arg("request_token") = py::none())
         .def("cancel_all", [](TaskRoutineRunnerV1& runner) {
             return marshal_task_result(runner, [&] { return runner.cancel_all(); }, false);
         })

@@ -11,8 +11,10 @@ page access and longer continuation intervals need no further rewrite on
 current evidence. Kernel/source/captured-frame evidence and strict multicore
 FP/timing checks are recorded. Prepared Desktop journeys are complete in the
 documented direct-dispatch scope, with Python requiring expanded diagnostic
-deadlines. Closed integer callbacks are qualified; nesting, shared-task
-exceptions/suspension and service execution remain in progress. The pinned
+deadlines. Closed and nested integer callbacks and private scalar services are
+qualified through the unified application. The synchronous shared-task adapter
+and retained exception frontiers are qualified; prepared-session accounting and
+composite suspension remain in progress. The pinned
 retained frontend changes are integrated and qualified locally.
 Production semantic sessions now default to required native execution; explicit
 CLI/environment choices and Python embedding defaults remain available.
@@ -419,9 +421,36 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
 | 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
 | 5B2 — nested callbacks | Qualified through the generic unified application path | 302 native child/root/publication/legacy checks; 767 private composition checks; rebuilt isolated activation candidate passed all 1,977 checks, including all 11 formerly deferred application journeys |
-| 5C/5D — shared task callbacks | Synchronous semantic dispatcher and bounded native transport qualified; production adapter and composite suspension in progress | Existing foundation gates; 541 one-frame and 567 child transport checks; 136 dispatcher and 930 regression checks; no task capability exposed |
-| 5E — private scalar services | Fourteen scalar FP/FPCSR services qualified through the unified application; crossing benchmark pending | 426 private dispatcher, 754 initial registry, 613 retained construction and 448 private bridge checks; application selection passed 1,939 checks, followed by 58 passing affected-fixture and launcher checks after setup corrections |
+| 5C/5D — shared task callbacks | Synchronous production adapter, native parked validation, original exception frontiers and engine callback receipts qualified; prepared-session composition and suspension in progress | Original transport/dispatcher gates; 607 adapter checks, 444 native validation checks, 170 tail/regression passes plus eight corrected/native targeted passes, and 153 semantic receipt checks; no task capability exposed |
+| 5E — private scalar services | Fourteen scalar FP/FPCSR services qualified through the unified application; fine-grained crossing path is substantially slower than direct execution | Existing service/bridge/application gates, 35 benchmark checks and clean `ddc986c` measurements at 64/256 iterations under both executors; full costs retained in the scalar-service performance report |
 | Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
+
+### Shared-task ownership and retained execution — 2026-09-30
+
+The production `NativeTaskAdapter` uses the original hybrid CPU owner and
+atomic dictionary/body publication. Its 607-check gate covers native receipt
+identity, retained root limits, stack grants, callback dependency publication,
+mixed-profile rejection and cancellation-delivery recovery. Native parked
+validation independently passed 444 checks after a matching GCC rebuild. It
+proves retained root/frame/code/control authority without execution, token
+rotation, CPU initialization or new work receipts.
+
+Repeated guest exception unwinds retain the original bounded vector of
+continuation frontiers, with monotonic loss tracking. Repaired cookies or
+metadata cannot restore discarded authority. The combined gate passed 170
+cases and found one overly broad expected error string in a new fixture; after
+correcting that expectation, all eight selected grant and native THROW cases
+passed. These checks include unchanged KDOS exception control and actual
+native child cancellation.
+
+Engine-issued semantic receipts retain cumulative callback work independently
+of native instruction receipts and public counters. Their 153-check gate
+covers exact issued identity, optional adapter method seals, root finalization
+and preservation of the first error during accounting or cleanup failure.
+Prepared-session projection and composite idle/wake scheduling are the next
+integration gates. Public task/composite capabilities remain disabled until
+the application journeys are qualified; generic task manifests remain outside
+this prepared-session gate.
 
 ### Private scalar service application — 2026-09-30
 

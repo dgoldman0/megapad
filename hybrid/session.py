@@ -8,6 +8,9 @@ from shared.session import RichTerminalSessionConfig
 from simulator.session import SimulatorMachineSession, SimulatorSharedMachine
 
 
+_HYBRID_CLOSE = HybridRuntime.close
+
+
 class HybridSession(SimulatorMachineSession):
     """Own a hybrid composition after attaching its semantic session backend.
 
@@ -62,8 +65,21 @@ class HybridSession(SimulatorMachineSession):
     def close(self) -> None:
         # Release the terminal lease, cancel any owned continuation, and give
         # up semantic authority before revoking code or native mapping leases.
-        super().close()
-        self.hybrid.close()
+        hybrid = self.hybrid
+        # Capture before frontend/backend cleanup can raise or alter a route.
+        cleanup = (lambda close=_HYBRID_CLOSE: close(hybrid)) if type(hybrid) is HybridRuntime else hybrid.close
+        try:
+            super().close()
+        except BaseException as error:
+            try:
+                cleanup()
+            except BaseException:
+                try:
+                    BaseException.add_note(error, "hybrid native owner cleanup also failed")
+                except BaseException:
+                    pass
+            raise
+        cleanup()
 
 
 class HybridSharedMachine(SimulatorSharedMachine):

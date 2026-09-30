@@ -987,3 +987,222 @@ suffix already retired by the failed delivery. It does not claim the earlier
 suffix call succeeded, create a work receipt, or permit guest reuse. Any other
 retirement list fails closed. Qualification covers both native outcomes,
 malformed IDs, exact original exception propagation and released ownership.
+
+### Task completion refinement — 2026-09-30
+
+The following gates complete retained-tail control and composite suspension.
+The single-frontier and synchronous-session limitations above remain the
+qualification boundaries of those earlier checkpoints. This refinement does
+not activate a public capability or change the private callback profiles.
+
+#### Original retained-tail frontiers
+
+Before guest callback effects, retain a bounded immutable vector of original
+active continuation evidence: exact entry identity, slot address and raw
+cookie. Bound both scanning and retained records by the canonical return-stack
+allocation and the original finite root ceiling. Inactive retained history
+cannot add authority. On a foreign discard, select the relevant surviving
+suffix of this vector and retain a monotonic frontier index with the original
+semantic capture and effect scope.
+
+A subsequent RP!, raw mismatch or metadata removal must first retire the
+affected machine suffix, then revalidate the original vector, code and grants.
+It may advance to a still-valid original frontier; a newly pushed helper, a
+copied entry or a repaired tombstone can never become that frontier. Retain no
+discarded machine frame, token, child-local fuel or machine-entry authority.
+Charge the original root and surviving ancestor callback guards only. Release
+the tail at the selected exact continuation or when the original root leaves;
+fail closed if no trustworthy continuation remains. Preserve the existing
+older-root `_GuestControlTransfer` behavior and guest SP/RP/HANDLER results.
+
+#### Callback IDL under the existing suspension owner
+
+Admit only the exact `Idle` and `IdleUntil` IR forms in this gate, including
+their metadata and dispatcher route seals. Preserve canonical ordering: charge
+the semantic tick, perform the operation's operand/deadline effects, then retain
+the next semantic IP. This does not admit `UartReadAttempt`, `KEY`, `MS@` or
+`IDLE-MS` as new callback effects.
+
+For `IdleUntil`, capture the original canonical RTC owner and implementation
+routes plus the selected monotonic-clock identity. Keep the deadline pop
+before the uptime read and any clock failure. Admit only this deadline
+observation, including the configured realtime policy; it grants no general
+`MS@` or RTC callback authority. A narrowly installed deadline-read issuer
+preserves exact host exceptions from the clock, and owner/code/grant evidence
+is checked again after that host call before suspension publication.
+
+Use the existing `_SuspendedExecution`, context lease and one-shot
+`IdleWakeReceipt`. Strongly retain the original task root, meter, ledger,
+foreign chain and retained tail through every block and resume, including an
+empty machine chain. Add engine-issued suspension evidence for exact cursor,
+frame/request identities, foreign slots, code/grants and owner routes; stack
+snapshot equality alone is insufficient. Revalidate before another guest
+effect. Copied, stale or repeated suspension/wake values confer no authority,
+and waking renews no execution allowance. Source evaluation and nested public
+host dispatch remain unresumable.
+
+Cancellation settles and retires native/foreign authority before the existing
+semantic root/capture cleanup and lease release. Never restore a return-stack
+snapshot to suspend or recreate foreign authority. Preserve the first error
+if cancellation or publication of a later suspension also fails.
+
+#### Typed machine cursor and scheduling quantum
+
+Extend the single dispatch cursor with engine-issued states for pending or
+accepted zero-work entry and a runnable machine invocation. Retain the exact
+binding, semantic resume target, operation token, root and completed entry
+effects. Resume must not replay Call ticks, admission, CPU initialization,
+input pops or callback reply. Preserve synchronous behavior when detachable
+scheduling has not been selected.
+
+Use a separate native instruction quantum per host turn. Spend it across all
+machine segments and entries in that turn; do not reset it at each adapter
+transition or confuse it with semantic steps. A later host turn receives a
+fresh scheduling quantum while retaining every spent invocation/root limit.
+Instruction-fuel exhaustion remains terminal. A host yield adds no semantic
+tick, machine instruction/cycle, IDL or wake. Return runnable cursors through
+the existing `YieldedExecution`/`resume_yielded` path, without a second scheduler,
+input owner or suspension handle.
+
+Before detaching and before resuming an active parked chain, use a no-work
+native `validate_parked(root_token, operation_token, request_token=None)` query.
+Validate the exact root and leaf operation, the exact pending request when in
+callback state, every ancestor, publication/code seal, private control bytes
+and live CPU evidence. Reuse the common owner's existing validators and
+exclusion guard. The query must not initialize the CPU, execute, rotate tokens,
+lower budgets, issue receipts or change cycles. Cached `last_receipt()` is not
+this proof; validation at eventual reply is too late for resumed callback
+effects. Composite admission requires this complete native surface, while the
+earlier synchronous capability remains separately qualified.
+
+#### Optional adapter validation and semantic settlement
+
+The six mandatory neutral adapter methods remain the synchronous contract.
+Two optional, directly class-defined Python methods are captured with their
+original function, code and closure evidence. `validate_parked(root_token,
+operation_token, request_token=None)` must return exact `True` without changing
+issued frame/token/receipt evidence or doing work. Missing validation support
+rejects a live callback detach after the canonical IDL tick and operand
+effects, before suspension publication. It does not remove synchronous use.
+
+`settle_semantic_receipt(receipt)` receives an engine-issued immutable
+`TaskSemanticReceiptV1(root_token, root_id, sequence, semantic_steps)`. The count
+is cumulative task callback work from the original ledger, independently of
+native receipts and public meter projections. The engine retains one bounded
+latest record and independent scalar evidence. Its
+`task_semantic_receipt(adapter, root_token, root_id)` query only returns that
+existing exact receipt; numeric equality or a copied value cannot issue it.
+The first receipt has sequence one. More callback work advances the sequence;
+retrying an unchanged total returns the same object and sequence. The initial
+synchronous gate settles before root teardown; composite detach later uses
+the same mechanism before publishing status. A final receipt already settled
+at detach contributes zero additional work. Accounting values infer no
+success or cancellation outcome. Settlement failure preserves its receipt
+and first error while native/control cleanup is still attempted. Optional
+method changes cannot replace or prevent use of otherwise intact mandatory
+cancellation routes.
+
+#### Completion qualification
+
+Use the unchanged KDOS exception and IDLE fixtures with these focused journeys:
+
+- Normal/local CATCH, THROW 0, nested rethrow and DEFER/DOES>/loop unwinds;
+  child THROW caught by the parent and rethrow to the outer guest CATCH.
+- A wrapper using `HANDLER @ RP! R> HANDLER ! -42 THROW` across two preexisting
+  catch frontiers, while keeping the fixture's THROW/HANDLER unchanged. Check
+  exact suffix retirement, intermediate helper returns, no discarded reply or
+  RET, exact final code/HANDLER state and preserved completed stores/cycles.
+- Raw overwrite, identical-cookie writes, metadata removal and later repair;
+  budget and cancellation failures at both frontiers without restored authority.
+- Callback and retained-tail IDL, repeated IDL, deadline/input wake, wrong or
+  stale wake values, RP@ capture, failed second suspension publication and
+  cancellation while parent and child are parked.
+- Quantum boundaries around zero-work admission, CALL, reply, child return,
+  RET and empty-chain reentry. Compare exact cumulative work, cookies, pointers
+  and memory with uninterrupted execution, including terminal fuel exhaustion.
+
+Then use one host-prepared `HybridSession`: load the fixtures and compile all
+entries before arming; machine A's callback catches child B, whose callback
+executes IDLE then `-17 THROW`. Existing backend input admission wakes the root,
+B is canceled, and A receives/replies with the code. Ordinary outer `KEY EMIT`
+consumes and emits the queued byte after the callback finishes. Repeat with a
+parent rethrow to outer CATCH and with timeout/cancel at each parked boundary.
+
+Record the actual Python-reference task callback dispatcher, semantic ticks,
+machine segments/instructions/cycles, observed depth, yields, wakes and cleanup.
+Preserve private-profile and ordinary suspension gates. Advertise task and
+composite capabilities only after their reviewed application gates pass;
+generic task manifests/startup remain a separate qualification.
+
+#### Machine scheduling API and cursor lock — 2026-09-30
+
+The opt-in host parameter is `machine_quantum_instructions: int | None = None`.
+Accept only an exact integer in `1..10_000_000`, excluding booleans, or `None`.
+`None` retains synchronous machine driving. Keep this parameter separate from
+`quantum_steps`, instruction fuel, callback limits and machine-entry limits.
+Session/backend configuration forwards the selected value only to the fresh
+`run_until_blocked` call. Resume and wake retain that original selection and
+offer no replacement limit. This adds no CLI/default/capability activation.
+
+For each detachable outer host dispatch, create one exact immutable
+`MachineTurn(limit)` and retain it on the original dispatch frame. The task
+root's `begin_machine_turn(turn)` binds the original outer frame and turn
+identities, original limit and starting cumulative instruction receipt. A
+repeat admission with that same turn cannot reset its start. All machine
+entries and segments in that turn, including reentry after an empty machine
+chain, share the remaining allowance derived from the retained root ledger.
+Do not use a hook-mutable consumed-work projection as a second accounting
+authority. A resumed outer host frame creates a fresh turn with the original
+limit; it retains the same root, meter, spent ledger and execution ceilings.
+Finite scheduling cannot detach source evaluation or nested arbitrary public
+host dispatch; reject such task admission before native begin.
+
+Keep the existing adapter advance cap of 65,536 instructions and additionally
+clamp it to the turn's remaining scheduling allowance. Begin remains an
+admission-only zero-quantum transition, even when the preceding machine entry
+spent the turn allowance. Validate and publish that accepted frame and consume
+its input operands once, then retain its real runnable event. This avoids a
+second pending-entry protocol: a later turn does not repeat the Call tick,
+begin admission or operand pops. Native initialization still occurs only on
+the first positive advance. Callback reply likewise consumes its request and
+outputs exactly once at zero quantum before any resulting runnable yield.
+
+Use a distinct exact frozen `ForeignMachineCursor`, with root token/root ID,
+invocation ID, operation token and receipt observations, and fixed
+`host_yield=True`. It carries no invented semantic XT/IP. The root retains one
+exact issued cursor record containing the original runnable event, frame,
+resume target, token/receipt and independent scalar evidence. A constructed or
+copied cursor has no authority. `machine_cursor_evidence(cursor)` exposes an
+immutable original snapshot for the existing engine-owned suspension witness;
+`resume_machine(cursor)` validates and consumes the exact live issuance once,
+then continues that retained event. Cancellation/close invalidates it. Neither
+API reconstructs native state from public cursor fields.
+
+Only an actual `ForeignRunnableYieldV1` may publish a machine cursor. A CALL or
+RET completed on the last scheduling instruction retains its real callback or
+return outcome; callback semantic execution may continue in the same host turn.
+If a zero-quantum reply reports terminal fuel exhaustion, preserve that failure
+instead of fabricating a runnable yield. A positive advance returning zero
+work remains a no-progress error. A scheduling yield itself adds no semantic
+tick, native instruction/cycle, IDL, wake or work receipt.
+
+The ordinary dispatcher explicitly propagates this cursor from direct foreign
+entry, Call/CallSelf, callback Return and `_continue_foreign`, and recognizes
+it before resolving a resumed semantic XT/IP. The original outer frame supplies
+the turn to `root_for`; nested semantic leaf frames cannot issue fresh turns.
+The existing `_SuspendedExecution` holds either the semantic cursor or this
+machine cursor, the original selected quantum and task root. The one existing
+lease, suspension handle and engine witness validate both forms, using the
+no-work parked-chain query before detach and resume. Machine yields use
+`YieldedExecution`/`resume_yielded` and do not acquire an IDL wake receipt.
+
+Qualification must compare synchronous execution with limits 1, 2 and larger
+than the workload, covering accepted zero-work entry, a final-quantum CALL,
+zero-quantum reply, final-quantum RET, multiple entries in one turn and empty
+chain reentry. Assert exact consumed operands, PC initialization, outputs,
+stores, cumulative work and one-shot token/receipt use. Include instruction,
+callback, entry and semantic fuel exhaustion across repeated host yields;
+copied/stale cursors, turn replacement, cancellation and failed later suspension
+publication; and the prepared KDOS child-IDL/THROW/input journeys above. Keep
+the synchronous and private-profile gates intact before any public capability
+claim.
