@@ -2,8 +2,8 @@
 
 Date: 2026-09-30
 
-Status: Phase 5A value contract, semantic export engine and v2 manifest loader
-are qualified. Native request/resume tokens, composition and launcher admission
+Status: Phase 5A value contract, semantic export engine, v2 manifest loader and
+native request/resume runner are qualified. Composition and launcher admission
 remain separate implementation gates.
 The locked implementation direction is
 [`hybrid-interop-plan.md`](hybrid-interop-plan.md).
@@ -34,10 +34,35 @@ These are copyable observations and declarations, not callable authority:
   composition owner must prove their liveness; construction proves only
   numerical and type constraints.
 
-The native runner will own a separate single-use continuation token, bound
+The native runner owns a separate single-use continuation token, bound
 to the exact owner, invocation, publication, request and private return slot.
 It is deliberately absent from these shared values. No value accepts a
 semantic `Word`, execution XT or Python callable in place of an export.
+
+The native `RoutineRunnerV2` executes the real declared `CALL.L`, parks with
+its effects and accounting intact, then executes the real `RET.L` after an
+admitted reply. It reserves the CPU across the parked interval without holding
+an execution lock or the GIL while the host dispatches the callback. Public CPU
+mutation and other execution entries reject that reservation, including
+conversion and buffer-export reentry. Begin and resume prove the exact sealed
+publication, instruction boundaries, resident instruction-cache bytes and
+live private control bytes. Cancellation releases the reservation; it does not
+undo completed machine effects.
+
+Native remaining callback allowance may be zero: callback-free execution can
+finish, while the first actual declared call returns `callback_limit` with its
+completed call effects and no continuation token. A request on the final
+instruction can likewise have no machine allowance left. A valid reply then
+consumes the token and returns `instruction_limit` before publishing outputs
+or executing the return. The composition owner must avoid dispatching semantic
+work for such an exhausted request.
+
+The September 30 native gate passed 246 checks: 61 callback-runner cases, 79 v1
+routine cases and 106 private/worker/coordinator execution, scalar FP and TACC
+regressions. Callback cases compare ordinary MP64 state and cover repeated
+requests, bounds, token ownership/replay, stale code/control/cache evidence,
+CPU mutation exclusion, cancellation and publication rollback. The v1 run body
+is unchanged. This gate does not qualify the still-separate semantic bridge.
 
 ## Bounds
 
