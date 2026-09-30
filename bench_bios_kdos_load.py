@@ -102,11 +102,29 @@ def _path_within(path: Path, root: Path) -> bool:
 
 def _activate_runtime(runtime_root: Path) -> SimpleNamespace:
     root = runtime_root.expanduser().resolve()
-    required = ("bios.asm", "kdos.f", "diskutil.py", "session.py")
+    # A package checkout must never silently load historical flat modules when
+    # an import inside its emulator package fails. Detect the layout before
+    # importing anything, including incomplete package checkouts.
+    packaged = (root / "emulator").exists()
+    session_name = "emulator.session" if packaged else "session"
+    system_name = "emulator.system" if packaged else "system"
+    module_files = {
+        "diskutil": "diskutil.py",
+        **({"emulator": "emulator/__init__.py"} if packaged else {}),
+        session_name: session_name.replace(".", "/") + ".py",
+        system_name: system_name.replace(".", "/") + ".py",
+    }
+    required = ("bios.asm", "kdos.f", *module_files.values())
     missing = [name for name in required if not (root / name).is_file()]
     if missing:
         raise RuntimeError(
             f"invalid MegaPad runtime root {root}: missing {', '.join(missing)}"
+        )
+    escaped = [name for name in required if not _path_within(root / name, root)]
+    if escaped:
+        raise RuntimeError(
+            f"invalid MegaPad runtime root {root}: files outside --runtime-root: "
+            + ", ".join(escaped)
         )
 
     script_root = ROOT.resolve()
@@ -122,22 +140,30 @@ def _activate_runtime(runtime_root: Path) -> SimpleNamespace:
         retained_paths.append(entry)
     sys.path[:] = [str(root), *retained_paths]
 
-    accel = importlib.import_module("_mp64_accel")
-    accelerator_path = Path(accel.__file__).resolve()
-    if not _path_within(accelerator_path, root):
-        raise RuntimeError(
-            "loaded accelerator is outside --runtime-root: "
-            f"{accelerator_path}"
-        )
-    diskutil = importlib.import_module("diskutil")
-    session = importlib.import_module("session")
-    system = importlib.import_module("system")
-    for module in (diskutil, session, system):
-        if not _path_within(Path(module.__file__), root):
+    def import_runtime_module(name: str):
+        # ImportError is deliberately not caught: a broken modern package is
+        # a failed benchmark input, not permission to measure another runtime.
+        module = importlib.import_module(name)
+        location = getattr(module, "__file__", None)
+        if not isinstance(location, (str, os.PathLike)):
+            raise RuntimeError(f"loaded {name} has no file provenance")
+        path = Path(location).resolve()
+        if not _path_within(path, root):
             raise RuntimeError(
-                f"loaded {module.__name__} outside --runtime-root: "
-                f"{module.__file__}"
+                f"loaded {name} outside --runtime-root: {path}"
             )
+        if not path.is_file():
+            raise RuntimeError(f"loaded {name} file does not exist: {path}")
+        if name in module_files and path != (root / module_files[name]).resolve():
+            raise RuntimeError(
+                f"loaded {name} from unexpected path for --runtime-root: {path}"
+            )
+        return module, path
+
+    accel, accelerator_path = import_runtime_module("_mp64_accel")
+    modules = {name: import_runtime_module(name)[0] for name in module_files}
+    diskutil = modules["diskutil"]
+    session = modules[session_name]
     return SimpleNamespace(
         root=root,
         accel=accel,

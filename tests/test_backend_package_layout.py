@@ -16,7 +16,6 @@ def test_flat_machine_imports_alias_canonical_emulator_modules() -> None:
         ("accel_wrapper", "emulator.accel_wrapper"),
         ("devices", "emulator.devices"),
         ("system", "emulator.system"),
-        ("session", "emulator.session"),
         ("rich_terminal.megapad", "emulator.rich_terminal_host"),
     )
 
@@ -24,6 +23,12 @@ def test_flat_machine_imports_alias_canonical_emulator_modules() -> None:
         flat = importlib.import_module(flat_name)
         canonical = importlib.import_module(canonical_name)
         assert flat is canonical
+
+
+def test_session_owner_has_only_its_canonical_package_module() -> None:
+    assert not (ROOT / "session.py").exists()
+    session = importlib.import_module("emulator.session")
+    assert Path(session.__file__).resolve() == ROOT / "emulator" / "session.py"
 
 
 def test_shared_and_backends_obey_the_dependency_direction() -> None:

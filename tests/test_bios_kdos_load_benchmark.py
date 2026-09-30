@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,6 +208,187 @@ def test_profile_cache_metadata_and_rejection_counters_reconcile() -> None:
 def test_runtime_root_must_contain_the_boot_sources(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="missing"):
         benchmark._activate_runtime(tmp_path)
+
+
+def _fake_runtime_root(tmp_path: Path, monkeypatch, *, packaged: bool):
+    """Exercise selection/provenance without booting or loading native code."""
+
+    root = tmp_path / "runtime"
+    root.mkdir()
+    module_files = {
+        "_mp64_accel": "_mp64_accel.fixture",
+        "diskutil": "diskutil.py",
+        "session": "session.py",
+        "system": "system.py",
+    }
+    if packaged:
+        module_files.update({
+            "emulator": "emulator/__init__.py",
+            "emulator.session": "emulator/session.py",
+            "emulator.system": "emulator/system.py",
+        })
+    modules = {}
+    for name, relative in module_files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# fixture\n", encoding="utf-8")
+        modules[name] = SimpleNamespace(__name__=name, __file__=str(path))
+    for name in ("bios.asm", "kdos.f"):
+        (root / name).write_text("fixture\n", encoding="utf-8")
+    for name in ("session", "emulator.session"):
+        if name in modules:
+            modules[name].MachineSession = object()
+    for name in (
+        "MP64FS", "FTYPE_FORTH", "FLAG_SYSTEM", "SECTOR_SIZE",
+        "DIR_ENTRY_SIZE", "pack_forth_source",
+    ):
+        setattr(modules["diskutil"], name, object())
+    calls = []
+
+    def import_module(name):
+        calls.append(name)
+        value = modules[name]
+        if isinstance(value, BaseException):
+            raise value
+        return value
+
+    monkeypatch.setattr(
+        benchmark, "importlib", SimpleNamespace(import_module=import_module)
+    )
+    monkeypatch.setattr(
+        benchmark, "sys", SimpleNamespace(path=list(benchmark.sys.path))
+    )
+    return root, modules, calls
+
+
+@pytest.mark.parametrize("flat_decoys", (False, True))
+def test_runtime_loader_selects_canonical_package_modules(
+    tmp_path: Path, monkeypatch, flat_decoys: bool,
+) -> None:
+    root, modules, calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=True)
+    if not flat_decoys:
+        (root / "session.py").unlink()
+        (root / "system.py").unlink()
+
+    runtime = benchmark._activate_runtime(root)
+
+    assert runtime.MachineSession is modules["emulator.session"].MachineSession
+    assert runtime.accelerator_path == root / "_mp64_accel.fixture"
+    assert calls == [
+        "_mp64_accel", "diskutil", "emulator", "emulator.session", "emulator.system"
+    ]
+
+
+def test_runtime_loader_supports_historical_flat_checkouts(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    root, modules, calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=False)
+
+    runtime = benchmark._activate_runtime(root)
+
+    assert runtime.MachineSession is modules["session"].MachineSession
+    assert calls == ["_mp64_accel", "diskutil", "session", "system"]
+
+
+def test_historical_flat_layout_requires_its_system_module(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    root, _modules, calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=False)
+    (root / "system.py").unlink()
+
+    with pytest.raises(RuntimeError, match="missing system.py"):
+        benchmark._activate_runtime(root)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("name", ("emulator", "emulator.session", "emulator.system"))
+def test_package_import_error_is_not_masked_by_flat_fallback(
+    tmp_path: Path, monkeypatch, name: str,
+) -> None:
+    root, modules, calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=True)
+    failure = ImportError("a required package dependency is unavailable")
+    modules[name] = failure
+
+    with pytest.raises(ImportError) as raised:
+        benchmark._activate_runtime(root)
+
+    assert raised.value is failure
+    assert "session" not in calls
+    assert "system" not in calls
+
+
+@pytest.mark.parametrize("missing", (
+    "emulator/__init__.py", "emulator/session.py", "emulator/system.py",
+))
+def test_incomplete_package_layout_does_not_select_flat_decoys(
+    tmp_path: Path, monkeypatch, missing: str,
+) -> None:
+    root, _modules, calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=True)
+    (root / missing).unlink()
+
+    with pytest.raises(RuntimeError, match="missing " + missing):
+        benchmark._activate_runtime(root)
+
+    assert calls == []
+
+
+@pytest.mark.parametrize("name", (
+    "_mp64_accel", "diskutil", "emulator", "emulator.session", "emulator.system",
+))
+def test_runtime_loader_rejects_modules_from_another_checkout(
+    tmp_path: Path, monkeypatch, name: str,
+) -> None:
+    root, modules, _calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=True)
+    outside = tmp_path / "other-checkout.py"
+    outside.write_text("# stale import\n", encoding="utf-8")
+    modules[name].__file__ = str(outside)
+
+    with pytest.raises(RuntimeError, match="outside --runtime-root"):
+        benchmark._activate_runtime(root)
+
+
+@pytest.mark.parametrize("name", ("session", "system"))
+def test_runtime_loader_rejects_package_modules_pointing_at_flat_decoys(
+    tmp_path: Path, monkeypatch, name: str,
+) -> None:
+    root, modules, _calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=True)
+    modules["emulator." + name].__file__ = modules[name].__file__
+
+    with pytest.raises(RuntimeError, match="unexpected path"):
+        benchmark._activate_runtime(root)
+
+
+@pytest.mark.parametrize("missing", ("attribute", "file"))
+def test_runtime_loader_rejects_missing_accelerator_file_provenance(
+    tmp_path: Path, monkeypatch, missing: str,
+) -> None:
+    root, modules, _calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=True)
+    if missing == "attribute":
+        del modules["_mp64_accel"].__file__
+        message = "no file provenance"
+    else:
+        Path(modules["_mp64_accel"].__file__).unlink()
+        message = "file does not exist"
+
+    with pytest.raises(RuntimeError, match=message):
+        benchmark._activate_runtime(root)
+
+
+def test_runtime_loader_rejects_source_symlinks_outside_checkout(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    root, _modules, calls = _fake_runtime_root(tmp_path, monkeypatch, packaged=True)
+    outside = tmp_path / "other-session.py"
+    outside.write_text("# different source\n", encoding="utf-8")
+    session = root / "emulator/session.py"
+    session.unlink()
+    session.symlink_to(outside)
+
+    with pytest.raises(RuntimeError, match="files outside --runtime-root"):
+        benchmark._activate_runtime(root)
+
+    assert calls == []
 
 
 def test_boot_image_is_byte_reproducible(tmp_path: Path) -> None:
