@@ -271,6 +271,13 @@ Per `docs/SoC-hardening.md`:
 
 - 25 ✅ **Outbound data** — `NET-SEND` (BIOS + NIC DMA), `PORT-SEND` / `PORT-SEND-SLICE` (KDOS §10.1 UDP data port transport)
 - 26 ✅ **FP16 tile mode** — `FP16-MODE`, `BF16-MODE` BIOS words, KDOS §3.1 (`F.SUM`, `F.DOT`, `F.SUMSQ`, `F.ADD`, `F.MUL`, `BF.SUM`, `BF.DOT`)
+- 26b ✅ **Full floating point** (2026-09-29) — one normative spec
+  (`docs/floating-point.md`) and one exact oracle (`shared/ieee_fp.py`) for
+  FP16, BF16, FP32, and FP64 tile operations, reductions, TACC, TCVT, TCMP,
+  VSEL, TDIV, and TSQRT, and a scalar FP32/FP64 engine (`FC`, `FPCSR`) with
+  five rounding modes and IEEE flags; bit-exact in the Python emulator,
+  native accelerator, hosted simulator, and RTL
+  (`docs/megapad-full-float-plan.md`)
 - 27 ✅ **QoS** — per-port bus bandwidth weights in `mp64_bus.v`
 - 29 ✅ **Scripting / AUTOEXEC** — BIOS auto-boots first Forth file from disk; `autoexec.f` (DHCP + static fallback + userland + `REQUIRE tools.f`)
 - 31 ✅ **CLI boot performance** — C++ accelerator engaged, boot ~2–3 s

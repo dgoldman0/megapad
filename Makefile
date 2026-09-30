@@ -129,6 +129,23 @@ test: test-bg
 # Usage: make test-sequential
 #        make test-sequential TEST_PATH=tests/test_system.py
 #        make test-sequential K=TestFoo
+.PHONY: float-parity
+# One cross-backend floating-point parity sweep (docs/floating-point.md).
+# Every step compares a backend with the exact oracle, shared/ieee_fp.py:
+# the oracle's own vectors, the native accelerator's seeded differentials
+# and the scalar engine against the Python emulator, the hosted words
+# against the emulator, and the RTL replaying emulator-generated vectors
+# (each vector file is first regenerated and compared byte for byte).  The
+# steps run one at a time.
+float-parity: accel
+	$(MAKE) test-sequential K= TEST_PATH="tests/test_ieee_fp.py \
+		tests/test_fp_scalar.py tests/test_native_mex_oracle.py"
+	$(MAKE) test-simulator SIMULATOR_TEST_PATH="\
+		tests/simulator/test_extended_tile.py \
+		tests/simulator/test_scalar_float_words.py"
+	$(MAKE) -C rtl/sim fp_exact fma_unit fpu tile_fp tile_ext cpu_fp \
+		tacc_cycles
+
 .PHONY: test-sequential
 test-sequential: accel
 	@set -eu; \

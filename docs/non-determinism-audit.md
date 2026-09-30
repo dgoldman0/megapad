@@ -199,12 +199,17 @@
 ### E-1. Cluster Round-Robin Shared-Unit Arbitration
 - **File:** `rtl/core/mp64_cluster.v` lines 55–120
 - **Mechanism:** Each micro-core cluster (4 cores) shares a MUL/DIV unit, CRC
-  engine, SHA ISA engine, and MEX (tile) engine. Access is round-robin
+  engine, SHA ISA engine, MEX (tile) engine, and, since the full-float work,
+  a scalar FP unit (`docs/floating-point.md` §8.7). Access is round-robin
   arbitrated — if two cores request the same unit simultaneously, one waits.
   Wait time depends on the operation length of the winning core (MUL = 4
-  cycles, DIV = 64 cycles, SHA compress = 64–80 cycles, tile ops = variable).
+  cycles, DIV = 64 cycles, SHA compress = 64–80 cycles, FP = 1 to 30 cycles
+  plus a one-cycle drain, tile ops = variable).
 - **Cycle-accuracy impact:** A core requesting MUL while another is mid-DIV
-  waits up to 64 cycles. Completely timing-dependent.
+  waits up to 64 cycles. Completely timing-dependent. Results never depend
+  on the order: each FP request carries its core's rounding mode and its
+  flags return only to that core's `FPCSR`, and FP latencies are fixed per
+  operation.
 - **Severity:** **HIGH**
 
 ### E-2. Hardware Barrier Encoding and Lifetime Mismatch

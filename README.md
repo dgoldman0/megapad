@@ -504,14 +504,24 @@ and block-RAM-backed memory:
   RTL counterpart remains a stub
 - **Fully static design** — retains state down to DC for ultra-low power
 
-Manual resource estimates (Kintex-7 325T, no Vivado synthesis yet):
+Manual resource estimates in Kintex-7 325T terms (no synthesis yet). The
+full floating-point datapath (`docs/floating-point.md`) is a large share of
+the chip: each of the seven tile engines (four full cores, three clusters)
+has two multi-format FMA units, two divide and square-root units, and
+sixteen TCVT lane converters, and each full core and cluster has one scalar
+FPU. These are rough hand estimates, not synthesis results.
 
-| Resource | Used | Available | Utilization |
-|----------|------|-----------|-------------|
-| LUTs | ~145K–185K | 203,800 | 70–90% |
-| FFs | ~220K | 326,080 | 67% |
-| BRAM36 | ~240 | 445 | 54% |
-| DSP48E1 | ~420–620 | 840 | 50–74% |
+| Resource | Before full float | Full-float additions | Estimated total | Kintex-7 325T |
+|----------|------------------:|---------------------:|----------------:|--------------:|
+| LUTs | ~145K–185K | ~250K–350K | ~400K–535K | 203,800 |
+| FFs | ~220K | ~30K–50K | ~250K–270K | 326,080 |
+| BRAM36 | ~240 | 0 | ~240 | 445 |
+| DSP48E1 | ~420–620 | ~220 | ~640–840 | 840 |
+
+The RTL describes the intended chip, so it no longer fits the Kintex-7
+325T as a whole. A prototype on that board would build fewer engines or
+set `FMA_UNITS = 1`, which keeps every result and changes only the cycle
+counts.
 
 Software written for the emulator is intended to run identically on the RTL.
 The simplification affects timing, not architectural behavior. A future

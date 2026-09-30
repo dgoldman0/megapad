@@ -759,19 +759,37 @@ Progress:
 - **Cleanup.** The native admission table no longer allows FP16/BF16 PACK
   and UNPACK; it now mirrors `shared/tile_formats.admits` exactly.
 
-### Phase 9 — Closure
+### Phase 9 — Closure (complete)
 
-- **Parity sweep.** Run one cross-backend parity sweep over every float
-  operation and format using the generated vectors.
-- **Docs.** Update the README resource table as an estimate only, the
-  ROADMAP, and the audit.
-- **Akashic handoff note.**
-  - Software `fp32.f` can move to the scalar unit.
-  - `fp16.f:189` adds binary32 bit patterns with an integer `+`.
-  - The `simd.f` mode table needs FP32 and FP64.
-  - That repository's work is its own vertical.
-- **Final regression.** Run the physical Desktop journey once, because the
-  hosted simulator changed.
+- **Parity sweep.** `make float-parity` runs, one step at a time, every
+  check that holds a backend to the exact oracle: the oracle's vectors, the
+  scalar engine and the native accelerator's seeded differentials against
+  the Python emulator, the hosted words against the emulator, and the RTL
+  replaying the emulator-generated vectors after regenerating each file
+  byte for byte (`fp_exact`, `fma_unit`, `fpu`, `tile_fp`, `tile_ext`,
+  `cpu_fp`, `tacc_cycles`). It passes: 1,217 Python and native tests,
+  297 hosted tests, and every RTL vector set.
+- **Regression.** `test_system.py` passes in fresh-process chunks except
+  the three THROW-during-load tests recorded in §7, which fail the same way
+  before this work. The hosted suite (2,472), the full RTL list, and SoC
+  elaboration pass.
+- **Docs.** The README carries a manual resource estimate that includes the
+  float datapath and says the chip no longer fits the Kintex-7 325T whole;
+  the ROADMAP lists the work; the non-determinism audit's cluster
+  arbitration item now covers the shared FP unit.
+- **Akashic handoff.** These belong to Akashic's own vertical; nothing here
+  changes that repository.
+  - `akashic/math/fp32.f` does binary32 arithmetic in software. The `F32`
+    BIOS words (`F32+`, `F32*`, `F32/`, `F32SQRT`, `S>F32`, `F32>S`, ...)
+    now do the same operations correctly rounded in one instruction each.
+  - `akashic/math/fp16.f:189` adds the binary32 bit patterns TDOT leaves in
+    ACC0 with an integer `+`. That is wrong for every nonzero sum; `F32+`
+    or `TCTRL` ACC_ACC accumulation gives the correct binary32 sum.
+  - `akashic/math/simd.f` has mode words and tables for U8–I64 and FP16
+    only; it needs FP32 and FP64 (`FP32-MODE`, `FP64-MODE`, TMODE 6 and 7)
+    and can use `TCVT`, `TCMP`, `TVSEL`, `TDIV`, and `TSQRT`.
+  - The planned KDOS `B.CVT` buffer-conversion word was deferred in Phase 6;
+    `TCVT` covers the need.
 
 ## 6. Testing and resource rules
 
