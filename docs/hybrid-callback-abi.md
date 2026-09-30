@@ -2,9 +2,9 @@
 
 Date: 2026-09-30
 
-Status: Phase 5A value contract is locked and the semantic export engine is
-qualified. Native request/resume tokens, composition, a v2 manifest loader and
-launcher admission remain separate implementation gates.
+Status: Phase 5A value contract, semantic export engine and v2 manifest loader
+are qualified. Native request/resume tokens, composition and launcher admission
+remain separate implementation gates.
 The locked implementation direction is
 [`hybrid-interop-plan.md`](hybrid-interop-plan.md).
 
@@ -162,7 +162,8 @@ session and enforce its 64-export bound. This module has no global registry.
 The v2 Python image/declaration classes reuse v1 field definitions and common
 validation, but a v1 API that requires exact v1 values must continue to reject
 them. In particular, `RoutineManifestV1` does not accept `RoutineImageV2`.
-There is no v2 manifest type or parser in this slice.
+The later loader slice adds `RoutineManifestV2` and single-read version
+selection; see [hybrid-callback-manifest.md](hybrid-callback-manifest.md).
 
 ## Qualified semantic export engine
 
@@ -184,7 +185,8 @@ execution can use its reference path for this separate private context.
 The final engine gate passed 74 checks across both selected semantic backends.
 The existing hybrid bridge and registration-failure gates also passed 99
 checks. This engine does not yet connect an actual machine callback or enable
-v2 manifests in the application.
+v2 manifests in the application. The separate loader gate passed 98 new checks
+alongside 94 existing v1 manifest and 90 callback-value checks.
 
 ## `CallbackRequestV2`
 

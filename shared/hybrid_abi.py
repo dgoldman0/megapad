@@ -443,6 +443,61 @@ class RoutineImageV2(RoutineImageV1):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RoutineManifestV2:
+    """Unpublished images and leaf descriptors, without callback authority."""
+
+    dispatch_instruction_limit: int
+    dispatch_callback_limit: int
+    dispatch_callback_semantic_limit: int
+    exports: tuple[CallbackExportV2, ...]
+    routines: tuple[RoutineImageV2, ...]
+    abi: str = HYBRID_ABI
+    version: int = HYBRID_CALLBACK_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _version(self.abi, self.version, expected=HYBRID_CALLBACK_ABI_VERSION)
+        _integer(self.dispatch_instruction_limit, "dispatch instructions", 1,
+                 MAX_DISPATCH_INSTRUCTIONS)
+        _integer(self.dispatch_callback_limit, "dispatch callback requests", 1,
+                 MAX_DISPATCH_CALLBACKS)
+        _integer(self.dispatch_callback_semantic_limit, "dispatch callback semantic steps", 1,
+                 MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS)
+        if type(self.exports) is not tuple:
+            raise TypeError("manifest exports must be an immutable tuple")
+        if len(self.exports) > MAX_CALLBACK_EXPORTS:
+            raise ValueError("a manifest may declare at most 64 callback exports")
+        exports = {}
+        for export in self.exports:
+            if type(export) is not CallbackExportV2:
+                raise TypeError("manifest exports must be CallbackExportV2 values")
+            if export.export_id in exports:
+                raise ValueError(f"duplicate callback export ID: {export.export_id}")
+            exports[export.export_id] = export
+        if type(self.routines) is not tuple:
+            raise TypeError("manifest routines must be an immutable tuple")
+        if len(self.routines) > MAX_ROUTINES:
+            raise ValueError("a session may declare at most 64 routines")
+        names: set[str] = set()
+        total = 0
+        for routine in self.routines:
+            if type(routine) is not RoutineImageV2:
+                raise TypeError("manifest routines must be RoutineImageV2 values")
+            key = routine.name.upper()
+            if key in names:
+                raise ValueError(f"duplicate routine name: {routine.name}")
+            names.add(key)
+            total += ((len(routine.code) + CODE_ALIGNMENT - 1) // CODE_ALIGNMENT) * CODE_ALIGNMENT
+            for site in routine.callbacks:
+                descriptor = exports.get(site.export.export_id)
+                if descriptor is None:
+                    raise ValueError(f"undeclared callback export ID: {site.export.export_id}")
+                if descriptor != site.export:
+                    raise ValueError("callback export ID has conflicting descriptors")
+        if total > MAX_TOTAL_CODE_BYTES:
+            raise ValueError("total code image bytes exceed 16 MiB")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RoutineDeclarationV2(RoutineDeclarationV1):
     """Sealed v2 metadata; allocation/export/token authority stays external."""
 
@@ -553,6 +608,6 @@ __all__ = [
     "HYBRID_CALLBACK_ABI_VERSION", "MAX_CALLBACK_EXPORTS", "MAX_CALLBACK_SITES",
     "MAX_DISPATCH_CALLBACKS", "MAX_CALLBACK_SEMANTIC_STEPS",
     "MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS", "CallbackExportV2", "CallbackSiteV2",
-    "RoutineImageV2", "RoutineDeclarationV2", "CallbackRequestV2",
+    "RoutineImageV2", "RoutineManifestV2", "RoutineDeclarationV2", "CallbackRequestV2",
     "MachineExitKindV2", "MachineSegmentResultV2",
 ]
