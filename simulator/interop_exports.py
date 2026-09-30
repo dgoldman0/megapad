@@ -7,7 +7,9 @@ neither a name, an XT nor a copied handle grants invocation authority.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from typing import Iterator
 
 from shared.cells import CELL_BYTES, MASK64
 from shared.hybrid_abi import (
@@ -61,6 +63,13 @@ class _ExportBinding:
     handle: CallbackExportHandle
     descriptor: CallbackExportV2
     leaf: _CanonicalLeaf
+
+
+@dataclass(slots=True)
+class _ExportRegistration:
+    table: dict[int, _ExportBinding]
+    previous: dict[int, _ExportBinding]
+    issued: list[tuple[int, _ExportBinding]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -134,6 +143,8 @@ class CallbackExportEngine:
         self._canonical: dict[str, _CanonicalLeaf] = {}
         self._exports: dict[int, _ExportBinding] = {}
         self._active: _ActiveExport | None = None
+        self._registration: _ExportRegistration | None = None
+        self._registration_failure: str | None = None
         if core_installed:
             for name, callback in _CANONICAL_CALLBACKS.items():
                 word = runtime.dictionary.find(name)
@@ -150,6 +161,8 @@ class CallbackExportEngine:
 
     def _require_owner(self, operation: str) -> None:
         self._runtime._require_session_owner_access(operation)
+        if self._registration_failure is not None:
+            raise CallbackExportError(self._registration_failure)
         if getattr(self._runtime, "_callback_exports", None) is not self:
             raise CallbackExportError("callback export engine is not its runtime's owner")
         if self._runtime.dictionary is not self._dictionary:
@@ -185,22 +198,114 @@ class CallbackExportEngine:
             self._runtime._require_no_suspension("bind a semantic callback export")
             if self._active is not None:
                 raise CallbackExportError("cannot publish an export during a callback")
-            descriptor = _descriptor(descriptor)
-            existing = self._exports.get(descriptor.export_id)
-            if existing is not None:
-                if existing.descriptor != descriptor:
+            if self._registration is not None:
+                raise CallbackExportError("cannot publish an export during export registration")
+            return self._bind_descriptor(_descriptor(descriptor))
+
+    def _bind_descriptor(self, descriptor: CallbackExportV2) -> CallbackExportHandle:
+        """Bind already revalidated metadata under the owner's held lock."""
+
+        existing = self._exports.get(descriptor.export_id)
+        if existing is not None:
+            if existing.descriptor != descriptor:
+                raise CallbackExportError("callback export ID has a conflicting descriptor")
+            self._require_leaf(existing.leaf)
+            return existing.handle
+        leaf = self._canonical.get(descriptor.name)
+        if leaf is None:
+            raise CallbackExportError("canonical installed callback Word is unavailable")
+        self._require_leaf(leaf)
+        if len(self._exports) >= MAX_CALLBACK_EXPORTS:
+            raise CallbackExportError("callback export table is full")
+        handle = CallbackExportHandle(descriptor.export_id, self._owner)
+        binding = _ExportBinding(handle, descriptor, leaf)
+        if self._registration is not None:
+            # Record the exact identity before insertion, so a failure after
+            # publication but before return still has complete rollback data.
+            self._registration.issued.append((descriptor.export_id, binding))
+        self._exports[descriptor.export_id] = binding
+        return handle
+
+    def _check_registration(self, registration: _ExportRegistration) -> None:
+        self._require_owner("finish semantic callback export registration")
+        if self._registration is not registration or self._exports is not registration.table:
+            raise CallbackExportError("callback registration table ownership changed")
+        expected = dict(registration.previous)
+        expected.update(registration.issued)
+        if (len(self._exports) != len(expected)
+                or any(self._exports.get(key) is not binding for key, binding in expected.items())):
+            raise CallbackExportError("callback registration binding identity changed")
+        for binding in expected.values():
+            self._binding(binding.handle)
+
+    def _rollback_registration(self, registration: _ExportRegistration) -> None:
+        table = registration.table
+        for export_id, binding in reversed(registration.issued):
+            # Never remove a replacement, a preexisting binding, or a binding
+            # merely carrying the same numerical export ID.
+            if table.get(export_id) is binding:
+                del table[export_id]
+        if (self._registration is not registration or self._exports is not table
+                or len(table) != len(registration.previous)
+                or any(table.get(key) is not binding
+                       for key, binding in registration.previous.items())):
+            raise CallbackExportError("callback registration rollback could not restore exact bindings")
+
+    @contextmanager
+    def registration(
+        self, descriptors: tuple[CallbackExportV2, ...],
+    ) -> Iterator[tuple[CallbackExportHandle, ...]]:
+        """Issue a bounded batch; retain it only if the caller's body succeeds.
+
+        Existing equal bindings are reused. Exceptional exit revokes only new
+        exact bindings from this batch. The owner lock covers the whole body;
+        verification is allowed, but nested publication and invocation are not.
+        """
+
+        with self._runtime._session_owner_lock:
+            self._require_owner("register semantic callback exports")
+            self._runtime._require_no_suspension("register semantic callback exports")
+            if self._active is not None:
+                raise CallbackExportError("cannot publish exports during a callback")
+            if self._registration is not None:
+                raise CallbackExportError("nested callback export registration is not admitted")
+            if type(descriptors) is not tuple:
+                raise TypeError("callback registration descriptors must be an exact tuple")
+            if len(descriptors) > MAX_CALLBACK_EXPORTS:
+                raise ValueError("callback registration admits at most 64 descriptors")
+            checked = tuple(_descriptor(value) for value in descriptors)
+            unique: dict[int, CallbackExportV2] = {}
+            for descriptor in checked:
+                previous = unique.setdefault(descriptor.export_id, descriptor)
+                if previous != descriptor:
                     raise CallbackExportError("callback export ID has a conflicting descriptor")
-                self._require_leaf(existing.leaf)
-                return existing.handle
-            leaf = self._canonical.get(descriptor.name)
-            if leaf is None:
-                raise CallbackExportError("canonical installed callback Word is unavailable")
-            self._require_leaf(leaf)
-            if len(self._exports) >= MAX_CALLBACK_EXPORTS:
-                raise CallbackExportError("callback export table is full")
-            handle = CallbackExportHandle(descriptor.export_id, self._owner)
-            self._exports[descriptor.export_id] = _ExportBinding(handle, descriptor, leaf)
-            return handle
+            registration = _ExportRegistration(self._exports, dict(self._exports))
+            self._registration = registration
+            try:
+                handles = {key: self._bind_descriptor(descriptor)
+                           for key, descriptor in unique.items()}
+                yield tuple(handles[descriptor.export_id] for descriptor in checked)
+                self._check_registration(registration)
+            except BaseException as error:
+                try:
+                    self._rollback_registration(registration)
+                except BaseException as cleanup:
+                    try:
+                        cleanup_detail = str(cleanup)
+                    except BaseException:
+                        cleanup_detail = "cleanup error text unavailable"
+                    self._registration_failure = (
+                        f"callback export registration rollback failed: "
+                        f"{type(cleanup).__name__}: {cleanup_detail}"
+                    )
+                    # Match routine publication: preserve the original error
+                    # object/type and its cause even if repair also fails.
+                    add_note = getattr(BaseException, "add_note", None)
+                    if add_note is not None:
+                        add_note(error, self._registration_failure)
+                raise
+            finally:
+                self._registration = None
 
     def verify(self, handle: CallbackExportHandle) -> CallbackExportV2:
         with self._runtime._session_owner_lock:
@@ -215,6 +320,8 @@ class CallbackExportEngine:
             self._runtime._require_no_suspension("invoke a semantic callback export")
             if self._active is not None:
                 raise CallbackExportError("nested semantic callback exports are not admitted")
+            if self._registration is not None:
+                raise CallbackExportError("cannot invoke an export during export registration")
             binding = self._binding(handle)
             _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
 

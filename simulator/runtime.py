@@ -2430,6 +2430,11 @@ class MegaForthRuntime:
 
         return self._callback_exports.bind(descriptor)
 
+    def callback_export_registration(self, descriptors):
+        """Stage a bounded export table atomically with its host publication."""
+
+        return self._callback_exports.registration(descriptors)
+
     def verify_callback_export(self, handle):
         """Return metadata for a live issued handle, without exposing its Word."""
 

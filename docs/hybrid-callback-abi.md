@@ -207,6 +207,16 @@ does not enter an installed guest fault callback. The caller's stack bytes and
 retained return metadata are not copied or restored. Native-selected semantic
 execution can use its reference path for this separate private context.
 
+`callback_export_registration(descriptors)` holds the semantic owner lock
+across a bounded publication transaction and yields handles in input order.
+Equal IDs reuse their exact existing binding. Failure revokes only bindings
+issued by that transaction, preserving preexisting handles and the original
+exception. Verification remains available inside the transaction; nested
+registration, standalone binding and invocation are rejected. A cleanup
+failure disables later export access and adds diagnostic context to the
+original exception. The transaction gate passed 36 checks across both selected
+executors, together with all 74 existing export-engine checks.
+
 The final engine gate passed 74 checks across both selected semantic backends.
 The existing hybrid bridge and registration-failure gates also passed 99
 checks. This engine does not yet connect an actual machine callback or enable
