@@ -9,7 +9,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from shared.session_options import retained_policy, rich_terminal_policy
+from shared.session_options import (
+    configured_production_executor, retained_policy, rich_terminal_policy,
+)
 from shared_session import DEFAULT_SOCKET, SessionServer
 from simulator.image_bootstrap import (
     ImageBootstrapPreparation,
@@ -75,7 +77,8 @@ def build_argument_parser(
         choices=("python", "native", "auto"),
         help=(
             "semantic executor for source preparation and live execution; "
-            "defaults to MEGAFORTH_EXECUTOR, otherwise python"
+            "defaults to MEGAFORTH_EXECUTOR, otherwise required native; "
+            "only auto permits a Python fallback"
         ),
     )
     parser.add_argument(
@@ -129,6 +132,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
     storage_path = args.storage.resolve()
     if not storage_path.is_file():
         raise ValueError(f"storage image does not exist: {storage_path}")
+    executor = configured_production_executor(args.executor)
     # Resolve the environment before image preparation so a bad value fails
     # without first running autoexec. None selects the executor's default.
     quantum_steps = configured_semantic_quantum_steps(
@@ -158,7 +162,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         terminal_cols=args.cols,
         terminal_rows=args.rows,
         semantic_step_budget=args.semantic_step_budget,
-        execution_backend=args.executor,
+        execution_backend=executor,
     )
     session = SimulatorMachineSession(
         preparation.runtime,

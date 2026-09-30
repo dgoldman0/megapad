@@ -61,6 +61,20 @@ class HybridSharedMachine(SimulatorSharedMachine):
         with self.lock:
             result = super().status(detailed=detailed)
             hybrid = self.semantic_session.hybrid
+            registrations = hybrid.registered_routines
+            registered_versions = sorted({image.version for image in registrations})
+            exports = sorted({
+                site.export.name
+                for image in registrations
+                for site in getattr(image, "callbacks", ())
+            })
+            effects = {site.export.effect
+                       for image in registrations
+                       for site in getattr(image, "callbacks", ())}
+            closed_policies = "closed_integer_colon" in effects
+            profiles = (["canonical_integer_leaf"] if "integer_leaf" in effects else [])
+            if closed_policies:
+                profiles.append("closed_integer_colon")
             result["backend"] = "hybrid"
             result["runtime"]["mode"] = "hybrid"
             result["runtime"]["capabilities"].update(
@@ -68,7 +82,11 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 declared_machine_routines=True,
                 arbitrary_machine_code=False,
                 machine_mmio=False,
-                semantic_callbacks=False,
+                semantic_callbacks=bool(exports),
+                closed_integer_callbacks=closed_policies,
+                arbitrary_semantic_callbacks=False,
+                nested_machine_callbacks=False,
+                callback_suspension=False,
                 native_bios_boot=False,
                 multicore=False,
                 native_snapshot=False,
@@ -76,11 +94,25 @@ class HybridSharedMachine(SimulatorSharedMachine):
             result["machine_execution"] = {
                 "backend": "mp64_native_interpreter",
                 "abi": HYBRID_ABI,
-                "abi_version": HYBRID_ABI_VERSION,
+                "abi_version": max(registered_versions, default=HYBRID_ABI_VERSION),
+                "registered_abi_versions": registered_versions,
+                "native_transport_version": 2 if any(v >= 2 for v in registered_versions) else 1,
                 "instructions": hybrid.machine_instructions,
                 "cycles": hybrid.machine_cycles,
                 "transitions": hybrid.transitions,
+                "segments": hybrid.machine_segments,
                 "dispatch_instruction_limit": hybrid.dispatch_instruction_limit,
+                "callback_abi_available": hybrid.callback_abi_available,
+                "closed_callback_abi_available": hybrid.closed_callback_abi_available,
+                "callback_profile": ("closed_integer_colon" if closed_policies else
+                                     "canonical_integer_leaf" if exports else None),
+                "callback_profiles": profiles,
+                "closed_callback_executor": "python_reference" if closed_policies else None,
+                "callback_exports": exports,
+                "callback_requests": hybrid.callback_requests,
+                "callback_semantic_steps": hybrid.callback_semantic_steps,
+                "dispatch_callback_limit": hybrid.dispatch_callback_limit,
+                "dispatch_callback_semantic_limit": hybrid.dispatch_callback_semantic_limit,
             }
             if detailed:
                 result["hybrid"] = result.pop("simulator")

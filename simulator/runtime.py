@@ -523,6 +523,7 @@ class _DispatchFrame:
     context: ExecutionContext
     meter: _StepMeter
     root_id: int
+    closed_guard: object = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -780,6 +781,7 @@ class MegaForthRuntime:
         self._active_dispatches: list[_DispatchFrame] = []
         self._transient_words: dict[int, Word] = {}
         self._colon_accelerators: dict[int, _ColonAccelerator] = {}
+        self._primitive_host_escapes: dict[int, tuple[PrimitiveDefinition, object]] = {}
         self._next_dispatch_root_id = 1
         self._uart_input: deque[int] = deque()
         self._uart_output = bytearray()
@@ -787,6 +789,13 @@ class MegaForthRuntime:
             from simulator.core_words import install_core
 
             install_core(self)
+        # Capture only the original installed leaves, before any user can
+        # shadow their names. Shared ABI metadata never carries Word authority.
+        from simulator.interop_exports import CallbackExportEngine
+
+        self._callback_exports = CallbackExportEngine(
+            self, core_installed=install_core_words
+        )
         # BIOS S" interpret mode owns one reusable 255-byte payload plus its
         # terminator. Keep it in the protected Bank-0 prefix rather than at
         # transient HERE, so later definitions cannot change its address.
@@ -816,6 +825,11 @@ class MegaForthRuntime:
                 if type(self.sha3) is HostedSHA3Service:
                     self.sha3.bind_native_permutation(
                         self._native_execution.extension.keccak_f1600
+                    )
+                if type(self.tile) is HostedTileService:
+                    self.tile.bind_native_values(
+                        self._native_execution.extension.tile_execute_values,
+                        guard_factory=self._native_execution.extension.TileIdentityGuard,
                     )
         self.storage.claim()
 
@@ -1754,7 +1768,17 @@ class MegaForthRuntime:
             raise ExecutionError("semantic suspension identity space exhausted")
         return ExecutionSuspension(sequence, self._runtime_token)
 
+    def _require_no_closed_callback_entry(self, operation: str) -> None:
+        accounting_guard = getattr(self, "_closed_accounting_guard", None)
+        if accounting_guard is not None:
+            accounting_guard(operation)
+        if any(frame.closed_guard is not None for frame in self._active_dispatches):
+            from simulator.interop_exports import CallbackExportError
+
+            raise CallbackExportError(f"cannot {operation} during a closed callback")
+
     def _require_no_suspension(self, operation: str) -> None:
+        self._require_no_closed_callback_entry(operation)
         suspended = self._suspended_execution
         if suspended is not None:
             raise ExecutionError(
@@ -1787,6 +1811,30 @@ class MegaForthRuntime:
             _DICTIONARY_FAULT_ABORT,
         )
 
+    def _register_primitive_host_escape(self, implementation, callback):
+        """Issue exact implementation authority for a trusted host boundary.
+
+        Hybrid v2 uses this only to preserve an inner callback exception after
+        its native frame has been cancelled. It is not a source-word option.
+        """
+        if (type(implementation) is not PrimitiveDefinition
+                or implementation.callback is not callback or not callable(callback)):
+            raise TypeError("host escape admission requires an exact primitive and callback")
+        key = id(implementation)
+        if key in self._primitive_host_escapes:
+            raise ExecutionError("primitive host escape authority already issued")
+        if len(self._primitive_host_escapes) >= 64:
+            raise ExecutionError("primitive host escape table is full")
+        admission = (implementation, callback)
+        self._primitive_host_escapes[key] = admission
+        return admission
+
+    def _revoke_primitive_host_escape(self, admission) -> None:
+        key = id(admission[0])
+        if self._primitive_host_escapes.get(key) is not admission:
+            raise ExecutionError("primitive host escape authority is no longer issued")
+        del self._primitive_host_escapes[key]
+
     def _invoke_primitive(
         self,
         implementation: PrimitiveDefinition,
@@ -1794,9 +1842,17 @@ class MegaForthRuntime:
     ) -> object:
         """Run a primitive; a machine trap becomes a guest fault request."""
 
+        callback = implementation.callback
+        host_escape = False
+        if self._primitive_host_escapes:
+            admission = self._primitive_host_escapes.get(id(implementation))
+            host_escape = (admission is not None and admission[0] is implementation
+                           and admission[1] is callback)
         try:
-            return implementation.callback(context)
+            return callback(context)
         except InstructionFault as fault:
+            if host_escape:
+                raise
             raise _GuestFaultRequest(
                 self._fault_xt,
                 context,
@@ -2253,6 +2309,7 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("evaluate source")
+            self._require_no_closed_callback_entry("evaluate source")
             try:
                 return self._evaluate_source(
                     source,
@@ -2293,6 +2350,8 @@ class MegaForthRuntime:
             active_context.returns.pointer_capture_checkpoint()
         )
         has_enclosing_dispatch = self._has_active_dispatch(active_context)
+        closed_cleanup_guard = self._closed_cleanup_guard
+        unsafe_closed_cleanup = False
         state: _EvaluationState | None = None
         line_count = 0
         try:
@@ -2334,6 +2393,9 @@ class MegaForthRuntime:
                 definitions=tuple(state.definitions),
             )
         except _GuestFaultRequest as request:
+            if closed_cleanup_guard(request, active_context):
+                unsafe_closed_cleanup = True
+                raise
             # Nested evaluation must hand the request back to the suspended
             # semantic dispatcher so guest THROW can discard its fault
             # sentinel and resume the existing CATCH continuation.
@@ -2352,6 +2414,9 @@ class MegaForthRuntime:
                     meter,
                 )
             except _GuestControlTransfer as transfer:
+                if closed_cleanup_guard(transfer, active_context):
+                    unsafe_closed_cleanup = True
+                    raise
                 if (
                     transfer.context is not active_context
                     and active_context.returns.has_pointer_captures_after(
@@ -2361,6 +2426,9 @@ class MegaForthRuntime:
                     active_context._mark_host_control_fault(transfer)
                 raise
             except ForthAbort as exc:
+                if closed_cleanup_guard(exc, active_context):
+                    unsafe_closed_cleanup = True
+                    raise
                 if active_context.returns.has_pointer_captures_after(
                     capture_checkpoint
                 ):
@@ -2370,6 +2438,9 @@ class MegaForthRuntime:
                     active_context.returns.clear()
                 raise
             except BaseException as exc:
+                if closed_cleanup_guard(exc, active_context):
+                    unsafe_closed_cleanup = True
+                    raise
                 if active_context.returns.has_pointer_captures_after(
                     capture_checkpoint
                 ):
@@ -2377,6 +2448,9 @@ class MegaForthRuntime:
                 raise
             raise AssertionError("dictionary fault callback returned to evaluator")
         except _GuestControlTransfer as transfer:
+            if closed_cleanup_guard(transfer, active_context):
+                unsafe_closed_cleanup = True
+                raise
             if (
                 transfer.context is not active_context
                 and active_context.returns.has_pointer_captures_after(
@@ -2386,6 +2460,9 @@ class MegaForthRuntime:
                 active_context._mark_host_control_fault(transfer)
             raise
         except ForthAbort as exc:
+            if closed_cleanup_guard(exc, active_context):
+                unsafe_closed_cleanup = True
+                raise
             self._fail_closed_active_bios_evaluator()
             if active_context.returns.has_pointer_captures_after(
                 capture_checkpoint
@@ -2396,6 +2473,9 @@ class MegaForthRuntime:
                 active_context.returns.clear()
             raise
         except BaseException as exc:
+            if closed_cleanup_guard(exc, active_context):
+                unsafe_closed_cleanup = True
+                raise
             self._fail_closed_active_bios_evaluator()
             if active_context.returns.has_pointer_captures_after(
                 capture_checkpoint
@@ -2408,10 +2488,56 @@ class MegaForthRuntime:
                 if compiler is not None and compiler.temporary:
                     state.compiler = None
                     self._discard_temporary_compiler(compiler, state)
-            if not has_enclosing_dispatch:
+            if not unsafe_closed_cleanup and not has_enclosing_dispatch:
                 active_context.returns.restore_pointer_captures(
                     capture_checkpoint
                 )
+
+    def bind_callback_export(self, descriptor):
+        """Bind bounded value metadata to an original installed integer leaf."""
+
+        return self._callback_exports.bind(descriptor)
+
+    def callback_export_registration(self, descriptors):
+        """Stage a bounded export table atomically with its host publication."""
+
+        return self._callback_exports.registration(descriptors)
+
+    def verify_callback_export(self, handle):
+        """Return metadata for a live issued handle, without exposing its Word."""
+
+        return self._callback_exports.verify(handle)
+
+    @property
+    def callback_export_abi_version(self) -> int:
+        """Metadata profile supported by the canonical callback export engine."""
+        return 3
+
+    def inspect_callback_export(self, handle):
+        """Return immutable derived proof diagnostics, or None for a leaf."""
+        return self._callback_exports.inspect(handle)
+
+    def callback_policy_core_xt(self, name: str) -> int:
+        """Resolve one verified original canonical policy dependency at idle."""
+        return self._callback_exports.policy_core_xt(name)
+
+    def consume_callback_budget_failure(self, error) -> bool:
+        """Consume exact engine-issued budget-error identity, never a class claim."""
+        return self._callback_exports.consume_budget_failure(error)
+
+    def begin_closed_callback_accounting(self, handle):
+        """Issue one bounded checkpoint for the next exact closed invocation."""
+        return self._closed_accounting_dispatch("begin", handle)
+
+    def consume_closed_callback_accounting(self, checkpoint, handle):
+        """Consume independent admitted-tick evidence, including failed callbacks."""
+        return self._closed_accounting_dispatch("consume", checkpoint, handle)
+
+    def invoke_callback_export(self, handle, arguments: tuple[int, ...], *,
+                               semantic_step_limit: int | None = None):
+        """Invoke an approved export using actual ticks on the original meter."""
+
+        return self._callback_exports.invoke(handle, arguments, semantic_step_limit=semantic_step_limit)
 
     def execute(
         self,
@@ -2423,6 +2549,7 @@ class MegaForthRuntime:
         """Execute one live word to completion or raise ``ExecutionBlocked``."""
 
         self._require_session_owner_access("execute a semantic word")
+        self._require_no_closed_callback_entry("execute a semantic word")
         if self._active_dispatches or self._active_input_states:
             active_context = self.main_context if context is None else context
             if not isinstance(active_context, ExecutionContext):
@@ -2462,6 +2589,7 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("run a semantic dispatch")
+            self._require_no_closed_callback_entry("run a semantic dispatch")
             try:
                 return self._run_until_blocked(
                     name_or_xt,
@@ -2577,6 +2705,7 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("resume a semantic dispatch")
+            self._require_no_closed_callback_entry("resume a semantic dispatch")
             return self._resume_locked(suspension, wake_receipt)
 
     def _resume_locked(
@@ -2603,6 +2732,7 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("resume a semantic dispatch")
+            self._require_no_closed_callback_entry("resume a semantic dispatch")
             blocked = self._require_suspension(suspension)
             if not blocked.cursor.host_yield:
                 raise ExecutionError("IDL suspension requires a runtime-issued wake")
@@ -3317,9 +3447,46 @@ class MegaForthRuntime:
         allow_idle: bool = False,
         starting_steps: int = 0,
         quantum_steps: int | None = None,
+        closed_guard=None,
     ) -> _SuspendedExecution | None:
         """Execute atomically with respect to internal return-stack state."""
 
+        if closed_guard is not None:
+            # Private storage is discarded, never restored through mutable routes.
+            closed_guard.require_state()
+            root_id = self._allocate_dispatch_root_id()
+            frame = _DispatchFrame(context, meter, root_id, closed_guard)
+            namespace = object.__getattribute__(self, "__dict__")
+            frames = self._active_dispatches
+            prefix = tuple(frames)
+            original = None
+            list.append(frames, frame)
+            try:
+                closed_guard.pin_frame(frames, frame, root_id, prefix)
+                return self._execute_top(word, context, meter, root_id=root_id,
+                                         closed_guard=closed_guard)
+            except BaseException as error:
+                original = error
+                raise
+            finally:
+                try:
+                    clean = (dict.get(namespace, "_active_dispatches") is frames
+                             and len(frames) == len(prefix) + 1
+                             and all(item is frames[index] for index, item in enumerate(prefix))
+                             and frames[-1] is frame)
+                    # Repair only the issued host list, using its original namespace.
+                    list.__setitem__(frames, slice(None), prefix)
+                    dict.__setitem__(namespace, "_active_dispatches", frames)
+                    closed_guard.release_frame(frame)
+                    if not clean:
+                        closed_guard.cleanup_failed(original)
+                except BaseException:
+                    if original is None:
+                        closed_guard.cleanup_failed(None)
+                    closed_guard.cleanup_failed(original)
+
+        closed_cleanup_guard = self._closed_cleanup_guard
+        unsafe_closed_cleanup = False
         context._require_reusable()
         return_snapshot = context.returns.snapshot()
         capture_checkpoint = context.returns.pointer_capture_checkpoint()
@@ -3366,6 +3533,9 @@ class MegaForthRuntime:
                 self._suspended_execution = suspended
                 preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
+            if closed_cleanup_guard(transfer, context):
+                unsafe_closed_cleanup = True
+                raise
             if transfer.context is not context:
                 if context.returns.has_pointer_captures_after(
                     capture_checkpoint
@@ -3381,6 +3551,9 @@ class MegaForthRuntime:
             # nested loop has already completed this semantic dispatch.
             completed_successfully = True
         except _GuestFaultRequest as request:
+            if closed_cleanup_guard(request, context):
+                unsafe_closed_cleanup = True
+                raise
             # A nested public execute/evaluate boundary must not install a
             # fresh fault continuation above an older guest CATCH.  Remove
             # only this nested dispatch's internal return state and let the
@@ -3398,6 +3571,9 @@ class MegaForthRuntime:
             preserve_capture_evidence = True
             raise
         except ForthAbort as exc:
+            if closed_cleanup_guard(exc, context):
+                unsafe_closed_cleanup = True
+                raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
@@ -3410,6 +3586,9 @@ class MegaForthRuntime:
                 context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:
+            if closed_cleanup_guard(exc, context):
+                unsafe_closed_cleanup = True
+                raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
@@ -3421,7 +3600,7 @@ class MegaForthRuntime:
                     context
                 ) or self._has_active_evaluation(context):
                     preserve_capture_evidence = True
-            if not preserve_capture_evidence:
+            if not unsafe_closed_cleanup and not preserve_capture_evidence:
                 context.returns.restore_pointer_captures(capture_checkpoint)
             active = self._active_dispatches.pop()
             if active is not frame:
@@ -3435,6 +3614,8 @@ class MegaForthRuntime:
         """Continue a detached dispatch under its original host guard."""
 
         context = suspended.context
+        closed_cleanup_guard = self._closed_cleanup_guard
+        unsafe_closed_cleanup = False
         resume_capture_checkpoint = (
             context.returns.pointer_capture_checkpoint()
         )
@@ -3467,6 +3648,9 @@ class MegaForthRuntime:
             if cursor is not None:
                 preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
+            if closed_cleanup_guard(transfer, context):
+                unsafe_closed_cleanup = True
+                raise
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -3486,6 +3670,9 @@ class MegaForthRuntime:
             completed_successfully = True
             cursor = None
         except _GuestFaultRequest as request:
+            if closed_cleanup_guard(request, context):
+                unsafe_closed_cleanup = True
+                raise
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -3503,6 +3690,9 @@ class MegaForthRuntime:
             preserve_capture_evidence = True
             raise
         except ForthAbort as exc:
+            if closed_cleanup_guard(exc, context):
+                unsafe_closed_cleanup = True
+                raise
             self._fail_closed_active_bios_evaluator()
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
@@ -3519,6 +3709,9 @@ class MegaForthRuntime:
                 context.returns.restore(suspended.return_snapshot)
             raise
         except BaseException as exc:
+            if closed_cleanup_guard(exc, context):
+                unsafe_closed_cleanup = True
+                raise
             self._fail_closed_active_bios_evaluator()
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
@@ -3536,7 +3729,7 @@ class MegaForthRuntime:
                 or self._has_active_evaluation(context)
             ):
                 preserve_capture_evidence = True
-            if not preserve_capture_evidence:
+            if not unsafe_closed_cleanup and not preserve_capture_evidence:
                 context.returns.restore_pointer_captures(
                     suspended.capture_checkpoint
                 )
@@ -3553,6 +3746,8 @@ class MegaForthRuntime:
     ) -> None:
         """Enter a top-level fault callback with ordinary host escape guards."""
 
+        closed_cleanup_guard = self._closed_cleanup_guard
+        unsafe_closed_cleanup = False
         context._require_reusable()
         return_snapshot = context.returns.snapshot()
         capture_checkpoint = context.returns.pointer_capture_checkpoint()
@@ -3569,6 +3764,9 @@ class MegaForthRuntime:
                 fault_request=request,
             )
         except _GuestControlTransfer as transfer:
+            if closed_cleanup_guard(transfer, context):
+                unsafe_closed_cleanup = True
+                raise
             if transfer.context is context:
                 preserve_capture_evidence = True
             else:
@@ -3579,6 +3777,9 @@ class MegaForthRuntime:
                 context.returns.restore(return_snapshot)
             raise
         except ForthAbort as exc:
+            if closed_cleanup_guard(exc, context):
+                unsafe_closed_cleanup = True
+                raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
@@ -3589,13 +3790,16 @@ class MegaForthRuntime:
                 context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:
+            if closed_cleanup_guard(exc, context):
+                unsafe_closed_cleanup = True
+                raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
             context.returns.restore(return_snapshot)
             raise
         finally:
-            if not preserve_capture_evidence:
+            if not unsafe_closed_cleanup and not preserve_capture_evidence:
                 context.returns.restore_pointer_captures(capture_checkpoint)
             active = self._active_dispatches.pop()
             if active is not frame:
@@ -3691,7 +3895,10 @@ class MegaForthRuntime:
         resume_cursor: _DispatchCursor | None = None,
         allow_idle: bool = False,
         quantum_limit: int | None = None,
+        closed_guard=None,
     ) -> _DispatchCursor | None:
+        if closed_guard is not None:
+            closed_guard.begin(word, root_id)
         fault_entry = fault_request is not None
         if resume_cursor is not None:
             if word is not None or fault_request is not None:
@@ -3735,9 +3942,22 @@ class MegaForthRuntime:
                     break
                 if not isinstance(implementation, PrimitiveDefinition):
                     break
+                exports = getattr(self, "_callback_exports", None)
+                export_guard = (
+                    exports._guard_primitive
+                    if exports is not None and exports._active_context is context
+                    else None
+                )
                 meter.tick()
                 try:
-                    invocation = self._invoke_primitive(implementation, context)
+                    if export_guard is not None:
+                        # Pin this bound authority before accounting can run
+                        # host hooks. Only the dispatcher invokes the checked
+                        # primitive, without translating faults into FAULT-XT!.
+                        callback = export_guard(implementation, context)
+                        invocation = callback(context)
+                    else:
+                        invocation = self._invoke_primitive(implementation, context)
                 except _GuestFaultRequest as request:
                     if request.context is not context:
                         raise
@@ -3772,6 +3992,8 @@ class MegaForthRuntime:
         assert current is not None
 
         while True:
+            if closed_guard is not None:
+                closed_guard.cursor(current, ip)
             definition = current.implementation
             if not isinstance(definition, ColonDefinition):
                 raise ExecutionError("semantic dispatch entered a non-colon word")
@@ -3793,7 +4015,7 @@ class MegaForthRuntime:
             ):
                 return _DispatchCursor(current.xt, ip, host_yield=True)
 
-            if ip == 0 and self._try_colon_accelerator(
+            if closed_guard is None and ip == 0 and self._try_colon_accelerator(
                 current,
                 context,
                 meter,
@@ -3820,7 +4042,7 @@ class MegaForthRuntime:
                 ip = int(continuation.ip)
                 continue
 
-            if self._native_execution is not None:
+            if closed_guard is None and self._native_execution is not None:
                 native_quantum = (
                     quantum_limit if allow_idle
                     and len(self._active_dispatches) == 1
@@ -3834,19 +4056,26 @@ class MegaForthRuntime:
                     continue
 
             operation = definition.operations[ip]
-            meter.tick()
+            if closed_guard is not None:
+                evidence = closed_guard.before_tick(current, ip, operation)
+                closed_guard.tick()
+                closed_guard.after_tick(evidence)
+            else:
+                meter.tick()
 
             if isinstance(operation, Literal):
                 context.data.push(operation.value)
                 ip += 1
             elif isinstance(operation, Call):
-                called = self._resolve_dispatch_word(operation.xt)
+                called = (closed_guard.call_target(operation) if closed_guard is not None
+                          else self._resolve_dispatch_word(operation.xt))
                 entered = self._call_from_colon(
                     called,
                     caller=current,
                     return_ip=ip + 1,
                     context=context,
                     meter=meter,
+                    closed_guard=closed_guard,
                 )
                 if entered is None:
                     ip += 1
@@ -3996,6 +4225,12 @@ class MegaForthRuntime:
                 ip += 1
             elif isinstance(operation, Return):
                 continuation = context.returns.pop_continuation()
+                if closed_guard is not None:
+                    caller = closed_guard.returned_target(continuation)
+                    if caller is None:
+                        return
+                    current, ip = caller, continuation.ip
+                    continue
                 if continuation.fault_abort is not None:
                     self._abort_guest_fault(continuation.fault_abort, context)
                 if continuation.root:
@@ -4043,7 +4278,24 @@ class MegaForthRuntime:
         return_ip: int,
         context: ExecutionContext,
         meter: _StepMeter,
+        closed_guard=None,
     ) -> tuple[Word, int] | None:
+        if closed_guard is not None:
+            implementation = target.implementation
+            if type(implementation) is PrimitiveDefinition:
+                evidence = closed_guard.before_tick(target, caller=caller, call_ip=return_ip - 1)
+                closed_guard.tick()
+                callback = closed_guard.after_tick(evidence)
+                result = callback(context)
+                if result is not None:
+                    from simulator.interop_exports import CallbackExportError
+
+                    raise CallbackExportError("closed callback primitive returned dynamic control")
+                return None
+            closed_guard.cursor(target, 0)
+            context.returns.push_continuation(caller.xt, return_ip)
+            return target, 0
+
         while True:
             implementation = target.implementation
             if isinstance(implementation, ConstantDefinition):

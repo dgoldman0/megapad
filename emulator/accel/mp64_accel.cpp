@@ -29,6 +29,7 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 #if defined(__GNUC__) || defined(__clang__)
 #define MP64_ALWAYS_INLINE inline __attribute__((always_inline))
 #define MP64_NOINLINE __attribute__((noinline))
@@ -43,12 +44,14 @@
 
 #include "../../shared/accel/scalar_fp_bindings.h"
 #include "../../shared/accel/keccak_bindings.h"
+#include "../../shared/accel/tile_values_bindings.h"
 #include "dbt/executable_arena.h"
 #include "dbt/x86_64/lowering.h"
 #include "cpu/mp64/block_ir.h"
 #include "cpu/mp64/decode.h"
 #include "cpu/mp64/interpreter.h"
 #include "cpu/mp64/routine_runner.h"
+#include "cpu/mp64/routine_callbacks.h"
 #include "cpu/mp64/semantics.h"
 #include "machine/memory.h"
 #include "machine/settlement.h"
@@ -63,6 +66,7 @@
 namespace py = pybind11;
 namespace mp64_x86_64 = mp64::dbt::x86_64;
 namespace mp64_scalar_fp = megapad::scalar_fp;
+namespace mp64_tile_values = megapad::tile_values;
 namespace mp64_routine = mp64::cpu::routine_v1;
 
 using mp64::machine::SystemClock;
@@ -187,41 +191,10 @@ static constexpr uint64_t TMODE_WRITE_MASK = 0x7F;
 static constexpr uint64_t FPCSR_WRITE_MASK = 0x1F7;  // RM[2:0], flags[8:4]
 static constexpr uint64_t TCTRL_WRITE_MASK = 0x03;
 
-// One binary interchange format (docs/floating-point.md §2).
-struct TileFloatFormat {
-    int width;
-    int exponent_bits;
-    int fraction_bits;
-};
-
-static constexpr TileFloatFormat TILE_FP16{16, 5, 10};
-static constexpr TileFloatFormat TILE_BF16{16, 8, 7};
-static constexpr TileFloatFormat TILE_FP32{32, 8, 23};
-static constexpr TileFloatFormat TILE_FP64{64, 11, 52};
-
-// One descriptor per TMODE.EW code.  Lane geometry, float-ness, and the
-// accumulation format come from this table rather than per-site arithmetic.
-struct TileFormat {
-    int lane_bytes;                        // 0 for a reserved code
-    const TileFloatFormat* floating;       // null for integer formats
-    const TileFloatFormat* accumulation;   // the float format A of §4
-
-    constexpr bool defined() const { return lane_bytes != 0; }
-    constexpr bool is_float() const { return floating != nullptr; }
-    constexpr int lanes() const { return 64 / lane_bytes; }
-    constexpr int lane_bits() const { return lane_bytes * 8; }
-};
-
-static constexpr TileFormat TILE_FORMATS[TMODE_EW_MASK + 1] = {
-    {1, nullptr, nullptr},
-    {2, nullptr, nullptr},
-    {4, nullptr, nullptr},
-    {8, nullptr, nullptr},
-    {2, &TILE_FP16, &TILE_FP32},
-    {2, &TILE_BF16, &TILE_FP32},
-    {4, &TILE_FP32, &TILE_FP64},
-    {8, &TILE_FP64, &TILE_FP64},
-};
+// Shared lane geometry and values; CPU state and tile transport remain here.
+using mp64_tile_values::TileFloatFormat;
+using mp64_tile_values::TileFormat;
+using mp64_tile_values::TILE_FORMATS;
 
 static constexpr int tmode_ew(uint64_t tmode) {
     return static_cast<int>(tmode & TMODE_EW_MASK);
@@ -1752,6 +1725,11 @@ static constexpr uint8_t SINGLE_CORE_BLOCK_REGION_AVAILABLE =
     uint8_t{1} << 3;
 
 struct CPUState {
+    // Native routine ownership survives callback parking without retaining
+    // the GIL or a mapping lock. The public mutation count closes exporter,
+    // conversion and GIL-release re-entry windows before reservation.
+    std::atomic<const void*> routine_owner{nullptr};
+    std::atomic<uint64_t> public_mutation_count{0};
     CoreProfile profile = CoreProfile::FULL;
     uint64_t regs[32];      // GP registers (R0-R15 base, R16-R31 via REX)
     uint8_t  psel;          // PC register index
@@ -6282,13 +6260,87 @@ private:
 
 using MemoryMutationGuard = ExclusiveMemoryUseGuard;
 
+// Only native routine code may supply a non-null owner permission. Public
+// bindings use the default null permission, including during Python callback
+// dispatch. Sequential consistency makes the two-atomic reservation/mutator
+// handshake exclude both entrants even when they race on different threads.
+static void require_routine_cpu_access(
+        const CPUState& state, const void* permitted_owner = nullptr) {
+    const void* owner = state.routine_owner.load();
+    if (owner != nullptr && owner != permitted_owner)
+        throw std::runtime_error(
+            "CPUState belongs to an active or parked hybrid invocation");
+}
+
+class PublicCPUMutationScope {
+public:
+    explicit PublicCPUMutationScope(CPUState& state) : state_(state) {
+        require_routine_cpu_access(state_);
+        state_.public_mutation_count.fetch_add(1);
+        try {
+            require_routine_cpu_access(state_);
+        } catch (...) {
+            state_.public_mutation_count.fetch_sub(1);
+            throw;
+        }
+    }
+    ~PublicCPUMutationScope() {
+        state_.public_mutation_count.fetch_sub(1);
+    }
+    PublicCPUMutationScope(const PublicCPUMutationScope&) = delete;
+    PublicCPUMutationScope& operator=(const PublicCPUMutationScope&) = delete;
+private:
+    CPUState& state_;
+};
+
+class RoutineCPUReservation {
+public:
+    RoutineCPUReservation(CPUState& state, const void* owner)
+        : state_(state), owner_(owner) {
+        if (owner_ == nullptr)
+            throw std::logic_error("routine reservation owner is missing");
+        if (state_.public_mutation_count.load() != 0)
+            throw std::runtime_error("CPUState public operation is active");
+        const void* expected = nullptr;
+        if (!state_.routine_owner.compare_exchange_strong(expected, owner_))
+            throw std::runtime_error("CPUState already has a hybrid owner");
+        if (state_.public_mutation_count.load() != 0 ||
+            state_.memory->execution_active.load(std::memory_order_acquire) ||
+            state_.memory->exclusive_active.load(std::memory_order_acquire)) {
+            state_.routine_owner.store(nullptr);
+            throw std::runtime_error("CPUState memory or public operation is active");
+        }
+    }
+    ~RoutineCPUReservation() { state_.routine_owner.store(nullptr); }
+    RoutineCPUReservation(const RoutineCPUReservation&) = delete;
+    RoutineCPUReservation& operator=(const RoutineCPUReservation&) = delete;
+private:
+    CPUState& state_;
+    const void* owner_;
+};
+
+template <typename Value>
+static auto cpu_state_field_getter(Value CPUState::*member) {
+    return [member](const CPUState& state) -> Value { return state.*member; };
+}
+
+template <typename Value>
+static auto cpu_state_field_setter(Value CPUState::*member) {
+    return [member](CPUState& state, Value value) {
+        PublicCPUMutationScope mutation_scope(state);
+        state.*member = value;
+    };
+}
+
 class CPUExecutionGuard {
 public:
-    explicit CPUExecutionGuard(CPUState& state)
+    explicit CPUExecutionGuard(
+            CPUState& state, const void* permitted_routine_owner = nullptr)
         : state_(state),
           memory_(*state.memory),
           shared_owner_{&memory_, nullptr, nullptr, nullptr},
           native_owner_{&memory_, nullptr} {
+        require_routine_cpu_access(state_, permitted_routine_owner);
         if (
             state_.system_cycle_execution_pending != nullptr &&
             state_.system_cycle_execution_pending->load(
@@ -6355,6 +6407,7 @@ public:
         // that is itself waiting for memory.
         shared_owner_.lease = std::make_shared<SharedMemoryLease>(
             memory_, "CPUState is already executing");
+        require_routine_cpu_access(state_, permitted_routine_owner);
         register_shared_memory();
         register_native_execution();
     }
@@ -8001,247 +8054,15 @@ static int next_instruction_size(CPUState& s) {
     }
 }
 
-// ---------------------------------------------------------------------------
-//  Floating-point tile lanes.  docs/floating-point.md defines every result and
-//  shared/ieee_fp.py is the executable reference.  Host binary64 is used only
-//  where it is provably identical to that reference: FP16/BF16/FP32 values and
-//  their products are exact in binary64; one binary64 addition or
-//  multiplication rounded once to a format of precision p <= 24 is correctly
-//  rounded (53 >= 2p + 2); and a fused multiply-add rounds the round-to-odd
-//  binary64 sum once (53 >= p + 2).  Rounding to a tile format uses integer
-//  arithmetic on the binary64 encoding, and the build disables floating-point
-//  contraction so the two-sum steps stay separate.
-// ---------------------------------------------------------------------------
-
-static constexpr uint64_t tile_float_mask(const TileFloatFormat& f) {
-    return f.width == 64 ? ~0ULL : (1ULL << f.width) - 1;
-}
-
-static constexpr uint64_t tile_float_sign(const TileFloatFormat& f) {
-    return 1ULL << (f.width - 1);
-}
-
-static constexpr uint64_t tile_float_infinity(const TileFloatFormat& f) {
-    return ((1ULL << f.exponent_bits) - 1) << f.fraction_bits;
-}
-
-static constexpr uint64_t tile_float_canonical_nan(const TileFloatFormat& f) {
-    return tile_float_infinity(f) | (1ULL << (f.fraction_bits - 1));
-}
-
-static_assert(tile_float_canonical_nan(TILE_FP16) == 0x7E00);
-static_assert(tile_float_canonical_nan(TILE_BF16) == 0x7FC0);
-static_assert(tile_float_canonical_nan(TILE_FP32) == 0x7FC0'0000);
-static_assert(
-    tile_float_canonical_nan(TILE_FP64) == 0x7FF8'0000'0000'0000ULL);
-
-static inline const TileFloatFormat& tile_float_format(int ew) {
-    return *TILE_FORMATS[ew].floating;
-}
-
-static inline bool tile_float_is_nan(
-        const TileFloatFormat& f,
-        uint64_t bits) {
-    return (bits & tile_float_mask(f) & ~tile_float_sign(f)) >
-           tile_float_infinity(f);
-}
-
-static inline uint64_t tile_float_order_key(
-        const TileFloatFormat& f,
-        uint64_t bits) {
-    bits &= tile_float_mask(f);
-    return (bits & tile_float_sign(f))
-        ? (tile_float_mask(f) ^ bits)
-        : (bits | tile_float_sign(f));
-}
-
-static inline double tile_float_to_double(
-        const TileFloatFormat& f,
-        uint64_t bits) {
-    bits &= tile_float_mask(f);
-    const int bias = (1 << (f.exponent_bits - 1)) - 1;
-    const uint64_t exponent_max = (1ULL << f.exponent_bits) - 1;
-    const uint64_t exponent = (bits >> f.fraction_bits) & exponent_max;
-    const uint64_t fraction = bits & ((1ULL << f.fraction_bits) - 1);
-    double magnitude;
-    if (exponent == exponent_max) {
-        magnitude = fraction
-            ? std::numeric_limits<double>::quiet_NaN()
-            : std::numeric_limits<double>::infinity();
-    } else if (exponent == 0) {
-        magnitude = std::ldexp(
-            static_cast<double>(fraction),
-            1 - bias - f.fraction_bits);
-    } else {
-        magnitude = std::ldexp(
-            static_cast<double>(fraction | (1ULL << f.fraction_bits)),
-            static_cast<int>(exponent) - bias - f.fraction_bits);
-    }
-    return (bits & tile_float_sign(f)) ? -magnitude : magnitude;
-}
-
-static inline uint64_t double_bits(double value) {
-    uint64_t bits;
-    std::memcpy(&bits, &value, sizeof(bits));
-    return bits;
-}
-
-// Round a binary64 value once to a tile format: RNE, canonical NaN.
-static inline uint64_t tile_float_from_double(
-        const TileFloatFormat& f,
-        double value) {
-    if (std::isnan(value))
-        return tile_float_canonical_nan(f);
-    const uint64_t raw = double_bits(value);
-    if (f.width == 64)
-        return raw;
-    const uint64_t sign_bits = (raw >> 63) ? tile_float_sign(f) : 0;
-    const uint64_t biased64 = (raw >> 52) & 0x7FF;
-    if (biased64 == 0x7FF)
-        return sign_bits | tile_float_infinity(f);
-    // Zero, or a binary64 subnormal far below every tile format's range.
-    if (biased64 == 0)
-        return sign_bits;
-    const int precision = f.fraction_bits + 1;
-    const int bias = (1 << (f.exponent_bits - 1)) - 1;
-    const int emin = 1 - bias;
-    const uint64_t significand =
-        (raw & ((1ULL << 52) - 1)) | (1ULL << 52);
-    const int exponent = static_cast<int>(biased64) - 1075;
-    int quantum = std::max(
-        exponent + 52 - (precision - 1),
-        emin - (precision - 1));
-    const int shift = quantum - exponent;  // at least 53 - precision
-    if (shift > 63)
-        return sign_bits;
-    uint64_t mantissa = significand >> shift;
-    const uint64_t remainder = significand & ((1ULL << shift) - 1);
-    const uint64_t half = 1ULL << (shift - 1);
-    if (remainder > half || (remainder == half && (mantissa & 1))) {
-        mantissa++;
-        if (mantissa >> precision) {
-            mantissa >>= 1;
-            quantum++;
-        }
-    }
-    const uint64_t hidden = 1ULL << (precision - 1);
-    if (mantissa >= hidden) {
-        const int biased = quantum + (precision - 1) + bias;
-        if (biased >= (1 << f.exponent_bits) - 1)
-            return sign_bits | tile_float_infinity(f);
-        return sign_bits |
-               (static_cast<uint64_t>(biased) << f.fraction_bits) |
-               (mantissa - hidden);
-    }
-    return sign_bits | mantissa;
-}
-
-// The round-to-odd binary64 value of the exact sum of two binary64 values.
-static inline double round_to_odd_sum(double product, double addend) {
-    double total = product + addend;
-    if (!std::isfinite(total))
-        return total;
-    const double partial = total - addend;
-    const double error =
-        (product - partial) + (addend - (total - partial));
-    if (error != 0.0 && !(double_bits(total) & 1)) {
-        total = std::nextafter(
-            total,
-            error > 0.0
-                ? std::numeric_limits<double>::infinity()
-                : -std::numeric_limits<double>::infinity());
-    }
-    return total;
-}
-
-static inline uint64_t tile_float_add(
-        const TileFloatFormat& f,
-        uint64_t a,
-        uint64_t b) {
-    return tile_float_from_double(
-        f, tile_float_to_double(f, a) + tile_float_to_double(f, b));
-}
-
-static inline uint64_t tile_float_sub(
-        const TileFloatFormat& f,
-        uint64_t a,
-        uint64_t b) {
-    return tile_float_from_double(
-        f, tile_float_to_double(f, a) - tile_float_to_double(f, b));
-}
-
-static inline uint64_t tile_float_product(
-        const TileFloatFormat& dst,
-        const TileFloatFormat& src,
-        uint64_t a,
-        uint64_t b) {
-    return tile_float_from_double(
-        dst, tile_float_to_double(src, a) * tile_float_to_double(src, b));
-}
-
-// RN_dst(a * b + c) with a, b in src and c in dst, rounded once.  Products
-// of precision <= 26 operands are exact in binary64, and the round-to-odd
-// sum rounds once more correctly for dst precision <= 51.  Binary64 operands
-// use the host's correctly rounded fused multiply-add.
-static inline uint64_t tile_float_fma(
-        const TileFloatFormat& dst,
-        const TileFloatFormat& src,
-        uint64_t a,
-        uint64_t b,
-        uint64_t c) {
-    const double x = tile_float_to_double(src, a);
-    const double y = tile_float_to_double(src, b);
-    const double z = tile_float_to_double(dst, c);
-    if (src.width == 64)
-        return tile_float_from_double(dst, std::fma(x, y, z));
-    const double product = x * y;
-    if (dst.width == 64)
-        return tile_float_from_double(dst, product + z);
-    return tile_float_from_double(dst, round_to_odd_sum(product, z));
-}
-
-static inline uint64_t tile_float_convert(
-        const TileFloatFormat& dst,
-        const TileFloatFormat& src,
-        uint64_t bits) {
-    return tile_float_from_double(dst, tile_float_to_double(src, bits));
-}
-
-// IEEE 754-2019 minimum/maximum: NaN propagates and -0 orders below +0.
-static inline uint64_t tile_float_extreme2(
-        const TileFloatFormat& f,
-        uint64_t a,
-        uint64_t b,
-        bool largest) {
-    if (tile_float_is_nan(f, a) || tile_float_is_nan(f, b))
-        return tile_float_canonical_nan(f);
-    const uint64_t key_a = tile_float_order_key(f, a);
-    const uint64_t key_b = tile_float_order_key(f, b);
-    if (largest)
-        return (key_a >= key_b ? a : b) & tile_float_mask(f);
-    return (key_a <= key_b ? a : b) & tile_float_mask(f);
-}
-
-// The canonical pairwise tree over leaves held as exact doubles, rounding
-// once to the accumulation format at every node.  A binary64 host addition
-// is RN_64 itself, and for binary32 leaves RN_32(RN_64(x + y)) = RN_32(x + y)
-// because 53 >= 2 * 24 + 2.
-static inline uint64_t tile_float_tree(
-        const TileFloatFormat& wide,
-        double* values,
-        int count) {
-    while (count > 1) {
-        for (int j = 0; j < count / 2; j++) {
-            values[j] = tile_float_to_double(
-                wide,
-                tile_float_from_double(
-                    wide,
-                    values[2 * j] + values[2 * j + 1]));
-        }
-        count /= 2;
-    }
-    return tile_float_from_double(wide, values[0]);
-}
+// Pure floating-point lane helpers are shared with semantic execution.
+using mp64_tile_values::tile_float_mask;
+using mp64_tile_values::tile_float_sign;
+using mp64_tile_values::tile_float_format;
+using mp64_tile_values::tile_float_from_double;
+using mp64_tile_values::tile_float_add;
+using mp64_tile_values::tile_float_fma;
+using mp64_tile_values::tile_float_skip_nan_extreme;
+using mp64_tile_values::tile_float_index_replaces;
 
 static inline uint32_t fp32_to_bits(float f) {
     uint32_t b; std::memcpy(&b, &f, 4); return b;
@@ -9500,50 +9321,55 @@ static int exec_native_tacc_tamac(
     const int lane_count =
         static_cast<int>(TILE_BYTES * 8) /
         source_bits;
-    for (int lane = 0; lane < lane_count; lane++) {
-        const uint64_t a = tile_get_elem(
-            source_a,
-            lane,
-            source_bytes);
-        const uint64_t b = tile_get_elem(
-            source_b,
-            lane,
-            source_bytes);
-        const uint64_t old =
-            native_tacc_image_read(
+    {
+        std::optional<mp64_tile_values::ScopedFloatEnvironment> environment;
+        if (floating)
+            environment.emplace();
+        for (int lane = 0; lane < lane_count; lane++) {
+            const uint64_t a = tile_get_elem(
+                source_a,
+                lane,
+                source_bytes);
+            const uint64_t b = tile_get_elem(
+                source_b,
+                lane,
+                source_bytes);
+            const uint64_t old =
+                native_tacc_image_read(
+                    staged,
+                    lane,
+                    accumulator_bits);
+            uint64_t result = 0;
+            if (floating) {
+                result = tile_float_fma(
+                    *lane_format.accumulation, tile_float_format(ew), a, b, old);
+            } else if (signed_mode) {
+                const __int128 product =
+                    static_cast<__int128>(
+                        native_tacc_sign_extend(
+                            a,
+                            source_bits)) *
+                    static_cast<__int128>(
+                        native_tacc_sign_extend(
+                            b,
+                            source_bits));
+                result = old +
+                    static_cast<uint64_t>(product);
+            } else {
+                const __uint128_t product =
+                    static_cast<__uint128_t>(a) *
+                    static_cast<__uint128_t>(b);
+                result = old +
+                    static_cast<uint64_t>(product);
+            }
+            if (accumulator_bits == 32)
+                result &= 0xFFFF'FFFFULL;
+            native_tacc_image_write(
                 staged,
                 lane,
-                accumulator_bits);
-        uint64_t result = 0;
-        if (floating) {
-            result = tile_float_fma(
-                *lane_format.accumulation, tile_float_format(ew), a, b, old);
-        } else if (signed_mode) {
-            const __int128 product =
-                static_cast<__int128>(
-                    native_tacc_sign_extend(
-                        a,
-                        source_bits)) *
-                static_cast<__int128>(
-                    native_tacc_sign_extend(
-                        b,
-                        source_bits));
-            result = old +
-                static_cast<uint64_t>(product);
-        } else {
-            const __uint128_t product =
-                static_cast<__uint128_t>(a) *
-                static_cast<__uint128_t>(b);
-            result = old +
-                static_cast<uint64_t>(product);
+                accumulator_bits,
+                result);
         }
-        if (accumulator_bits == 32)
-            result &= 0xFFFF'FFFFULL;
-        native_tacc_image_write(
-            staged,
-            lane,
-            accumulator_bits,
-            result);
     }
     const std::size_t active =
         native_tacc_active_bytes(ew);
@@ -9585,6 +9411,7 @@ static void publish_float_sums(
         const TileFloatFormat& wide,
         const uint64_t* results,
         int count) {
+    const mp64_tile_values::ScopedFloatEnvironment environment;
     const bool accumulate = take_accumulator_controls(s);
     const uint64_t mask = tile_float_mask(wide);
     const uint64_t magnitude = mask ^ tile_float_sign(wide);
@@ -9602,108 +9429,6 @@ static void publish_float_sums(
     s.flag_z = all_zero ? 1 : 0;
 }
 
-// The running NaN-skipping extreme of TRED MIN/MAX under ACC_ACC.
-static inline uint64_t tile_float_skip_nan_extreme(
-        const TileFloatFormat& wide,
-        uint64_t old_value,
-        uint64_t value,
-        bool largest) {
-    if (tile_float_is_nan(wide, old_value))
-        return tile_float_is_nan(wide, value)
-            ? tile_float_canonical_nan(wide) : value;
-    if (tile_float_is_nan(wide, value))
-        return old_value;
-    const uint64_t old_key = tile_float_order_key(wide, old_value);
-    const uint64_t key = tile_float_order_key(wide, value);
-    return (largest ? key > old_key : key < old_key) ? value : old_value;
-}
-
-// Whether a MINIDX/MAXIDX tile result replaces ACC0/ACC1 under ACC_ACC.
-static inline bool tile_float_index_replaces(
-        const TileFloatFormat& wide,
-        uint64_t candidate,
-        uint64_t old_value,
-        bool largest) {
-    if (tile_float_is_nan(wide, candidate))
-        return false;
-    if (tile_float_is_nan(wide, old_value))
-        return true;
-    const uint64_t candidate_key = tile_float_order_key(wide, candidate);
-    const uint64_t old_key = tile_float_order_key(wide, old_value);
-    return largest ? candidate_key > old_key : candidate_key < old_key;
-}
-
-// Round an exact integer, given as a sign and magnitude, once to a tile
-// float format (RNE).  Integer magnitudes are never subnormal.
-static inline uint64_t tile_float_from_integer(
-        const TileFloatFormat& f,
-        bool negative,
-        uint64_t magnitude) {
-    if (magnitude == 0)
-        return 0;
-    const uint64_t sign_bits = negative ? tile_float_sign(f) : 0;
-    const int precision = f.fraction_bits + 1;
-    const int bias = (1 << (f.exponent_bits - 1)) - 1;
-    int exponent = 63 - __builtin_clzll(magnitude);
-    uint64_t mantissa;
-    if (exponent < precision) {
-        mantissa = magnitude << (precision - 1 - exponent);
-    } else {
-        const int shift = exponent - (precision - 1);
-        mantissa = magnitude >> shift;
-        const uint64_t remainder = magnitude & ((1ULL << shift) - 1);
-        const uint64_t half = 1ULL << (shift - 1);
-        if (remainder > half || (remainder == half && (mantissa & 1))) {
-            mantissa++;
-            if (mantissa >> precision) {
-                mantissa >>= 1;
-                exponent++;
-            }
-        }
-    }
-    const int biased = exponent + bias;
-    if (biased >= (1 << f.exponent_bits) - 1)
-        return sign_bits | tile_float_infinity(f);
-    return sign_bits |
-           (static_cast<uint64_t>(biased) << f.fraction_bits) |
-           (mantissa & ((1ULL << f.fraction_bits) - 1));
-}
-
-// A float lane converted to a saturating integer lane of width bits: NaN
-// gives 0, and the value rounds toward zero or to nearest-even first.  Every
-// tile float format converts exactly to double.
-static inline uint64_t tile_float_to_integer(
-        const TileFloatFormat& f,
-        uint64_t bits,
-        int width,
-        bool is_signed,
-        bool nearest) {
-    const double x = tile_float_to_double(f, bits);
-    if (std::isnan(x))
-        return 0;
-    double r = std::trunc(x);
-    if (nearest) {
-        r = std::floor(x);
-        const double fraction = x - r;
-        if (fraction > 0.5 || (fraction == 0.5 && std::fmod(r, 2.0) != 0.0))
-            r += 1.0;
-    }
-    const uint64_t mask = width == 64 ? ~0ULL : (1ULL << width) - 1;
-    if (is_signed) {
-        const double bound = std::ldexp(1.0, width - 1);
-        if (r >= bound)
-            return (mask >> 1);
-        if (r < -bound)
-            return (1ULL << (width - 1)) & mask;
-        return static_cast<uint64_t>(static_cast<int64_t>(r)) & mask;
-    }
-    if (r >= std::ldexp(1.0, width))
-        return mask;
-    if (r <= 0.0)
-        return 0;
-    return static_cast<uint64_t>(r) & mask;
-}
-
 // TCVT: convert a region from TMODE.EW to function bits [7:4] (§6.3).
 // Widening reads TSRC0 and writes k tiles from TDST; narrowing reads k tiles
 // from TSRC0 and writes one tile.  Every source tile is read before any
@@ -9715,39 +9440,25 @@ static int exec_native_tcvt(
         int funct_byte) {
     const TileFormat& source = TILE_FORMATS[source_ew];
     const TileFormat& target = TILE_FORMATS[(funct_byte >> 4) & 0xF];
-    const bool is_signed = (s.tmode >> 4) & 1;
-    const bool nearest = (s.tmode >> 6) & 1;
     const int wide = std::max(source.lane_bytes, target.lane_bytes);
     const int k = wide / std::min(source.lane_bytes, target.lane_bytes);
     const int reads = target.lane_bytes < source.lane_bytes ? k : 1;
     const int writes = target.lane_bytes > source.lane_bytes ? k : 1;
-    std::array<Tile, 8> region{};
-    for (int index = 0; index < reads; index++)
-        tile_read_64bytes(s, cb, s.tsrc0 + 64ULL * index, region[index]);
-    std::array<Tile, 8> output{};
-    const int lanes = reads * source.lanes();
-    for (int lane = 0; lane < lanes; lane++) {
-        const uint64_t x = tile_get_elem(
-            region[lane / source.lanes()], lane % source.lanes(),
-            source.lane_bytes);
-        uint64_t y = 0;
-        if (source.is_float() && target.is_float()) {
-            y = tile_float_convert(*target.floating, *source.floating, x);
-        } else if (source.is_float()) {
-            y = tile_float_to_integer(*source.floating, x,
-                                      target.lane_bits(), is_signed, nearest);
-        } else {
-            const bool negative =
-                is_signed && (x >> (source.lane_bits() - 1)) & 1;
-            const uint64_t magnitude = negative
-                ? (0ULL - static_cast<uint64_t>(
-                      to_signed_eb(x, source.lane_bytes)))
-                : x;
-            y = tile_float_from_integer(*target.floating, negative, magnitude);
-        }
-        tile_set_elem(output[lane / target.lanes()], lane % target.lanes(),
-                      target.lane_bytes, y);
+    std::array<uint8_t, 8 * TILE_BYTES> region{};
+    for (int index = 0; index < reads; index++) {
+        Tile tile{};
+        tile_read_64bytes(s, cb, s.tsrc0 + 64ULL * index, tile);
+        std::copy(tile.begin(), tile.end(), region.begin() + index * TILE_BYTES);
     }
+    const auto result = mp64_tile_values::execute(
+        mp64_tile_values::Operation::Convert,
+        static_cast<unsigned>(s.tmode & TMODE_WRITE_MASK),
+        {region.data(), static_cast<std::size_t>(reads) * TILE_BYTES},
+        {}, {}, static_cast<unsigned>((funct_byte >> 4) & 0xF));
+    std::array<Tile, 8> output{};
+    for (int index = 0; index < writes; index++)
+        std::copy_n(result.bytes.data() + index * TILE_BYTES,
+                    TILE_BYTES, output[index].data());
     for (int index = 0; index < writes; index++)
         tile_write_64bytes(s, cb, s.tdst + 64ULL * index, output[index]);
     return 4 + (k - 1);
@@ -9882,8 +9593,8 @@ static int exec_mex(
         funct = 0;
 
     // Python owns the 256-bit integer accumulator semantics, the current
-    // TSYS instruction map, the EXT.8 ALU in float formats, and every trap
-    // for an operation the format does not admit.  Decide this before
+    // TSYS instruction map, and every trap for an operation the format does
+    // not admit.  Decide this before
     // reading sources or changing ACC/TCTRL/destination state so
     // rewind-and-fallback is transactional.  FP POPCNT counts raw bits into
     // the integer accumulator.
@@ -9921,6 +9632,7 @@ static int exec_mex(
         src_b = src_a;
         if (is_fp) {
             // The unsigned immediate converted exactly to the lane format.
+            const mp64_tile_values::ScopedFloatEnvironment environment;
             const uint64_t immediate = tile_float_from_double(
                 tile_float_format(ew_bits), static_cast<double>(funct_byte));
             for (int lane = 0; lane < num_lanes; lane++)
@@ -9933,77 +9645,43 @@ static int exec_mex(
         tile_read_64bytes(s, cb, s.tsrc0, src_b);
     }
 
+    // Value execution never reads CPU memory or invokes a callback. Preserve
+    // source/destination transport order around each shared operation.
+    using TileOperation = mp64_tile_values::Operation;
+    const auto evaluate = [&](TileOperation operation,
+                              const Tile* destination = nullptr,
+                              unsigned argument = 0) {
+        return mp64_tile_values::execute(
+            operation, static_cast<unsigned>(s.tmode & TMODE_WRITE_MASK),
+            {src_a.data(), src_a.size()}, {src_b.data(), src_b.size()},
+            destination == nullptr ? mp64_tile_values::ByteView{} :
+                mp64_tile_values::ByteView{destination->data(), destination->size()},
+            argument);
+    };
+    const auto write_result = [&](const mp64_tile_values::Outcome& result) {
+        for (std::size_t offset = 0; offset < result.size; offset += TILE_BYTES) {
+            Tile tile{};
+            std::copy_n(result.bytes.data() + offset, TILE_BYTES, tile.data());
+            tile_write_64bytes(s, cb, s.tdst + offset, tile);
+        }
+    };
+
     // Extended Tile ALU (EXT modifier 8)
     if (s.ext_modifier == 8 && op == 0x0) {
         if (funct == 4 || funct == 5) {  // TDIV, TSQRT (§6.1, §6.2)
-            // binary64 division and square root are correctly rounded, and
-            // rounding them once to a narrower lane format is exact because
-            // 53 >= 2p + 2 for every lane format.
-            const TileFloatFormat& fmt = tile_float_format(ew_bits);
-            for (int lane = 0; lane < num_lanes; lane++) {
-                const double x = tile_float_to_double(
-                    fmt, tile_get_elem(src_a, lane, elem_bytes));
-                const double r = funct == 4
-                    ? x / tile_float_to_double(
-                          fmt, tile_get_elem(src_b, lane, elem_bytes))
-                    : std::sqrt(x);
-                tile_set_elem(dst, lane, elem_bytes,
-                              tile_float_from_double(fmt, r));
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
+            write_result(evaluate(funct == 4
+                ? TileOperation::Divide : TileOperation::SquareRoot));
             return tile_divide_extra_cycles(ew_bits);
         }
         if (funct == 2) {  // VSEL: msb(M) ? A : B, M = old [TDST] (§6.4)
             Tile masks{};
             tile_read_64bytes(s, cb, s.tdst, masks);
-            const uint64_t top = 1ULL << (elem_bytes * 8 - 1);
-            for (int lane = 0; lane < num_lanes; lane++) {
-                tile_set_elem(dst, lane, elem_bytes,
-                    (tile_get_elem(masks, lane, elem_bytes) & top)
-                        ? tile_get_elem(src_a, lane, elem_bytes)
-                        : tile_get_elem(src_b, lane, elem_bytes));
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
+            write_result(evaluate(TileOperation::Select, &masks));
             return 1;
         }
         if (funct == 7) {  // TCMP: all-ones or zero lane masks (§6.5)
-            const int predicate = (funct_byte >> 3) & 0x7;
-            for (int lane = 0; lane < num_lanes; lane++) {
-                const uint64_t a = tile_get_elem(src_a, lane, elem_bytes);
-                const uint64_t b = tile_get_elem(src_b, lane, elem_bytes);
-                bool less = false, equal = false, unordered = false;
-                if (is_fp) {
-                    const TileFloatFormat& fmt = tile_float_format(ew_bits);
-                    const double x = tile_float_to_double(fmt, a);
-                    const double y = tile_float_to_double(fmt, b);
-                    unordered = std::isnan(x) || std::isnan(y);
-                    less = x < y;
-                    equal = x == y;
-                } else if (is_signed) {
-                    const int64_t x = to_signed_eb(a, elem_bytes);
-                    const int64_t y = to_signed_eb(b, elem_bytes);
-                    less = x < y;
-                    equal = x == y;
-                } else {
-                    less = a < b;
-                    equal = a == b;
-                }
-                const bool greater = !unordered && !less && !equal;
-                bool result = false;
-                switch (predicate) {
-                    case 0: result = equal; break;
-                    case 1: result = !equal; break;
-                    case 2: result = less; break;
-                    case 3: result = less || equal; break;
-                    case 4: result = greater; break;
-                    case 5: result = greater || equal; break;
-                    case 6: result = unordered; break;
-                    default: result = !unordered; break;
-                }
-                tile_set_elem(dst, lane, elem_bytes,
-                              result ? elem_mask(elem_bytes) : 0);
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
+            write_result(evaluate(TileOperation::Compare, nullptr,
+                                  static_cast<unsigned>((funct_byte >> 3) & 0x7)));
             return 1;
         }
         bool rounding = (s.tmode >> 6) & 1;
@@ -10040,224 +9718,44 @@ static int exec_mex(
         return 1;
     }
 
-    if (op == 0x0) {  // TALU
-        if (is_fp) {
-            const TileFloatFormat& fmt = tile_float_format(ew_bits);
-            const uint64_t magnitude =
-                tile_float_mask(fmt) ^ tile_float_sign(fmt);
-            for (int lane = 0; lane < num_lanes; lane++) {
-                const uint64_t a = tile_get_elem(src_a, lane, elem_bytes);
-                const uint64_t b = tile_get_elem(src_b, lane, elem_bytes);
-                uint64_t r = 0;
-                switch (funct) {
-                    case 0: r = tile_float_add(fmt, a, b); break;
-                    case 1: r = tile_float_sub(fmt, a, b); break;
-                    case 2: r = a & b; break;
-                    case 3: r = a | b; break;
-                    case 4: r = a ^ b; break;
-                    case 5: r = tile_float_extreme2(fmt, a, b, false); break;
-                    case 6: r = tile_float_extreme2(fmt, a, b, true); break;
-                    default: r = a & magnitude; break;  // ABS
-                }
-                tile_set_elem(dst, lane, elem_bytes, r);
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
-            return tile_float_extra_cycles(ew_bits, op, funct);
-        }
-
-        // ---- Integer TALU ----
-        bool saturate = (s.tmode >> 5) & 1;
-        for (int lane = 0; lane < num_lanes; lane++) {
-            uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
-            uint64_t eb_val = tile_get_elem(src_b, lane, elem_bytes);
-            int bits = elem_bytes * 8;
-            uint64_t mask = elem_mask(elem_bytes);
-            uint64_t r = 0;
-
-            switch (funct) {
-                case 0: {  // ADD
-                    if (saturate) {
-                        if (is_signed) {
-                            __int128 sum = static_cast<__int128>(
-                                               to_signed_eb(ea, elem_bytes)) +
-                                           static_cast<__int128>(
-                                               to_signed_eb(eb_val, elem_bytes));
-                            const __int128 bound =
-                                static_cast<__int128>(1) << (bits - 1);
-                            const __int128 hi = bound - 1;
-                            const __int128 lo = -bound;
-                            if (sum > hi) sum = hi;
-                            if (sum < lo) sum = lo;
-                            r = static_cast<uint64_t>(sum) & mask;
-                        } else {
-                            const __uint128_t sum =
-                                static_cast<__uint128_t>(ea) + eb_val;
-                            r = sum > static_cast<__uint128_t>(mask)
-                                    ? mask : static_cast<uint64_t>(sum);
-                        }
-                    } else {
-                        r = (ea + eb_val) & mask;
-                    }
-                    break;
-                }
-                case 1: {  // SUB
-                    if (saturate) {
-                        if (is_signed) {
-                            __int128 diff = static_cast<__int128>(
-                                                to_signed_eb(ea, elem_bytes)) -
-                                            static_cast<__int128>(
-                                                to_signed_eb(eb_val, elem_bytes));
-                            const __int128 bound =
-                                static_cast<__int128>(1) << (bits - 1);
-                            const __int128 hi = bound - 1;
-                            const __int128 lo = -bound;
-                            if (diff > hi) diff = hi;
-                            if (diff < lo) diff = lo;
-                            r = static_cast<uint64_t>(diff) & mask;
-                        } else {
-                            r = ea < eb_val ? 0 : ea - eb_val;
-                        }
-                    } else {
-                        r = (ea - eb_val) & mask;
-                    }
-                    break;
-                }
-                case 2: r = ea & eb_val; break;   // AND
-                case 3: r = ea | eb_val; break;   // OR
-                case 4: r = ea ^ eb_val; break;   // XOR
-                case 5: {  // MIN
-                    if (is_signed)
-                        r = (to_signed_eb(ea, elem_bytes) < to_signed_eb(eb_val, elem_bytes))
-                            ? ea : eb_val;
-                    else
-                        r = (ea < eb_val) ? ea : eb_val;
-                    break;
-                }
-                case 6: {  // MAX
-                    if (is_signed)
-                        r = (to_signed_eb(ea, elem_bytes) > to_signed_eb(eb_val, elem_bytes))
-                            ? ea : eb_val;
-                    else
-                        r = (ea > eb_val) ? ea : eb_val;
-                    break;
-                }
-                case 7: {  // ABS
-                    if (is_signed) {
-                        const int64_t sv = to_signed_eb(ea, elem_bytes);
-                        // Compute the magnitude in unsigned arithmetic so
-                        // abs(INT64_MIN) is defined and wraps like Python.
-                        r = (sv < 0 ? (~ea + 1) : ea) & mask;
-                    } else {
-                        r = ea;
-                    }
-                    break;
-                }
-            }
-            tile_set_elem(dst, lane, elem_bytes, r);
-        }
-        tile_write_64bytes(s, cb, s.tdst, dst);
-        return 0;
+    if (op == 0x0) {  // TALU, integer and floating-point lane values
+        static constexpr TileOperation operations[] = {
+            TileOperation::Add, TileOperation::Subtract, TileOperation::And,
+            TileOperation::Or, TileOperation::Xor, TileOperation::Minimum,
+            TileOperation::Maximum, TileOperation::Absolute,
+        };
+        write_result(evaluate(operations[funct]));
+        return is_fp ? tile_float_extra_cycles(ew_bits, op, funct) : 0;
     }
 
     if (op == 0x1) {  // TMUL
-        if (is_fp) {
-            // ---- Floating-point TMUL ----
-            const TileFloatFormat& fmt = tile_float_format(ew_bits);
-            const int cycles = tile_float_extra_cycles(ew_bits, op, funct);
-            if (funct == 0) {  // MUL
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    tile_set_elem(dst, lane, elem_bytes, tile_float_product(
-                        fmt, fmt,
-                        tile_get_elem(src_a, lane, elem_bytes),
-                        tile_get_elem(src_b, lane, elem_bytes)));
-                }
-                tile_write_64bytes(s, cb, s.tdst, dst);
-                return cycles;
-            }
-            if (funct == 1 || funct == 5) {  // DOT, DOTACC
-                const TileFloatFormat& wide = *lane_format.accumulation;
-                double products[32];
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    products[lane] = tile_float_to_double(
-                        wide,
-                        tile_float_product(
-                            wide, fmt,
-                            tile_get_elem(src_a, lane, elem_bytes),
-                            tile_get_elem(src_b, lane, elem_bytes)));
-                }
-                uint64_t results[4]{};
-                if (funct == 1) {
-                    results[0] = tile_float_tree(wide, products, num_lanes);
-                    publish_float_sums(s, wide, results, 1);
-                } else {
-                    const int chunk = num_lanes / 4;
-                    for (int k = 0; k < 4; k++) {
-                        results[k] = tile_float_tree(
-                            wide, products + k * chunk, chunk);
-                    }
-                    publish_float_sums(s, wide, results, 4);
-                }
-                return cycles;
-            }
-            if (funct == 2) {  // WMUL — products rounded once to format A
-                const TileFloatFormat& wide = *lane_format.accumulation;
-                const int wide_bytes = 2 * elem_bytes;
-                const int half = num_lanes / 2;
-                Tile dst0{}, dst1{};
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    const uint64_t product = tile_float_product(
-                        wide, fmt,
-                        tile_get_elem(src_a, lane, elem_bytes),
-                        tile_get_elem(src_b, lane, elem_bytes));
-                    if (lane < half)
-                        tile_set_elem(dst0, lane, wide_bytes, product);
-                    else
-                        tile_set_elem(dst1, lane - half, wide_bytes, product);
-                }
-                tile_write_64bytes(s, cb, s.tdst, dst0);
-                tile_write_64bytes(s, cb, s.tdst + 64, dst1);
-                return cycles;
-            }
-            if (funct == 3 || funct == 4) {  // MAC, FMA — fused, addend [TDST]
-                Tile addend{};
-                tile_read_64bytes(s, cb, s.tdst, addend);
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    tile_set_elem(dst, lane, elem_bytes, tile_float_fma(
-                        fmt, fmt,
-                        tile_get_elem(src_a, lane, elem_bytes),
-                        tile_get_elem(src_b, lane, elem_bytes),
-                        tile_get_elem(addend, lane, elem_bytes)));
-                }
-                tile_write_64bytes(s, cb, s.tdst, dst);
-                return cycles;
-            }
-            return 1;  // unknown FP TMUL funct
-        }
-
-        // ---- Integer TMUL ----
-        if (funct == 0) {  // MUL (element-wise)
-            for (int lane = 0; lane < num_lanes; lane++) {
-                uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
-                uint64_t eb_val = tile_get_elem(src_b, lane, elem_bytes);
-                const uint64_t mask = elem_mask(elem_bytes);
-                uint64_t r = 0;
-                if (is_signed) {
-                    const __int128 product =
-                        static_cast<__int128>(to_signed_eb(ea, elem_bytes)) *
-                        static_cast<__int128>(to_signed_eb(eb_val, elem_bytes));
-                    r = static_cast<uint64_t>(product) & mask;
-                } else {
-                    const __uint128_t product =
-                        static_cast<__uint128_t>(ea) * eb_val;
-                    r = static_cast<uint64_t>(product) & mask;
-                }
-                tile_set_elem(dst, lane, elem_bytes, r);
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
-            return 1;
+        const int cycles = is_fp
+            ? tile_float_extra_cycles(ew_bits, op, funct) : 1;
+        if (funct == 0) {  // MUL, integer or floating-point
+            write_result(evaluate(TileOperation::Multiply));
+            return cycles;
         }
         // Non-MUL integer functions were routed to Python before source reads.
-        return -1;
+        if (!is_fp)
+            return -1;
+        if (funct == 1 || funct == 5) {  // DOT, DOTACC
+            const auto result = evaluate(funct == 1
+                ? TileOperation::Dot : TileOperation::DotChunks);
+            publish_float_sums(s, *lane_format.accumulation,
+                               result.values.data(), funct == 1 ? 1 : 4);
+            return cycles;
+        }
+        if (funct == 2) {  // WMUL, preserving the two destination beats
+            write_result(evaluate(TileOperation::WideningMultiply));
+            return cycles;
+        }
+        if (funct == 3 || funct == 4) {  // MAC, FMA: addend [TDST]
+            Tile addend{};
+            tile_read_64bytes(s, cb, s.tdst, addend);
+            write_result(evaluate(TileOperation::FusedMultiplyAdd, &addend));
+            return cycles;
+        }
+        return 1;  // unknown FP TMUL funct
     }
 
     if (op == 0x2) {  // TRED (reductions)
@@ -10267,45 +9765,22 @@ static int exec_mex(
         if (!is_fp || funct == 3)
             return -1;
 
-        const TileFloatFormat& fmt = tile_float_format(ew_bits);
         const TileFloatFormat& wide = *lane_format.accumulation;
         if (funct == 0 || funct == 4 || funct == 5) {  // SUM, L1, SUMSQ
-            const uint64_t magnitude =
-                tile_float_mask(fmt) ^ tile_float_sign(fmt);
-            double leaves[32];
-            for (int lane = 0; lane < num_lanes; lane++) {
-                const uint64_t x = tile_get_elem(src_a, lane, elem_bytes);
-                const uint64_t leaf =
-                    funct == 5 ? tile_float_product(wide, fmt, x, x)
-                    : tile_float_convert(
-                          wide, fmt, funct == 4 ? (x & magnitude) : x);
-                leaves[lane] = tile_float_to_double(wide, leaf);
-            }
-            const uint64_t result = tile_float_tree(wide, leaves, num_lanes);
-            publish_float_sums(s, wide, &result, 1);
+            const auto result = evaluate(funct == 0 ? TileOperation::Sum :
+                funct == 4 ? TileOperation::L1 : TileOperation::SumSquares);
+            publish_float_sums(s, wide, result.values.data(), 1);
             return tile_float_extra_cycles(ew_bits, op, funct);
         }
 
         // MIN, MAX, MINIDX, MAXIDX: NaN-skipping, -0 below +0, lowest index.
         const bool largest = funct == 2 || funct == 7;
-        int best_index = -1;
-        uint64_t best_key = 0;
-        for (int lane = 0; lane < num_lanes; lane++) {
-            const uint64_t x = tile_get_elem(src_a, lane, elem_bytes);
-            if (tile_float_is_nan(fmt, x))
-                continue;
-            const uint64_t key = tile_float_order_key(fmt, x);
-            if (best_index < 0 ||
-                (largest ? key > best_key : key < best_key)) {
-                best_index = lane;
-                best_key = key;
-            }
-        }
-        const uint64_t value = best_index < 0
-            ? tile_float_canonical_nan(wide)
-            : tile_float_convert(
-                  wide, fmt, tile_get_elem(src_a, best_index, elem_bytes));
-        const int index = best_index < 0 ? 0 : best_index;
+        const bool indexed = funct == 6 || funct == 7;
+        const auto result = evaluate(indexed
+            ? (largest ? TileOperation::MaximumIndex : TileOperation::MinimumIndex)
+            : (largest ? TileOperation::ReductionMaximum : TileOperation::ReductionMinimum));
+        const uint64_t value = result.values[indexed ? 1 : 0];
+        const uint64_t index = indexed ? result.values[0] : 0;
         const bool accumulate = take_accumulator_controls(s);
         const uint64_t wide_mask = tile_float_mask(wide);
         if (funct == 1 || funct == 2) {
@@ -13146,6 +12621,8 @@ public:
             py::buffer control_buffer)
         : state_owner_(std::move(state_owner)),
           state_(&state_owner_.cast<CPUState&>()) {
+        if (state_->public_mutation_count.load() != 0)
+            throw std::runtime_error("cannot pin a routine runner during a public CPU operation");
         if (state_->profile != CoreProfile::FULL || !state_->private_memory ||
             state_->system_batch_active != nullptr)
             throw py::value_error("routine runner requires a standalone full core");
@@ -13164,6 +12641,8 @@ public:
             throw py::value_error("private control arena overlaps MMIO");
         // Lock acquisition briefly released the GIL and acquiring a custom
         // buffer can re-enter Python. Recheck before publishing this owner.
+        if (state_->public_mutation_count.load() != 0)
+            throw std::runtime_error("cannot pin a routine runner during a public CPU operation");
         require_private_memory_mapping(*state_);
         control_bytes_ = prepared.ptr;
         validate_mappings();
@@ -13173,11 +12652,11 @@ public:
         owns_mapping_pin_ = true;
     }
 
-    ~RoutineRunnerV1() { release(); }
+    virtual ~RoutineRunnerV1() { release(); }
     RoutineRunnerV1(const RoutineRunnerV1&) = delete;
     RoutineRunnerV1& operator=(const RoutineRunnerV1&) = delete;
 
-    void close() {
+    virtual void close() {
         if (active_)
             throw std::runtime_error("routine runner cannot close during an active boundary");
         release();
@@ -13287,14 +12766,15 @@ public:
         return result;
     }
 
-private:
+protected:
     struct ActiveBoundary {
         RoutineRunnerV1& owner;
-        explicit ActiveBoundary(RoutineRunnerV1& value) : owner(value) {
+        explicit ActiveBoundary(RoutineRunnerV1& value, const void* permitted_owner = nullptr) : owner(value) {
             if (owner.closed_)
                 throw std::runtime_error("routine runner is closed");
             if (owner.active_)
                 throw std::runtime_error("routine runner boundary is already active");
+            require_routine_cpu_access(*owner.state_, permitted_owner);
             owner.active_ = true;
         }
         ~ActiveBoundary() { owner.active_ = false; }
@@ -13352,11 +12832,11 @@ private:
         }
     };
 
-    std::unique_ptr<CPUExecutionGuard> acquire_execution() {
+    std::unique_ptr<CPUExecutionGuard> acquire_execution(const void* permitted_owner = nullptr) {
         // Only lock acquisition releases the GIL. The bounded machine
         // interval retains it and cannot call Python or enter a device.
         py::gil_scoped_release release;
-        return std::make_unique<CPUExecutionGuard>(*state_);
+        return std::make_unique<CPUExecutionGuard>(*state_, permitted_owner);
     }
 
     void release() {
@@ -13545,7 +13025,7 @@ private:
         state_->regs[15] = spec.stack_empty() - 8;
         for (std::size_t i = 0; i < arguments.size(); ++i)
             state_->regs[4 + i] = arguments[i];
-        uint8_t* root = control_bytes_ + state_->regs[15] - control_.base;
+        uint8_t* root = control_bytes_ + (state_->regs[15] - control_.base);
         std::fill(root, root + 8, uint8_t{0xFF});
     }
 
@@ -13559,6 +13039,505 @@ private:
     bool active_ = false;
     bool closed_ = false;
 };
+
+namespace mp64_callbacks = mp64::cpu::routine_v2;
+
+static std::shared_ptr<mp64_callbacks::Spec> make_routine_spec_v2(
+        py::handle code_base, py::handle code, py::handle entry_offset,
+        py::handle input_cells, py::handle output_cells,
+        py::handle stack_base, py::handle stack_size,
+        py::handle max_instructions, py::handle callbacks) {
+    if (!PyBytes_CheckExact(code.ptr()))
+        throw py::type_error("sealed code must be exact bytes");
+    const std::size_t code_size = static_cast<std::size_t>(PyBytes_GET_SIZE(code.ptr()));
+    if (code_size == 0 || code_size > mp64_routine::MAX_CODE_BYTES)
+        throw py::value_error("sealed code must contain 1 through 1048576 bytes");
+    const auto* bytes = reinterpret_cast<const uint8_t*>(PyBytes_AS_STRING(code.ptr()));
+    auto spec = std::make_shared<mp64_callbacks::Spec>();
+    spec->routine = make_routine_spec_v1(
+        code_base, py::int_(code_size), entry_offset, input_cells,
+        output_cells, stack_base, stack_size, max_instructions);
+    spec->code.assign(bytes, bytes + code_size);
+    const auto sites = routine_exact_sequence(
+        callbacks, "callback sites", mp64_callbacks::MAX_CALLBACK_SITES);
+    std::vector<uint8_t> occupied(code_size, 0);
+    for (py::handle item : sites) {
+        const auto fields = routine_exact_sequence(item, "callback site", 5);
+        if (fields.size() != 5)
+            throw py::value_error("callback site requires five integer fields");
+        mp64_callbacks::Site site{
+            routine_exact_uint64(fields[0], "call offset"),
+            routine_exact_uint64(fields[1], "stub offset"),
+            routine_exact_uint64(fields[2], "export ID"),
+            routine_exact_uint64(fields[3], "callback input cells"),
+            routine_exact_uint64(fields[4], "callback output cells")};
+        if (site.call_offset >= code_size ||
+            code_size - site.call_offset < 2 ||
+            site.stub_offset >= code_size ||
+            site.export_id >= mp64_callbacks::MAX_EXPORTS ||
+            site.input_cells > 8 || site.output_cells > 8)
+            throw py::value_error("callback metadata exceeds the bounded profile");
+        for (uint64_t offset : {site.call_offset, site.call_offset + 1, site.stub_offset}) {
+            if (occupied[static_cast<std::size_t>(offset)] != 0)
+                throw py::value_error("callback call and stub spans overlap");
+            occupied[static_cast<std::size_t>(offset)] = 1;
+        }
+        for (const auto& previous : spec->callbacks)
+            if (previous.export_id == site.export_id &&
+                (previous.input_cells != site.input_cells ||
+                 previous.output_cells != site.output_cells))
+                throw py::value_error("callback export signatures disagree");
+        spec->callbacks.push_back(site);
+    }
+
+    struct SealReader {
+        const std::vector<uint8_t>& bytes;
+        std::size_t offset = 0;
+        bool read(uint8_t& value) {
+            if (offset == bytes.size()) return false;
+            value = bytes[offset++];
+            return true;
+        }
+        void observe_prefix(uint8_t) {}
+    } reader{spec->code};
+    spec->boundaries.assign(code_size, 0);
+    while (reader.offset < spec->code.size()) {
+        const std::size_t start = reader.offset;
+        const DecodeResult decoded = decode_instruction(reader, -1);
+        if (decoded.status != DecodeStatus::DECODED ||
+            !mp64_routine::admitted(decoded.instruction))
+            throw py::value_error("v2 image must completely decode to admitted integer instructions");
+        spec->boundaries[start] = 1;
+        for (const auto& site : spec->callbacks) {
+            if (site.call_offset == start &&
+                (decoded.instruction.operation != DecodedOperation::CALL_LONG ||
+                 decoded.instruction.encoded_size != 2 ||
+                 decoded.instruction.has_trait(mp64::cpu::PREFIXED_ENCODING) ||
+                 decoded.instruction.has_trait(mp64::cpu::NONCANONICAL_ENCODING)))
+                throw py::value_error("callback call must be canonical unprefixed CALL.L");
+            if (site.stub_offset == start &&
+                (decoded.instruction.operation != DecodedOperation::RETURN_LONG ||
+                 decoded.instruction.encoded_size != 1 ||
+                 decoded.instruction.has_trait(mp64::cpu::PREFIXED_ENCODING)))
+                throw py::value_error("callback stub must be canonical unprefixed RET.L");
+        }
+    }
+    if (!spec->boundaries[static_cast<std::size_t>(spec->routine.entry_offset)])
+        throw py::value_error("entry offset is not an instruction boundary");
+    for (const auto& site : spec->callbacks)
+        if (!spec->boundaries[static_cast<std::size_t>(site.call_offset)] ||
+            !spec->boundaries[static_cast<std::size_t>(site.stub_offset)])
+            throw py::value_error("callback offsets must be instruction boundaries");
+    return spec;
+}
+
+class RoutineRunnerV2 : public RoutineRunnerV1 {
+public:
+    using RoutineRunnerV1::RoutineRunnerV1;
+    ~RoutineRunnerV2() { frame_.reset(); }
+
+    void close() override {
+        if (active_)
+            throw std::runtime_error("routine runner cannot close during an active boundary");
+        frame_.reset();
+        publications_.clear();
+        identity_.reset();
+        RoutineRunnerV1::close();
+    }
+
+    void publish_code_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        ActiveBoundary boundary(*this);
+        if (!spec)
+            throw py::type_error("publication requires a RoutineSpecV2");
+        auto execution_guard = acquire_execution();
+        validate_spec(spec->routine);
+        validate_seal(*spec, false);
+        const auto found = publications_.find(spec.get());
+        if (found == publications_.end()) {
+            if (publications_.size() == mp64_callbacks::MAX_PUBLICATIONS ||
+                spec->code.size() > mp64_callbacks::MAX_TOTAL_CODE_BYTES - published_bytes_)
+                throw py::value_error("v2 publication count or aggregate code limit exceeded");
+            if (publication_sequence_ == std::numeric_limits<uint64_t>::max())
+                throw std::runtime_error("native publication identity space is exhausted");
+            publications_.emplace(spec.get(), Publication{spec, ++publication_sequence_});
+            published_bytes_ += spec->code.size();
+        }
+        icache_invalidate_span(*state_, spec->routine.code_base, spec->routine.code_size);
+        state_->ifetch_window_valid = false;
+    }
+
+    void revoke_code_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        ActiveBoundary boundary(*this);
+        if (!spec)
+            throw py::type_error("revocation requires a RoutineSpecV2");
+        auto execution_guard = acquire_execution();
+        const auto publication = publications_.find(spec.get());
+        if (publication == publications_.end())
+            throw py::value_error("v2 specification was not published by this runner");
+        published_bytes_ -= publication->second.spec->code.size();
+        publications_.erase(publication);
+        // Revocation removes entry authority, not architectural cache state.
+        // A later publication obtains a new generation and invalidates lines.
+    }
+
+    bool is_code_published_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        ActiveBoundary boundary(*this);
+        if (!spec)
+            throw py::type_error("publication query requires a RoutineSpecV2");
+        return publications_.find(spec.get()) != publications_.end();
+    }
+
+    mp64_callbacks::Result begin_v2(
+            const std::shared_ptr<mp64_callbacks::Spec>& spec,
+            py::handle arguments, py::handle spans, py::handle instruction_limit,
+            py::handle callback_limit, py::handle protected_spans) {
+        ActiveBoundary boundary(*this);
+        if (!spec)
+            throw py::type_error("entry requires a RoutineSpecV2");
+        const uint64_t requested = routine_exact_uint64(instruction_limit, "instruction_limit");
+        const uint64_t callbacks = routine_exact_uint64(callback_limit, "callback_limit");
+        if (requested == 0 || requested > mp64_routine::MAX_DISPATCH_INSTRUCTIONS)
+            throw py::value_error("instruction_limit must be in [1, 10000000]");
+        if (callbacks > mp64_callbacks::MAX_CALLBACKS)
+            throw py::value_error("remaining callback_limit must be in [0, 1024]");
+        const auto args = parse_arguments(arguments, spec->routine.input_cells);
+        auto borrowed = parse_spans(spans);
+        const auto protected_values = parse_protected(protected_spans);
+        const auto publication = publications_.find(spec.get());
+        if (publication == publications_.end())
+            throw py::value_error("v2 specification was not published by this runner");
+        if (invocation_sequence_ == std::numeric_limits<uint64_t>::max())
+            throw std::runtime_error("native invocation identity space is exhausted");
+        require_segment_identity();
+        auto next = std::make_unique<Frame>();
+        next->spec = spec;
+        next->publication = publication->second.generation;
+        next->allowance = std::min(requested, spec->routine.max_instructions);
+        next->callback_allowance = callbacks;
+        next->spans = std::move(borrowed);
+        next->reservation = std::make_unique<RoutineCPUReservation>(*state_, this);
+        auto execution_guard = acquire_execution(this);
+        validate_spec(spec->routine);
+        validate_borrowed(spec->routine, next->spans, protected_values);
+        validate_seal(*spec, true);
+        next->invocation_id = ++invocation_sequence_;
+        frame_ = std::move(next);
+        initialize_entry(spec->routine, args);
+        return drive(false);
+    }
+
+    mp64_callbacks::Result resume_callback(
+            const std::shared_ptr<mp64_callbacks::Token>& token,
+            py::handle outputs) {
+        ActiveBoundary boundary(*this, this);
+        validate_token(token);
+        const auto values = parse_arguments(outputs, frame_->pending_site.output_cells);
+        auto execution_guard = acquire_execution(this);
+        validate_token(token);
+        validate_seal(*frame_->spec, true);
+        validate_parked_frame();
+        require_segment_identity();
+        if (frame_->instructions == frame_->allowance) {
+            auto result = make_result();
+            result.detail = "machine instruction allowance exhausted before callback return";
+            token->consumed = true;
+            frame_->pending.reset();
+            record_segment(frame_->instructions, frame_->cycles, frame_->sequence);
+            result.segment_id = last_segment_->segment_id;
+            frame_.reset();
+            return result;
+        }
+        token->consumed = true;
+        frame_->pending.reset();
+        for (std::size_t i = 0; i < values.size(); ++i)
+            state_->regs[4 + i] = values[i];
+        return drive(true);
+    }
+
+    mp64_callbacks::Result cancel_invocation(py::object token) {
+        ActiveBoundary boundary(*this, this);
+        if (!frame_)
+            throw std::runtime_error("no callback invocation is active");
+        if (!token.is_none())
+            validate_token(token.cast<std::shared_ptr<mp64_callbacks::Token>>());
+        auto result = make_result();
+        result.exit_kind = "cancelled";
+        result.detail = "callback invocation cancelled by its owner";
+        if (frame_->pending) frame_->pending->consumed = true;
+        frame_.reset();
+        return result;
+    }
+
+    bool owner_cancel_is_inactive() const {
+        if (active_)
+            throw std::runtime_error("routine runner boundary is already active");
+        return !frame_;
+    }
+
+    std::optional<mp64_callbacks::Receipt> last_segment_v2() const noexcept {
+        return last_segment_;
+    }
+
+    void abandon_marshaled_result(uint64_t invocation_id) noexcept {
+        // Binding conversion runs after all native admission has unwound.
+        // It may fail before the caller receives a token. Revoke only that
+        // exact invocation without allocating another result or exception.
+        if (frame_ && frame_->invocation_id == invocation_id) {
+            if (frame_->pending)
+                frame_->pending->consumed = true;
+            frame_.reset();
+        }
+    }
+
+private:
+    struct Publication {
+        std::shared_ptr<mp64_callbacks::Spec> spec;
+        uint64_t generation;
+    };
+    struct Frame {
+        std::shared_ptr<mp64_callbacks::Spec> spec;
+        std::vector<mp64_routine::BufferSpan> spans;
+        std::unique_ptr<RoutineCPUReservation> reservation;
+        uint64_t invocation_id = 0, publication = 0;
+        uint64_t allowance = 0, callback_allowance = 0;
+        uint64_t instructions = 0, cycles = 0, sequence = 0;
+        std::shared_ptr<mp64_callbacks::Token> pending;
+        mp64_callbacks::Site pending_site{};
+        std::array<uint64_t, 32> registers{};
+        std::array<uint8_t, 3> selectors{};
+        uint8_t flags = 0;
+        int modifier = -1;
+        uint64_t cycle_count = 0, live_stack_base = 0;
+        std::vector<uint8_t> live_control;
+    };
+
+    void validate_seal(const mp64_callbacks::Spec& spec, bool cache) const {
+        const auto code = resolve_memory_span(*state_->memory, spec.routine.code_base,
+            MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+        if (!code.covers(spec.code.size()) ||
+            std::memcmp(code.data, spec.code.data(), spec.code.size()) != 0)
+            throw py::value_error("published v2 code seal has changed");
+        if (!cache) return;
+        for (std::size_t index = 0; index < CPUState::ICACHE_LINES; ++index) {
+            if (!state_->icache_valid[index] ||
+                state_->icache_tags[index] > (std::numeric_limits<uint64_t>::max() >> 12))
+                continue;
+            const uint64_t address = (state_->icache_tags[index] << 12) | (index << 4);
+            if (spec.routine.code().contains(address, CPUState::ICACHE_LINE_BYTES) &&
+                std::memcmp(state_->icache_data[index].data(),
+                    spec.code.data() + (address - spec.routine.code_base),
+                    CPUState::ICACHE_LINE_BYTES) != 0)
+                throw py::value_error("resident I-cache bytes disagree with v2 publication seal");
+        }
+    }
+
+    void validate_token(const std::shared_ptr<mp64_callbacks::Token>& token) const {
+        if (!frame_ || !frame_->pending || !token ||
+            token != frame_->pending || token->consumed ||
+            token->owner.lock() != identity_ ||
+            token->invocation_id != frame_->invocation_id ||
+            token->sequence != frame_->sequence ||
+            token->publication != frame_->publication ||
+            token->spec != frame_->spec.get())
+            throw py::value_error("callback token is foreign, consumed, or stale");
+    }
+
+    void capture_parked_frame() {
+        Frame& frame = *frame_;
+        std::copy(std::begin(state_->regs), std::end(state_->regs), frame.registers.begin());
+        frame.selectors = {state_->psel, state_->xsel, state_->spsel};
+        frame.flags = flags_pack(*state_);
+        frame.modifier = state_->ext_modifier;
+        frame.cycle_count = state_->cycle_count;
+        frame.live_stack_base = state_->regs[15];
+        const uint8_t* begin = control_access(frame.spec->routine,
+            frame.live_stack_base, "callback_stack_seal");
+        frame.live_control.assign(begin,
+            begin + (frame.spec->routine.stack_empty() - frame.live_stack_base));
+    }
+
+    void validate_parked_frame() const {
+        const Frame& frame = *frame_;
+        if (!std::equal(frame.registers.begin(), frame.registers.end(), state_->regs) ||
+            frame.selectors != std::array<uint8_t, 3>{state_->psel, state_->xsel, state_->spsel} ||
+            frame.flags != flags_pack(*state_) || frame.modifier != state_->ext_modifier ||
+            frame.cycle_count != state_->cycle_count ||
+            frame.pending->control_slot != state_->regs[15] ||
+            std::memcmp(control_bytes_ + (frame.live_stack_base - control_.base),
+                frame.live_control.data(), frame.live_control.size()) != 0)
+            throw py::value_error("parked callback CPU or private control state changed");
+    }
+
+    mp64_callbacks::Result make_result() const {
+        mp64_callbacks::Result result;
+        result.invocation_id = frame_->invocation_id;
+        result.invocation_instructions = frame_->instructions;
+        result.invocation_cycles = frame_->cycles;
+        result.entry_pc = frame_->spec->routine.entry();
+        result.instruction_pc = result.pc = pc(*state_);
+        return result;
+    }
+
+    void require_segment_identity() const {
+        if (segment_sequence_ == std::numeric_limits<uint64_t>::max())
+            throw std::runtime_error("native segment identity space is exhausted");
+    }
+
+    void record_segment(uint64_t instructions_before, uint64_t cycles_before,
+                        uint64_t callbacks_before) noexcept {
+        const Frame& frame = *frame_;
+        last_segment_ = mp64_callbacks::Receipt{
+            ++segment_sequence_, frame.invocation_id,
+            frame.instructions - instructions_before,
+            frame.cycles - cycles_before, frame.instructions, frame.cycles,
+            frame.sequence, frame.sequence > callbacks_before};
+    }
+
+    mp64_callbacks::Result drive(bool resume_stub) {
+        const uint64_t instructions_before = frame_->instructions;
+        const uint64_t cycles_before = frame_->cycles;
+        const uint64_t callbacks_before = frame_->sequence;
+        try {
+            auto result = make_result();
+            Frame& frame = *frame_;
+            const auto& spec = *frame.spec;
+            Operations operations{*this, spec.routine, frame.spans};
+            Reader reader{*state_, spec.routine};
+            while (frame.instructions < frame.allowance) {
+                result.instruction_pc = pc(*state_);
+                const uint64_t offset = result.instruction_pc - spec.routine.code_base;
+                if (!spec.routine.code().contains(result.instruction_pc, 1) ||
+                    !spec.boundaries[static_cast<std::size_t>(offset)]) {
+                    result.exit_kind = "invalid_callback";
+                    result.detail = "machine target is not a sealed instruction boundary";
+                    break;
+                }
+                const mp64_callbacks::Site* call = nullptr;
+                bool stub = false;
+                for (const auto& site : spec.callbacks) {
+                    if (site.call_offset == offset) call = &site;
+                    if (site.stub_offset == offset) stub = true;
+                }
+                if (stub && !resume_stub) {
+                    result.exit_kind = "invalid_callback";
+                    result.detail = "callback stub reached without its exact completed CALL.L";
+                    break;
+                }
+                resume_stub = false;
+                try {
+                    icache_begin_instruction(*state_);
+                    const DecodeResult decoded = decode_instruction(reader, state_->ext_modifier);
+                    if (decoded.status != DecodeStatus::DECODED ||
+                        !mp64_routine::admitted(decoded.instruction)) {
+                        result.exit_kind = "decode_fault";
+                        result.trap_id = IVEC_ILLEGAL_OP;
+                        result.detail = "sealed v2 decode became unavailable";
+                        break;
+                    }
+                    operations.operation = decoded.instruction.operation;
+                    const uint64_t previous_sp = state_->regs[15];
+                    const int cycles = execute_decoded_instruction(*state_, operations, decoded.instruction);
+                    commit_decoded_instruction(*state_, decoded.instruction, cycles);
+                    ++frame.instructions;
+                    frame.cycles += static_cast<uint64_t>(cycles);
+                    ++result.instructions;
+                    result.cycles += static_cast<uint64_t>(cycles);
+                    if (call != nullptr) {
+                        if (pc(*state_) != spec.routine.code_base + call->stub_offset) {
+                            result.exit_kind = "invalid_callback";
+                            result.detail = "declared CALL.L did not reach its declared stub";
+                            break;
+                        }
+                        if (frame.sequence == frame.callback_allowance) {
+                            result.exit_kind = "callback_limit";
+                            result.detail = "callback request allowance exhausted";
+                            break;
+                        }
+                        ++frame.sequence;
+                        frame.pending_site = *call;
+                        frame.pending = std::make_shared<mp64_callbacks::Token>();
+                        auto& token = *frame.pending;
+                        token.owner = identity_;
+                        token.invocation_id = frame.invocation_id;
+                        token.sequence = frame.sequence;
+                        token.publication = frame.publication;
+                        token.control_slot = state_->regs[15];
+                        token.return_pc = result.instruction_pc + 2;
+                        token.spec = &spec;
+                        capture_parked_frame();
+                        result.callback = std::make_shared<mp64_callbacks::Callback>();
+                        auto& callback = *result.callback;
+                        callback.invocation_id = frame.invocation_id;
+                        callback.sequence = frame.sequence;
+                        callback.call_offset = call->call_offset;
+                        callback.stub_offset = call->stub_offset;
+                        callback.export_id = call->export_id;
+                        for (uint64_t i = 0; i < call->input_cells; ++i)
+                            callback.arguments.push_back(state_->regs[4 + i]);
+                        result.token = frame.pending;
+                        result.exit_kind = "callback_request";
+                        break;
+                    }
+                    if (pc(*state_) == mp64_routine::ROOT_RETURN) {
+                        if (decoded.instruction.operation == DecodedOperation::RETURN_LONG &&
+                            previous_sp == spec.routine.stack_empty() - 8 &&
+                            state_->regs[15] == spec.routine.stack_empty() &&
+                            state_->psel == 3 && state_->xsel == 2 && state_->spsel == 15) {
+                            result.exit_kind = "returned";
+                            for (uint64_t i = 0; i < spec.routine.output_cells; ++i)
+                                result.outputs.push_back(state_->regs[4 + i]);
+                        } else {
+                            result.exit_kind = "invalid_return";
+                            result.detail = "root return requires RET.L from original root slot";
+                        }
+                        break;
+                    }
+                } catch (const mp64_routine::AccessFault& fault) {
+                    result.exit_kind = "rejected_access";
+                    result.access_address = fault.address;
+                    result.access_width = fault.width;
+                    result.access_operation = fault.operation;
+                    result.detail = fault.detail;
+                    break;
+                }
+            }
+            result.pc = pc(*state_);
+            result.invocation_instructions = frame.instructions;
+            result.invocation_cycles = frame.cycles;
+            if (result.exit_kind == "instruction_limit")
+                result.detail = "machine instruction allowance exhausted before root return";
+            record_segment(instructions_before, cycles_before, callbacks_before);
+            result.segment_id = last_segment_->segment_id;
+            if (result.exit_kind != "callback_request") frame_.reset();
+            return result;
+        } catch (...) {
+            record_segment(instructions_before, cycles_before, callbacks_before);
+            frame_.reset();
+            throw;
+        }
+    }
+
+    std::shared_ptr<mp64_callbacks::OwnerIdentity> identity_ =
+        std::make_shared<mp64_callbacks::OwnerIdentity>();
+    std::unordered_map<const mp64_callbacks::Spec*, Publication> publications_;
+    uint64_t published_bytes_ = 0, publication_sequence_ = 0, invocation_sequence_ = 0;
+    uint64_t segment_sequence_ = 0;
+    std::optional<mp64_callbacks::Receipt> last_segment_;
+    std::unique_ptr<Frame> frame_;
+};
+
+template <typename Execute>
+static py::object marshal_routine_segment_v2(
+        RoutineRunnerV2& runner, Execute execute) {
+    auto result = execute();
+    const uint64_t invocation_id = result.invocation_id;
+    try {
+        return py::cast(std::move(result));
+    } catch (...) {
+        runner.abandon_marshaled_result(invocation_id);
+        throw;
+    }
+}
 
 static int step_one(
         CPUState& s,
@@ -30552,6 +30531,7 @@ build_system_dma_callbacks(
 PYBIND11_MODULE(_mp64_accel, m) {
     megapad::scalar_fp::register_bindings(m);
     megapad::keccak::register_bindings(m);
+    megapad::tile_values::register_bindings(m);
     m.doc() = "C++ accelerated core for Megapad-64 emulator";
 
     py::class_<PythonMemoryUseScope>(m, "_MemoryUseScope")
@@ -30581,6 +30561,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "_memory_use",
             [](CPUState& state) {
+                PublicCPUMutationScope mutation_scope(state);
                 return std::make_unique<PythonMemoryUseScope>(
                     state, /*permit_native_execution=*/false);
             },
@@ -30588,6 +30569,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "_logical_memory_use",
             [](CPUState& state) {
+                PublicCPUMutationScope mutation_scope(state);
                 if (
                     state.system_batch_active != nullptr &&
                     state.system_batch_active->load(
@@ -30601,29 +30583,98 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     state, /*permit_native_execution=*/true);
             },
             py::keep_alive<0, 1>())
-        .def_readwrite("psel", &CPUState::psel)
-        .def_readwrite("xsel", &CPUState::xsel)
-        .def_readwrite("spsel", &CPUState::spsel)
-        .def_readwrite("flag_z", &CPUState::flag_z)
-        .def_readwrite("flag_c", &CPUState::flag_c)
-        .def_readwrite("flag_n", &CPUState::flag_n)
-        .def_readwrite("flag_v", &CPUState::flag_v)
-        .def_readwrite("flag_p", &CPUState::flag_p)
-        .def_readwrite("flag_g", &CPUState::flag_g)
-        .def_readwrite("flag_i", &CPUState::flag_i)
-        .def_readwrite("flag_s", &CPUState::flag_s)
-        .def_readwrite("d_reg", &CPUState::d_reg)
-        .def_readwrite("q_out", &CPUState::q_out)
-        .def_readwrite("t_reg", &CPUState::t_reg)
-        .def_readwrite("sb", &CPUState::sb)
-        .def_readwrite("sr", &CPUState::sr)
-        .def_readwrite("sc", &CPUState::sc)
-        .def_readwrite("sw", &CPUState::sw)
-        .def_readwrite("tmode", &CPUState::tmode)
-        .def_readwrite("tctrl", &CPUState::tctrl)
-        .def_readwrite("tsrc0", &CPUState::tsrc0)
-        .def_readwrite("tsrc1", &CPUState::tsrc1)
-        .def_readwrite("tdst", &CPUState::tdst)
+        .def_property(
+            "psel",
+            cpu_state_field_getter(&CPUState::psel),
+            cpu_state_field_setter(&CPUState::psel))
+        .def_property(
+            "xsel",
+            cpu_state_field_getter(&CPUState::xsel),
+            cpu_state_field_setter(&CPUState::xsel))
+        .def_property(
+            "spsel",
+            cpu_state_field_getter(&CPUState::spsel),
+            cpu_state_field_setter(&CPUState::spsel))
+        .def_property(
+            "flag_z",
+            cpu_state_field_getter(&CPUState::flag_z),
+            cpu_state_field_setter(&CPUState::flag_z))
+        .def_property(
+            "flag_c",
+            cpu_state_field_getter(&CPUState::flag_c),
+            cpu_state_field_setter(&CPUState::flag_c))
+        .def_property(
+            "flag_n",
+            cpu_state_field_getter(&CPUState::flag_n),
+            cpu_state_field_setter(&CPUState::flag_n))
+        .def_property(
+            "flag_v",
+            cpu_state_field_getter(&CPUState::flag_v),
+            cpu_state_field_setter(&CPUState::flag_v))
+        .def_property(
+            "flag_p",
+            cpu_state_field_getter(&CPUState::flag_p),
+            cpu_state_field_setter(&CPUState::flag_p))
+        .def_property(
+            "flag_g",
+            cpu_state_field_getter(&CPUState::flag_g),
+            cpu_state_field_setter(&CPUState::flag_g))
+        .def_property(
+            "flag_i",
+            cpu_state_field_getter(&CPUState::flag_i),
+            cpu_state_field_setter(&CPUState::flag_i))
+        .def_property(
+            "flag_s",
+            cpu_state_field_getter(&CPUState::flag_s),
+            cpu_state_field_setter(&CPUState::flag_s))
+        .def_property(
+            "d_reg",
+            cpu_state_field_getter(&CPUState::d_reg),
+            cpu_state_field_setter(&CPUState::d_reg))
+        .def_property(
+            "q_out",
+            cpu_state_field_getter(&CPUState::q_out),
+            cpu_state_field_setter(&CPUState::q_out))
+        .def_property(
+            "t_reg",
+            cpu_state_field_getter(&CPUState::t_reg),
+            cpu_state_field_setter(&CPUState::t_reg))
+        .def_property(
+            "sb",
+            cpu_state_field_getter(&CPUState::sb),
+            cpu_state_field_setter(&CPUState::sb))
+        .def_property(
+            "sr",
+            cpu_state_field_getter(&CPUState::sr),
+            cpu_state_field_setter(&CPUState::sr))
+        .def_property(
+            "sc",
+            cpu_state_field_getter(&CPUState::sc),
+            cpu_state_field_setter(&CPUState::sc))
+        .def_property(
+            "sw",
+            cpu_state_field_getter(&CPUState::sw),
+            cpu_state_field_setter(&CPUState::sw))
+        .def_property(
+            "tmode",
+            cpu_state_field_getter(&CPUState::tmode),
+            cpu_state_field_setter(&CPUState::tmode))
+        .def_property(
+            "tctrl",
+            cpu_state_field_getter(&CPUState::tctrl),
+            cpu_state_field_setter(&CPUState::tctrl))
+        .def_property(
+            "tsrc0",
+            cpu_state_field_getter(&CPUState::tsrc0),
+            cpu_state_field_setter(&CPUState::tsrc0))
+        .def_property(
+            "tsrc1",
+            cpu_state_field_getter(&CPUState::tsrc1),
+            cpu_state_field_setter(&CPUState::tsrc1))
+        .def_property(
+            "tdst",
+            cpu_state_field_getter(&CPUState::tdst),
+            cpu_state_field_setter(&CPUState::tdst))
         .def_property(
             "tacc",
             [](const CPUState& state) {
@@ -30633,6 +30684,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     state.tacc.size());
             },
             [](CPUState& state, const py::bytes& image) {
+                PublicCPUMutationScope mutation_scope(state);
                 const std::string bytes = image;
                 if (bytes.size() != state.tacc.size()) {
                     throw std::invalid_argument(
@@ -30643,30 +30695,38 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     bytes.end(),
                     state.tacc.begin());
             })
-        .def_readwrite(
+        .def_property(
             "tacc_owner",
-            &CPUState::tacc_owner)
-        .def_readwrite(
+            cpu_state_field_getter(&CPUState::tacc_owner),
+            cpu_state_field_setter(&CPUState::tacc_owner))
+        .def_property(
             "tacc_valid",
-            &CPUState::tacc_valid)
-        .def_readwrite(
+            cpu_state_field_getter(&CPUState::tacc_valid),
+            cpu_state_field_setter(&CPUState::tacc_valid))
+        .def_property(
             "tacc_dirty",
-            &CPUState::tacc_dirty)
-        .def_readwrite(
+            cpu_state_field_getter(&CPUState::tacc_dirty),
+            cpu_state_field_setter(&CPUState::tacc_dirty))
+        .def_property(
             "tacc_format_ew",
-            &CPUState::tacc_format_ew)
-        .def_readwrite(
+            cpu_state_field_getter(&CPUState::tacc_format_ew),
+            cpu_state_field_setter(&CPUState::tacc_format_ew))
+        .def_property(
             "tacc_format_signed",
-            &CPUState::tacc_format_signed)
-        .def_readwrite(
+            cpu_state_field_getter(&CPUState::tacc_format_signed),
+            cpu_state_field_setter(&CPUState::tacc_format_signed))
+        .def_property(
             "tacc_busy",
-            &CPUState::tacc_busy)
-        .def_readwrite(
+            cpu_state_field_getter(&CPUState::tacc_busy),
+            cpu_state_field_setter(&CPUState::tacc_busy))
+        .def_property(
             "tacc_force_pending",
-            &CPUState::tacc_force_pending)
-        .def_readwrite(
+            cpu_state_field_getter(&CPUState::tacc_force_pending),
+            cpu_state_field_setter(&CPUState::tacc_force_pending))
+        .def_property(
             "tacc_epoch",
-            &CPUState::tacc_epoch)
+            cpu_state_field_getter(&CPUState::tacc_epoch),
+            cpu_state_field_setter(&CPUState::tacc_epoch))
         .def(
             "tacc_snapshot",
             [](const CPUState& state) {
@@ -30675,6 +30735,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "tacc_restore",
             [](CPUState& state, const py::dict& snapshot) {
+                PublicCPUMutationScope mutation_scope(state);
                 validate_exact_snapshot_schema(
                     snapshot,
                     TACC_SNAPSHOT_FIELDS,
@@ -30695,37 +30756,115 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def(
             "tacc_reset",
             [](CPUState& state) {
+                PublicCPUMutationScope mutation_scope(state);
                 state.reset_tacc();
             })
-        .def_readwrite("ivt_base", &CPUState::ivt_base)
-        .def_readwrite("ivec_id", &CPUState::ivec_id)
-        .def_readwrite("trap_addr", &CPUState::trap_addr)
-        .def_readwrite("wake_ms", &CPUState::wake_ms)
-        .def_readwrite("ef_flags", &CPUState::ef_flags)
-        .def_readwrite("halted", &CPUState::halted)
-        .def_readwrite("idle", &CPUState::idle)
-        .def_readwrite("cycle_count", &CPUState::cycle_count)
-        .def_readwrite("tstride_r", &CPUState::tstride_r)
-        .def_readwrite("tstride_c", &CPUState::tstride_c)
-        .def_readwrite("ttile_h", &CPUState::ttile_h)
-        .def_readwrite("ttile_w", &CPUState::ttile_w)
-        .def_readwrite("perf_enable", &CPUState::perf_enable)
-        .def_readwrite("perf_cycles", &CPUState::perf_cycles)
-        .def_readwrite("perf_stalls", &CPUState::perf_stalls)
-        .def_readwrite("perf_tileops", &CPUState::perf_tileops)
-        .def_readwrite("perf_extmem", &CPUState::perf_extmem)
-        .def_readwrite("bist_status", &CPUState::bist_status)
-        .def_readwrite("bist_fail_addr", &CPUState::bist_fail_addr)
-        .def_readwrite("bist_fail_data", &CPUState::bist_fail_data)
-        .def_readwrite("tile_selftest", &CPUState::tile_selftest)
-        .def_readwrite("tile_st_detail", &CPUState::tile_st_detail)
-        .def_readwrite("icache_enabled", &CPUState::icache_enabled)
-        .def_readwrite("icache_hits", &CPUState::icache_hits)
-        .def_readwrite("icache_misses", &CPUState::icache_misses)
+        .def_property(
+            "ivt_base",
+            cpu_state_field_getter(&CPUState::ivt_base),
+            cpu_state_field_setter(&CPUState::ivt_base))
+        .def_property(
+            "ivec_id",
+            cpu_state_field_getter(&CPUState::ivec_id),
+            cpu_state_field_setter(&CPUState::ivec_id))
+        .def_property(
+            "trap_addr",
+            cpu_state_field_getter(&CPUState::trap_addr),
+            cpu_state_field_setter(&CPUState::trap_addr))
+        .def_property(
+            "wake_ms",
+            cpu_state_field_getter(&CPUState::wake_ms),
+            cpu_state_field_setter(&CPUState::wake_ms))
+        .def_property(
+            "ef_flags",
+            cpu_state_field_getter(&CPUState::ef_flags),
+            cpu_state_field_setter(&CPUState::ef_flags))
+        .def_property(
+            "halted",
+            cpu_state_field_getter(&CPUState::halted),
+            cpu_state_field_setter(&CPUState::halted))
+        .def_property(
+            "idle",
+            cpu_state_field_getter(&CPUState::idle),
+            cpu_state_field_setter(&CPUState::idle))
+        .def_property(
+            "cycle_count",
+            cpu_state_field_getter(&CPUState::cycle_count),
+            cpu_state_field_setter(&CPUState::cycle_count))
+        .def_property(
+            "tstride_r",
+            cpu_state_field_getter(&CPUState::tstride_r),
+            cpu_state_field_setter(&CPUState::tstride_r))
+        .def_property(
+            "tstride_c",
+            cpu_state_field_getter(&CPUState::tstride_c),
+            cpu_state_field_setter(&CPUState::tstride_c))
+        .def_property(
+            "ttile_h",
+            cpu_state_field_getter(&CPUState::ttile_h),
+            cpu_state_field_setter(&CPUState::ttile_h))
+        .def_property(
+            "ttile_w",
+            cpu_state_field_getter(&CPUState::ttile_w),
+            cpu_state_field_setter(&CPUState::ttile_w))
+        .def_property(
+            "perf_enable",
+            cpu_state_field_getter(&CPUState::perf_enable),
+            cpu_state_field_setter(&CPUState::perf_enable))
+        .def_property(
+            "perf_cycles",
+            cpu_state_field_getter(&CPUState::perf_cycles),
+            cpu_state_field_setter(&CPUState::perf_cycles))
+        .def_property(
+            "perf_stalls",
+            cpu_state_field_getter(&CPUState::perf_stalls),
+            cpu_state_field_setter(&CPUState::perf_stalls))
+        .def_property(
+            "perf_tileops",
+            cpu_state_field_getter(&CPUState::perf_tileops),
+            cpu_state_field_setter(&CPUState::perf_tileops))
+        .def_property(
+            "perf_extmem",
+            cpu_state_field_getter(&CPUState::perf_extmem),
+            cpu_state_field_setter(&CPUState::perf_extmem))
+        .def_property(
+            "bist_status",
+            cpu_state_field_getter(&CPUState::bist_status),
+            cpu_state_field_setter(&CPUState::bist_status))
+        .def_property(
+            "bist_fail_addr",
+            cpu_state_field_getter(&CPUState::bist_fail_addr),
+            cpu_state_field_setter(&CPUState::bist_fail_addr))
+        .def_property(
+            "bist_fail_data",
+            cpu_state_field_getter(&CPUState::bist_fail_data),
+            cpu_state_field_setter(&CPUState::bist_fail_data))
+        .def_property(
+            "tile_selftest",
+            cpu_state_field_getter(&CPUState::tile_selftest),
+            cpu_state_field_setter(&CPUState::tile_selftest))
+        .def_property(
+            "tile_st_detail",
+            cpu_state_field_getter(&CPUState::tile_st_detail),
+            cpu_state_field_setter(&CPUState::tile_st_detail))
+        .def_property(
+            "icache_enabled",
+            cpu_state_field_getter(&CPUState::icache_enabled),
+            cpu_state_field_setter(&CPUState::icache_enabled))
+        .def_property(
+            "icache_hits",
+            cpu_state_field_getter(&CPUState::icache_hits),
+            cpu_state_field_setter(&CPUState::icache_hits))
+        .def_property(
+            "icache_misses",
+            cpu_state_field_getter(&CPUState::icache_misses),
+            cpu_state_field_setter(&CPUState::icache_misses))
         .def("icache_reset", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             icache_reset(s);
         })
         .def("icache_control_write", [](CPUState& s, uint64_t value) {
+                PublicCPUMutationScope mutation_scope(s);
             if (s.profile != CoreProfile::FULL)
                 return;
             s.icache_enabled = value & 1;
@@ -30734,6 +30873,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("icache_invalidate_span",
             [](CPUState& s, uint64_t address, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
                 icache_invalidate_span(s, address, size);
             })
         .def("icache_snapshot", [](const CPUState& s) {
@@ -30756,6 +30896,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                    uint64_t,
                    CPUState::ICACHE_LINES>& tags,
                const py::bytes& data_bytes) {
+                PublicCPUMutationScope mutation_scope(s);
                 const std::string valid = valid_bytes;
                 const std::string data = data_bytes;
                 if (valid.size() != s.icache_valid.size() ||
@@ -30776,19 +30917,58 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 s.discard_all_host_instruction_plans();
                 s.reset_single_core_icache_identity_epochs();
             })
-        .def_readwrite("priv_level", &CPUState::priv_level)
-        .def_readwrite("mpu_base", &CPUState::mpu_base)
-        .def_readwrite("mpu_limit", &CPUState::mpu_limit)
-        .def_readwrite("fpcsr", &CPUState::fpcsr)
-        .def_readwrite("ext_modifier", &CPUState::ext_modifier)
-        .def_readwrite("crc_acc", &CPUState::crc_acc)
-        .def_readwrite("crc_mode", &CPUState::crc_mode)
-        .def_readwrite("sha_mode", &CPUState::sha_mode)
-        .def_readwrite("sha_msglen_lo", &CPUState::sha_msglen_lo)
-        .def_readwrite("sha_msglen_hi", &CPUState::sha_msglen_hi)
-        .def_readwrite("gf_prime_sel", &CPUState::gf_prime_sel)
-        .def_readwrite("core_id", &CPUState::core_id)
-        .def_readwrite("num_cores", &CPUState::num_cores)
+        .def_property(
+            "priv_level",
+            cpu_state_field_getter(&CPUState::priv_level),
+            cpu_state_field_setter(&CPUState::priv_level))
+        .def_property(
+            "mpu_base",
+            cpu_state_field_getter(&CPUState::mpu_base),
+            cpu_state_field_setter(&CPUState::mpu_base))
+        .def_property(
+            "mpu_limit",
+            cpu_state_field_getter(&CPUState::mpu_limit),
+            cpu_state_field_setter(&CPUState::mpu_limit))
+        .def_property(
+            "fpcsr",
+            cpu_state_field_getter(&CPUState::fpcsr),
+            cpu_state_field_setter(&CPUState::fpcsr))
+        .def_property(
+            "ext_modifier",
+            cpu_state_field_getter(&CPUState::ext_modifier),
+            cpu_state_field_setter(&CPUState::ext_modifier))
+        .def_property(
+            "crc_acc",
+            cpu_state_field_getter(&CPUState::crc_acc),
+            cpu_state_field_setter(&CPUState::crc_acc))
+        .def_property(
+            "crc_mode",
+            cpu_state_field_getter(&CPUState::crc_mode),
+            cpu_state_field_setter(&CPUState::crc_mode))
+        .def_property(
+            "sha_mode",
+            cpu_state_field_getter(&CPUState::sha_mode),
+            cpu_state_field_setter(&CPUState::sha_mode))
+        .def_property(
+            "sha_msglen_lo",
+            cpu_state_field_getter(&CPUState::sha_msglen_lo),
+            cpu_state_field_setter(&CPUState::sha_msglen_lo))
+        .def_property(
+            "sha_msglen_hi",
+            cpu_state_field_getter(&CPUState::sha_msglen_hi),
+            cpu_state_field_setter(&CPUState::sha_msglen_hi))
+        .def_property(
+            "gf_prime_sel",
+            cpu_state_field_getter(&CPUState::gf_prime_sel),
+            cpu_state_field_setter(&CPUState::gf_prime_sel))
+        .def_property(
+            "core_id",
+            cpu_state_field_getter(&CPUState::core_id),
+            cpu_state_field_setter(&CPUState::core_id))
+        .def_property(
+            "num_cores",
+            cpu_state_field_getter(&CPUState::num_cores),
+            cpu_state_field_setter(&CPUState::num_cores))
         .def_property(
             "irq_ipi",
             [](const CPUState& s) {
@@ -30798,6 +30978,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     std::memory_order_acquire);
             },
             [](CPUState& s, bool asserted) {
+                PublicCPUMutationScope mutation_scope(s);
                 if (s.interrupts != nullptr) {
                     s.interrupts->set_ipi_line(
                         s.core_id, asserted);
@@ -30812,11 +30993,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 : uint64_t{0};
         })
         .def("ipi_send", [](CPUState& s, uint64_t target_id) {
+                PublicCPUMutationScope mutation_scope(s);
             return s.interrupts != nullptr &&
                 s.interrupts->send_ipi(
                     s.core_id, static_cast<uint8_t>(target_id));
         })
         .def("ipi_ack", [](CPUState& s, uint64_t source_id) {
+                PublicCPUMutationScope mutation_scope(s);
             return s.interrupts != nullptr &&
                 s.interrupts->acknowledge_ipi(
                     s.core_id, static_cast<uint8_t>(source_id));
@@ -30824,6 +31007,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("mem_size",
             [](const CPUState& s) { return s.memory->mem_size; },
             [](CPUState& s, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
                 require_private_memory_mapping(s);
                 MemoryMutationGuard guard(*s.memory);
                 if (size == 0)
@@ -30838,18 +31022,23 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         // Register access
         .def("get_reg", [](const CPUState& s, int i) { return s.regs[i & 0x1F]; })
-        .def("set_reg", [](CPUState& s, int i, uint64_t v) { s.regs[i & 0x1F] = v; })
+        .def("set_reg", [](CPUState& s, int i, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s); s.regs[i & 0x1F] = v; })
         // Accumulator access
         .def("get_acc", [](const CPUState& s, int i) { return s.acc[i & 3]; })
-        .def("set_acc", [](CPUState& s, int i, uint64_t v) { s.acc[i & 3] = v; })
+        .def("set_acc", [](CPUState& s, int i, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s); s.acc[i & 3] = v; })
         // Port access
         .def("get_port_out", [](const CPUState& s, int i) { return s.port_out[i & 7]; })
-        .def("set_port_in", [](CPUState& s, int i, uint8_t v) { s.port_in[i & 7] = v; })
+        .def("set_port_in", [](CPUState& s, int i, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s); s.port_in[i & 7] = v; })
         // Port bridge remap table
         .def("get_port_map", [](const CPUState& s, int i) -> uint32_t { return s.port_map[i & 7]; })
-        .def("set_port_map", [](CPUState& s, int i, uint32_t v) { s.port_map[i & 7] = v; })
+        .def("set_port_map", [](CPUState& s, int i, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s); s.port_map[i & 7] = v; })
         // Memory attachment
         .def("attach_mem", [](CPUState& s, py::buffer buf, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
             require_private_memory_mapping(s);
             PreparedBuffer prepared =
                 prepare_writable_byte_buffer(buf, size, true);
@@ -30869,6 +31058,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // HBW memory attachment
         .def("attach_hbw_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
             require_private_memory_mapping(s);
             validate_guest_region(base, size);
             PreparedBuffer prepared =
@@ -30888,6 +31078,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("hbw_base",
             [](const CPUState& s) { return s.memory->hbw_base; },
             [](CPUState& s, uint64_t base) {
+                PublicCPUMutationScope mutation_scope(s);
                 require_private_memory_mapping(s);
                 MemoryMutationGuard guard(*s.memory);
                 validate_guest_region(base, s.memory->hbw_size);
@@ -30897,6 +31088,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("hbw_size",
             [](const CPUState& s) { return s.memory->hbw_size; },
             [](CPUState& s, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
                 require_private_memory_mapping(s);
                 MemoryMutationGuard guard(*s.memory);
                 if ((size != 0 && !s.memory->hbw_lease) || size > s.memory->hbw_capacity)
@@ -30908,6 +31100,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         // External memory attachment
         .def("attach_ext_mem", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
             require_private_memory_mapping(s);
             validate_guest_region(base, size);
             PreparedBuffer prepared =
@@ -30927,6 +31120,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("ext_mem_base",
             [](const CPUState& s) { return s.memory->ext_mem_base; },
             [](CPUState& s, uint64_t base) {
+                PublicCPUMutationScope mutation_scope(s);
                 require_private_memory_mapping(s);
                 MemoryMutationGuard guard(*s.memory);
                 validate_guest_region(base, s.memory->ext_mem_size);
@@ -30936,6 +31130,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("ext_mem_size",
             [](const CPUState& s) { return s.memory->ext_mem_size; },
             [](CPUState& s, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
                 require_private_memory_mapping(s);
                 MemoryMutationGuard guard(*s.memory);
                 if ((size != 0 && !s.memory->ext_mem_lease) ||
@@ -30948,6 +31143,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         // VRAM memory attachment
         .def("attach_vram", [](CPUState& s, py::buffer buf, uint64_t base, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
             require_private_memory_mapping(s);
             validate_guest_region(base, size);
             PreparedBuffer prepared =
@@ -30966,6 +31162,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("vram_base",
             [](const CPUState& s) { return s.memory->vram_base; },
             [](CPUState& s, uint64_t base) {
+                PublicCPUMutationScope mutation_scope(s);
                 require_private_memory_mapping(s);
                 MemoryMutationGuard guard(*s.memory);
                 validate_guest_region(base, s.memory->vram_size);
@@ -30974,6 +31171,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_property("vram_size",
             [](const CPUState& s) { return s.memory->vram_size; },
             [](CPUState& s, uint64_t size) {
+                PublicCPUMutationScope mutation_scope(s);
                 require_private_memory_mapping(s);
                 MemoryMutationGuard guard(*s.memory);
                 if ((size != 0 && !s.memory->vram_lease) ||
@@ -30985,6 +31183,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         // Native UART
         .def("uart_init", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             MemoryMutationGuard guard(
                 *s.memory,
                 "CPUState UART memory cannot be initialized while memory is in use");
@@ -30992,34 +31191,42 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.uart->attach_mem(s.memory->mem, s.memory->mem_size);
         })
         .def("uart_disable", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.uart->enabled = false;
         })
         .def("uart_enabled", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.uart->enabled;
         })
         .def("uart_read8", [](CPUState& s, uint32_t off) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.uart->read8(off);
         })
         .def("uart_write8", [](CPUState& s, uint32_t off, uint8_t value) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.uart->write8(off, value);
         })
         .def("uart_inject", [](CPUState& s, py::bytes payload) {
+                PublicCPUMutationScope mutation_scope(s);
             std::string data = payload;
             s.uart->inject(reinterpret_cast<const uint8_t*>(data.data()), data.size());
         })
         .def("uart_has_rx", [](const CPUState& s) { return s.uart->has_rx_data(); })
         .def("uart_rx_size", [](const CPUState& s) { return s.uart->rx_size(); })
         .def("uart_discard_rx_tail", [](CPUState& s, size_t size) {
+                PublicCPUMutationScope mutation_scope(s);
             s.uart->discard_rx_tail(size);
         })
         .def_property("uart_tx_ring_base",
             [](const CPUState& s) { return s.uart->get_tx_ring_base(); },
-            [](CPUState& s, uint64_t value) { s.uart->set_tx_ring_base(value); })
+            [](CPUState& s, uint64_t value) {
+                PublicCPUMutationScope mutation_scope(s); s.uart->set_tx_ring_base(value); })
         .def("uart_drain_tx", [](CPUState& s) -> py::bytes {
+                PublicCPUMutationScope mutation_scope(s);
             const std::vector<uint8_t> data = s.uart->take_tx();
             if (data.empty())
                 return py::bytes();
@@ -31027,9 +31234,11 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // Flags
         .def("flags_pack", [](const CPUState& s) { return flags_pack(s); })
-        .def("flags_unpack", [](CPUState& s, uint8_t v) { flags_unpack(s, v); })
+        .def("flags_unpack", [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s); flags_unpack(s, v); })
         // Crypto devices — initialize C++ native crypto accelerators
         .def("init_crypto", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             MemoryMutationGuard guard(
                 *s.memory,
                 "CPUState crypto memory cannot be initialized while memory is in use");
@@ -31037,46 +31246,56 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.crypto->configure_wots(s.memory->mem_size, 1);
         })
         .def("disable_crypto", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->enabled = false;
         })
         .def("crypto_enabled", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.crypto->enabled;
         })
         // Sync crypto state from Python devices (for save/restore)
         .def("crypto_aes_reset", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->aes.reset();
         })
         .def("crypto_sha3_reset", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->sha3.reset();
         })
         .def("crypto_wots_reset", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->wots.reset();
         })
         .def("crypto_wots_status", [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.crypto->wots.status;
         })
         .def("crypto_wots_snapshot", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return native_wots_snapshot(s.crypto->wots);
         })
         .def("crypto_wots_private_zeroized", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.crypto->wots.private_zeroized();
         })
         // Direct crypto MMIO access (for testing / Python-side access)
         .def("crypto_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             if (!s.crypto->access_shape_valid(mmio_off, 1, false))
                 throw py::value_error("invalid native crypto byte read");
             return s.crypto->read8(mmio_off);
         })
         .def("crypto_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             if (!s.crypto->access_shape_valid(mmio_off, 1, true))
                 throw py::value_error("invalid native crypto byte write");
@@ -31087,6 +31306,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 uint32_t mmio_off,
                 uint32_t width,
                 bool write) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 return s.crypto->preflight(mmio_off, width, write);
              },
@@ -31094,6 +31314,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
              py::arg("width"),
              py::arg("write") = false)
         .def("crypto_read64", [](CPUState& s, uint32_t mmio_off) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             if (!s.crypto->preflight(mmio_off, 8, false))
                 throw py::value_error("invalid native crypto qword read");
@@ -31106,6 +31327,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("crypto_write64",
              [](CPUState& s, uint32_t mmio_off, uint64_t value) {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 if (!s.crypto->preflight(mmio_off, 8, true))
                     throw py::value_error(
@@ -31117,32 +31339,39 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 }
              })
         .def("crypto_tick", [](CPUState& s, uint64_t cycles) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->tick(cycles);
         })
         .def("_crypto_sha3_test_set_features",
              [](CPUState& s, bool stream, bool raw) {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 s.crypto->sha3.set_features(stream, raw);
              })
         .def("_crypto_sha3_test_fail_next", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->sha3.fail_next_operation = true;
         })
         .def("_crypto_sha3_test_claim_wots", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.crypto->sha3.claim_wots();
         })
         .def("_crypto_sha3_test_release_wots", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.crypto->sha3.release_wots();
         })
         .def("_crypto_sha3_test_zeroized", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.crypto->sha3.test_zeroized();
         })
         // ── NIC device ────────────────────────────────────────
         .def("nic_init", [](CPUState& s, py::bytes mac_bytes) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(s, "native NIC");
             MemoryMutationGuard guard(
                 *s.memory,
@@ -31160,12 +31389,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
             );
         })
         .def("nic_sync_mem_ptrs", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             // Re-sync memory pointers after attach_ext_mem / attach_hbw_mem
             require_cycle_device_mutation_allowed(s, "native NIC");
             MemoryMutationGuard guard(*s.memory);
             sync_nic_memory_ptrs(s);
         })
         .def("nic_set_tx_callback", [](CPUState& s, py::function cb) {
+                PublicCPUMutationScope mutation_scope(s);
             // tx_callback: called from C++ when NIC sends a frame
             // cb receives (bytes,) and returns bool
             require_cycle_device_mutation_allowed(s, "native NIC");
@@ -31183,6 +31414,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             };
         })
         .def("nic_inject_frame", [](CPUState& s, py::bytes frame) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(s, "native NIC");
             std::string data = frame;
             return s.nic->inject_frame(
@@ -31190,49 +31422,60 @@ PYBIND11_MODULE(_mp64_accel, m) {
             );
         })
         .def("nic_has_rx", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             return s.nic->has_rx();
         })
         .def("nic_rx_queue_size", [](CPUState& s) -> size_t {
+                PublicCPUMutationScope mutation_scope(s);
             return s.nic->rx_queue_size();
         })
         .def("nic_tx_queue_size", [](CPUState& s) -> size_t {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.nic->tx_queue_size();
         })
         .def("nic_drain_one_tx", [](CPUState& s) -> py::bytes {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             auto frame = s.nic->drain_one_tx();
             return py::bytes(reinterpret_cast<const char*>(frame.data()), frame.size());
         })
         .def("nic_set_link_up", [](CPUState& s, bool up) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->link_up = up;
         })
         .def("nic_enabled", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.nic->enabled;
         })
         .def("nic_disable", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->enabled = false;
         })
         .def("nic_reset", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->reset_state();
         })
         .def("nic_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.nic->read8(mmio_off);
         })
         .def("nic_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
             s.nic->write8(mmio_off, val);
         })
         .def("nic_cycle_dma_snapshot", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             if (
                 s.system_batch_active != nullptr &&
                 s.system_batch_active->load(
@@ -31281,6 +31524,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             return s.nic->irq_pending();
         })
         .def("nic_get_tx_count", [](CPUState& s) -> uint16_t {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.nic->tx_count;
         })
@@ -31289,6 +31533,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── TRNG device ───────────────────────────────────────
         .def("init_trng", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(s, "native TRNG");
             MemoryMutationGuard guard(
                 *s.memory,
@@ -31296,14 +31541,17 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.trng->init();
         })
         .def("trng_enabled", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.trng->is_enabled();
         })
         .def("trng_usable", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.trng->is_usable();
         })
         .def("disable_trng", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(s, "native TRNG");
             MemoryMutationGuard guard(
                 *s.memory,
@@ -31312,6 +31560,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         .def("_trng_test_health_loss_after",
              [](CPUState& s, std::size_t successful_bytes) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(
                 s, "native TRNG test seam");
             MemoryMutationGuard guard(
@@ -31321,6 +31570,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 successful_bytes);
         })
         .def("_trng_test_fail_next_refill", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             require_cycle_device_mutation_allowed(
                 s, "native TRNG test seam");
             MemoryMutationGuard guard(
@@ -31329,11 +31579,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
             s.trng->test_fail_next_host_refill();
         })
         .def("_trng_test_zeroized_state", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.trng->test_zeroized_state();
         })
         .def("_native_singleton_read8",
              [](CPUState& s, uint32_t mmio_off) -> int {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             if (s.nic->handles(mmio_off))
                 return s.nic->read8(mmio_off);
@@ -31352,6 +31604,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 uint32_t mmio_off,
                 uint32_t width,
                 bool write) -> int {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             const auto check_span = [mmio_off, width](const auto* device) {
                 if (!device->handles(mmio_off))
@@ -31382,6 +31635,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         py::arg("write") = false)
         .def("_native_singleton_write8",
              [](CPUState& s, uint32_t mmio_off, uint8_t value) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             if (s.nic->handles(mmio_off))
                 require_cycle_device_mutation_allowed(s, "native NIC");
             auto memory_guard = acquire_shared_memory_use(s);
@@ -31404,140 +31658,168 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── Framebuffer device ────────────────────────────────
         .def("fb_init", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             s.fb->init();
         })
         .def("fb_enabled", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             std::lock_guard<std::mutex> framebuffer_guard(
                 s.fb->mutex);
             return s.fb->enabled;
         })
         .def("fb_disable", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             std::lock_guard<std::mutex> framebuffer_guard(
                 s.fb->mutex);
             s.fb->enabled = false;
         })
         .def("fb_tick", [](CPUState& s, uint64_t cycles) {
+                PublicCPUMutationScope mutation_scope(s);
             s.fb->tick(cycles);
         })
         .def("fb_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
             return s.fb->read8(mmio_off);
         })
         .def("fb_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+                PublicCPUMutationScope mutation_scope(s);
             s.fb->write8(mmio_off, val);
         })
         .def("fb_irq_pending", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             return s.fb->irq_pending();
         })
         .def("fb_host_present", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             s.fb->host_present();
         })
         // FB properties for display thread access
         .def_property("fb_base_addr",
             [](CPUState& s) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->fb_base;
             },
             [](CPUState& s, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->fb_base = v;
             })
         .def_property("fb_width",
             [](CPUState& s) -> uint32_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->width;
             },
             [](CPUState& s, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->width = v;
             })
         .def_property("fb_height",
             [](CPUState& s) -> uint32_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->height;
             },
             [](CPUState& s, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->height = v;
             })
         .def_property("fb_stride",
             [](CPUState& s) -> uint32_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->stride;
             },
             [](CPUState& s, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->stride = v;
             })
         .def_property("fb_mode",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->mode;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->mode = v;
             })
         .def_property("fb_enable",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->enable;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->enable = v;
             })
         .def_property("fb_vsync_count",
             [](CPUState& s) -> uint32_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->vsync_count;
             },
             [](CPUState& s, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->vsync_count = v;
             })
         .def_property("fb_vblank",
             [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->vblank;
             },
             [](CPUState& s, bool v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->vblank = v;
             })
         .def_property("fb_cycles_per_frame",
             [](CPUState& s) -> uint32_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 return s.fb->cycles_per_frame;
             },
             [](CPUState& s, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
                 s.fb->cycles_per_frame = v;
             })
         .def("fb_get_palette", [](CPUState& s) -> std::vector<uint32_t> {
+                PublicCPUMutationScope mutation_scope(s);
             const auto framebuffer = s.fb->snapshot();
             return std::vector<uint32_t>(
                 framebuffer.palette.begin(),
                 framebuffer.palette.end());
         })
         .def("fb_set_palette_entry", [](CPUState& s, int idx, uint32_t rgb) {
+                PublicCPUMutationScope mutation_scope(s);
             if (idx >= 0 && idx < 256) {
                 std::lock_guard<std::mutex> framebuffer_guard(
                     s.fb->mutex);
@@ -31545,6 +31827,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             }
         })
         .def("fb_snapshot", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             const auto framebuffer = s.fb->snapshot();
             return py::make_tuple(
                 framebuffer.fb_base,
@@ -31571,6 +31854,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         // Returns None if the framebuffer base address doesn't map to
         // any attached memory region.
         .def("render_fb_rgb", [](CPUState& s) -> py::object {
+                PublicCPUMutationScope mutation_scope(s);
             ExclusiveMemoryUseGuard memory_guard(
                 *s.memory, "CPUState framebuffer render is busy");
             const auto framebuffer = s.fb->snapshot();
@@ -31668,71 +31952,87 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── Timer device ──────────────────────────────────────
         .def("timer_init", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.timer->init();
         })
         .def("timer_enabled", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.timer->enabled;
         })
         .def("timer_disable", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.timer->enabled = false;
         })
         .def("timer_tick", [](CPUState& s, uint64_t cycles) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.timer->tick(cycles);
         })
         .def("timer_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             return s.timer->read8(mmio_off);
         })
         .def("timer_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+                PublicCPUMutationScope mutation_scope(s);
             auto memory_guard = acquire_shared_memory_use(s);
             s.timer->write8(mmio_off, val);
         })
         .def_property("timer_irq_pending",
             [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 return s.timer->irq_pending;
             },
             [](CPUState& s, bool v) {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 s.timer->irq_pending = v;
             })
         .def_property("timer_counter",
             [](CPUState& s) -> uint32_t {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 return s.timer->counter;
             },
             [](CPUState& s, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 s.timer->counter = v;
             })
         .def_property("timer_compare",
             [](CPUState& s) -> uint32_t {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 return s.timer->compare;
             },
             [](CPUState& s, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 s.timer->compare = v;
             })
         .def_property("timer_control",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 return s.timer->control;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 s.timer->control = v;
             })
         .def_property("timer_status",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 return s.timer->status;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 auto memory_guard = acquire_shared_memory_use(s);
                 s.timer->status = v;
             })
@@ -31741,37 +32041,47 @@ PYBIND11_MODULE(_mp64_accel, m) {
                              uint64_t epoch_ms, uint8_t sec,
                              uint8_t min, uint8_t hour, uint8_t day,
                              uint8_t mon, uint32_t year, uint8_t dow) {
+                PublicCPUMutationScope mutation_scope(s);
             s.rtc->init(
                 realtime, epoch_ms, sec, min, hour, day, mon, year, dow);
         })
         .def("rtc_enabled", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
             return s.rtc->enabled;
         })
         .def("rtc_disable", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
             s.rtc->enabled = false;
         })
         .def("rtc_tick", [](CPUState& s, uint64_t cycles) {
+                PublicCPUMutationScope mutation_scope(s);
             s.rtc->tick(cycles);
         })
         .def("rtc_sync_realtime", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             s.rtc->sync_realtime();
         })
         .def("rtc_reanchor_host_clock", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             s.rtc->reanchor_host_clock();
         })
         .def("rtc_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
             return s.rtc->read8(mmio_off);
         })
         .def("rtc_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+                PublicCPUMutationScope mutation_scope(s);
             s.rtc->write8(mmio_off, val);
         })
         .def_property("rtc_realtime",
             [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
                 return s.rtc->snapshot().realtime;
             },
             [](CPUState& s, bool v) {
+                PublicCPUMutationScope mutation_scope(s);
                 if (s.system_batch_active != nullptr &&
                     s.system_batch_active->load(
                         std::memory_order_acquire)) {
@@ -31790,176 +32100,215 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         .def_property("rtc_uptime_ms",
             [](CPUState& s) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->uptime_ms;
             },
             [](CPUState& s, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->uptime_ms = v;
             })
         .def_property("rtc_epoch_ms",
             [](CPUState& s) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->epoch_ms;
             },
             [](CPUState& s, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->epoch_ms = v;
             })
         .def_property("rtc_sec",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->sec;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->sec = v;
             })
         .def_property("rtc_min",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->min;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->min = v;
             })
         .def_property("rtc_hour",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->hour;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->hour = v;
             })
         .def_property("rtc_day",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->day;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->day = v;
             })
         .def_property("rtc_mon",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->mon;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->mon = v;
             })
         .def_property("rtc_year",
             [](CPUState& s) -> uint32_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->year;
             },
             [](CPUState& s, uint32_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->year = v;
             })
         .def_property("rtc_dow",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->dow;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->dow = v;
             })
         .def_property("rtc_ctrl",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->ctrl;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->ctrl = v;
             })
         .def_property("rtc_status",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->status;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->status = v;
             })
         .def_property("rtc_alarm_sec",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->alarm_sec;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->alarm_sec = v;
             })
         .def_property("rtc_alarm_min",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->alarm_min;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->alarm_min = v;
             })
         .def_property("rtc_alarm_hour",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->alarm_hour;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->alarm_hour = v;
             })
         .def_property("rtc_irq_pending",
             [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->irq_pending;
             },
             [](CPUState& s, bool v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->irq_pending = v;
             })
         .def_property("rtc_ms_prescaler",
             [](CPUState& s) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->ms_prescaler;
             },
             [](CPUState& s, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->ms_prescaler = v;
             })
         .def_property("rtc_sec_prescaler",
             [](CPUState& s) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->sec_prescaler;
             },
             [](CPUState& s, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->sec_prescaler = v;
             })
         .def_property("rtc_uptime_latch",
             [](CPUState& s) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->uptime_latch;
             },
             [](CPUState& s, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->uptime_latch = v;
             })
         .def_property("rtc_epoch_latch",
             [](CPUState& s) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 return s.rtc->epoch_latch;
             },
             [](CPUState& s, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->epoch_latch = v;
             })
         .def("rtc_snapshot", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             const auto rtc = s.rtc->snapshot();
             return py::make_tuple(
                 rtc.enabled,
@@ -31986,64 +32335,77 @@ PYBIND11_MODULE(_mp64_accel, m) {
         })
         // ── UART Geometry device ──────────────────────────────
         .def("uart_geom_init", [](CPUState& s, uint16_t cols, uint16_t rows) {
+                PublicCPUMutationScope mutation_scope(s);
             s.uart_geom->init(cols, rows);
         }, py::arg("cols") = 80, py::arg("rows") = 30)
         .def("uart_geom_enabled", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             std::lock_guard<std::mutex> geometry_guard(
                 s.uart_geom->mutex);
             return s.uart_geom->enabled;
         })
         .def("uart_geom_disable", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             std::lock_guard<std::mutex> geometry_guard(
                 s.uart_geom->mutex);
             s.uart_geom->enabled = false;
         })
         .def("uart_geom_read8", [](CPUState& s, uint32_t mmio_off) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
             return s.uart_geom->read8(mmio_off);
         })
         .def("uart_geom_write8", [](CPUState& s, uint32_t mmio_off, uint8_t val) {
+                PublicCPUMutationScope mutation_scope(s);
             s.uart_geom->write8(mmio_off, val);
         })
         .def_property("uart_geom_cols",
             [](CPUState& s) -> uint16_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 return s.uart_geom->cols;
             },
             [](CPUState& s, uint16_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 s.uart_geom->cols = v;
             })
         .def_property("uart_geom_rows",
             [](CPUState& s) -> uint16_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 return s.uart_geom->rows;
             },
             [](CPUState& s, uint16_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 s.uart_geom->rows = v;
             })
         .def_property("uart_geom_status",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 return s.uart_geom->status;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 s.uart_geom->status = v;
             })
         .def_property("uart_geom_ctrl",
             [](CPUState& s) -> uint8_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 return s.uart_geom->ctrl;
             },
             [](CPUState& s, uint8_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 s.uart_geom->ctrl = v;
@@ -32051,11 +32413,13 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         .def_property("uart_geom_req_cols",
             [](CPUState& s) -> uint16_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 return s.uart_geom->req_cols;
             },
             [](CPUState& s, uint16_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 s.uart_geom->req_cols = v;
@@ -32063,24 +32427,29 @@ PYBIND11_MODULE(_mp64_accel, m) {
             })
         .def_property("uart_geom_req_rows",
             [](CPUState& s) -> uint16_t {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 return s.uart_geom->req_rows;
             },
             [](CPUState& s, uint16_t v) {
+                PublicCPUMutationScope mutation_scope(s);
                 std::lock_guard<std::mutex> geometry_guard(
                     s.uart_geom->mutex);
                 s.uart_geom->req_rows = v;
                 ++s.uart_geom->request_generation;
             })
         .def("uart_geom_host_set_size", [](CPUState& s, uint16_t c, uint16_t r) {
+                PublicCPUMutationScope mutation_scope(s);
             s.uart_geom->host_set_size(c, r);
         })
         .def("uart_geom_has_resize_request", [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
             return s.uart_geom->has_resize_request();
         })
         .def("uart_geom_snapshot_resize_request",
             [](CPUState& s) -> py::object {
+                PublicCPUMutationScope mutation_scope(s);
                 const auto snapshot =
                     s.uart_geom->snapshot_resize_request();
                 if (!snapshot.pending)
@@ -32091,28 +32460,39 @@ PYBIND11_MODULE(_mp64_accel, m) {
                     snapshot.rows);
             })
         .def("uart_geom_host_accept_resize", [](CPUState& s, uint16_t c, uint16_t r) {
+                PublicCPUMutationScope mutation_scope(s);
             s.uart_geom->host_accept_resize(c, r);
         })
         .def("uart_geom_host_deny_resize", [](CPUState& s) {
+                PublicCPUMutationScope mutation_scope(s);
             s.uart_geom->host_deny_resize();
         })
         .def(
             "uart_geom_host_accept_resize_if_pending",
             [](CPUState& s, uint64_t generation, uint16_t c, uint16_t r) {
+                PublicCPUMutationScope mutation_scope(s);
                 return s.uart_geom->host_accept_resize_if_pending(
                     generation, c, r);
             })
         .def(
             "uart_geom_host_deny_resize_if_pending",
             [](CPUState& s, uint64_t generation) {
+                PublicCPUMutationScope mutation_scope(s);
                 return s.uart_geom->host_deny_resize_if_pending(
                     generation);
             })
         // ── Accelerator hooks ─────────────────────────────────
-        .def("register_accel_hook", &CPUState::register_accel_hook)
+        .def("register_accel_hook",
+            [](CPUState& state, uint64_t address, int hook_id, uint64_t code_size) {
+                PublicCPUMutationScope mutation_scope(state);
+                state.register_accel_hook(address, hook_id, code_size);
+            })
         .def_readonly("accel_hook_count", &CPUState::accel_hook_count)
         // ── Dictionary cache ──────────────────────────────────
-        .def("dict_clear", &CPUState::dict_clear_all)
+        .def("dict_clear", [](CPUState& state) {
+            PublicCPUMutationScope mutation_scope(state);
+            state.dict_clear_all();
+        })
         ;
 
     py::enum_<BusOperation>(m, "BusOperation")
@@ -35937,6 +36317,116 @@ PYBIND11_MODULE(_mp64_accel, m) {
             py::arg("instruction_limit"), py::arg("protected_spans") = py::tuple(),
             py::arg("cancelled") = py::bool_(false));
 
+    m.attr("HYBRID_CALLBACK_ABI_VERSION") = 2;
+    py::class_<mp64_callbacks::Spec, std::shared_ptr<mp64_callbacks::Spec>>(m, "RoutineSpecV2")
+        .def(py::init(&make_routine_spec_v2),
+            py::arg("code_base"), py::arg("code"), py::arg("entry_offset"),
+            py::arg("input_cells"), py::arg("output_cells"),
+            py::arg("stack_base"), py::arg("stack_size"),
+            py::arg("max_instructions"), py::arg("callbacks") = py::tuple())
+        .def_property_readonly("code_base", [](const mp64_callbacks::Spec& s) { return s.routine.code_base; })
+        .def_property_readonly("code_size", [](const mp64_callbacks::Spec& s) { return s.routine.code_size; })
+        .def_property_readonly("entry_offset", [](const mp64_callbacks::Spec& s) { return s.routine.entry_offset; })
+        .def_property_readonly("input_cells", [](const mp64_callbacks::Spec& s) { return s.routine.input_cells; })
+        .def_property_readonly("output_cells", [](const mp64_callbacks::Spec& s) { return s.routine.output_cells; })
+        .def_property_readonly("stack_base", [](const mp64_callbacks::Spec& s) { return s.routine.stack_base; })
+        .def_property_readonly("stack_size", [](const mp64_callbacks::Spec& s) { return s.routine.stack_size; })
+        .def_property_readonly("max_instructions", [](const mp64_callbacks::Spec& s) { return s.routine.max_instructions; })
+        .def_property_readonly("code", [](const mp64_callbacks::Spec& s) {
+            return py::bytes(reinterpret_cast<const char*>(s.code.data()), s.code.size());
+        })
+        .def_property_readonly("callbacks", [](const mp64_callbacks::Spec& s) {
+            py::tuple sites(s.callbacks.size());
+            for (std::size_t i = 0; i < s.callbacks.size(); ++i) {
+                const auto& site = s.callbacks[i];
+                sites[i] = py::make_tuple(site.call_offset, site.stub_offset,
+                    site.export_id, site.input_cells, site.output_cells);
+            }
+            return sites;
+        });
+
+    py::class_<mp64_callbacks::Token, std::shared_ptr<mp64_callbacks::Token>>(m, "RoutineCallbackTokenV2")
+        .def("__copy__", [](const mp64_callbacks::Token&) -> py::object {
+            throw py::type_error("callback tokens cannot be copied");
+        })
+        .def("__deepcopy__", [](const mp64_callbacks::Token&, py::object) -> py::object {
+            throw py::type_error("callback tokens cannot be copied");
+        })
+        .def("__reduce_ex__", [](const mp64_callbacks::Token&, py::object) -> py::object {
+            throw py::type_error("callback tokens cannot be serialized");
+        });
+
+    py::class_<mp64_callbacks::Callback, std::shared_ptr<mp64_callbacks::Callback>>(m, "RoutineCallbackRequestV2")
+        .def_readonly("invocation_id", &mp64_callbacks::Callback::invocation_id)
+        .def_readonly("sequence", &mp64_callbacks::Callback::sequence)
+        .def_readonly("call_offset", &mp64_callbacks::Callback::call_offset)
+        .def_readonly("stub_offset", &mp64_callbacks::Callback::stub_offset)
+        .def_readonly("export_id", &mp64_callbacks::Callback::export_id)
+        .def_property_readonly("arguments", [](const mp64_callbacks::Callback& request) {
+            py::tuple values(request.arguments.size());
+            for (std::size_t i = 0; i < request.arguments.size(); ++i)
+                values[i] = py::int_(request.arguments[i]);
+            return values;
+        });
+
+    py::class_<mp64_callbacks::Result, mp64_routine::Result>(m, "RoutineSegmentResultV2")
+        .def_readonly("segment_id", &mp64_callbacks::Result::segment_id)
+        .def_readonly("invocation_id", &mp64_callbacks::Result::invocation_id)
+        .def_readonly("invocation_instructions", &mp64_callbacks::Result::invocation_instructions)
+        .def_readonly("invocation_cycles", &mp64_callbacks::Result::invocation_cycles)
+        .def_readonly("callback", &mp64_callbacks::Result::callback)
+        .def_readonly("token", &mp64_callbacks::Result::token);
+
+    py::class_<mp64_callbacks::Receipt>(m, "RoutineSegmentReceiptV2")
+        .def_readonly("segment_id", &mp64_callbacks::Receipt::segment_id)
+        .def_readonly("invocation_id", &mp64_callbacks::Receipt::invocation_id)
+        .def_readonly("instructions", &mp64_callbacks::Receipt::instructions)
+        .def_readonly("cycles", &mp64_callbacks::Receipt::cycles)
+        .def_readonly("invocation_instructions", &mp64_callbacks::Receipt::invocation_instructions)
+        .def_readonly("invocation_cycles", &mp64_callbacks::Receipt::invocation_cycles)
+        .def_readonly("invocation_callbacks", &mp64_callbacks::Receipt::invocation_callbacks)
+        .def_readonly("callback_request", &mp64_callbacks::Receipt::callback_request);
+
+    py::class_<RoutineRunnerV2, RoutineRunnerV1>(m, "RoutineRunnerV2")
+        .def(py::init<py::object, py::handle, py::buffer>(),
+            py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
+        .def("close", &RoutineRunnerV2::close)
+        .def("last_segment_v2", &RoutineRunnerV2::last_segment_v2)
+        .def("publish_code_v2", &RoutineRunnerV2::publish_code_v2,
+            py::arg("spec").none(false))
+        .def("revoke_code_v2", &RoutineRunnerV2::revoke_code_v2,
+            py::arg("spec").none(false))
+        .def("is_code_published_v2", &RoutineRunnerV2::is_code_published_v2,
+            py::arg("spec").none(false))
+        .def("begin_v2", [](
+                RoutineRunnerV2& runner,
+                const std::shared_ptr<mp64_callbacks::Spec>& spec,
+                py::handle arguments, py::handle spans,
+                py::handle instruction_limit, py::handle callback_limit,
+                py::handle protected_spans) {
+            return marshal_routine_segment_v2(runner, [&] {
+                return runner.begin_v2(spec, arguments, spans,
+                    instruction_limit, callback_limit, protected_spans);
+            });
+        }, py::arg("spec").none(false), py::arg("arguments"), py::arg("spans"),
+            py::arg("instruction_limit"), py::arg("callback_limit") = py::int_(1024),
+            py::arg("protected_spans") = py::tuple())
+        .def("resume_callback", [](
+                RoutineRunnerV2& runner,
+                const std::shared_ptr<mp64_callbacks::Token>& token,
+                py::handle outputs) {
+            return marshal_routine_segment_v2(runner, [&] {
+                return runner.resume_callback(token, outputs);
+            });
+        }, py::arg("token").none(false), py::arg("outputs"))
+        .def("cancel_invocation", [](RoutineRunnerV2& runner, py::object token) -> py::object {
+            if (token.is_none() && runner.owner_cancel_is_inactive())
+                return py::none();
+            return marshal_routine_segment_v2(runner, [&] {
+                return runner.cancel_invocation(token);
+            });
+        }, py::arg("token") = py::none());
+
     // Expose RunResult
     py::class_<RunResult>(m, "RunResult")
         .def_readonly("total_cycles", &RunResult::total_cycles)
@@ -35953,6 +36443,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                           py::object csr_read_override,
                           uint64_t mmio_start,
                           uint64_t mmio_end) -> int {
+        PublicCPUMutationScope mutation_scope(s);
         StepCallbacks cb;
         cb.mmio_start = mmio_start;
         cb.mmio_end = mmio_end;
@@ -36021,6 +36512,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
                            uint64_t mmio_start,
                            uint64_t mmio_end,
                            int max_steps) -> RunResult {
+        PublicCPUMutationScope mutation_scope(s);
         StepCallbacks cb;
         cb.mmio_start = mmio_start;
         cb.mmio_end = mmio_end;

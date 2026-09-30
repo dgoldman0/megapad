@@ -39,6 +39,7 @@ _compile_args = [
     "-march=native",
     # Floating-point tile lanes depend on separately rounded binary64 steps.
     "-ffp-contract=off",
+    "-frounding-math",
     "-Wall",
     "-Wextra",
     "-Wno-unused-parameter",
@@ -70,12 +71,16 @@ ext = Extension(
     sources=[
         "emulator/accel/mp64_accel.cpp",
         "shared/accel/scalar_fp.cpp", "shared/accel/keccak.cpp",
+        "shared/accel/tile_values.cpp",
         "emulator/accel/dbt/executable_arena.cpp",
         "emulator/accel/dbt/x86_64/emitter.cpp",
         "emulator/accel/dbt/x86_64/lowering.cpp",
         "emulator/accel/machine/settlement.cpp",
     ],
     depends=[
+        "shared/accel/tile_values.h",
+        "shared/accel/tile_values_bindings.h",
+        "shared/accel/tile_guard_bindings.h",
         "shared/accel/keccak.h",
         "shared/accel/keccak_bindings.h",
         "shared/accel/scalar_fp.h",
@@ -85,6 +90,7 @@ ext = Extension(
         "emulator/accel/cpu/mp64/decode_impl.h",
         "emulator/accel/cpu/mp64/interpreter.h",
         "emulator/accel/cpu/mp64/routine_runner.h",
+        "emulator/accel/cpu/mp64/routine_callbacks.h",
         "emulator/accel/cpu/mp64/semantics.h",
         "emulator/accel/dbt/executable_arena.h",
         "emulator/accel/dbt/host_jit_config.h",

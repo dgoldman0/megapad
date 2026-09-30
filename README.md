@@ -310,8 +310,13 @@ Use a prepared MP64FS source image with the ordinary KDOS autoexec entry for
 simulator sessions; the existing Akashic image preparation remains applicable.
 Each running session needs its own writable image and socket/runtime namespace.
 `--executor python|native|auto` applies to simulator and hybrid preparation and live
-execution. Omission preserves `MEGAFORTH_EXECUTOR`, otherwise Python; explicit
-`native` requires the extension, and `auto` uses it when available. Emulator
+execution. An explicit option takes priority over `MEGAFORTH_EXECUTOR`; when
+both are absent, production sessions require the native semantic extension.
+A missing or stale required extension fails before boot source runs. Select
+`python` for the reference executor, or `auto` to permit fallback when the
+native extension is unavailable or incompatible. Embedded `MegaForthRuntime`
+and `HybridRuntime.create` retain their Python default when no executor or
+environment setting is supplied. Emulator
 lane and clock controls remain emulator options. Python-only simulation and
 launcher help do not require the emulator extension. The simulator and viewer
 also import no architectural backend.
@@ -320,7 +325,7 @@ All modes report a common `runtime` object in session status: selected mode
 and executor, work/step units, timer and RTC policy, and supported diagnostic
 and reset actions. A native executor may still use Python service fallbacks.
 See [the session API](docs/development-session.md) for the boundary and status
-fields. Executor defaults remain unchanged.
+fields. The default application mode remains emulator.
 
 Hybrid mode uses the semantic dictionary and services, with explicit calls to
 bounded MP64 integer routines declared in a local manifest. Both engines share

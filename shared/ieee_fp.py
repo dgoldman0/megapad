@@ -23,8 +23,8 @@ to the exact layer:
 * a fused multiply-add for ``p <= 24`` uses an exact binary64 product and an
   error-free two-sum to form the round-to-odd binary64 sum, which rounds
   correctly to any format with ``53 >= p + 2``;
-* binary64 fused multiply-add uses ``math.fma`` after special values are
-  handled.
+* binary64 fused multiply-add uses ``math.fma`` when available, after special
+  values are handled, and otherwise uses the exact integer layer.
 
 ``tests/test_ieee_fp.py`` checks every lane-layer function against the exact
 layer.
@@ -710,19 +710,24 @@ def lane_mixed_fma(dst: Format, src: Format, a: int, b: int, c: int) -> int:
     x = to_double(src, a)
     y = to_double(src, b)
     z = to_double(dst, c)
-    if src is FP64:
+    if src is FP64 or dst is FP64:
         return _host_fma(dst, x, y, z)
     product_value = x * y  # exact for precision <= 26
-    if dst is FP64:
-        return from_double(dst, product_value + z)
     return from_double(dst, _round_to_odd_sum(product_value, z))
 
 
 def _host_fma(dst: Format, x: float, y: float, z: float) -> int:
     if x != x or y != y or z != z:
         return dst.canonical_nan
+    host_fma = getattr(math, "fma", None)
+    if host_fma is None:
+        # Python versions before 3.13 lack math.fma. The bridge above widens
+        # every narrower input exactly; do the product and sum in the integer
+        # oracle and round only once to binary64, just as math.fma would.
+        bits = fma(FP64, double_bits(x), double_bits(y), double_bits(z))[0]
+        return bits if dst is FP64 else from_double(dst, to_double(FP64, bits))
     try:
-        return from_double(dst, math.fma(x, y, z))
+        return from_double(dst, host_fma(x, y, z))
     except ValueError:
         return dst.canonical_nan
     except OverflowError:

@@ -41,6 +41,16 @@ scalar FP only; unsupported combinations are explicit in the report.
 
 ## Decisions
 
+The harness now also accepts eight opt-in residual-cost probes without changing
+its original defaults: `aes-gcm32`, `page-hot`, `page-scattered`,
+`page-crossing`, `continuation-short`, `continuation-long`, `ntt-compute`, and
+`ntt-transfer`. Their independent checks cover complete AES ciphertext/tag,
+page-layout checksums and unchanged source bytes, continuation retained-state
+parity, and a direct modular DFT. Each has an explicit iteration bound; the
+continuation cases also bound host resumes. The harness gates passed 105 checks.
+Adding these probes establishes no new performance result or extraction priority
+until their unprofiled and attribution runs are recorded.
+
 Scalar FP runs four binary64 operations per iteration and checks known result
 bits and sticky flags. The native emulator still crosses into Python once per
 FP instruction and synchronizes CPU state. Hosted native execution still exits

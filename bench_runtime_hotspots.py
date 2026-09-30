@@ -7,8 +7,11 @@ not a retained guest/JIT cache. Setup and validation are outside the measured
 action. Optional attribution repeats the action on another fresh instance and
 is never included in the unprofiled timing samples.
 
-This covers scalar FP, hosted FP64 tiles, SHA3, PCM capture, and synthetic
-source compilation. It does not measure Desktop, full KDOS boot, audio playback,
+The default cases cover scalar FP, hosted FP64 tiles, SHA3, PCM capture, and
+synthetic source compilation. Opt-in cases cover AES-GCM, page access,
+continuation resumption, and NTT computation/transfers. They measure the current
+implementation, including any remaining Python service work. This does not
+measure Desktop, full KDOS boot, audio playback,
 or architectural/semantic timing equivalence. Use bench_simulator_kdos_load.py
 and bench_bios_kdos_load.py for their separately qualified full-source cases.
 """
@@ -38,7 +41,18 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parent
 SCHEMA = "megapad.runtime-hotspots"
-WORKLOADS = ("fp64", "tile-fp64", "sha3", "audio", "source-load")
+DEFAULT_WORKLOADS = ("fp64", "tile-fp64", "sha3", "audio", "source-load")
+EXTENDED_WORKLOAD_LIMITS = {
+    "aes-gcm32": 1024,
+    "page-hot": 65_536,
+    "page-scattered": 65_536,
+    "page-crossing": 65_536,
+    "continuation-short": 4096,
+    "continuation-long": 4096,
+    "ntt-compute": 256,
+    "ntt-transfer": 256,
+}
+WORKLOADS = DEFAULT_WORKLOADS + tuple(EXTENDED_WORKLOAD_LIMITS)
 EXECUTORS = ("emulator-native", "simulator-python", "simulator-native")
 MASK64 = (1 << 64) - 1
 # Independent binary64 known answers, round-to-nearest-even.
@@ -49,6 +63,22 @@ FP_XOR = FP_RESULTS[0] ^ FP_RESULTS[1] ^ FP_RESULTS[2] ^ FP_RESULTS[3]
 # protected dictionary prefix, and outside these small compiled kernels.
 SOURCE_ADDRESS, SOURCE1_ADDRESS, DESTINATION_ADDRESS = 0x20000, 0x20100, 0x20200
 AUDIO_BYTES = 4096
+# Extended cases own disjoint buffers, outside the original tile/SHA3/audio
+# locations and below the default Bank-0 stack boundary.
+CRYPTO_SOURCE, CRYPTO_DESTINATION = 0x30000, 0x31000
+AES_KEY_ADDRESS, AES_IV_ADDRESS, AES_TAG_ADDRESS = 0x32000, 0x32100, 0x32200
+PAGE_BUFFER_BASE = 0x40000
+PAGE_SIZE = 4096
+PAGE_VALUES = tuple(17 * (index + 1) for index in range(16))
+AES_PLAINTEXT = b"A" * 16 + b"B" * 16
+# Checked-in independent known answer from tests/simulator/test_kdos_aes.py.
+# AES-256, key bytes(range(32)), IV bytes(range(12)), no AAD.
+AES_CIPHERTEXT = bytes.fromhex(
+    "0643975a84a4835acc00d6caf0a8392c"
+    "c194c576b2391d3e7a25a7c75f2b42f0"
+)
+AES_TAG = bytes.fromhex("61f3ad860a90ca7ede2074f793b887c1")
+NTT_MODULUS, NTT_ROOT, NTT_LENGTH = 3329, 3061, 256
 
 
 class BenchmarkError(RuntimeError):
@@ -74,7 +104,8 @@ def _bounded_int(lower: int, upper: int):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workload", nargs="+", choices=WORKLOADS, default=list(WORKLOADS))
+    parser.add_argument("--workload", nargs="+", choices=WORKLOADS,
+                        default=list(DEFAULT_WORKLOADS))
     parser.add_argument("--executor", nargs="+", choices=EXECUTORS, default=list(EXECUTORS))
     parser.add_argument("--iterations", type=_bounded_int(1, 100_000), default=64)
     parser.add_argument("--trials", type=_bounded_int(1, 10), default=3)
@@ -247,9 +278,288 @@ loop:
     )
 
 
+def _extended_fixture(runtime, source: bytes, iterations: int, expected_stack: tuple,
+                      description: dict, check: Callable) -> PreparedWorkload:
+    """Compile an opt-in fixture without changing the original case paths."""
+    from simulator.runtime import ExecutionResult
+
+    budget = iterations * 200 + 10_000
+    runtime.evaluate(source, source_name="hotspot-extended.f", step_budget=budget)
+    _require(runtime.main_context.data.snapshot() == (), "preparation left a dirty stack")
+    description["source_sha256"] = hashlib.sha256(source).hexdigest()
+
+    def observe(result):
+        _require(isinstance(result, ExecutionResult), "semantic kernel did not complete")
+        _require(runtime.main_context.data.snapshot() == expected_stack,
+                 "semantic result stack differs")
+        returns = runtime.main_context.returns
+        _require(returns.snapshot() == () and returns.pointer == returns.empty_pointer,
+                 "semantic return stack differs")
+        observation = {"semantic_steps": result.semantic_steps, "stack": list(expected_stack)}
+        observation.update(check())
+        return observation
+
+    return PreparedWorkload(
+        action=lambda: runtime.execute("HOTSPOT", step_budget=budget),
+        observe=observe, close=runtime.memory.mmio.audio.release_host_sink,
+        counters=lambda: runtime.native_execution_stats, description=description,
+    )
+
+
+def _prepare_aes(runtime, iterations: int) -> PreparedWorkload:
+    key, iv = bytes(range(32)), bytes(range(12))
+    inputs = ((AES_KEY_ADDRESS, key), (AES_IV_ADDRESS, iv),
+              (CRYPTO_SOURCE, AES_PLAINTEXT))
+    for address, payload in inputs:
+        runtime.memory.write_bytes(address, payload)
+    # Explicit AES-256 mode selection is setup, as are all input buffers.
+    runtime.evaluate(b"0 AES-KEY-MODE!")
+    source = (
+        f": HOTSPOT 0 {iterations} 0 DO "
+        f"{AES_KEY_ADDRESS} AES-KEY! {AES_IV_ADDRESS} AES-IV! "
+        "0 AES-AAD-LEN! 32 AES-DATA-LEN! 0 AES-CMD! "
+        f"{CRYPTO_SOURCE} AES-DIN! {CRYPTO_DESTINATION} AES-DOUT@ "
+        f"{CRYPTO_SOURCE + 16} AES-DIN! {CRYPTO_DESTINATION + 16} AES-DOUT@ "
+        f"{AES_TAG_ADDRESS} AES-TAG@ AES-STATUS@ 2 - OR LOOP ;"
+    ).encode("ascii")
+
+    def check():
+        ciphertext = runtime.memory.read_bytes(CRYPTO_DESTINATION, 32)
+        tag = runtime.memory.read_bytes(AES_TAG_ADDRESS, 16)
+        _require(ciphertext == AES_CIPHERTEXT, "AES ciphertext differs")
+        _require(tag == AES_TAG, "AES authentication tag differs")
+        _require(runtime.aes.status == 2 and runtime.aes.key_mode == 0,
+                 "AES status or key mode differs")
+        _require(all(runtime.memory.read_bytes(address, len(payload)) == payload
+                     for address, payload in inputs), "AES source bytes changed")
+        return {"transactions": iterations, "aes_blocks": iterations * 2,
+                "status": 2, "ciphertext_hex": ciphertext.hex(), "tag_hex": tag.hex()}
+
+    return _extended_fixture(
+        runtime, source, iterations, (0,),
+        {"scope": "hosted AES-256-GCM BIOS transfers and service computation",
+         "work_unit": "aes_gcm32_transaction", "plaintext_bytes_per_iteration": 32,
+         "aad_bytes_per_iteration": 0, "aes_blocks_per_iteration": 2,
+         "oracle": "fixed ciphertext and full tag from checked-in AES fixture"}, check,
+    )
+
+
+def _page_geometry(workload: str) -> tuple[int, int, tuple[int, ...]]:
+    stride = 8 if workload == "page-hot" else PAGE_SIZE
+    base = PAGE_BUFFER_BASE + (PAGE_SIZE - 4 if workload == "page-crossing" else 0)
+    return base, stride, tuple(base + index * stride for index in range(16))
+
+
+def _prepare_pages(runtime, workload: str, iterations: int) -> PreparedWorkload:
+    _require(runtime.memory.page_size == PAGE_SIZE, "page fixture requires 4096-byte pages")
+    base, stride, addresses = _page_geometry(workload)
+    # Materialize every configured page before timing, including cell crossings.
+    # Guard bytes and inter-cell padding must remain unchanged after reads.
+    span_start, span_end = addresses[0] - 16, addresses[-1] + 8 + 16
+    image = bytearray(b"\xa5" * (span_end - span_start))
+    for address, value in zip(addresses, PAGE_VALUES):
+        offset = address - span_start
+        image[offset:offset + 8] = value.to_bytes(8, "little")
+    expected_image = bytes(image)
+    runtime.memory.write_bytes(span_start, expected_image)
+    source = (
+        f": HOTSPOT 0 {iterations} 0 DO I 15 AND {stride} * {base} + @ + LOOP ;"
+    ).encode("ascii")
+    full, tail = divmod(iterations, len(PAGE_VALUES))
+    checksum = (full * sum(PAGE_VALUES) + sum(PAGE_VALUES[:tail])) & MASK64
+    pages = lambda cells: sorted({page for address in cells
+                                 for page in (address // PAGE_SIZE, (address + 7) // PAGE_SIZE)})
+    configured_pages = pages(addresses)
+    touched_pages = pages(addresses[:min(iterations, 16)])
+
+    def check():
+        actual = runtime.memory.read_bytes(span_start, len(expected_image))
+        _require(actual == expected_image, "page source or guard bytes changed")
+        return {"checksum": checksum, "cell_reads": iterations,
+                "source_sha256": hashlib.sha256(actual).hexdigest()}
+
+    return _extended_fixture(
+        runtime, source, iterations, (checksum,),
+        {"scope": "identical guest cell-read loop over prepared ordinary pages",
+         "work_unit": "cell_read", "page_size": PAGE_SIZE, "stride_bytes": stride,
+         "cell_width": 8, "configured_cells": 16, "base_address": base,
+         "configured_data_pages": len(configured_pages),
+         "touched_data_pages": len(touched_pages),
+         "crosses_page_per_read": workload == "page-crossing",
+         "buffer_start": span_start, "buffer_bytes": len(expected_image)}, check,
+    )
+
+
+def _ntt_direct_expected(coefficients: tuple[int, ...]) -> tuple[int, ...]:
+    """Independent quadratic DFT; no shared transform or device helper calls."""
+    _require(len(coefficients) == NTT_LENGTH, "NTT oracle needs 256 coefficients")
+    result = []
+    for frequency in range(NTT_LENGTH):
+        ratio = pow(NTT_ROOT, frequency, NTT_MODULUS)
+        factor, total = 1, 0
+        for coefficient in coefficients:
+            total = (total + coefficient * factor) % NTT_MODULUS
+            factor = factor * ratio % NTT_MODULUS
+        result.append(total)
+    return tuple(result)
+
+
+def _prepare_ntt(runtime, workload: str, iterations: int) -> PreparedWorkload:
+    coefficients = tuple((17 * index + 3) % NTT_MODULUS for index in range(NTT_LENGTH))
+    payload = struct.pack("<256I", *coefficients)
+    expected = _ntt_direct_expected(coefficients)
+    expected_bytes = struct.pack("<256I", *expected)
+    runtime.memory.write_bytes(CRYPTO_SOURCE, payload)
+    destination_initial = b"\xa5" * (len(payload) + 32)
+    runtime.memory.write_bytes(CRYPTO_DESTINATION - 16, destination_initial)
+    runtime.ntt.set_modulus(NTT_MODULUS)
+    runtime.ntt.load(CRYPTO_SOURCE, 0, runtime.memory)
+    transfer = workload == "ntt-transfer"
+    body = (f"{CRYPTO_SOURCE} 0 NTT-LOAD NTT-FWD {CRYPTO_DESTINATION} NTT-STORE"
+            if transfer else "NTT-FWD")
+    source = f": HOTSPOT {iterations} 0 DO {body} LOOP ;".encode("ascii")
+    destination_expected = (b"\xa5" * 16 + expected_bytes + b"\xa5" * 16
+                            if transfer else destination_initial)
+
+    def check():
+        _require(runtime.ntt.result() == expected, "NTT result differs from direct DFT")
+        _require(runtime.ntt.polynomial_a() == coefficients and
+                 runtime.ntt.polynomial_b() == (0,) * NTT_LENGTH,
+                 "NTT input polynomial changed")
+        _require(runtime.ntt.status == 2 and runtime.ntt.index == 0 and
+                 runtime.ntt.modulus == NTT_MODULUS, "NTT retained registers differ")
+        roots = runtime.ntt.roots
+        _require(roots is not None and
+                 (roots.forward, roots.inverse, roots.size_inverse) == (3061, 2298, 3316),
+                 "NTT selected roots differ")
+        _require(runtime.memory.read_bytes(CRYPTO_SOURCE, len(payload)) == payload,
+                 "NTT source bytes changed")
+        _require(runtime.memory.read_bytes(CRYPTO_DESTINATION - 16, len(destination_expected)) ==
+                 destination_expected, "NTT output or guard bytes differ")
+        return {"transforms": iterations, "coefficients": NTT_LENGTH, "status": 2,
+                "index": 0, "output_sha256": hashlib.sha256(expected_bytes).hexdigest(),
+                "guest_transfer_bytes": iterations * len(payload) * 2 if transfer else 0}
+
+    return _extended_fixture(
+        runtime, source, iterations, (),
+        {"scope": "hosted NTT command with BIOS transfers" if transfer else
+                  "hosted NTT command; polynomial loaded during untimed setup",
+         "work_unit": "ntt_forward_transform", "modulus": NTT_MODULUS,
+         "forward_root": NTT_ROOT, "coefficients_per_transform": NTT_LENGTH,
+         "guest_transfer_bytes_per_iteration": len(payload) * 2 if transfer else 0,
+         "oracle": "independent direct 256-point modular DFT computed outside timing"}, check,
+    )
+
+
+def _run_continuations(runtime, quantum: int, budget: int):
+    from simulator.runtime import ExecutionResult, YieldedExecution
+
+    result = runtime.run_until_blocked("HOTSPOT", quantum_steps=quantum, step_budget=budget)
+    resumes, prior_steps = 0, -1
+    # The cumulative semantic budget and this host bound are independent stops.
+    while isinstance(result, YieldedExecution):
+        _require(prior_steps < result.semantic_steps <= budget,
+                 "continuation made no progress or exceeded its step budget")
+        _require(resumes < budget // quantum + 1, "continuation resume bound exceeded")
+        prior_steps = result.semantic_steps
+        result = runtime.resume_yielded(result.suspension)
+        resumes += 1
+    _require(isinstance(result, ExecutionResult), "continuation did not complete; unexpected block")
+    _require(prior_steps < result.semantic_steps <= budget, "continuation completion steps differ")
+    return result, resumes
+
+
+def _continuation_state(runtime) -> dict:
+    context = runtime.main_context
+    returns = context.returns
+    slots = []
+    for address, (frame, raw) in sorted(returns._continuations.items()):
+        _require(frame.fault_abort is None, "unexpected fault continuation in benchmark")
+        slots.append((address, frame.xt, frame.ip, frame.root, frame.dispatch_id, raw))
+    return {"stack": context.data.snapshot(), "return_stack": returns.snapshot(),
+            "return_pointer": returns.pointer, "empty_return_pointer": returns.empty_pointer,
+            "continuation_cookie": returns._continuation_cookie,
+            "continuation_slots": tuple(slots),
+            "retained_return_bytes": runtime.memory.read_bytes(returns.empty_pointer - 256, 256)}
+
+
+def _prepare_continuations(runtime, workload: str, iterations: int) -> PreparedWorkload:
+    from simulator.runtime import MegaForthRuntime
+
+    quantum = 7 if workload == "continuation-short" else 8192
+    budget = iterations * 32 + 64
+    source = (
+        ": HSLEAF 1+ ; : HSL1 HSLEAF ; : HSL2 HSL1 ; : HSL3 HSL2 ; "
+        f": HOTSPOT 0 {iterations} 0 DO HSL3 LOOP ;"
+    ).encode("ascii")
+    runtime.evaluate(source, source_name="hotspot-continuation.f", step_budget=10_000)
+    reference = MegaForthRuntime(execution_backend="python")
+    try:
+        reference.evaluate(source, source_name="hotspot-continuation.f", step_budget=10_000)
+        reference_result, reference_resumes = _run_continuations(reference, quantum, budget)
+        expected_state = _continuation_state(reference)
+    finally:
+        reference.memory.mmio.audio.release_host_sink()
+    _require(expected_state["stack"] == (iterations,), "Python continuation work differs")
+    _require(expected_state["return_stack"] == () and
+             expected_state["return_pointer"] == expected_state["empty_return_pointer"],
+             "Python continuation return stack differs")
+    _require(runtime.main_context.data.snapshot() == (), "preparation left a dirty stack")
+
+    def observe(outcome):
+        result, resumes = outcome
+        actual = _continuation_state(runtime)
+        _require(actual == expected_state, "continuation retained state differs from Python reference")
+        _require(result.semantic_steps == reference_result.semantic_steps and
+                 resumes == reference_resumes, "continuation work or yield count differs")
+        return {"semantic_steps": result.semantic_steps, "stack": list(actual["stack"]),
+                "increments": iterations, "host_resumes": resumes,
+                "return_pointer": actual["return_pointer"],
+                "continuation_cookie": actual["continuation_cookie"],
+                "continuation_slots": [list(slot) for slot in actual["continuation_slots"]],
+                "retained_return_sha256": hashlib.sha256(actual["retained_return_bytes"]).hexdigest()}
+
+    return PreparedWorkload(
+        action=lambda: _run_continuations(runtime, quantum, budget), observe=observe,
+        close=runtime.memory.mmio.audio.release_host_sink,
+        counters=lambda: runtime.native_execution_stats,
+        description={"scope": "nested colon calls and bounded host-quantum resumption",
+                     "work_unit": "nested_increment", "calls_per_iteration": 4,
+                     "quantum_steps": quantum, "semantic_step_budget": budget,
+                     "max_host_resumes": budget // quantum + 1,
+                     "source_sha256": hashlib.sha256(source).hexdigest(),
+                     "oracle": "fresh Python execution; exact steps, RP, cookie, slots and retained bytes"},
+    )
+
+
+def _prepare_extended_semantic(workload: str, executor: str, iterations: int) -> PreparedWorkload:
+    from simulator.runtime import MegaForthRuntime
+
+    limit = EXTENDED_WORKLOAD_LIMITS[workload]
+    if type(iterations) is not int or not 1 <= iterations <= limit:
+        raise ValueError(f"{workload} iterations must be between 1 and {limit}")
+    backend = executor.removeprefix("simulator-")
+    runtime = MegaForthRuntime(execution_backend=backend)
+    try:
+        _require(runtime.execution_backend == backend, "requested semantic executor was not selected")
+        if workload == "aes-gcm32":
+            return _prepare_aes(runtime, iterations)
+        if workload.startswith("page-"):
+            return _prepare_pages(runtime, workload, iterations)
+        if workload.startswith("ntt-"):
+            return _prepare_ntt(runtime, workload, iterations)
+        return _prepare_continuations(runtime, workload, iterations)
+    except BaseException:
+        runtime.memory.mmio.audio.release_host_sink()
+        raise
+
+
 def prepare_semantic(workload: str, executor: str, iterations: int) -> PreparedWorkload:
     from simulator.memory import MMIO_BASE
     from simulator.runtime import MegaForthRuntime
+
+    if workload in EXTENDED_WORKLOAD_LIMITS:
+        return _prepare_extended_semantic(workload, executor, iterations)
 
     backend = executor.removeprefix("simulator-")
     runtime = MegaForthRuntime(execution_backend=backend)

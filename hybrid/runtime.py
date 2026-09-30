@@ -7,7 +7,8 @@ both engines retain the same fixed ordinary-memory buffers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 import os
 from typing import Any, Callable
 import weakref
@@ -16,11 +17,19 @@ from shared.cells import MASK64
 from shared.hybrid_abi import (
     CELL_BYTES, CODE_ALIGNMENT, HYBRID_ABI, HYBRID_ABI_VERSION,
     MAX_CONTROL_BYTES, MAX_DISPATCH_INSTRUCTIONS, MAX_ROUTINES,
-    MAX_TOTAL_CODE_BYTES, MachineExitKindV1, MachineRoutineResultV1,
+    MAX_TOTAL_CODE_BYTES, MachineRoutineResultV1,
     RoutineDeclarationV1, RoutineImageV1,
+    HYBRID_CALLBACK_ABI_VERSION, MAX_DISPATCH_CALLBACKS,
+    MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS, CallbackRequestV2, CallbackSiteV2,
+    MachineExitKindV2, MachineSegmentResultV2, RoutineDeclarationV2, RoutineImageV2,
+    HYBRID_CLOSED_ABI_VERSION, CallbackRequestV3, MachineSegmentResultV3,
+    RoutineDeclarationV3, RoutineImageV3,
 )
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES, Word
 from simulator.errors import ExecutionBlocked, ExecutionError
+from simulator.interop_exports import (
+    CallbackExportBudgetExceeded, CallbackExportResult, ClosedCallbackReceipt,
+)
 from simulator.memory import AddressClass, MMIO_BASE, MMIO_LIMIT, SparseAddressSpace
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import ExecutionContext, MegaForthRuntime
@@ -45,6 +54,9 @@ class HybridRunReport:
     machine_instructions: int
     machine_cycles: int
     transitions: int
+    callback_requests: int = 0
+    callback_semantic_steps: int = 0
+    machine_segments: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +72,19 @@ class _Registration:
     word: Word
     declaration: RoutineDeclarationV1
     spec: object
+    implementation: object
+    callback: object
+    exports: tuple[tuple[CallbackSiteV2, object], ...] = ()
 
 
 @dataclass(slots=True)
 class _MachineAllowance:
     limit: int
+    callback_limit: int
+    callback_semantic_limit: int
     instructions: int = 0
+    callback_requests: int = 0
+    callback_semantic_steps: int = 0
 
 
 def _positive_limit(value: int, maximum: int, label: str) -> int:
@@ -80,6 +99,14 @@ def _alias(first: Any, second: Any, label: str) -> Any:
     if first is not None and second is not None:
         raise TypeError(f"specify only one {label} argument")
     return first if first is not None else second
+
+
+def _error_detail(error: BaseException) -> str:
+    try:
+        detail = str(error)
+    except BaseException:
+        detail = "error text unavailable"
+    return f"{type(error).__name__}: {detail}"
 
 
 def _overlap(base: int, size: int, other_base: int, other_size: int) -> bool:
@@ -101,7 +128,7 @@ def _merge_spans(spans: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
 
 
 class HybridRuntime:
-    """Own one shared image and the v1 integer-routine declaration registry.
+    """Own one shared image and its sealed integer-routine declarations.
 
     ``semantic`` is the actual MegaForthRuntime, including its original stack,
     dictionary, native planner, timers, and services. Raw semantic entry remains
@@ -113,10 +140,19 @@ class HybridRuntime:
         cls, *, executor: str | None = None, semantic_executor: str | None = None,
         memory: SparseAddressSpace | None = None, geometry: dict | None = None,
         dispatch_instruction_limit: int = MAX_DISPATCH_INSTRUCTIONS,
+        dispatch_callback_limit: int = MAX_DISPATCH_CALLBACKS,
+        dispatch_callback_semantic_limit: int = MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
         **runtime_kwargs: Any,
     ) -> HybridRuntime:
         limit = _positive_limit(dispatch_instruction_limit,
                                 MAX_DISPATCH_INSTRUCTIONS, "dispatch instruction limit")
+        callback_limit = _positive_limit(
+            dispatch_callback_limit, MAX_DISPATCH_CALLBACKS, "dispatch callback limit"
+        )
+        callback_semantic_limit = _positive_limit(
+            dispatch_callback_semantic_limit, MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
+            "dispatch callback semantic limit",
+        )
         if executor is not None and semantic_executor is not None and executor != semantic_executor:
             raise ValueError("executor and semantic_executor disagree")
         selected = executor if executor is not None else semantic_executor
@@ -154,13 +190,16 @@ class HybridRuntime:
             machine[1].close()
             machine = None
             raise
-        return cls(semantic, native, limit, machine)
+        return cls(semantic, native, limit, machine, callback_limit, callback_semantic_limit)
 
     def __init__(self, semantic: MegaForthRuntime, native: Any, limit: int,
-                 machine: tuple) -> None:
+                 machine: tuple, callback_limit: int = MAX_DISPATCH_CALLBACKS,
+                 callback_semantic_limit: int = MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS) -> None:
         self.semantic = semantic
         self._native = native
         self._dispatch_instruction_limit = limit
+        self._dispatch_callback_limit = callback_limit
+        self._dispatch_callback_semantic_limit = callback_semantic_limit
         self._executor = semantic.execution_backend
         self._session_nonce = object()
         self._closed = False
@@ -173,11 +212,45 @@ class HybridRuntime:
         self._machine_instructions = 0
         self._machine_cycles = 0
         self._transitions = 0
+        self._callback_requests = 0
+        self._callback_semantic_steps = 0
+        self._machine_segments = 0
+        self._v2_segment_id = 0
+        self._v2_invocation_id = 0
         self._allowances: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._stack_allocations: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
-        self._wrapper_limits: list[int] = []
+        self._wrapper_limits: list[tuple[int, int, int]] = []
         self._cpu, self._runner, self._control_base, self._control_buffer = machine
+        self._callbacks_available = self._supports_callbacks(native)
+        self._dictionary = semantic.dictionary
+        self._memory = semantic.memory
+        previous_guard = self._dictionary._mutation_guard
+        owner = weakref.ref(self)
+
+        def mutation_guard(operation: str) -> None:
+            if previous_guard is not None:
+                previous_guard(operation)
+            current = owner()
+            if current is not None and current._active_machine:
+                raise HybridExecutionError(
+                    "active_dispatch", "dictionary mutation is forbidden during a machine invocation"
+                )
+
+        self._dictionary_guard = mutation_guard
+        self._dictionary._mutation_guard = mutation_guard
         self._remember_context(semantic.main_context)
+
+    @staticmethod
+    def _supports_callbacks(native: Any) -> bool:
+        runner = getattr(native, "RoutineRunnerV2", None)
+        return (
+            getattr(native, "HYBRID_CALLBACK_ABI_VERSION", None) == HYBRID_CALLBACK_ABI_VERSION
+            and callable(runner) and callable(getattr(native, "RoutineSpecV2", None))
+            and all(callable(getattr(runner, name, None)) for name in (
+                "publish_code_v2", "is_code_published_v2", "revoke_code_v2",
+                "begin_v2", "resume_callback", "cancel_invocation", "last_segment_v2",
+            ))
+        )
 
     @staticmethod
     def _prepare_machine(memory: SparseAddressSpace, native: Any) -> tuple:
@@ -217,7 +290,9 @@ class HybridRuntime:
                 cpu.attach_vram(buffer, region.base, region.size)
             else:
                 raise ValueError("unsupported hybrid ordinary region")
-        runner = native.RoutineRunnerV1(cpu, control_base, control_buffer)
+        runner_type = (native.RoutineRunnerV2 if HybridRuntime._supports_callbacks(native)
+                       else native.RoutineRunnerV1)
+        runner = runner_type(cpu, control_base, control_buffer)
         return cpu, runner, control_base, control_buffer
 
     @property
@@ -228,6 +303,45 @@ class HybridRuntime:
     @property
     def dispatch_instruction_limit(self) -> int:
         return self._dispatch_instruction_limit
+
+    @property
+    def dispatch_callback_limit(self) -> int:
+        return self._dispatch_callback_limit
+
+    @property
+    def dispatch_callback_semantic_limit(self) -> int:
+        return self._dispatch_callback_semantic_limit
+
+    @property
+    def callback_abi_available(self) -> bool:
+        """Whether this owner's native runner supports callback ABI v2."""
+        return self._callbacks_available
+
+    @property
+    def closed_callback_abi_available(self) -> bool:
+        """Whether this owner admits V3 closed policies over the V2 transport."""
+        return (
+            self._callbacks_available
+            and getattr(self.semantic, "callback_export_abi_version", None)
+            == HYBRID_CLOSED_ABI_VERSION
+            and callable(getattr(self.semantic, "inspect_callback_export", None))
+            and callable(getattr(self.semantic, "callback_policy_core_xt", None))
+            and callable(getattr(self.semantic, "consume_callback_budget_failure", None))
+            and callable(getattr(self.semantic, "begin_closed_callback_accounting", None))
+            and callable(getattr(self.semantic, "consume_closed_callback_accounting", None))
+        )
+
+    @property
+    def callback_requests(self) -> int:
+        return self._callback_requests
+
+    @property
+    def callback_semantic_steps(self) -> int:
+        return self._callback_semantic_steps
+
+    @property
+    def machine_segments(self) -> int:
+        return self._machine_segments
 
     @property
     def machine_instructions(self) -> int:
@@ -254,18 +368,58 @@ class HybridRuntime:
     def register_routine_v1(self, image: RoutineImageV1 | None = None,
                             **values: Any) -> Word:
         """Publish a sealed image as one ordinary semantic primitive word."""
+        return self._register_routine(image, RoutineImageV1, values)
+
+    def register_routine_v2(self, image: RoutineImageV2 | None = None,
+                            **values: Any) -> Word:
+        """Publish an integer image with explicit canonical semantic callbacks."""
+        return self._register_routine(image, RoutineImageV2, values)
+
+    def register_routine_v3(self, image: RoutineImageV3 | None = None,
+                            **values: Any) -> Word:
+        """Publish an integer image with admitted closed semantic policies."""
+        return self._register_routine(image, RoutineImageV3, values)
+
+    def _require_authority(self) -> None:
+        if (self.semantic.dictionary is not self._dictionary
+                or self._dictionary._mutation_guard is not self._dictionary_guard
+                or self.semantic.memory is not self._memory):
+            raise HybridExecutionError("stale_registration", "shared dictionary or memory owner changed")
+
+    def _registration_cleanup_error(self, error: BaseException, cleanup: BaseException) -> None:
+        self._registration_failure = (
+            f"registration rollback failed: {_error_detail(cleanup)}"
+        )
+        BaseException.add_note(error, self._registration_failure)
+
+    def _register_routine(self, image, image_type, values: dict[str, Any]) -> Word:
         with self.semantic._session_owner_lock:
             self._require_open()
+            self._require_authority()
             self.semantic._require_session_owner_access("register a hybrid routine")
+            if self._active_machine:
+                raise HybridExecutionError("active_dispatch", "register only at an idle host boundary")
             self.semantic._require_no_suspension("register a hybrid routine")
             if self.semantic._active_dispatches or self.semantic._active_input_states:
                 raise HybridExecutionError("active_dispatch", "register only at an idle host boundary")
             if image is not None and values:
-                raise TypeError("pass a RoutineImageV1 or its keyword fields, not both")
+                raise TypeError(f"pass a {image_type.__name__} or its keyword fields, not both")
             if image is None:
-                image = RoutineImageV1(**values)
-            if type(image) is not RoutineImageV1:
-                raise TypeError("registration requires a RoutineImageV1")
+                image = image_type(**values)
+            if type(image) is not image_type:
+                raise TypeError(f"registration requires a {image_type.__name__}")
+            callbacks = image_type in (RoutineImageV2, RoutineImageV3)
+            if image_type is RoutineImageV3 and not self.closed_callback_abi_available:
+                raise RuntimeError(
+                    "hybrid closed callbacks require semantic profile v3 and "
+                    "a matching _mp64_accel v2; run make build"
+                )
+            if callbacks:
+                if not self._callbacks_available:
+                    raise RuntimeError("hybrid callbacks require a matching _mp64_accel v2; run make build")
+                image = replace(image, callbacks=tuple(
+                    replace(site, export=replace(site.export)) for site in image.callbacks
+                ))
             if len(self._registrations) >= MAX_ROUTINES:
                 raise ValueError("a hybrid session may issue at most 64 registrations")
             code = image.code + b"\x01" * (-len(image.code) % CODE_ALIGNMENT)
@@ -287,10 +441,19 @@ class HybridRuntime:
             )
             if rejection is not None:
                 raise ValueError(rejection)
-            spec = self._native.RoutineSpecV1(
-                code_base, len(code), image.entry_offset, image.input_cells,
-                image.output_cells, stack_base, stack_size, image.max_instructions,
-            )
+            if callbacks:
+                spec = self._native.RoutineSpecV2(
+                    code_base, code, image.entry_offset, image.input_cells,
+                    image.output_cells, stack_base, stack_size, image.max_instructions,
+                    tuple((site.call_offset, site.stub_offset, site.export.export_id,
+                           site.export.input_cells, site.export.output_cells)
+                          for site in image.callbacks),
+                )
+            else:
+                spec = self._native.RoutineSpecV1(
+                    code_base, len(code), image.entry_offset, image.input_cells,
+                    image.output_cells, stack_base, stack_size, image.max_instructions,
+                )
             if not any(region.base <= code_base and code_base + len(code) <= region.limit
                        for region in self.semantic.memory.regions):
                 raise ValueError("complete padded routine image must fit one ordinary region")
@@ -304,45 +467,80 @@ class HybridRuntime:
                 current._invoke(registration_nonce, context)
 
             checkpoint = dictionary.checkpoint()
+            host_escape = None
+            transaction = (self.semantic.callback_export_registration(
+                tuple(site.export for site in image.callbacks)
+            ) if callbacks else nullcontext(()))
             try:
-                word = self.semantic.define_primitive(image.name, invoke, initial_body=body)
-                lease = dictionary.acquire_body_lease(word)
-                if lease.body_address != body_base or lease.body_limit != body_base + len(body):
-                    raise HybridExecutionError("stale_registration", "body publication geometry changed")
-                generation = len(self._registrations) + 1
-                control = _ControlLease(self._session_nonce, generation, stack_base, stack_size)
-                declaration = RoutineDeclarationV1(
-                    name=image.name, session_nonce=self._session_nonce,
-                    registration_nonce=registration_nonce, allocation_lease=lease,
-                    allocation_generation=lease.allocation_serial,
-                    control_lease=control, control_generation=generation,
-                    body_base=body_base, body_size=len(body), code_base=code_base,
-                    code=code, entry_offset=image.entry_offset,
-                    input_cells=image.input_cells, output_cells=image.output_cells,
-                    buffers=image.buffers, stack_base=stack_base,
-                    return_stack_cells=image.return_stack_cells,
-                    max_instructions=image.max_instructions,
-                    dispatch_instruction_limit=self._dispatch_instruction_limit,
-                )
-                self._runner.publish_code(spec)
+                with transaction as handles:
+                    word = self.semantic.define_primitive(image.name, invoke, initial_body=body)
+                    if callbacks:
+                        host_escape = self.semantic._register_primitive_host_escape(
+                            word.implementation, invoke
+                        )
+                    lease = dictionary.acquire_body_lease(word)
+                    if lease.body_address != body_base or lease.body_limit != body_base + len(body):
+                        raise HybridExecutionError("stale_registration", "body publication geometry changed")
+                    generation = len(self._registrations) + 1
+                    control = _ControlLease(self._session_nonce, generation, stack_base, stack_size)
+                    declaration_type = {
+                        RoutineImageV1: RoutineDeclarationV1,
+                        RoutineImageV2: RoutineDeclarationV2,
+                        RoutineImageV3: RoutineDeclarationV3,
+                    }[image_type]
+                    extra = dict(
+                        callbacks=image.callbacks,
+                        dispatch_callback_limit=self._dispatch_callback_limit,
+                        dispatch_callback_semantic_limit=self._dispatch_callback_semantic_limit,
+                    ) if callbacks else {}
+                    declaration = declaration_type(
+                        name=image.name, session_nonce=self._session_nonce,
+                        registration_nonce=registration_nonce, allocation_lease=lease,
+                        allocation_generation=lease.allocation_serial,
+                        control_lease=control, control_generation=generation,
+                        body_base=body_base, body_size=len(body), code_base=code_base,
+                        code=code, entry_offset=image.entry_offset,
+                        input_cells=image.input_cells, output_cells=image.output_cells,
+                        buffers=image.buffers, stack_base=stack_base,
+                        return_stack_cells=image.return_stack_cells,
+                        max_instructions=image.max_instructions,
+                        dispatch_instruction_limit=self._dispatch_instruction_limit,
+                        **extra,
+                    )
+                    registration = _Registration(
+                        word, declaration, spec, word.implementation, invoke,
+                        tuple(zip(image.callbacks, handles)) if callbacks else (),
+                    )
+                    # Allocate the host tables before native publication. They
+                    # become visible only after the export transaction commits.
+                    registrations = {**self._registrations, id(word): registration}
+                    by_nonce = {**self._by_nonce, registration_nonce: registration}
+                    if callbacks:
+                        self._runner.publish_code_v2(spec)
+                    else:
+                        self._runner.publish_code(spec)
             except BaseException as error:
+                if callbacks:
+                    try:
+                        # A host wrapper may forward publication then raise;
+                        # query exact native identity before revoking it.
+                        if self._runner.is_code_published_v2(spec):
+                            self._runner.revoke_code_v2(spec)
+                    except BaseException as cleanup:
+                        self._registration_cleanup_error(error, cleanup)
+                if host_escape is not None:
+                    try:
+                        self.semantic._revoke_primitive_host_escape(host_escape)
+                    except BaseException as cleanup:
+                        self._registration_cleanup_error(error, cleanup)
                 try:
                     dictionary.rollback(checkpoint)
                     self.semantic.dictionary_index.rebuild()
                 except BaseException as cleanup:
-                    # Preserve the actual publication failure. A failed repair
-                    # cannot leave this registry available for further entry;
-                    # the host can still close and release its native owner.
-                    self._registration_failure = (
-                        f"registration rollback failed: {type(cleanup).__name__}: {cleanup}"
-                    )
-                    add_note = getattr(error, "add_note", None)
-                    if add_note is not None:
-                        add_note(self._registration_failure)
+                    self._registration_cleanup_error(error, cleanup)
                 raise
-            registration = _Registration(word, declaration, spec)
-            self._registrations[id(word)] = registration
-            self._by_nonce[registration_nonce] = registration
+            self._registrations = registrations
+            self._by_nonce = by_nonce
             self._issued_code_bytes += len(code)
             self._control_used += stack_size
             return word
@@ -356,6 +554,37 @@ class HybridRuntime:
                 raise HybridExecutionError("stale_registration", "word has no registration in this owner")
             return registration.declaration
 
+    @property
+    def registered_routines(self) -> tuple[RoutineImageV1 | RoutineImageV2 | RoutineImageV3, ...]:
+        """Fresh value-only snapshots of issued declarations, without leases.
+
+        These describe registrations, including ones whose dictionary leases
+        were later revoked; they do not grant or promise live entry authority.
+        """
+        with self.semantic._session_owner_lock:
+            self._require_open()
+            values = []
+            for registration in self._registrations.values():
+                declaration = registration.declaration
+                callbacks = type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3)
+                image_type = {
+                    RoutineDeclarationV1: RoutineImageV1,
+                    RoutineDeclarationV2: RoutineImageV2,
+                    RoutineDeclarationV3: RoutineImageV3,
+                }[type(declaration)]
+                extra = dict(callbacks=tuple(
+                    replace(site, export=replace(site.export)) for site in declaration.callbacks
+                )) if callbacks else {}
+                values.append(image_type(
+                    name=declaration.name, code=declaration.code,
+                    entry_offset=declaration.entry_offset,
+                    input_cells=declaration.input_cells, output_cells=declaration.output_cells,
+                    buffers=tuple(replace(rule) for rule in declaration.buffers),
+                    return_stack_cells=declaration.return_stack_cells,
+                    max_instructions=declaration.max_instructions, **extra,
+                ))
+            return tuple(values)
+
     def _current_meter(self) -> object | None:
         # A source input is one outer budget even though it starts a fresh
         # semantic dispatch for each token. Nested evaluation shares that root.
@@ -366,14 +595,23 @@ class HybridRuntime:
         return None
 
     def _allowance(self, meter: object) -> _MachineAllowance:
-        requested = min(self._wrapper_limits, default=self._dispatch_instruction_limit)
+        requested = self._inherited_limits()
         allowance = self._allowances.get(meter)
         if allowance is None:
-            allowance = _MachineAllowance(requested)
+            allowance = _MachineAllowance(*requested)
             self._allowances[meter] = allowance
         else:
-            allowance.limit = min(allowance.limit, requested)
+            allowance.limit = min(allowance.limit, requested[0])
+            allowance.callback_limit = min(allowance.callback_limit, requested[1])
+            allowance.callback_semantic_limit = min(allowance.callback_semantic_limit, requested[2])
         return allowance
+
+    def _inherited_limits(self) -> tuple[int, int, int]:
+        limits = (self._dispatch_instruction_limit, self._dispatch_callback_limit,
+                  self._dispatch_callback_semantic_limit)
+        for current in self._wrapper_limits:
+            limits = tuple(min(left, right) for left, right in zip(limits, current))
+        return limits
 
     def _remember_context(self, context: ExecutionContext) -> None:
         if type(context) is not ExecutionContext:
@@ -397,6 +635,8 @@ class HybridRuntime:
         with self.semantic._session_owner_lock:
             self._require_open()
             self.semantic._require_session_owner_access("register a hybrid context")
+            if self._active_machine:
+                raise HybridExecutionError("active_dispatch", "register contexts only at an idle boundary")
             self._remember_context(context)
 
     def _protected_spans(self, context: ExecutionContext) -> tuple[tuple[int, int], ...]:
@@ -419,6 +659,264 @@ class HybridRuntime:
         spans.append((self._control_base, MAX_CONTROL_BYTES))
         return _merge_spans(spans)
 
+    def _validate_registration(self, registration: _Registration) -> None:
+        self._require_open()
+        self._require_authority()
+        declaration = registration.declaration
+        lease = declaration.allocation_lease
+        control = declaration.control_lease
+        if (declaration.session_nonce is not self._session_nonce
+                or self._by_nonce.get(declaration.registration_nonce) is not registration
+                or self._registrations.get(id(registration.word)) is not registration
+                or not self._dictionary.is_body_lease_live(lease)
+                or lease.word is not registration.word
+                or lease.allocation_serial != declaration.allocation_generation
+                or lease.body_address != declaration.body_base
+                or lease.body_limit != declaration.body_base + declaration.body_size
+                or registration.word.implementation is not registration.implementation
+                or registration.implementation.callback is not registration.callback
+                or type(control) is not _ControlLease
+                or control.owner is not self._session_nonce
+                or control.generation != declaration.control_generation
+                or control.base != declaration.stack_base
+                or control.size != declaration.stack_size):
+            raise HybridExecutionError("stale_registration", "word or allocation lease was revoked")
+        if self._memory.read_bytes(declaration.code_base, declaration.code_size) != declaration.code:
+            raise HybridExecutionError("stale_code", "shared code bytes no longer match the sealed image")
+        for site, handle in registration.exports:
+            try:
+                descriptor = self.semantic.verify_callback_export(handle)
+                if descriptor != site.export:
+                    raise ValueError("callback export descriptor changed")
+            except (ExecutionError, TypeError, ValueError) as exc:
+                raise HybridExecutionError("stale_export", str(exc)) from exc
+
+    @staticmethod
+    def _result_fields(raw) -> dict[str, Any]:
+        return dict(
+            exit_kind=raw.exit_kind, instructions=raw.instructions, cycles=raw.cycles,
+            entry_pc=raw.entry_pc, pc=raw.pc, outputs=tuple(raw.outputs),
+            instruction_pc=raw.instruction_pc, access_address=raw.access_address,
+            access_width=raw.access_width, access_operation=raw.access_operation,
+            trap_id=raw.trap_id, detail=raw.detail,
+        )
+
+    def _settle_segment(self, raw, allowance: _MachineAllowance) -> None:
+        # Native fields are deltas, not invocation totals. Cancellation itself
+        # has no completed work and is not another execution segment.
+        allowance.instructions += raw.instructions
+        self._machine_instructions += raw.instructions
+        self._machine_cycles += raw.cycles
+        self._machine_segments += 1
+        if raw.exit_kind == "callback_request":
+            allowance.callback_requests += 1
+            self._callback_requests += 1
+
+    def _settle_v2_receipt(self, runner, allowance: _MachineAllowance) -> None:
+        receipt = runner.last_segment_v2()
+        if receipt is None or receipt.segment_id == self._v2_segment_id:
+            return
+        if receipt.segment_id != self._v2_segment_id + 1:
+            raise RuntimeError("native segment accounting sequence changed")
+        if receipt.invocation_id != self._v2_invocation_id:
+            if receipt.invocation_id <= self._v2_invocation_id:
+                raise RuntimeError("native invocation accounting sequence changed")
+            self._transitions += 1
+            self._v2_invocation_id = receipt.invocation_id
+        allowance.instructions += receipt.instructions
+        self._machine_instructions += receipt.instructions
+        self._machine_cycles += receipt.cycles
+        self._machine_segments += 1
+        if receipt.callback_request:
+            allowance.callback_requests += 1
+            self._callback_requests += 1
+        self._v2_segment_id = receipt.segment_id
+
+    def _native_callback_boundary(self, runner, allowance, operation, *args, **kwargs):
+        # The native receipt is retained before result marshalling. Even an
+        # allocation failure or a forwarding host wrapper cannot hide completed
+        # work and let a later dispatch replenish its allowance.
+        try:
+            raw = operation(*args, **kwargs)
+        except BaseException as error:
+            try:
+                self._settle_v2_receipt(runner, allowance)
+            except BaseException as cleanup:
+                self._registration_cleanup_error(error, cleanup)
+            raise
+        try:
+            self._settle_v2_receipt(runner, allowance)
+            if raw.segment_id != self._v2_segment_id:
+                raise RuntimeError("native result differs from its accounting receipt")
+        except BaseException as error:
+            self._registration_failure = (
+                f"native segment accounting failed: {_error_detail(error)}"
+            )
+            raise
+        return raw
+
+    def _closed_callback_boundary(self, handle, arguments, allowance, local_limit):
+        """Settle only the exact engine-owned invocation, including failures.
+
+        Accounting hooks may have changed the outer meter or raised before an
+        effect. A closed invocation's one-shot receipt owns its charged count;
+        this path never reads or subtracts the mutable meter's step fields.
+        """
+        remaining = allowance.callback_semantic_limit - allowance.callback_semantic_steps
+        consume = self.semantic.consume_closed_callback_accounting
+        checkpoint = self.semantic.begin_closed_callback_accounting(handle)
+
+        def settle():
+            receipt = consume(checkpoint, handle)
+            if type(receipt) is not ClosedCallbackReceipt:
+                raise RuntimeError("closed callback accounting returned a foreign receipt")
+            steps = receipt.semantic_steps
+            if (type(steps) is not int or not 0 <= steps <= min(local_limit, remaining)
+                    or type(receipt.entered) is not bool or type(receipt.completed) is not bool
+                    or (not receipt.entered and (steps != 0 or receipt.completed))
+                    or (receipt.completed and steps == 0)):
+                raise RuntimeError("closed callback accounting receipt is inconsistent")
+            allowance.callback_semantic_steps += steps
+            self._callback_semantic_steps += steps
+            return receipt
+
+        try:
+            callback_result = self.semantic.invoke_callback_export(
+                handle, arguments, semantic_step_limit=remaining,
+            )
+        except BaseException as error:
+            try:
+                settle()
+            except BaseException as cleanup:
+                self._registration_cleanup_error(error, cleanup)
+            raise
+        try:
+            receipt = settle()
+            if (not receipt.entered or not receipt.completed
+                    or type(callback_result) is not CallbackExportResult
+                    or type(callback_result.semantic_steps) is not int
+                    or callback_result.semantic_steps != receipt.semantic_steps):
+                raise RuntimeError("closed callback result has no matching completed invocation")
+        except BaseException as error:
+            self._registration_failure = f"closed callback accounting failed: {_error_detail(error)}"
+            raise HybridExecutionError("callback_accounting", self._registration_failure) from error
+        return callback_result
+
+    def _semantic_callback_boundary(self, handle, request, meter, allowance):
+        if request.site.export.effect == "closed_integer_colon":
+            return self._closed_callback_boundary(
+                handle, request.arguments, allowance, request.site.export.max_semantic_steps,
+            )
+        # The locked leaf path retains its existing one-tick behavior.
+        starting_steps = meter.steps
+        try:
+            return self.semantic.invoke_callback_export(
+                handle, request.arguments,
+                semantic_step_limit=(allowance.callback_semantic_limit - allowance.callback_semantic_steps),
+            )
+        finally:
+            completed_steps = meter.steps - starting_steps
+            allowance.callback_semantic_steps += completed_steps
+            self._callback_semantic_steps += completed_steps
+
+    def _drive_callbacks(self, registration: _Registration, arguments: tuple,
+                         spans: tuple, protected: tuple, meter: object,
+                         allowance: _MachineAllowance, remaining: int):
+        runner = self._runner
+        pending = None
+        closed_metadata = type(registration.declaration) is RoutineDeclarationV3
+        request_type = CallbackRequestV3 if closed_metadata else CallbackRequestV2
+        result_type = MachineSegmentResultV3 if closed_metadata else MachineSegmentResultV2
+        try:
+            before_segment = self._v2_segment_id
+            try:
+                raw = self._native_callback_boundary(
+                    runner, allowance, runner.begin_v2,
+                    registration.spec, arguments, spans, remaining,
+                    callback_limit=max(0, allowance.callback_limit - allowance.callback_requests),
+                    protected_spans=protected,
+                )
+            except (TypeError, ValueError) as exc:
+                if self._v2_segment_id != before_segment or self._registration_failure is not None:
+                    raise
+                raise HybridExecutionError("rejected_access", str(exc)) from exc
+            instruction_limit = min(remaining, registration.declaration.max_instructions)
+            while True:
+                pending = raw.token
+                request = None
+                handle = None
+                if raw.exit_kind == "callback_request":
+                    callback = raw.callback
+                    matching = [(site, issued) for site, issued in registration.exports
+                                if site.call_offset == callback.call_offset
+                                and site.stub_offset == callback.stub_offset
+                                and site.export.export_id == callback.export_id]
+                    if len(matching) != 1 or pending is None:
+                        raise HybridExecutionError("invalid_callback", "native callback site was not declared")
+                    site, handle = matching[0]
+                    request = request_type(
+                        invocation_id=callback.invocation_id, sequence=callback.sequence,
+                        site=site, arguments=tuple(callback.arguments),
+                    )
+                result = result_type(
+                    **self._result_fields(raw), invocation_id=raw.invocation_id,
+                    invocation_instructions=raw.invocation_instructions,
+                    invocation_cycles=raw.invocation_cycles, callback=request,
+                )
+                if result.exit_kind is not MachineExitKindV2.CALLBACK_REQUEST:
+                    return result
+                # The completed CALL is visible, but no semantic leaf may run
+                # unless some machine allowance remains for its return path.
+                if (raw.invocation_instructions >= instruction_limit
+                        or allowance.instructions >= allowance.limit):
+                    raise HybridExecutionError(
+                        "instruction_limit", "machine allowance exhausted before callback dispatch",
+                        result=result,
+                    )
+                self._validate_registration(registration)
+                if self._runner is not runner:
+                    raise HybridExecutionError("stale_registration", "native invocation owner changed")
+                if allowance.callback_semantic_steps >= allowance.callback_semantic_limit:
+                    raise HybridExecutionError(
+                        "callback_semantic_limit", "outer callback semantic allowance exhausted",
+                        result=result,
+                    )
+                try:
+                    callback_result = self._semantic_callback_boundary(
+                        handle, request, meter, allowance,
+                    )
+                except CallbackExportBudgetExceeded as exc:
+                    if self._registration_failure is not None:
+                        raise
+                    try:
+                        issued = self.semantic.consume_callback_budget_failure(exc)
+                    except BaseException as cleanup:
+                        self._registration_cleanup_error(exc, cleanup)
+                        raise exc
+                    if not issued:
+                        raise
+                    raise HybridExecutionError(exc.reason, str(exc), result=result) from exc
+                self._validate_registration(registration)
+                if self._runner is not runner:
+                    raise HybridExecutionError("stale_registration", "native invocation owner changed")
+                before_segment = self._v2_segment_id
+                try:
+                    raw = self._native_callback_boundary(
+                        runner, allowance, runner.resume_callback, pending, callback_result.outputs
+                    )
+                except (TypeError, ValueError) as exc:
+                    if self._v2_segment_id != before_segment or self._registration_failure is not None:
+                        raise
+                    raise HybridExecutionError("invalid_callback", str(exc)) from exc
+        except BaseException as error:
+            try:
+                # Owner cancellation is idempotent, including when native
+                # execution or marshalling already revoked the pending frame.
+                runner.cancel_invocation()
+            except BaseException as cleanup:
+                self._registration_cleanup_error(error, cleanup)
+            raise
+
     def _invoke(self, nonce: object, context: ExecutionContext) -> None:
         with self.semantic._session_owner_lock:
             self._require_open()
@@ -428,24 +926,8 @@ class HybridRuntime:
             registration = self._by_nonce.get(nonce)
             if registration is None:
                 raise HybridExecutionError("stale_registration", "registration identity is no longer live")
+            self._validate_registration(registration)
             declaration = registration.declaration
-            lease = declaration.allocation_lease
-            control = declaration.control_lease
-            if (declaration.session_nonce is not self._session_nonce
-                    or declaration.registration_nonce is not nonce
-                    or not self.semantic.dictionary.is_body_lease_live(lease)
-                    or lease.word is not registration.word
-                    or lease.allocation_serial != declaration.allocation_generation
-                    or lease.body_address != declaration.body_base
-                    or lease.body_limit != declaration.body_base + declaration.body_size
-                    or type(control) is not _ControlLease
-                    or control.owner is not self._session_nonce
-                    or control.generation != declaration.control_generation
-                    or control.base != declaration.stack_base
-                    or control.size != declaration.stack_size):
-                raise HybridExecutionError("stale_registration", "word or allocation lease was revoked")
-            if self.semantic.memory.read_bytes(declaration.code_base, declaration.code_size) != declaration.code:
-                raise HybridExecutionError("stale_code", "shared code bytes no longer match the sealed image")
             protected = self._protected_spans(context)
             # Read only the declared argument cells, never the whole stack.
             arguments = tuple(context.data.peek(index)
@@ -473,27 +955,25 @@ class HybridRuntime:
                 raise HybridExecutionError("instruction_limit", "outer dispatch machine allowance exhausted")
             self._active_machine = True
             try:
-                raw = self._runner.run(registration.spec, arguments, tuple(spans), remaining,
-                                       protected_spans=protected)
-            except (TypeError, ValueError) as exc:
-                raise HybridExecutionError("rejected_access", str(exc)) from exc
+                if type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3):
+                    result = self._drive_callbacks(
+                        registration, arguments, tuple(spans), protected, meter, allowance, remaining
+                    )
+                else:
+                    try:
+                        raw = self._runner.run(registration.spec, arguments, tuple(spans), remaining,
+                                               protected_spans=protected)
+                    except (TypeError, ValueError) as exc:
+                        raise HybridExecutionError("rejected_access", str(exc)) from exc
+                    self._settle_segment(raw, allowance)
+                    self._transitions += 1
+                    result = MachineRoutineResultV1(**self._result_fields(raw))
             finally:
                 self._active_machine = False
-            # Settle completed work before returning to Python or raising. No
-            # machine cycles are added to the semantic step clock or timer.
-            allowance.instructions += raw.instructions
-            self._machine_instructions += raw.instructions
-            self._machine_cycles += raw.cycles
-            self._transitions += 1
-            result = MachineRoutineResultV1(
-                exit_kind=raw.exit_kind, instructions=raw.instructions, cycles=raw.cycles,
-                entry_pc=raw.entry_pc, pc=raw.pc, outputs=tuple(raw.outputs),
-                instruction_pc=raw.instruction_pc, access_address=raw.access_address,
-                access_width=raw.access_width, access_operation=raw.access_operation,
-                trap_id=raw.trap_id, detail=raw.detail,
-            )
-            if result.exit_kind is not MachineExitKindV1.RETURNED:
+            if result.exit_kind != "returned":
                 raise HybridExecutionError(result.exit_kind.value, result.detail, result=result)
+            if len(result.outputs) != declaration.output_cells:
+                raise HybridExecutionError("invalid_return", "machine output arity changed", result=result)
             for _ in range(declaration.input_cells):
                 context.data.pop()
             for cell in result.outputs:
@@ -502,13 +982,22 @@ class HybridRuntime:
     def _call(self, operation: Callable, *args: Any,
               machine_instruction_limit: int | None = None,
               machine_instruction_budget: int | None = None,
+              dispatch_callback_limit: int | None = None,
+              dispatch_callback_semantic_limit: int | None = None,
               _resume: bool = False, **kwargs: Any) -> HybridRunReport:
         limit = _alias(machine_instruction_limit, machine_instruction_budget, "machine instruction budget")
-        if limit is not None:
-            _positive_limit(limit, self._dispatch_instruction_limit, "machine instruction limit")
+        requested = (limit, dispatch_callback_limit, dispatch_callback_semantic_limit)
+        maxima = (self._dispatch_instruction_limit, self._dispatch_callback_limit,
+                  self._dispatch_callback_semantic_limit)
+        labels = ("machine instruction limit", "dispatch callback limit", "dispatch callback semantic limit")
+        for value, maximum, label in zip(requested, maxima, labels):
+            if value is not None:
+                _positive_limit(value, maximum, label)
         with self.semantic._session_owner_lock:
             self._require_open()
             self.semantic._require_session_owner_access("run hybrid source")
+            if self._active_machine:
+                raise HybridExecutionError("active_dispatch", "host entry is forbidden during a machine invocation")
             context = kwargs.get("context")
             if context is not None:
                 self._remember_context(context)
@@ -517,14 +1006,20 @@ class HybridRuntime:
                 suspended = self.semantic._suspended_execution
                 self._remember_context(suspended.context)
                 meter = suspended.meter
-            inherited = min(self._wrapper_limits, default=self._dispatch_instruction_limit)
+            inherited = self._inherited_limits()
             allowance = self._allowances.get(meter) if meter is not None else None
             if allowance is not None:
-                inherited = min(inherited, allowance.limit)
-            if limit is not None and limit > inherited:
-                raise ValueError("machine instruction limit cannot raise the active dispatch allowance")
-            self._wrapper_limits.append(inherited if limit is None else limit)
-            before = self._machine_instructions, self._machine_cycles, self._transitions
+                inherited = tuple(min(left, right) for left, right in zip(
+                    inherited, (allowance.limit, allowance.callback_limit, allowance.callback_semantic_limit)
+                ))
+            for value, active, label in zip(requested, inherited, labels):
+                if value is not None and value > active:
+                    raise ValueError(f"{label} cannot raise the active dispatch allowance")
+            self._wrapper_limits.append(tuple(
+                active if value is None else value for value, active in zip(requested, inherited)
+            ))
+            before = (self._machine_instructions, self._machine_cycles, self._transitions,
+                      self._callback_requests, self._callback_semantic_steps, self._machine_segments)
             completed = False
             try:
                 result = operation(*args, **kwargs)
@@ -542,8 +1037,12 @@ class HybridRuntime:
                         self._allowance(suspended.meter)
                 finally:
                     self._wrapper_limits.pop()
-            return HybridRunReport(result, self._machine_instructions - before[0],
-                                   self._machine_cycles - before[1], self._transitions - before[2])
+            return HybridRunReport(
+                result, self._machine_instructions - before[0],
+                self._machine_cycles - before[1], self._transitions - before[2],
+                self._callback_requests - before[3], self._callback_semantic_steps - before[4],
+                self._machine_segments - before[5],
+            )
 
     def evaluate(self, source: str | bytes | bytearray | memoryview, *,
                  step_budget: int | None = None, semantic_step_budget: int | None = None,

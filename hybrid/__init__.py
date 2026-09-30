@@ -5,6 +5,13 @@ HybridRuntime from hybrid.runtime and HybridSession from hybrid.session when
 constructing a bounded integer-routine session.
 """
 
-from hybrid.manifest import HybridManifestError, load_manifest_v1
+from hybrid.manifest import (
+    HybridManifestError,
+    load_manifest,
+    load_manifest_v1,
+    load_manifest_v2,
+    load_manifest_v3,
+)
 
-__all__ = ["HybridManifestError", "load_manifest_v1"]
+__all__ = ["HybridManifestError", "load_manifest", "load_manifest_v1", "load_manifest_v2",
+           "load_manifest_v3"]

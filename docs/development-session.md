@@ -64,11 +64,14 @@ work accounting, diagnostics, and backend resource release stay in their
 adapters. The simulator does not inherit architectural run or BIOS methods.
 The viewer imports only common terminal/protocol interfaces.
 
-The root `session` import temporarily aliases `emulator.session` for the
-benchmark runtime loader and existing callers. Import terminal types from
-`shared.session` and the architectural owner from `emulator.shared_session`;
-`shared_session.SharedMachine` has been removed. The remaining alias can be
-removed when the benchmark's support for older runtime roots is migrated.
+Import terminal types from `shared.session`, the architectural session from
+`emulator.session`, and the shared architectural owner from
+`emulator.shared_session`. The root `session.py` shim and
+`shared_session.SharedMachine` have been removed. The BIOS/KDOS benchmark
+detects a selected checkout's layout before importing it: package checkouts
+use `emulator.session` and `emulator.system`; historical flat checkouts use
+their root modules. It validates source and imported-module provenance, and
+an import failure in a package checkout remains an error.
 
 Both detailed and lightweight status contain the same `runtime` descriptor:
 

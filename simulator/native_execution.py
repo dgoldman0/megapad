@@ -39,7 +39,12 @@ class NativeExecutor:
             return None
         if (getattr(extension, "SEMANTIC_API_VERSION", None) != SEMANTIC_API_VERSION
                 or not hasattr(extension, "scalar_fp_execute")
-                or not hasattr(extension, "keccak_f1600")):
+                or not hasattr(extension, "keccak_f1600")
+                or getattr(extension, "TILE_VALUES_API_VERSION", None) != 1
+                or not callable(getattr(extension, "tile_execute_values", None))
+                or not callable(getattr(extension, "tile_values_supported", None))
+                or getattr(extension, "TILE_GUARD_API_VERSION", None) != 1
+                or not callable(getattr(extension, "TileIdentityGuard", None))):
             if required:
                 raise RuntimeError(
                     "native semantic execution requires a matching "

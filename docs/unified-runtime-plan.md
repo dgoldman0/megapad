@@ -4,10 +4,18 @@ Started: 2026-09-30
 
 Status: The unified emulator/simulator/hybrid application and bounded hybrid
 integer-routine v1 are implemented and qualified locally. Shared native scalar
-FP, Keccak and bulk audio are qualified; native tile extraction and remaining
-measured runtime costs are next. Kernel/source/captured-frame evidence and
-strict multicore FP/timing checks are recorded. Live Desktop acceptance,
-executor default promotion and expanded hybrid interoperability remain open.
+FP, tile values, Keccak, checked SHA3 input transfers, NTT bulk transfers and
+bulk audio are qualified. The hardened AES transfer candidate showed no gain
+against a fresh scalar baseline, so existing AES routing is retained. Native
+page access and longer continuation intervals need no further rewrite on
+current evidence. Kernel/source/captured-frame evidence and strict multicore
+FP/timing checks are recorded. Prepared Desktop journeys are complete in the
+documented direct-dispatch scope, with Python requiring expanded diagnostic
+deadlines. Closed integer callbacks are qualified; nesting, shared-task
+exceptions/suspension and service execution remain in progress. The pinned
+retained frontend changes are integrated and qualified locally.
+Production semantic sessions now default to required native execution; explicit
+CLI/environment choices and Python embedding defaults remain available.
 
 Branch: `feature/unified-runtime`
 
@@ -295,11 +303,49 @@ and repeated transitions. The unknown-XT error path remains intact.
 
 ## Phase 5 — Expanded hybrid interoperability
 
+The staged callback, ownership, budget and continuation contracts are locked
+in [`hybrid-interop-plan.md`](hybrid-interop-plan.md). The first implementation
+gate is opt-in v2 with sealed local CALL/RET sites and canonical integer
+callbacks; v1 remains unchanged. General task exceptions require their own
+shared-task ABI before admission.
+
+After qualifying 5A, the next bounded implementation contract is
+[`hybrid-closed-callback-plan.md`](hybrid-closed-callback-plan.md): statically
+closed, acyclic integer colon policies on the existing private stacks. Its
+explicit v3 metadata reuses the v2 native transport. Declarative policy IR is
+validated and installed before routine publication and unchanged source
+bootstrap; no arbitrary source prelude or dynamic callback is admitted.
+The following nesting gate is separately locked in
+[`hybrid-nested-callback-plan.md`](hybrid-nested-callback-plan.md): at most eight
+distinct active registrations, narrowed child buffers, per-frame callback
+ceilings and one shared dispatch budget. It requires 5B1 qualification first.
+
+The shared-task exception and suspension boundary is locked separately in
+[`hybrid-task-callback-plan.md`](hybrid-task-callback-plan.md). Its new task ABI
+uses the original main-context stacks, dispatcher-owned foreign continuations,
+permanent cookie revocation, child-suffix cancellation and one composite
+suspension. Private callback stack/failure semantics stay unchanged. Reference,
+native and production session gates precede capability exposure.
+
+The first service crossing is separately locked in
+[`hybrid-service-callback-plan.md`](hybrid-service-callback-plan.md): 14 exact
+scalar FP/FPCSR exports using the existing semantic service owner, explicit
+private metadata v5, and transport 2. It preserves validation/pop/flag order
+and distinguishes issued service faults from raw host failures. Memory and
+checked crypto exports require their own later effect/grant gates.
+
 Add machine-to-semantic callbacks, nested transitions, exceptions,
 suspension/wake, and selected service access in separate qualified slices.
 Then specify native compiler/dictionary integration for guest JIT, machine
 modules, and code introspection. Preserve source-visible CREATE/DOES>, body
 addresses, immediate-word behavior, and rollback for each admitted profile.
+
+That design deliverable is recorded in
+[`hybrid-native-dictionary-plan.md`](hybrid-native-dictionary-plan.md). It
+separates read-only mappings and bounded modules from a later compiler-owned
+stack/accounting ABI, executable arena and defining-word/JIT vocabulary.
+The existing semantic `JIT-ON`/`JIT-OFF` behavior is unchanged; implementing
+those compiler stages is not implied by callback completion.
 
 General native images, arbitrary self-modification, complete snapshots, and
 multicore hybrid execution need explicit capability and state-mapping work.
@@ -307,6 +353,32 @@ They are later deliverables, not implied results of Phase 4.
 
 Gate: each new capability has functional cross-mode evidence and explicit
 limits. Machine-level claims continue to require the architectural oracle.
+
+### Continuation checkpoints — 2026-09-30
+
+- Shared native tile values and per-operation identity admission are qualified.
+  The first Python-guard extraction regressed the FP64 add probe; moving the
+  exact checks into the binding reduced its median from the 83.986 ms baseline
+  to 65.133 ms for 4,096 operations. Python control variation and exact scope
+  are recorded in
+  [`performance/runtime-tile-values-2026-09-30.md`](performance/runtime-tile-values-2026-09-30.md).
+- Removed the final root session import shim after migrating the benchmark's
+  current/legacy layout selection. Its ownership/provenance gates passed.
+- Added a MegaPad-owned bounded prepared-image Desktop harness. Its 28 checks
+  include small production simulator/Python, simulator/native and hybrid/native
+  journeys. The prepared eight-step Desktop journey subsequently passed with
+  simulator/native (31.111 seconds to ready, 36.340 seconds overall, 12 offers,
+  clean shutdown and original image preserved). Other mode/executor runs are
+  pending; direct dispatch and SDL dummy do not qualify socket transport or
+  physical output.
+- Locked the expanded interoperability plan and v2 callback value contract.
+  Ninety value checks plus 94 existing manifest checks passed. Callback
+  execution and v2 manifest admission are not enabled by those values.
+- Qualified checked SHA3 input routing: 59 new checks, 47 hosted checks per
+  executor and 86 native/differential checks passed. For 256 transactions of
+  256 bytes, median host wall time fell from 392.772 to 292.855 ms with Python
+  and from 220.225 to 116.830 ms with native semantic execution. See
+  [`performance/runtime-sha3-input-transfer-2026-09-30.md`](performance/runtime-sha3-input-transfer-2026-09-30.md).
 
 ## Validation and work discipline
 
@@ -332,13 +404,44 @@ limits. Machine-level claims continue to require the architectural oracle.
 |---|---|---|
 | Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
-| 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
-| 2 — workload profiles | Kernels, KDOS controls/attribution and captured Desktop composition recorded; live Desktop pending | 19 harness checks; source controls in both executors; 3 exact captured-frame gates; separate evidence in `docs/performance/runtime-hotspots-2026-09-30.md` |
+| 1B — common session boundary | Extraction complete; production native default and pinned frontend integration qualified | Original boundary gates plus 30 default-selection cases and the 317-check application gate; merged frontend passed 1,346 checks with three socket skips and another 30 default-selection checks; all three native-selected prepared Desktop modes passed |
+| 2 — workload profiles | Kernels, KDOS controls/attribution and prepared Desktop subsets recorded | 56 Desktop harness checks; eight-step emulator/native, simulator/native and hybrid/native journeys passed through direct session dispatch; Python completed the identical assertions in 758.105 seconds under explicit expanded diagnostic deadlines, exceeding the standard step bound |
 | 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
-| 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
+| 3B/3C — remaining native extraction | Bulk audio, shared Keccak, SHA3 and NTT transfer work qualified; AES candidate declined on current measurements | Existing oracle gates plus 109 NTT checks; 200 AES candidate checks with no measured speed benefit; retained raw comparisons |
 | 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
-| 5 — expanded interoperability | Pending | |
+| 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
+| 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
+| 5B2 — nested callbacks | Contract locked; native owner implementation in progress | One-owner legacy facade and complete parent-field audit specified before implementation |
+| 5C/5D — shared task callbacks | Contract and neutral value protocol complete; runtime execution pending | 206 protocol/ABI checks, including 48 new continuation, receipt and cancellation cases |
+| 5E — private scalar services | Contract and explicit metadata loader complete; execution pending | 532 service metadata and existing manifest checks; no service capability advertised |
+| Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
+
+### Qualified closed callbacks and frontend integration — 2026-09-30
+
+Closed version 3 policies now use the existing export registry, private
+eight-cell stacks and native transport 2. The reference dispatcher checks
+captured Words, IR, method routes and control evidence around every admitted
+tick. One-shot engine receipts settle actual work on the original meter even
+when host callbacks mutate it or raise after completed work. Raw host errors
+retain identity; failed cleanup closes the affected owner. Manifest policies
+are proved and installed before machine publication and unchanged bootstrap.
+
+The [clamp comparison](performance/hybrid-closed-clamp-2026-09-30.md) records
+identical bytes, guards, checksum and exact work for 128 values. Hybrid medians
+are 485.114 ms with Python outer execution and 477.469 ms with native outer
+execution, versus 6.218 ms and 0.149 ms for the semantic controls. This is a
+functional interoperability result with substantial callback overhead. It
+does not justify moving a small integer policy out of native semantic code.
+
+The reviewed peer integration `b71e6fc` was merged locally into this branch.
+Its peer parent is exactly `b847c5bddc7ab861df0f534816ddb0e888e47af4`; newer
+parallel work was excluded. The merged tree passed 1,346 model, wire, input,
+rendering, guest-source and unified session checks, with three AF_UNIX skips
+because this environment denies socket creation. A separate 30-case gate
+confirmed the required-native production default. Prepared Desktop reports
+retain their original source identities and do not claim that the later
+frontend families were exercised by those historical images.
 
 ### Phase 1A implementation and validation — 2026-09-30
 

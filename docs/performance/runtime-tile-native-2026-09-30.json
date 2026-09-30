@@ -1,0 +1,906 @@
+{
+  "cases": [
+    {
+      "attribution_run": {
+        "attribution": {
+          "native_host_profile": null,
+          "python_fallback_and_sync_calls": {
+            "_step_python_fallback_in_memory_scope": 0,
+            "_sync_cs_to_py": 0,
+            "_sync_py_to_cs": 0
+          },
+          "top_functions_by_cumulative_time": [
+            {
+              "cumulative_seconds": 0.31848189000000005,
+              "file": "bench_runtime_hotspots.py",
+              "function": "<lambda>",
+              "line": 622,
+              "own_seconds": 4.126e-06,
+              "primitive_calls": 1,
+              "total_calls": 1
+            },
+            {
+              "cumulative_seconds": 0.318477764,
+              "file": "simulator/runtime.py",
+              "function": "execute",
+              "line": 2443,
+              "own_seconds": 4.356e-06,
+              "primitive_calls": 1,
+              "total_calls": 1
+            },
+            {
+              "cumulative_seconds": 0.31845548100000004,
+              "file": "simulator/runtime.py",
+              "function": "run_until_blocked",
+              "line": 2473,
+              "own_seconds": 4.597e-06,
+              "primitive_calls": 1,
+              "total_calls": 1
+            },
+            {
+              "cumulative_seconds": 0.31844900200000004,
+              "file": "simulator/runtime.py",
+              "function": "_run_until_blocked",
+              "line": 2506,
+              "own_seconds": 1.4232e-05,
+              "primitive_calls": 1,
+              "total_calls": 1
+            },
+            {
+              "cumulative_seconds": 0.318417926,
+              "file": "simulator/runtime.py",
+              "function": "_execute_guarded",
+              "line": 3338,
+              "own_seconds": 3.2269e-05,
+              "primitive_calls": 1,
+              "total_calls": 1
+            },
+            {
+              "cumulative_seconds": 0.318244658,
+              "file": "simulator/runtime.py",
+              "function": "_execute_top",
+              "line": 3710,
+              "own_seconds": 0.016259995,
+              "primitive_calls": 1,
+              "total_calls": 1
+            },
+            {
+              "cumulative_seconds": 0.236563987,
+              "file": "simulator/runtime.py",
+              "function": "_call_from_colon",
+              "line": 4078,
+              "own_seconds": 0.0039030590000000004,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.22516148900000002,
+              "file": "simulator/runtime.py",
+              "function": "_invoke_primitive",
+              "line": 1802,
+              "own_seconds": 0.001216084,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.22394540500000001,
+              "file": "simulator/core_words.py",
+              "function": "<lambda>",
+              "line": 1969,
+              "own_seconds": 0.0011768710000000001,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.22276853400000002,
+              "file": "simulator/tile.py",
+              "function": "add",
+              "line": 286,
+              "own_seconds": 0.002224137,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.220544397,
+              "file": "simulator/tile.py",
+              "function": "_binary",
+              "line": 613,
+              "own_seconds": 0.015117859,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.07553274700000001,
+              "file": "shared/tile_float.py",
+              "function": "elementwise",
+              "line": 51,
+              "own_seconds": 0.007775391,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.067757356,
+              "file": "shared/ieee_fp.py",
+              "function": "lane_add",
+              "line": 689,
+              "own_seconds": 0.017102496000000002,
+              "primitive_calls": 32768,
+              "total_calls": 32768
+            },
+            {
+              "cumulative_seconds": 0.042463195,
+              "file": "simulator/memory.py",
+              "function": "read_bytes",
+              "line": 500,
+              "own_seconds": 0.004825528,
+              "primitive_calls": 8192,
+              "total_calls": 8192
+            },
+            {
+              "cumulative_seconds": 0.041476149000000004,
+              "file": "simulator/memory.py",
+              "function": "_resolve",
+              "line": 825,
+              "own_seconds": 0.013303618000000001,
+              "primitive_calls": 12288,
+              "total_calls": 12288
+            },
+            {
+              "cumulative_seconds": 0.039165836,
+              "file": "simulator/stacks.py",
+              "function": "loop",
+              "line": 632,
+              "own_seconds": 0.0013664600000000001,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.037799376,
+              "file": "simulator/stacks.py",
+              "function": "_advance_loop",
+              "line": 652,
+              "own_seconds": 0.0031842040000000004,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.034621954,
+              "file": "shared/ieee_fp.py",
+              "function": "to_double",
+              "line": 636,
+              "own_seconds": 0.021900665,
+              "primitive_calls": 65536,
+              "total_calls": 65536
+            },
+            {
+              "cumulative_seconds": 0.028558152000000003,
+              "file": "simulator/stacks.py",
+              "function": "_loop_frame",
+              "line": 856,
+              "own_seconds": 0.0038381620000000004,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.026544157000000002,
+              "file": "simulator/memory.py",
+              "function": "write_bytes",
+              "line": 516,
+              "own_seconds": 0.004219874,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.023929409000000002,
+              "file": "shared/tile_float.py",
+              "function": "unpack_lanes",
+              "line": 43,
+              "own_seconds": 0.00239607,
+              "primitive_calls": 8192,
+              "total_calls": 8192
+            },
+            {
+              "cumulative_seconds": 0.022114389,
+              "file": "simulator/stacks.py",
+              "function": "_peek_entry",
+              "line": 833,
+              "own_seconds": 0.005659185000000001,
+              "primitive_calls": 8193,
+              "total_calls": 8193
+            },
+            {
+              "cumulative_seconds": 0.021533339000000002,
+              "file": "shared/tile_float.py",
+              "function": "unpack_bits",
+              "line": 22,
+              "own_seconds": 0.015281437,
+              "primitive_calls": 8192,
+              "total_calls": 8192
+            },
+            {
+              "cumulative_seconds": 0.018642899,
+              "file": "simulator/runtime.py",
+              "function": "tick",
+              "line": 512,
+              "own_seconds": 0.0035868400000000004,
+              "primitive_calls": 12292,
+              "total_calls": 12292
+            },
+            {
+              "cumulative_seconds": 0.016737297,
+              "file": "shared/tile_float.py",
+              "function": "pack_lanes",
+              "line": 47,
+              "own_seconds": 0.001235219,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            }
+          ]
+        },
+        "description": {
+          "lanes_per_iteration": 8,
+          "scope": "hosted guest word dispatch",
+          "source_sha256": "9c08e285335c3d2beb608a942ea43850a7f07fb282b6bbb2efd8b1d59c56b4af",
+          "work_unit": "tile-fp64"
+        },
+        "guest": {
+          "output_sha256": "ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c",
+          "semantic_steps": 12292,
+          "stack": [],
+          "tile_operations": 4096
+        },
+        "native_counter_delta": {
+          "entries": 0,
+          "plans": 0,
+          "semantic_steps": 0
+        },
+        "process_cpu_seconds": 0.31831046,
+        "process_lifetime_peak_rss_bytes": 22228992,
+        "setup": {
+          "process_cpu_seconds": 0.004488653000000009,
+          "wall_seconds": 0.004486585999984527
+        },
+        "wall_seconds": 0.3188739920005901
+      },
+      "executor": "simulator-python",
+      "iterations": 4096,
+      "median_process_cpu_seconds": 0.07941637000000001,
+      "median_wall_seconds": 0.0794779860007111,
+      "native_artifact": null,
+      "samples": [
+        {
+          "description": {
+            "lanes_per_iteration": 8,
+            "scope": "hosted guest word dispatch",
+            "source_sha256": "9c08e285335c3d2beb608a942ea43850a7f07fb282b6bbb2efd8b1d59c56b4af",
+            "work_unit": "tile-fp64"
+          },
+          "guest": {
+            "output_sha256": "ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c",
+            "semantic_steps": 12292,
+            "stack": [],
+            "tile_operations": 4096
+          },
+          "native_counter_delta": {
+            "entries": 0,
+            "plans": 0,
+            "semantic_steps": 0
+          },
+          "process_cpu_seconds": 0.08218617300000003,
+          "process_lifetime_peak_rss_bytes": 21442560,
+          "setup": {
+            "process_cpu_seconds": 0.0038154900000000047,
+            "wall_seconds": 0.003813788000115892
+          },
+          "wall_seconds": 0.08239887799936696
+        },
+        {
+          "description": {
+            "lanes_per_iteration": 8,
+            "scope": "hosted guest word dispatch",
+            "source_sha256": "9c08e285335c3d2beb608a942ea43850a7f07fb282b6bbb2efd8b1d59c56b4af",
+            "work_unit": "tile-fp64"
+          },
+          "guest": {
+            "output_sha256": "ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c",
+            "semantic_steps": 12292,
+            "stack": [],
+            "tile_operations": 4096
+          },
+          "native_counter_delta": {
+            "entries": 0,
+            "plans": 0,
+            "semantic_steps": 0
+          },
+          "process_cpu_seconds": 0.07941637000000001,
+          "process_lifetime_peak_rss_bytes": 21704704,
+          "setup": {
+            "process_cpu_seconds": 0.0034935110000000047,
+            "wall_seconds": 0.0034927610013255617
+          },
+          "wall_seconds": 0.0794779860007111
+        },
+        {
+          "description": {
+            "lanes_per_iteration": 8,
+            "scope": "hosted guest word dispatch",
+            "source_sha256": "9c08e285335c3d2beb608a942ea43850a7f07fb282b6bbb2efd8b1d59c56b4af",
+            "work_unit": "tile-fp64"
+          },
+          "guest": {
+            "output_sha256": "ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c",
+            "semantic_steps": 12292,
+            "stack": [],
+            "tile_operations": 4096
+          },
+          "native_counter_delta": {
+            "entries": 0,
+            "plans": 0,
+            "semantic_steps": 0
+          },
+          "process_cpu_seconds": 0.07640284200000003,
+          "process_lifetime_peak_rss_bytes": 21966848,
+          "setup": {
+            "process_cpu_seconds": 0.004163748999999994,
+            "wall_seconds": 0.004162285000347765
+          },
+          "wall_seconds": 0.07640382499994303
+        }
+      ],
+      "warmup_instances": 1,
+      "workload": "tile-fp64"
+    },
+    {
+      "attribution_run": {
+        "attribution": {
+          "native_host_profile": null,
+          "python_fallback_and_sync_calls": {
+            "_step_python_fallback_in_memory_scope": 0,
+            "_sync_cs_to_py": 0,
+            "_sync_py_to_cs": 0
+          },
+          "top_functions_by_cumulative_time": [
+            {
+              "cumulative_seconds": 0.127566424,
+              "file": "simulator/runtime.py",
+              "function": "_invoke_primitive",
+              "line": 1802,
+              "own_seconds": 0.0041553530000000005,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.115296591,
+              "file": "simulator/core_words.py",
+              "function": "<lambda>",
+              "line": 1969,
+              "own_seconds": 0.0011413620000000001,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.11415522900000001,
+              "file": "simulator/tile.py",
+              "function": "add",
+              "line": 286,
+              "own_seconds": 0.0013459610000000001,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.112809268,
+              "file": "simulator/tile.py",
+              "function": "_binary",
+              "line": 613,
+              "own_seconds": 0.008701948000000001,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.044666260000000006,
+              "file": "simulator/memory.py",
+              "function": "read_bytes",
+              "line": 500,
+              "own_seconds": 0.005847536,
+              "primitive_calls": 8192,
+              "total_calls": 8192
+            },
+            {
+              "cumulative_seconds": 0.040755263,
+              "file": "simulator/memory.py",
+              "function": "_resolve",
+              "line": 825,
+              "own_seconds": 0.012690024000000001,
+              "primitive_calls": 12288,
+              "total_calls": 12288
+            },
+            {
+              "cumulative_seconds": 0.0254288,
+              "file": "simulator/native_execution.py",
+              "function": "_profile_exit",
+              "line": 143,
+              "own_seconds": 0.012380351000000001,
+              "primitive_calls": 8195,
+              "total_calls": 8195
+            },
+            {
+              "cumulative_seconds": 0.025381341,
+              "file": "simulator/memory.py",
+              "function": "write_bytes",
+              "line": 516,
+              "own_seconds": 0.004966174,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.017462657,
+              "file": "simulator/runtime.py",
+              "function": "_resolve_dispatch_word",
+              "line": 4145,
+              "own_seconds": 0.006339995,
+              "primitive_calls": 16388,
+              "total_calls": 16388
+            },
+            {
+              "cumulative_seconds": 0.016455991,
+              "file": "simulator/tile.py",
+              "function": "_native_value_executor",
+              "line": 217,
+              "own_seconds": 0.011365960000000001,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.013130409000000001,
+              "file": "simulator/runtime.py",
+              "function": "tick",
+              "line": 512,
+              "own_seconds": 0.003130074,
+              "primitive_calls": 8194,
+              "total_calls": 8194
+            },
+            {
+              "cumulative_seconds": 0.012175287,
+              "file": "simulator/memory.py",
+              "function": "_checked_span",
+              "line": 161,
+              "own_seconds": 0.0062151310000000005,
+              "primitive_calls": 12288,
+              "total_calls": 12288
+            },
+            {
+              "cumulative_seconds": 0.011638505,
+              "file": "simulator/memory.py",
+              "function": "read",
+              "line": 198,
+              "own_seconds": 0.00802474,
+              "primitive_calls": 8193,
+              "total_calls": 8193
+            },
+            {
+              "cumulative_seconds": 0.011539119,
+              "file": "~",
+              "function": "<built-in method builtins.isinstance>",
+              "line": 0,
+              "own_seconds": 0.011539119,
+              "primitive_calls": 118874,
+              "total_calls": 118874
+            },
+            {
+              "cumulative_seconds": 0.011267215,
+              "file": "simulator/native_execution.py",
+              "function": "_admitted_context",
+              "line": 161,
+              "own_seconds": 0.009249263,
+              "primitive_calls": 8195,
+              "total_calls": 8195
+            },
+            {
+              "cumulative_seconds": 0.010000335,
+              "file": "simulator/runtime.py",
+              "function": "_account_semantic_step",
+              "line": 4170,
+              "own_seconds": 0.003385115,
+              "primitive_calls": 8194,
+              "total_calls": 8194
+            },
+            {
+              "cumulative_seconds": 0.009516525000000001,
+              "file": "simulator/dictionary.py",
+              "function": "resolve",
+              "line": 448,
+              "own_seconds": 0.004994537,
+              "primitive_calls": 16388,
+              "total_calls": 16388
+            },
+            {
+              "cumulative_seconds": 0.009349267000000001,
+              "file": "<string>",
+              "function": "__init__",
+              "line": 2,
+              "own_seconds": 0.009349267000000001,
+              "primitive_calls": 12288,
+              "total_calls": 12288
+            },
+            {
+              "cumulative_seconds": 0.006186134,
+              "file": "simulator/field.py",
+              "function": "_state",
+              "line": 451,
+              "own_seconds": 0.004077238,
+              "primitive_calls": 8192,
+              "total_calls": 8192
+            },
+            {
+              "cumulative_seconds": 0.0060223310000000006,
+              "file": "simulator/tile.py",
+              "function": "source0",
+              "line": 241,
+              "own_seconds": 0.001592452,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.005960156,
+              "file": "simulator/memory.py",
+              "function": "_require_integer",
+              "line": 148,
+              "own_seconds": 0.004239708,
+              "primitive_calls": 24576,
+              "total_calls": 24576
+            },
+            {
+              "cumulative_seconds": 0.005853581,
+              "file": "simulator/memory.py",
+              "function": "write",
+              "line": 228,
+              "own_seconds": 0.003804355,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            },
+            {
+              "cumulative_seconds": 0.005659079,
+              "file": "simulator/diagnostics.py",
+              "function": "account_work_many",
+              "line": 125,
+              "own_seconds": 0.0028997230000000003,
+              "primitive_calls": 4097,
+              "total_calls": 4097
+            },
+            {
+              "cumulative_seconds": 0.005425524,
+              "file": "simulator/memory.py",
+              "function": "_region_at",
+              "line": 819,
+              "own_seconds": 0.0041914840000000005,
+              "primitive_calls": 12288,
+              "total_calls": 12288
+            },
+            {
+              "cumulative_seconds": 0.005408387000000001,
+              "file": "simulator/tile.py",
+              "function": "destination",
+              "line": 249,
+              "own_seconds": 0.001324059,
+              "primitive_calls": 4096,
+              "total_calls": 4096
+            }
+          ]
+        },
+        "description": {
+          "lanes_per_iteration": 8,
+          "scope": "hosted guest word dispatch",
+          "source_sha256": "9c08e285335c3d2beb608a942ea43850a7f07fb282b6bbb2efd8b1d59c56b4af",
+          "work_unit": "tile-fp64"
+        },
+        "guest": {
+          "output_sha256": "ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c",
+          "semantic_steps": 12292,
+          "stack": [],
+          "tile_operations": 4096
+        },
+        "native_counter_delta": {
+          "entries": 4097,
+          "plans": 1,
+          "profile": {
+            "exits": {
+              "empty:Literal": 1,
+              "empty:Return": 1,
+              "progress:Call:TADD": 4096,
+              "progress:Return": 1,
+              "skipped:Call:TADD": 4096
+            },
+            "native_run_ns": 9186031,
+            "settlement_ns": 12925877
+          },
+          "semantic_steps": 4098
+        },
+        "process_cpu_seconds": 0.2376437,
+        "process_lifetime_peak_rss_bytes": 25567232,
+        "setup": {
+          "process_cpu_seconds": 0.004737473999999964,
+          "wall_seconds": 0.004736486998808687
+        },
+        "wall_seconds": 0.23764403899986064
+      },
+      "executor": "simulator-native",
+      "iterations": 4096,
+      "median_process_cpu_seconds": 0.06512441,
+      "median_wall_seconds": 0.06513267300033476,
+      "native_artifact": {
+        "bytes": 6633208,
+        "module": "_megaforth_native",
+        "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/_megaforth_native.cpython-312-x86_64-linux-gnu.so",
+        "sha256": "930bf606a6f7429ee660418a14ec23d69c1927b98b4a1654d6bfa0338de36c6e"
+      },
+      "samples": [
+        {
+          "description": {
+            "lanes_per_iteration": 8,
+            "scope": "hosted guest word dispatch",
+            "source_sha256": "9c08e285335c3d2beb608a942ea43850a7f07fb282b6bbb2efd8b1d59c56b4af",
+            "work_unit": "tile-fp64"
+          },
+          "guest": {
+            "output_sha256": "ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c",
+            "semantic_steps": 12292,
+            "stack": [],
+            "tile_operations": 4096
+          },
+          "native_counter_delta": {
+            "entries": 4097,
+            "plans": 1,
+            "semantic_steps": 4098
+          },
+          "process_cpu_seconds": 0.06512441,
+          "process_lifetime_peak_rss_bytes": 25567232,
+          "setup": {
+            "process_cpu_seconds": 0.0044093049999999745,
+            "wall_seconds": 0.0044078090013499605
+          },
+          "wall_seconds": 0.06513267300033476
+        },
+        {
+          "description": {
+            "lanes_per_iteration": 8,
+            "scope": "hosted guest word dispatch",
+            "source_sha256": "9c08e285335c3d2beb608a942ea43850a7f07fb282b6bbb2efd8b1d59c56b4af",
+            "work_unit": "tile-fp64"
+          },
+          "guest": {
+            "output_sha256": "ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c",
+            "semantic_steps": 12292,
+            "stack": [],
+            "tile_operations": 4096
+          },
+          "native_counter_delta": {
+            "entries": 4097,
+            "plans": 1,
+            "semantic_steps": 4098
+          },
+          "process_cpu_seconds": 0.06454062100000002,
+          "process_lifetime_peak_rss_bytes": 25567232,
+          "setup": {
+            "process_cpu_seconds": 0.004807777999999985,
+            "wall_seconds": 0.004806771001312882
+          },
+          "wall_seconds": 0.06454165499962983
+        },
+        {
+          "description": {
+            "lanes_per_iteration": 8,
+            "scope": "hosted guest word dispatch",
+            "source_sha256": "9c08e285335c3d2beb608a942ea43850a7f07fb282b6bbb2efd8b1d59c56b4af",
+            "work_unit": "tile-fp64"
+          },
+          "guest": {
+            "output_sha256": "ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c",
+            "semantic_steps": 12292,
+            "stack": [],
+            "tile_operations": 4096
+          },
+          "native_counter_delta": {
+            "entries": 4097,
+            "plans": 1,
+            "semantic_steps": 4098
+          },
+          "process_cpu_seconds": 0.06724339500000004,
+          "process_lifetime_peak_rss_bytes": 25567232,
+          "setup": {
+            "process_cpu_seconds": 0.0037259169999999675,
+            "wall_seconds": 0.0037246060001052683
+          },
+          "wall_seconds": 0.06724419500096701
+        }
+      ],
+      "warmup_instances": 1,
+      "workload": "tile-fp64"
+    }
+  ],
+  "generated_at": "2026-09-30T15:07:16.267450+00:00",
+  "host": {
+    "cpu_count": 9,
+    "machine": "x86_64",
+    "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+    "python": "3.12.14 (main, Aug 25 2026, 14:00:49) [Clang 22.1.3 ]",
+    "python_executable": "/workspace/scratch/64bce13821f6/runcheck-venv/bin/python"
+  },
+  "measurement": {
+    "attribution": "separate fresh instance, excluded from timing summaries",
+    "case_timeout_seconds": 30,
+    "order": "sequential fresh subprocess per workload/executor",
+    "rss": "process lifetime high-water mark, not a per-trial allocation delta",
+    "scope": "bounded kernels and synthetic source; no Desktop or full boot claim",
+    "trials": "fresh prepared instance; setup, validation and cleanup excluded",
+    "warmup": "discarded fresh instances; no retained guest/JIT cache"
+  },
+  "repository": {
+    "commit": "795be39e9632a334fb2a6687e148ad583b787678",
+    "dirty": true,
+    "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+    "status": "M emulator/accel/mp64_accel.cpp\n M setup_accel.py\n M setup_simulator_accel.py\n M simulator/accel/semantic_executor.cpp\n M simulator/native_execution.py\n M simulator/runtime.py\n M simulator/tile.py\n?? docs/performance/runtime-tile-baseline-2026-09-30.json\n?? docs/performance/runtime-tile-python-guard-2026-09-30.json\n?? shared/accel/tile_guard_bindings.h\n?? shared/accel/tile_values.cpp\n?? shared/accel/tile_values.h\n?? shared/accel/tile_values_bindings.h\n?? simulator/interop_exports.py\n?? tests/simulator/test_interop_exports.py\n?? tests/simulator/test_native_tile_service.py\n?? tests/test_native_hybrid_callbacks.py\n?? tests/test_native_tile_guard.py\n?? tests/test_native_tile_values.py"
+  },
+  "schema": "megapad.runtime-hotspots",
+  "schema_version": 1,
+  "source_sha256": {
+    "accel_wrapper.py": "2df31e95c59ecde7adb5e29894f0730e60b01bfe7593968991222b835c3ec33c",
+    "asm.py": "d602d9c839aaba819138aae8c18b0ac7a07f0b971f4830125f808aad8430d12f",
+    "audio_sinks.py": "9739f9d8aaaeda694950bedc209d7d71cb4c22e539a77cf305afbe46ab0fbba1",
+    "autoexec.f": "1a9d852818efcedb14c5247152d5799050aa7bd43b8fff96ed7488ca4b834a90",
+    "bench_runtime_hotspots.py": "b5283ab6873e7ced3ef1c71576a5d86dc2928d0bee151a71eb859314795f4328",
+    "bios.asm": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+    "cli.py": "892e6a39b7170df3282648a2978372a0aa3476b9b6504f9fa129006a5730efae",
+    "data_sources.py": "604d46681e40ba080498a305dff6a696078c85db92bb22c6f97960d956edb4e6",
+    "dev_session.py": "e4cbcfc3b6c31ac8810176f8178f8c18936ab9c76fd03768a20ed250012401f1",
+    "devices.py": "5bc7d172bc5423c31e148c9eadd81c4a28add89ced374a83ce9383104a7cd672",
+    "diskutil.py": "954ba2a711b284f7ea565a1f6d89c78bae28570c3dfa23ca9a3db4714f3a6d1d",
+    "display.py": "6ec2bce2a746bfad8139c74189bb6ee95139ecb8835aa656c8721ad899313a1b",
+    "emulator/__init__.py": "f3058eb1343e8bbf9375541226eb9a441656da408fa75b726db22d8b8b4d3505",
+    "emulator/accel/cpu/mp64/block_ir.h": "9e160b8391a2d997c6be4b7b96e0c4d72c65eeaa6e0e027201a53d36588220e0",
+    "emulator/accel/cpu/mp64/decode.h": "3bb81727bedf592642269459fde929ad13ba8c8c10722871d767db409ff1143d",
+    "emulator/accel/cpu/mp64/decode_impl.h": "62f31f1875940cd713ddd4e306a4cd0dd6e30ef49a626c68e890b4a86e6cff8a",
+    "emulator/accel/cpu/mp64/interpreter.h": "07206f81bcf91adef58a740a1d58d42372205d2289491e4109151732932da73a",
+    "emulator/accel/cpu/mp64/routine_runner.h": "2c342f5501a87b844b8170ba6e81d2965bfe673f266c9c4369ace5696a37d44b",
+    "emulator/accel/cpu/mp64/semantics.h": "3962743d6e940bae05b1f4b6076902c3fccc9e4fea007874f5484dd95bf2e42e",
+    "emulator/accel/dbt/executable_arena.cpp": "a9c495a50404df83e008f9694178a3792b5237c82829565b7a037e16be96d9be",
+    "emulator/accel/dbt/executable_arena.h": "5ca3efd29ba1f421a7c68ab180558456676729714a5b07fa1edeff4d5ab6917c",
+    "emulator/accel/dbt/host_jit_config.h": "79bdb94a7a3804b639e58a39ace2200de438b2996160a16dc91af2e2658bee99",
+    "emulator/accel/dbt/x86_64/emitter.cpp": "f61cf5377010c173297d7a6f5a63911d68b675bf2a3bd6f5b9439e2cc6d573e8",
+    "emulator/accel/dbt/x86_64/emitter.h": "ea20e4de4b693b97e16a3336a2afcc1466d331cb4f8a35cb72e2fa96fefd2a93",
+    "emulator/accel/dbt/x86_64/lowering.cpp": "10551ddcd880886fa8ab944a85738c82a8750bc4a6f42adba79ea43285b712bb",
+    "emulator/accel/dbt/x86_64/lowering.h": "d7cc0a836719f136472c0425523e449564d5586d3515e16830dd3fc52986f281",
+    "emulator/accel/machine/memory.h": "415025fd3cd36b5b1a2d75340c6015246a6e8536cfdbb855d09ba3a3067984af",
+    "emulator/accel/machine/settlement.cpp": "0133819cc66464acc7a09543e2cf9656beedfbb80824b58b5370199c3d502024",
+    "emulator/accel/machine/settlement.h": "3597880280fa53dae1a744677b137450a844d9ca5da1b6320477512f2fc4bcbc",
+    "emulator/accel/mp64_accel.cpp": "9b40d48928087d691792719508e2b09e73c0927501c084809ef7bed96bf8bf15",
+    "emulator/accel/mp64_crypto.h": "c8693601b0aec705092b69c0c5ca38abefea0066dd4c7d97aeaabc3b9f46fb67",
+    "emulator/accel/mp64_fb.h": "137ce1ce2d1bb5b97ce24ab195d6cf26aadbd328710a4929f8ce06761e9f9db0",
+    "emulator/accel/mp64_nic.h": "62f49d83f0362bb238b881a0a86083ea1ae4c4a32a5b860edfe6526d92ff0276",
+    "emulator/accel/mp64_rtc.h": "64ee766f8fbbafac5884dee8314dcc1fc57a1c894485bedff3405e0ae10bbdfe",
+    "emulator/accel/mp64_timer.h": "4cd20c58704586dd2f1ab16e9a16d0c35c67f78315ef2c6aee78b538a94e38d4",
+    "emulator/accel/mp64_uart.h": "8fadedf14f7923b99d8ce249b4ccb1ca1d37eb1d6b447ddd0af5acf7411b1ffa",
+    "emulator/accel/mp64_uart_geom.h": "1d994db7e3bc1f00f3b00f0f79639f17936827d67e5d48f65c4f7a0c04080aa1",
+    "emulator/accel_wrapper.py": "2f9c3e5599720ce94cac0c5312cb80ef24fdb211e63e6c0925586ec840b05aec",
+    "emulator/devices.py": "dcd82bd8d3708a65c5fa8ff6832b23babf41447f1784f6dda0225ed1a78df6f5",
+    "emulator/megapad64.py": "f0525b89efe7145048afe5205b6e84374333526b6a2840c314828c9f0c77df81",
+    "emulator/rich_terminal_host.py": "2abb8678a771bedc7f00b963ccea5637c05b2fe96c5bd9e0ebb0cc5338ce4721",
+    "emulator/session.py": "9c487710918e3a4314fcad217874d0aa0e7150b5bf1f5d03f1cb22b0681a069f",
+    "emulator/shared_session.py": "a4cc74dcdfe951a28a2e0d4ee12230816cc20e97be62a6c6ae42aa44a6847b32",
+    "emulator/system.py": "0a8d0e543aeaf474fb3c1e061a03e811f3e4c1d887311fde747757dec0c924d4",
+    "generate_text_data.py": "e540f05f22e1ab631517089bafd65ce17ecf14df143ba9fb57d40327fc4a884e",
+    "graphics.f": "637fb337e084e6ab65c3f811ebf016a2089712fb631d78d8c683ffc25b8107ea",
+    "kdos.f": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+    "megapad.py": "2a857f774aca39ee5cd846c63d8d05e4577069b6691179829c25abdc30367f67",
+    "megapad64.py": "cdb9f7a6f47babb3b1c14c6269d6455a4eff86763e078dfbc02a45d5fc272d28",
+    "networking.f": "4b1ee395dcf3a309a0e778f98072722ae11d6c3c583031c06406a9641a889609",
+    "nic_backends.py": "51949fec7a634750e0b54ffae88366944fc83118cb78f09fda8356b0dd60b1bc",
+    "rich-terminal.f": "e384d456b4cbbfa295b6358ced7bc925633b0869b18838efaca1fd885222a382",
+    "rich_terminal/__init__.py": "5452864bb3a68e601222d52fc22f7cc5d7957ba2e4304975ea7f0ba77044104f",
+    "rich_terminal/apt1.py": "c45b772a4553f0f9a2ffc94f9e070eaa90b05dc16957840784a9f240c8f49faf",
+    "rich_terminal/cell_model.py": "968099bc3bf148a9897d620769f5be2ce22f03296c00cdf1725073b2eede8bcd",
+    "rich_terminal/display_cadence.py": "336751aba38a26c52a15eb5738d4c9e592bdcf96f6ab6e5679bdff8e7e727f3e",
+    "rich_terminal/driver.py": "ec84b6cc4166b3cec6d965634b4f6fccfc797f4150416fbc6fa19f97bd09fabf",
+    "rich_terminal/final_raster.py": "9f92022eef39469afbf093e23228688589f2295acad25f52a5bd663c9b9cc9a4",
+    "rich_terminal/font_set.py": "6a20b4c04e993c37bdc00516dfb5544d0d919359cd076094e26555b4f86c7295",
+    "rich_terminal/megapad.py": "f40ed04fb594507c4cb5276c05351c4f5d54c7453ad63997769ab2fd34f31d04",
+    "rich_terminal/output_coordinator.py": "11cbec2b02f2d98355251e1c13b5270cc5e5cbde25731494d8eae980adb18da1",
+    "rich_terminal/pygame_view.py": "140b61e965467141d66ca83cede20b67f583a2a7f22f2be1dcf8a0293bc7f0ca",
+    "rich_terminal/retained_model.py": "c90cb3f83dc0322e165e276b582d048f330775729f62553e39ecb8ce391eb220",
+    "rich_terminal/retained_resources.py": "9a3fdb48fbf6ab2b2aa7450896aedb3257c949ea13817eef4a80665d3f61cf07",
+    "rich_terminal/retained_scene.py": "dc317f0806ce703ca231750b7e89c459ea47874ba1bbf6a72039017329d65312",
+    "rich_terminal/retained_view.py": "ec36d65c1ae620514fe8dbf6d2834ca9ff0855f12b94055b9b6a3b4f77026cbe",
+    "rich_terminal/retained_wire.py": "382e5149b2f5c18d2faaff7444f108e1ec2e6693d8a771293daeb92857595fbc",
+    "rich_terminal/semantic_content.py": "bdc454a46118631003f477647ffd948b85ae83a5fa34948c149165c4df8eadbd",
+    "rich_terminal/semantic_items.py": "e166de7c8384403483a2b71f77a0bbaab34a5116d1ab86a8920aa5a3302cca0d",
+    "rich_terminal/server.py": "ac487ea5902988939752feeb905ada60ed917fe4004a536a9e1aa3f3452344f9",
+    "rich_terminal/testing.py": "b9c1318716820909e1ba063f77838e0bd0572b9ec1fc1b0dd9d0948bee367b22",
+    "rich_terminal/text_data.py": "a4e2a68b76bb7f6dad8172ec2d27282d494562a27acc90d3c2ef91af69381d3e",
+    "rich_terminal/text_rules.py": "d00c383dd9a158a79cfae3b74733ca5d514162084d6e2dc55237b29b535264fd",
+    "rich_terminal/transport.py": "aee308d7167c4b782654ff499a1247dd4ae7a053ba636d444fb2f8cad39a5699",
+    "rich_terminal/update_authority.py": "fa7d645248ed35261d01303060f53c6a74dc09ae5cfd2e338dc716736b3c86f0",
+    "runtime_paths.py": "61e3c4d222e5505e5d6da80d2e998f7ed4fc8966503d4018054bca17fdbec120",
+    "session_ctl.py": "354f8078a6b9fd9838643df6670fe1e7f2dd3368f431cc5068fbb5dcb83952e1",
+    "session_server.py": "8c6a00f739c4ba1feca65e3364331100dc48f7908e046ed466ad97753aa30e39",
+    "session_viewer.py": "0c0c18de028801de2bc7307e616d26660a5c9e58234f39d8f1061a3ababfc604",
+    "setup_accel.py": "d9cd6ec80035b727f5b7d830ca92785564bf72355f76c1150ae4e2da174a4ef0",
+    "setup_simulator_accel.py": "6ce3c005880c9898bf066037a2c1ab51353533b516aef1b7f10f18840e46f592",
+    "shared/__init__.py": "be61fe7008dc32a46b334b5767cc59d0fdab91052d9e7781211c1af149494acd",
+    "shared/accel/keccak.cpp": "63039de1924c07d3f5e00ee77df26c21505f33736c07cfb71eb6aa339bf2fc51",
+    "shared/accel/keccak.h": "445a214da7b80fbe2adaf704670543ce4894028bc1d12b20396cd7c337da0a13",
+    "shared/accel/keccak_bindings.h": "1cdf119363f11602da01d510a74e46e1c2307ae9c453a7178cc0312b4db9e95d",
+    "shared/accel/scalar_fp.cpp": "6a48309e85f7e831e84c46016645748ea55baaa4b76852029f2337f1b6b972f0",
+    "shared/accel/scalar_fp.h": "36035240c8fbbb8c12341e16fb6a7dc40521330c645cd08955b48fda38db8321",
+    "shared/accel/scalar_fp_bindings.h": "04f4aea49cde7a8a0dfae89d6b1b48c11a1761af1557ff0f9707cbfa7d4e2c6d",
+    "shared/accel/tile_guard_bindings.h": "2f6d491b73d120d68e585550467c794725ab75f5f80fc0190ed807cb95c87e3a",
+    "shared/accel/tile_values.cpp": "07986fc551e790311e1ea18877112c9dc7258bba261eb99f2b7ccca32f91c315",
+    "shared/accel/tile_values.h": "89bce885dc4e03cb1e36a36ac767be2eb4a36e36ed89d1c37f210521e99d94f9",
+    "shared/accel/tile_values_bindings.h": "227f57fd9c7843a25017cb75d6f87bae6dcf3bfc551fe640341cbd6f71e12b08",
+    "shared/aes.py": "97b92738cd36fcf212115e2e6bb0cce5b681f875d530626df3e8eb5720d44bb3",
+    "shared/audio_output.py": "766b1f04764ef7904854560c6a57f7c4ab1f752c7e9143b048197c494c1cae87",
+    "shared/cells.py": "b686bac0d35d7fd42a8cd95999291306ffa09468d7de19d9b0791241a7a34581",
+    "shared/crc.py": "94b17769b027d832f43bd883b3e91d623c36cfea20394eeeeeb02e112271d4ba",
+    "shared/crypto_caps.py": "2f4e9fd2f2d110b2873dfff5e554b9429d876df360a9ffe8f71698db36259584",
+    "shared/field.py": "7bcc930329ac0e31a17ed43bf2601cf7457f97e39369cc270c1a8436080b23dc",
+    "shared/hybrid_abi.py": "680ef3b9ea7100c6ce85a1d369f24cae85e685851557e5a77af5803f4d2f38e2",
+    "shared/ieee_fp.py": "61d95825b7a9e317ff37941c34e94aff0cfc327ae5a4c610623e54c5f93ec5ad",
+    "shared/keccak.py": "f505a98dee4efbd5cdcccf320c9cf69a7539b07a2f237b9de34487558e8b7c04",
+    "shared/memory_backing.py": "dc2327a97b716577c86210e93027ecd679014c0c42b942d6eed5917f677d09c1",
+    "shared/mlkem.py": "2332c2d8f6a7f6210f6544d9c51d78277a418b2380056dc63daf8b9355c525e4",
+    "shared/mp64fs.py": "393a5f6db09762f22543ae0caff0b4e0e2316e550920b0edbcfbbf6371764c94",
+    "shared/ntt.py": "a3e77fbc8d4c65c23d99bb5e2b2de3cc396ebeac4a45a85bd092bc9db179f666",
+    "shared/rich_terminal_host.py": "9361069eededc8ea053ff83410cc73a11eb3ba553b593c54edf1677151fd97fe",
+    "shared/scalar_fp.py": "82c0ef517c9890d818d4d0bc1558ac1c483a6e0c31cff46f5fe8557675d1ff47",
+    "shared/session.py": "a541d039fef716ba7cb9a937acf6db4882898caeb7cb96ade5c025c55d1ad7c8",
+    "shared/session_options.py": "4527cf441ca8fcb976626a19d91c74111512d8102f15554fe93978d896d741f9",
+    "shared/session_status.py": "a101659665f56655a0f341939be4814a536068a0835815a135b17707e02c89ee",
+    "shared/storage.py": "288b92a6d195c002ad266f3ef355b30e3faf77096a4461cce97a9f21a615307a",
+    "shared/tile_float.py": "8c43b8dcf841d3643ad14d355f180771e3e9b574bd08530ace92f31eb2b98857",
+    "shared/tile_formats.py": "9a873a0713336a2bec981d64022b37a5dec28184c933093f8cd73f9397f2fb01",
+    "shared/x25519.py": "6d0ad248ff85bf604c1aa5eabf2e03bb77c525cc41eb3d8b5248119a0dd3c9d9",
+    "shared_session.py": "e75cf176a8788bb2dacecf9df178288ed8af54f4262d39be72de47b949bf3ed8",
+    "simulator/__init__.py": "668b9e35b0874582d66545931330bf151237ab4dd3a4f81b67982907ffcc1ce0",
+    "simulator/accel/semantic_executor.cpp": "c31e97f73a5707a6d5e30dc8ace01164e619c1ceaccaa16d6c594c15d306ff18",
+    "simulator/aes.py": "c7ca391f84dfb19ffc191f248f285677d60c4ff45e36d81005bff4b8941e5487",
+    "simulator/audio.py": "d59c1000c27231161dacafc1b4c3bc13fe8d3a705b633c70bc37c257b370748d",
+    "simulator/bootstrap_loader.py": "afd20f8025f162fb353f3b84de1194ad8c512488767dbd3092f6021ea4b3380b",
+    "simulator/core_words.py": "c9af60f480264ea8cc6458db224f4c2a6de2bdc03bfe0ed8afc3080c263d6ce8",
+    "simulator/crc.py": "b81f1e000c8efd751484d79b6897dcff91a0fb13b51a8a8db09198f540f60e0b",
+    "simulator/diagnostics.py": "a3e35f118d9009f736042aa821d39e52200417882236faadb8c7be00dda2c6d4",
+    "simulator/dictionary.py": "db99b4f3869bf2c80c464907928289ea861880be556ede59f56324606067c293",
+    "simulator/dictionary_index.py": "4bcb4455ba65d02306557f4465aa39754973fece5851a81a799674f02483958e",
+    "simulator/entropy.py": "413fa8644f90a587ec653b31b4754348ed8a9344d35574d0b734f8ef68f2211e",
+    "simulator/errors.py": "2b4748b8adef5610cb7d3c8afd4544037439f9c53e5311e0613c8e2133eccfae",
+    "simulator/field.py": "a5b11f9dde0e179fdf96661c2ba960e5099cf82117e7acd34163f4d0b8d74ce0",
+    "simulator/image_bootstrap.py": "71e0a3f43dd6eb8f592d35f198a7906d36a9e403f96c0a10fe84fc0c45a86f2f",
+    "simulator/interop_exports.py": "31c1375d171edf2b2db2e1b74bd210a2923de8ccf12713c3de4b4a9c14058bde",
+    "simulator/ir.py": "96baf58a4981473c15fd23e50f63e894d460ff5f73a820315edff529c01a91b7",
+    "simulator/kem.py": "bac63cacb24d3b3d117d8f22ebc348e60597d27ad5496e3307b6e7e1eb87a94a",
+    "simulator/memory.py": "447996e89dd124ac1991b21450487ce3e8116fd89891cbd5bbd534b1c162500a",
+    "simulator/mp64fs.py": "49764020c8d0d9faac467f1aaaadde29ebb5aedc32e3c5476503f69004aeb2e1",
+    "simulator/native_execution.py": "a94d4fcf2811a2c0a40e9b20460e552e15da63a394d9ec8037e165498c8df877",
+    "simulator/ntt.py": "6aa6ba5b185b4b095cb403ef7e116692641594e5c0e266d2e486b87c85eccd16",
+    "simulator/platform.py": "6a7c54d71ec739231c9fff41dbd39b80450bd3b5f38609b825cfbbac1b6a9778",
+    "simulator/rich_terminal_host.py": "4cb36be28b2794485f9375667506137bbd7f7c19350e14dc792f415a6e6d5f09",
+    "simulator/rtc.py": "2e7dd24e6f5d945d1d66dcb6f5d53bfe9457a40d793786c07aefe7195e6e65ed",
+    "simulator/runtime.py": "d249e16c714e2ce6647fcf08e67449fc1a6a110a1828d00f6d07f02a7a5ad6ce",
+    "simulator/scalar_float.py": "72d18fd53bfc0cfa1dd2483e8db488014b5aad5756b689bb7c9dfaaf4e4f0740",
+    "simulator/session.py": "30e84b2f71b3b51d1d99c57f37ff3dacedf44f1de11083006a0490bc389c0cd5",
+    "simulator/sha2.py": "efe9f585dab9363962f8ae614c792cde30b7bdbc20f0938371abb293c89dde39",
+    "simulator/sha3.py": "25b3d63a1ae9fbb2b1b0280af5151761fc8d00a466dec67eae24da234f5d3589",
+    "simulator/source.py": "fd5203556a79a6b31ec6268811af51aab9a4f08b9849b1a8105016ef53aea2fa",
+    "simulator/source_acceleration.py": "cc153364010cf2d116b3f602a3fc7d6fabbbc325ef7ce5a5c83a09d63a51cbd3",
+    "simulator/spinlocks.py": "6868a532fd6eb31ee25bf40301c62036916452f145d1b6f8de492ffcfd13156a",
+    "simulator/stacks.py": "403e8bb7968d002fac9a29a920b06869ae0e004133bb30b73f2782f523c2f593",
+    "simulator/storage.py": "f851946b9deca0197f737ac2b9f630984b7c59414b98ddbfecfc6df29f721e9b",
+    "simulator/terminal_geometry.py": "d9a7c9c15df275198b6bfdcda1ebed05687b0eed47092353606758b315e0eafb",
+    "simulator/tile.py": "e4d55c96da8853210aa4b8fc993322b5cf743533a494a09f44db068832b77059",
+    "simulator/timer.py": "9dac5ba34f5009c25d4516f2727f383a1d735e8811007bbba8dbe7280dd2279b",
+    "simulator_server.py": "31887c39117bc20348dff2a6bddc7c392127ce9859657b037898408abb2b2c7c",
+    "system.py": "524b5bf5f1eb3b00e15645b135e3486ec948e9b7e4b1d409c5c237f57ddc04f7",
+    "test_live.py": "23af86d03ee561b4c856b36f2228c9c62c888b1a341a4f23e482c9437629a9d6",
+    "test_monitor.py": "4c3a46caa0718e7380b0f1b2133122dcf464c97cd1ae88d8e87b9b0b9c763854",
+    "test_process_supervisor.py": "9b300d7782f3ebc269deac4ae73462916f38792ba6ce4eb4a0c0e739ec42d25d",
+    "tools.f": "d0caaefbba8c7354e48279c32e5754ba13f144f9b5816507bfa0b3d4ec9d8d42"
+  },
+  "unsupported_pairs": []
+}
