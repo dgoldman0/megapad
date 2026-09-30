@@ -324,9 +324,9 @@ def prepare_server(args, image, directory):
         if args.mode == "hybrid":
             from hybrid import server as backend
         else:
-            import simulator_server as backend
+            from simulator import server as backend
         return backend.prepare_server(backend.build_argument_parser().parse_args(arguments)).server
-    import session_server as backend
+    from emulator import server as backend
     from emulator.session import MachineSession
     from emulator.shared_session import SharedMachine
     from shared_session import SessionServer

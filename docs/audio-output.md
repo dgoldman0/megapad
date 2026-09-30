@@ -75,7 +75,7 @@ asynchronous with cancellable ownership is a separate streaming-era hardening
 step, not a property this one-shot revision pretends to provide.
 
 Interactive emulator sessions may opt into audible playback with
-`session_server.py --audio`. The adapter initializes only `pygame.mixer`,
+`megapad.py --mode emulator --audio`. The adapter initializes only `pygame.mixer`,
 requires the exact requested signed-PCM16 format, owns a single replaceable
 voice, and advertises the host-sink capability only after initialization
 succeeds. The separate pygame viewer intentionally does not initialize a

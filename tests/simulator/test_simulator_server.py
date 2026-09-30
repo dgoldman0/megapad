@@ -13,7 +13,7 @@ import pytest
 from simulator.image_bootstrap import ImageBootstrapError
 from simulator.memory import AddressClass
 from simulator.session import SEMANTIC_QUANTUM_ENVIRONMENT
-from simulator_server import build_argument_parser, prepare_server
+from simulator.server import build_argument_parser, prepare_server
 from tests.simulator.test_image_bootstrap import _boot_image
 
 
@@ -27,8 +27,8 @@ def _region_sizes(prepared) -> dict[AddressClass, int]:
 def test_server_cli_builds_the_shared_semantic_facade(tmp_path, monkeypatch) -> None:
     now_ns = [7_000_000_000]
     epoch_ms = 1_788_890_400_000
-    monkeypatch.setattr("simulator_server.time.time_ns", lambda: epoch_ms * 1_000_000)
-    monkeypatch.setattr("simulator_server.time.monotonic_ns", lambda: now_ns[0])
+    monkeypatch.setattr("simulator.server.time.time_ns", lambda: epoch_ms * 1_000_000)
+    monkeypatch.setattr("simulator.server.time.monotonic_ns", lambda: now_ns[0])
     # The explicit option wins over the environment.
     monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, "40000")
     image = tmp_path / "desktop-simulator.img"
@@ -143,7 +143,7 @@ def test_server_cli_rejects_invalid_quanta_before_preparing_the_image(
         pytest.fail("an invalid quantum must fail before autoexec runs")
 
     monkeypatch.setattr(
-        "simulator_server.prepare_image_bootstrap", prepare_image_bootstrap
+        "simulator.server.prepare_image_bootstrap", prepare_image_bootstrap
     )
     monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, "0")
     args = parser.parse_args(
@@ -233,7 +233,7 @@ def test_python_image_session_runs_without_importing_the_emulator_accelerator(
                 return None
 
         sys.meta_path.insert(0, BlockEmulatorAccelerator())
-        from simulator_server import build_argument_parser, prepare_server
+        from simulator.server import build_argument_parser, prepare_server
 
         args = build_argument_parser().parse_args([
             "--storage", sys.argv[1],

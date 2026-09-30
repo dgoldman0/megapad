@@ -73,6 +73,16 @@ use `emulator.session` and `emulator.system`; historical flat checkouts use
 their root modules. It validates source and imported-module provenance, and
 an import failure in a package checkout remains an error.
 
+Backend server interfaces live in `emulator.server`, `simulator.server`, and
+`hybrid.server`. Each owns its argument parser and `main(argv=None)`;
+`megapad.py --mode MODE` loads the selected package lazily; top-level help
+requires no backend imports.
+Simulator and hybrid image preparation also expose `prepare_server(args)`
+without opening a listener. The deprecated root `session_server.py` and
+`simulator_server.py` scripts retain only `main` forwarding for external
+launchers that have not migrated. Their removal waits for that external
+dependency cluster; they contain no second server implementation.
+
 Both detailed and lightweight status contain the same `runtime` descriptor:
 
 | Field | Emulator | Simulator | Hybrid |
@@ -147,7 +157,7 @@ boundary and composites both before acknowledging that revision as displayed.
 Start the machine owner from the workspace root:
 
 ```bash
-python3 megapad/session_server.py
+python3 megapad/megapad.py --mode emulator
 ```
 
 The shared server accepts the same policy as
@@ -156,7 +166,7 @@ The shared server accepts the same policy as
 To attach the shared machine to an already configured Linux TAP interface:
 
 ```bash
-python3 megapad/session_server.py --nic-tap mp64tap0
+python3 megapad/megapad.py --mode emulator --nic-tap mp64tap0
 ```
 
 The server refuses startup if the TAP device is missing or inaccessible; it
@@ -165,7 +175,7 @@ does not create interfaces or alter host routing on the user's behalf.
 Audible one-shot PCM playback is likewise explicit opt-in:
 
 ```bash
-python3 megapad/session_server.py --audio
+python3 megapad/megapad.py --mode emulator --audio
 ```
 
 Without `--audio`, the guest audio device still captures every successful
@@ -181,12 +191,12 @@ deterministic cycle-derived clock in isolated tests.
 
 ### Hosted simulator owner
 
-`simulator_server.py` serves the same shared-session protocol from the hosted
+`megapad.py --mode simulator` serves the same shared-session protocol from the hosted
 semantic simulator instead of the emulator. It prepares an MP64FS image, runs
 its ordinary autoexec, and only then exposes the socket:
 
 ```bash
-MEGAFORTH_EXECUTOR=native python3 megapad/simulator_server.py \
+python3 megapad/megapad.py --mode simulator --executor native \
   --storage path/to/image.img --ext-mem-mib 128
 ```
 
@@ -195,8 +205,10 @@ It takes `--storage` (required), `--socket`, the memory sizes (`--ram-kib`,
 takes `--semantic-step-budget`, `--semantic-quantum-steps`, `--paused`, and
 the complete caller-owned `--rich-terminal-policy` and
 `--retained-terminal-policy` JSON. It has no NIC or audible audio option.
-`MEGAFORTH_EXECUTOR` selects the executor: `python` (the default reference),
-`native`, or `auto`. `MEGAFORTH_QUANTUM_STEPS` sets the semantic steps between
+`--executor python|native|auto` takes precedence over `MEGAFORTH_EXECUTOR`.
+With neither set, the production server requires native execution; only
+`auto` permits fallback to Python. Embedded `MegaForthRuntime` construction
+still defaults to the Python reference. `MEGAFORTH_QUANTUM_STEPS` sets the semantic steps between
 host owner boundaries when the option is absent. The default is 65,536 with
 the native executor and 8,192 with the Python reference. The viewer and `session_ctl.py`
 attach exactly as they do to the emulator owner. Akashic's

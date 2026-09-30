@@ -23,7 +23,7 @@ from simulator.ir import Branch, BranchZero, Call, Literal, Return
 from simulator.platform import create_one_core_address_space
 from simulator.session import configured_semantic_quantum_steps
 from simulator.storage import HostedStorageService
-from simulator_server import build_argument_parser as semantic_argument_parser
+from simulator.server import build_argument_parser as semantic_argument_parser
 
 
 @dataclass(frozen=True, slots=True)

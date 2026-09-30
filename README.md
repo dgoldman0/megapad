@@ -336,9 +336,14 @@ callbacks into source, native BIOS images, and multicore hybrid execution.
 See [the v1 ABI and manifest format](docs/hybrid-runtime-abi.md) and
 [the implementation plan](docs/unified-runtime-plan.md).
 
-The architectural
-monitor in `cli.py` and the existing `session_server.py` and
-`simulator_server.py` entry points remain available during consolidation.
+The architectural monitor in `cli.py` remains a separate debugging tool.
+Server implementations and programmatic interfaces live in `emulator.server`,
+`simulator.server`, and `hybrid.server`; the unified launcher selects one.
+The deprecated `session_server.py` and `simulator_server.py` scripts forward
+only to the corresponding package's `main`. They remain temporarily for
+external launchers, including the separately maintained Akashic tooling;
+new callers should use `megapad.py --mode MODE`. Their external callers have
+not been migrated as part of this repository change.
 
 ### Boot the System
 
