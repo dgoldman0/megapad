@@ -418,10 +418,41 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
 | 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
 | 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
-| 5B2 — nested callbacks | Contract locked; native owner implementation in progress | One-owner legacy facade and complete parent-field audit specified before implementation |
-| 5C/5D — shared task callbacks | Contract and neutral value protocol complete; runtime execution pending | 206 protocol/ABI checks, including 48 new continuation, receipt and cancellation cases |
+| 5B2 — nested callbacks | Graph capture/publication, one native owner and root execution qualified; child execution and composition in progress | 502 metadata checks; 387 accounting/startup checks with 11 full journeys deferred; 929 clean-checkpoint native root, capture and legacy checks |
+| 5C/5D — shared task callbacks | Neutral protocol and permanent foreign-return retirement qualified; dispatcher and native task execution pending | 206 protocol/ABI checks and 409 stack/private-profile checks, repeated on a clean checkpoint; no task capability exposed |
 | 5E — private scalar services | Contract and explicit metadata loader complete; execution pending | 532 service metadata and existing manifest checks; no service capability advertised |
 | Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
+
+### Nested publication and root execution — 2026-09-30
+
+Native V3 now shares one CPU owner, publication budget and memory pin with
+its legacy V2 facade. Transactional child-edge publication binds exact parent
+sites and child generations. Semantic V4 capture binds original Words and IR
+positions, proves the combined graph, and rejects stale code, changed leases,
+malformed descriptors and publication failures without exposing partial state.
+Older metadata continues through the same qualified legacy routes.
+
+Root V3 begin/resume/cancel uses the existing sealed integer interpreter.
+Independent V3 receipts retain completed work across allocation failures;
+the CPU reservation remains held through Python result delivery. Root work,
+callback limits, output values, stores, cache observations and cycles were
+compared with ordinary MP64 execution. The differential fixture explicitly
+initializes the same integer controls, including the inactive modifier.
+
+Commit `dd971ee`, including capture commit `6d47b1f`, passed 929 checks on a
+clean checkpoint with its matching GCC accelerator and the unchanged qualified
+semantic extension. This qualifies root segments and publication only.
+Public V4 registration, required creation, generic manifest dispatch and full
+capability status remain closed until child execution, private semantic
+composition and production session journeys pass together. The 11 staged V4
+journeys remain deferred, not counted as passes.
+
+The task profile separately has issued foreign-return control and permanent
+retirement after RP!, raw-cell changes and snapshot operations. It has no
+task dispatcher or native task adapter yet. Its contract now makes zero-quantum
+begin admission-only, retains the original ledger across empty-chain quanta,
+and bounds the semantic THROW tail after discarded machine authority expires.
+These foundations do not imply shared-task CATCH/THROW or suspension support.
 
 ### Qualified closed callbacks and frontend integration — 2026-09-30
 
