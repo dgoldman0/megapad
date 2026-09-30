@@ -46,9 +46,19 @@ go one at a time; commit each coherent slice once it is green.
 1. **Baseline.** Build both extensions and run the recorded gates on this
    machine: unified application, simulator under the Python and native
    executors, rich-terminal dual, and the three socket tests skipped before.
-   Record any failure before changing code.
+   Record any failure before changing code. Done on Python 3.13: 2,468
+   application, 2 × 2,569 simulator, 8 dual and 1,811 further rich-terminal
+   tests passed. The one failure, a socket test stepping an idle guest, had
+   failed on main since the idle work and is corrected.
 2. **Measure a hybrid call.** Attribute the time of a machine-to-Forth
-   callback and a Forth-to-machine routine call under both executors.
+   callback and a Forth-to-machine routine call under both executors. Done
+   with the native executor, 64 iterations of four FP operations: direct
+   semantic FP took 0.3 ms and machine code without callbacks 0.4 ms. A
+   scalar-service callback took about 6.2 ms and ran about 127,000 Python
+   calls, nearly all re-verifying class, module and function seals and
+   scanning namespaces. An integer leaf callback took about 134 µs, mostly
+   rebuilding and revalidating frozen records and the registration on every
+   crossing.
 3. **One format, one transport.** Replace manifest schemas 1–5 with one
    schema and the routine transports V1, V2, V3 and task with one. Remove
    capability probing, fallback to older runners, legacy facades and the
