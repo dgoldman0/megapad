@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from display import VirtualTerminal, glyph_extent
+from rich_terminal.appearance import Appearance, REFERENCE_APPEARANCE, get_appearance
 from rich_terminal.final_raster import FinalRaster
 from rich_terminal.font_set import FontSet, discover_fallback_fonts
 from rich_terminal.pygame_view import (
@@ -1830,9 +1831,13 @@ def compose_terminal_frame(
     show_cursor: bool,
     glyph_cache: dict | None = None,
     resource_surfaces: Mapping | None = None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ):
     """Render CELL, then retained draws, then the terminal cursor."""
 
+    if not isinstance(appearance, Appearance):
+        raise TypeError("appearance must be Appearance")
+    appearance_options = {} if appearance == REFERENCE_APPEARANCE else {"appearance": appearance}
     surface = terminal.render(
         pygame_module,
         font,
@@ -1853,6 +1858,7 @@ def compose_terminal_frame(
                 font,
                 cell_width,
                 cell_height,
+                **appearance_options,
             )
         else:
             composite_draw_plane(
@@ -1863,6 +1869,7 @@ def compose_terminal_frame(
                 cell_width,
                 cell_height,
                 resource_surfaces=resource_surfaces,
+                **appearance_options,
             )
     _paint_terminal_cursor(
         pygame_module,
@@ -1889,9 +1896,12 @@ def compose_terminal_frame_result(
     hovered: ControlIdentity | None = None,
     pressed: ControlIdentity | None = None,
     resource_surfaces: Mapping | None = None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> CompositeDrawResult:
     """Render the complete frame and return hits from that exact paint pass."""
 
+    if not isinstance(appearance, Appearance):
+        raise TypeError("appearance must be Appearance")
     surface = terminal.render(
         pygame_module,
         font,
@@ -1913,6 +1923,8 @@ def compose_terminal_frame_result(
         }
         if resource_surfaces is not None:
             compositor_kwargs["resource_surfaces"] = resource_surfaces
+        if appearance != REFERENCE_APPEARANCE:
+            compositor_kwargs["appearance"] = appearance
         retained_result = composite_draw_plane_result(
             pygame_module,
             surface,
@@ -1984,6 +1996,7 @@ class ComposedFrame:
     control_font: object
     glyph_cache: dict
     resource_surfaces: object
+    appearance: Appearance = REFERENCE_APPEARANCE
 
 
 # Repainted only whole: these painters clip diagonal lines or fill polygons
@@ -2231,16 +2244,20 @@ def compose_terminal_frame_changes(
     pressed: ControlIdentity | None = None,
     resource_surfaces: Mapping | None = None,
     previous: ComposedFrame | None = None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> ComposedFrame:
     """Compose the frame, repainting in PREVIOUS's surface only what changed.
 
     The frame is exactly what ``compose_terminal_frame_result`` composes
     from the same inputs, pixel for pixel and entry for entry.  It is
-    composed in full for the first frame, after a change of geometry, fonts,
+    composed in full for the first frame, after a change of appearance, geometry, fonts,
     glyph cache, retained visibility or IMAGE resources, when regions are
     reordered, and when the damage would cover more than half the frame.
     """
 
+    if not isinstance(appearance, Appearance):
+        raise TypeError("appearance must be Appearance")
+    appearance_options = {} if appearance == REFERENCE_APPEARANCE else {"appearance": appearance}
     control_font = font if control_font is None else control_font
     with terminal._lock:
         grid = tuple(tuple(row) for row in terminal.grid)
@@ -2258,6 +2275,7 @@ def compose_terminal_frame_changes(
     damage = None
     if (
         previous is not None
+        and previous.appearance == appearance
         and previous.geometry == geometry
         and previous.font is font
         and previous.control_font is control_font
@@ -2288,6 +2306,7 @@ def compose_terminal_frame_changes(
                 cell_width,
                 cell_height,
                 control_font=control_font,
+                **appearance_options,
             )
         damage = _frame_damage(
             previous,
@@ -2315,11 +2334,12 @@ def compose_terminal_frame_changes(
             hovered=hovered,
             pressed=pressed,
             resource_surfaces=resource_surfaces,
+            **appearance_options,
         )
         return ComposedFrame(
             result.surface, result.hit_entries, result.regions, None, grid, cursor,
             retained_plane, hovered, pressed, geometry, font, control_font,
-            glyph_cache, resource_surfaces,
+            glyph_cache, resource_surfaces, appearance,
         )
 
     surface = previous.surface
@@ -2356,6 +2376,7 @@ def compose_terminal_frame_changes(
                 control_font=control_font,
                 hovered=hovered,
                 pressed=pressed,
+                **appearance_options,
             ).items():
                 extent = extents[key]
                 # Only a draw painted whole under this clip made exact entries.
@@ -2419,7 +2440,7 @@ def compose_terminal_frame_changes(
         surface, hit_entries, tuple(regions),
         tuple(PixelRect(*rect) for rect in damage), grid, cursor,
         retained_plane, hovered, pressed, geometry, font, control_font,
-        glyph_cache, resource_surfaces,
+        glyph_cache, resource_surfaces, appearance,
     )
 
 
@@ -2548,6 +2569,12 @@ def main() -> int:
     parser.add_argument("--font", type=Path)
     parser.add_argument("--font-size", type=int, default=18)
     parser.add_argument(
+        "--appearance",
+        choices=("reference", "flowing"),
+        default="reference",
+        help="host rendering of semantic controls (default: reference)",
+    )
+    parser.add_argument(
         "--fallback-font",
         type=Path,
         action="append",
@@ -2566,6 +2593,7 @@ def main() -> int:
     )
     parser.add_argument("--exit-after", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    appearance = get_appearance(args.appearance)
     if args.input_queue_events <= 0:
         parser.error("--input-queue-events must be positive")
 
@@ -2957,6 +2985,7 @@ def main() -> int:
                     pointer.pressed,
                     cursor_state,
                     frozenset(resource_surfaces.items()),
+                    appearance,
                     screen.get_size(),
                 ),
                 (status_text, state_color),
@@ -2983,6 +3012,7 @@ def main() -> int:
                         pressed=pointer.pressed,
                         resource_surfaces=resource_surfaces,
                         previous=composed_frame,
+                        appearance=appearance,
                     )
                     rendered_hit_entries = composed_frame.hit_entries
                 changed = None
