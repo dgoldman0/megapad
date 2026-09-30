@@ -4,7 +4,8 @@ Started: 2026-09-30
 
 Status: Phase 1A and the Phase 1B session extraction are implemented and
 qualified locally. Executor default promotion remains deferred to workload
-qualification. Phase 2 profiles are next; hybrid execution is not implemented.
+qualification. Bounded Phase 2 kernel baselines are recorded; broader workload qualification
+remains open. Hybrid execution is not implemented.
 
 Branch: `feature/unified-runtime`
 
@@ -293,10 +294,10 @@ limits. Machine-level claims continue to require the architectural oracle.
 
 | Slice | Status | Evidence |
 |---|---|---|
-| Plan | Locked | Read-only source review at the base above; local commit `512ed32` |
+| Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
-| 2 — workload profiles | Pending | |
+| 2 — workload profiles | Bounded kernels recorded; representative work pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 3A — native scalar FP | Pending | |
 | 3B/3C — remaining native extraction | Pending, profile-driven | |
 | 4 — initial hybrid ABI and execution | Pending | |
