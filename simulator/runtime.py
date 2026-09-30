@@ -1260,6 +1260,9 @@ class MegaForthRuntime:
 
     def _require_session_owner_access(self, operation: str) -> None:
         with self._session_owner_lock:
+            task_engine = getattr(self, "_foreign_tasks", None)
+            if task_engine is not None and task_engine._batch is not None:
+                raise ExecutionError(f"cannot {operation} during task registration batch")
             if (
                 self._session_owner_token is not None
                 and self._session_owner_thread != threading.get_ident()
