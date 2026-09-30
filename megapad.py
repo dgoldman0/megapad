@@ -9,8 +9,8 @@ import sys
 
 
 _SERVER_MODULES = {
-    "emulator": "session_server",
-    "simulator": "simulator_server",
+    "emulator": "emulator.server",
+    "simulator": "simulator.server",
     "hybrid": "hybrid.server",
 }
 

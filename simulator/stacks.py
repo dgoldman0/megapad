@@ -12,6 +12,12 @@ from dataclasses import dataclass
 from typing import Iterable, TypeAlias
 
 from shared.cells import CELL_BYTES, MASK64, u64
+from simulator.foreign_control import (
+    ForeignContinuation,
+    ForeignControlError,
+    ForeignRetirementReason,
+    ForeignReturnControl,
+)
 from simulator.memory import SparseAddressSpace
 
 
@@ -126,7 +132,57 @@ class Continuation:
             raise ValueError("a continuation cannot be both root and fault-abort")
 
 
-ReturnEntry: TypeAlias = int | Continuation
+ReturnEntry: TypeAlias = int | Continuation | ForeignContinuation
+
+_FOREIGN_RESTORE_SLOTS = tuple(
+    (kind, tuple((name, vars(kind)[name]) for name in names))
+    for kind, names in (
+        (Continuation, ("xt", "ip", "root", "dispatch_id", "fault_abort")),
+        (FaultAbort, ("report", "message")),
+    )
+)
+
+
+def _validate_foreign_restore(snapshot: tuple[ReturnEntry, ...]) -> None:
+    """Validate a canonical ordinary snapshot before retiring foreign authority."""
+
+    if type(snapshot) is not tuple:
+        raise TypeError("bound foreign restore requires an exact tuple")
+    continuation_type, continuation_slots = _FOREIGN_RESTORE_SLOTS[0]
+    fault_type, fault_slots = _FOREIGN_RESTORE_SLOTS[1]
+    for kind, fields in _FOREIGN_RESTORE_SLOTS:
+        if any(vars(kind).get(name) is not descriptor for name, descriptor in fields):
+            raise TypeError("ordinary continuation field routing changed")
+    for entry in snapshot:
+        entry_type = type(entry)
+        if entry_type is ForeignContinuation:
+            raise TypeError("return stack restore cannot install foreign continuations")
+        if entry_type is int:
+            if not 0 <= entry <= MASK64:
+                raise ValueError("bound foreign restore cells must be uint64 values")
+            continue
+        if entry_type is not continuation_type:
+            raise TypeError("bound foreign restore requires exact ordinary continuations or cells")
+        values = {name: descriptor.__get__(entry, continuation_type)
+                  for name, descriptor in continuation_slots}
+        for name in ("xt", "ip", "dispatch_id"):
+            value = values[name]
+            if type(value) is not int or not 0 <= value <= MASK64:
+                raise TypeError("ordinary continuation fields must be exact uint64 integers")
+        if type(values["root"]) is not bool:
+            raise TypeError("ordinary continuation root must be an exact boolean")
+        fault = values["fault_abort"]
+        if fault is not None:
+            if type(fault) is not fault_type:
+                raise TypeError("ordinary fault continuation requires an exact FaultAbort")
+            fault_values = {name: descriptor.__get__(fault, fault_type)
+                            for name, descriptor in fault_slots}
+            if type(fault_values["report"]) is not bytes or type(fault_values["message"]) is not str:
+                raise TypeError("ordinary fault continuation report/message must be exact bytes/string")
+        if values["dispatch_id"] and not values["root"]:
+            raise ValueError("only an ordinary root continuation may name a dispatch")
+        if values["root"] and fault is not None:
+            raise ValueError("an ordinary continuation cannot be root and fault-abort")
 
 
 def _backing_bounds(
@@ -455,7 +511,8 @@ class ReturnStack:
         self._memory = memory
         self._memory_view = None
         self._entries: list[ReturnEntry] | None
-        self._continuations: dict[int, tuple[Continuation, int]]
+        self._continuations: dict[int, tuple[Continuation | ForeignContinuation, int]]
+        self._foreign_control: ForeignReturnControl | None = None
         self._pointer_capture_generation = 0
         self._continuation_cookie = 0
         self._floor: int | None
@@ -483,6 +540,34 @@ class ReturnStack:
         """Whether entries occupy the caller's shared guest address space."""
 
         return self._memory is not None
+
+    @property
+    def has_foreign_state(self) -> bool:
+        """Whether task foreign authority is bound, including an idle control.
+
+        Retained tombstones after close remain non-resumable control entries,
+        but own no bound foreign authority. Private callback owners must reject
+        a bound control even when its live table is empty.
+        """
+
+        return self._foreign_control is not None
+
+    def _bound_foreign_control(self) -> ForeignReturnControl | None:
+        control = self._foreign_control
+        if control is not None and type(control) is not ForeignReturnControl:
+            raise ForeignControlError("foreign return control is not stack-issued")
+        return control
+
+    def bind_foreign_control(self, issuer: object) -> ForeignReturnControl:
+        """Opt an exact backed stack into one identity-owned foreign control."""
+
+        control = self._bound_foreign_control()
+        if control is not None:
+            ForeignReturnControl._require_issuer(control, issuer)
+            return control
+        control = ForeignReturnControl._issue(self, issuer)
+        self._foreign_control = control
+        return control
 
     @property
     def pointer(self) -> int:
@@ -544,7 +629,7 @@ class ReturnStack:
         """Implement user ``R>``, rejecting an exposed continuation."""
 
         entry = self._peek_entry(0, "R>")
-        if isinstance(entry, Continuation):
+        if isinstance(entry, (Continuation, ForeignContinuation)):
             raise self._shape_error("R>", "user cell", entry)
         self._discard_entries(1)
         return entry
@@ -553,7 +638,7 @@ class ReturnStack:
         """Implement user ``R@``, rejecting an exposed continuation."""
 
         entry = self._peek_entry(0, "R@")
-        if isinstance(entry, Continuation):
+        if isinstance(entry, (Continuation, ForeignContinuation)):
             raise self._shape_error("R@", "user cell", entry)
         return entry
 
@@ -570,9 +655,9 @@ class ReturnStack:
         self._require(2, operation)
         second = self._peek_entry(0, operation)
         first = self._peek_entry(1, operation)
-        if isinstance(second, Continuation):
+        if isinstance(second, (Continuation, ForeignContinuation)):
             raise self._shape_error(operation, "top user cell", second)
-        if isinstance(first, Continuation):
+        if isinstance(first, (Continuation, ForeignContinuation)):
             raise self._shape_error(operation, "deeper user cell", first)
         return first, second
 
@@ -704,10 +789,16 @@ class ReturnStack:
             # also survive until the enclosing host guard observes ABORT and
             # restores its dispatch-scoped capture checkpoint.
             self._pointer = self._empty_pointer
+            if self._foreign_control is not None:
+                control = self._bound_foreign_control()
+                ForeignReturnControl._retire_all(control, ForeignRetirementReason.CLEARED)
 
     def snapshot(self) -> tuple[ReturnEntry, ...]:
         """Return an immutable bottom-to-top view of the ordered stack."""
 
+        if self._foreign_control is not None:
+            control = self._bound_foreign_control()
+            ForeignReturnControl._reconcile(control)
         if self._memory is None:
             assert self._entries is not None
             return tuple(self._entries)
@@ -723,11 +814,18 @@ class ReturnStack:
                 typed = continuations.get(address)
                 if typed is None:
                     entries.append(raw)
+                elif (self._foreign_control is not None
+                      and (type(typed) is not tuple or len(typed) != 2
+                           or type(typed[1]) is not int)):
+                    raise ForeignControlError("foreign return metadata payload is not canonical")
                 elif raw == typed[1]:
                     entries.append(typed[0])
                 else:
                     # The same stale-type removal as scalar _decode_entry.
                     # Inactive slots remain untouched for a later RP!.
+                    if self._foreign_control is not None:
+                        control = self._bound_foreign_control()
+                        ForeignReturnControl._raw_mismatch(control, address)
                     del continuations[address]
                     entries.append(raw)
                 address += CELL_BYTES
@@ -749,10 +847,14 @@ class ReturnStack:
         this failure restore while blocked.
         """
 
+        if self._foreign_control is not None:
+            _validate_foreign_restore(snapshot)
         if not isinstance(snapshot, tuple):
             raise TypeError("return stack snapshot must be a tuple")
         entries: list[ReturnEntry] = []
         for entry in snapshot:
+            if isinstance(entry, ForeignContinuation):
+                raise TypeError("return stack restore cannot install foreign continuations")
             if isinstance(entry, Continuation):
                 entries.append(entry)
             elif isinstance(entry, int):
@@ -768,6 +870,9 @@ class ReturnStack:
         if len(entries) > self.capacity:
             assert self._floor is not None
             raise StackOverflow("return", floor=self._floor)
+        if self._foreign_control is not None:
+            control = self._bound_foreign_control()
+            ForeignReturnControl._retire_all(control, ForeignRetirementReason.RESTORED)
         self._pointer = self._empty_pointer
         self._pointer_capture_generation = 0
         for entry in entries:
@@ -785,8 +890,13 @@ class ReturnStack:
     def set_pointer(self, pointer: int) -> None:
         """Set a backed return-stack frontier without erasing retained slots."""
 
+        if self._foreign_control is not None and type(pointer) is not int:
+            raise TypeError("bound foreign return pointer must be an exact integer")
         self._validate_pointer(pointer)
         self._pointer = pointer
+        if self._foreign_control is not None:
+            control = self._bound_foreign_control()
+            ForeignReturnControl._frontier_changed(control)
 
     def capture_pointer(self) -> int:
         """Return and register a frontier observed in this host dispatch."""
@@ -842,14 +952,25 @@ class ReturnStack:
         return self._decode_entry(address, raw)
 
     def _decode_entry(self, address: int, raw: int) -> ReturnEntry:
+        if self._foreign_control is not None:
+            control = self._bound_foreign_control()
+            ForeignReturnControl._require_stack(control)
         typed = self._continuations.get(address)
         if typed is None:
             return raw
+        if (self._foreign_control is not None
+                and (type(typed) is not tuple or len(typed) != 2 or type(typed[1]) is not int)):
+            control = self._bound_foreign_control()
+            ForeignReturnControl._reconcile(control)
+            raise ForeignControlError("foreign return metadata payload is not canonical")
         continuation, expected_raw = typed
         if raw == expected_raw:
             return continuation
         # A raw guest store replaced this return slot.  Shared memory is
         # authoritative; do not resurrect stale host-only type metadata.
+        if self._foreign_control is not None:
+            control = self._bound_foreign_control()
+            ForeignReturnControl._raw_mismatch(control, address)
         del self._continuations[address]
         return raw
 
@@ -859,13 +980,13 @@ class ReturnStack:
         self._require(offset + 2, operation)
         index_entry = self._peek_entry(offset, operation)
         limit_entry = self._peek_entry(offset + 1, operation)
-        if isinstance(index_entry, Continuation):
+        if isinstance(index_entry, (Continuation, ForeignContinuation)):
             raise self._shape_error(
                 operation,
                 f"loop index cell at offset {offset}",
                 index_entry,
             )
-        if isinstance(limit_entry, Continuation):
+        if isinstance(limit_entry, (Continuation, ForeignContinuation)):
             raise self._shape_error(
                 operation,
                 f"loop limit cell at offset {offset + 1}",
@@ -890,6 +1011,9 @@ class ReturnStack:
         else:
             assert self._pointer is not None
             self._pointer += count * CELL_BYTES
+            if self._foreign_control is not None:
+                control = self._bound_foreign_control()
+                ForeignReturnControl._frontier_changed(control)
 
     def _push_address(self) -> int:
         assert self._pointer is not None
@@ -935,14 +1059,16 @@ class ReturnStack:
         expected: str,
         actual: ReturnEntry,
     ) -> ReturnStackShapeError:
-        actual_kind = (
-            "continuation" if isinstance(actual, Continuation) else "user cell"
-        )
+        if isinstance(actual, ForeignContinuation):
+            actual_kind = "foreign continuation"
+        else:
+            actual_kind = "continuation" if isinstance(actual, Continuation) else "user cell"
         return ReturnStackShapeError(operation, expected, actual_kind)
 
 
 __all__ = [
     "Continuation",
+    "ForeignContinuation",
     "DataStack",
     "ReturnEntry",
     "ReturnStack",

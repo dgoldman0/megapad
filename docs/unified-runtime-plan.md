@@ -178,6 +178,12 @@ Preserve execution semantics while establishing the user-facing entry point.
   explicit after qualification. Reference execution remains selectable.
 - Migrate supported consumers and remove obsolete entry-point bridges when
   the dependency cluster is complete. Avoid parallel permanent APIs.
+- Package server implementations in `emulator.server`, `simulator.server`,
+  and `hybrid.server`. Keep the old root server scripts as temporary
+  `main`-only forwarders until their separately maintained external callers
+  migrate. This repository does not modify Akashic; retaining those script
+  entrypoints is an explicit external compatibility boundary, not a second
+  implementation or a permanent programmatic API.
 
 Gate: both existing modes run through one application with unchanged
 source-visible behavior and honest mode-specific capabilities.
@@ -442,6 +448,34 @@ because this environment denies socket creation. A separate 30-case gate
 confirmed the required-native production default. Prepared Desktop reports
 retain their original source identities and do not claim that the later
 frontend families were exercised by those historical images.
+
+### Phase 1B server consumer migration — 2026-09-30
+
+The emulator and simulator server implementations now live in
+`emulator/server.py` and `simulator/server.py`. The unified launcher,
+hybrid parser, prepared Desktop harness and in-repository server tests use
+those package interfaces. The emulator still resolves its default BIOS from
+the repository root; parser behavior, executor selection and owner lifecycle
+are unchanged. Current user commands use `megapad.py --mode MODE`.
+
+The root `session_server.py` and `simulator_server.py` files now contain only
+deprecated `main` forwarding. External launchers, including separately
+maintained Akashic tooling, are outside this change and have not been
+migrated. Those two script paths remain until that dependency cluster can
+move. Internal helper imports and monkeypatches use the canonical package
+modules; no second server implementation remains.
+
+`shared_session.py` remains the canonical common protocol/owner module.
+The architectural monitor `cli.py` and flat architectural module aliases
+are separate supported surfaces; removing them is not part of this server
+migration. The earlier sections below preserve the history of the initially
+qualified launcher and session extraction.
+
+The focused gate passed 210 checks with one known AF_UNIX skip: launcher cold
+imports and legacy script help, emulator server policy/default BIOS, simulator
+server preparation, production executor selection, package dependency
+direction, existing Desktop preparation and all hybrid session profiles.
+This change makes no new socket or physical-display acceptance claim.
 
 ### Phase 1A implementation and validation — 2026-09-30
 

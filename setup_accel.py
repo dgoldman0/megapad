@@ -91,6 +91,7 @@ ext = Extension(
         "emulator/accel/cpu/mp64/interpreter.h",
         "emulator/accel/cpu/mp64/routine_runner.h",
         "emulator/accel/cpu/mp64/routine_callbacks.h",
+        "emulator/accel/cpu/mp64/routine_nested.h",
         "emulator/accel/cpu/mp64/semantics.h",
         "emulator/accel/dbt/executable_arena.h",
         "emulator/accel/dbt/host_jit_config.h",

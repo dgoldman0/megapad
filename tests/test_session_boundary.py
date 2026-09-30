@@ -52,7 +52,7 @@ sys.meta_path.insert(0, BlockImports())
 
 @pytest.mark.parametrize(
     ("module_name", "help_option"),
-    [("simulator_server", "--executor"), ("session_viewer", "--fps")],
+    [("simulator.server", "--executor"), ("session_viewer", "--fps")],
 )
 def test_hosted_server_and_viewer_help_have_no_emulator_dependency(
     module_name, help_option

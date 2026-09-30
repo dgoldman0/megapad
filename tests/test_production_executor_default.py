@@ -52,7 +52,7 @@ def production_server(request, tmp_path):
     mode = request.param
     if mode == "hybrid":
         pytest.importorskip("_mp64_accel")
-    module = importlib.import_module("simulator_server" if mode == "simulator" else "hybrid.server")
+    module = importlib.import_module("simulator.server" if mode == "simulator" else "hybrid.server")
     image = tmp_path / "source.img"
     image.write_bytes(_boot_image())
     arguments = ["--storage", str(image), "--socket", str(tmp_path / "session.sock"),

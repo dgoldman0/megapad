@@ -536,7 +536,7 @@ for the Python reference. A native boundary then lasts about a millisecond,
 while the Python reference (roughly 0.6 to 0.8 million steps per second)
 keeps boundaries at 10 to 14 ms instead of holding the owner lock for 90 to
 110 ms.
-`simulator_server.py --semantic-quantum-steps` passes an explicit value, and
+`megapad.py --mode simulator --semantic-quantum-steps` passes an explicit value, and
 server status reports the selected value as `semantic_execution.quantum_steps`.
 The quantum changes only where the host services the session; step budgets,
 guest results, and yield determinism for a given quantum are unchanged. The session settles UART output, services

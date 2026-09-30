@@ -15,10 +15,18 @@ import megapad
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _cold_launch(arguments: list[str], *, block_servers: bool = False):
-    blocked = ["_mp64_accel", "_megaforth_native"]
+def _cold_launch(
+    arguments: list[str], *, block_servers: bool = False,
+    legacy_script: str | None = None,
+):
+    blocked = ["_mp64_accel", "_megaforth_native", "session_server", "simulator_server"]
     if block_servers:
-        blocked += ["session_server", "simulator_server", "hybrid"]
+        blocked += ["emulator", "simulator", "hybrid"]
+    launch = (
+        "from megapad import main\nraise SystemExit(main(sys.argv[1:]))"
+        if legacy_script is None
+        else f"import runpy\nrunpy.run_path({str(ROOT / legacy_script)!r}, run_name='__main__')"
+    )
     source = f"""
 import importlib.abc
 import sys
@@ -29,8 +37,7 @@ class BlockImports(importlib.abc.MetaPathFinder):
             raise AssertionError('unexpected import: ' + fullname)
 
 sys.meta_path.insert(0, BlockImports())
-from megapad import main
-raise SystemExit(main(sys.argv[1:]))
+{launch}
 """
     return subprocess.run(
         [sys.executable, "-c", source, *arguments],
@@ -64,22 +71,22 @@ def test_unavailable_mode_fails_before_importing_a_backend(mode):
     [
         (
             ["--socket", "/tmp/example.sock", "--paused"],
-            "session_server",
+            "emulator.server",
             ["--socket", "/tmp/example.sock", "--paused"],
         ),
         (
             ["--mode", "emulator", "--bios", "a bios.asm", "--lanes", "2"],
-            "session_server",
+            "emulator.server",
             ["--bios", "a bios.asm", "--lanes", "2"],
         ),
         (
             ["--storage", "a disk.img", "--mode=simulator", "--paused"],
-            "simulator_server",
+            "simulator.server",
             ["--storage", "a disk.img", "--paused"],
         ),
         (
             ["--mode", "simulator", "--help"],
-            "simulator_server",
+            "simulator.server",
             ["--help"],
         ),
     ],
@@ -116,6 +123,22 @@ def test_selected_help_uses_backend_options_without_native_imports(
     mode, present, absent
 ):
     result = _cold_launch(["--mode", mode, "--help"])
+    assert result.returncode == 0, result.stderr
+    assert present in result.stdout
+    assert absent not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("script", "present", "absent"),
+    [
+        ("session_server.py", "--bios", "--semantic-step-budget"),
+        ("simulator_server.py", "--semantic-step-budget", "--bios"),
+    ],
+)
+def test_deprecated_script_help_forwards_without_native_imports(
+    script, present, absent,
+):
+    result = _cold_launch(["--help"], legacy_script=script)
     assert result.returncode == 0, result.stderr
     assert present in result.stdout
     assert absent not in result.stdout

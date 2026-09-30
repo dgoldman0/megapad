@@ -16,6 +16,7 @@ from shared.hybrid_closed import (
     PolicyBranchV3, PolicyBranchZeroV3, PolicyCallV3, PolicyCoreCallV3,
     PolicyLiteralV3, PolicyReturnV3, prove_policies,
 )
+from shared.hybrid_nested import PolicyMachineCallV4, RoutineManifestV4
 from shared.session_options import configured_production_executor
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapPreparation, prepare_image_bootstrap
@@ -23,7 +24,7 @@ from simulator.ir import Branch, BranchZero, Call, Literal, Return
 from simulator.platform import create_one_core_address_space
 from simulator.session import configured_semantic_quantum_steps
 from simulator.storage import HostedStorageService
-from simulator_server import build_argument_parser as semantic_argument_parser
+from simulator.server import build_argument_parser as semantic_argument_parser
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +107,75 @@ def _install_manifest_policies(hybrid: HybridRuntime, manifest: RoutineManifestV
             defined[policy.policy_id] = runtime.define_colon(policy.name, tuple(operations))
 
 
+def _install_nested_manifest(hybrid: HybridRuntime, manifest: RoutineManifestV4) -> None:
+    """Publish a proved graph only into this fresh, unexposed preparation owner.
+
+    The loader's dependency order is diagnostic. Runtime registration captures
+    and proves the exact newly published static Words independently; no graph
+    ID, copied proof or source-evaluated placeholder grants child authority.
+    """
+    if type(manifest) is not RoutineManifestV4:
+        raise TypeError("nested startup requires a RoutineManifestV4")
+    RoutineManifestV4.__post_init__(manifest)
+    exports = {export.export_id: replace(export) for export in manifest.exports}
+    manifest = replace(
+        manifest,
+        policies=tuple(replace(policy, operations=tuple(replace(operation)
+                       for operation in policy.operations)) for policy in manifest.policies),
+        exports=tuple(exports.values()),
+        routines=tuple(replace(image, callbacks=tuple(replace(
+            site, export=exports[site.export.export_id]) for site in image.callbacks))
+            for image in manifest.routines),
+    )
+    graph = manifest.graph_proof()
+    policies = {policy.policy_id: policy for policy in manifest.policies}
+    routines = {image.routine_id: image for image in manifest.routines}
+    runtime = hybrid.semantic
+    with runtime._session_owner_lock:
+        runtime._require_session_owner_access("install nested hybrid manifest")
+        runtime._require_no_suspension("install nested hybrid manifest")
+        if runtime._active_dispatches or runtime._active_input_states:
+            raise RuntimeError("nested manifest publication requires a fresh idle runtime")
+        if getattr(hybrid, "nested_callback_abi_available", False) is not True:
+            raise RuntimeError("hybrid nested callbacks require full semantic profile v4 and native transport v3")
+        # Check the complete fresh namespace before even the earliest child
+        # is published. Existing V1/V2/V3 startup keeps its original rules.
+        for value in (*manifest.policies, *manifest.routines):
+            if runtime.find(value.name) is not None:
+                raise ValueError(f"nested manifest name already exists: {value.name}")
+        core_names = {name for proof in graph.policy_proofs for name in proof.core_names}
+        core_names.update(export.name for export in manifest.exports
+                          if export.effect == "integer_leaf")
+        core = {name: runtime.callback_policy_core_xt(name) for name in sorted(core_names)}
+        defined_policies, defined_routines = {}, {}
+        for node in graph.publication_order:
+            if node.kind == "routine":
+                defined_routines[node.node_id] = hybrid.register_routine_v4(routines[node.node_id])
+                continue
+            policy = policies[node.node_id]
+            operations = []
+            for operation in policy.operations:
+                kind = type(operation)
+                if kind is PolicyLiteralV3:
+                    lowered = Literal(operation.value)
+                elif kind is PolicyCoreCallV3:
+                    lowered = Call(core[operation.name])
+                elif kind is PolicyCallV3:
+                    lowered = Call(defined_policies[operation.policy_id].xt)
+                elif kind is PolicyMachineCallV4:
+                    lowered = Call(defined_routines[operation.routine_id].xt)
+                elif kind is PolicyBranchV3:
+                    lowered = Branch(operation.target)
+                elif kind is PolicyBranchZeroV3:
+                    lowered = BranchZero(operation.target)
+                elif kind is PolicyReturnV3:
+                    lowered = Return()
+                else:
+                    raise TypeError("nested manifest contains an unsupported operation")
+                operations.append(lowered)
+            defined_policies[node.node_id] = runtime.define_colon(policy.name, tuple(operations))
+
+
 def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     """Validate every routine before publication, then prepare the boot image."""
 
@@ -123,7 +193,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     # binding, boot source, or socket is made visible.
     manifest = load_manifest(args.hybrid_routines)
     closed_manifest = type(manifest) is RoutineManifestV3
-    callback_manifest = type(manifest) in (RoutineManifestV2, RoutineManifestV3)
+    nested_manifest = type(manifest) is RoutineManifestV4
+    callback_manifest = type(manifest) in (RoutineManifestV2, RoutineManifestV3, RoutineManifestV4)
     rich_terminal = None
     if args.rich_terminal_policy is not None:
         rich_terminal = args.rich_terminal_policy.configuration(
@@ -144,6 +215,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         memory=memory,
         storage=storage,
         dispatch_instruction_limit=manifest.dispatch_instruction_limit,
+        **({"require_nested_callbacks": True} if nested_manifest else {}),
         **({
             "dispatch_callback_limit": manifest.dispatch_callback_limit,
             "dispatch_callback_semantic_limit": manifest.dispatch_callback_semantic_limit,
@@ -151,6 +223,10 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     )
     session = None
     try:
+        if nested_manifest and getattr(hybrid, "nested_callback_abi_available", False) is not True:
+            raise RuntimeError(
+                "hybrid nested callbacks require full semantic profile v4 and native transport v3"
+            )
         if closed_manifest and not hybrid.closed_callback_abi_available:
             raise RuntimeError(
                 "hybrid closed callbacks require semantic profile v3 and "
@@ -160,9 +236,11 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
             raise RuntimeError("hybrid callbacks require a matching _mp64_accel v2; run make build")
         # Core BIOS vocabulary already exists. Source compilation and autoexec
         # can now resolve the exact declared words through ordinary lookup.
-        if closed_manifest:
+        if nested_manifest:
+            _install_nested_manifest(hybrid, manifest)
+        elif closed_manifest:
             _install_manifest_policies(hybrid, manifest)
-        for image in manifest.routines:
+        for image in (() if nested_manifest else manifest.routines):
             if closed_manifest:
                 hybrid.register_routine_v3(image)
             elif callback_manifest:
@@ -189,6 +267,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
             ),
             semantic_quantum_steps=quantum_steps,
             rich_terminal=rich_terminal,
+            manifest_abi_version=manifest.version,
         )
         machine = HybridSharedMachine(session)
         machine.paused = args.paused

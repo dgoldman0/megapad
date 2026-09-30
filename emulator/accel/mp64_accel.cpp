@@ -52,6 +52,7 @@
 #include "cpu/mp64/interpreter.h"
 #include "cpu/mp64/routine_runner.h"
 #include "cpu/mp64/routine_callbacks.h"
+#include "cpu/mp64/routine_nested.h"
 #include "cpu/mp64/semantics.h"
 #include "machine/memory.h"
 #include "machine/settlement.h"
@@ -12614,9 +12615,12 @@ static mp64_routine::Spec make_routine_spec_v1(
     return spec;
 }
 
-class RoutineRunnerV1 {
+// Internal execution and resource ownership only. Python transports below
+// retain shared ownership of one RoutineOwner; no facade pins another mapping
+// or duplicates this decoder/interpreter/admission path.
+class RoutineExecutionCore {
 public:
-    RoutineRunnerV1(
+    RoutineExecutionCore(
             py::object state_owner, py::handle control_base,
             py::buffer control_buffer)
         : state_owner_(std::move(state_owner)),
@@ -12652,9 +12656,9 @@ public:
         owns_mapping_pin_ = true;
     }
 
-    virtual ~RoutineRunnerV1() { release(); }
-    RoutineRunnerV1(const RoutineRunnerV1&) = delete;
-    RoutineRunnerV1& operator=(const RoutineRunnerV1&) = delete;
+    virtual ~RoutineExecutionCore() { release(); }
+    RoutineExecutionCore(const RoutineExecutionCore&) = delete;
+    RoutineExecutionCore& operator=(const RoutineExecutionCore&) = delete;
 
     virtual void close() {
         if (active_)
@@ -12768,8 +12772,8 @@ public:
 
 protected:
     struct ActiveBoundary {
-        RoutineRunnerV1& owner;
-        explicit ActiveBoundary(RoutineRunnerV1& value, const void* permitted_owner = nullptr) : owner(value) {
+        RoutineExecutionCore& owner;
+        explicit ActiveBoundary(RoutineExecutionCore& value, const void* permitted_owner = nullptr) : owner(value) {
             if (owner.closed_)
                 throw std::runtime_error("routine runner is closed");
             if (owner.active_)
@@ -12797,7 +12801,7 @@ protected:
     };
 
     struct Operations {
-        RoutineRunnerV1& runner;
+        RoutineExecutionCore& runner;
         const mp64_routine::Spec& spec;
         const std::vector<mp64_routine::BufferSpan>& spans;
         DecodedOperation operation = DecodedOperation::INVALID;
@@ -13131,18 +13135,53 @@ static std::shared_ptr<mp64_callbacks::Spec> make_routine_spec_v2(
     return spec;
 }
 
-class RoutineRunnerV2 : public RoutineRunnerV1 {
+namespace mp64_nested = mp64::cpu::routine_v3;
+
+static std::shared_ptr<mp64_nested::Spec> make_routine_spec_v3(
+        py::handle code_base, py::handle code, py::handle entry_offset,
+        py::handle input_cells, py::handle output_cells,
+        py::handle stack_base, py::handle stack_size,
+        py::handle max_instructions, py::handle max_callback_requests,
+        py::handle callbacks) {
+    const uint64_t maximum = routine_exact_uint64(max_callback_requests, "max_callback_requests");
+    if (maximum > mp64_callbacks::MAX_CALLBACKS)
+        throw py::value_error("max_callback_requests must be in [0, 1024]");
+    auto sealed = make_routine_spec_v2(code_base, code, entry_offset, input_cells,
+        output_cells, stack_base, stack_size, max_instructions, callbacks);
+    auto spec = std::make_shared<mp64_nested::Spec>();
+    spec->sealed = std::move(*sealed);
+    spec->max_callback_requests = maximum;
+    return spec;
+}
+
+// One CPU/control pin, boundary admission, sealed-publication ledger and V2
+// sequence space. Future V3 state belongs here with its own receipt sequence;
+// selecting another Python facade must never replenish owner-wide resources.
+class RoutineOwner : public RoutineExecutionCore {
 public:
-    using RoutineRunnerV1::RoutineRunnerV1;
-    ~RoutineRunnerV2() { frame_.reset(); }
+    using RoutineExecutionCore::RoutineExecutionCore;
+    ~RoutineOwner() { frame_.reset(); }
 
     void close() override {
         if (active_)
             throw std::runtime_error("routine runner cannot close during an active boundary");
         frame_.reset();
         publications_.clear();
+        nested_publications_.clear();
+        published_count_ = published_bytes_ = published_edges_ = 0;
+        nested_identity_.reset();
         identity_.reset();
-        RoutineRunnerV1::close();
+        RoutineExecutionCore::close();
+    }
+
+    void close_v3_owner() {
+        if (active_)
+            throw std::runtime_error("routine runner cannot close during an active boundary");
+        // A parked V2 invocation retains its existing cancel/close protocol.
+        // The V3 view cannot cancel another transport's pending callback.
+        if (frame_)
+            throw std::runtime_error("V3 owner cannot close a parked V2 invocation");
+        close();
     }
 
     void publish_code_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
@@ -13154,12 +13193,13 @@ public:
         validate_seal(*spec, false);
         const auto found = publications_.find(spec.get());
         if (found == publications_.end()) {
-            if (publications_.size() == mp64_callbacks::MAX_PUBLICATIONS ||
+            if (published_count_ == mp64_callbacks::MAX_PUBLICATIONS ||
                 spec->code.size() > mp64_callbacks::MAX_TOTAL_CODE_BYTES - published_bytes_)
                 throw py::value_error("v2 publication count or aggregate code limit exceeded");
             if (publication_sequence_ == std::numeric_limits<uint64_t>::max())
                 throw std::runtime_error("native publication identity space is exhausted");
             publications_.emplace(spec.get(), Publication{spec, ++publication_sequence_});
+            ++published_count_;
             published_bytes_ += spec->code.size();
         }
         icache_invalidate_span(*state_, spec->routine.code_base, spec->routine.code_size);
@@ -13174,6 +13214,7 @@ public:
         const auto publication = publications_.find(spec.get());
         if (publication == publications_.end())
             throw py::value_error("v2 specification was not published by this runner");
+        --published_count_;
         published_bytes_ -= publication->second.spec->code.size();
         publications_.erase(publication);
         // Revocation removes entry authority, not architectural cache state.
@@ -13185,6 +13226,122 @@ public:
         if (!spec)
             throw py::type_error("publication query requires a RoutineSpecV2");
         return publications_.find(spec.get()) != publications_.end();
+    }
+
+    std::vector<std::shared_ptr<mp64_nested::ChildEdge>> publish_code_v3(
+            const std::shared_ptr<mp64_nested::Spec>& spec, py::handle child_edges) {
+        ActiveBoundary boundary(*this);
+        if (!spec)
+            throw py::type_error("publication requires a RoutineSpecV3");
+        if (!PyTuple_CheckExact(child_edges.ptr()))
+            throw py::type_error("child edges must be an exact tuple");
+        const auto rows = py::reinterpret_borrow<py::tuple>(child_edges);
+        if (static_cast<uint64_t>(rows.size()) > mp64_nested::MAX_CHILD_EDGES)
+            throw py::value_error("a routine may publish at most 4096 child edges");
+        auto execution_guard = acquire_execution();
+        validate_spec(spec->sealed.routine);
+        validate_seal(spec->sealed, false);
+
+        const auto existing = nested_publications_.find(spec.get());
+        const bool issued = existing != nested_publications_.end();
+        if (!issued) {
+            if (published_count_ == mp64_callbacks::MAX_PUBLICATIONS ||
+                    spec->sealed.code.size() > mp64_callbacks::MAX_TOTAL_CODE_BYTES - published_bytes_)
+                throw py::value_error("owner publication count or aggregate code limit exceeded");
+            if (static_cast<uint64_t>(rows.size()) > mp64_nested::MAX_OWNER_CHILD_EDGES - published_edges_)
+                throw py::value_error("owner child edge limit of 65536 exceeded");
+            if (publication_sequence_ == std::numeric_limits<uint64_t>::max())
+                throw std::runtime_error("native publication identity space is exhausted");
+        }
+        auto publication = std::make_shared<NestedPublication>();
+        publication->spec = spec;
+        publication->generation = issued ? existing->second->generation : publication_sequence_ + 1;
+        publication->identity = issued ? existing->second->identity
+                                      : std::make_shared<mp64_nested::PublicationIdentity>();
+        publication->edges.reserve(rows.size());
+        std::array<bool, mp64_callbacks::MAX_CALLBACK_SITES * mp64_nested::MAX_CHILD_EDGES> keys{};
+        for (py::handle row : rows) {
+            if (!PyTuple_CheckExact(row.ptr()))
+                throw py::type_error("child edge must be an exact tuple");
+            if (PyTuple_GET_SIZE(row.ptr()) != 3)
+                throw py::value_error("child edge requires three fields");
+            const uint64_t site = routine_exact_uint64(py::handle(PyTuple_GET_ITEM(row.ptr(), 0)), "site_index");
+            const uint64_t edge_id = routine_exact_uint64(py::handle(PyTuple_GET_ITEM(row.ptr(), 1)), "call_edge_id");
+            if (site >= spec->sealed.callbacks.size() || edge_id >= mp64_nested::MAX_CHILD_EDGES)
+                throw py::value_error("child edge site or call ID is outside the declared profile");
+            const auto key = static_cast<std::size_t>(site * mp64_nested::MAX_CHILD_EDGES + edge_id);
+            if (keys[key])
+                throw py::value_error("duplicate child edge site and call ID");
+            keys[key] = true;
+            py::handle child_value(PyTuple_GET_ITEM(row.ptr(), 2));
+            if (!py::isinstance<mp64_nested::Spec>(child_value))
+                throw py::type_error("child edge requires a RoutineSpecV3");
+            const auto child = child_value.cast<std::shared_ptr<mp64_nested::Spec>>();
+            const auto found = nested_publications_.find(child.get());
+            if (found == nested_publications_.end())
+                throw py::value_error("child specification was not published by this owner");
+            auto edge = std::make_shared<mp64_nested::ChildEdge>();
+            edge->owner = nested_identity_;
+            edge->parent_publication = publication->identity;
+            edge->child_publication = found->second->identity;
+            edge->parent_spec = spec.get();
+            edge->child_spec = child.get();
+            edge->parent_generation = publication->generation;
+            edge->child_generation = found->second->generation;
+            edge->site_index = site;
+            edge->call_edge_id = edge_id;
+            publication->edges.push_back(std::move(edge));
+        }
+        if (issued) {
+            const auto& prior = *existing->second;
+            if (prior.edges.size() != publication->edges.size())
+                throw py::value_error("published child edge table cannot be replaced");
+            for (std::size_t index = 0; index < prior.edges.size(); ++index) {
+                const auto& first = prior.edges[index];
+                const auto& next = publication->edges[index];
+                if (first->site_index != next->site_index || first->call_edge_id != next->call_edge_id ||
+                        first->child_spec != next->child_spec || first->child_generation != next->child_generation)
+                    throw py::value_error("published child edge table cannot be replaced");
+            }
+            // Reuse the original authority objects, never replace their generations.
+            publication = existing->second;
+        }
+        validate_nested_closure(*publication);
+        auto result = publication->edges; // Allocate before publishing or invalidating cache.
+        if (!issued) {
+            // One throwing map insertion precedes only nonthrowing ledger/cache updates.
+            nested_publications_.emplace(spec.get(), publication);
+            ++publication_sequence_;
+            ++published_count_;
+            published_bytes_ += spec->sealed.code.size();
+            published_edges_ += publication->edges.size();
+        }
+        icache_invalidate_span(*state_, spec->sealed.routine.code_base, spec->sealed.routine.code_size);
+        state_->ifetch_window_valid = false;
+        return result;
+    }
+
+    void revoke_code_v3(const std::shared_ptr<mp64_nested::Spec>& spec) {
+        ActiveBoundary boundary(*this);
+        if (!spec)
+            throw py::type_error("revocation requires a RoutineSpecV3");
+        auto execution_guard = acquire_execution();
+        const auto publication = nested_publications_.find(spec.get());
+        if (publication == nested_publications_.end())
+            throw py::value_error("v3 specification was not published by this owner");
+        --published_count_;
+        published_bytes_ -= publication->second->spec->sealed.code.size();
+        published_edges_ -= publication->second->edges.size();
+        nested_publications_.erase(publication);
+        // Parents retain stale generation evidence; republishing this same Spec
+        // cannot revive an earlier issued edge. Revocation never flushes cache.
+    }
+
+    bool is_code_published_v3(const std::shared_ptr<mp64_nested::Spec>& spec) {
+        ActiveBoundary boundary(*this);
+        if (!spec)
+            throw py::type_error("publication query requires a RoutineSpecV3");
+        return nested_publications_.find(spec.get()) != nested_publications_.end();
     }
 
     mp64_callbacks::Result begin_v2(
@@ -13310,6 +13467,64 @@ private:
         uint64_t cycle_count = 0, live_stack_base = 0;
         std::vector<uint8_t> live_control;
     };
+
+    struct NestedPublication {
+        std::shared_ptr<mp64_nested::Spec> spec;
+        std::shared_ptr<mp64_nested::PublicationIdentity> identity;
+        uint64_t generation = 0, depth = 1;
+        std::vector<std::shared_ptr<mp64_nested::ChildEdge>> edges;
+    };
+
+    const NestedPublication& nested_child(
+            const NestedPublication& parent,
+            const std::shared_ptr<mp64_nested::ChildEdge>& edge) const {
+        const auto found = nested_publications_.find(edge->child_spec);
+        if (edge->owner.lock() != nested_identity_ ||
+                edge->parent_spec != parent.spec.get() ||
+                edge->parent_generation != parent.generation ||
+                edge->parent_publication.lock() != parent.identity ||
+                found == nested_publications_.end() ||
+                edge->child_generation != found->second->generation ||
+                edge->child_publication.lock() != found->second->identity)
+            throw py::value_error("nested child publication is stale or belongs to another owner");
+        return *found->second;
+    }
+
+    void validate_nested_closure(NestedPublication& proposed) const {
+        std::vector<const NestedPublication*> pending;
+        std::vector<const NestedPublication*> visited;
+        pending.reserve(mp64_callbacks::MAX_PUBLICATIONS);
+        visited.reserve(mp64_callbacks::MAX_PUBLICATIONS);
+        uint64_t depth = 1;
+        for (const auto& edge : proposed.edges) {
+            const auto& child = nested_child(proposed, edge);
+            depth = std::max(depth, child.depth + 1);
+            if (std::find(pending.begin(), pending.end(), &child) == pending.end())
+                pending.push_back(&child);
+        }
+        if (depth > mp64_nested::MAX_DEPTH)
+            throw py::value_error("nested publication graph exceeds eight machine levels");
+        while (!pending.empty()) {
+            const auto* child = pending.back();
+            pending.pop_back();
+            if (std::find(visited.begin(), visited.end(), child) != visited.end())
+                continue;
+            if (child->spec.get() == proposed.spec.get())
+                throw py::value_error("nested publication graph is cyclic");
+            if (proposed.spec->sealed.routine.stack().overlaps(child->spec->sealed.routine.stack()))
+                throw py::value_error("nested ancestor and descendant private stacks overlap");
+            validate_spec(child->spec->sealed.routine);
+            validate_seal(child->spec->sealed, true);
+            visited.push_back(child);
+            for (const auto& edge : child->edges) {
+                const auto& descendant = nested_child(*child, edge);
+                if (std::find(visited.begin(), visited.end(), &descendant) == visited.end() &&
+                        std::find(pending.begin(), pending.end(), &descendant) == pending.end())
+                    pending.push_back(&descendant);
+            }
+        }
+        proposed.depth = depth;
+    }
 
     void validate_seal(const mp64_callbacks::Spec& spec, bool cache) const {
         const auto code = resolve_memory_span(*state_->memory, spec.routine.code_base,
@@ -13520,10 +13735,116 @@ private:
     std::shared_ptr<mp64_callbacks::OwnerIdentity> identity_ =
         std::make_shared<mp64_callbacks::OwnerIdentity>();
     std::unordered_map<const mp64_callbacks::Spec*, Publication> publications_;
-    uint64_t published_bytes_ = 0, publication_sequence_ = 0, invocation_sequence_ = 0;
+    std::shared_ptr<mp64_nested::OwnerIdentity> nested_identity_ =
+        std::make_shared<mp64_nested::OwnerIdentity>();
+    std::unordered_map<const mp64_nested::Spec*, std::shared_ptr<NestedPublication>> nested_publications_;
+    uint64_t published_count_ = 0, published_bytes_ = 0, published_edges_ = 0;
+    uint64_t publication_sequence_ = 0, invocation_sequence_ = 0;
     uint64_t segment_sequence_ = 0;
     std::optional<mp64_callbacks::Receipt> last_segment_;
     std::unique_ptr<Frame> frame_;
+};
+
+// Public facades intentionally own no CPU state, pins, publication registry,
+// frame or counters. Destruction releases a reference; explicit close revokes
+// the owner through every retained facade. V1/V2 public inheritance is stable.
+class RoutineRunnerV1 {
+public:
+    RoutineRunnerV1(py::object state, py::handle control_base, py::buffer control_buffer)
+        : owner_(std::make_shared<RoutineOwner>(
+            std::move(state), control_base, std::move(control_buffer))) {}
+    virtual ~RoutineRunnerV1() = default;
+    RoutineRunnerV1(const RoutineRunnerV1&) = delete;
+    RoutineRunnerV1& operator=(const RoutineRunnerV1&) = delete;
+
+    virtual void close() { owner_->close(); }
+    uint64_t control_base() const noexcept { return owner_->control_base(); }
+    uint64_t control_size() const noexcept { return owner_->control_size(); }
+    void publish_code(const mp64_routine::Spec& spec) { owner_->publish_code(spec); }
+    mp64_routine::Result run(
+            const mp64_routine::Spec& spec, py::handle arguments, py::handle spans,
+            py::handle instruction_limit, py::handle protected_spans, bool cancelled) {
+        return owner_->run(spec, arguments, spans, instruction_limit, protected_spans, cancelled);
+    }
+
+protected:
+    explicit RoutineRunnerV1(std::shared_ptr<RoutineOwner> owner) : owner_(std::move(owner)) {}
+    std::shared_ptr<RoutineOwner> owner_;
+};
+
+class RoutineRunnerV3;
+
+class RoutineRunnerV2 : public RoutineRunnerV1 {
+public:
+    using RoutineRunnerV1::RoutineRunnerV1;
+    void close() override { owner_->close(); }
+    void publish_code_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        owner_->publish_code_v2(spec);
+    }
+    void revoke_code_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        owner_->revoke_code_v2(spec);
+    }
+    bool is_code_published_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        return owner_->is_code_published_v2(spec);
+    }
+    mp64_callbacks::Result begin_v2(
+            const std::shared_ptr<mp64_callbacks::Spec>& spec,
+            py::handle arguments, py::handle spans, py::handle instruction_limit,
+            py::handle callback_limit, py::handle protected_spans) {
+        return owner_->begin_v2(spec, arguments, spans, instruction_limit,
+                                callback_limit, protected_spans);
+    }
+    mp64_callbacks::Result resume_callback(
+            const std::shared_ptr<mp64_callbacks::Token>& token, py::handle outputs) {
+        return owner_->resume_callback(token, outputs);
+    }
+    mp64_callbacks::Result cancel_invocation(py::object token) {
+        return owner_->cancel_invocation(std::move(token));
+    }
+    bool owner_cancel_is_inactive() const { return owner_->owner_cancel_is_inactive(); }
+    std::optional<mp64_callbacks::Receipt> last_segment_v2() const noexcept {
+        return owner_->last_segment_v2();
+    }
+    void abandon_marshaled_result(uint64_t invocation_id) noexcept {
+        owner_->abandon_marshaled_result(invocation_id);
+    }
+
+private:
+    friend class RoutineRunnerV3;
+    explicit RoutineRunnerV2(std::shared_ptr<RoutineOwner> owner)
+        : RoutineRunnerV1(std::move(owner)) {}
+};
+
+// Deliberately no public V1/V2 base: this view cannot acquire an inherited entry
+// method. The nested capability marker and child methods remain unavailable
+// until the complete V3 frame/receipt protocol has been implemented and gated.
+class RoutineRunnerV3 {
+public:
+    RoutineRunnerV3(py::object state, py::handle control_base, py::buffer control_buffer)
+        : owner_(std::make_shared<RoutineOwner>(
+            std::move(state), control_base, std::move(control_buffer))),
+          legacy_(std::shared_ptr<RoutineRunnerV2>(new RoutineRunnerV2(owner_))) {}
+    RoutineRunnerV3(const RoutineRunnerV3&) = delete;
+    RoutineRunnerV3& operator=(const RoutineRunnerV3&) = delete;
+
+    std::shared_ptr<RoutineRunnerV2> legacy_v2() const noexcept { return legacy_; }
+    uint64_t control_base() const noexcept { return owner_->control_base(); }
+    uint64_t control_size() const noexcept { return owner_->control_size(); }
+    void close() { owner_->close_v3_owner(); }
+    std::vector<std::shared_ptr<mp64_nested::ChildEdge>> publish_code_v3(
+            const std::shared_ptr<mp64_nested::Spec>& spec, py::handle child_edges) {
+        return owner_->publish_code_v3(spec, child_edges);
+    }
+    void revoke_code_v3(const std::shared_ptr<mp64_nested::Spec>& spec) {
+        owner_->revoke_code_v3(spec);
+    }
+    bool is_code_published_v3(const std::shared_ptr<mp64_nested::Spec>& spec) {
+        return owner_->is_code_published_v3(spec);
+    }
+
+private:
+    std::shared_ptr<RoutineOwner> owner_;
+    std::shared_ptr<RoutineRunnerV2> legacy_;
 };
 
 template <typename Execute>
@@ -36296,7 +36617,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             return output;
         });
 
-    py::class_<RoutineRunnerV1>(m, "RoutineRunnerV1")
+    py::class_<RoutineRunnerV1, std::shared_ptr<RoutineRunnerV1>>(m, "RoutineRunnerV1")
         .def(py::init<py::object, py::handle, py::buffer>(),
             py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
         .def_property_readonly("control_base", &RoutineRunnerV1::control_base)
@@ -36387,7 +36708,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly("invocation_callbacks", &mp64_callbacks::Receipt::invocation_callbacks)
         .def_readonly("callback_request", &mp64_callbacks::Receipt::callback_request);
 
-    py::class_<RoutineRunnerV2, RoutineRunnerV1>(m, "RoutineRunnerV2")
+    py::class_<RoutineRunnerV2, RoutineRunnerV1, std::shared_ptr<RoutineRunnerV2>>(m, "RoutineRunnerV2")
         .def(py::init<py::object, py::handle, py::buffer>(),
             py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
         .def("close", &RoutineRunnerV2::close)
@@ -36426,6 +36747,67 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return runner.cancel_invocation(token);
             });
         }, py::arg("token") = py::none());
+
+    py::class_<mp64_nested::Spec, std::shared_ptr<mp64_nested::Spec>>(m, "RoutineSpecV3")
+        .def(py::init(&make_routine_spec_v3),
+            py::arg("code_base"), py::arg("code"), py::arg("entry_offset"),
+            py::arg("input_cells"), py::arg("output_cells"),
+            py::arg("stack_base"), py::arg("stack_size"), py::arg("max_instructions"),
+            py::arg("max_callback_requests"), py::arg("callbacks") = py::tuple())
+        .def_property_readonly("code_base", [](const mp64_nested::Spec& s) { return s.sealed.routine.code_base; })
+        .def_property_readonly("code_size", [](const mp64_nested::Spec& s) { return s.sealed.routine.code_size; })
+        .def_property_readonly("entry_offset", [](const mp64_nested::Spec& s) { return s.sealed.routine.entry_offset; })
+        .def_property_readonly("input_cells", [](const mp64_nested::Spec& s) { return s.sealed.routine.input_cells; })
+        .def_property_readonly("output_cells", [](const mp64_nested::Spec& s) { return s.sealed.routine.output_cells; })
+        .def_property_readonly("stack_base", [](const mp64_nested::Spec& s) { return s.sealed.routine.stack_base; })
+        .def_property_readonly("stack_size", [](const mp64_nested::Spec& s) { return s.sealed.routine.stack_size; })
+        .def_property_readonly("max_instructions", [](const mp64_nested::Spec& s) { return s.sealed.routine.max_instructions; })
+        .def_readonly("max_callback_requests", &mp64_nested::Spec::max_callback_requests)
+        .def_property_readonly("code", [](const mp64_nested::Spec& s) {
+            return py::bytes(reinterpret_cast<const char*>(s.sealed.code.data()), s.sealed.code.size());
+        })
+        .def_property_readonly("callbacks", [](const mp64_nested::Spec& s) {
+            py::tuple sites(s.sealed.callbacks.size());
+            for (std::size_t index = 0; index < s.sealed.callbacks.size(); ++index) {
+                const auto& site = s.sealed.callbacks[index];
+                sites[index] = py::make_tuple(site.call_offset, site.stub_offset, site.export_id,
+                                               site.input_cells, site.output_cells);
+            }
+            return sites;
+        });
+    py::class_<mp64_nested::ChildEdge, std::shared_ptr<mp64_nested::ChildEdge>>(m, "ChildEdgeV3")
+        .def("__copy__", [](const mp64_nested::ChildEdge&) -> py::object {
+            throw py::type_error("child edges cannot be copied");
+        })
+        .def("__deepcopy__", [](const mp64_nested::ChildEdge&, py::object) -> py::object {
+            throw py::type_error("child edges cannot be copied");
+        })
+        .def("__reduce_ex__", [](const mp64_nested::ChildEdge&, py::object) -> py::object {
+            throw py::type_error("child edges cannot be serialized");
+        });
+
+    // Publication foundation only. No HYBRID_NESTED_ROUTINE_ABI_VERSION
+    // advertisement until the full distinct-registration child path qualifies.
+    py::class_<RoutineRunnerV3>(m, "RoutineRunnerV3")
+        .def(py::init<py::object, py::handle, py::buffer>(),
+            py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
+        .def_property_readonly("control_base", &RoutineRunnerV3::control_base)
+        .def_property_readonly("control_size", &RoutineRunnerV3::control_size)
+        .def("legacy_v2", &RoutineRunnerV3::legacy_v2)
+        .def("close", &RoutineRunnerV3::close)
+        .def("publish_code_v3", [](RoutineRunnerV3& runner,
+                const std::shared_ptr<mp64_nested::Spec>& spec, py::handle child_edges) {
+            const auto edges = runner.publish_code_v3(spec, child_edges);
+            // Native admission has ended before allocating any Python handles.
+            // If conversion fails, exact publication query/revoke retain the
+            // rollback authority even though the caller received no tuple.
+            py::tuple result(edges.size());
+            for (std::size_t index = 0; index < edges.size(); ++index)
+                result[index] = py::cast(edges[index]);
+            return result;
+        }, py::arg("spec").none(false), py::arg("child_edges") = py::tuple())
+        .def("revoke_code_v3", &RoutineRunnerV3::revoke_code_v3, py::arg("spec").none(false))
+        .def("is_code_published_v3", &RoutineRunnerV3::is_code_published_v3, py::arg("spec").none(false));
 
     // Expose RunResult
     py::class_<RunResult>(m, "RunResult")

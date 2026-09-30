@@ -267,9 +267,11 @@ make test-simulator-native
 ```
 
 `MEGAFORTH_EXECUTOR` accepts `python`, `native`, or `auto` for any runtime.
-`python` remains the code default; current physical acceptance and typing
-runs select `native`. `simulator_server.py` serves a prepared image through
-the shared session protocol. Akashic's
+Embedded runtime construction defaults to `python`. The production
+`megapad.py --mode simulator` entrypoint serves a prepared image through the
+shared session protocol and requires native execution when neither
+`--executor` nor the environment selects an executor. An explicit option
+overrides the environment; only `auto` permits a Python fallback. Akashic's
 `local_testing/akashic_tui.py serve|accept --backend simulator` drives the
 ordinary Desktop through it.
 
@@ -2494,7 +2496,7 @@ evaluation; preparation does not require or manufacture an empty data stack.
 Captured
 boot output remains the distinct pre-attachment legacy output boundary.
 
-The root `simulator_server.py` entry point exposes this prepared runtime through
+The `megapad.py --mode simulator` entry point exposes this prepared runtime through
 the unchanged shared-session socket and `SimulatorSharedMachine`. It accepts
 only semantic memory, geometry, terminal-policy, pause, and optional semantic
 step-budget arguments; emulator BIOS, core scheduling, TAP, audio, cycle
@@ -2511,6 +2513,10 @@ independent read latches retain their usual semantics. Standalone runtimes
 remain deterministic unless their caller explicitly binds a clock; this does
 not add timer interrupts or change semantic-step accounting. Physical retained
 offer and complete Desktop acceptance remain separate qualification evidence.
+
+Its parser, preparation and lifecycle interfaces live in `simulator.server`.
+The deprecated root `simulator_server.py` script temporarily forwards `main`
+for external launchers; it contains no separate implementation.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.
