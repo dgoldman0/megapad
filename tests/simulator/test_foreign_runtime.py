@@ -17,7 +17,7 @@ from simulator.foreign_runtime import (
     ForeignDefinition, ForeignRootLedger, ForeignTaskBudgetExceeded,
     ForeignTaskError,
 )
-from simulator.ir import Call, Idle, Literal, Return
+from simulator.ir import Call, Literal, Return, UartReadAttempt
 from simulator.memory import EXTERNAL_BASE, MMIO_BASE, MemoryAccessError
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import MegaForthRuntime, _StepMeter
@@ -333,7 +333,7 @@ def test_capture_limit_is_global_and_rejected_capture_spends_no_slots():
 
 def test_unsupported_unused_ir_is_rejected_without_publishing_capture():
     result = runtime()
-    word = result.define_colon("IDL-CALLBACK", (Idle(), Return()))
+    word = result.define_colon("UART-CALLBACK", (UartReadAttempt(), Return()))
     with pytest.raises(ForeignTaskError, match="unsupported operation"):
         result._foreign_tasks.capture_export(word, signature())
     assert not result._foreign_tasks._exports

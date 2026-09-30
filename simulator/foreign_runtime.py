@@ -11,10 +11,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from types import FunctionType, GetSetDescriptorType, MemberDescriptorType, MethodType
 from weakref import WeakKeyDictionary
+from sys import _getframe as _task_getframe
 
 from shared.cells import CELL_BYTES, MASK64
 from shared.foreign_abi import (
-    ForeignAccessV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1,
+    ForeignAccessV1, ForeignCallbackRequestV1, ForeignCancellationV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1,
     ForeignSignatureV1, ForeignSpanV1, ForeignStateV1, MAX_CALLBACK_REQUESTS, MAX_DEPTH,
     MAX_ROOT_CALLBACK_SEMANTIC_STEPS, MAX_ROOT_ENTRIES, MAX_ROOT_INSTRUCTIONS,
 )
@@ -24,12 +25,12 @@ from simulator import memory as _memory_module
 from simulator.foreign_effects import TaskEffectGuard, TaskEffectScope, _EFFECT_ROUTES
 from simulator.foreign_control import ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn
 from simulator.dictionary import BodyAllocationLease, Dictionary, Word
-from simulator.errors import ExecutionError
+from simulator.errors import ExecutionError, ForthAbort
 from simulator.foreign_types import (
-    ForeignDefinition, ForeignResumeTarget, ForeignDispatchReport, TaskSemanticReceiptV1,
+    ForeignDefinition, ForeignResumeTarget, ForeignCallbackTarget, ForeignDispatchReport, TaskSemanticReceiptV1,
 )
 from simulator.ir import (
-    Branch, BranchZero, Call, CallSelf, Do, Literal, Loop, PlusLoop, QuestionDo,
+    Branch, BranchZero, Call, CallSelf, Do, Idle, IdleUntil, Literal, Loop, PlusLoop, QuestionDo,
     RestoreDataStackPointer, RestoreReturnStackPointer, Return, RPeek, RPeekPair,
     RPop, RPopPair, RPush, RPushPair, StoreValue, Unloop,
 )
@@ -37,10 +38,11 @@ from simulator.memory import SparseAddressSpace, _QualifiedOrdinarySpan, _Sparse
 from simulator.runtime import (
     ColonDefinition, ConstantDefinition, CreatedDefinition, DoesBodyRef,
     ExecutionContext, MegaForthRuntime, PrimitiveDefinition, ValueDefinition,
-    _StepMeter,
+    _StepMeter, _DispatchCursor, _SuspendedExecution, ExecutionSuspension, _TASK_METER_NAMESPACE,
     _TASK_DISPATCH_ALIASES,
 )
 from simulator.stacks import DataStack, ReturnStack, Continuation, FaultAbort
+from simulator.rtc import HostedRTCService
 
 
 _MAX_WORDS = 64
@@ -58,7 +60,7 @@ _OPERATION_FIELDS = {
     BranchZero: "target", QuestionDo: "target", Loop: "target", PlusLoop: "target",
     CallSelf: None, Return: None, Do: None, Unloop: None, RPush: None, RPop: None,
     RPeek: None, RPushPair: None, RPopPair: None, RPeekPair: None,
-    RestoreDataStackPointer: None, RestoreReturnStackPointer: None,
+    RestoreDataStackPointer: None, RestoreReturnStackPointer: None, Idle: None, IdleUntil: None,
 }
 _BRANCH_TYPES = (Branch, BranchZero, QuestionDo, Loop, PlusLoop)
 _MEMORY_ROUTES = tuple((name, value) for name, value in vars(SparseAddressSpace).items()
@@ -81,8 +83,9 @@ _CORE_HELPERS = tuple((name, value) for name, value in vars(core_words).items()
 _METADATA_ROUTES = tuple((kind, tuple(vars(kind).items())) for kind in (
     Word, BodyAllocationLease, PrimitiveDefinition, ColonDefinition, ConstantDefinition, ValueDefinition,
     CreatedDefinition, DoesBodyRef, *_OPERATION_FIELDS,
-    ForeignSignatureV1, ForeignSpanV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1,
-    ExecutionContext, ForeignDefinition, ForeignResumeTarget, TaskSemanticReceiptV1,
+    ForeignSignatureV1, ForeignSpanV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1, ForeignCallbackRequestV1, ForeignCancellationV1,
+    ExecutionContext, ForeignDefinition, ForeignResumeTarget, ForeignCallbackTarget, TaskSemanticReceiptV1,
+    _DispatchCursor, _SuspendedExecution, ExecutionSuspension,
     _QualifiedOrdinarySpan, _SparseRegion, _DenseRegion, RegionSpec, _ResolvedSpan,
     Continuation, FaultAbort, ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn,
 )) + _EFFECT_ROUTES
@@ -190,6 +193,112 @@ class _FunctionSeal:
             raise ForeignTaskError("captured task primitive closure changed")
 
 
+_RTC_FIELDS = tuple((name, vars(HostedRTCService)[name]) for name in (
+    "uptime_ms", "_sync_clock", "_require_monotonic_ns", "_monotonic_ns",
+    "_last_monotonic_ns", "_remainder_ns", "_uptime_ms", "_epoch_ms"))
+_RTC_FUNCTIONS = tuple(_FunctionSeal.capture(callback) for callback in (
+    HostedRTCService.uptime_ms.fget, HostedRTCService._sync_clock,
+    HostedRTCService._require_monotonic_ns))
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskRTCSeal:
+    owner: object = field(repr=False)
+    clock: object = field(repr=False)
+
+    @classmethod
+    def capture(cls, runtime):
+        result = cls(runtime.rtc, None)
+        result._routes()
+        clock = next(slot for name, slot in _RTC_FIELDS if name == "_monotonic_ns")
+        result = cls(runtime.rtc, clock.__get__(runtime.rtc, HostedRTCService))
+        result.verify(runtime)
+        return result
+
+    def _routes(self):
+        fields = vars(HostedRTCService)
+        if (type(self.owner) is not HostedRTCService
+                or any(type(key) is not str for key in fields)
+                or HostedRTCService.__getattribute__ is not object.__getattribute__
+                or HostedRTCService.__setattr__ is not object.__setattr__
+                or HostedRTCService.__delattr__ is not object.__delattr__
+                or "__getattr__" in fields
+                or any(fields.get(name) is not value for name, value in _RTC_FIELDS)):
+            raise ForeignTaskError("task deadline RTC owner or routes changed")
+        for seal in _RTC_FUNCTIONS:
+            seal.verify()
+
+    def verify(self, runtime):
+        self._routes()
+        if runtime.rtc is not self.owner:
+            raise ForeignTaskError("task deadline RTC owner changed")
+        values = {name: slot.__get__(self.owner, HostedRTCService)
+                  for name, slot in _RTC_FIELDS if type(slot) is MemberDescriptorType}
+        if values["_monotonic_ns"] is not self.clock:
+            raise ForeignTaskError("task deadline clock identity changed")
+        if (any(type(values[name]) is not int for name in (
+                "_last_monotonic_ns", "_remainder_ns", "_uptime_ms", "_epoch_ms"))
+                or values["_last_monotonic_ns"] < 0
+                or not 0 <= values["_remainder_ns"] < 1_000_000
+                or not 0 <= values["_uptime_ms"] <= MASK64
+                or not 0 <= values["_epoch_ms"] <= MASK64):
+            raise ForeignTaskError("task deadline clock state is not canonical")
+
+
+_METADATA_ROUTES += ((_TaskRTCSeal, tuple(vars(_TaskRTCSeal).items())),)
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _TaskParkedWitness:
+    blocked: object = field(repr=False)
+    root: object = field(repr=False)
+    blocked_values: object = field(repr=False)
+    root_values: object = field(repr=False)
+    data: tuple = field(repr=False)
+    returns: tuple = field(repr=False)
+    deadline: int | None
+
+
+_METADATA_ROUTES += ((_TaskParkedWitness, tuple(vars(_TaskParkedWitness).items())),)
+
+
+def _parked_value(value, kinds, depth=0):
+    """Copy consumed scalars without comparing or inspecting opaque owners."""
+    if depth > 24:
+        raise ForeignTaskError("task suspension evidence is too deeply nested")
+    kind = type(value)
+    if kind is int or kind is bool or kind is str or value is None:
+        return ("scalar", kind, value)
+    if kind is tuple or kind is list:
+        if len(value) > MAX_ROOT_CALLBACK_SEMANTIC_STEPS:
+            raise ForeignTaskError("task suspension evidence exceeds its finite bound")
+        return ("sequence", kind, value, tuple(_parked_value(item, kinds, depth + 1) for item in value))
+    if any(kind is candidate for candidate in kinds):
+        return ("fields", kind, value, tuple((name, _parked_value(getattr(value, name), kinds, depth + 1))
+                                            for name in vars(kind)["__slots__"]))
+    return ("opaque", kind, value)
+
+
+def _match_parked(value, evidence):
+    mode, kind, original = evidence[:3]
+    if type(value) is not kind:
+        raise ForeignTaskError("task suspension evidence type changed")
+    if mode == "scalar":
+        if value != original:
+            raise ForeignTaskError("task suspension scalar evidence changed")
+        return
+    if value is not original:
+        raise ForeignTaskError("task suspension identity changed")
+    if mode == "sequence":
+        if len(value) != len(evidence[3]):
+            raise ForeignTaskError("task suspension sequence changed")
+        for item, item_evidence in zip(value, evidence[3]):
+            _match_parked(item, item_evidence)
+    elif mode == "fields":
+        for name, item_evidence in evidence[3]:
+            _match_parked(getattr(value, name), item_evidence)
+
+
 @dataclass(frozen=True, slots=True)
 class _OperationSeal:
     operation: object = field(repr=False)
@@ -265,6 +374,7 @@ class CapturedTaskExport:
     entry: Word = field(repr=False)
     words: tuple[_CapturedWord, ...] = field(repr=False)
     fault_target: Word | None = field(default=None, repr=False)
+    rtc: object = field(default=None, repr=False)
 
     def require_target(self, engine, word, *, entry_ip=0, permit_machine=True):
         engine._verify_export(self)
@@ -497,6 +607,9 @@ class ForeignTaskEngine:
                         MAX_ROOT_ENTRIES, MAX_ROOT_CALLBACK_SEMANTIC_STEPS)
         self._last_dispatch = None
         self._semantic_receipt = None
+        self._parked_task = None
+        self._parked_ownership = None
+        self._native_chain = None
         self._publication_failure = None
         self._execution_failure = None
         self._memory_evidence = None
@@ -524,8 +637,15 @@ class ForeignTaskEngine:
                         word, word.xt, word.header_address, word.implementation,
                         function=_FunctionSeal.capture(word.implementation.callback),
                     )
-        from simulator.foreign_dispatch import TaskDispatchRoot
+        from simulator.foreign_dispatch import TaskDispatchRoot, _Invocation, _Tail
 
+        self._parked_metadata = tuple((kind, tuple(vars(kind).items())) for kind in (
+            _Invocation, _Tail, _LedgerState, _RootPolicy, _InvocationAccount, _SemanticAccount))
+        self._ledger_namespace_route = vars(ForeignRootLedger)["__dict__"]
+        self._parked_value_kinds = tuple(kind for kind, _fields in self._parked_metadata) + (
+            _DispatchCursor, ExecutionSuspension, Continuation, FaultAbort, ForeignContinuation,
+            ForeignCallbackRequestV1, ForeignReceiptV1, ForeignResumeTarget, ForeignCallbackTarget,
+            TaskEffectScope, _LiveReturn)
         self._dispatch_kind = TaskDispatchRoot
         self._dispatch_routes = tuple(vars(TaskDispatchRoot).items())
         self._dispatch_namespace = vars(TaskDispatchRoot)["__dict__"]
@@ -608,20 +728,42 @@ class ForeignTaskEngine:
             raise ForeignTaskError("task semantic receipt changed after issuance")
         return receipt
 
+    def _ledger_cleanup_values(self, root):
+        ownership = self._restore_cleanup_owners(root)
+        ledger = dict(ownership[2])["ledger"]
+        namespace = self._ledger_namespace_route.__get__(ledger, ForeignRootLedger)
+        if type(namespace) is not dict or any(type(key) is not str for key in namespace):
+            raise ForeignTaskError("task ledger lost its original cleanup namespace")
+        state, policy = dict.get(namespace, "_state"), dict.get(namespace, "_policy")
+        if type(state) is not _LedgerState or type(policy) is not _RootPolicy:
+            raise ForeignTaskError("task ledger lost its original cleanup values")
+        values = {}
+        for kind, instance, names in (
+                (_RootPolicy, policy, ("root_id", "root_token")),
+                (_LedgerState, state, ("instructions", "cycles", "callbacks", "entries", "semantic_steps"))):
+            routes = next(routes for original, routes in self._parked_metadata if original is kind)
+            for name in names:
+                descriptor = next(value for field, value in routes if field == name)
+                value = descriptor.__get__(instance, kind)
+                if name != "root_token":
+                    _uint(value, "task cleanup " + name, minimum=int(name == "root_id"))
+                values[name] = value
+        return values
+
     def _publish_semantic_receipt(self, root):
         self._require_adapter_cleanup_routes()
         ownership = self._restore_cleanup_owners(root)
-        ledger = dict(ownership[2])["ledger"]
+        values = self._ledger_cleanup_values(root)
         if dict.get(ownership[1], "adapter") is None:
             return None
         adapter = ownership[3]
         previous = self._semantic_receipt
         sequence = 1
-        if previous is not None and previous.root_token is ledger.root_token:
-            self.task_semantic_receipt(adapter.adapter, ledger.root_token, ledger.root_id)
-            if ledger.semantic_steps < previous.semantic_steps:
+        if previous is not None and previous.root_token is values["root_token"]:
+            self.task_semantic_receipt(adapter.adapter, values["root_token"], values["root_id"])
+            if values["semantic_steps"] < previous.semantic_steps:
                 raise ForeignTaskError("task semantic work cannot move backwards")
-            if ledger.semantic_steps == previous.semantic_steps:
+            if values["semantic_steps"] == previous.semantic_steps:
                 return previous.receipt
             sequence = previous.sequence + 1
         if sequence > MASK64:
@@ -630,12 +772,392 @@ class ForeignTaskEngine:
         # The independently held record is the authority for these projections.
         receipt = object.__new__(TaskSemanticReceiptV1)
         for descriptor, value in zip(_SEMANTIC_RECEIPT_SLOTS,
-                (ledger.root_token, ledger.root_id, sequence, ledger.semantic_steps)):
+                (values["root_token"], values["root_id"], sequence, values["semantic_steps"])):
             descriptor.__set__(receipt, value)
-        record = _SemanticReceiptRecord(adapter.adapter, ledger.root_token,
-            ledger.root_id, sequence, ledger.semantic_steps, receipt)
+        record = _SemanticReceiptRecord(adapter.adapter, values["root_token"],
+            values["root_id"], sequence, values["semantic_steps"], receipt)
         self._semantic_receipt = record
         return receipt
+
+    def _native_transition_caller(self, root, names):
+        frame = _task_getframe(2)
+        allowed = tuple(value.__code__ for name, value in self._dispatch_routes if name in names)
+        if (not any(frame.f_code is code for code in allowed)
+                or frame.f_locals.get("self") is not root
+                or self._root_ownership is None or self._root_ownership[0] is not root
+                or self._native_chain is None or self._native_chain[0] is not root):
+            raise ForeignTaskError("native chain evidence requires its original accepted transition")
+
+    def record_native_receipt(self, root, receipt):
+        self._native_transition_caller(root, ("_latest", "_transition"))
+        _value(receipt, ForeignReceiptV1)
+        previous = self._native_chain
+        if receipt is previous[2]:
+            _match_parked(receipt, previous[3])
+            return
+        ids = previous[4]
+        if receipt.sequence != previous[1] + 1 or receipt.root_id != root.ledger.root_id:
+            raise ForeignTaskError("native chain receipt is not the next original transition")
+        if receipt.invocation_started:
+            if (receipt.depth != len(ids) + 1
+                    or receipt.parent_invocation_id != (ids[-1] if ids else None)
+                    or receipt.invocation_id in ids):
+                raise ForeignTaskError("native entry changed original ancestry")
+            ids += (receipt.invocation_id,)
+        elif not ids or ids[-1] != receipt.invocation_id or receipt.depth != len(ids):
+            raise ForeignTaskError("native receipt changed original active ancestry")
+        if receipt.state is ForeignStateV1.RETURNED:
+            ids = ids[:-1]
+        evidence = _parked_value(receipt, self._parked_value_kinds)
+        self._native_chain = (root, receipt.sequence, receipt, evidence, ids, None)
+
+    def record_native_cancellation(self, root, result):
+        self._native_transition_caller(root, ("_cancellation",))
+        _value(result, ForeignCancellationV1)
+        previous = self._native_chain
+        if result is previous[5]:
+            return
+        ids, retired = previous[4], result.retired_invocation_ids
+        if (result.receipt is not previous[2] or len(retired) > len(ids)
+                or retired != tuple(reversed(ids[len(ids) - len(retired):]))):
+            raise ForeignTaskError("native cancellation changed its original owned suffix")
+        remaining = ids[:len(ids) - len(retired)]
+        if result.surviving_parent_id != (remaining[-1] if remaining else None):
+            raise ForeignTaskError("native cancellation changed its original surviving parent")
+        self._native_chain = (root, previous[1], previous[2], previous[3], remaining, result)
+
+    def require_native_chain(self, root):
+        chain = self._native_chain
+        if chain is None or chain[0] is not root:
+            raise ForeignTaskError("task native chain has no original transition owner")
+        ledger = root.ledger
+        if (type(ledger._state) is not _LedgerState or type(ledger._policy) is not _RootPolicy
+                or type(ledger._state.active) is not tuple or len(ledger._state.active) > MAX_DEPTH
+                or any(type(account) is not _InvocationAccount or type(account.invocation_id) is not int
+                       for account in ledger._state.active)):
+            raise ForeignTaskError("task native ledger projection shape changed")
+        if (tuple(account.invocation_id for account in ledger._state.active) != chain[4]
+                or ledger.last_receipt is not chain[2]):
+            raise ForeignTaskError("task native chain differs from accepted transition authority")
+        if chain[2] is not None:
+            receipt = chain[2]
+            _match_parked(receipt, chain[3])
+            if (ledger.instructions != receipt.root_instructions or ledger.cycles != receipt.root_cycles
+                    or ledger.callbacks != receipt.root_callbacks or ledger.entries != receipt.root_entries
+                    or ledger._state.sequence != receipt.sequence):
+                raise ForeignTaskError("task native work projection differs from original receipt")
+        elif ledger.instructions or ledger.cycles or ledger.callbacks or ledger.entries:
+            raise ForeignTaskError("unentered task root invented native work")
+        return chain
+
+    def read_task_uptime(self, root):
+        """Read only the captured canonical IdleUntil deadline clock."""
+        self._require_parked_routes()
+        if root is not self._task_root:
+            raise ForeignTaskError("deadline read requires its original task root")
+        capture, scope = root._scope()
+        if capture is None or capture.rtc is None:
+            raise ForeignTaskError("task scope has no captured deadline observation")
+        self._verify_export(capture)
+        root.effects.require_binding(root.issuer, scope)
+        rtc = capture.rtc
+        rtc_owner, rtc_clock = rtc.owner, rtc.clock
+        getter = next(value.fget for name, value in _RTC_FIELDS if name == "uptime_ms")
+        namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
+        issue_host_abort = self._runtime._private_host_abort.issue_task_deadline
+        ledger, original_state = root.ledger, root.ledger._state
+        original_policy = ledger._policy
+        policy_evidence = _parked_value(original_policy, self._parked_value_kinds)
+        retained_policy = replace(original_policy)
+        state_evidence = _parked_value(original_state, self._parked_value_kinds)
+        retained_state = replace(original_state,
+            active=tuple(replace(account) for account in original_state.active),
+            semantic_scopes=tuple(replace(account) for account in original_state.semantic_scopes),
+            receipt_values=None if original_state.receipt_values is None else replace(original_state.receipt_values))
+        meter, meter_namespace = ledger.meter, root._meter_namespace
+        meter_descriptor = _TASK_METER_NAMESPACE
+        ledger_descriptor = vars(ForeignRootLedger)["__dict__"]
+        ledger_namespace = ledger_descriptor.__get__(ledger, ForeignRootLedger)
+        steps = dict.get(meter_namespace, "steps")
+        repair_owners = self._restore_cleanup_owners
+
+        def repair_accounting():
+            ledger_descriptor.__set__(ledger, ledger_namespace)
+            dict.__setitem__(ledger_namespace, "_state", retained_state)
+            dict.__setitem__(ledger_namespace, "_policy", retained_policy)
+            meter_descriptor.__set__(meter, meter_namespace)
+            dict.__setitem__(meter_namespace, "steps", steps)
+            repair_owners(root)
+
+        previous_busy = dict.get(namespace, "busy")
+        dict.__setitem__(namespace, "busy", True)
+        try:
+            try:
+                value = getter(rtc_owner)
+            except BaseException as failure:
+                try:
+                    repair_accounting()
+                except BaseException:
+                    try:
+                        BaseException.add_note(failure, "task deadline accounting repair also failed")
+                    except BaseException:
+                        pass
+                if isinstance(failure, ForthAbort):
+                    issue_host_abort(root, failure)
+                    if dict.get(namespace, "_unwinding_error") is None:
+                        dict.__setitem__(namespace, "_unwinding_error", failure)
+                raise
+        finally:
+            dict.__setitem__(namespace, "busy", previous_busy)
+        try:
+            if (ledger_descriptor.__get__(ledger, ForeignRootLedger) is not ledger_namespace
+                    or dict.get(ledger_namespace, "_state") is not original_state
+                    or dict.get(ledger_namespace, "_policy") is not original_policy
+                    or meter_descriptor.__get__(meter, _StepMeter) is not meter_namespace
+                    or type(dict.get(meter_namespace, "steps")) is not int
+                    or dict.get(meter_namespace, "steps") != steps):
+                raise ForeignTaskError("task deadline clock changed charged accounting")
+            self._require_parked_routes()
+            _match_parked(original_state, state_evidence)
+            _match_parked(original_policy, policy_evidence)
+            root._require_meter()
+            self._verify_export(capture)
+            root.effects.require_binding(root.issuer, scope)
+            _uint(value, "task deadline uptime")
+        except BaseException as failure:
+            try:
+                repair_accounting()
+            except BaseException:
+                try:
+                    BaseException.add_note(failure, "task deadline accounting repair also failed")
+                except BaseException:
+                    pass
+            raise
+        return value
+
+    def _require_parked_metadata(self):
+        for kind, routes in self._parked_metadata:
+            fields = vars(kind)
+            if (any(type(key) is not str for key in fields)
+                    or kind.__getattribute__ is not object.__getattribute__
+                    or "__getattr__" in fields
+                    or any(fields.get(name) is not original for name, original in routes)):
+                raise ForeignTaskError("task suspension metadata routes changed")
+
+    def _require_parked_routes(self):
+        self._require_parked_metadata()
+        self._require_task(self._context)
+
+    def _parked_root_values(self, root):
+        self._require_parked_routes()
+        root._require_meter()
+        root.reconcile()
+        ledger = root.ledger
+        chain = self.require_native_chain(root)
+        frames = root.frames
+        if (type(frames) is not list or len(frames) > MAX_DEPTH
+                or any(type(frame) is not self._parked_metadata[0][0] for frame in frames)
+                or len(frames) != ledger.depth or root.pending_binding is not None):
+            raise ForeignTaskError("task suspension has an unproved native chain")
+        if (chain is None or chain[0] is not root
+                or tuple(account.invocation_id for account in ledger._state.active) != chain[4]
+                or tuple(frame.invocation_id for frame in frames) != chain[4]
+                or ledger.last_receipt is not chain[2]):
+            raise ForeignTaskError("task native chain differs from accepted transition authority")
+        if chain[2] is not None:
+            _match_parked(chain[2], chain[3])
+        for frame, account in zip(frames, ledger._state.active):
+            if (type(frame) is not self._parked_metadata[0][0]
+                    or type(frame.invocation_id) is not int
+                    or frame.invocation_id != account.invocation_id
+                    or frame.binding is not self.require_definition(frame.binding.word)
+                    or account.registration is not frame.binding.metadata.registration
+                    or type(frame.request) is not ForeignCallbackRequestV1
+                    or frame.token is not frame.request.operation_token
+                    or frame.capture is not self.require_export(frame.request.export)
+                    or frame.scope is None or frame.cookie is None
+                    or not any(live.entry is frame.cookie and live.frame_id == frame.invocation_id
+                               and live.request_id == frame.request.request_sequence
+                               for live in root.control._live)):
+                raise ForeignTaskError("task suspension lost its exact callback frame")
+            _value(frame.request, ForeignCallbackRequestV1)
+        capture, scope = root._scope()
+        if capture is not None:
+            self._verify_export(capture)
+            root.effects.require_binding(root.issuer, scope)
+        elif root.context.data._task_effect_guard is not None or root.context.returns._task_effect_guard is not None:
+            raise ForeignTaskError("empty task scope retained foreign effect authority")
+        if ledger.last_receipt is not None:
+            ledger.settle(ledger.last_receipt, issued_receipt=ledger.last_receipt)
+        return dict(
+            frames=frames, tail=root.tail, policy=ledger._policy, ledger=ledger._state, native_chain=chain,
+            meter_namespace=root._meter_namespace, meter_steps=ledger.meter.steps,
+            adapter=root.adapter, pending=root.pending_binding,
+            control_live=root.control._live, control_pending=root.control._pending,
+            control_generation=root.control._generation, effects_scope=root.effects._scope,
+            effect_scopes=root.effects._scopes, data_pointer=self._context.data.pointer,
+            return_pointer=self._context.returns.pointer,
+        )
+
+    @staticmethod
+    def _parked_blocked_values(blocked):
+        if type(blocked) is not _SuspendedExecution or type(blocked.cursor) is not _DispatchCursor:
+            raise ForeignTaskError("task suspension requires its exact semantic cursor")
+        return {name: getattr(blocked, name) for name in (
+            "handle", "context", "meter", "starting_steps", "root_id", "cursor",
+            "return_snapshot", "capture_checkpoint", "had_pointer_capture",
+            "blocked_data_snapshot", "blocked_return_snapshot", "quantum_steps", "task_root")}
+
+    def _capture_parked(self, blocked):
+        root = blocked.task_root
+        if (root is not self._task_root or blocked.context is not self._context
+                or blocked.meter is not root.ledger.meter or blocked.root_id != root.ledger.root_id):
+            raise ForeignTaskError("task suspension changed original dispatcher ownership")
+        values = self._parked_root_values(root)
+        if root.active:
+            root.require_target(self._runtime._resolve_dispatch_word(blocked.cursor.xt), blocked.cursor.ip)
+        kinds = self._parked_value_kinds
+        data = self._context.data.snapshot()
+        returns = self._context.returns.snapshot()
+        if data != blocked.blocked_data_snapshot or returns != blocked.blocked_return_snapshot:
+            raise ForeignTaskError("task stack changed before suspension publication")
+        return _TaskParkedWitness(blocked, root,
+            tuple((name, _parked_value(value, kinds)) for name, value in self._parked_blocked_values(blocked).items()),
+            tuple((name, _parked_value(value, kinds)) for name, value in values.items()),
+            tuple(_parked_value(value, kinds) for value in data),
+            tuple(_parked_value(value, kinds) for value in returns), self._runtime._idle_deadline_ms)
+
+    def _verify_parked(self, witness, blocked):
+        self._require_parked_routes()
+        ownership = self._parked_ownership
+        if (ownership is None or ownership[0] is not witness or ownership[1] is not blocked
+                or ownership[2] is not self._task_root or witness.blocked is not blocked
+                or witness.root is not ownership[2]
+                or witness.blocked_values is not ownership[3] or witness.root_values is not ownership[4]
+                or witness.data is not ownership[5] or witness.returns is not ownership[6]
+                or type(witness.deadline) is not type(ownership[7]) or witness.deadline != ownership[7]):
+            raise ForeignTaskError("task suspension is not the issued composite owner")
+        actual = self._parked_blocked_values(blocked)
+        for name, evidence in witness.blocked_values:
+            _match_parked(actual[name], evidence)
+        values = self._parked_root_values(witness.root)
+        for name, evidence in witness.root_values:
+            _match_parked(values[name], evidence)
+        for current, evidence in ((self._context.data.snapshot(), witness.data),
+                                  (self._context.returns.snapshot(), witness.returns)):
+            if len(current) != len(evidence):
+                raise ForeignTaskError("task stack changed while suspended")
+            for value, item in zip(current, evidence):
+                _match_parked(value, item)
+        deadline = self._runtime._idle_deadline_ms
+        if type(deadline) is not type(witness.deadline) or deadline != witness.deadline:
+            raise ForeignTaskError("task suspension deadline changed")
+
+    def _validate_parked_adapter(self, root):
+        if not root.frames:
+            if root.ledger.depth:
+                raise ForeignTaskError("empty task suspension lost native retirement evidence")
+            return
+        if not root.adapter.supports("validate_parked"):
+            raise ForeignTaskError("live task callback cannot detach without parked validation")
+        top = root.frames[-1]
+        expected = root.ledger.last_receipt
+        before = root._owned_call("last_receipt")
+        if before is not expected:
+            raise ForeignTaskError("task parked receipt changed before validation")
+        valid = root._owned_call("validate_parked", root.ledger.root_token, top.token, top.request.request_token)
+        after = root._owned_call("last_receipt")
+        if valid is not True or after is not before:
+            raise ForeignTaskError("task parked validation changed authority or did not return True")
+        root.ledger.settle(after, issued_receipt=after)
+
+    def park_suspension(self, blocked):
+        """Issue one composite witness without executing or renewing any work."""
+        if blocked.task_root is None:
+            return
+        self._require_parked_routes()
+        root = blocked.task_root
+        receipt = self._publish_semantic_receipt(root)
+        witness = self._capture_parked(blocked)
+        self._parked_ownership = (witness, blocked, root, witness.blocked_values,
+                                  witness.root_values, witness.data, witness.returns, witness.deadline)
+        self._parked_task = witness
+        if receipt is not None and root.adapter.supports("settle_semantic_receipt"):
+            root._owned_call("settle_semantic_receipt", receipt)
+            self._verify_parked(witness, blocked)
+        self._validate_parked_adapter(root)
+        self._verify_parked(witness, blocked)
+        self._parked_task = witness
+
+    def resume_suspension(self, blocked):
+        witness = self._parked_task
+        if witness is None:
+            raise ForeignTaskError("task suspension has no issued composite witness")
+        self._verify_parked(witness, blocked)
+        self._validate_parked_adapter(witness.root)
+        self._verify_parked(witness, blocked)
+        self._parked_task = None
+        self._parked_ownership = None
+
+    def parked_idle_wake_due(self, blocked, deadline):
+        return self.parked_idle_uptime(blocked) >= deadline
+
+    def parked_idle_uptime(self, blocked):
+        witness = self._parked_task
+        if witness is None:
+            raise ForeignTaskError("task deadline has no issued suspension witness")
+        self._verify_parked(witness, blocked)
+        if witness.root.active:
+            value = self.read_task_uptime(witness.root)
+        else:
+            # An empty chain retains its ledger, not a retired callback's RTC
+            # authority. This is the ordinary semantic tail's clock read.
+            namespace = self._dispatch_namespace.__get__(witness.root, self._dispatch_kind)
+            prior = dict.get(namespace, "busy")
+            dict.__setitem__(namespace, "busy", True)
+            try:
+                value = self._runtime.rtc.uptime_ms
+            finally:
+                dict.__setitem__(namespace, "busy", prior)
+        self._verify_parked(witness, blocked)
+        return value
+
+    def suspension_transition_busy(self):
+        ownership = self._root_ownership
+        return ownership is not None and dict.get(ownership[1], "busy") is True
+
+    def task_suspension_owner(self, *, blocked=None, handle=None):
+        ownership = self._parked_ownership
+        if ownership is None or (blocked is not None and ownership[1] is not blocked):
+            return None
+        if handle is not None and not any(name == "handle" and evidence[2] is handle
+                                         for name, evidence in ownership[3]):
+            return None
+        return ownership[2]
+
+    def restore_suspension_cleanup(self, blocked):
+        """Repair original host projections only; never restore guest effects."""
+        ownership = self._parked_ownership
+        if ownership is None or ownership[1] is not blocked:
+            return True
+        safe = True
+        for name, evidence in ownership[3]:
+            if name == "return_snapshot":
+                try:
+                    _match_parked(evidence[2], evidence)
+                except BaseException:
+                    safe = False
+            slot = next(value for kind, fields in _METADATA_ROUTES if kind is _SuspendedExecution
+                        for field_name, value in fields if field_name == name)
+            slot.__set__(blocked, evidence[2])
+        return safe
+
+    def release_suspension_lease(self):
+        descriptor = next(value for kind, fields in _METADATA_ROUTES if kind is ExecutionContext
+                          for name, value in fields if name == "_suspension_sequence")
+        descriptor.__set__(self._context, None)
+        self._parked_task = None
+        self._parked_ownership = None
 
     def task_export_dependencies(self, export):
         capture = self.require_export(export)
@@ -761,6 +1283,7 @@ class ForeignTaskEngine:
             root = self._dispatch_kind(self, meter, frames[0].root_id, self._limits)
             try:
                 namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
+                self._native_chain = (root, 0, None, None, (), None)
                 self._root_ownership = (root, namespace, tuple((name, getattr(root, name)) for name in (
                     "engine", "context", "ledger", "issuer", "effects", "control", "frames",
                     "_meter_namespace", "_meter_policy", "_effects_close", "_control_close", "_cleanup_functions")),
@@ -788,6 +1311,84 @@ class ForeignTaskEngine:
             object.__setattr__(frame, "task_root", root)
         return root
 
+    def _cancel_damaged_native_projection(self, root):
+        chain = self._native_chain
+        if chain is None or chain[0] is not root or not chain[4]:
+            return
+        ledger = root.ledger
+        frames = root.frames
+        projected = (tuple(account.invocation_id for account in ledger._state.active)
+                     if type(ledger._state) is _LedgerState and type(ledger._state.active) is tuple
+                     and all(type(account) is _InvocationAccount for account in ledger._state.active) else None)
+        frame_ids = (tuple(frame.invocation_id for frame in frames) if type(frames) is list
+                     and all(type(frame) is self._parked_metadata[0][0] for frame in frames) else None)
+        if projected == chain[4] and frame_ids == chain[4]:
+            return
+        # Native ownership is independent of both exposed host projections.
+        # Cancel that original chain before any control or ordinary RS cleanup.
+        failure = ForeignTaskError("task native chain projections were changed before cleanup")
+        self._execution_failure = failure
+        result = self._root_cleanup_call(root, "_owned_call", name="cancel_all")
+        if (type(result) is not ForeignCancellationV1
+                or type(result.retired_invocation_ids) is not tuple
+                or any(type(value) is not int for value in result.retired_invocation_ids)
+                or result.retired_invocation_ids != tuple(reversed(chain[4]))
+                or result.surviving_parent_id is not None or result.surviving_parent_token is not None
+                or result.receipt is not chain[2]):
+            raise ForeignTaskError("damaged task chain cancellation did not prove complete retirement")
+        self._native_chain = (root, chain[1], chain[2], chain[3], (), result)
+        if type(ledger._state) is not _LedgerState or type(frames) is not list:
+            raise failure
+        ledger._state = replace(ledger._state, active=(), semantic_scopes=())
+        list.clear(frames)
+        raise failure
+
+    def _close_rejected_ledger_routes(self, root):
+        """Cancel original native authority without using rejected ledger getters."""
+        ownership = self._restore_cleanup_owners(root)
+        original = dict(ownership[2])
+        chain = self._native_chain
+        error = None
+        try:
+            if chain is not None and chain[0] is root and chain[4]:
+                result = self._root_cleanup_call(root, "_owned_call", name="cancel_all")
+                if type(result) is not ForeignCancellationV1:
+                    raise ForeignTaskError("emergency task cancellation returned an unknown value")
+                fields = next(fields for kind, fields in _METADATA_ROUTES if kind is ForeignCancellationV1)
+                values = {name: next(slot for field, slot in fields if field == name).__get__(
+                    result, ForeignCancellationV1) for name in (
+                        "retired_invocation_ids", "surviving_parent_id", "surviving_parent_token", "receipt")}
+                ids = values["retired_invocation_ids"]
+                if (type(ids) is not tuple or any(type(item) is not int for item in ids)
+                        or ids != tuple(reversed(chain[4])) or values["surviving_parent_id"] is not None
+                        or values["surviving_parent_token"] is not None or values["receipt"] is not chain[2]):
+                    raise ForeignTaskError("emergency task cancellation lost original retirement proof")
+                self._native_chain = (root, chain[1], chain[2], chain[3], (), result)
+        except BaseException as failure:
+            error = failure
+        # These helpers use the separately proved original stack/effect routes,
+        # never an invocation account, ledger projection, or changed descriptor.
+        if self.task_cleanup_safe(root):
+            for kind, instance, close, function in (
+                    (TaskEffectGuard, original["effects"], original["_effects_close"], original["_cleanup_functions"][0]),
+                    (ForeignReturnControl, original["control"], original["_control_close"], original["_cleanup_functions"][1])):
+                try:
+                    self._root_cleanup_call(root, "_close_helper", kind=kind, instance=instance,
+                                            close=close, function=function)
+                except BaseException as failure:
+                    if error is None:
+                        error = failure
+        else:
+            self.mark_task_cleanup_unsafe(root)
+        frames = original["frames"]
+        if type(frames) is list:
+            list.clear(frames)
+        for name, value in (("tail", None), ("pending_binding", None), ("closed", True), ("cancelled", True)):
+            dict.__setitem__(ownership[1], name, value)
+        if error is not None:
+            self.mark_task_cleanup_unsafe(root)
+            raise error
+
     def finish_root(self, root, *, completed, primary_error=None):
         ownership = self._restore_cleanup_owners(root)
         dict.__setitem__(ownership[1], "closed", False)
@@ -795,7 +1396,22 @@ class ForeignTaskEngine:
             dict.__setitem__(ownership[1], "_unwinding_error", primary_error)
             completed = False
         original = None
+        rejected_ledger_routes = False
         try:
+            self._require_parked_metadata()
+        except BaseException as failure:
+            original = failure
+            self._execution_failure = failure
+            completed = False
+            rejected_ledger_routes = True
+        try:
+            try:
+                if not rejected_ledger_routes:
+                    self._cancel_damaged_native_projection(root)
+            except BaseException as failure:
+                original = failure
+                self._execution_failure = failure
+                completed = False
             try:
                 receipt = self._publish_semantic_receipt(root)
                 self._require_adapter_cleanup_routes()
@@ -804,11 +1420,15 @@ class ForeignTaskEngine:
                 if receipt is not None and any(name == "settle_semantic_receipt" for name, _method in methods):
                     self._root_cleanup_call(root, "_owned_call", name="settle_semantic_receipt", receipt=receipt)
             except BaseException as failure:
-                original = failure
+                if original is None:
+                    original = failure
                 self._execution_failure = failure
                 completed = False
             try:
-                self._root_cleanup_call(root, "close", completed=completed)
+                if rejected_ledger_routes:
+                    self._close_rejected_ledger_routes(root)
+                else:
+                    self._root_cleanup_call(root, "close", completed=completed)
             except BaseException as failure:
                 self._execution_failure = failure
                 completed = False
@@ -827,7 +1447,7 @@ class ForeignTaskEngine:
                 except BaseException:
                     pass
         finally:
-            ledger = dict(ownership[2])["ledger"]
+            values = self._ledger_cleanup_values(root)
             namespace = ownership[1]
             dict.__setitem__(namespace, "closed", True)
             cancelled = dict.get(namespace, "cancelled")
@@ -835,9 +1455,11 @@ class ForeignTaskEngine:
                 cancelled = True
                 dict.__setitem__(namespace, "cancelled", True)
             self._last_dispatch = ForeignDispatchReport(
-                ledger.root_id, ledger.instructions, ledger.cycles, ledger.callbacks,
-                ledger.entries, ledger.semantic_steps, completed, cancelled)
+                values["root_id"], values["instructions"], values["cycles"], values["callbacks"],
+                values["entries"], values["semantic_steps"], completed, cancelled)
             if self._task_root is root:
+                self._parked_task = None
+                self._parked_ownership = None
                 self._task_root = None
                 self._cleanup_ownership = self._root_ownership
                 self._root_ownership = None
@@ -852,8 +1474,9 @@ class ForeignTaskEngine:
         self._dispatch_namespace.__set__(root, namespace)
         for name, value in ownership[2]:
             dict.__setitem__(namespace, name, value)
-        ledger = dict(ownership[2])["ledger"]
-        if (dict.get(namespace, "adapter") is not None or ledger.entries
+        chain = self._native_chain
+        entered = chain is not None and chain[0] is root and chain[1] > 0
+        if (dict.get(namespace, "adapter") is not None or entered
                 or dict.get(namespace, "pending_binding") is not None):
             dict.__setitem__(namespace, "adapter", ownership[3])
         # Remove only shadowed host method routes. Guest stack/memory state is
@@ -1253,6 +1876,7 @@ class ForeignTaskEngine:
             pending.append((fault, 0))
         captured = {}
         total_operations = 0
+        rtc = None
         while pending:
             word, start_ip = pending.pop()
             word = self._word(word)
@@ -1283,6 +1907,8 @@ class ForeignTaskEngine:
                     operation_kind = type(operation)
                     if operation_kind not in _OPERATION_FIELDS:
                         raise ForeignTaskError("task colon contains an unsupported operation")
+                    if operation_kind is IdleUntil and rtc is None:
+                        rtc = _TaskRTCSeal.capture(self._runtime)
                     field_name = _OPERATION_FIELDS[operation_kind]
                     value = None if field_name is None else getattr(operation, field_name)
                     if field_name is not None:
@@ -1315,7 +1941,7 @@ class ForeignTaskEngine:
             captured[id(word)] = evidence
         metadata = replace(descriptor, signature=replace(descriptor.signature),
                            task_grants=tuple(replace(span) for span in descriptor.task_grants))
-        capture = CapturedTaskExport(descriptor, metadata, entry, tuple(captured.values()), fault)
+        capture = CapturedTaskExport(descriptor, metadata, entry, tuple(captured.values()), fault, rtc)
         # Count each declared capture's IR, including repeated dependencies;
         # rejected captures spend neither registration nor operation capacity.
         replacement = dict(self._exports)
@@ -1341,6 +1967,8 @@ class ForeignTaskEngine:
                 or descriptor.max_semantic_steps != metadata.max_semantic_steps):
             raise ForeignTaskError("task export descriptor changed after capture")
         self._check_grants(capture.descriptor.task_grants)
+        if capture.rtc is not None:
+            capture.rtc.verify(self._runtime)
         for word in capture.words:
             try:
                 word.verify(self)
