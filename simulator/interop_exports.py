@@ -112,6 +112,55 @@ class ServiceCallbackProfileV5:
     effect: str = "scalar_fp_state"
 
 
+def _service_value_layout(kind, names):
+    namespace = type.__getattribute__(kind, "__dict__")
+    return (kind, tuple(namespace[name] for name in names),
+            tuple((name, value) for name, value in namespace.items() if name != "__slotnames__"),
+            namespace["__slots__"], type.__getattribute__(kind, "__mro__"))
+
+
+_SERVICE_VALUE_NEW = object.__new__
+_SERVICE_RESULT_LAYOUT = _service_value_layout(CallbackExportResult, ("outputs", "semantic_steps"))
+_SERVICE_RECEIPT_LAYOUT = _service_value_layout(ServiceCallbackReceiptV5, (
+    "semantic_steps", "entered", "completed", "consumed_input_cells", "failure",
+))
+_SERVICE_FAILURE_LAYOUT = _service_value_layout(ServiceCallbackFailureV5, (
+    "export_id", "name", "invocation_id", "sequence", "call_offset", "stub_offset",
+    "operation", "consumed_input_cells", "fpcsr", "semantic_steps", "cause", "fault_kind", "throw_code",
+))
+_SERVICE_PROFILE_LAYOUT = _service_value_layout(ServiceCallbackProfileV5, (
+    "value_executor", "version", "capability", "effect",
+))
+
+
+def _service_value_routes_match(layout):
+    kind, _fields, entries, slots, mro = layout
+    namespace = type.__getattribute__(kind, "__dict__")
+    # Scan first: an unrelated non-exact key must not run equality while a
+    # route is checked. copyreg's normal derived cache is harmless metadata.
+    if len(namespace) > 4096 or any(type(key) is not str for key in namespace):
+        return False
+    cache = namespace.get("__slotnames__")
+    cached = "__slotnames__" in namespace
+    if cached and (type(cache) is not list or len(cache) != len(slots)
+                   or any(type(name) is not str for name in cache) or tuple(cache) != slots):
+        return False
+    return (type.__getattribute__(kind, "__mro__") is mro
+            and len(namespace) == len(entries) + cached
+            and all(namespace.get(name) is value for name, value in entries))
+
+
+def _issue_service_value(layout, values):
+    # Do not dispatch a potentially replaced __new__, __init__, __setattr__,
+    # or public field descriptor while publishing authoritative work. Retained
+    # member descriptors write the original storage even after a route change.
+    kind, fields, _entries, _slots, _mro = layout
+    result = _SERVICE_VALUE_NEW(kind)
+    for field, value in zip(fields, values):
+        field.__set__(result, value)
+    return result
+
+
 @dataclass(frozen=True, slots=True, eq=False)
 class _ServiceCheckpoint:
     _owner: object
@@ -552,6 +601,9 @@ class CallbackExportEngine:
                 from simulator.interop_closed import repair_meter
                 if repair_meter(record.meter, record.namespace, record.starting_steps + steps):
                     self._registration_failure = "private service accounting meter changed"
+            if not all(_service_value_routes_match(layout) for layout in (
+                    _SERVICE_RESULT_LAYOUT, _SERVICE_RECEIPT_LAYOUT, _SERVICE_FAILURE_LAYOUT)):
+                self._registration_failure = "private service issued value routes changed"
             failure = None
             observation, scope, active = record.validation_failure, record.scope, record.dispatch
             if observation is not None and self._registration_failure is None:
@@ -607,13 +659,14 @@ class CallbackExportEngine:
                     self._registration_failure = "private service validation FPCSR changed"
                     raise CallbackExportError(self._registration_failure)
                 request = record.request
-                failure = ServiceCallbackFailureV5(
+                failure = _issue_service_value(_SERVICE_FAILURE_LAYOUT, (
                     binding.descriptor.export_id, binding.descriptor.name,
                     request.invocation_id, request.sequence, request.site.call_offset,
                     request.site.stub_offset, observation.operation, consumed,
-                    observation.fpcsr, steps, error,
-                )
-            result = ServiceCallbackReceiptV5(steps, entered, completed, consumed, failure)
+                    observation.fpcsr, steps, error, "illegal_scalar_float", -21,
+                ))
+            result = _issue_service_value(_SERVICE_RECEIPT_LAYOUT,
+                                          (steps, entered, completed, consumed, failure))
             self._closed_accounting = None
             return result
 
@@ -963,7 +1016,9 @@ class CallbackExportEngine:
                 raise CallbackExportError("private scalar service did not return balanced state")
             outputs = context.data.snapshot()
             _cells(outputs, count=binding.descriptor.output_cells, label="outputs")
-            result = CallbackExportResult(outputs, record.semantic_steps)
+            result = _issue_service_value(_SERVICE_RESULT_LAYOUT, (outputs, record.semantic_steps))
+            if not _service_value_routes_match(_SERVICE_RESULT_LAYOUT):
+                self._registration_failure = "private service issued result routes changed"
             record.completed = True
             return result
         except BaseException as error:
@@ -1118,6 +1173,8 @@ def service_callback_profile(runtime):
                     or namespace.get("_service_accounting_type") is not _ServiceAccounting
                     or namespace.get("_service_dispatch_type") is not ServiceDispatch):
                 return None
+            if not _service_value_routes_match(_SERVICE_PROFILE_LAYOUT):
+                return None
             catalog = namespace.get("_service_catalog")
             if type(catalog) is not ScalarServiceCatalog:
                 return None
@@ -1128,7 +1185,8 @@ def service_callback_profile(runtime):
                 return None
             ScalarServiceCatalog.verify(catalog)
             executor = "python_reference" if catalog._executor is None else "shared_native_kernel"
-            return ServiceCallbackProfileV5(executor)
+            return _issue_service_value(_SERVICE_PROFILE_LAYOUT,
+                                        (executor, 5, "private_scalar_fp_v1", "scalar_fp_state"))
     except CallbackExportError:
         return None
 

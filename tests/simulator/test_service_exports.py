@@ -8,13 +8,17 @@ from __future__ import annotations
 
 from copy import copy
 from dataclasses import FrozenInstanceError
+from pathlib import Path
+import subprocess
+import sys
 import pytest
 
 from shared.hybrid_abi import CallbackExportV2
 from shared.hybrid_services import CallbackRequestV5, CallbackSiteV5, ServiceExportV5
 from simulator.errors import ForthAbort, IllegalInstructionFault
 from simulator.interop_exports import (
-    CallbackExportBudgetExceeded, CallbackExportError, ServiceCallbackFailureV5,
+    CallbackExportBudgetExceeded, CallbackExportError, CallbackExportResult,
+    ServiceCallbackFailureV5, ServiceCallbackReceiptV5, ServiceCallbackProfileV5,
     begin_service_callback_accounting, consume_service_callback_accounting,
     service_callback_profile,
 )
@@ -475,3 +479,102 @@ def test_failure_consumption_does_not_enter_a_late_stack_method(runtime, monkeyp
     with pytest.raises(CallbackExportError, match="class route"):
         consume_service_callback_accounting(runtime, checkpoint, handle, raised.value)
     assert calls == []
+
+
+@pytest.mark.parametrize("kind", (CallbackExportResult, ServiceCallbackReceiptV5, ServiceCallbackFailureV5))
+@pytest.mark.parametrize("route", ("__new__", "__init__", "__setattr__", "field"))
+@pytest.mark.parametrize("outcome", ("return", "raw", "validation"))
+def test_changed_issued_value_routes_cannot_construct_or_refund_work(runtime, monkeypatch, kind, route, outcome, request):
+    if route == "__new__" and request is not None:
+        # CPython can retain a changed tp_new slot after adding and deleting a
+        # class-local __new__, even when the class dictionary looks restored.
+        # Exercise that real mutation in a fresh process so later legacy
+        # dataclass constructors are not corrupted by the test's teardown.
+        # Invoke this same assertion body directly; no nested pytest session
+        # or shared test-monitor state is started by the child.
+        program = """
+import runpy
+import sys
+values = runpy.run_path(sys.argv[1])
+runtime = values['MegaForthRuntime'](execution_backend=sys.argv[2])
+patch = values['pytest'].MonkeyPatch()
+try:
+    values['test_changed_issued_value_routes_cannot_construct_or_refund_work'](
+        runtime, patch, values[sys.argv[3]], '__new__', sys.argv[4], None)
+finally:
+    runtime.memory.mmio.audio.release_host_sink()
+    patch.undo()
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", program, str(Path(__file__).resolve()),
+             runtime.execution_backend, kind.__name__, outcome],
+            cwd=Path(__file__).resolve().parents[2], capture_output=True, text=True, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return
+    receipt_fields = tuple(vars(ServiceCallbackReceiptV5)[name] for name in (
+        "semantic_steps", "entered", "completed", "consumed_input_cells", "failure"))
+    result_fields = tuple(vars(CallbackExportResult)[name] for name in ("outputs", "semantic_steps"))
+    calls = []
+    original_error = IllegalScalarFloatError("raw hook escape")
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("rejected value construction or getter was called")
+
+    def tick():
+        name = ("fpcsr" if kind is ServiceCallbackFailureV5 else "semantic_steps") if route == "field" else route
+        replacement = (property(forbidden) if route == "field" else
+                       staticmethod(forbidden) if route == "__new__" else forbidden)
+        monkeypatch.setattr(kind, name, replacement)
+        if outcome == "raw":
+            raise original_error
+        if outcome == "validation":
+            runtime.scalar_float.write_fpcsr(5)
+
+    monkeypatch.setattr(runtime, "_account_semantic_step", tick)
+    result, error, receipt = perform(runtime, descriptor(), (ONE, TWO))
+    steps, entered, completed, consumed, failure = tuple(
+        field.__get__(receipt, ServiceCallbackReceiptV5) for field in receipt_fields)
+    assert (steps, entered, completed, failure) == (1, True, outcome == "return", None)
+    assert consumed == (0 if outcome == "raw" else 2)
+    if outcome == "return":
+        assert error is None
+        assert tuple(field.__get__(result, CallbackExportResult) for field in result_fields) == ((THREE,), 1)
+    elif outcome == "raw":
+        assert result is None and error is original_error
+    else:
+        assert result is None and type(error) is IllegalScalarFloatError
+    assert calls == []
+    assert runtime._callback_exports._registration_failure is not None
+    assert runtime._callback_exports._closed_accounting is None
+
+
+@pytest.mark.parametrize("route", ("__init__", "value_executor"))
+def test_profile_constructor_and_getter_mutations_make_profile_unavailable(runtime, monkeypatch, route):
+    calls = []
+
+    def forbidden(*_args, **_kwargs):
+        calls.append(True)
+        raise AssertionError("changed profile route was called")
+
+    monkeypatch.setattr(ServiceCallbackProfileV5, route,
+                        property(forbidden) if route == "value_executor" else forbidden)
+    assert service_callback_profile(runtime) is None
+    assert calls == []
+
+
+def test_normal_issued_value_copies_do_not_disable_later_service_metadata(runtime):
+    result, error, receipt = perform(runtime, descriptor(), (ONE, TWO))
+    assert error is None
+    assert copy(result) == result and copy(receipt) == receipt
+    profile = service_callback_profile(runtime)
+    assert copy(profile) == profile
+    runtime.scalar_float.write_fpcsr(5)
+    _, error, receipt = perform(runtime, descriptor(), (ONE, TWO))
+    assert receipt.failure.cause is error
+    assert copy(receipt.failure).cause is error
+    runtime.scalar_float.write_fpcsr(0)
+    result, error, receipt = perform(runtime, descriptor(), (ONE, TWO))
+    assert error is None and result.outputs == (THREE,) and receipt.completed
+    assert service_callback_profile(runtime) == profile
