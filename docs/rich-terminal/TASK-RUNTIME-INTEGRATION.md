@@ -76,3 +76,73 @@ scheduling implementation and capability activation are outside this merge.
 This checkpoint supplies richer runtime regression coverage for the combined
 Desk qualification; it does not replace a complete Desk journey or change the
 frozen standalone runs' source and timing records.
+
+## Prepared-task machine quanta and qualified composite sessions
+
+The next qualification uses the isolated branch
+`integration/flowing-machine-runtime` in
+`/workspace/scratch/64bce13821f6/megapad-flowing-machine-integration`.
+Conflict-free source merge `162086eb663dd069fff6e4457ff444e0186dc453`
+starts from the previous integration
+`5bf70614ce7f06105463f6448abe5f342fcc1b70` and imports the committed peer
+through frozen `4ef08d88817af1fbe9c6a5ef17e834295bc1f17e`. This includes
+`abd77639be99284d42c55ed6c09288bae2d7c60b` machine scheduling plus the
+successor's prepared-task exception and capability activation. No peer working
+files or later commits are part of this checkpoint.
+
+A selected machine quantum now bounds actual prepared-task instructions during
+one host turn, shared across the root and its children. Runnable machine yields
+retain an exact one-shot cursor, owner, operation token and accepted task
+receipt; resume preserves cumulative instruction, callback, entry and semantic
+budgets. Machine progress does not require an outer semantic step. Genuine idle
+and deadline callbacks retain their separate wake conditions.
+
+This checkpoint supersedes the previous section's capability limitation.
+Qualified prepared-task sessions advertise shared exceptions, callback
+suspension and composite suspension only when their original installed routes
+satisfy the corresponding capability checks. Finite machine quanta require
+composite support before session entry. `None` preserves synchronous execution,
+including the supported older revision2 transport path. Generic task manifests,
+automatic publication ordering and task launcher support remain deferred.
+
+Both native extensions were rebuilt using `make build`, `CC=gcc`, `CXX=g++`
+and `VENV_PY=/workspace/scratch/64bce13821f6/runcheck-venv/bin/python`.
+The toolchain was GCC/G++ 13.3.0 and Python 3.12.14; the build log is
+`/tmp/flowing-machine-build.log`. The existing task child-count signedness
+warning remains the only compiler warning. The built extension SHA-256 values
+are:
+
+| Extension | SHA-256 |
+| --- | --- |
+| `_mp64_accel.cpython-312-x86_64-linux-gnu.so` | `83c4e55b9c7e5c9977245d98db843e838c814371b55c4692d438dd84360dc119` |
+| `_megaforth_native.cpython-312-x86_64-linux-gnu.so` | `c70a2c53201ae1196d4237f7c662e8c8911b4c048c7d5c636708cc336625f3f0` |
+
+The focused regression gate ran through `make test-sequential` in supervisor
+namespace `flowing-machine`: **644 passed in 182.94 seconds**, with no skips
+(`/tmp/flowing-machine-task-rich-gates.log`). It covers the new foreign machine
+quantum, session quantum, composite session and capability suites; existing
+foreign suspension authority, task deadlines/abort, receipt accounting,
+registration, stack and runtime behavior; idle/deadline and KDOS exceptions;
+native task adapters/parked state; prepared, private, nested and service sessions;
+and FIELD, STATUS_FIELD, GRID, PANE and TASKBAR simulator/viewer-input boundaries.
+
+Test-only commit `b52374cb130e26ad47db820a3c98081044bc1589` adds the missing
+intersection of enhanced input with a retained prepared-task cursor. The
+existing rich hybrid-session scenario now runs synchronous private and genuine
+prepared-task quantum1 profiles on both Python and native executors. At the
+one-instruction yield it queues an acknowledged TASK activation and proves
+admission leaves the exact cursor, receipt, stacks and semantic count intact.
+Subsequent turns return the original invocation and apply the event exactly
+once; a later revision-aware FIELD adjustment also applies once without
+changing the completed task receipt. This separate Make-supervised gate passed
+**4 tests in 4.70 seconds**, with no skips
+(`/tmp/flowing-machine-rich-quantum.log`, namespace `flowing-machine-rich`).
+There are **648 passing tests across the two disjoint gates**. Their wall-clock
+times include brief concurrent execution and are not a Desk performance
+benchmark.
+
+This qualifies the combined runtime and rich input boundary for the next full
+Desk journey; it does not claim that journey has completed or alter the source
+and timing records of frozen standalone qualifications. The older task-runtime
+checkout remains at `5bf70614ce7f06105463f6448abe5f342fcc1b70`. Neither main
+nor a remote branch was changed, and nothing was pushed.
