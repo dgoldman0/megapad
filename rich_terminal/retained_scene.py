@@ -113,6 +113,7 @@ class ObjectKind(IntEnum):
     STATUS = 7
     PLOT = 8
     WAVEFORM = 9
+    PANE = 10
 
 
 class ImageFit(IntEnum):
@@ -353,6 +354,49 @@ class RegionDefinition:
 @dataclass(frozen=True, slots=True)
 class GroupBody:
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class PaneBody:
+    """Explicit pane chrome and its same-owner content-region relationship."""
+
+    content_region_id: int
+    content_bounds: ObjectBounds
+    title: str
+    focused: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "content_region_id",
+            _integer("content_region_id", self.content_region_id,
+                     minimum=1, maximum=UINT64_MAX),
+        )
+        if not isinstance(self.content_bounds, ObjectBounds):
+            raise TypeError("content_bounds must be ObjectBounds")
+        _control_text_bytes("title", self.title)
+        if any(0x7F <= ord(character) <= 0x9F
+               or character in "\u2028\u2029" for character in self.title):
+            raise ValueError("title contains a control or line-separator character")
+        object.__setattr__(self, "focused", _boolean("focused", self.focused))
+
+
+def validate_pane_shape(
+    body: PaneBody, *, bounds: ObjectBounds, region_id: int,
+    parent_object_id: int, visible: bool,
+) -> None:
+    """Keep the immutable model and wire envelope's pane checks identical."""
+
+    if parent_object_id:
+        raise ValueError("PANE must be a root object")
+    if body.content_region_id == region_id:
+        raise ValueError("PANE content region must differ from its chrome region")
+    if body.focused and not visible:
+        raise ValueError("a focused PANE must be visible")
+    content = body.content_bounds
+    if (content.cell_x < 0 or content.cell_y < 0
+            or content.cell_right > bounds.cell_cols
+            or content.cell_bottom > bounds.cell_rows):
+        raise ValueError("PANE content bounds must lie inside its outer bounds")
 
 
 @dataclass(frozen=True, slots=True)
@@ -624,6 +668,7 @@ def _validate_series_consumer(body, *, include_zero_line: bool) -> None:
 
 ObjectBody = (
     GroupBody
+    | PaneBody
     | PolylineBody
     | ImageBody
     | GlyphRunBody
@@ -637,6 +682,7 @@ ObjectBody = (
 
 _BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
+    PaneBody: ObjectKind.PANE,
     PolylineBody: ObjectKind.POLYLINE,
     ImageBody: ObjectKind.IMAGE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
@@ -676,6 +722,11 @@ class ObjectDefinition:
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         if type(self.body) not in _BODY_KIND:
             raise TypeError("body is not a supported retained object body")
+        if isinstance(self.body, PaneBody):
+            validate_pane_shape(
+                self.body, bounds=self.bounds, region_id=self.region_id,
+                parent_object_id=self.parent_object_id, visible=self.visible,
+            )
 
     @property
     def kind(self) -> ObjectKind:
@@ -1826,9 +1877,13 @@ class RetainedSceneModel:
         definition = owner_scene.objects.get(normalized_id)
         if definition is None:
             self._fail(SceneErrorCode.MISSING_ID, "object visibility target is absent")
+        try:
+            replacement_definition = replace(definition, visible=visible)
+        except (TypeError, ValueError) as exc:
+            self._fail(SceneErrorCode.STATE, str(exc))
         usage = owner_scene.usage
         self._admit_operation(staging, owner_scene, usage)
-        owner_scene.objects[normalized_id] = replace(definition, visible=visible)
+        owner_scene.objects[normalized_id] = replacement_definition
         self._commit_operation(staging, owner_scene, usage)
 
     def append_series(
@@ -2230,6 +2285,8 @@ class RetainedSceneModel:
 
     def _object_utf8_bytes(self, definition: ObjectDefinition) -> int:
         body = definition.body
+        if isinstance(body, PaneBody):
+            return len(_control_text_bytes("title", body.title))
         if isinstance(body, GlyphRunBody):
             return len(_text_bytes("text", body.text))
         if isinstance(body, ReadoutBody):
@@ -2409,6 +2466,8 @@ class RetainedSceneModel:
         kind = definition.kind
         if kind is ObjectKind.GLYPH_RUN:
             required = RetainedFeature.CORE
+        elif kind is ObjectKind.PANE:
+            required = RetainedFeature.PANES
         elif kind in (ObjectKind.GROUP, ObjectKind.POLYLINE):
             required = RetainedFeature.VECTOR
         elif kind is ObjectKind.IMAGE:
@@ -2419,6 +2478,11 @@ class RetainedSceneModel:
             required = RetainedFeature.INSTRUMENT
         if not policy.features & required:
             self._fail(SceneErrorCode.FEATURE, f"{kind.name} feature was not advertised")
+        if isinstance(definition.body, PaneBody):
+            title_bytes = len(_control_text_bytes("title", definition.body.title))
+            if (104 + title_bytes > policy.client_to_terminal_max_payload
+                    or 304 + title_bytes > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA, "PANE title exceeds payload or transaction capacity")
         if isinstance(definition.body, PolylineBody) and len(definition.body.points) > policy.max_path_points:
             self._fail(SceneErrorCode.QUOTA, "polyline point count exceeds advertised maximum")
         if isinstance(definition.body, GlyphRunBody):
@@ -2495,6 +2559,12 @@ class RetainedSceneModel:
                 SceneErrorCode.GRAPH,
                 "object region must be defined before the dependent object",
             )
+        if (isinstance(definition.body, PaneBody)
+                and definition.body.content_region_id not in owner_scene.regions):
+            self._fail(
+                SceneErrorCode.GRAPH,
+                "PANE content region must be defined before the pane",
+            )
         if definition.parent_object_id:
             parent = owner_scene.objects.get(definition.parent_object_id)
             if parent is None or parent.kind is not ObjectKind.GROUP:
@@ -2545,6 +2615,34 @@ class RetainedSceneModel:
         except OwnerLedgerError as exc:
             self._fail(SceneErrorCode.AUTHORITY, str(exc))
 
+    def _validate_pane_region(
+        self, owner_scene: OwnerScene | _MutableOwnerScene,
+        definition: ObjectDefinition,
+    ) -> None:
+        body = definition.body
+        assert isinstance(body, PaneBody)
+        content_region = owner_scene.regions.get(body.content_region_id)
+        if content_region is None or content_region.owner != definition.owner:
+            self._fail(SceneErrorCode.GRAPH, "PANE refers to an absent exact-owner content region")
+        chrome_region = owner_scene.regions[definition.region_id]
+        if (content_region.z_order, content_region.region_id) <= (
+                chrome_region.z_order, chrome_region.region_id):
+            self._fail(SceneErrorCode.GRAPH, "PANE content region must paint after its chrome region")
+        if not content_region.clipped:
+            self._fail(SceneErrorCode.GRAPH, "PANE content region requires an explicit clip")
+        # Region validation already makes all zero the only empty clip.  Its
+        # logical coordinates stay independent; only its physical viewport is
+        # constrained by the explicitly published pane content rectangle.
+        if content_region.clip_cols == 0:
+            return
+        content = body.content_bounds
+        left = chrome_region.logical_x + definition.bounds.cell_x + content.cell_x
+        top = chrome_region.logical_y + definition.bounds.cell_y + content.cell_y
+        if (content_region.clip_x < left or content_region.clip_y < top
+                or content_region.clip_x + content_region.clip_cols > left + content.cell_cols
+                or content_region.clip_y + content_region.clip_rows > top + content.cell_rows):
+            self._fail(SceneErrorCode.BOUNDS, "PANE content-region clip exceeds its content bounds")
+
     def _validate_scene(
         self,
         scene: RetainedScene,
@@ -2552,11 +2650,18 @@ class RetainedSceneModel:
     ) -> None:
         for owner_scene in scene.owners.values():
             self._validate_usage(owner_scene.owner, owner_scene.usage)
+            pane_content_regions: set[int] = set()
             for object_key, definition in owner_scene.objects.items():
                 if object_key != definition.object_id or definition.owner != owner_scene.owner:
                     self._fail(SceneErrorCode.GRAPH, "object map key or owner is invalid")
                 if definition.region_id not in owner_scene.regions:
                     self._fail(SceneErrorCode.GRAPH, "object refers to an absent region")
+                if isinstance(definition.body, PaneBody):
+                    self._validate_pane_region(owner_scene, definition)
+                    content_region_id = definition.body.content_region_id
+                    if content_region_id in pane_content_regions:
+                        self._fail(SceneErrorCode.GRAPH, "a content region has multiple panes")
+                    pane_content_regions.add(content_region_id)
                 parent_id = definition.parent_object_id
                 if parent_id:
                     parent = owner_scene.objects.get(parent_id)
@@ -2686,6 +2791,7 @@ __all__ = [
     "ObjectDefinition",
     "ObjectKind",
     "OwnerScene",
+    "PaneBody",
     "PlotBody",
     "Point",
     "PolylineBody",
@@ -2709,5 +2815,6 @@ __all__ = [
     "TimestampMode",
     "UniformSamples",
     "validate_control_shape",
+    "validate_pane_shape",
     "WaveformBody",
 ]

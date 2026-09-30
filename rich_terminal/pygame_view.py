@@ -25,6 +25,7 @@ from .retained_view import (
     MenuItemDraw,
     MenuSeparatorDraw,
     MeterDraw,
+    PaneDraw,
     PlotDraw,
     PolylineDraw,
     ReadoutDraw,
@@ -834,6 +835,7 @@ _OBJECT_DRAWS = (
     GlyphRunDraw,
     PolylineDraw,
     ImageDraw,
+    PaneDraw,
     ReadoutDraw,
     MeterDraw,
     StatusDraw,
@@ -3043,6 +3045,68 @@ def _object_clip(pygame_module, surface, region, region_rect, draw):
     return object_rect, clip
 
 
+def _pane_chrome_rects(outer, content):
+    """Partition the declared frame into four disjoint bands around its hole."""
+    return (
+        _WideRect(outer.left, outer.top, outer.width, content.top - outer.top),
+        _WideRect(outer.left, content.bottom, outer.width, outer.bottom - content.bottom),
+        _WideRect(outer.left, content.top, content.left - outer.left, content.height),
+        _WideRect(content.right, content.top, outer.right - content.right, content.height),
+    )
+
+
+def _paint_pane(pygame_module, surface, font, region, region_rect, draw, *,
+                appearance: Appearance = REFERENCE_APPEARANCE) -> None:
+    """Paint explicit chrome only; CELL and retained content keep their pixels.
+
+    Pane focus is committed guest state. This painter creates no input target,
+    reflow, or implicit content clipping. A title without a reserved header
+    row remains metadata, as in Desk's edge-to-edge menu layout.
+    """
+    outer, clip = _object_clip(pygame_module, surface, region, region_rect, draw)
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    cell_w = region_rect.width // region.logical_cols
+    cell_h = region_rect.height // region.logical_rows
+    content = _bounds_rect(pygame_module, outer, draw.content_bounds, cell_w, cell_h)
+    prior_clip = surface.get_clip()
+    border = (appearance.accent if draw.focused else appearance.border) if appearance.flowing else (
+        _ACCENT[:3] if draw.focused else _COLLECTION_BORDER)
+    try:
+        for band in _pane_chrome_rects(outer, content):
+            visible = _bounded_pygame_rect(pygame_module, band, clip)
+            if visible.width <= 0 or visible.height <= 0:
+                continue
+            surface.set_clip(visible)
+            # Opaque backing replaces legacy border cells even outside a
+            # rounded corner. The content hole is never touched or copied.
+            surface.fill(appearance.surface if appearance.flowing else _COLLECTION_SURFACE, visible)
+            if appearance.flowing:
+                paint_channel(
+                    pygame_module, surface, outer, appearance.channel,
+                    radius=_flow_text_radius(cell_w), border=border,
+                    highlight=appearance.highlight,
+                )
+            else:
+                _paint_clipped_border(
+                    pygame_module, surface, border, left=outer.left, top=outer.top,
+                    right=outer.right, bottom=outer.bottom, width=1, clip=visible,
+                )
+        if draw.title and draw.content_bounds.cell_y >= 1 and draw.bounds.cell_cols >= 3:
+            title = _WideRect(outer.left + cell_w, outer.top,
+                              outer.width - 2 * cell_w, cell_h)
+            visible_title = _bounded_pygame_rect(pygame_module, title, clip)
+            surface.set_clip(visible_title)
+            _paint_bounded_text(
+                pygame_module, surface, font, draw.title,
+                border if draw.focused else _MUTED_TEXT, visible_title,
+                left=title.left, right=title.right, top=title.top, bottom=title.bottom,
+                tab_advance=max(1, cell_w * 4),
+            )
+    finally:
+        surface.set_clip(prior_clip)
+
+
 def _paint_readout(pygame_module, surface, font, region, region_rect, draw, *, appearance: Appearance = REFERENCE_APPEARANCE) -> None:
     object_rect, clip = _object_clip(
         pygame_module, surface, region, region_rect, draw
@@ -3993,6 +4057,11 @@ def _paint_draw(
                     draw.resource_id,
                 )
             ],
+        )
+    elif isinstance(draw, PaneDraw):
+        _paint_pane(
+            pygame_module, surface, control_font, region, region_rect, draw,
+            appearance=appearance,
         )
     elif isinstance(draw, ReadoutDraw):
         _paint_readout(

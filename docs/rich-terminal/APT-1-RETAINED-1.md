@@ -231,8 +231,9 @@ Feature bits are:
 | 8 | `RET_CONTROLS` | semantic menu controls and revision-bound activation |
 | 9 | `RET_CONTROL_COLLECTIONS` | text-area, text-grid, tabset, and tab CONTROL kinds |
 | 10 | `RET_CONTROL_ITEMS` | the item-view CONTROL kind and its item events |
+| 11 | `RET_PANES` | explicit pane chrome, title, focus, and content-region relationship |
 
-Bits 11 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 12 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -270,6 +271,14 @@ whose minimum complete transaction is 280 bytes. `RET_CONTROL_COLLECTIONS`
 raises that floor to 352 bytes for one CONTROL prefix plus the 72-byte
 zero-item STX1 body, which also covers the 56-byte smallest ITM1 body of
 `RET_CONTROL_ITEMS`. These are complete frame bytes, not payload bytes.
+`RET_PANES` depends only on CORE and requires positive object and aggregate
+UTF-8 capacity and at least two regions for distinct chrome and content. Its
+operation-count minimum remains one: those regions can be staged in earlier
+transactions. It adds no per-title maximum; the frame, transaction and
+aggregate UTF-8 bounds limit each title. Its smallest PANE has a 104-byte
+payload and a 304-byte complete transaction. A caller must explicitly enable
+the family; implementations must not enlarge an existing product policy's
+advertised features merely because its decoder supports PANE.
 Advertising a payload maximum that cannot be used in one valid transaction is
 inconsistent discovery.
 
@@ -317,6 +326,7 @@ exactly when CADENCE is set and otherwise zero. It is a renderer admission
 bound, not a clock source or permission to invent samples.
 CONTROLS adds no field to `RET_FORMATS`; its count and string storage consume
 the existing object and aggregate UTF-8 bounds.
+PANES likewise adds no `RET_FORMATS` field and uses those same bounds.
 
 Advertised maxima must describe at least one usable maximum-sized item:
 `total_utf8_bytes >= max_glyph_run_bytes` when glyph runs are enabled;
@@ -1157,8 +1167,11 @@ Object type values are:
 | 7 | `STATUS` | INSTRUMENT |
 | 8 | `PLOT` | SERIES |
 | 9 | `WAVEFORM` | SERIES |
+| 10 | `PANE` | PANES |
 
-No object type in this table defines a semantic UI control. The APT-1 base
+No object type in this table defines an input-producing semantic UI control.
+PANE explicitly describes pane chrome and a region relationship; it preserves
+the generic OBJECT pointer behavior. The APT-1 base
 contract reserves `4000` through `4FFF` for semantic controls; this profile now
 defines `CONTROL_DEFINE`, `CONTROL_REPLACE`, and `CONTROL_DROP` at `4000`
 through `4002` under `RET_CONTROLS`; feature bit 9 adds text, grid, and tab
@@ -1312,6 +1325,83 @@ maximum i64, trace RGBA, zero-line RGBA, zero-line value i64, waveform flags,
 and reserved zero. Minimum is less than maximum and includes the zero-line
 value. Flag bit 0 draws the zero line; other bits are zero.
 Timestamp and value mapping is identical to PLOT.
+
+### 11.10 PANE
+
+PANE is an explicit renderer-neutral description of pane chrome. It uses the
+existing OBJECT identity, complete DEFINE/REPLACE, visibility, drop, quota,
+transaction and revision rules. The common prefix's CELL_RECT32 is the outer
+pane rectangle. `parent_object_id` must be zero. The common owner tuple is its
+exact wire authority; an application identity, title or focus state grants no
+additional authority.
+
+Its body is the 40-byte `<IHHQiiIIII>` header followed immediately by
+`title_bytes` bytes with no padding:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | tag = `0x31454E50` (`PNE1`) | u32 |
+| 4 | version = 1 | u16 |
+| 6 | state, bit 0 = `FOCUSED`; other bits zero | u16 |
+| 8 | content region ID, nonzero | u64 |
+| 16 | content x, relative to the pane's outer origin | i32 |
+| 20 | content y, relative to the pane's outer origin | i32 |
+| 24 | content columns, positive | u32 |
+| 28 | content rows, positive | u32 |
+| 32 | title byte count | u32 |
+| 36 | reserved = 0 | u32 |
+
+Content bounds must be fully contained within the outer rectangle. Endpoints
+use exact mathematical addition rather than wrapping or an i32 endpoint cap.
+A focused pane must have its common visibility bit set. Focus is committed
+descriptive state: it does not grant keyboard focus, create an input target,
+or authorize a host-local focus transition. `OBJECT_SET_VALUE` does not apply
+to PANE; title, content and focus changes use complete OBJECT_REPLACE.
+
+The title is clean single-line Unicode-scalar UTF-8. C0 (`U+0000..001F`), DEL
+and C1 (`U+007F..009F`), and `U+2028` and `U+2029` are forbidden. Empty text is
+valid. The exact title bytes consume the existing owner aggregate UTF-8 quota;
+the PANE consumes one object slot. Each complete payload and transaction must
+fit their advertised limits. The title always remains semantic metadata. A
+renderer may paint it in the first outer cell row, with one cell of horizontal
+inset, only when content y is at least one and outer width is at least three.
+Otherwise it omits the visual title. Clipping or shortening a title must never
+shift or consume the declared content rectangle.
+
+The content region must be distinct from the pane's chrome region and belong
+to the same exact owner generation. It must exist before the pane is defined.
+The final graph must contain both regions, and at most one PANE may bind each
+content region. The content region must use an explicit physical clip. Its
+all-zero clip remains the canonical fully clipped form; every nonempty clip
+must fit inside the content rectangle translated through the chrome region's
+logical origin and the pane's outer origin. Ordinary REGION validation also
+requires the clip to fit the selected surface and that content region's own
+logical rectangle. The region's logical geometry is not rewritten.
+
+The content region must paint after the chrome region: for their shared owner,
+`(content.z_order, content.region_id)` is strictly greater than
+`(chrome.z_order, chrome.region_id)`. This preserves the existing region
+occlusion and control hit-map authority. A region replacement, pane replacement,
+or drop is validated against the transaction's final graph; a producer may
+repair both sides together before committing. Hiding or dropping pane chrome
+does not implicitly hide, drop, or reparent content. Producer intent changes
+both explicit records atomically when their visibility should change together.
+
+The renderer draws pane material only in outer-minus-content chrome and leaves
+the content rectangle untouched. Curves, colors and materials are host choices
+bounded by that geometry. PANE remains pointer-transparent under the OBJECT
+rules; existing raw pointer and semantic CONTROL routing are unchanged. Controls
+and other objects belong to the pane through their existing content-region
+membership, without new cross-namespace parentage or glyph-derived inference.
+
+An old client that does not recognize advertised bit 11 follows the existing
+unsupported-discovery rule and retains the complete CELL fallback. A client
+must not emit PANE when the terminal omits the feature. Unsupported PNE1 versions,
+reserved state, malformed titles, or an invalid relationship reject the whole
+transaction under Section 15; they are never silently skipped or partially
+applied. CELL remains the independent complete visual fallback. A sink may
+advertise PANES only when its complete compose and exact-acknowledgement path
+supports the family.
 
 ## 12. Bounded i64 series
 

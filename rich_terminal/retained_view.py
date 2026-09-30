@@ -32,6 +32,7 @@ from .retained_scene import (
     ObjectBounds,
     ObjectDefinition,
     OwnerScene,
+    PaneBody,
     Point,
     PlotBody,
     PolylineBody,
@@ -45,6 +46,7 @@ from .retained_scene import (
     StatusBody,
     WaveformBody,
     validate_control_shape,
+    validate_pane_shape,
 )
 from .semantic_content import SemanticTextContent
 from .semantic_items import ItemViewContent
@@ -383,6 +385,45 @@ class ImageDraw:
             "parent_bounds",
             _object_bounds_path("parent_bounds", self.parent_bounds),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PaneDraw:
+    """Root pane chrome with an explicit, independently clipped content region."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    content_region_id: int
+    content_bounds: ObjectBounds
+    title: str
+    focused: bool = False
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "object_id",
+            _integer("object_id", self.object_id, minimum=1, maximum=UINT64_MAX),
+        )
+        object.__setattr__(
+            self, "z_order",
+            _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
+        )
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        parent_bounds = _object_bounds_path("parent_bounds", self.parent_bounds)
+        if parent_bounds:
+            raise ValueError("PANE draw must be a root object")
+        body = PaneBody(
+            self.content_region_id, self.content_bounds, self.title, self.focused
+        )
+        # The containing draw region checks the distinct-region relationship.
+        validate_pane_shape(
+            body, bounds=self.bounds, region_id=0, parent_object_id=0, visible=True
+        )
+        object.__setattr__(self, "content_region_id", body.content_region_id)
+        object.__setattr__(self, "focused", body.focused)
+        object.__setattr__(self, "parent_bounds", parent_bounds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1180,6 +1221,7 @@ ObjectDraw = (
     GlyphRunDraw
     | PolylineDraw
     | ImageDraw
+    | PaneDraw
     | ReadoutDraw
     | MeterDraw
     | StatusDraw
@@ -1193,6 +1235,7 @@ _OBJECT_DRAW_TYPES = (
     GlyphRunDraw,
     PolylineDraw,
     ImageDraw,
+    PaneDraw,
     ReadoutDraw,
     MeterDraw,
     StatusDraw,
@@ -1306,6 +1349,7 @@ class RetainedRegionDraw:
                     GlyphRunDraw,
                     PolylineDraw,
                     ImageDraw,
+                    PaneDraw,
                     ReadoutDraw,
                     MeterDraw,
                     StatusDraw,
@@ -1323,7 +1367,35 @@ class RetainedRegionDraw:
             raise TypeError("draws contain a value outside the retained draw vocabulary")
         if tuple(sorted(draws, key=_draw_order_key)) != draws:
             raise ValueError("region draw values are not in back-to-front order")
+        if any(
+            isinstance(draw, PaneDraw) and draw.content_region_id == self.region_id
+            for draw in draws
+        ):
+            raise ValueError("PANE content region must differ from its chrome region")
         object.__setattr__(self, "draws", draws)
+
+
+def _validate_pane_content_region(chrome_region, content_region, bounds, content):
+    """Validate the published viewport without changing either region's geometry."""
+
+    if not content_region.clipped:
+        raise ValueError("PANE content region requires an explicit clip")
+    if (content_region.z_order, content_region.region_id) <= (
+        chrome_region.z_order, chrome_region.region_id
+    ):
+        raise ValueError("PANE content region must sort after its chrome region")
+    # All-zero clips represent empty viewports, including off-screen panes.
+    if content_region.clip_cols == 0:
+        return
+    left = chrome_region.logical_x + bounds.cell_x + content.cell_x
+    top = chrome_region.logical_y + bounds.cell_y + content.cell_y
+    if (
+        content_region.clip_x < left
+        or content_region.clip_y < top
+        or content_region.clip_x + content_region.clip_cols > left + content.cell_cols
+        or content_region.clip_y + content_region.clip_rows > top + content.cell_rows
+    ):
+        raise ValueError("PANE content-region clip exceeds its content bounds")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1361,6 +1433,12 @@ class RetainedDrawPlane:
             raise ValueError("a hidden retained plane cannot contain draw regions")
         if self.retained_visible and not self.retained_initialized:
             raise ValueError("an uninitialized retained plane cannot be visible")
+        regions_by_key = {
+            (region.owner_id, region.owner_generation, region.region_id): region
+            for region in regions
+        }
+        if len(regions_by_key) != len(regions):
+            raise ValueError("draw region identities are duplicated")
         series = tuple(self.series)
         if any(not isinstance(history, SeriesHistoryDraw) for history in series):
             raise TypeError("series must contain only SeriesHistoryDraw values")
@@ -1391,12 +1469,27 @@ class RetainedDrawPlane:
                 "a hidden retained plane cannot contain IMAGE resource manifests"
             )
         control_ids_by_owner: dict[tuple[int, int], set[int]] = {}
+        object_ids_by_owner: dict[tuple[int, int], set[int]] = {}
+        pane_content_keys: set[tuple[int, int, int]] = set()
         referenced_series: set[tuple[int, int, int]] = set()
         referenced_resources: set[tuple[int, int, int]] = set()
         for region in regions:
             owner = region.owner_id, region.owner_generation
             owner_control_ids = control_ids_by_owner.setdefault(owner, set())
+            owner_object_ids = object_ids_by_owner.setdefault(owner, set())
             for draw in region.draws:
+                if isinstance(draw, PaneDraw):
+                    content_key = (*owner, draw.content_region_id)
+                    if content_key in pane_content_keys:
+                        raise ValueError("a content region has multiple PANE draws")
+                    pane_content_keys.add(content_key)
+                    content_region = regions_by_key.get(content_key)
+                    # Hidden regions are omitted by projection. Their absence
+                    # cannot grant visible contents any unverified authority.
+                    if content_region is not None:
+                        _validate_pane_content_region(
+                            region, content_region, draw.bounds, draw.content_bounds
+                        )
                 if isinstance(draw, (PlotDraw, WaveformDraw)):
                     key = region.owner_id, region.owner_generation, draw.series_id
                     if key not in series_by_key:
@@ -1412,6 +1505,9 @@ class RetainedDrawPlane:
                         raise ValueError("IMAGE draw has no exact resource manifest")
                     referenced_resources.add(key)
                 if isinstance(draw, _OBJECT_DRAW_TYPES):
+                    if draw.object_id in owner_object_ids:
+                        raise ValueError("owner object IDs are duplicated")
+                    owner_object_ids.add(draw.object_id)
                     continue
                 draw_control_ids = _semantic_draw_control_ids(draw)
                 if owner_control_ids & draw_control_ids:
@@ -2022,6 +2118,7 @@ def project_composite_draw_plane(
             except (TypeError, ValueError) as exc:
                 raise RetainedViewError(str(exc)) from exc
 
+        pane_content_regions: set[int] = set()
         for object_key, definition in owner_scene.objects.items():
             if not isinstance(definition, ObjectDefinition):
                 raise RetainedViewError("retained object map contains an invalid value")
@@ -2040,6 +2137,27 @@ def project_composite_draw_plane(
                 raise RetainedViewError("retained object map or owner identity is invalid")
             if definition.region_id not in owner_scene.regions:
                 raise RetainedViewError("retained object refers to a missing region")
+            if isinstance(definition.body, PaneBody):
+                body = definition.body
+                content_region = owner_scene.regions.get(body.content_region_id)
+                if content_region is None or content_region.owner != owner:
+                    raise RetainedViewError("PANE has no exact-owner content region")
+                if body.content_region_id in pane_content_regions:
+                    raise RetainedViewError("a content region has multiple panes")
+                pane_content_regions.add(body.content_region_id)
+                try:
+                    validate_pane_shape(
+                        body, bounds=definition.bounds,
+                        region_id=definition.region_id,
+                        parent_object_id=definition.parent_object_id,
+                        visible=definition.visible,
+                    )
+                    _validate_pane_content_region(
+                        owner_scene.regions[definition.region_id], content_region,
+                        definition.bounds, body.content_bounds,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise RetainedViewError(str(exc)) from exc
 
         for series_key, definition in owner_scene.series.items():
             if not isinstance(definition, SeriesDefinition):
@@ -2076,6 +2194,20 @@ def project_composite_draw_plane(
                 )
                 bounds = definition.bounds
                 body = definition.body
+                if isinstance(body, PaneBody):
+                    draws.append(
+                        PaneDraw(
+                            object_id=definition.object_id,
+                            z_order=definition.z_order,
+                            bounds=bounds,
+                            content_region_id=body.content_region_id,
+                            content_bounds=body.content_bounds,
+                            title=body.title,
+                            focused=body.focused,
+                            parent_bounds=parent_bounds,
+                        )
+                    )
+                    continue
                 if isinstance(body, GlyphRunBody):
                     draws.append(
                         GlyphRunDraw(
@@ -2305,6 +2437,7 @@ __all__ = [
     "MenuSeparatorDraw",
     "MeterDraw",
     "ObjectDraw",
+    "PaneDraw",
     "PlotDraw",
     "PolylineDraw",
     "ReadoutDraw",

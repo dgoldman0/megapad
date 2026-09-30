@@ -35,6 +35,7 @@ from rich_terminal.retained_view import (
     MenuItemDraw,
     MenuSeparatorDraw,
     MeterDraw,
+    PaneDraw,
     PlotDraw,
     PolylineDraw,
     ReadoutDraw,
@@ -642,6 +643,17 @@ _IMAGE_WIRE_FIELDS = (
     "fit",
     "opacity",
 )
+_PANE_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "content_region_id",
+    "content_bounds",
+    "title",
+    "focused",
+)
 _READOUT_WIRE_FIELDS = (
     "kind",
     "object_id",
@@ -1064,6 +1076,7 @@ def _retained_draw_to_wire(
         GlyphRunDraw
         | PolylineDraw
         | ImageDraw
+        | PaneDraw
         | ReadoutDraw
         | MeterDraw
         | StatusDraw
@@ -1124,6 +1137,18 @@ def _retained_draw_to_wire(
             "resource_id": draw.resource_id,
             "fit": int(draw.fit),
             "opacity": draw.opacity,
+        }
+    if isinstance(draw, PaneDraw):
+        return {
+            "kind": "pane",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "content_region_id": draw.content_region_id,
+            "content_bounds": _bounds_to_wire(draw.content_bounds),
+            "title": draw.title,
+            "focused": draw.focused,
         }
     if isinstance(draw, ReadoutDraw):
         return {
@@ -1617,6 +1642,23 @@ def _tabset_from_wire(data, name: str) -> TabSetDraw:
     )
 
 
+def _pane_bounds_from_wire(value, name: str) -> ObjectBounds:
+    """Decode signed CELL_RECT32 offsets and positive unsigned dimensions."""
+
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise TypeError(f"{name} must be an array of four integers")
+    return ObjectBounds(
+        *(
+            _wire_integer(
+                item, f"{name}[{index}]",
+                minimum=INT32_MIN if index < 2 else 1,
+                maximum=INT32_MAX if index < 2 else UINT32_MAX,
+            )
+            for index, item in enumerate(value)
+        )
+    )
+
+
 def _retained_draw_from_wire(
     data,
     name: str,
@@ -1624,6 +1666,7 @@ def _retained_draw_from_wire(
     GlyphRunDraw
     | PolylineDraw
     | ImageDraw
+    | PaneDraw
     | ReadoutDraw
     | MeterDraw
     | StatusDraw
@@ -1749,6 +1792,30 @@ def _retained_draw_from_wire(
             opacity=_wire_integer(
                 wire["opacity"], f"{name} opacity", minimum=0, maximum=0xFF
             ),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+        )
+    if kind == "pane":
+        wire = _wire_object(data, name, _PANE_WIRE_FIELDS)
+        return PaneDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"], f"{name} z_order",
+                minimum=INT32_MIN, maximum=INT32_MAX,
+            ),
+            bounds=_pane_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            content_region_id=_wire_integer(
+                wire["content_region_id"], f"{name} content_region_id",
+                minimum=1, maximum=UINT64_MAX,
+            ),
+            content_bounds=_pane_bounds_from_wire(
+                wire["content_bounds"], f"{name} content_bounds"
+            ),
+            title=_wire_text(wire["title"], f"{name} title"),
+            focused=_wire_boolean(wire["focused"], f"{name} focused"),
             parent_bounds=_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),

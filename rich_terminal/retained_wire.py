@@ -32,6 +32,7 @@ from .retained_scene import (
     MeterBody,
     ObjectBounds,
     ObjectKind,
+    PaneBody,
     PlotBody,
     Point,
     PolylineBody,
@@ -44,6 +45,7 @@ from .retained_scene import (
     UniformSamples,
     validate_control_shape,
     WaveformBody,
+    validate_pane_shape,
 )
 from .semantic_content import (
     SemanticContentError,
@@ -59,7 +61,7 @@ from .semantic_items import (
 
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0x73F
+_RETAINED_FEATURE_MASK = 0xF3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -82,6 +84,8 @@ _POINT = struct.Struct("<II")
 # ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
 _IMAGE_BODY = struct.Struct("<QIB3s")
 _GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
+_PANE_BODY = struct.Struct("<IHHQiiIIII")
+PANE_BODY_TAG = 0x31454E50
 _READOUT_BODY = struct.Struct("<8BIIqqII")
 _METER_BODY = struct.Struct("<8BIIqqqQ")
 _STATUS_BODY = struct.Struct("<8BqIIQ")
@@ -403,6 +407,10 @@ class RetainedCaps:
             raise ValueError("CORE maxima must be positive")
         if features & RetainedFeature.CONTROLS and self.max_objects == 0:
             raise ValueError("CONTROLS requires object capacity")
+        if features & RetainedFeature.PANES and self.max_objects == 0:
+            raise ValueError("PANES requires object capacity")
+        if features & RetainedFeature.PANES and self.max_regions < 2:
+            raise ValueError("PANES requires at least two regions")
 
     def policy(
         self,
@@ -932,6 +940,7 @@ class RegionWireDefinition:
 
 ObjectWireBody = (
     GroupBody
+    | PaneBody
     | PolylineBody
     | ImageBody
     | GlyphRunBody
@@ -945,6 +954,7 @@ ObjectWireBody = (
 
 _WIRE_BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
+    PaneBody: ObjectKind.PANE,
     PolylineBody: ObjectKind.POLYLINE,
     ImageBody: ObjectKind.IMAGE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
@@ -1184,6 +1194,11 @@ class ObjectWireDefinition:
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         if type(self.body) not in _WIRE_BODY_KIND:
             raise TypeError("body is not a supported RETAINED-1 wire body")
+        if isinstance(self.body, PaneBody):
+            validate_pane_shape(
+                self.body, bounds=self.bounds, region_id=self.region_id,
+                parent_object_id=self.parent_object_id, visible=self.visible,
+            )
 
     @property
     def kind(self) -> ObjectKind | int:
@@ -1711,6 +1726,15 @@ def _body_size(raw: bytes, expected: int, name: str) -> None:
 def _encode_object_body(body: ObjectWireBody) -> bytes:
     if isinstance(body, GroupBody):
         return b""
+    if isinstance(body, PaneBody):
+        title = body.title.encode("utf-8", "strict")
+        title_bytes = _integer("title_bytes", len(title), minimum=0, maximum=UINT32_MAX)
+        content = body.content_bounds
+        return _PANE_BODY.pack(
+            PANE_BODY_TAG, 1, int(body.focused), body.content_region_id,
+            content.cell_x, content.cell_y, content.cell_cols, content.cell_rows,
+            title_bytes, 0,
+        ) + title
     if isinstance(body, PolylineBody):
         point_count = _integer(
             "point_count", len(body.points), minimum=2, maximum=UINT32_MAX
@@ -1832,6 +1856,19 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
         if kind is ObjectKind.GROUP:
             _body_size(raw, 0, "GROUP")
             return GroupBody()
+        if kind is ObjectKind.PANE:
+            if len(raw) < _PANE_BODY.size:
+                _body_size(raw, _PANE_BODY.size, "PANE prefix")
+            tag, version, state, region_id, x, y, cols, rows, title_bytes, reserved = _PANE_BODY.unpack_from(raw)
+            if tag != PANE_BODY_TAG or version != 1:
+                raise RetainedWireError(RetainedWireErrorCode.ENUM, "PANE tag or version is unsupported")
+            if state & ~0x1 or reserved:
+                raise RetainedWireError(RetainedWireErrorCode.RESERVED, "PANE state or reserved field is noncanonical")
+            _body_size(raw, _PANE_BODY.size + title_bytes, "PANE")
+            return PaneBody(
+                region_id, ObjectBounds(x, y, cols, rows),
+                _wire_text(raw[_PANE_BODY.size:], "PANE title"), bool(state),
+            )
         if kind is ObjectKind.POLYLINE:
             if len(raw) < _POLYLINE_BODY.size:
                 _body_size(raw, _POLYLINE_BODY.size, "POLYLINE prefix")
@@ -2504,6 +2541,7 @@ __all__ = [
     "ControlWireDefinition", "ImageBody", "ImageFit", "ObjectSetValue",
     "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
+    "PaneBody", "PANE_BODY_TAG",
     "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RetainedItemReference",
     "RET1_TAG", "RetStatus", "SeriesWireBatch", "SeriesWireDefinition", "SeriesWireSamples",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",

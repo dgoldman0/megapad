@@ -254,6 +254,14 @@ PT-WAVEFORM-REPLACE ( owner generation object region parent
                       trace-red trace-green trace-blue trace-alpha zero-red
                       zero-green zero-blue zero-alpha zero-value waveform-flags
                       session -- status )
+PT-PANE-DEFINE    ( owner generation object region parent
+                      x y cols rows z visible content-region content-x
+                      content-y content-cols content-rows pane-state
+                      title-a title-u session -- status )
+PT-PANE-REPLACE   ( owner generation object region parent
+                      x y cols rows z visible content-region content-x
+                      content-y content-cols content-rows pane-state
+                      title-a title-u session -- status )
 PT-OBJECT-SET-VALUE ( owner generation object value session -- status )
 PT-OBJECT-SET-VISIBILITY ( owner generation object visible session -- status )
 PT-OBJECT-DROP      ( owner generation object session -- status )
@@ -518,8 +526,33 @@ It then encodes every timestamp and value little-endian into private TX scratch.
 The upper engine retains per-series definitions/history and replay authority;
 PT introduces no series table or hard-coded history capacity of its own.
 
+`PT-PANE-DEFINE` and `PT-PANE-REPLACE` require the additive `RET_PANES`
+feature (bit 11) and use object kind `PT-OBJECT-PANE` (10). The standard
+64-byte OBJECT prefix is followed by the canonical PNE1 header and borrowed
+UTF-8 title. `parent` is zero; the content region is nonzero and distinct from
+the pane's own region. Content bounds are pane-local, positive, and contained
+by the outer rectangle. Title metadata never reserves or shifts guest cells.
+The renderer displays it one cell inside the first row only when content
+starts below that row and the pane has at least three columns; otherwise
+the title remains metadata and the guest retains the full content geometry.
+`PT-PANE-FOCUSED` is the sole pane-state bit and requires a visible object.
+Title bytes exclude C0/C1 controls, DEL, and U+2028/U+2029, and use canonical
+`0 0` for an empty title. The borrowed title must be disjoint from the session
+and TX scratch; it is copied before return and its address is then cleared.
+
+PANES requires CORE, capacity for at least two distinct regions, positive
+shared object and aggregate UTF-8 capacities, at least 104 inbound payload
+bytes, and a 304-byte retained transaction
+maximum. It adds no per-title capacity. A terminal without PANES can continue
+publishing its other retained families; a pane writer returns
+`PT-S-UNSUPPORTED` before emitting bytes or advancing transaction accounting.
+The caller keeps the complete CELL fallback. Existing guests that reject the
+new capability bit retain their established deterministic CELL-only outcome.
+The terminal validates final same-owner content-region binding, explicit clip
+containment, and unique binding at commit; the guest keeps no graph cache.
+
 The object writers expose the protocol's renderer-neutral GROUP, POLYLINE,
-IMAGE, GLYPH_RUN, READOUT, METER, STATUS, PLOT, and WAVEFORM records. POLYLINE
+IMAGE, GLYPH_RUN, READOUT, METER, STATUS, PLOT, WAVEFORM, and PANE records. POLYLINE
 accepts an aligned borrowed span of native coordinate-cell pairs and derives
 the point count; READOUT accepts a borrowed canonical UTF-8 unit span. Both are
 range-checked and caller-bounded; scalar fields and coordinate cells are

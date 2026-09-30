@@ -114,6 +114,8 @@ PROVIDED rich-terminal.f
 \ Renderer-neutral object enums and exact canonical flag bits.
 0 CONSTANT PT-OBJECT-HIDDEN
 1 CONSTANT PT-OBJECT-VISIBLE
+10 CONSTANT PT-OBJECT-PANE
+0x01 CONSTANT PT-PANE-FOCUSED
 
 0x01 CONSTANT PT-POLYLINE-CLOSED
 
@@ -247,7 +249,8 @@ PROVIDED rich-terminal.f
 0x100    CONSTANT _PT-RET-CONTROLS
 0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS
 0x400    CONSTANT _PT-RET-CONTROL-ITEMS
-0x73F    CONSTANT _PT-RET-FEATURE-MASK
+0x800    CONSTANT _PT-RET-PANES
+0xF3F    CONSTANT _PT-RET-FEATURE-MASK
 250      CONSTANT _PT-TIMEOUT-MS
 3        CONSTANT _PT-PROBE-LIMIT
 256      CONSTANT _PT-SERVICE-BYTES
@@ -686,6 +689,10 @@ VARIABLE _PT-U64-A
 : _PT-RET-SERIES?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
     _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-SERIES AND 0<> ;
+
+: _PT-RET-PANES?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-PANES AND 0<> ;
 
 : _PT-I32@  ( a -- n )
     L@ DUP 0x80000000 AND IF 0xFFFFFFFF00000000 OR THEN ;
@@ -2173,6 +2180,13 @@ VARIABLE _PT-RV-TOTAL
     _PT-RV-S @ _PT.S.CLIENT-MAX-PAY @ 64 U< OR IF FALSE EXIT THEN
     _PT-RV-S @ _PT.S.TX-U @ 104 U< IF FALSE EXIT THEN
 
+    _PT-RV-FEATURES @ _PT-RET-PANES AND IF
+        _PT-RV-P @ 24 + L@ 2 U< IF FALSE EXIT THEN
+        _PT-RV-P @ 32 + L@ 0= IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 104 U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.TX-U @ 144 U< IF FALSE EXIT THEN
+        _PT-RV-RETMAX @ 304 U< IF FALSE EXIT THEN
+    THEN
     _PT-RV-FEATURES @ 0x11E AND IF
         _PT-RV-P @ 32 + L@ 0= IF FALSE EXIT THEN
     THEN
@@ -2263,6 +2277,7 @@ VARIABLE _PT-RF-PIXELS
         _PT-RV-FEATURES @ 0x08 AND IF FALSE EXIT THEN
         _PT-RF-FORMATS @ 48 + _PT-U64@
         _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0<>
+        _PT-RV-FEATURES @ _PT-RET-PANES AND 0<> OR
         _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
     THEN
 
@@ -4761,7 +4776,7 @@ VARIABLE _PT-OB-PAYLOAD-U
     _PT-OB-ID @ 0= OR _PT-OB-REGION @ 0= OR IF FALSE EXIT THEN
     _PT-OB-TYPE @ DUP _PT-M-OBJECT-DEFINE =
     SWAP _PT-M-OBJECT-REPLACE = OR 0= IF FALSE EXIT THEN
-    _PT-OB-KIND @ DUP 1 U< SWAP 9 U> OR IF FALSE EXIT THEN
+    _PT-OB-KIND @ DUP 1 U< SWAP PT-OBJECT-PANE U> OR IF FALSE EXIT THEN
     _PT-OB-X @ _PT-OB-COLS @ _PT-I32-EXTENT? 0=
     _PT-OB-Y @ _PT-OB-ROWS @ _PT-I32-EXTENT? 0= OR IF FALSE EXIT THEN
     _PT-OB-Z @ _PT-I32? 0= IF FALSE EXIT THEN
@@ -5377,6 +5392,122 @@ VARIABLE _PT-WF-FLAGS
 \        session -- status
 : PT-WAVEFORM-REPLACE
     _PT-M-OBJECT-REPLACE _PT-WAVEFORM-WRITE ;
+
+\ Pane chrome has its own retained feature and keeps content in a separately
+\ owned region.  The guest validates local geometry and borrowed title text;
+\ the terminal validates the final same-owner region graph and clip binding.
+VARIABLE _PT-PN-S
+VARIABLE _PT-PN-TYPE
+VARIABLE _PT-PN-REGION
+VARIABLE _PT-PN-X
+VARIABLE _PT-PN-Y
+VARIABLE _PT-PN-COLS
+VARIABLE _PT-PN-ROWS
+VARIABLE _PT-PN-STATE
+VARIABLE _PT-PN-TITLE-A
+VARIABLE _PT-PN-TITLE-U
+VARIABLE _PT-PN-PAYLOAD-U
+
+: _PT-PANE-TITLE?  ( -- flag )
+    _PT-PN-TITLE-U @ 0= IF _PT-PN-TITLE-A @ 0= EXIT THEN
+    _PT-PN-TITLE-A @ _PT-PN-TITLE-U @ _PT-RANGE-VALID? 0= IF
+        FALSE EXIT
+    THEN
+    _PT-PN-TITLE-A @ _PT-PN-TITLE-U @ _PT-OB-S @ /PT-SESSION
+        _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-PN-TITLE-A @ _PT-PN-TITLE-U @ _PT-OB-S @ _PT.S.TX-A @
+        _PT-OB-S @ _PT.S.TX-U @ _PT-RANGES-OVERLAP? IF FALSE EXIT THEN
+    _PT-PN-TITLE-A @ _PT-PN-TITLE-U @ _PT-UTF8? 0= IF FALSE EXIT THEN
+    \ UTF-8 is already canonical, so these exact byte patterns exclude
+    \ C0/C1 controls, DEL, and the two Unicode line/paragraph separators.
+    _PT-PN-TITLE-U @ 0 ?DO
+        _PT-PN-TITLE-A @ I + C@ DUP 32 U< OVER 127 = OR IF
+            DROP FALSE UNLOOP EXIT
+        THEN
+        DUP 0xC2 = I 1+ _PT-PN-TITLE-U @ U< AND IF
+            _PT-PN-TITLE-A @ I 1+ + C@ 0x80 0xA0 WITHIN IF
+                DROP FALSE UNLOOP EXIT
+            THEN
+        THEN
+        0xE2 = I 2 + _PT-PN-TITLE-U @ U< AND IF
+            _PT-PN-TITLE-A @ I 1+ + C@ 0x80 =
+            _PT-PN-TITLE-A @ I 2 + + C@ 0xA8 0xAA WITHIN AND IF
+                FALSE UNLOOP EXIT
+            THEN
+        THEN
+    LOOP
+    TRUE ;
+
+: _PT-PANE-FIELDS?  ( -- flag )
+    _PT-OBJECT-COMMON-FIELDS? 0= IF FALSE EXIT THEN
+    _PT-OB-PARENT @ IF FALSE EXIT THEN
+    _PT-PN-REGION @ 0= IF FALSE EXIT THEN
+    _PT-PN-REGION @ _PT-OB-REGION @ = IF FALSE EXIT THEN
+    _PT-PN-STATE @ PT-PANE-FOCUSED INVERT AND IF FALSE EXIT THEN
+    _PT-PN-STATE @ PT-PANE-FOCUSED AND
+    _PT-OB-VISIBLE @ 0= AND IF FALSE EXIT THEN
+    _PT-PN-X @ _PT-PN-COLS @ _PT-I32-EXTENT? 0=
+    _PT-PN-Y @ _PT-PN-ROWS @ _PT-I32-EXTENT? 0= OR IF FALSE EXIT THEN
+    _PT-PN-X @ 0< _PT-PN-Y @ 0< OR IF FALSE EXIT THEN
+    _PT-PN-X @ _PT-PN-COLS @ + _PT-OB-COLS @ U>
+    _PT-PN-Y @ _PT-PN-ROWS @ + _PT-OB-ROWS @ U> OR IF FALSE EXIT THEN
+    _PT-PN-TITLE-U @ _PT-U32? 0= IF FALSE EXIT THEN
+    _PT-PN-TITLE-U @ 104 _PT-UADD? 0= IF DROP FALSE EXIT THEN
+    _PT-PN-PAYLOAD-U !
+    _PT-PANE-TITLE? ;
+
+: _PT-PANE-PAYLOAD!  ( -- )
+    _PT-OBJECT-COMMON-PAYLOAD!
+    0x31454E50 _PT-FRAME-PAYLOAD 64 + L!
+    1 _PT-FRAME-PAYLOAD 68 + W!
+    _PT-PN-STATE @ _PT-FRAME-PAYLOAD 70 + W!
+    _PT-PN-REGION @ _PT-FRAME-PAYLOAD 72 + _PT-U64!
+    _PT-PN-X @ _PT-FRAME-PAYLOAD 80 + L!
+    _PT-PN-Y @ _PT-FRAME-PAYLOAD 84 + L!
+    _PT-PN-COLS @ _PT-FRAME-PAYLOAD 88 + L!
+    _PT-PN-ROWS @ _PT-FRAME-PAYLOAD 92 + L!
+    _PT-PN-TITLE-U @ _PT-FRAME-PAYLOAD 96 + L!
+    _PT-PN-TITLE-U @ IF
+        _PT-PN-TITLE-A @ _PT-PN-TITLE-U @
+            _PT-FRAME-PAYLOAD 104 + SWAP MOVE
+    THEN ;
+
+: _PT-PANE-BODY  ( -- status )
+    _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-OB-S @ _PT-RET-PANES? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-PANE-FIELDS? 0= IF PT-S-INVALID EXIT THEN
+    _PT-PN-PAYLOAD-U @ _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-PANE-PAYLOAD!
+    _PT-PO-SEND ;
+
+: _PT-PANE-SCRUB  ( -- )
+    0 _PT-PN-S ! 0 _PT-PN-TYPE !
+    0 _PT-PN-TITLE-A ! 0 _PT-PN-TITLE-U ! 0 _PT-PN-PAYLOAD-U !
+    0 _PT-RA ! 0 _PT-RU ! 0 _PT-RB ! 0 _PT-RV !
+    0 _PT-U8-A ! 0 _PT-U8-END ! 0 _PT-U8-B ! ;
+
+\ Stack: common-prefix content-region content-x content-y content-cols
+\        content-rows pane-state title-a title-u session message-type -- status
+: _PT-PANE-WRITE
+    _PT-PN-TYPE ! _PT-PN-S ! _PT-PN-TITLE-U ! _PT-PN-TITLE-A !
+    _PT-PN-STATE ! _PT-PN-ROWS ! _PT-PN-COLS ! _PT-PN-Y ! _PT-PN-X !
+    _PT-PN-REGION !
+    _PT-PN-S @ _PT-PN-TYPE @ PT-OBJECT-PANE _PT-OBJECT-COMMON!
+    ['] _PT-PANE-BODY CATCH ?DUP IF DROP PT-S-INVALID THEN
+    _PT-PANE-SCRUB ;
+
+\ Stack: owner generation object region parent x y cols rows z visible
+\        content-region content-x content-y content-cols content-rows
+\        pane-state title-a title-u session -- status
+: PT-PANE-DEFINE
+    _PT-M-OBJECT-DEFINE _PT-PANE-WRITE ;
+
+\ Stack: owner generation object region parent x y cols rows z visible
+\        content-region content-x content-y content-cols content-rows
+\        pane-state title-a title-u session -- status
+: PT-PANE-REPLACE
+    _PT-M-OBJECT-REPLACE _PT-PANE-WRITE ;
 
 VARIABLE _PT-OU-S
 VARIABLE _PT-OU-TYPE

@@ -88,12 +88,13 @@ Status instruments represent simple indicators; they do not describe an
 application status bar. A retained region also does not by itself identify
 an application pane or its focus state.
 
-The full pane-and-channel design needs the following additional semantic
-publication. Its border curves and material treatment remain host choices.
+The full pane-and-channel design needs the following semantic publication.
+MegaPad now implements the pane family; its Akashic producer remains the next
+integration step. Border curves and material treatment remain host choices.
 
 | Family | Required meaning | Producer work after the MegaPad side |
 | --- | --- | --- |
-| Pane | Stable identity, bounds and clip, title, visibility and focus; relationships to contained controls | Desk/app-host publication using existing pane state |
+| Pane (MegaPad implemented) | Stable identity, outer/content bounds, title metadata, visibility and focus; exact-owner content-region binding | Desk/app-host publication using existing pane state and explicit content clips |
 | Structured status | Stable fields with label/value, severity or state, order and bounds | Shared UIDL status/label observation and lowering, covering existing app status strips |
 | Taskbar | Running-app and launcher entries, selected/minimized/enabled state, bounds, and activation intent | Desk shell publication from the same entries used for painting and hit testing |
 | Editable field | Label/value, type, limits or choices when applicable, selected/enabled/read-only state, and revision-bound edit intents | Reusable widget with normal CELL drawing and ordinary event routing; migrate Sound Lab's parameter rows to it |
@@ -220,3 +221,91 @@ The runtime branch can continue from its existing history. Future integration
 should merge a committed runtime checkpoint into the UI branch and repeat the
 affected boundary checks. This checkpoint leaves hybrid execution as later
 runtime work and establishes the common module locations for pane support.
+
+## Pane objects and the Akashic producer handoff
+
+`PANE` is object kind 10, gated by `RET_PANES` (feature bit 11). Its `PNE1`
+body names an exact-owner content region and publishes pane-local content
+bounds, clean UTF-8 title metadata, and committed focus state. The ordinary
+object envelope supplies identity, generation, outer bounds, z-order, and
+visibility. The normative format is in APT-1-RETAINED-1 Section 11.10; the
+guest API is `PT-PANE-DEFINE` / `PT-PANE-REPLACE` in RICH-TERMINAL-MODULE.
+
+The host validates that the content region has an explicit clip contained in
+the translated content rectangle, paints after the chrome region, and belongs
+to one pane. One pane consumes one object slot and its title's UTF-8 bytes.
+Owner quotas, atomic transactions, visibility, reset, and stale-generation
+rules remain the existing retained rules. A pane adds no semantic input
+target: ordinary chrome pointer intent still reaches Desk, which publishes
+the resulting focus. Hiding chrome does not implicitly mutate another region.
+
+Both appearances paint only the declared outer rectangle minus the content
+rectangle. They preserve every content pixel and cell position. A title is
+drawn in the first outer row, with one cell of horizontal clearance, only
+when the content rectangle leaves that row available and the outer width is
+at least three cells. Otherwise it remains metadata. Desk currently starts
+each application with its menu row, so adding a title row would change the
+agreed geometry. Its present pane preview uses the existing divider space.
+
+Keep the current product policies unchanged until their producers opt into
+panes. Updated guests retain their existing supported objects when PANES is
+absent; pane publication returns `PT-S-UNSUPPORTED` without emitting a frame.
+Older guests reject unknown feature bits during discovery and retain CELL
+fallback. Advertise PANES only alongside the updated guest module. The
+profile needs at least two regions, positive object and aggregate UTF-8
+capacity, a 104-byte inbound payload, and a 304-byte retained transaction.
+Larger titles must fit the caller's actual frame, transaction, and owner quota.
+
+For Akashic, publish the pane frame and content-region clip from the same
+Desk/app-host geometry used to draw and route events. Define both regions
+before their pane, keep content above chrome in region paint order, and
+update focus/visibility with the existing presentation transaction. Preserve
+complete CELL borders and application content for fallback. When producing
+the retained view, omit the explicit divider glyph runs replaced by pane
+chrome. Guest publication should provide real content-region bindings for
+the contained controls; the host never discovers them from text or app names.
+
+### Constructed six-pane preview
+
+```sh
+python tools/render_pane_preview.py \
+  tests/fixtures/compositor/desktop-six-app-final.json.gz \
+  build/flowing-preview/desk-panes.png --appearance flowing
+```
+
+The fixture uses the exact six-tile geometry from Akashic `f2f0679` and the
+recorded 280-by-84 Desk frame. Its checked layout manifest supplies every
+outer/content rectangle and title. It preserves the original CELL snapshot,
+application draws, and input targets, suppressing only retained glyph runs
+wholly contained in the explicitly declared divider cells. A partially
+overlapping glyph run is refused instead of dropping guest text.
+
+This is a constructed publication preview, not a run of migrated Akashic
+producers. Empty content-region bindings sit below the unchanged recorded
+regions and do not reparent their controls. The JSON sidecar records those
+bindings, removed divider-object IDs, source hash, geometry, and focus. Use
+`--focus 0..6` to preview focus, `--pane-bounds SLOT X Y COLS ROWS` to adjust
+chrome within the existing dividers, and `--offer output.json.gz` to save the
+constructed display offer. The production decoder and compositor render it.
+
+### Pane validation checkpoint
+
+The supervised sequential gate passed 626 tests in 55.27 seconds. It covers
+the pane codec, quota and transaction rules, immutable projection, shared
+full/delta offers, production server presentation and acknowledgment, pointer
+routing, both appearances, and full/partial repaint equivalence. The complete
+guest writers emitted matching canonical frames under the emulator and both
+Python and native simulator executors. Unsupported profiles emitted no pane
+frames. The six-pane fixture preserved content pixels and pointer targets
+outside the explicitly declared dividers.
+
+These checks qualify the MegaPad implementation and the constructed preview;
+they do not represent a new live Desk run with Akashic pane producers. The
+earlier unified-runtime Desk acceptance above remains a separate checkpoint.
+
+Runtime commits through `6bea7e5` were reviewed at this checkpoint. Their native
+floating-point, fault-return, Keccak, and hybrid-ABI work does not change the
+pane, retained-view, or shared-session contracts, so no additional runtime
+merge was needed. The next integration must rebuild both native extensions
+for their changed exported APIs. The runtime team's uncommitted dense-memory
+work remains in its own worktree.

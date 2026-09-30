@@ -29,6 +29,7 @@ class RetainedFeature(IntFlag):
     CONTROLS = 1 << 8
     CONTROL_COLLECTIONS = 1 << 9
     CONTROL_ITEMS = 1 << 10
+    PANES = 1 << 11
 
 
 class ResourceFormat(IntEnum):
@@ -45,6 +46,7 @@ _ALL_FEATURES = (
     | RetainedFeature.CONTROLS
     | RetainedFeature.CONTROL_COLLECTIONS
     | RetainedFeature.CONTROL_ITEMS
+    | RetainedFeature.PANES
 )
 
 
@@ -245,6 +247,9 @@ class RetainedPolicy:
 
         instrument = bool(features & RetainedFeature.INSTRUMENT)
         controls = bool(features & RetainedFeature.CONTROLS)
+        panes = bool(features & RetainedFeature.PANES)
+        if panes and self.max_regions < 2:
+            raise ValueError("PANES requires at least two regions")
         control_collections = bool(features & RetainedFeature.CONTROL_COLLECTIONS)
         if control_collections and not controls:
             raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
@@ -259,9 +264,11 @@ class RetainedPolicy:
             raise ValueError("total UTF-8 capacity cannot admit one maximum glyph run")
         if controls and self.total_utf8_bytes == 0:
             raise ValueError("CONTROLS requires aggregate UTF-8 capacity")
-        if not glyph_runs and not controls and self.total_utf8_bytes != 0:
-            raise ValueError("UTF-8 capacity requires glyph-run or control capacity")
-        if (vector or image or instrument or controls) and self.max_objects == 0:
+        if panes and self.total_utf8_bytes == 0:
+            raise ValueError("PANES requires aggregate UTF-8 capacity")
+        if not glyph_runs and not controls and not panes and self.total_utf8_bytes != 0:
+            raise ValueError("UTF-8 capacity requires glyph-run, control, or pane capacity")
+        if (vector or image or instrument or controls or panes) and self.max_objects == 0:
             raise ValueError("advertised object features require object capacity")
         if instrument and not glyph_runs:
             raise ValueError("INSTRUMENT requires glyph-run text capacity")
@@ -319,6 +326,10 @@ class RetainedPolicy:
             if inbound < 80:
                 raise ValueError("CONTROLS requires an 80-byte inbound payload")
             operation_payloads.append(80)
+        if panes:
+            if inbound < 104:
+                raise ValueError("PANES requires a 104-byte inbound payload")
+            operation_payloads.append(104)
         if control_collections:
             if inbound < 152:
                 raise ValueError(
@@ -816,12 +827,12 @@ class OwnerLedger:
             )
         if (
             not policy.max_glyph_run_bytes
-            and not (policy.features & RetainedFeature.CONTROLS)
+            and not (policy.features & (RetainedFeature.CONTROLS | RetainedFeature.PANES))
             and quotas.utf8_bytes
         ):
             raise OwnerLedgerError(
                 OwnerLedgerErrorCode.INVALID,
-                "UTF-8 quota requires glyph-run or control capacity",
+                "UTF-8 quota requires glyph-run, control, or pane capacity",
             )
         if not policy.features & RetainedFeature.SERIES and (
             quotas.series or quotas.sample_slots
