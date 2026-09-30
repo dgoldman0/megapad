@@ -322,6 +322,13 @@ Then specify native compiler/dictionary integration for guest JIT, machine
 modules, and code introspection. Preserve source-visible CREATE/DOES>, body
 addresses, immediate-word behavior, and rollback for each admitted profile.
 
+That design deliverable is recorded in
+[`hybrid-native-dictionary-plan.md`](hybrid-native-dictionary-plan.md). It
+separates read-only mappings and bounded modules from a later compiler-owned
+stack/accounting ABI, executable arena and defining-word/JIT vocabulary.
+The existing semantic `JIT-ON`/`JIT-OFF` behavior is unchanged; implementing
+those compiler stages is not implied by callback completion.
+
 General native images, arbitrary self-modification, complete snapshots, and
 multicore hybrid execution need explicit capability and state-mapping work.
 They are later deliverables, not implied results of Phase 4.
