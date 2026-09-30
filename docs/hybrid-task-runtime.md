@@ -88,7 +88,15 @@ ownership and native pins. Native cleanup is still attempted if semantic close
 raises, and the first exception is preserved. An original semantic root cannot
 mix private and task machine entries; separate roots may use either profile.
 
+An installed, qualified native task adapter advertises `shared_task_exceptions`.
+Its original parked-state validator and semantic suspension routes additionally
+qualify `callback_suspension`; the original machine scheduling routes qualify
+`composite_suspension`. These flags describe available prepared-session support,
+including when the selected machine quantum is `None`. The separate task status
+also identifies its neutral ABI and native transport revision. An older revision2
+transport without the parked validator retains synchronous task execution;
+finite machine quanta require qualified composite support before session entry.
+
 Generic task manifests, automatic source/publication ordering and launcher
-support remain deferred. Transport availability alone does not enable the
-`shared_task_exceptions` or `composite_suspension` application capabilities;
-those remain gated on the corresponding prepared-session qualification.
+support remain deferred. Transport availability alone does not establish these
+application capabilities, and diagnostic registration names grant no authority.

@@ -590,6 +590,11 @@ class TaskRegistrationBatch:
 class ForeignTaskEngine:
     """One runtime's opt-in task registrations and exact captured dependencies."""
 
+    # Application qualifications; value metadata never grants entry authority.
+    TASK_CALLBACK_ABI_VERSION = 1
+    TASK_CALLBACK_SUSPENSION_VERSION = 1
+    TASK_MACHINE_QUANTUM_VERSION = 1
+
     def __init__(self, runtime, *, core_installed):
         self._runtime = runtime
         self._dictionary = runtime.dictionary
@@ -2376,6 +2381,36 @@ class ForeignRootLedger:
 
 _CORE_FUNCTION_SEALS = tuple((name, _FunctionSeal.capture(function))
                              for name, function in _CORE_HELPERS)
+
+
+
+# Original source evidence for application support observations. This table is
+# intentionally eager: adapter installation must not bless later replacements.
+_TASK_CAPABILITY_ROUTES = tuple(
+    (kind, name, route, (callback, callback.__code__, callback.__globals__,
+        callback.__defaults__, callback.__kwdefaults__,
+        tuple(cell.cell_contents for cell in (callback.__closure__ or ()))))
+    for kind, names in (
+        (_FunctionSeal, ("verify",)),
+        (ForeignTaskEngine, ("registration_batch", "root_for", "finish_root",
+            "adapter_root_policy", "task_export_dependencies", "task_semantic_receipt",
+            "claim_machine_profile", "_require_task", "park_suspension", "resume_suspension",
+            "task_suspension_owner", "parked_idle_wake_due", "parked_idle_uptime",
+            "restore_suspension_cleanup", "release_suspension_lease", "_validate_parked_adapter",
+            "begin_host_machine_turn", "require_machine_turn", "require_machine_selection",
+            "_machine_call", "_machine_host_caller")),
+        (MegaForthRuntime, ("execute", "run_until_blocked", "_run_until_blocked",
+            "_execute_guarded", "_execute_top", "_execute_top_inner", "_continue_foreign",
+            "task_suspension_pending", "deliver_idle_wake", "resume", "cancel_suspension",
+            "idle_wake_due", "idle_wake_delay_s", "resume_yielded", "_resume_guarded",
+            "_continue_suspension_locked")),
+    )
+    for name in names
+    for route in (vars(kind)[name],)
+    for callback in ((route.fget if type(route) is property else route),)
+)
+_TASK_CAPABILITY_SEAL_FIELDS = tuple(vars(_FunctionSeal)[name] for name in (
+    "callback", "code", "globals", "defaults", "kwdefaults", "closure"))
 
 
 __all__ = [

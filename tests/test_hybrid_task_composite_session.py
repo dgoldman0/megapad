@@ -231,7 +231,9 @@ def test_task_deadline_poll_rejects_changed_witness_and_retires_backend_handle(o
     hybrid, adapter, _executor = owner
     runtime, context = hybrid.semantic, hybrid.semantic.main_context
     _prepare(hybrid, adapter, deadline=True)
+    cpu, control = hybrid._cpu, hybrid._control_buffer
     with _session(hybrid, tmp_path) as (session, server):
+        backend = session.backend
         _until(server, "idle")
         _suspended, task, cookies, receipt = _parked(hybrid, adapter, 2)
         before = (context.data.snapshot(), task.ledger.semantic_steps,
@@ -251,6 +253,13 @@ def test_task_deadline_poll_rejects_changed_witness_and_retires_backend_handle(o
         assert runtime.memory.read64(runtime.find("_TASK-HANDLERS").body_address) == before[2]
         assert hybrid.callback_semantic_steps == before[1]
         assert (hybrid.machine_instructions, hybrid.machine_cycles) == (6, 8)
+    # Prove production server.stop released ownership before the owner fixture's
+    # fallback close can conceal a leak after the failed polling boundary.
+    assert backend.closed and hybrid.closed
+    assert runtime._session_owner_token is None
+    control.extend(b"released after task polling failure")
+    cpu.set_reg(4, 123)
+    assert cpu.get_reg(4) == 123
 
 
 @pytest.mark.parametrize("depth", (1, 2))
