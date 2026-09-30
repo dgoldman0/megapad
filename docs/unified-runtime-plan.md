@@ -300,7 +300,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 2 — workload profiles | Bounded kernels recorded; representative work pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio complete; further work profile-driven | 57 audio checks; paired headless transfer measurements |
-| 4 — initial hybrid ABI and execution | Pending | |
+| 4 — initial hybrid ABI and execution | Integer-routine v1 ABI locked; implementation pending | `docs/hybrid-runtime-abi.md`; source-reviewed memory, lifetime and return-stack constraints |
 | 5 — expanded interoperability | Pending | |
 
 ### Phase 1A implementation and validation — 2026-09-30
@@ -490,3 +490,21 @@ rounding/flags, tiny budgets, stack faults/retained bytes, missing/fragmented
 backing, fault observers, callbacks/quanta and original service/word identities.
 Independent read-only review found no additional issue. The native extension
 built successfully and paired timings are recorded in the performance report.
+
+### Phase 4 contract checkpoint — 2026-09-30
+
+`docs/hybrid-runtime-abi.md` locks the initial declared integer-routine profile
+before execution changes. It specifies fixed shared ordinary backing, bounded
+use of the existing decoded architectural interpreter, original semantic
+stack ownership, body-allocation leases, code publication and failure effects.
+A separate private control arena avoids altering inactive semantic SP!/RP!
+frontiers. Its bytes are never an alternate copy of shared guest data and its
+addresses are absent from semantic geometry. Machine access remains checked
+before modulo aliasing or any device route.
+
+The contract includes versioned host registration, a bounded manifest, normal
+source-word calls, honest launcher/status capabilities, separate machine and
+semantic accounting, and staged acceptance gates. The launcher remains disabled
+for hybrid until those gates pass. No machine execution or performance claim
+is added by the document. Dense memory and allocation lifetime are the next
+implementation foundations; callback/service/JIT interoperability stays later.
