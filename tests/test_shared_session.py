@@ -2456,6 +2456,11 @@ def test_shared_server_clients_control_one_machine(tmp_path):
 
             paused = controller.request("pause")
             assert paused["paused"]
+            # The idle guest sleeps until input or a deadline, so a paused
+            # step runs nothing; queued input gives it an instruction to run.
+            idle = controller.request("step", count=1)
+            assert (idle["executed"], idle["stop_reason"]) == (0, "all_idle")
+            controller.request("send_text", text="1 .\n", generation=generation)
             stepped = controller.request("step", count=1)
             assert stepped["executed"] == 1
             assert stepped["status"]["paused"]
