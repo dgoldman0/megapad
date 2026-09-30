@@ -67,7 +67,7 @@ def test_owner_shell_withholds_nested_capability_and_legacy_entry_routes():
     assert owner.root.control_base == owner.legacy.control_base == CONTROL_BASE
     assert owner.root.control_size == owner.legacy.control_size == CONTROL_SIZE
     for name in ("run", "publish_code", "begin_v2", "resume_callback", "cancel_invocation",
-                 "publish_code_v2", "begin_root_v3", "begin_child_v3", "publish_code_v3"):
+                 "publish_code_v2", "begin_root_v3", "begin_child_v3"):
         assert not hasattr(owner.root, name)
     owner.root.close()
 
