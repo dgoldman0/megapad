@@ -554,3 +554,173 @@ work: it returns the latest already-published receipt, which may belong to a
 discarded child. Empty inactive cancellation still exposes that receipt.
 Retired IDs alone cannot prove a contiguous suffix or parent restoration;
 those checks and original parent-token preservation belong to the adapter.
+
+## Native task transport contract lock — 2026-09-30
+
+Implement the production adapter behind a distinct `TaskRoutineRunnerV1`
+facade on the existing native `RoutineOwner`. Reuse its bounded integer
+instruction loop and backing ownership; do not introduce a second CPU or
+interpreter. A standalone constructor may create the owner. The cached
+`RoutineRunnerV3.task_v1()` facade shares the existing owner. Facade garbage
+collection only releases its reference. This contract enables no capability
+until the native, dispatcher and application gates pass.
+
+Task transport has distinct sealed `TaskRoutineSpecV1`, `TaskBudgetV1`, root,
+operation, request and child-edge tokens, publication authority and receipts.
+It does not inherit private V1/V2/V3 token authority. The spec uses the V3
+integer parser and bounded callback fields. Exact immutable budget fields
+mirror `ForeignBudgetV1`: `invocation_instructions_remaining`,
+`root_instructions_remaining`, `invocation_callbacks_remaining`,
+`root_callbacks_remaining`, and `quantum_instructions`.
+
+### Root ownership and boundaries
+
+`bind_root(root_id, instruction_limit, callback_limit, entry_limit=1024)`
+issues a native `TaskRootTokenV1`. Keep one bounded retained root ledger,
+separate from live frames and the CPU reservation. A new root may replace it
+only with no active frame and a greater root ID. The semantic adapter maps
+the exact engine root token and original outer dispatch ID to this token;
+same-meter nested host frames reuse the mapping. One exact adapter owner is
+admitted per semantic root. Different owners cannot rebase receipt counters.
+
+Root token generations prevent old authority from reviving when a new root's
+receipt sequence starts at zero. Accepted begin issues sequence one; every
+accepted segment advances it. Invocation IDs increase within the task owner
+and are independent of private V2/V3 IDs. Cancellation, empty-chain reentry
+and ordinary semantic scheduling quanta retain original ceilings, spent work,
+entry counts and the latest receipt. Never retain or destroy Python root
+objects while holding native CPU admission.
+
+```python
+begin(spec, arguments, spans, *, root_token, budget,
+      parent_token=None, child_edge=None, protected_spans=())
+advance(operation_token, *, budget)
+reply(request_token, outputs, *, budget)
+cancel_suffix(operation_token)
+cancel_all()
+last_receipt()
+```
+
+Begin requires zero execution quantum and positive retained own/root
+instruction fuel. Validate, reserve, stage arguments and publish an accepted
+zero-work yielded event without changing guest CPU/control bytes or writing
+the sentinel. First positive-quantum advance initializes exactly once, after
+the semantic dispatcher has consumed inputs following accepted delivery.
+Preflight rejection leaves both machines and all ledgers unchanged.
+
+Every accepted event rotates operation authority; previous advance/cancel
+tokens become stale. A parent operation/request token stays unchanged while
+a child executes. Advance admits only the top runnable token. Reply admits
+only the top exact pending request, validates and stages outputs, and consumes
+that request once. At zero scheduling quantum it issues a runnable event,
+deferring register publication and the real sealed stub RET until advance.
+
+Retained absolute ceilings are lowered by spent work plus the supplied
+remainders, never renewed by a later budget. Scheduling quantum is independent
+of terminal fuel: available fuel with zero quantum may yield; exhausted fuel
+fails even at zero quantum and does not publish pending outputs. A completed
+CALL or RET on the final quantum instruction produces its actual callback or
+returned event. Never invent IDL, instructions or cycles to represent yields.
+
+Publish native POD receipts before Python allocation. The result carries
+issued operation/request tokens, site, request sequence, export identity,
+arguments, outputs or bounded failure metadata. The adapter caches the exact
+converted neutral receipt by root generation and sequence. Native parent ID
+zero maps to neutral `None`; callback/returned/yielded/failed map directly to
+the four neutral states and their original accounting rules.
+
+### Task publication and child authority
+
+Task captures may contain EXECUTE, DEFER, loops and cyclic potential target
+graphs. Do not impose the private V4 publication DAG on them. Only active
+recursion is forbidden. Use two-stage publication:
+
+* `prepare_code(spec)` registers an immutable code/control candidate, returns
+  `None`, and grants no execution authority. The exact spec is the registry
+  key and remains usable for query/rollback after result delivery failure.
+  Count prepared entries immediately against the shared 64-publication,
+  16 MiB owner limits. Preparation does not invalidate instruction caches.
+* `seal_publications(batch)` takes an exact tuple of at most 64 pairs of
+  prepared parent spec and child rows. Each parent has at most 1024 distinct
+  `(site_index, child_spec)` rows (16 sites by 64 registrations). Children must
+  already be sealed or prepared in this same atomic batch. Allocate and
+  validate the entire batch and opaque `TaskChildEdgeV1` handles before
+  publication/cache invalidation. Failed preflight leaves prepared state
+  unchanged. Return per-parent handles in declared row order.
+* `is_code_registered(spec)` observes prepared or sealed exact identity;
+  `is_code_published(spec)` observes sealed executable identity. Both permit
+  owned parked task read-only access, but reject active execution/delivery.
+  `revoke_code(spec)` is idle-only, removes either state, and reclaims shared
+  count/bytes/edge capacity. Incoming edges remain permanently stale.
+
+Self edges and potential A-to-B-to-A graphs are legal at publication. Bind
+each edge to exact owner, parent generation, callback site/export metadata
+and child generation. Entry still enforces at most eight distinct active
+frames, disjoint control storage, and child grants contained within one
+immediate parent grant with equal or narrower permissions. Every control
+arena remains excluded from grants. No path expansion is needed; any closure
+walk has at most 64 visited nodes and 65536 edges. The common owner shares
+aggregate publication/edge capacity with private transport.
+
+Idempotent resealing requires identical child generations and order, with no
+in-place rebinding. A failed seal result conversion leaves exact spec query
+and revoke authority for rollback; the high-level registration transaction
+stays undispatchable until every seal and semantic export capture succeeds.
+Prepared entries cannot begin or satisfy executable-capability checks. A
+stale edge never becomes valid after revoke/reprepare.
+
+### Failure, cancellation and restoration
+
+Task machine failure retains its failed frame until explicit suffix/all
+cancellation. `cancel_suffix` requires the latest exact operation token for
+any live frame and retires that frame and descendants deepest first. Validate
+surviving ancestor code/control and allocate diagnostics before mutation.
+Restore the parent's saved integer execution state, including initialization-
+owned control fields that a partially failed child may have changed. Do not
+execute RET, publish outputs, or rewind stores, cache state or cycle counters.
+The surviving parent's pending request, site, arguments and allowances remain
+unchanged. Cancellation creates no receipt and retains the last issued one.
+
+Before issuing a returned child receipt or popping its frame, validate the
+parent restoration. A completed RET followed by restoration failure issues
+one failed receipt containing the actual work and retains a cancellable failed
+child. Successful restoration/pop followed by result delivery failure retains
+the returned receipt and only the surviving ancestors: never resurrect a
+retired child or disagree with the neutral ledger's completed return.
+
+Raw host/allocation errors propagate unchanged, with actual completed prefix
+settled from the retained receipt. Result delivery failure blocks further
+execution until `cancel_all` or close. Cancellation/restoration failure marks
+task admission unusable while retaining safe all-cancel/close paths. Hold the
+reservation through event delivery, including terminal empty-chain return and
+cancellation. No Python callback or destructor runs under CPU admission;
+tokens retain weak common-owner identities.
+
+Task close cancels its own frames and closes the common owner, but rejects
+active private V2/V3 transport. Private close/cancel rejects active task
+frames and preserves existing private behavior. `last_receipt` remains
+available after cancellation and close.
+
+### Ordered implementation and qualification
+
+1. Add the distinct facade, spec, budgets and tokens; empty-child atomic
+   publication; retained root ledger; one-frame admission-only begin,
+   advance/reply with real instruction quanta; all-cancel and receipts.
+   Keep capability absent. Compare ordinary architectural execution at every
+   instruction/CALL/RET boundary, untouched zero-admission CPU/sentinel state,
+   zero/positive quantum, lowered fuel, replay/owner/stale seals, empty-frame
+   ledger reuse, actual delivery failures, and all private native regressions.
+2. Add child batches with potential cycles, the bounded frame chain, narrowed
+   grants, validated real-return parent restoration, exact suffix cancellation
+   and lifecycle exclusion. Cover quanta at every transition, unchanged parent
+   requests after THROW-style suffix discard, cancellation before initialization,
+   partial failure effects, ancestor corruption and delivery failure after pop.
+3. Map native events to canonical neutral values with exact receipt identity
+   caching. Run the reference dispatcher scenarios against that adapter, then
+   composite suspension and application/session admission. A prepared host
+   session seam may precede generic manifests; partial foundations never
+   advertise the completed task or composite-suspension capability.
+
+Use a new `cpu/mp64/routine_tasks.h` with narrow setup dependency changes and
+the existing `mp64_accel.cpp` common-owner helpers. Build and test serially
+through the repository Make gates, preserving private transport regressions.
