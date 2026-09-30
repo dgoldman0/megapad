@@ -324,6 +324,13 @@ permanent cookie revocation, child-suffix cancellation and one composite
 suspension. Private callback stack/failure semantics stay unchanged. Reference,
 native and production session gates precede capability exposure.
 
+The first service crossing is separately locked in
+[`hybrid-service-callback-plan.md`](hybrid-service-callback-plan.md): 14 exact
+scalar FP/FPCSR exports using the existing semantic service owner, explicit
+private metadata v5, and transport 2. It preserves validation/pop/flag order
+and distinguishes issued service faults from raw host failures. Memory and
+checked crypto exports require their own later effect/grant gates.
+
 Add machine-to-semantic callbacks, nested transitions, exceptions,
 suspension/wake, and selected service access in separate qualified slices.
 Then specify native compiler/dictionary integration for guest JIT, machine
