@@ -25,6 +25,7 @@ from shared.hybrid_abi import (
     HYBRID_CLOSED_ABI_VERSION, CallbackRequestV3, MachineSegmentResultV3,
     RoutineDeclarationV3, RoutineImageV3,
 )
+from shared.hybrid_nested import RoutineImageV4, RoutineDeclarationV4, MAX_CHILD_EDGES
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES, Word
 from simulator.errors import ExecutionBlocked, ExecutionError
 from simulator.interop_exports import (
@@ -75,6 +76,8 @@ class _Registration:
     implementation: object
     callback: object
     exports: tuple[tuple[CallbackSiteV2, object], ...] = ()
+    child_edges: tuple = ()
+    nested_graph: object = None
 
 
 @dataclass(slots=True)
@@ -221,6 +224,7 @@ class HybridRuntime:
         self._by_nonce: dict[object, _Registration] = {}
         self._issued_code_bytes = 0
         self._control_used = 0
+        self._issued_child_edges = 0
         self._machine_instructions = 0
         self._machine_cycles = 0
         self._transitions = 0
@@ -232,7 +236,7 @@ class HybridRuntime:
         self._allowances: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._stack_allocations: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._wrapper_limits: list[tuple[int, int, int]] = []
-        self._cpu, self._runner, self._control_base, self._control_buffer = machine
+        self._cpu, self._runner, self._control_base, self._control_buffer, self._nested_runner = machine
         self._callbacks_available = self._supports_callbacks(native)
         self._dictionary = semantic.dictionary
         self._memory = semantic.memory
@@ -258,19 +262,21 @@ class HybridRuntime:
 
     def _capture_nested_target(self, word):
         """Resolve only this owner's exact explicitly V4 registration."""
+        if type(self._registrations) is not dict:
+            raise HybridExecutionError("stale_registration", "machine registration table changed")
         registration = self._registrations.get(id(word))
-        if registration is None or registration.word is not word:
+        if type(registration) is not _Registration or registration.word is not word:
             raise HybridExecutionError("stale_registration", "machine target is not registered here")
-        self._verify_nested_target(registration)
-        return registration
+        from simulator.interop_nested import CapturedMachineTarget
+        return CapturedMachineTarget.create(self, registration)
 
-    def _verify_nested_target(self, registration):
-        from shared.hybrid_nested import RoutineDeclarationV4
-
-        if (type(registration) is not _Registration
-                or type(registration.declaration) is not RoutineDeclarationV4):
+    def _verify_nested_target(self, target):
+        from simulator.interop_nested import CapturedMachineTarget
+        if (type(target) is not CapturedMachineTarget
+                or type(target.registration) is not _Registration
+                or type(target.registration.declaration) is not RoutineDeclarationV4):
             raise HybridExecutionError("invalid_child", "nested targets require an explicit V4 registration")
-        self._validate_registration(registration)
+        target.verify_owner(self)
 
     def _invoke_nested_child(self, use, arguments):
         # The authority/accounting foundation is installed at creation; it
@@ -286,6 +292,17 @@ class HybridRuntime:
             and all(callable(getattr(runner, name, None)) for name in (
                 "publish_code_v2", "is_code_published_v2", "revoke_code_v2",
                 "begin_v2", "resume_callback", "cancel_invocation", "last_segment_v2",
+            ))
+        )
+
+    @staticmethod
+    def _supports_nested_publication(native: Any) -> bool:
+        runner = getattr(native, "RoutineRunnerV3", None)
+        return (
+            HybridRuntime._supports_callbacks(native)
+            and callable(runner) and callable(getattr(native, "RoutineSpecV3", None))
+            and all(callable(getattr(runner, name, None)) for name in (
+                "legacy_v2", "publish_code_v3", "revoke_code_v3", "is_code_published_v3", "close",
             ))
         )
 
@@ -327,10 +344,22 @@ class HybridRuntime:
                 cpu.attach_vram(buffer, region.base, region.size)
             else:
                 raise ValueError("unsupported hybrid ordinary region")
-        runner_type = (native.RoutineRunnerV2 if HybridRuntime._supports_callbacks(native)
-                       else native.RoutineRunnerV1)
-        runner = runner_type(cpu, control_base, control_buffer)
-        return cpu, runner, control_base, control_buffer
+        nested = None
+        if HybridRuntime._supports_nested_publication(native):
+            nested = native.RoutineRunnerV3(cpu, control_base, control_buffer)
+            try:
+                runner = nested.legacy_v2()
+            except BaseException as error:
+                try:
+                    nested.close()
+                except BaseException as cleanup:
+                    BaseException.add_note(error, f"native owner cleanup failed: {_error_detail(cleanup)}")
+                raise
+        else:
+            runner_type = (native.RoutineRunnerV2 if HybridRuntime._supports_callbacks(native)
+                           else native.RoutineRunnerV1)
+            runner = runner_type(cpu, control_base, control_buffer)
+        return cpu, runner, control_base, control_buffer, nested
 
     @property
     def executor(self) -> str:
@@ -422,6 +451,16 @@ class HybridRuntime:
         """Publish an integer image with admitted closed semantic policies."""
         return self._register_routine(image, RoutineImageV3, values)
 
+    def register_routine_v4(self, image: RoutineImageV4 | None = None, **values: Any) -> Word:
+        """Publish nested metadata only with the full executable capability."""
+        if not self.nested_callback_abi_available:
+            raise RuntimeError("hybrid nested callbacks require fully qualified semantic V4 and native V3")
+        return self._publish_nested_routine(image, **values)
+
+    def _publish_nested_routine(self, image: RoutineImageV4 | None = None, **values: Any) -> Word:
+        """Transactional publication core; it grants no execution by itself."""
+        return self._register_routine(image, RoutineImageV4, values)
+
     def _require_authority(self) -> None:
         if (self.semantic.dictionary is not self._dictionary
                 or self._dictionary._mutation_guard is not self._dictionary_guard
@@ -450,7 +489,17 @@ class HybridRuntime:
                 image = image_type(**values)
             if type(image) is not image_type:
                 raise TypeError(f"registration requires a {image_type.__name__}")
-            callbacks = image_type in (RoutineImageV2, RoutineImageV3)
+            nested = image_type is RoutineImageV4
+            callbacks = image_type in (RoutineImageV2, RoutineImageV3, RoutineImageV4)
+            if nested:
+                RoutineImageV4.__post_init__(image)
+                if (type(self) is not HybridRuntime or self._nested_runner is None
+                        or self.semantic._callback_exports._nested_owner is None):
+                    raise RuntimeError("nested publication requires the exact owner and native V3 publication surface")
+                if any(type(item.declaration) is RoutineDeclarationV4
+                       and item.declaration.routine_id == image.routine_id
+                       for item in self._registrations.values()):
+                    raise ValueError("a V4 routine ID is already registered in this owner")
             if image_type is RoutineImageV3 and not self.closed_callback_abi_available:
                 raise RuntimeError(
                     "hybrid closed callbacks require semantic profile v3 and "
@@ -483,7 +532,14 @@ class HybridRuntime:
             )
             if rejection is not None:
                 raise ValueError(rejection)
-            if callbacks:
+            if nested:
+                spec = self._native.RoutineSpecV3(
+                    code_base, code, image.entry_offset, image.input_cells, image.output_cells,
+                    stack_base, stack_size, image.max_instructions, image.max_callback_requests,
+                    tuple((site.call_offset, site.stub_offset, site.export.export_id,
+                           site.export.input_cells, site.export.output_cells) for site in image.callbacks),
+                )
+            elif callbacks:
                 spec = self._native.RoutineSpecV2(
                     code_base, code, image.entry_offset, image.input_cells,
                     image.output_cells, stack_base, stack_size, image.max_instructions,
@@ -510,11 +566,31 @@ class HybridRuntime:
 
             checkpoint = dictionary.checkpoint()
             host_escape = None
+            child_rows = ()
+            child_captures = ()
+            nested_graph = None
             transaction = (self.semantic.callback_export_registration(
                 tuple(site.export for site in image.callbacks)
             ) if callbacks else nullcontext(()))
             try:
                 with transaction as handles:
+                    if nested:
+                        from simulator.interop_nested import capture_nested_graph
+                        engine = self.semantic._callback_exports
+                        roots = []
+                        rows, captures = [], []
+                        for site_index, (site, handle) in enumerate(zip(image.callbacks, handles)):
+                            binding = engine._binding(handle)
+                            entry = binding.leaf.word if binding.closed is None else binding.closed.entry.word
+                            roots.append((site.export, entry))
+                            for call_id, token in enumerate(() if binding.closed is None else binding.closed.calls):
+                                captured = engine._nested_calls[token]
+                                rows.append((site_index, call_id, captured.target.spec))
+                                captures.append((site_index, token, captured.target))
+                        child_rows, child_captures = tuple(rows), tuple(captures)
+                        if self._issued_child_edges + len(child_rows) > MAX_CHILD_EDGES:
+                            raise ValueError("registered child edges exceed 65536")
+                        nested_graph = capture_nested_graph(engine, tuple(roots), root_machine=image.graph_node())
                     word = self.semantic.define_primitive(image.name, invoke, initial_body=body)
                     if callbacks:
                         host_escape = self.semantic._register_primitive_host_escape(
@@ -529,12 +605,15 @@ class HybridRuntime:
                         RoutineImageV1: RoutineDeclarationV1,
                         RoutineImageV2: RoutineDeclarationV2,
                         RoutineImageV3: RoutineDeclarationV3,
+                        RoutineImageV4: RoutineDeclarationV4,
                     }[image_type]
                     extra = dict(
                         callbacks=image.callbacks,
                         dispatch_callback_limit=self._dispatch_callback_limit,
                         dispatch_callback_semantic_limit=self._dispatch_callback_semantic_limit,
                     ) if callbacks else {}
+                    if nested:
+                        extra.update(routine_id=image.routine_id, max_callback_requests=image.max_callback_requests)
                     declaration = declaration_type(
                         name=image.name, session_nonce=self._session_nonce,
                         registration_nonce=registration_nonce, allocation_lease=lease,
@@ -552,12 +631,22 @@ class HybridRuntime:
                     registration = _Registration(
                         word, declaration, spec, word.implementation, invoke,
                         tuple(zip(image.callbacks, handles)) if callbacks else (),
+                        (), nested_graph,
                     )
                     # Allocate the host tables before native publication. They
                     # become visible only after the export transaction commits.
                     registrations = {**self._registrations, id(word): registration}
                     by_nonce = {**self._by_nonce, registration_nonce: registration}
-                    if callbacks:
+                    if nested:
+                        edges = self._nested_runner.publish_code_v3(spec, child_rows)
+                        if len(edges) != len(child_captures):
+                            raise RuntimeError("native child edge publication shape changed")
+                        registration = replace(registration, child_edges=tuple(
+                            (*captured, edge) for captured, edge in zip(child_captures, edges)
+                        ))
+                        registrations[id(word)] = registration
+                        by_nonce[registration_nonce] = registration
+                    elif callbacks:
                         self._runner.publish_code_v2(spec)
                     else:
                         self._runner.publish_code(spec)
@@ -566,7 +655,9 @@ class HybridRuntime:
                     try:
                         # A host wrapper may forward publication then raise;
                         # query exact native identity before revoking it.
-                        if self._runner.is_code_published_v2(spec):
+                        if nested and self._nested_runner.is_code_published_v3(spec):
+                            self._nested_runner.revoke_code_v3(spec)
+                        elif not nested and self._runner.is_code_published_v2(spec):
                             self._runner.revoke_code_v2(spec)
                     except BaseException as cleanup:
                         self._registration_cleanup_error(error, cleanup)
@@ -585,6 +676,7 @@ class HybridRuntime:
             self._by_nonce = by_nonce
             self._issued_code_bytes += len(code)
             self._control_used += stack_size
+            self._issued_child_edges += len(child_rows)
             return word
 
     def declaration_for(self, word: Word) -> RoutineDeclarationV1:
@@ -608,15 +700,19 @@ class HybridRuntime:
             values = []
             for registration in self._registrations.values():
                 declaration = registration.declaration
-                callbacks = type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3)
+                callbacks = type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3, RoutineDeclarationV4)
                 image_type = {
                     RoutineDeclarationV1: RoutineImageV1,
                     RoutineDeclarationV2: RoutineImageV2,
                     RoutineDeclarationV3: RoutineImageV3,
+                    RoutineDeclarationV4: RoutineImageV4,
                 }[type(declaration)]
                 extra = dict(callbacks=tuple(
                     replace(site, export=replace(site.export)) for site in declaration.callbacks
                 )) if callbacks else {}
+                if type(declaration) is RoutineDeclarationV4:
+                    extra.update(routine_id=declaration.routine_id,
+                                 max_callback_requests=declaration.max_callback_requests)
                 values.append(image_type(
                     name=declaration.name, code=declaration.code,
                     entry_offset=declaration.entry_offset,
@@ -701,7 +797,7 @@ class HybridRuntime:
         spans.append((self._control_base, MAX_CONTROL_BYTES))
         return _merge_spans(spans)
 
-    def _validate_registration(self, registration: _Registration) -> None:
+    def _validate_registration(self, registration: _Registration, *, verify_exports: bool = True) -> None:
         self._require_open()
         self._require_authority()
         declaration = registration.declaration
@@ -725,7 +821,7 @@ class HybridRuntime:
             raise HybridExecutionError("stale_registration", "word or allocation lease was revoked")
         if self._memory.read_bytes(declaration.code_base, declaration.code_size) != declaration.code:
             raise HybridExecutionError("stale_code", "shared code bytes no longer match the sealed image")
-        for site, handle in registration.exports:
+        for site, handle in registration.exports if verify_exports else ():
             try:
                 descriptor = self.semantic.verify_callback_export(handle)
                 if descriptor != site.export:
@@ -968,6 +1064,8 @@ class HybridRuntime:
             registration = self._by_nonce.get(nonce)
             if registration is None:
                 raise HybridExecutionError("stale_registration", "registration identity is no longer live")
+            if type(registration.declaration) is RoutineDeclarationV4 and not self.nested_callback_abi_available:
+                raise HybridExecutionError("nested_unavailable", "nested machine execution is not enabled")
             self._validate_registration(registration)
             declaration = registration.declaration
             protected = self._protected_spans(context)
@@ -1129,6 +1227,7 @@ class HybridRuntime:
             self._closed = True
             self._runner.close()
             self._runner = None
+            self._nested_runner = None
             self._cpu = None
             self._control_buffer = None
             self._allowances.clear()
@@ -1147,6 +1246,7 @@ _NESTED_OWNER_FIELD_ROUTES = tuple((name, vars(HybridRuntime).get(name, _NESTED_
                                  for name in (
     "semantic", "_registrations", "_by_nonce", "_session_nonce", "_closed",
     "_registration_failure", "_dictionary", "_dictionary_guard", "_memory",
+    "_nested_runner", "_dispatch_callback_limit", "dispatch_callback_limit",
 ))
 
 

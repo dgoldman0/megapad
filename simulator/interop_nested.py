@@ -7,7 +7,7 @@ authorities can reach machine execution. Existing V2/V3 dispatch is unchanged.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import weakref
 
 from shared.cells import MASK64
@@ -452,3 +452,349 @@ def capture_machine_call(engine, handle, word, operation, operation_index, targe
         operation, operation_index, operation.xt, target,
     )
     return token
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedMachineTarget:
+    """Independent registration evidence, never an executable XT permit."""
+
+    registration: object
+    word: object
+    xt: int
+    implementation: object
+    callback: object
+    declaration: object
+    spec: object
+    exports: tuple
+    child_edges: tuple
+    nested_graph: object
+    image: object
+    allocation_lease: object
+    control_lease: object
+    geometry: tuple
+
+    @staticmethod
+    def _image(declaration):
+        from shared.hybrid_nested import RoutineImageV4
+        return RoutineImageV4(
+            name=declaration.name, code=declaration.code, entry_offset=declaration.entry_offset,
+            input_cells=declaration.input_cells, output_cells=declaration.output_cells,
+            buffers=tuple(replace(rule) for rule in declaration.buffers),
+            return_stack_cells=declaration.return_stack_cells, max_instructions=declaration.max_instructions,
+            routine_id=declaration.routine_id, max_callback_requests=declaration.max_callback_requests,
+            callbacks=tuple(replace(site, export=replace(site.export)) for site in declaration.callbacks),
+        )
+
+    @staticmethod
+    def _geometry(declaration):
+        return tuple(getattr(declaration, name) for name in (
+            "allocation_generation", "control_generation", "body_base", "body_size",
+            "code_base", "stack_base", "dispatch_instruction_limit",
+            "dispatch_callback_limit", "dispatch_callback_semantic_limit",
+        ))
+
+    @classmethod
+    def create(cls, owner, registration):
+        from shared.hybrid_nested import RoutineDeclarationV4
+        declaration = registration.declaration
+        if type(declaration) is not RoutineDeclarationV4:
+            raise CallbackExportError("nested machine targets require explicit V4 registration")
+        RoutineDeclarationV4.__post_init__(declaration)
+        result = cls(registration, registration.word, registration.word.xt,
+                     registration.implementation, registration.callback, declaration, registration.spec,
+                     registration.exports, registration.child_edges, registration.nested_graph,
+                     cls._image(declaration), declaration.allocation_lease,
+                     declaration.control_lease, cls._geometry(declaration))
+        result.verify_owner(owner)
+        return result
+
+    def verify_owner(self, owner):
+        from shared.hybrid_nested import RoutineDeclarationV4, RoutineImageV4
+        registration = self.registration
+        if (type(self.xt) is not int or not 0 < self.xt <= MASK64
+                or type(self.geometry) is not tuple or len(self.geometry) != 9
+                or any(type(value) is not int for value in self.geometry)
+                or type(self.image) is not RoutineImageV4):
+            raise CallbackExportError("captured machine evidence values changed")
+        RoutineImageV4.__post_init__(self.image)
+        if (registration.word is not self.word or type(self.word.xt) is not int or self.word.xt != self.xt
+                or registration.implementation is not self.implementation
+                or registration.callback is not self.callback or registration.spec is not self.spec
+                or registration.exports is not self.exports or registration.child_edges is not self.child_edges
+                or registration.nested_graph is not self.nested_graph
+                or registration.declaration is not self.declaration
+                or type(self.declaration) is not RoutineDeclarationV4):
+            raise CallbackExportError("captured machine registration identity changed")
+        RoutineDeclarationV4.__post_init__(self.declaration)
+        if (self.declaration.allocation_lease is not self.allocation_lease
+                or self.declaration.control_lease is not self.control_lease
+                or self._geometry(self.declaration) != self.geometry
+                or self._image(self.declaration) != self.image):
+            raise CallbackExportError("captured machine registration values changed")
+        owner._validate_registration(registration, verify_exports=False)
+        if owner._nested_runner is None or not owner._nested_runner.is_code_published_v3(self.spec):
+            raise CallbackExportError("captured machine publication is no longer live")
+
+
+@dataclass(frozen=True, slots=True)
+class _ExportEvidence:
+    binding: object
+    descriptor: object
+    leaf: object
+    closed: object
+
+    def verify(self, engine):
+        binding = self.binding
+        if (engine._exports.get(self.descriptor.export_id) is not binding
+                or binding.handle._owner is not engine._owner
+                or binding.leaf is not self.leaf or binding.closed is not self.closed
+                or type(binding.descriptor) is not type(self.descriptor)
+                or replace(binding.descriptor) != self.descriptor):
+            raise CallbackExportError("captured machine callback binding changed")
+
+
+@dataclass(frozen=True, slots=True)
+class NestedGraphCapture:
+    words: tuple
+    machines: tuple[CapturedMachineTarget, ...]
+    exports: tuple[_ExportEvidence, ...]
+    policies: tuple
+    routine_nodes: tuple
+    export_values: tuple
+    proof: object
+    policy_words: tuple[tuple[int, object], ...]
+
+    def verify(self, engine):
+        from simulator.interop_closed import (
+            _require_metadata_routes, _require_routes, _RUNTIME_ROUTES, _DICTIONARY_ROUTES,
+        )
+        from simulator.dictionary import Dictionary
+        from simulator.runtime import MegaForthRuntime
+        _require_metadata_routes()
+        _require_routes(engine._runtime, MegaForthRuntime, _RUNTIME_ROUTES)
+        _require_routes(engine._dictionary, Dictionary, _DICTIONARY_ROUTES)
+        engine._require_owner("verify a nested callback graph")
+        for word in self.words:
+            word.verify(engine._dictionary)
+        for target in self.machines:
+            engine._nested_owner.call("_verify_nested_target", target)
+        for export in self.exports:
+            export.verify(engine)
+
+
+def capture_nested_graph(engine, roots, *, root_machine=None):
+    """Rebuild a bounded graph from exact live Words and issued dependencies.
+
+    ``roots`` pairs already validated descriptors with their captured entry
+    Words; no manifest ID or name retargets an existing dependency. Policy IDs
+    are local proof labels, consistently rebased for the complete snapshot.
+    """
+    from shared.hybrid_nested import (
+        CallbackExportV4, PolicyBodyV4, PolicyMachineCallV4, prove_nested_graph,
+    )
+    from shared.hybrid_closed import (
+        PolicyLiteralV3, PolicyCoreCallV3, PolicyCallV3, PolicyBranchV3,
+        PolicyBranchZeroV3, PolicyReturnV3,
+    )
+    from simulator.dictionary import Word
+    from simulator.ir import Literal, Call, Branch, BranchZero, Return
+    from simulator.runtime import ColonDefinition, PrimitiveDefinition
+    from simulator.interop_closed import CapturedWord, CapturedOperation, _require_metadata_routes
+
+    _require_metadata_routes()
+    if engine._nested_owner is None:
+        raise CallbackExportError("nested capture requires an exact installed machine owner")
+    engine._nested_owner.require()
+    words, machines, exports, evidence = {}, {}, {}, {}
+    pending = []
+    if type(roots) is not tuple or len(roots) > 64:
+        raise CallbackExportError("nested graph roots must be a bounded exact tuple")
+    for descriptor, word in roots:
+        if type(descriptor) is not CallbackExportV4:
+            raise CallbackExportError("nested graph requires exact V4 exports")
+        checked = replace(descriptor)
+        previous = exports.setdefault(descriptor.export_id, (checked, word))
+        if previous[0] != checked or previous[1] is not word:
+            raise CallbackExportError("nested graph root export identity conflicts")
+        pending.append(word)
+    total_operations = 0
+    while pending:
+        word = pending.pop()
+        if id(word) in words or id(word) in machines:
+            continue
+        if type(word) is not Word or type(word.xt) is not int or not 0 < word.xt <= MASK64:
+            raise CallbackExportError("nested capture requires exact live Word identities")
+        try:
+            live = engine._dictionary.resolve(word.xt)
+        except KeyError:
+            raise CallbackExportError("nested callback Word is no longer live") from None
+        if live is not word:
+            raise CallbackExportError("nested callback Word is no longer live")
+        implementation = word.implementation
+        if type(implementation) is PrimitiveDefinition:
+            canonical = next(((name, leaf) for name, leaf in engine._canonical.items()
+                              if leaf.word is word), None)
+            if canonical is not None:
+                name, leaf = canonical
+                engine._require_leaf(leaf)
+                words[id(word)] = CapturedWord(word, word.xt, implementation, None, (), name, leaf.callback)
+                continue
+            target = engine._nested_owner.call("_capture_nested_target", word)
+            if type(target) is not CapturedMachineTarget or target.word is not word:
+                raise CallbackExportError("nested owner returned a foreign machine capture")
+            machines[id(word)] = target
+            if len(machines) > 64:
+                raise CallbackExportError("nested graph has more than 64 machines")
+            for site, handle in target.registration.exports:
+                binding = engine._exports.get(handle.export_id)
+                if (binding is None or binding.handle is not handle or handle._owner is not engine._owner
+                        or type(binding.descriptor) is not CallbackExportV4
+                        or binding.descriptor != site.export):
+                    raise CallbackExportError("nested machine callback is not the issued V4 binding")
+                existing = evidence.setdefault(handle.export_id, _ExportEvidence(
+                    binding, replace(binding.descriptor), binding.leaf, binding.closed,
+                ))
+                existing.verify(engine)
+                if binding.closed is not None:
+                    binding.closed.verify(engine)
+                entry = binding.leaf.word if binding.closed is None else binding.closed.entry.word
+                previous = exports.setdefault(handle.export_id, (replace(binding.descriptor), entry))
+                if previous[0] != binding.descriptor or previous[1] is not entry:
+                    raise CallbackExportError("nested graph callback export identity conflicts")
+                pending.append(entry)
+            continue
+        if type(implementation) is not ColonDefinition or type(implementation.operations) is not tuple:
+            raise CallbackExportError("nested callback target is not admitted static IR")
+        operations = implementation.operations
+        total_operations += len(operations)
+        if not operations or total_operations > 4096:
+            raise CallbackExportError("nested policy graph exceeds 4096 operations")
+        captured_operations = []
+        for operation in operations:
+            kind = type(operation)
+            field = {Literal: "value", Call: "xt", Branch: "target", BranchZero: "target", Return: None}.get(kind, "invalid")
+            if field == "invalid":
+                raise CallbackExportError("nested callback contains an unsupported operation")
+            value = None if field is None else getattr(operation, field)
+            if field is not None and (type(value) is not int or not 0 <= value <= MASK64):
+                raise CallbackExportError("nested callback fields must be exact uint64 integers")
+            if kind is Call:
+                try:
+                    pending.append(engine._dictionary.resolve(value))
+                except KeyError:
+                    raise CallbackExportError("nested callback static target is not live") from None
+            captured_operations.append(CapturedOperation(operation, kind, field, value))
+        words[id(word)] = CapturedWord(word, word.xt, implementation, operations, tuple(captured_operations))
+    colons = tuple(word for word in words.values() if word.operations is not None)
+    if len(colons) > 64:
+        raise CallbackExportError("nested graph has more than 64 policies")
+    # Preserve the first root's label when possible; every other reference is
+    # rebased together, including callback descriptors in machine nodes.
+    ids = {}
+    first = next(((descriptor, word) for descriptor, word in roots if descriptor.policy_id is not None), None)
+    if first is not None:
+        ids[id(first[1])] = first[0].policy_id
+    available = iter(index for index in range(64) if index not in ids.values())
+    for word in colons:
+        if id(word.word) not in ids:
+            ids[id(word.word)] = next(available)
+    by_xt = {word.xt: word for word in words.values()}
+    machine_by_xt = {target.xt: target for target in machines.values()}
+    normalized_exports = {}
+    for identifier, (descriptor, word) in exports.items():
+        normalized_exports[identifier] = (replace(descriptor, policy_id=ids[id(word)],
+                                                name=f"CAPTURE-{ids[id(word)]}")
+                                           if descriptor.policy_id is not None else descriptor)
+    policies = []
+    for word in colons:
+        lowered = []
+        for operation in word.evidence:
+            if operation.kind is Literal:
+                value = PolicyLiteralV3(value=operation.value)
+            elif operation.kind is Call:
+                if operation.value in machine_by_xt:
+                    value = PolicyMachineCallV4(routine_id=machine_by_xt[operation.value].image.routine_id)
+                else:
+                    target = by_xt[operation.value]
+                    value = (PolicyCoreCallV3(name=target.core_name) if target.core_name is not None
+                             else PolicyCallV3(policy_id=ids[id(target.word)]))
+            elif operation.kind is Branch:
+                value = PolicyBranchV3(target=operation.value)
+            elif operation.kind is BranchZero:
+                value = PolicyBranchZeroV3(target=operation.value)
+            else:
+                value = PolicyReturnV3()
+            lowered.append(value)
+        identifier = ids[id(word.word)]
+        policies.append(PolicyBodyV4(policy_id=identifier, name=f"CAPTURE-{identifier}", operations=tuple(lowered)))
+    routine_nodes = []
+    for node in (*(target.image.graph_node() for target in machines.values()),
+                 *((root_machine,) if root_machine is not None else ())):
+        routine_nodes.append(replace(node, callbacks=tuple(
+            replace(site, export=normalized_exports[site.export.export_id]) for site in node.callbacks
+        )))
+    try:
+        proof = prove_nested_graph(policies=tuple(policies), routines=tuple(routine_nodes),
+                                   exports=tuple(normalized_exports.values()),
+                                   dispatch_callback_limit=engine._nested_owner.require().dispatch_callback_limit)
+    except (TypeError, ValueError) as error:
+        raise CallbackExportError(f"nested callback graph rejected: {error}") from error
+    result = NestedGraphCapture(tuple(words.values()), tuple(machines.values()), tuple(evidence.values()),
+                                tuple(policies), tuple(routine_nodes), tuple(normalized_exports.values()), proof,
+                                tuple((ids[id(word.word)], word) for word in colons))
+    result.verify(engine)
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class NestedCapture:
+    entry: object
+    words: tuple
+    machines: tuple
+    proof: object
+    graph: NestedGraphCapture
+    calls: tuple[CapturedMachineCall, ...]
+
+    @classmethod
+    def create(cls, engine, descriptor, handle):
+        from simulator.runtime import ColonDefinition
+        entry = engine._dictionary.find(descriptor.name)
+        if entry is None or type(entry.implementation) is not ColonDefinition:
+            raise CallbackExportError("nested callback entry must name a live colon definition")
+        graph = capture_nested_graph(engine, ((descriptor, entry),))
+        proof = next(item for item in graph.proof.policy_proofs if item.policy_id == descriptor.policy_id)
+        policy_words = dict(graph.policy_words)
+        machines = {target.image.routine_id: target for target in graph.machines}
+        calls = []
+        before = frozenset(engine._nested_calls)
+        try:
+            for call in proof.child_calls:
+                word = policy_words[call.policy_id]
+                calls.append(capture_machine_call(engine, handle, word.word,
+                                                  word.operations[call.operation_index], call.operation_index,
+                                                  machines[call.routine_id]))
+        except BaseException:
+            for token in tuple(engine._nested_calls):
+                if token not in before:
+                    del engine._nested_calls[token]
+            raise
+        return cls(next(word for word in graph.words if word.word is entry),
+                   tuple(word for word in graph.words if word.core_name in proof.core_names
+                         or (word.operations is not None and any(word is policy_words[item] for item in proof.policy_ids))),
+                   tuple(machines[item] for item in proof.routine_ids), proof, graph, tuple(calls))
+
+    def verify(self, engine):
+        self.graph.verify(engine)
+        for token in self.calls:
+            captured = engine._nested_calls.get(token)
+            if captured is None:
+                raise CallbackExportError("nested callback Call authority was revoked")
+            captured.verify(engine)
+
+    def target(self, xt):
+        value = next((word for word in self.words if word.xt == xt), None)
+        if value is None:
+            value = next((target for target in self.machines if target.xt == xt), None)
+        if value is None:
+            raise CallbackExportError("nested callback escaped its captured targets")
+        return value

@@ -16,6 +16,7 @@ from shared.hybrid_abi import (
     CallbackExportV2, CallbackExportV3, MAX_CALLBACK_EXPORTS, MAX_SIGNATURE_CELLS,
     MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
 )
+from shared.hybrid_nested import CallbackExportV4
 from simulator import core_words
 from simulator.dictionary import Word
 from simulator.errors import ExecutionError
@@ -154,8 +155,8 @@ class _PrivateStackSeal:
 
 
 def _descriptor(value):
-    if type(value) not in (CallbackExportV2, CallbackExportV3):
-        raise TypeError("callback descriptor must be an exact CallbackExportV2 or CallbackExportV3")
+    if type(value) not in (CallbackExportV2, CallbackExportV3, CallbackExportV4):
+        raise TypeError("callback descriptor must be an exact admitted callback value")
     # Revalidate even a forged frozen value and keep our own metadata copy.
     return replace(value)
 
@@ -276,7 +277,10 @@ class CallbackExportEngine:
             if (self._active is not None or self._registration is not None
                     or self._closed_accounting is not None or self._nested_chain is not None):
                 raise CallbackExportError("closed callback accounting already has an active owner")
-            if self._binding(handle).closed is None:
+            binding = self._binding(handle)
+            if type(binding.descriptor) is CallbackExportV4:
+                raise CallbackExportError("V4 callbacks require their admitted nested chain")
+            if binding.closed is None:
                 raise CallbackExportError("closed callback accounting requires a closed export")
             frames = self._runtime._active_dispatches
             states = self._runtime._active_input_states
@@ -374,23 +378,35 @@ class CallbackExportEngine:
             return existing.handle
         closed = None
         leaf = None
-        if descriptor.effect == "closed_integer_colon":
-            closed = self._closed_capture_type.create(self, descriptor)
-        else:
-            leaf = self._canonical.get(descriptor.name)
-            if leaf is None:
-                raise CallbackExportError("canonical installed callback Word is unavailable")
-            self._require_leaf(leaf)
         if len(self._exports) >= MAX_CALLBACK_EXPORTS:
             raise CallbackExportError("callback export table is full")
         handle = CallbackExportHandle(descriptor.export_id, self._owner)
-        binding = _ExportBinding(handle, descriptor, leaf, closed)
-        if self._registration is not None:
-            # Record the exact identity before insertion, so a failure after
-            # publication but before return still has complete rollback data.
-            self._registration.issued.append((descriptor.export_id, binding))
-        self._exports[descriptor.export_id] = binding
-        return handle
+        binding = None
+        try:
+            if type(descriptor) is CallbackExportV4 and descriptor.effect != "integer_leaf":
+                from simulator.interop_nested import NestedCapture
+                closed = NestedCapture.create(self, descriptor, handle)
+            elif descriptor.effect == "closed_integer_colon":
+                closed = self._closed_capture_type.create(self, descriptor)
+            else:
+                leaf = self._canonical.get(descriptor.name)
+                if leaf is None:
+                    raise CallbackExportError("canonical installed callback Word is unavailable")
+                self._require_leaf(leaf)
+            binding = _ExportBinding(handle, descriptor, leaf, closed)
+            if self._registration is not None:
+                # Record the exact identity before insertion, so a failure after
+                # publication but before return still has complete rollback data.
+                self._registration.issued.append((descriptor.export_id, binding))
+            self._exports[descriptor.export_id] = binding
+            return handle
+        except BaseException:
+            if binding is not None and self._exports.get(descriptor.export_id) is binding:
+                del self._exports[descriptor.export_id]
+            for token, captured in tuple(self._nested_calls.items()):
+                if captured.handle is handle:
+                    del self._nested_calls[token]
+            raise
 
     def _check_registration(self, registration: _ExportRegistration) -> None:
         self._require_owner("finish semantic callback export registration")
@@ -411,6 +427,9 @@ class CallbackExportEngine:
             # merely carrying the same numerical export ID.
             if table.get(export_id) is binding:
                 del table[export_id]
+            for token, captured in tuple(self._nested_calls.items()):
+                if captured.handle is binding.handle:
+                    del self._nested_calls[token]
         if (self._registration is not registration or self._exports is not table
                 or len(table) != len(registration.previous)
                 or any(table.get(key) is not binding
@@ -540,6 +559,8 @@ class CallbackExportEngine:
                 record.entered = True
             self._budget_failure = None
             binding = self._binding(handle)
+            if type(binding.descriptor) is CallbackExportV4:
+                raise CallbackExportError("V4 callbacks require their admitted nested chain")
             _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
             if semantic_step_limit is not None:
                 if type(semantic_step_limit) is not int:
