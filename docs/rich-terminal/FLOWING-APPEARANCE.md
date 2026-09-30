@@ -89,7 +89,7 @@ application status bar. A retained region also does not by itself identify
 an application pane or its focus state.
 
 The full pane-and-channel design needs the following semantic publication.
-MegaPad now implements pane, structured-status, and taskbar families; their Akashic
+MegaPad now implements pane, structured-status, taskbar, and editable-field families; their Akashic
 producers remain integration work. Border curves and material treatment
 remain host choices.
 
@@ -98,7 +98,7 @@ remain host choices.
 | Pane (MegaPad implemented) | Stable identity, outer/content bounds, title metadata, visibility and focus; exact-owner content-region binding | Desk/app-host publication using existing pane state and explicit content clips |
 | Structured status (MegaPad implemented) | Stable fields with separate label/value slots, severity, emphasis, order and bounds | Shared UIDL status/label observation and lowering, covering existing app status strips |
 | Taskbar (MegaPad implemented) | Running-app and launcher entries, selected/minimized/enabled state, bounds, and activation intent | Desk shell publication from the same entries used for painting and hit testing |
-| Editable field | Label/value, type, limits or choices when applicable, selected/enabled/read-only state, and revision-bound edit intents | Reusable widget with normal CELL drawing and ordinary event routing; migrate Sound Lab's parameter rows to it |
+| Editable field (MegaPad implemented) | Label/value, type, limits or choices, selected/enabled/read-only state, and revision-bound edit intents | Reusable widget with normal CELL drawing and ordinary event routing; migrate Sound Lab's parameter rows to it |
 | Spreadsheet | Logical cells, row/column headers, selection, viewport, and existing edit actions | Targeted migration of Grid's custom drawing into a canonical reusable grid model |
 | Waveform | Plot bounds, actual sample/series source, scale, and clip | Shared waveform widget/projector backed by Sound Lab's rendered PCM; the terminal already has a retained `WAVEFORM` object |
 
@@ -384,3 +384,55 @@ fallback geometry minima; the focused model/wire rerun passed all 114 checks.
 The production input test crosses projection, JSON, actual Pygame hit maps,
 sink acknowledgment, shared RPC, and binary ACTIVATE. It verifies that an old
 press or backpressured activation cannot cross to a replacement display.
+
+## Editable fields and producer handoff
+
+`RET_FIELDS` (feature bit 14) adds the root CONTROL kind `FIELD` (13). FDC1
+content describes INTEGER, CHOICE, or TEXT values, a content revision,
+read-only state, and explicit disjoint label/value rectangles inside the
+root. Integer fields carry inclusive signed-64-bit bounds and a positive
+adjustment step; the step does not constrain which in-range exact values are
+valid. Choices carry ordered, unique signed values and their labels. Text
+fields carry single-line UTF-8. All strings and choice records use existing
+owner quotas; each choice consumes one additional object slot.
+
+The producer retains authority over values and editing. Clicking a writable
+value slot sends existing ACTIVATE for the guest's editor or choice action.
+Vertical wheel input sends a 56-byte ADJUST event with signed step count and
+the exact displayed content revision. Positive counts mean increase/next;
+the guest applies its own overflow-safe clamp, wrap, or refusal policy and
+publishes the result. Read-only, hidden, and disabled fields cannot activate
+or adjust, and TEXT fields cannot adjust. The host never changes the displayed
+value speculatively. Raw keyboard navigation, text input, and prompt editing
+continue through their existing routes.
+
+The host paints each text slot independently and attaches input only to the
+writable value rectangle. Labels and gaps block activation of controls below
+them. Every adjustment requires the current acknowledged display, owner
+generation, model revision, and content revision; backpressured wheel input
+is dropped rather than carried into a later field. Integer values align to
+the right of their declared value slot; choice and text values use its left
+edge. The geometry and clipping remain guest-defined.
+
+FIELDS requires CONTROLS, a 176-byte inbound payload, and a 376-byte retained
+transaction. The existing CORE outbound minimum already accommodates ADJUST.
+Existing profiles remain unchanged. Generic `PT-CONTROL-DEFINE` / REPLACE
+writers validate canonical FDC1 content before publication; public event
+accessors expose ADJUST's content revision and signed adjustment count.
+
+Sound Lab's current rows map directly: frequency 40–2000 with step 10,
+amplitude 0–100 with step 5, duration 100–2000 with step 100, and waveform
+choices with their existing oscillator IDs. Reuse the current label/value
+positions and exact-value prompt, which accepts arbitrary in-range integers.
+A shared Akashic field widget should publish from that same state and keep
+its ordinary CELL drawing and event handling. Terminal-local text editing,
+caret/selection state, and IME composition are outside this field contract.
+
+The FIELD checkpoint passed all 859 supervised checks in 62.87 seconds.
+Production-source publication ran on the emulator and both simulator
+executors; independent incoming-frame tests exercised signed ADJUST limits,
+capability negotiation, malformed tails, revision checks, and event accessors.
+Host tests covered choice/object and UTF-8 quotas, atomic failure and retry,
+immutable full/delta offers, driver credit, display proof, and pointer routing
+through the rendered value area. Read-only behavior, unchanged raw keyboard
+handling, and full/partial repaint equivalence are covered.

@@ -93,7 +93,7 @@ use the APT-1 control reserve under Section 17.
 | `000a` | `RET_RESULT` | T -> C | reserve | 48 bytes |
 | `000b` | `OWNER_DROP` | C -> T | reserve | 32 bytes |
 | `000c` | `RESOURCE_ABORT` | C -> T | reserve | 32 bytes |
-| `0205` | `CONTROL_EVENT` | T -> C | ordinary | 40, 48, or 64 bytes by kind |
+| `0205` | `CONTROL_EVENT` | T -> C | ordinary | 40, 48, 56, or 64 bytes by kind |
 | `1000` | `RESOURCE_BEGIN` | C -> T | ordinary | 80 bytes |
 | `1001` | `RESOURCE_CHUNK` | C -> T | ordinary | 32-byte prefix + bytes |
 | `1002` | `RESOURCE_COMMIT` | C -> T | ordinary | 24 bytes |
@@ -234,8 +234,9 @@ Feature bits are:
 | 11 | `RET_PANES` | explicit pane chrome, title, focus, and content-region relationship |
 | 12 | `RET_STATUS_FIELDS` | structured single-row label/value status fields |
 | 13 | `RET_TASKBARS` | fixed-slot taskbar, task, and launcher CONTROL kinds |
+| 14 | `RET_FIELDS` | typed FIELD controls with explicit label/value slots |
 
-Bits 14 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 15 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -252,6 +253,13 @@ existing 80-byte CONTROL prefix and its complete transaction floor is 280
 bytes for one empty TASKBAR root. Entry label and shortcut bytes must fit the
 actual negotiated payload, transaction, and aggregate UTF-8 bounds. Support
 does not automatically enable the feature in existing product policies.
+
+`RET_FIELDS` requires `RET_CONTROLS`, independently of the collection, item,
+and taskbar families. It adds no capacity field. A FIELD and each of its
+choices consume the existing object reservation; its outer label and content
+text consume aggregate UTF-8 capacity. Its smallest payload is 176 bytes and
+its complete transaction floor is 376 bytes. The caller must explicitly enable
+the family only on a complete supported display path.
 
 All maxima are terminal policy supplied by its caller. This contract does not
 assign desktop-, application-, or implementation-specific numeric caps.
@@ -373,7 +381,10 @@ the fixed prefix, at least 40 terminal-to-client payload bytes for
 CONTROL prefix and the smallest STX1 body fit, at least 64 terminal-to-client
 payload bytes for a positioned `CONTROL_EVENT`, and a retained transaction
 maximum of at least 352 bytes. `RET_CONTROL_ITEMS` needs no more: its
-smallest body and its 64-byte item events fit those minima. A client must
+smallest body and its 64-byte item events fit those minima. `RET_FIELDS`
+requires at least 176 inbound payload bytes for CONTROL plus FDC1, 376 complete
+transaction bytes, and 56 outbound payload bytes for ADJUST. The existing CORE
+outbound minimum of 64 remains in force and already covers that event. A client must
 treat an inconsistent reply pair as the deterministic unsupported-profile
 outcome.
 
@@ -923,7 +934,7 @@ renderer-neutral semantic extension rather than pixel inference.
 A region barrier point that no control surface covers shows CELL or residual
 content, so a pointer gesture may start there and reach the client as raw
 `POINTER` at that cell (APT-1 Section 12). The visible root bounds of every
-`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, and `TASKBAR`, and every
+`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `TASKBAR`, and `FIELD`, and every
 open menu popup, are control surfaces laid out by the renderer: a point on
 one never starts a raw gesture. It resolves to an activatable target, to a
 `TEXT_AREA`/`TEXT_GRID` position or an `ITEM_VIEW` item under
@@ -937,7 +948,8 @@ is invalid until every surviving region is stamped with the new generation.
 
 `RET_CONTROLS` defines the independent CONTROL identity namespace and its menu
 kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds, and
-`RET_CONTROL_ITEMS` the item view, and `RET_TASKBARS` taskbar roots and entries,
+`RET_CONTROL_ITEMS` the item view, `RET_TASKBARS` taskbar roots and entries,
+and `RET_FIELDS` typed fields,
 in that same namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
 80-byte prefix `<QQQHHiQQIiiIIIII>`, followed immediately by `label_bytes`
 bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
@@ -986,6 +998,7 @@ Control kinds are:
 | 10 | `TASKBAR` (requires `RET_TASKBARS`) |
 | 11 | `TASK` (requires `RET_TASKBARS`) |
 | 12 | `LAUNCHER` (requires `RET_TASKBARS`) |
+| 13 | `FIELD` (requires `RET_FIELDS`) |
 
 Menu controls, `TABSET`, `TAB`, `TASKBAR`, `TASK`, and `LAUNCHER` require
 `content_bytes = 0`. `TEXT_AREA`
@@ -993,7 +1006,8 @@ and `TEXT_GRID` require one canonical STX1 text collection, and `ITEM_VIEW`
 one canonical ITM1 item collection. Their exact header, item, graph, state,
 replacement, and quota rules are specified in the MegaPad-owned
 `docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract. Menu and collection
-roots use the same CELL_RECT32 geometry contract.
+roots use the same CELL_RECT32 geometry contract. FIELD requires the canonical
+FDC1 content specified in Section 9.2.
 
 State bits are:
 
@@ -1081,8 +1095,10 @@ CONTROL high-water. That high-water is independent of the OBJECT high-water;
 equal numeric IDs in the two namespaces are distinct. `CONTROL_REPLACE`
 requires an existing exact-target control and resends its complete wire record.
 Menu, TABSET, and TASKBAR records remain state-only replacements; TAB, TASK,
-and LAUNCHER may replace state, label, and shortcut; TEXT_AREA, TEXT_GRID, and ITEM_VIEW may replace state
-and their complete content with a strictly newer content revision. Every identity, kind,
+and LAUNCHER may replace state, label, and shortcut; TEXT_AREA, TEXT_GRID,
+ITEM_VIEW, and FIELD may replace state and their complete content. Changed
+content requires a strictly newer content revision; state-only changes preserve
+the current content revision. FIELD labels remain fixed for their identity. Every identity, kind,
 authority, hierarchy, order, bounds, and geometry field remains exact. The
 proposed value still undergoes normal control policy, dependency, quota, and
 final-graph validation.
@@ -1098,7 +1114,8 @@ Each committed control consumes one slot from the target's existing
 `object_quota`. Each STX1 or ITM1 item carried by a text, grid, or item-view
 control consumes one additional slot because it is a separately retained,
 stable-keyed value that a selected renderer may need to
-materialize. OBJECTs, controls, and semantic items are summed before the
+materialize. Each FDC1 choice consumes one additional slot, including choices
+that are not the current value. OBJECTs, controls, and semantic items are summed before the
 comparison. Label, shortcut, and semantic-content text bytes are summed with
 GLYPH_RUN and READOUT text against the same `utf8_byte_quota`. The terminal
 adds no `max_controls`, `max_semantic_items`, control-text maximum, or other
@@ -1130,7 +1147,7 @@ resulting authoritative state in a later transaction.
 
 | Kind | Name | Exact payload | Target kinds | Feature |
 |---:|---|---:|---|---|
-| 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER` | 8; `TAB` also 9; task entries also 13 |
+| 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER`, `FIELD` | 8; `TAB` also 9; task entries also 13; FIELD also 14 |
 | 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
 | 3 | `EXTEND` | 64 bytes | `TEXT_AREA` | 8 and 9 |
 | 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW` | 8 and 9; `ITEM_VIEW` also 10 |
@@ -1140,6 +1157,7 @@ resulting authoritative state in a later transaction.
 | 8 | `EXPAND` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
 | 9 | `COLLAPSE` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
 | 10 | `CHECK` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
+| 11 | `ADJUST` | 56 bytes | writable INTEGER or CHOICE `FIELD` | 8 and 14 |
 
 `PLACE`, `EXTEND`, and `FOLLOW` end with the position tail `<QQII>`: u64
 `content_revision`, u64 `item_key`, u32 `scalar_offset`, and u32 `reserved` =
@@ -1147,7 +1165,13 @@ resulting authoritative state in a later transaction.
 of the same shape, u64 `content_revision`, u64 `item_key`, and two u32
 `reserved` = 0. `SCROLL` ends with `<hhI>`: i16 horizontal wheel detents, i16
 vertical wheel detents, and u32 `reserved` = 0, with at least one nonzero
-detent count. All other kind values, lengths, and nonzero reserved fields are
+detent count. `ADJUST` ends with `<Qq>`: positive u64 `content_revision` and
+nonzero signed i64 `adjustment`. It carries no item key, scalar offset, or wheel
+fields. The amount is an adjustment-step count/direction interpreted by the
+guest against this exact committed FDC1 content. The guest chooses application
+boundary behavior and publishes the resulting value; the host never changes
+the retained field value in response to this intent. All other kind values,
+lengths, and nonzero reserved fields are
 invalid. Modifier bits are the APT-1 KEY modifier bits and all other bits are
 zero. SEMANTIC-CONTENT-1 defines how a position names STX1 content and an
 item names ITM1 content.
@@ -1155,7 +1179,10 @@ item names ITM1 content.
 The terminal may emit an event only for the exact active owner generation and
 control ID of a target kind listed for it, when the complete current control
 and all of its ancestors are effectively visible and enabled. `MENU_BAR`,
-`MENU_SEPARATOR`, `TABSET`, and `TASKBAR` never emit `CONTROL_EVENT`.
+`MENU_SEPARATOR`, `TABSET`, and `TASKBAR` never emit `CONTROL_EVENT`. FIELD
+activation requires writable content; ADJUST additionally requires INTEGER or
+CHOICE content and the exact current `content_revision`. TEXT fields accept
+ACTIVATE to request guest-owned editing, without a host-local text edit buffer.
 
 The event's `model_revision` is exactly the current global revision of the
 complete composite containing the hit-tested control, after that same revision
@@ -1166,6 +1193,87 @@ intent is retained/backpressured until an exact current view is eligible or is
 discarded as stale. The client revalidates owner, generation, control identity,
 kind, state, revision, and any position before routing the event through its
 authoritative UIDL/widget action path.
+
+### 9.2 Typed FIELD content (FDC1)
+
+FIELD is a root CONTROL with positive bounds, `parent_control_id = 0`,
+`order = 0`, a caller-selected signed z order, an optional label, and an empty
+shortcut. Allowed state bits are VISIBLE, ENABLED, and SELECTED. SELECTED still
+requires visible and enabled state. The optional outer label is immutable for
+that control identity; its layout slot is committed in FDC1. The root's bounds,
+region, identity and hierarchy follow the normal immutable CONTROL replacement
+rules. Complete newer content may replace type, value, choices, constraints,
+label/value slots, and read-only metadata atomically.
+
+The content starts with exact `<IHHQIIiiIIiiIIqqqqII>` (96 bytes):
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | tag = `0x31434446` (`FDC1`) | u32 |
+| 4 | version = 1 | u16 |
+| 6 | kind: INTEGER=1, CHOICE=2, TEXT=3 | u16 |
+| 8 | content revision, positive | u64 |
+| 16 | flags: READ_ONLY bit 0; other bits zero | u32 |
+| 20 | reserved = 0 | u32 |
+| 24 | label x, y, columns, rows | i32, i32, u32, u32 |
+| 40 | value x, y, columns, rows | i32, i32, u32, u32 |
+| 56 | current numeric value | i64 |
+| 64 | minimum | i64 |
+| 72 | maximum | i64 |
+| 80 | step | i64 |
+| 88 | choice count | u32 |
+| 92 | trailing text byte count | u32 |
+
+Both rectangles are relative to the root's origin. Their mathematical
+endpoints use exact addition. Value bounds have positive extents and are fully
+contained in the root. Label bounds have positive extents exactly when the
+outer CONTROL label is nonempty, and otherwise are canonical all-zero. Every
+nonempty label rectangle is fully contained in the root. The two rectangles
+do not overlap; touching edges are valid. The renderer preserves the declared
+rectangles and independently clips each single-line string within its slot.
+It must not infer geometry from the label or value, reflow adjacent controls,
+or clip a grapheme into a neighboring slot.
+
+INTEGER requires `minimum <= value <= maximum` and `step > 0`; signed i64
+extremes are valid when these constraints hold. There is no alignment-to-step
+requirement on the current value. Choice count and trailing text byte count
+are zero. Its display text is the ordinary signed decimal representation of
+the committed value.
+
+CHOICE requires positive choice count, zero minimum, maximum, step, and text
+byte count, and a current value matching exactly one choice. Each choice is
+`<qII>` (16 bytes): signed i64 value, u32 label byte count, and reserved u32
+zero, immediately followed by its label bytes. Labels are nonempty, values are
+unique, and wire order is semantic choice order. Duplicate display labels are
+valid because choice identity is the signed value. Display text is the label
+of the current value; it must not use the value as an array index.
+
+TEXT requires zero value, minimum, maximum, step, and choice count. Its exact
+UTF-8 value follows the header; empty text is valid. Its display text is that
+committed string. Host input can request activation; guest producers retain
+control of text entry and replacement.
+
+Outer FIELD labels, choice labels, and TEXT values are clean single-line
+Unicode-scalar UTF-8. C0 (`U+0000..001F`), DEL and C1 (`U+007F..009F`), and
+`U+2028` and `U+2029` are forbidden. Each exact byte count is independently
+checked; no padding or trailing bytes are valid. The sum of outer label and
+all content text bytes consumes aggregate UTF-8 quota. One root plus every
+choice consumes object quota, including hidden or read-only controls. Numeric
+display formatting adds no stored guest UTF-8 bytes. There are no family-local
+text or choice limits beyond the wire widths and enclosing negotiated quotas.
+
+READ_ONLY controls remain displayable and may retain descriptive selection,
+but cannot emit ACTIVATE or ADJUST. Host interaction reports intent without
+changing any committed value, choice, flags, or selection. A producer handles
+ADJUST using its own clamp, wrap, or refusal policy, and publishes complete
+newer FDC1 content when the value changes. A stale content revision cannot be
+reinterpreted against a newer choice list or numeric constraint set.
+
+Unsupported FDC1 versions, kinds or flags, noncanonical unused fields,
+malformed strings, and invalid geometry reject the entire transaction.
+Feature discovery remains optional, with complete CELL fallback when FIELDS
+is unavailable or unrecognized. Supporting a codec does not automatically
+enlarge an existing product's advertised policy.
 
 ## 10. Generic objects
 

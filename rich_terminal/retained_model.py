@@ -32,6 +32,7 @@ class RetainedFeature(IntFlag):
     PANES = 1 << 11
     STATUS_FIELDS = 1 << 12
     TASKBARS = 1 << 13
+    FIELDS = 1 << 14
 
 
 class ResourceFormat(IntEnum):
@@ -51,6 +52,7 @@ _ALL_FEATURES = (
     | RetainedFeature.PANES
     | RetainedFeature.STATUS_FIELDS
     | RetainedFeature.TASKBARS
+    | RetainedFeature.FIELDS
 )
 
 
@@ -258,6 +260,9 @@ class RetainedPolicy:
         control_collections = bool(features & RetainedFeature.CONTROL_COLLECTIONS)
         if control_collections and not controls:
             raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
+        fields = bool(features & RetainedFeature.FIELDS)
+        if fields and not controls:
+            raise ValueError("FIELDS requires CONTROLS")
         if features & RetainedFeature.TASKBARS and not controls:
             raise ValueError("TASKBARS requires CONTROLS")
         # Item views need no larger minimum: the smallest ITM1 body and the
@@ -335,6 +340,10 @@ class RetainedPolicy:
             if inbound < 80:
                 raise ValueError("CONTROLS requires an 80-byte inbound payload")
             operation_payloads.append(80)
+        if fields:
+            if inbound < 176:
+                raise ValueError("FIELDS requires a 176-byte inbound payload")
+            operation_payloads.append(176)
         if panes:
             if inbound < 104:
                 raise ValueError("PANES requires a 104-byte inbound payload")

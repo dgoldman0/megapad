@@ -295,6 +295,7 @@ PT-EVENT-POLL       ( event session -- status has-event )
 PT-CONTROL-EVENT-OWNER@      ( event -- owner )
 PT-CONTROL-EVENT-GENERATION@ ( event -- generation )
 PT-CONTROL-EVENT-ID@         ( event -- control )
+PT-CONTROL-EVENT-ADJUSTMENT@ ( event -- signed-step-count )
 PT-CONTROL-EVENT-KIND@       ( event -- kind )
 PT-CONTROL-EVENT-MODIFIERS@  ( event -- modifiers )
 PT-CONTROL-EVENT-CONTENT-REVISION@ ( event -- revision )
@@ -547,6 +548,43 @@ nonoverlap, and at most one selected task in the final graph. PT keeps no
 parallel control table. Task and launcher activation uses the existing
 revision-bound `PT-CONTROL-ACTIVATE` event; the guest decides which application
 to activate or launch, then publishes the resulting state.
+
+`PT-CONTROL-FIELD` (13) uses the existing CONTROL writers with an exact
+canonical FDC1 content span. It requires `RET_FIELDS` (bit 14), which depends
+on CONTROLS independently of collections. Discovery requires a 176-byte
+inbound payload, a 376-byte retained transaction, and a 56-byte outbound
+payload; actual label/content bytes must fit the negotiated bounds. FIELD
+is a positive root rectangle with parent/order zero, optional label, empty
+shortcut, and VISIBLE/ENABLED/SELECTED state bits. Selected fields must be
+visible and enabled. The caller retains the complete CELL fallback whenever
+the feature is unavailable.
+
+The 96-byte FDC1 header carries a positive content revision, field kind,
+flags, explicit root-relative label/value rectangles, numeric value/range/
+step, choice count, and text byte count. `PT-FIELD-INTEGER` (1) requires an
+inclusive range containing the value and a positive step. `PT-FIELD-CHOICE`
+(2) requires unique signed values with nonempty labels and a declared current
+value; range and step are zero. `PT-FIELD-TEXT` (3) carries exact UTF-8 text
+and zero numeric fields. `PT-FIELD-F-READ-ONLY` is the sole flag. Label bounds
+are all-zero exactly when the CONTROL label is empty; otherwise both label
+and value slots are positive, contained in the root, and disjoint. FDC1
+strings and the FIELD label exclude C0/C1, DEL, U+2028, and U+2029.
+
+PT validates the complete borrowed FDC1 span, including reserved fields,
+canonical lengths, choice uniqueness, geometry, and string content, before
+emission. It allocates no persistent field state or choice table; duplicate
+choice detection rescans preceding records within the bounded input. Existing
+span-alias checks and terminal owner quotas apply, and temporary content
+pointers are cleared before return.
+
+`PT-CONTROL-ADJUST` (11) is the existing CONTROL_EVENT prefix plus a 16-byte
+tail containing content revision and a nonzero signed step count. It is
+gated by FIELDS independently of collections. `PT-CONTROL-EVENT-ADJUSTMENT@`
+returns that signed count only for an ADJUST descriptor with the exact tail;
+`PT-CONTROL-EVENT-CONTENT-REVISION@` accepts ADJUST's 16-byte tail and the
+existing positioned/item 24-byte tails. Other event types, wrong kinds, and
+wrong tail sizes return zero. An adjustment proposes a change; the guest
+retains value authority and publishes the accepted replacement and revision.
 
 `PT-SERIES-TIMESTAMP-EXPLICIT` and `PT-SERIES-TIMESTAMP-UNIFORM` select the
 two protocol timestamp modes. APPEND and REPLACE take an aligned borrowed span

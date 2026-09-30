@@ -62,9 +62,10 @@ from .semantic_items import (
     encode_item_view_content,
 )
 
+from .semantic_fields import FieldContent, encode_field_content, decode_field_content
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0x3F3F
+_RETAINED_FEATURE_MASK = 0x7F3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -106,6 +107,7 @@ _CONTROL_PREFIX = struct.Struct("<QQQHHiQQIiiIIIII")
 _CONTROL_EVENT = struct.Struct("<QQQHHIQ")
 _CONTROL_EVENT_POSITION = struct.Struct("<QQII")
 _CONTROL_EVENT_SCROLL = struct.Struct("<hhI")
+_CONTROL_EVENT_ADJUST = struct.Struct("<Qq")
 
 
 class RetainedMessageType(IntEnum):
@@ -187,6 +189,7 @@ class ControlEventKind(IntEnum):
     EXPAND = 8
     COLLAPSE = 9
     CHECK = 10
+    ADJUST = 11
 
 
 _POSITIONED_CONTROL_EVENTS = frozenset(
@@ -212,6 +215,8 @@ def control_event_payload_size(kind: ControlEventKind) -> int:
     normalized = _enum("event_kind", ControlEventKind, kind)
     if normalized in _KEYED_CONTROL_EVENTS:
         return _CONTROL_EVENT.size + _CONTROL_EVENT_POSITION.size
+    if normalized is ControlEventKind.ADJUST:
+        return _CONTROL_EVENT.size + _CONTROL_EVENT_ADJUST.size
     if normalized is ControlEventKind.SCROLL:
         return _CONTROL_EVENT.size + _CONTROL_EVENT_SCROLL.size
     return _CONTROL_EVENT.size
@@ -383,6 +388,8 @@ class RetainedCaps:
             and not features & RetainedFeature.CONTROLS
         ):
             raise ValueError("TASKBARS requires CONTROLS")
+        if features & RetainedFeature.FIELDS and not features & RetainedFeature.CONTROLS:
+            raise ValueError("FIELDS requires CONTROLS")
         object.__setattr__(self, "features", features)
         for name in (
             "max_owner_records",
@@ -1013,7 +1020,7 @@ class ControlWireDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | None = None
+    content: SemanticTextContent | ItemViewContent | FieldContent | None = None
 
     def __post_init__(self) -> None:
         for name, minimum in (
@@ -1088,6 +1095,7 @@ class ControlEvent:
     scalar_offset: int = 0
     wheel_x: int = 0
     wheel_y: int = 0
+    adjustment: int = 0
 
     def __post_init__(self) -> None:
         for name in ("owner_id", "owner_generation", "control_id"):
@@ -1116,6 +1124,7 @@ class ControlEvent:
         positioned = kind in _POSITIONED_CONTROL_EVENTS
         keyed = kind in _KEYED_CONTROL_EVENTS
         scroll = kind is ControlEventKind.SCROLL
+        adjust = kind is ControlEventKind.ADJUST
         for name, maximum in (
             ("content_revision", UINT64_MAX),
             ("item_key", UINT64_MAX),
@@ -1126,8 +1135,8 @@ class ControlEvent:
                 _integer(
                     name,
                     getattr(self, name),
-                    minimum=1 if keyed else 0,
-                    maximum=maximum if keyed else 0,
+                    minimum=1 if keyed or (adjust and name == "content_revision") else 0,
+                    maximum=maximum if keyed or (adjust and name == "content_revision") else 0,
                 ),
             )
         object.__setattr__(
@@ -1151,6 +1160,13 @@ class ControlEvent:
                     maximum=(1 << 15) - 1 if scroll else 0,
                 ),
             )
+        object.__setattr__(self, "adjustment", _integer(
+            "adjustment", self.adjustment,
+            minimum=-(1 << 63) if adjust else 0,
+            maximum=(1 << 63) - 1 if adjust else 0,
+        ))
+        if adjust and self.adjustment == 0:
+            raise ValueError("ADJUST requires a nonzero signed adjustment")
         if scroll and not (self.wheel_x or self.wheel_y):
             raise ValueError("SCROLL requires a nonzero wheel detent count")
 
@@ -2202,6 +2218,8 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
     )
     if definition.content is None:
         content = b""
+    elif isinstance(definition.content, FieldContent):
+        content = encode_field_content(definition.content)
     elif isinstance(definition.content, ItemViewContent):
         content = encode_item_view_content(definition.content)
     else:
@@ -2282,6 +2300,8 @@ def decode_control_definition(payload) -> ControlWireDefinition:
     try:
         if content_bytes == 0:
             content = None
+        elif kind is ControlKind.FIELD:
+            content = decode_field_content(body)
         elif kind is ControlKind.ITEM_VIEW:
             content = decode_item_view_content(body)
         else:
@@ -2346,6 +2366,8 @@ def encode_control_event(event: ControlEvent) -> bytes:
             event.scalar_offset,
             0,
         )
+    if event.event_kind is ControlEventKind.ADJUST:
+        return prefix + _CONTROL_EVENT_ADJUST.pack(event.content_revision, event.adjustment)
     if event.event_kind is ControlEventKind.SCROLL:
         return prefix + _CONTROL_EVENT_SCROLL.pack(
             event.wheel_x,
@@ -2398,6 +2420,10 @@ def decode_control_event(payload) -> ControlEvent:
             "item_key": item_key,
             "scalar_offset": scalar_offset,
         }
+    elif kind is ControlEventKind.ADJUST:
+        content_revision, adjustment = _CONTROL_EVENT_ADJUST.unpack_from(raw, _CONTROL_EVENT.size)
+        tail = {"content_revision": content_revision, "adjustment": adjustment}
+        tail_reserved = 0
     elif kind is ControlEventKind.SCROLL:
         wheel_x, wheel_y, tail_reserved = _CONTROL_EVENT_SCROLL.unpack_from(
             raw,

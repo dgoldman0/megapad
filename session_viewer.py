@@ -24,6 +24,7 @@ from rich_terminal.pygame_view import (
     ControlHitTarget,
     ControlIdentity,
     ControlSurface,
+    FieldHitTarget,
     HIT_MAP_ENTRY_TYPES,
     HitMapEntry,
     ItemHitTarget,
@@ -1059,6 +1060,29 @@ class _GuestKeyboardForwarder:
             params.update(content_revision=target.content_revision, item_key=item_key)
         return self._request_now("send_text_event", **params)
 
+    def send_field_event(
+        self,
+        target: FieldHitTarget,
+        *,
+        adjustment: int,
+        modifiers: int = 0,
+    ) -> bool:
+        """Send an adjustment for this exact displayed field, without queueing."""
+        if not isinstance(target, FieldHitTarget):
+            raise TypeError("target must be FieldHitTarget")
+        if not target.adjustable:
+            return False
+        adjustment = _host_integer(adjustment, "field adjustment")
+        if not -(1 << 63) <= adjustment < (1 << 63) or adjustment == 0:
+            raise ValueError("field adjustment must be a nonzero signed 64-bit count")
+        return self._request_now(
+            "send_text_event", owner_id=target.identity.owner_id,
+            owner_generation=target.identity.owner_generation,
+            control_id=target.identity.control_id,
+            event_kind=int(ControlEventKind.ADJUST), modifiers=modifiers,
+            content_revision=target.content_revision, adjustment=adjustment,
+        )
+
     def _request_input(self, method: str, **params) -> None:
         if not self.input_enabled:
             self._pending_inputs.clear()
@@ -1596,6 +1620,12 @@ class _PointerRouter:
         if not wheel_x and not wheel_y:
             return False
         target = self._resolve(position, terminal_size)
+        if isinstance(target, FieldHitTarget):
+            if wheel_y == 0:
+                return False
+            return self.keyboard.send_field_event(
+                target, adjustment=-wheel_y, modifiers=modifiers,
+            )
         if isinstance(target, TextHitTarget):
             return self.keyboard.send_text_event(
                 target,

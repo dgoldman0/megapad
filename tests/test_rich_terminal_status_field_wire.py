@@ -92,4 +92,4 @@ def test_discovery_accepts_status_only_profile_and_preserves_legacy_profile():
     with pytest.raises(ValueError, match="object capacity"):
         replace(fields, max_objects=0)
     with pytest.raises(ValueError, match="reserved"):
-        replace(fields, features=RetainedFeature.CORE | (1 << 14))
+        replace(fields, features=RetainedFeature.CORE | (1 << 15))

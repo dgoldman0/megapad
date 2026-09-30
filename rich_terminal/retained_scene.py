@@ -47,6 +47,7 @@ from .semantic_content import (
     SemanticTextState,
 )
 from .semantic_items import ItemRole, ItemViewContent, ViewItem, card_row_count
+from .semantic_fields import FieldContent
 
 
 INT32_MIN = -(1 << 31)
@@ -146,6 +147,7 @@ class ControlKind(IntEnum):
     TASKBAR = 10
     TASK = 11
     LAUNCHER = 12
+    FIELD = 13
 
 
 class ControlState(IntFlag):
@@ -799,7 +801,7 @@ def validate_control_shape(
     bounds: ObjectBounds | None,
     label: str,
     shortcut: str,
-    content: SemanticTextContent | ItemViewContent | None,
+    content: SemanticTextContent | ItemViewContent | FieldContent | None,
 ) -> tuple[ControlKind, ControlState]:
     """Validate the common scene/wire shape of one semantic control.
 
@@ -830,9 +832,9 @@ def validate_control_shape(
     label_bytes = _control_text_bytes("label", label)
     shortcut_bytes = _control_text_bytes("shortcut", shortcut)
     if content is not None and not isinstance(
-        content, (SemanticTextContent, ItemViewContent)
+        content, (SemanticTextContent, ItemViewContent, FieldContent)
     ):
-        raise TypeError("content must be SemanticTextContent, ItemViewContent, or None")
+        raise TypeError("content must be SemanticTextContent, ItemViewContent, FieldContent, or None")
 
     allowed = {
         ControlKind.MENU_BAR: ControlState.VISIBLE | ControlState.ENABLED,
@@ -868,6 +870,7 @@ def validate_control_shape(
             | ControlState.MINIMIZED
         ),
         ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
+        ControlKind.FIELD: ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED,
     }[normalized_kind]
     if int(normalized_state) & ~int(allowed):
         raise ValueError(
@@ -889,13 +892,14 @@ def validate_control_shape(
         ControlKind.TABSET,
         ControlKind.ITEM_VIEW,
         ControlKind.TASKBAR,
+        ControlKind.FIELD,
     }
     if normalized_kind in root_kinds:
         if parent_control_id or order or bounds is None:
             raise ValueError(
                 f"{normalized_kind.name} requires root order zero and positive bounds"
             )
-        if label_bytes or shortcut_bytes:
+        if shortcut_bytes or (label_bytes and normalized_kind is not ControlKind.FIELD):
             raise ValueError(
                 f"{normalized_kind.name} carries no label or shortcut"
             )
@@ -908,6 +912,10 @@ def validate_control_shape(
                 raise ValueError(
                     f"{normalized_kind.name} carries no semantic text content"
                 )
+        elif normalized_kind is ControlKind.FIELD:
+            if not isinstance(content, FieldContent):
+                raise ValueError("FIELD requires FDC1 content")
+            content.validate_geometry(cols=bounds.cell_cols, rows=bounds.cell_rows, label=label)
         elif normalized_kind is ControlKind.ITEM_VIEW:
             if not isinstance(content, ItemViewContent):
                 raise ValueError("ITEM_VIEW requires an item collection")
@@ -999,7 +1007,7 @@ class ControlDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | None = None
+    content: SemanticTextContent | ItemViewContent | FieldContent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.owner, OwnerIdentity):
@@ -1504,6 +1512,38 @@ class RetainedSceneModel:
             )
         return item
 
+    def require_field_control(
+        self, owner: OwnerIdentity, control_id: int, *,
+        content_revision: int | None = None, adjustable: bool = False,
+    ) -> ControlDefinition:
+        """Resolve one writable visible field at its committed content revision."""
+
+        if not self._owners.policy.features & RetainedFeature.FIELDS:
+            raise SceneModelError(SceneErrorCode.FEATURE, "FIELDS was not advertised")
+        _owner_scene, definition = self._active_control(owner, control_id)
+        if definition.kind is not ControlKind.FIELD or not isinstance(definition.content, FieldContent):
+            raise SceneModelError(SceneErrorCode.STATE, "control kind is not a FIELD")
+        if not definition.visible or not definition.enabled:
+            raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+        content = definition.content
+        if content.read_only:
+            raise SceneModelError(SceneErrorCode.STATE, "FIELD is read-only")
+        if not isinstance(adjustable, bool):
+            raise SceneModelError(SceneErrorCode.STATE, "adjustable must be bool")
+        if content_revision is not None:
+            try:
+                revision = _integer("content_revision", content_revision, minimum=1, maximum=UINT64_MAX)
+            except (TypeError, ValueError) as exc:
+                raise SceneModelError(SceneErrorCode.STATE, str(exc)) from exc
+            if revision != content.content_revision:
+                raise SceneModelError(SceneErrorCode.STATE, "field event names a superseded content revision")
+        if adjustable:
+            if content_revision is None:
+                raise SceneModelError(SceneErrorCode.STATE, "ADJUST requires an exact content revision")
+            if not content.is_adjustable:
+                raise SceneModelError(SceneErrorCode.STATE, "FIELD kind does not accept ADJUST")
+        return definition
+
     def require_interactable_control(
         self,
         owner: OwnerIdentity,
@@ -1512,6 +1552,8 @@ class RetainedSceneModel:
         """Resolve one exact active semantic target without mutating guest state."""
 
         owner_scene, definition = self._active_control(owner, control_id)
+        if definition.kind is ControlKind.FIELD:
+            return self.require_field_control(owner, control_id)
         if definition.kind in (ControlKind.TASK, ControlKind.LAUNCHER):
             parent = owner_scene.controls.get(definition.parent_control_id)
             if (parent is None or parent.kind is not ControlKind.TASKBAR
@@ -1756,6 +1798,7 @@ class RetainedSceneModel:
             ControlKind.TEXT_AREA,
             ControlKind.TEXT_GRID,
             ControlKind.ITEM_VIEW,
+            ControlKind.FIELD,
         }:
             compatible = (
                 replace(
@@ -1766,7 +1809,7 @@ class RetainedSceneModel:
                 == current
             )
             failure = (
-                "text control replacement may change only state and semantic content"
+                "content control replacement may change only state and semantic content"
             )
             if (
                 compatible
@@ -2400,6 +2443,8 @@ class RetainedSceneModel:
 
     @staticmethod
     def _control_object_slots(definition: ControlDefinition) -> int:
+        if isinstance(definition.content, FieldContent):
+            return definition.content.object_slots
         return 1 + (0 if definition.content is None else len(definition.content.items))
 
     @staticmethod
@@ -2622,6 +2667,15 @@ class RetainedSceneModel:
             and not features & RetainedFeature.CONTROL_ITEMS
         ):
             self._fail(SceneErrorCode.FEATURE, "CONTROL_ITEMS was not advertised")
+        if definition.kind is ControlKind.FIELD:
+            if not features & RetainedFeature.FIELDS:
+                self._fail(SceneErrorCode.FEATURE, "FIELDS was not advertised")
+            assert isinstance(definition.content, FieldContent)
+            policy = self._owners.policy
+            payload = 80 + len(definition.label.encode("utf-8")) + definition.content.wire_bytes
+            if (payload > policy.client_to_terminal_max_payload
+                    or 200 + payload > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA, "FIELD content exceeds payload or transaction capacity")
         if definition.kind in {
             ControlKind.TASKBAR, ControlKind.TASK, ControlKind.LAUNCHER,
         }:
@@ -2650,6 +2704,7 @@ class RetainedSceneModel:
             ControlKind.TABSET,
             ControlKind.ITEM_VIEW,
             ControlKind.TASKBAR,
+            ControlKind.FIELD,
         }:
             return
         parent = owner_scene.controls.get(definition.parent_control_id)
@@ -2842,6 +2897,7 @@ class RetainedSceneModel:
                     ControlKind.TABSET,
                     ControlKind.ITEM_VIEW,
                     ControlKind.TASKBAR,
+                    ControlKind.FIELD,
                 }:
                     continue
                 order_key = (definition.parent_control_id, definition.order)

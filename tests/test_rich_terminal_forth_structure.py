@@ -155,7 +155,12 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
     assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
-    assert "0x3F3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x7F3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x4000   CONSTANT _PT-RET-FIELDS" in source
+    assert (
+        "_PT-RV-FEATURES @ _PT-RET-FIELDS AND\n"
+        "    _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND"
+    ) in caps
     assert "0x2000   CONSTANT _PT-RET-TASKBARS" in source
     assert (
         "_PT-RV-FEATURES @ _PT-RET-TASKBARS AND\n"
@@ -584,6 +589,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     assert "_PT-RET-CONTROL-COLLECTIONS? 0= IF" in body
     assert "_PT-CT-KIND @ _PT-CT-TASKBAR-KIND? IF" in body
     assert "_PT-RET-TASKBARS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
+    assert "_PT-RET-FIELDS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
     assert body.index("_PT-PO-ADMIT") < body.index("_PT-CT-PAYLOAD!")
     assert body.index("_PT-CT-PAYLOAD!") < body.index("_PT-PO-SEND")
 
@@ -634,6 +640,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
         "PT-CONTROL-TASKBAR",
         "PT-CONTROL-TASK",
         "PT-CONTROL-LAUNCHER",
+        "PT-CONTROL-FIELD",
     ):
         assert kind in kinds
     for value, kind in enumerate(
@@ -646,6 +653,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
             "PT-CONTROL-TASKBAR",
             "PT-CONTROL-TASK",
             "PT-CONTROL-LAUNCHER",
+            "PT-CONTROL-FIELD",
         ),
         start=5,
     ):
@@ -692,9 +700,10 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
     tail_valid = _definition(source, "_PT-CONTROL-TAIL-VALID?")
 
     assert "_PT-RET-CONTROLS? 0=" in dispatch
-    # Only the ACTIVATE kind is admitted without the collections feature.
+    # ACTIVATE and the independently gated ADJUST do not require collections.
     assert "W@ PT-CONTROL-ACTIVATE <> IF" in dispatch
     assert "_PT-RET-CONTROL-COLLECTIONS? 0=" in dispatch
+    assert "_PT-RET-FIELDS? 0=" in dispatch
     assert "_PT-RX-LEN @ 40 U<" in dispatch
     assert "_PT-CONTROL-EVENT-BYTES DUP 0=" in dispatch
     assert "SWAP _PT-RX-LEN @ <> OR" in dispatch
@@ -705,6 +714,7 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
     assert "_PT.S.REVISION @ <>" in dispatch
     assert "_PT-ACCEPT-EVENT" in dispatch
     assert "PT-CONTROL-ACTIVATE = IF DROP 40 EXIT THEN" in bytes_for_kind
+    assert "PT-CONTROL-ADJUST = IF DROP 56 EXIT THEN" in bytes_for_kind
     assert "IF DROP 64 EXIT THEN" in bytes_for_kind
     assert "PT-CONTROL-SCROLL = IF 48 EXIT THEN" in bytes_for_kind
     # Positions need a content revision and item key; scroll needs detents.

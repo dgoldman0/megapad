@@ -359,7 +359,7 @@ def test_control_drop_and_revision_bound_activation_have_exact_payloads() -> Non
     assert modifier_bits.value.code is RetainedWireErrorCode.RESERVED
 
     kind = bytearray(expected)
-    kind[24:26] = (11).to_bytes(2, "little")
+    kind[24:26] = (0xFFFF).to_bytes(2, "little")
     with pytest.raises(RetainedWireError) as event_kind:
         decode_control_event(kind)
     assert event_kind.value.code is RetainedWireErrorCode.ENUM

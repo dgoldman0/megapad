@@ -26,6 +26,7 @@ from rich_terminal.retained_view import (
     INT64_MAX,
     INT64_MIN,
     DisplayScope,
+    FieldDraw,
     GlyphRunDraw,
     ImageDraw,
     ItemViewDraw,
@@ -75,6 +76,9 @@ from rich_terminal.semantic_items import (
     ItemViewContent,
     decode_item_view_content,
     encode_item_view_content,
+)
+from rich_terminal.semantic_fields import (
+    FieldContent, decode_field_content, encode_field_content,
 )
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_wire import ControlEventKind
@@ -140,8 +144,10 @@ def _wire_object(data, name: str, fields: tuple[str, ...]) -> Mapping[str, Any]:
 _DISPLAY_INPUT_FIELDS = ("generation", "display_offer_id", "display_scope")
 _CONTROL_TARGET_FIELDS = ("owner_id", "owner_generation", "control_id", "modifiers")
 _CONTROL_INPUT_FIELDS = _DISPLAY_INPUT_FIELDS + _CONTROL_TARGET_FIELDS
-# One exact field set per positioned CONTROL_EVENT kind, mirroring its tail.
+# One exact field set per extended CONTROL_EVENT kind, mirroring its tail.
 _TEXT_EVENT_FIELDS = {
+    int(ControlEventKind.ADJUST): _CONTROL_INPUT_FIELDS
+    + ("event_kind", "content_revision", "adjustment"),
     int(ControlEventKind.PLACE): _CONTROL_INPUT_FIELDS
     + ("event_kind", "content_revision", "item_key", "scalar_offset"),
     int(ControlEventKind.EXTEND): _CONTROL_INPUT_FIELDS
@@ -798,6 +804,10 @@ _ITEM_VIEW_WIRE_FIELDS = (
     "bounds",
     "content_itm1_base64",
 )
+_FIELD_WIRE_FIELDS = (
+    "kind", "control_id", "state", "order", "z_order", "bounds", "label",
+    "content_fdc1_base64",
+)
 _TABSET_WIRE_FIELDS = (
     "kind",
     "control_id",
@@ -852,6 +862,12 @@ def _item_content_to_wire(content: ItemViewContent) -> str:
     """Carry the one canonical ITM1 schema through JSON without restating it."""
 
     return base64.b64encode(encode_item_view_content(content)).decode("ascii")
+
+
+def _field_content_to_wire(content: FieldContent) -> str:
+    """Carry canonical FDC1 through the same transport as STX1 and ITM1."""
+
+    return base64.b64encode(encode_field_content(content)).decode("ascii")
 
 
 def _bounds_to_wire(bounds: ObjectBounds) -> list[int]:
@@ -1006,6 +1022,14 @@ def _item_content_from_wire(value, name: str) -> ItemViewContent:
         raise ValueError(f"{name} is not canonical ITM1: {exc}") from exc
 
 
+def _field_content_from_wire(value, name: str) -> FieldContent:
+    payload = _canonical_base64(value, name)
+    try:
+        return decode_field_content(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical FDC1: {exc}") from exc
+
+
 def _semantic_content_from_wire(value, name: str) -> SemanticTextContent:
     encoded = _wire_text(value, name)
     try:
@@ -1124,6 +1148,7 @@ def _retained_draw_to_wire(
         | TextGridDraw
         | TabSetDraw
         | TaskBarDraw
+        | FieldDraw
     ),
 ) -> dict:
     if isinstance(draw, GlyphRunDraw):
@@ -1359,6 +1384,19 @@ def _retained_draw_to_wire(
             "z_order": draw.z_order,
             "bounds": _bounds_to_wire(draw.bounds),
             "content_itm1_base64": _item_content_to_wire(draw.content),
+        }
+    if isinstance(draw, FieldDraw):
+        validate_control_shape(
+            kind=ControlKind.FIELD, state=draw.state, order=draw.order,
+            z_order=draw.z_order, parent_control_id=0, bounds=draw.bounds,
+            label=draw.label, shortcut="", content=draw.content,
+        )
+        return {
+            "kind": "field", "control_id": draw.control_id,
+            "state": int(draw.state), "order": draw.order,
+            "z_order": draw.z_order, "bounds": _bounds_to_wire(draw.bounds),
+            "label": draw.label,
+            "content_fdc1_base64": _field_content_to_wire(draw.content),
         }
     if isinstance(draw, TabSetDraw):
         return {
@@ -1666,6 +1704,25 @@ def _item_view_from_wire(data, name: str) -> ItemViewDraw:
     )
 
 
+def _field_from_wire(data, name: str) -> FieldDraw:
+    wire = _wire_object(data, name, _FIELD_WIRE_FIELDS)
+    if wire["kind"] != "field":
+        raise ValueError(f"{name} kind must be field")
+    return FieldDraw(
+        control_id=_wire_integer(wire["control_id"], f"{name} control_id",
+                                 minimum=1, maximum=UINT64_MAX),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(wire["order"], f"{name} order",
+                            minimum=0, maximum=UINT32_MAX),
+        z_order=_wire_integer(wire["z_order"], f"{name} z_order",
+                              minimum=INT32_MIN, maximum=INT32_MAX),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+        label=_wire_text(wire["label"], f"{name} label"),
+        content=_field_content_from_wire(wire["content_fdc1_base64"],
+                                         f"{name} content_fdc1_base64"),
+    )
+
+
 def _tabset_from_wire(data, name: str) -> TabSetDraw:
     wire = _wire_object(data, name, _TABSET_WIRE_FIELDS)
     if wire["kind"] != "tabset":
@@ -1790,6 +1847,7 @@ def _retained_draw_from_wire(
     | TabSetDraw
     | TaskBarDraw
     | ItemViewDraw
+    | FieldDraw
 ):
     if not isinstance(data, Mapping):
         raise TypeError(f"{name} must be an object")
@@ -2193,6 +2251,8 @@ def _retained_draw_from_wire(
         return _taskbar_from_wire(data, name)
     if kind == "item_view":
         return _item_view_from_wire(data, name)
+    if kind == "field":
+        return _field_from_wire(data, name)
     raise ValueError(f"{name} kind is not a retained draw kind")
 
 
@@ -2915,6 +2975,7 @@ class SharedSessionOwner(ABC):
         scalar_offset: int = 0,
         wheel_x: int = 0,
         wheel_y: int = 0,
+        adjustment: int = 0,
         generation: int | None = None,
         display_authorized: bool = False,
         display_lease_ack: tuple[int, DisplayScope] | None = None,
@@ -2922,9 +2983,9 @@ class SharedSessionOwner(ABC):
     ) -> dict:
         """Forward one owner-qualified control intent under the display lease.
 
-        ACTIVATE names a control; PLACE and EXTEND also name one STX1 position
-        and SCROLL carries wheel detents.  The terminal core checks that the
-        fields match the kind and that the position is still carried.
+        ACTIVATE names a control; extended events preserve their exact content
+        revision and tail. The terminal core checks the currently committed
+        target and never substitutes a newer field value or text position.
         """
 
         normalized_owner = _wire_integer(
@@ -2991,6 +3052,18 @@ class SharedSessionOwner(ABC):
                 maximum=(1 << 15) - 1,
             ),
         }
+        if normalized_kind is ControlEventKind.ADJUST or adjustment != 0:
+            tail["adjustment"] = _wire_integer(
+                adjustment, "semantic control adjustment",
+                minimum=INT64_MIN, maximum=INT64_MAX,
+            )
+            if normalized_kind is ControlEventKind.ADJUST:
+                if not tail["content_revision"] or not tail["adjustment"]:
+                    raise ValueError("ADJUST requires content revision and nonzero adjustment")
+                if any(tail[name] for name in ("item_key", "scalar_offset", "wheel_x", "wheel_y")):
+                    raise ValueError("ADJUST carries only content revision and adjustment")
+            else:
+                raise ValueError("adjustment is carried only by ADJUST")
         with self.condition:
             if not self._generation_current(generation):
                 return {"status": "stale_generation", "accepted_events": 0}
@@ -3898,7 +3971,7 @@ class SessionServer:
             if fields is None:
                 raise ValueError(
                     "text event_kind must be 2 PLACE, 3 EXTEND, 4 SCROLL, 5 FOLLOW, "
-                    "6 SELECT, 7 OPEN, 8 EXPAND, 9 COLLAPSE, or 10 CHECK"
+                    "6 SELECT, 7 OPEN, 8 EXPAND, 9 COLLAPSE, 10 CHECK, or 11 ADJUST"
                 )
             params = _wire_object(params, "text control input", fields)
         elif method == "send_pointer":
@@ -3941,6 +4014,7 @@ class SessionServer:
                         "scalar_offset",
                         "wheel_x",
                         "wheel_y",
+                        "adjustment",
                     )
                     if name in params
                 }

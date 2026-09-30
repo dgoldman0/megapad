@@ -52,6 +52,7 @@ from .retained_scene import (
     validate_status_field_shape,
 )
 from .semantic_content import SemanticTextContent
+from .semantic_fields import FieldContent
 from .semantic_items import ItemViewContent
 from .update_authority import TerminalGeometry
 
@@ -113,6 +114,9 @@ _CONTROL_ALLOWED_STATES = {
     ),
     ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
     ControlKind.TAB: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+    ControlKind.FIELD: (
         ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
     ),
     ControlKind.ITEM_VIEW: (
@@ -1074,9 +1078,9 @@ def _root_draw_fields(
     order,
     z_order,
     bounds,
-    content: SemanticTextContent | ItemViewContent | None,
+    content: SemanticTextContent | ItemViewContent | FieldContent | None,
 ) -> tuple[
-    int, ControlState, int, int, ObjectBounds, SemanticTextContent | ItemViewContent | None
+    int, ControlState, int, int, ObjectBounds, SemanticTextContent | ItemViewContent | FieldContent | None
 ]:
     control_id = _integer(
         "control_id", control_id, minimum=1, maximum=UINT64_MAX
@@ -1102,6 +1106,9 @@ def _root_draw_fields(
     elif kind is ControlKind.ITEM_VIEW:
         if not isinstance(content, ItemViewContent):
             raise TypeError("ITEM_VIEW draw requires ItemViewContent")
+    elif kind is ControlKind.FIELD:
+        if not isinstance(content, FieldContent):
+            raise TypeError("FIELD draw requires FieldContent")
     elif content is not None:
         raise ValueError(f"{kind.name} draw carries no semantic text content")
     return control_id, state, order, z_order, bounds, content
@@ -1195,6 +1202,38 @@ class ItemViewDraw:
         object.__setattr__(self, "z_order", z_order)
         object.__setattr__(self, "bounds", bounds)
         object.__setattr__(self, "content", content)
+
+
+@dataclass(frozen=True, slots=True)
+class FieldDraw:
+    """A typed field with immutable guest state and exact label/value slots."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    z_order: int
+    bounds: ObjectBounds
+    label: str
+    content: FieldContent
+
+    def __post_init__(self) -> None:
+        control_id, state, order, z_order, bounds, content = _root_draw_fields(
+            ControlKind.FIELD, self.control_id, self.state, self.order,
+            self.z_order, self.bounds, self.content,
+        )
+        assert isinstance(content, FieldContent)
+        label = _control_text("label", self.label, nonempty=False)
+        validate_control_shape(
+            kind=ControlKind.FIELD, state=state, z_order=z_order,
+            parent_control_id=0, order=order, bounds=bounds,
+            label=label, shortcut="", content=content,
+        )
+        for name, value in (
+            ("control_id", control_id), ("state", state), ("order", order),
+            ("z_order", z_order), ("bounds", bounds), ("label", label),
+            ("content", content),
+        ):
+            object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1380,7 +1419,10 @@ ObjectDraw = (
     | PlotDraw
     | WaveformDraw
 )
-SemanticRootDraw = MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw | ItemViewDraw | TaskBarDraw
+SemanticRootDraw = (
+    MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw
+    | ItemViewDraw | TaskBarDraw | FieldDraw
+)
 RetainedDraw = ObjectDraw | SemanticRootDraw
 
 _OBJECT_DRAW_TYPES = (
@@ -1516,6 +1558,7 @@ class RetainedRegionDraw:
                     TextGridDraw,
                     TabSetDraw,
                     TaskBarDraw,
+                    FieldDraw,
                     ItemViewDraw,
                 ),
             )
@@ -1770,14 +1813,14 @@ _ValidatedControl = tuple[
     ControlDefinition,
     ControlKind,
     ControlState,
-    SemanticTextContent | ItemViewContent | None,
+    SemanticTextContent | ItemViewContent | FieldContent | None,
 ]
 _ValidatedControlMap = dict[int, _ValidatedControl]
 
 
 def _validate_control_value(
     definition: ControlDefinition,
-) -> tuple[ControlKind, ControlState, SemanticTextContent | ItemViewContent | None]:
+) -> tuple[ControlKind, ControlState, SemanticTextContent | ItemViewContent | FieldContent | None]:
     if isinstance(definition.kind, bool):
         raise TypeError("control kind must not be bool")
     try:
@@ -1884,6 +1927,7 @@ def _validate_control_graph(
         ControlKind.TABSET,
         ControlKind.ITEM_VIEW,
         ControlKind.TASKBAR,
+        ControlKind.FIELD,
     }
     expected_parent = {
         ControlKind.MENU: ControlKind.MENU_BAR,
@@ -2136,6 +2180,16 @@ def _project_taskbar(
     )
 
 
+def _project_field(root_id: int, controls: _ValidatedControlMap) -> FieldDraw:
+    root, kind, state, content = controls[root_id]
+    if kind is not ControlKind.FIELD or root.bounds is None or not isinstance(content, FieldContent):
+        raise RetainedViewError("semantic root is not a bounded FIELD")
+    return FieldDraw(
+        control_id=root.control_id, state=state, order=root.order,
+        z_order=root.z_order, bounds=root.bounds, label=root.label, content=content,
+    )
+
+
 def _project_semantic_root(
     root_id: int,
     controls: _ValidatedControlMap,
@@ -2152,6 +2206,8 @@ def _project_semantic_root(
         return _project_item_view(root_id, controls)
     if kind is ControlKind.TASKBAR:
         return _project_taskbar(root_id, controls, children)
+    if kind is ControlKind.FIELD:
+        return _project_field(root_id, controls)
     raise RetainedViewError(f"semantic root has unsupported kind {kind.name}")
 
 
@@ -2644,6 +2700,7 @@ def project_composite_draw_plane(
 
 __all__ = [
     "DisplayScope",
+    "FieldDraw",
     "GlyphRunDraw",
     "ImageDraw",
     "ImageResourceManifest",

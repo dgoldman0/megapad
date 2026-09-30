@@ -16,6 +16,7 @@ from .apt1 import UINT32_MAX, UINT64_MAX
 from .retained_model import ResourceFormat
 from .retained_scene import ControlKind, ControlState, ImageFit, StatusSeverity
 from .retained_view import (
+    FieldDraw,
     GlyphRunDraw,
     ImageDraw,
     ImageResourceManifest,
@@ -54,6 +55,7 @@ from .semantic_items import (
     card_field_width,
     card_row_count,
 )
+from .semantic_fields import FieldKind
 
 ATTR_BOLD = 0x01
 ATTR_DIM = 0x02
@@ -273,11 +275,29 @@ class ControlHitTarget:
             ControlKind.TAB,
             ControlKind.TASK,
             ControlKind.LAUNCHER,
+            ControlKind.FIELD,
         ):
-            raise ValueError("only MENU, MENU_ITEM, and TAB, TASK, or LAUNCHER can be hit targets")
+            raise ValueError("only MENU, MENU_ITEM, and TAB, TASK, LAUNCHER, or FIELD can be hit targets")
         object.__setattr__(self, "kind", kind)
         if not isinstance(self.rect, PixelRect):
             raise TypeError("rect must be PixelRect")
+
+
+@dataclass(frozen=True, slots=True)
+class FieldHitTarget(ControlHitTarget):
+    """A writable field's displayed value slot and adjustment authority."""
+
+    content_revision: int
+    adjustable: bool
+
+    def __post_init__(self) -> None:
+        ControlHitTarget.__post_init__(self)
+        if self.kind is not ControlKind.FIELD:
+            raise ValueError("field hit target must name FIELD")
+        object.__setattr__(self, "content_revision", _integer(
+            "content_revision", self.content_revision, minimum=1, maximum=UINT64_MAX))
+        if not isinstance(self.adjustable, bool):
+            raise TypeError("adjustable must be bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -847,7 +867,7 @@ _OBJECT_DRAWS = (
     PlotDraw,
     WaveformDraw,
 )
-_ROOT_CONTROLS = (TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw, TaskBarDraw)
+_ROOT_CONTROLS = (TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw, TaskBarDraw, FieldDraw)
 
 
 def _draw_extent(
@@ -2729,6 +2749,77 @@ def _paint_item_view(
     ]
 
 
+def _paint_field(
+    pygame_module, surface, font, region, region_rect, draw: FieldDraw,
+    cell_width: int, cell_height: int, *, hovered, pressed,
+    appearance: Appearance = REFERENCE_APPEARANCE,
+) -> list[HitMapEntry]:
+    """Render committed field values in explicit, independently clipped slots."""
+    anchor, visible = _semantic_root_rects(
+        pygame_module, surface, region, region_rect, draw.bounds,
+    )
+    if visible.width <= 0 or visible.height <= 0:
+        return []
+    entries: list[HitMapEntry] = [ControlSurface(
+        region.owner_id, region.owner_generation, draw.control_id, _pixel_rect(visible),
+    )]
+    content = draw.content
+    identity = _identity(region, draw.control_id)
+    enabled = bool(draw.state & ControlState.ENABLED)
+    writable = enabled and not content.read_only
+    selected = bool(draw.state & ControlState.SELECTED)
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(visible)
+        surface.fill(appearance.surface if appearance.flowing else _COLLECTION_SURFACE, visible)
+        for bounds, text, is_value in (
+            (content.label_bounds, draw.label, False),
+            (content.value_bounds, content.display_text, True),
+        ):
+            if bounds.empty:
+                continue
+            slot = _WideRect(anchor.left + bounds.x * cell_width,
+                             anchor.top + bounds.y * cell_height,
+                             bounds.cols * cell_width, bounds.rows * cell_height)
+            slot_clip = _bounded_pygame_rect(pygame_module, slot, visible)
+            if slot_clip.width <= 0 or slot_clip.height <= 0:
+                continue
+            surface.set_clip(slot_clip)
+            color = _TEXT if enabled else _DISABLED_TEXT
+            if is_value:
+                hot = writable and (selected or identity in (hovered, pressed))
+                background = ((appearance.selection if hot else appearance.channel)
+                              if appearance.flowing else (_TEXT_SELECTION if hot else _GRID_CELL))
+                surface.fill(background, slot_clip)
+                if hot:
+                    _alpha_line(pygame_module, surface,
+                                appearance.accent if appearance.flowing else _ACCENT,
+                                (slot.left, slot.bottom - 1), (slot.right - 1, slot.bottom - 1))
+                if content.read_only and enabled:
+                    color = _MUTED_TEXT
+                if writable:
+                    entries.append(FieldHitTarget(
+                        identity, ControlKind.FIELD, _pixel_rect(slot_clip),
+                        content.content_revision, content.is_adjustable,
+                    ))
+            else:
+                color = _MUTED_TEXT if enabled else _DISABLED_TEXT
+            left = slot.left
+            tab_advance = max(1, cell_width * 4)
+            if is_value and content.kind is FieldKind.INTEGER:
+                width = _bounded_text_width(font, text, slot.width, tab_advance)
+                if width <= slot.width:
+                    left = slot.right - width
+            _paint_bounded_text(
+                pygame_module, surface, font, text, color, slot_clip,
+                left=left, right=slot.right, top=slot.top, bottom=slot.bottom,
+                tab_advance=tab_advance,
+            )
+    finally:
+        surface.set_clip(prior_clip)
+    return entries
+
+
 def _paint_taskbar(
     pygame_module, surface, font, region, region_rect, draw: TaskBarDraw,
     cell_width: int, cell_height: int, *, hovered, pressed,
@@ -4293,6 +4384,11 @@ def _paint_draw(
                 appearance=appearance,
             )
         )
+    elif isinstance(draw, FieldDraw):
+        hit_entries.extend(_paint_field(
+            pygame_module, surface, font, region, region_rect, draw,
+            cell_w, cell_h, hovered=hovered, pressed=pressed, appearance=appearance,
+        ))
     elif isinstance(draw, TaskBarDraw):
         hit_entries.extend(_paint_taskbar(
             pygame_module, surface, control_font, region, region_rect, draw,
@@ -4687,6 +4783,7 @@ __all__ = [
     "PaintedDraw",
     "PaintedRegion",
     "ControlHitTarget",
+    "FieldHitTarget",
     "ControlIdentity",
     "ControlSurface",
     "HitMapEntry",
