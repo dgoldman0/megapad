@@ -5,7 +5,9 @@ Started: 2026-09-30
 Status: The unified emulator/simulator/hybrid application and bounded hybrid
 integer-routine v1 are implemented and qualified locally. Shared native scalar
 FP, tile values, Keccak, checked SHA3 input transfers and bulk audio are
-qualified; residual runtime costs are being measured. Kernel/source/captured-frame evidence and
+qualified; residual profiles identify NTT and AES transfer routing as the next
+targets. Native page access and longer continuation intervals need no further
+rewrite on current evidence. Kernel/source/captured-frame evidence and
 strict multicore FP/timing checks are recorded. Live Desktop acceptance,
 executor default promotion and expanded hybrid interoperability remain open.
 
