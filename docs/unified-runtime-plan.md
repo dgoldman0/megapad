@@ -12,12 +12,17 @@ current evidence. Kernel/source/captured-frame evidence and strict multicore
 FP/timing checks are recorded. Prepared Desktop journeys are complete in the
 documented direct-dispatch scope, with Python requiring expanded diagnostic
 deadlines. Closed and nested integer callbacks and private scalar services are
-qualified through the unified application. The synchronous shared-task adapter
-and retained exception frontiers are qualified; prepared-session accounting and
-composite suspension remain in progress. The pinned
-retained frontend changes are integrated and qualified locally.
-Production semantic sessions now default to required native execution; explicit
-CLI/environment choices and Python embedding defaults remain available.
+qualified through the unified application. Shared-task registration, native
+transport, exception frontiers, receipt accounting, callback IDL/deadline
+suspension and retained machine quanta are qualified through host-prepared
+sessions. Public task/composite capabilities are qualified for the exact
+installed host-prepared owner. Final selected acceptance passed on `4ef08d8`:
+2,466 application checks with three environment-dependent socket skips, 2,569
+simulator checks under each explicit executor, and eight production-source
+rich-terminal checks. The pinned retained frontend changes are integrated and
+qualified locally. Production semantic sessions default to required native
+execution; explicit CLI/environment choices and Python embedding defaults remain
+available. The approved local scope is complete within these documented limits.
 
 Branch: `feature/unified-runtime`
 
@@ -362,7 +367,43 @@ They are later deliverables, not implied results of Phase 4.
 Gate: each new capability has functional cross-mode evidence and explicit
 limits. Machine-level claims continue to require the architectural oracle.
 
+### Local completion and deferred scope
+
+The approved local work is complete at the qualified activation checkpoint
+`4ef08d8`. Both native engines rebuilt successfully and the final application,
+Python-selected simulator, native-selected simulator and production-source
+rich-terminal gates passed serially. The
+[acceptance report](unified-runtime-acceptance-2026-09-30.md) and its JSON record
+retain exact selectors, source and binary identities, outcomes and the three
+existing socket skips. The current plan and ledger reflect those results.
+Existing benchmark reports retain their original measured revisions; this
+functional regression gate does not remeasure them. Remote publication and
+integration into main remain outside the current local-work authorization.
+
+The following work remains explicitly deferred:
+
+- Generic task manifests, automatic task bootstrap/publication ordering, and
+  task CLI configuration. Prepared host APIs and sessions are the current gate.
+- Implementation of the staged native dictionary/compiler plan, including
+  execution-map/module stages, compiler overlays, defining-word/JIT integration,
+  native image authority and arbitrary executable dictionaries. The requested
+  design is complete; semantic `JIT-ON`/`JIT-OFF` keep their existing behavior.
+- Additional callback effect services: bounded MOVE, checked crypto, audio,
+  task-stack service extensions, tile/device/MMIO callbacks or other new
+  service catalogs. The qualified private service profile remains the fourteen
+  scalar FP/FPCSR exports; each later effect needs its own contract and gate.
+- The external math solver's latency/scaling reproducer. Its original reported
+  figures remain unverified here; local strict FP and timing fixtures do not
+  establish solver behavior, and Akashic remains untouched.
+- General self-modifying/native images, complete cross-profile snapshots,
+  multicore hybrid execution and live conversion of state authority. New
+  optimization work also requires current measured benefit; the declined AES
+  candidate does not become a required implementation task.
+
 ### Continuation checkpoints — 2026-09-30
+
+The following entries are historical intermediate checkpoints. The current
+status and implementation ledger include their later completed follow-ups.
 
 - Shared native tile values and per-operation identity admission are qualified.
   The first Python-guard extraction regressed the FP64 add probe; moving the
@@ -408,6 +449,12 @@ limits. Machine-level claims continue to require the architectural oracle.
 
 ## Implementation ledger
 
+This table records the latest qualified state. The dated implementation notes
+below preserve individual checkpoints; their references to then-pending gates
+are historical unless repeated in the current status or deferred-scope section.
+Test counts describe their named selectors and must not be summed as distinct
+coverage.
+
 | Slice | Status | Evidence |
 |---|---|---|
 | Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
@@ -421,9 +468,10 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
 | 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
 | 5B2 — nested callbacks | Qualified through the generic unified application path | 302 native child/root/publication/legacy checks; 767 private composition checks; rebuilt isolated activation candidate passed all 1,977 checks, including all 11 formerly deferred application journeys |
-| 5C/5D — shared task callbacks | Synchronous production adapter, native parked validation, original exception frontiers and engine callback receipts qualified; prepared-session composition and suspension in progress | Original transport/dispatcher gates; 607 adapter checks, 444 native validation checks, 170 tail/regression passes plus eight corrected/native targeted passes, and 153 semantic receipt checks; no task capability exposed |
+| 5C/5D — shared task callbacks | Host-prepared task exceptions, callback suspension and retained machine scheduling qualified and exposed for the exact installed owner | Earlier transport/adapter/frontier gates; 351 prepared accounting checks, 209 task-counter checks, 289 semantic suspension checks, 537 focused scheduling checks, all 38 real native composite-session cases and 75 activation checks; selectors overlap and are not additive |
 | 5E — private scalar services | Fourteen scalar FP/FPCSR services qualified through the unified application; fine-grained crossing path is substantially slower than direct execution | Existing service/bridge/application gates, 35 benchmark checks and clean `ddc986c` measurements at 64/256 iterations under both executors; full costs retained in the scalar-service performance report |
 | Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
+| Final unified acceptance | Qualified locally on `4ef08d8` | Both extensions rebuilt; 2,466 application passes with three socket skips; 2,569 simulator passes under each explicit executor; eight rich-terminal passes; exact selectors and identities in the acceptance report, counts overlap |
 
 ### Shared-task ownership and retained execution — 2026-09-30
 
@@ -438,19 +486,69 @@ rotation, CPU initialization or new work receipts.
 Repeated guest exception unwinds retain the original bounded vector of
 continuation frontiers, with monotonic loss tracking. Repaired cookies or
 metadata cannot restore discarded authority. The combined gate passed 170
-cases and found one overly broad expected error string in a new fixture; after
-correcting that expectation, all eight selected grant and native THROW cases
-passed. These checks include unchanged KDOS exception control and actual
-native child cancellation.
+cases; after correcting an overly broad expected error string in one new
+fixture, all eight selected grant and native THROW cases passed. These checks
+include unchanged KDOS exception control and actual native child cancellation.
 
 Engine-issued semantic receipts retain cumulative callback work independently
-of native instruction receipts and public counters. Their 153-check gate
-covers exact issued identity, optional adapter method seals, root finalization
-and preservation of the first error during accounting or cleanup failure.
-Prepared-session projection and composite idle/wake scheduling are the next
-integration gates. Public task/composite capabilities remain disabled until
-the application journeys are qualified; generic task manifests remain outside
-this prepared-session gate.
+of native instruction receipts and public counters. Their original 153-check
+gate covers exact issued identity, optional adapter method seals, root
+finalization and preservation of the first error during accounting or cleanup
+failure. Commit `363f448` then passed 351 checks for prepared-session projection,
+both outer executors, native parent/child CATCH/THROW, interrupted settlement,
+no-work parked proof and cleanup. Commit `d5ab2d9` passed 209 checks for retained
+task-only totals, repeated roots and mixed private/task accounting. These are
+overlapping gates, not additional distinct test totals.
+
+Commit `e723e50` qualified exact `Idle` and `IdleUntil` under the existing
+suspension owner: original main stacks, root, meter, request identities, code,
+grants and retained native-chain authority survive each detach and wake.
+Canonical deadline handling consumes the operand before reading the captured
+RTC owner/clock, preserves host exception identity, and checks authority again
+after polling. Invalid suspension evidence permanently consumes and cancels
+the retained authority before another effect. Its isolated semantic gate
+passed all 289 selected checks. KEY, general MS@/IDLE-MS callbacks and arbitrary
+UART effects are not admitted by the deadline observation.
+
+Commit `abd7763` qualified opt-in `machine_quantum_instructions` from 1 through
+10,000,000 through the existing runtime and prepared session continuation.
+`None` retains synchronous driving. One turn allowance covers every native
+segment, child and later entry; the original instruction, callback, entry and
+semantic limits remain cumulative. Admission and reply retain their actual
+zero-work events and consume inputs/outputs once. A runnable yield adds no
+semantic tick, machine work, interrupt or new work receipt. Zero-semantic
+machine progress remains visible to the session backend, and polling proof
+failure cancels both semantic and native authority.
+
+The scheduling checkpoint passed 537 focused simulator, adapter and session
+checks and all 38 real native composite-session cases across synchronous
+execution and instruction quanta 1, 2, 3, 5 and 64. This is host-prepared,
+direct-session evidence under both outer semantic executors; task callbacks
+still use the Python reference dispatcher. The host API and explicit limits
+are documented in [`hybrid-task-runtime.md`](hybrid-task-runtime.md).
+
+Commit `4ef08d8` qualified public prepared-task capabilities in all 75 selected
+capability, prepared-session and scheduling-admission checks. Status distinguishes
+synchronous task exceptions, callback suspension and composite scheduling using
+the exact installed semantic/native owner. Source-initialized function evidence
+rejects pre-install replacements and changed verifier bodies without invoking
+them. A selected revision-2 transport without parked validation retains its
+synchronous-only fallback; finite hybrid machine quanta require composite
+support before session ownership is claimed. Private ABI status remains separate.
+
+Final unified acceptance passed on this activation checkpoint: 2,466 application
+checks with three existing environment-dependent socket skips, 2,569 simulator
+checks with Python selection and the same 2,569 with native selection, followed
+by all eight production-source rich-terminal checks. The application gate also
+ran the strengthened production-close assertions after polling-proof failure.
+The two rebuilt native artifacts were identical across all final gates. Exact
+selectors, identities and limits are retained in the
+[acceptance report](unified-runtime-acceptance-2026-09-30.md).
+
+Generic task manifests, automatic task source/publication ordering and task
+launcher options remain outside the host-prepared session scope. No new socket,
+physical-display, guest-JIT or callback speedup claim follows from these
+functional gates.
 
 ### Private scalar service application — 2026-09-30
 
