@@ -320,8 +320,11 @@ limits. Machine-level claims continue to require the architectural oracle.
   current/legacy layout selection. Its ownership/provenance gates passed.
 - Added a MegaPad-owned bounded prepared-image Desktop harness. Its 28 checks
   include small production simulator/Python, simulator/native and hybrid/native
-  journeys. The full prepared Desktop journey remains pending; direct dispatch
-  and SDL dummy do not qualify socket transport or physical output.
+  journeys. The prepared eight-step Desktop journey subsequently passed with
+  simulator/native (31.111 seconds to ready, 36.340 seconds overall, 12 offers,
+  clean shutdown and original image preserved). Other mode/executor runs are
+  pending; direct dispatch and SDL dummy do not qualify socket transport or
+  physical output.
 - Locked the expanded interoperability plan and v2 callback value contract.
   Ninety value checks plus 94 existing manifest checks passed. Callback
   execution and v2 manifest admission are not enabled by those values.

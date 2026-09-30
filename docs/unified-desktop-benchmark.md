@@ -9,10 +9,14 @@ change the supplied image.
 The production two-key fixture has passed with simulator/Python,
 simulator/native, and hybrid/native. Those gates exercise preparation, real
 session ownership, input, CELL rendering, image isolation, and shutdown. The
-bundled eight-step prepared Desktop journey is **pending live qualification**;
-the small fixture is not evidence that the full Desktop boots or completes its
-journey. Emulator support is implemented but has not completed a prepared
-Desktop run. Hybrid uses an empty routine registry and must report zero
+bundled eight-step prepared Desktop journey also completed with
+simulator/native on 2026-09-30: 31.111 seconds to ready, 36.340 seconds overall,
+12 presented offers and 258,785,280 bytes peak RSS. Every expected step and
+shutdown check passed, and the original image hash was preserved. This is one
+bounded acceptance run, not a throughput comparison. Its report is
+[`performance/unified-desktop-simulator-native-2026-09-30.json`](performance/unified-desktop-simulator-native-2026-09-30.json).
+Prepared Desktop runs for the other modes/executors remain pending.
+Hybrid uses an empty routine registry and must report zero
 machine instructions and zero machine transitions.
 
 ## Scope
@@ -98,7 +102,8 @@ contain existing glyph-run, text-grid, text-area, menu, tab, item-view, meter,
 readout, and status kinds. The old flowing appearance only changes host paint;
 this harness uses the checkout's default compositor. This is compatibility
 evidence for attempting the run, not a completed live gate or visual parity
-claim.
+claim. The later simulator/native run above establishes this bounded subset;
+the peer's newer protocol families remain outside its coverage.
 
 ## Exact reusable policies
 
