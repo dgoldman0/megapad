@@ -177,7 +177,38 @@ lines, 222,397 packed bytes and 1,461 KDOS words, charging 36,116 semantic steps
 This workload checks loading compatibility outside the extracted hot kernels.
 No compiler change was made, and timing movement is not attributed to the FP,
 audio or Keccak changes. These trials do not include Desktop modules or input
-interaction. Source-loading attribution and Desktop qualification remain open;
+interaction. Desktop qualification remains open;
 executor default promotion is still deferred.
 
 Raw evidence: [kdos-controls-2026-09-30.json](kdos-controls-2026-09-30.json).
+
+## Diagnostic source and compositor attribution
+
+Separate cProfile runs of the existing full KDOS harness passed its exact
+source, dictionary, transcript, stack and storage checks in both executors.
+`kdos-attribution-2026-09-30.json` records source provenance, checked harness
+results and function costs. The profiler covers setup and validation too;
+none of these wall times replace the unprofiled controls above. Parsing and
+checked scalar memory operations remain visible Python costs in both
+executors: `parse_word` has about 0.14 s cumulative attributed time in each
+run, while `_write_integer` has about 0.21 s. Setup also includes disk format.
+Cumulative functions overlap and must not be added together. Native/Python
+reentry can distort profiler call counts; the harness's checked submitted-line
+and semantic-step counts remain the work authority. This evidence does not
+justify a new compiler or memory extraction without a targeted paired gate.
+
+The existing ready/typed Desktop and 12-offer typing-sequence tests also passed
+through Make with diagnostic profiling. Every pixel and hit map matches the
+complete reference. All 11 later typing offers take the partial-repaint path,
+each with damage below one quarter of the full frame. These are checked-in
+MegaPad fixtures; no external project sources were accessed or changed.
+`compositor-attribution-2026-09-30.json` records their hashes and attribution.
+
+That profile includes test collection, decoding, both optimized rendering and
+full-reference rendering. It attributes 0.368 s across 12 incremental compose
+calls and 1.650 s across 17 full compose calls, but their workloads differ and
+these numbers are not a speedup ratio. Wire-to-offer decoding is also visible
+(0.807 s across 42 calls, including collection/setup). These costs identify
+places to inspect if a live trace confirms they dominate. Captured offers do
+not measure guest input-to-frame latency, physical presentation, or a complete
+live Desktop session. Those acceptance and default-promotion gates remain open.

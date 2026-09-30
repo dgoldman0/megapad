@@ -329,7 +329,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
-| 2 — workload profiles | Bounded kernels and KDOS load controls recorded; Desktop/attribution pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
+| 2 — workload profiles | Kernels, KDOS controls/attribution and captured Desktop composition recorded; live Desktop pending | 19 harness checks; source controls in both executors; 3 exact captured-frame gates; separate evidence in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
@@ -683,3 +683,19 @@ protocol nor establish the reported solver ratios. The source/binary hashes,
 raw samples and full limits are in `docs/performance/execution-timing-2026-09-30.json`
 and `docs/performance/execution-timing-benchmark.md`. No modeled bus wait was
 removed or scheduler behavior changed to obtain these results.
+
+### Phase 2 source and captured-frame attribution — 2026-09-30
+
+Separate cProfile runs of full KDOS loading passed existing source, dictionary,
+transcript, stack and media validation in both semantic executors. Three
+existing Make-selected compositor tests passed exact pixel/hit-map comparison
+for ready/typed Desktop captures and all 12 typing offers. The 11 later offers
+used partial repaint with damage below one quarter of the frame each.
+
+Raw diagnostic reports retain source/fixture hashes and clearly include setup,
+collection and reference costs. They are not throughput samples or live
+Desktop latency measurements. Parsing, scalar memory checks, frame composition
+and wire decoding remain visible Python work, but each further extraction still
+needs a targeted compatibility and paired-performance gate. No external project
+was accessed or modified. Live Desktop and executor default promotion remain
+open; recorded offers cannot establish those outcomes.
