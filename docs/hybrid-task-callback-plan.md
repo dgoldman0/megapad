@@ -1133,3 +1133,76 @@ machine segments/instructions/cycles, observed depth, yields, wakes and cleanup.
 Preserve private-profile and ordinary suspension gates. Advertise task and
 composite capabilities only after their reviewed application gates pass;
 generic task manifests/startup remain a separate qualification.
+
+#### Machine scheduling API and cursor lock — 2026-09-30
+
+The opt-in host parameter is `machine_quantum_instructions: int | None = None`.
+Accept only an exact integer in `1..10_000_000`, excluding booleans, or `None`.
+`None` retains synchronous machine driving. Keep this parameter separate from
+`quantum_steps`, instruction fuel, callback limits and machine-entry limits.
+Session/backend configuration forwards the selected value only to the fresh
+`run_until_blocked` call. Resume and wake retain that original selection and
+offer no replacement limit. This adds no CLI/default/capability activation.
+
+For each detachable outer host dispatch, create one exact immutable
+`MachineTurn(limit)` and retain it on the original dispatch frame. The task
+root's `begin_machine_turn(turn)` binds the original outer frame and turn
+identities, original limit and starting cumulative instruction receipt. A
+repeat admission with that same turn cannot reset its start. All machine
+entries and segments in that turn, including reentry after an empty machine
+chain, share the remaining allowance derived from the retained root ledger.
+Do not use a hook-mutable consumed-work projection as a second accounting
+authority. A resumed outer host frame creates a fresh turn with the original
+limit; it retains the same root, meter, spent ledger and execution ceilings.
+Finite scheduling cannot detach source evaluation or nested arbitrary public
+host dispatch; reject such task admission before native begin.
+
+Keep the existing adapter advance cap of 65,536 instructions and additionally
+clamp it to the turn's remaining scheduling allowance. Begin remains an
+admission-only zero-quantum transition, even when the preceding machine entry
+spent the turn allowance. Validate and publish that accepted frame and consume
+its input operands once, then retain its real runnable event. This avoids a
+second pending-entry protocol: a later turn does not repeat the Call tick,
+begin admission or operand pops. Native initialization still occurs only on
+the first positive advance. Callback reply likewise consumes its request and
+outputs exactly once at zero quantum before any resulting runnable yield.
+
+Use a distinct exact frozen `ForeignMachineCursor`, with root token/root ID,
+invocation ID, operation token and receipt observations, and fixed
+`host_yield=True`. It carries no invented semantic XT/IP. The root retains one
+exact issued cursor record containing the original runnable event, frame,
+resume target, token/receipt and independent scalar evidence. A constructed or
+copied cursor has no authority. `machine_cursor_evidence(cursor)` exposes an
+immutable original snapshot for the existing engine-owned suspension witness;
+`resume_machine(cursor)` validates and consumes the exact live issuance once,
+then continues that retained event. Cancellation/close invalidates it. Neither
+API reconstructs native state from public cursor fields.
+
+Only an actual `ForeignRunnableYieldV1` may publish a machine cursor. A CALL or
+RET completed on the last scheduling instruction retains its real callback or
+return outcome; callback semantic execution may continue in the same host turn.
+If a zero-quantum reply reports terminal fuel exhaustion, preserve that failure
+instead of fabricating a runnable yield. A positive advance returning zero
+work remains a no-progress error. A scheduling yield itself adds no semantic
+tick, native instruction/cycle, IDL, wake or work receipt.
+
+The ordinary dispatcher explicitly propagates this cursor from direct foreign
+entry, Call/CallSelf, callback Return and `_continue_foreign`, and recognizes
+it before resolving a resumed semantic XT/IP. The original outer frame supplies
+the turn to `root_for`; nested semantic leaf frames cannot issue fresh turns.
+The existing `_SuspendedExecution` holds either the semantic cursor or this
+machine cursor, the original selected quantum and task root. The one existing
+lease, suspension handle and engine witness validate both forms, using the
+no-work parked-chain query before detach and resume. Machine yields use
+`YieldedExecution`/`resume_yielded` and do not acquire an IDL wake receipt.
+
+Qualification must compare synchronous execution with limits 1, 2 and larger
+than the workload, covering accepted zero-work entry, a final-quantum CALL,
+zero-quantum reply, final-quantum RET, multiple entries in one turn and empty
+chain reentry. Assert exact consumed operands, PC initialization, outputs,
+stores, cumulative work and one-shot token/receipt use. Include instruction,
+callback, entry and semantic fuel exhaustion across repeated host yields;
+copied/stale cursors, turn replacement, cancellation and failed later suspension
+publication; and the prepared KDOS child-IDL/THROW/input journeys above. Keep
+the synchronous and private-profile gates intact before any public capability
+claim.
