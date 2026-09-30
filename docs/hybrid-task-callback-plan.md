@@ -455,3 +455,74 @@ adapter tests pass. This design does not qualify general tasks, arbitrary
 callbacks, source evaluation during suspension, selected devices/services,
 compiler/JIT integration, native snapshots, multicore execution, or a Desktop
 journey. Those remain separate contracts and evidence.
+
+## Neutral value API appendix
+
+[`shared/foreign_abi.py`](../shared/foreign_abi.py) defines the first value and
+typing-interface slice. It implements no dispatcher, registration, cookie,
+adapter, or native task transport, and enables neither capability above.
+Every value has task ABI identity/version 1, frozen slots, exact validated
+integers and tuples, and finite bounds. Constructors revalidate nested values.
+Opaque references are retained without inspection, coercion, hashing or
+equality; containing values use identity equality and omit those references
+from representations. These conventions prevent validation from invoking
+opaque user behavior, but do not establish that any reference was issued.
+
+| Value | Fields and meaning |
+| --- | --- |
+| `ForeignSignatureV1` | `input_cells`, `output_cells`, each 0..8 |
+| `ForeignSpanV1` | Exact uint64 `base`, `size`, nonwrapping span and read/write/read_write `access`; an empty span grants nothing |
+| `ForeignOperationV1` | Opaque `registration`, signature, at most 16 resolved `machine_grants`, own instruction ceiling and own callback ceiling |
+| `ForeignExportV1` | Opaque `export`, signature, at most 16 distinct-role `task_grants`, callback semantic ceiling; no captured Word/IR implementation |
+| `ForeignBudgetV1` | Separate invocation/root remaining instruction and callback counts, plus `quantum_instructions`; values cannot renew original allowances |
+| `ForeignReceiptV1` | Root/invocation/parent IDs, depth, root segment sequence, invocation-start flag, accepted root-entry count, state, segment work and own-invocation/root totals |
+| `ForeignCallbackRequestV1` | Operation/request tokens, receipt, per-invocation request sequence, callback site, export descriptor and argument tuple |
+| `ForeignCompletedV1` | Operation token, returned receipt and output tuple; the issued operation owner still checks declared output arity |
+| `ForeignRunnableYieldV1` | Operation token and yielded receipt; zero instructions/cycles, including accepted entry before its first instruction, are valid |
+| `ForeignFailedV1` | Operation token, failed receipt, bounded machine/profile failure kind, detail and optional instruction PC; not a wrapper for host exceptions |
+| `ForeignCancellationV1` | Up to eight deepest-first retired invocation IDs, optional unchanged surviving-parent ID/request token and latest retained receipt |
+
+Receipt segment deltas count completed instructions/cycles and zero or one
+completed callback CALL. Invocation totals exclude child work; root totals
+include every invocation once. All three levels remain distinct. Each accepted
+segment, including a zero-work yield or terminal failure, obtains a new root
+sequence. `invocation_started` marks an accepted entry exactly once, rather
+than inferring entry from a changed invocation ID when returning to a parent.
+Callback/returned/yielded/failed are distinct receipt states; only returned
+and failed are terminal. A returned receipt requires a completed RET, and a
+callback receipt requires a completed CALL. Local consistency checks do not
+prove cross-receipt continuity, active ancestry, or correspondence with code.
+
+`ForeignAdapterV1` is a typing protocol with these boundaries:
+
+```python
+begin(operation, arguments, *, root_token, root_id, budget, parent=None)
+advance(operation_token, *, budget)
+reply(request_token, outputs, *, budget)
+cancel_suffix(operation_token)
+cancel_all()
+last_receipt()
+```
+
+The first three return one of the four event values. A child `begin` supplies
+the parent's pending callback request; the adapter must validate its exact
+issued authority, static child edge, root, ancestry and grants. `advance`
+resumes only an issued runnable token; `reply` consumes only its exact live
+callback token. Structural protocol conformance, copied values, numerical IDs
+and matching descriptors are never admission. The engine-owned registration,
+foreign return entry and token state remain outside this shared module.
+
+Adapters enforce the lesser of their retained original allowances and supplied
+remaining ceilings. A zero scheduling quantum may produce a zero-work yield;
+exhausted instruction fuel remains a terminal instruction-limit outcome.
+The semantic engine retains separate callback-local/root semantic fuel and
+capture/return authority; receipt machine counters do not replace it.
+
+The adapter must publish `last_receipt()` before event allocation and preserve
+it across cancellation and marshalling failure. The dispatcher settles each
+issued sequence once, including on a raw host exception. Rejected begin
+preflight creates no receipt. Cancellation creates no segment or invented
+work: it returns the latest already-published receipt, which may belong to a
+discarded child. Empty inactive cancellation still exposes that receipt.
+Retired IDs alone cannot prove a contiguous suffix or parent restoration;
+those checks and original parent-token preservation belong to the adapter.
