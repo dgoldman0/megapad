@@ -46,6 +46,47 @@ expose an inherited V1/V2 entry method that can replace a parked frame.
 Explicit use of an older runner on the same CPU remains excluded by native
 CPU reservation, independently of composition checks.
 
+### One owner across transport versions
+
+Mixed metadata versions remain supported in one `HybridRuntime`. Use one
+internal native owner for the CPU, pinned mapping/control buffer, boundary
+admission, reservation, publication identities and aggregate sealed-publication
+count/bytes. Keep one composition registration table and control-stack
+allocator across all versions; selecting another facade cannot replenish a
+resource limit or create another persistent export registry.
+
+The existing `RoutineRunnerV1(state, control_base, control_buffer)` and
+`RoutineRunnerV2(state, control_base, control_buffer)` constructors retain
+their standalone behavior. `RoutineRunnerV3` accepts the same constructor
+arguments, pins that owner once, and exposes `legacy_v2()`: an owner-bound
+`RoutineRunnerV2` facade with its existing V1 methods. This factory accepts
+no CPU, buffer or publication arguments and acquires no second mapping pin.
+The V3 Python type does not inherit the V1/V2 entry interface. A separately
+constructed runner still cannot claim an already pinned CPU.
+
+Composition routes metadata version 1 through the facade's V1 methods,
+metadata versions 2/3 through its V2 methods, and metadata version 4 through
+the explicit V3 methods. The older routes keep their existing transport
+behavior and status; sharing an internal owner does not promote an old
+registration to a nested child. Every older entry or mutation rejects before
+effects while a V3 chain owns the CPU, including legacy cancellation and
+close. V3 close cancels its complete chain before releasing the shared owner.
+When close is admitted through either view, it closes that owner and every
+facade; retaining another view cannot retain entry authority or buffer pins.
+The existing V2 resume/cancel/close protocol remains available for its own
+parked invocation, and an unrelated V3 entry remains excluded during it.
+
+Read-only receipt queries remain available. Preserve independent V2 and V3
+receipt sequences and result shapes, so a V2 call followed by a V4 call and
+another V2 call does not introduce a gap into the existing V2 settlement
+sequence. Aggregate work still charges the same outer dispatch allowance.
+
+Construction selects the V3 owner and legacy facade when the full transport-3
+capability is available. If it is unavailable, the existing V2/V1 construction
+fallback remains available only when no V4 capability is required. A required
+V4 manifest fails capability preflight before exposing its session owner;
+it must not silently fall back or begin publication through an older runner.
+
 ## Source constraints
 
 The current source establishes several changes that a nested runner needs:
@@ -213,6 +254,25 @@ privilege/core identity and the private IRQ latch. Raw instruction-bus access
 must remain absent. Selectors and invariant fields must still satisfy the
 admitted profile at each boundary. Do not capture unrelated tile, FP, crypto
 or device state under the guise of a whole CPU checkpoint.
+
+The current initialization audit identifies these invariant values: full-core
+profile, selectors 3/2/15, `sw=1`, interrupt/supervisor flags clear, D/Q/T/EF
+zero, halted/idle false, modifier -1, IVT/vector/trap/wake zero, privilege/core
+ID zero, one core, private IRQ latch false, no instruction-bus pointer and
+I-cache enabled. Ordinary integer registers and arithmetic flags may change.
+Validate invariants before accepting/restoring a snapshot; a host-mutated
+parent must not become an admitted baseline. Q/EF affect branch evaluation
+even though admitted instructions cannot modify them. Prefix decoding uses
+the existing modifier; there is no separate persistent REX register to copy.
+
+Maintain one chain cycle frontier updated after each segment. An ancestor's
+saved cycle count cannot equal the live CPU after a child has executed and
+must never be restored. I-cache undo scratch, decode plans, performance
+counters and cache identities likewise remain outside parent restoration.
+On successful child return, preserve the child's result and receipt before
+restoring its parent. If result marshalling then raises, cleanup is bound to
+the root-chain identity, not to the now-current parent invocation ID; cancel
+the complete chain and retain the already-issued child receipt.
 
 Save exact live parent return bytes from its current R15 to the original
 stack-empty pointer, at most 64 KiB per frame and 512 KiB for eight frames.
