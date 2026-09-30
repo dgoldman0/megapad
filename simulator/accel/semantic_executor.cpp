@@ -41,6 +41,7 @@ enum Opcode : uint32_t {
     OP_BSWAP, OP_CELL_PLUS, OP_EXECUTE, OP_COMPARE, OP_FILL,
     OP_CMOVE, OP_CMOVE_UP, OP_MOVE,
     OP_SP_FETCH, OP_RP_FETCH,
+    OP_SCALAR_FP, OP_FPCSR_FETCH, OP_FPCSR_STORE,
 };
 
 struct Instruction;
@@ -424,6 +425,7 @@ struct RunState {
     StackState data;
     StackState returns;
     Cell cookie;
+    Cell fpcsr;
     ContinuationChanges changed{returns.pointer};
     Cell pointer_captures = 0;
 };
@@ -547,7 +549,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_RP_FETCH)
+            if (opcode > OP_FPCSR_STORE)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -632,20 +634,20 @@ public:
 
     py::tuple run(Cell xt, Cell ip, const std::array<Cell, 3>& data_state,
                   const py::tuple& return_state, const py::dict& continuations,
-                  Cell remaining_steps) {
+                  Cell remaining_steps, Cell fpcsr) {
         if (return_state.size() != 4)
             throw py::value_error("return state must contain four cells");
         RunState state{xt, ip, 0,
             StackState{data_state[0], data_state[1], data_state[2]},
             StackState{return_state[0].cast<Cell>(), return_state[1].cast<Cell>(),
-                       return_state[2].cast<Cell>()}, 0};
+                       return_state[2].cast<Cell>()}, 0, fpcsr};
         // Python's continuation sequence is deliberately unbounded. Decline
         // very large sequences rather than wrap or truncate their identity.
         try {
             state.cookie = return_state[3].cast<Cell>();
         } catch (const py::cast_error&) {
             return py::make_tuple(xt, ip, 0, state.data.pointer,
-                state.returns.pointer, return_state[3], py::list(), 0);
+                state.returns.pointer, return_state[3], py::list(), 0, fpcsr);
         }
         if (!state.data.valid() || !state.returns.valid() ||
             !(state.data.empty <= state.returns.floor ||
@@ -754,7 +756,7 @@ private:
         state.changed.append_to(updates);
         return py::make_tuple(state.xt, state.ip, state.steps,
             state.data.pointer, state.returns.pointer, state.cookie, updates,
-            state.pointer_captures);
+            state.pointer_captures, state.fpcsr);
     }
 
     enum SlotKind { USER_CELL, CONTINUATION, PYTHON_BOUNDARY };
@@ -1041,6 +1043,45 @@ private:
             out[0] = opcode == OP_SP_FETCH ? s.data.pointer : s.returns.pointer;
             produced = 1;
             break;
+        case OP_FPCSR_FETCH:
+            if (!stack.inputs(0)) return false;
+            out[0] = s.fpcsr; produced = 1;
+            break;
+        case OP_FPCSR_STORE:
+            if (!stack.inputs(1) || !stack.outputs(0)) return false;
+            stack.commit();
+            s.fpcsr = v[0] & 0x1f7;
+            ++s.ip;
+            return true;
+        case OP_SCALAR_FP: {
+            if (operation.a > 0xff || operation.b < 1 || operation.b > 3)
+                return false;
+            const auto fc = static_cast<unsigned>(operation.a);
+            const auto arity = static_cast<unsigned>(operation.b);
+            // FCMP has no cell result and is not a hosted BIOS scalar word.
+            // Decline all malformed descriptors and reserved rounding modes
+            // before any stack/flag effects. Python retains its partial pops
+            // and instruction-fault flow at this original call boundary.
+            const auto code = fc & 0x3f;
+            const unsigned expected_arity =
+                code <= 3 || code == 5 || code == 6 ||
+                    (code >= 0x11 && code <= 0x13) ? 2 :
+                code == 7 || code == 8 ? 3 :
+                code == 4 || code == 0x14 || code >= 0x20 ? 1 : 0;
+            if (arity != expected_arity ||
+                megapad::scalar_fp::validate(fc, 0, s.fpcsr) != nullptr ||
+                !stack.inputs(arity) || !stack.outputs(1))
+                return false;
+            const Cell rd = arity == 2 ? v[1] : v[0];
+            const Cell rs = arity == 3 ? v[2] : v[0];
+            const Cell rt = arity == 3 ? v[1] : 0;
+            const auto outcome = megapad::scalar_fp::execute(fc, rd, rs, rt, s.fpcsr);
+            out[0] = outcome.value;
+            stack.commit();
+            s.fpcsr |= outcome.flags;
+            ++s.ip;
+            return true;
+        }
         case OP_LITERAL: case OP_PUSH_CELL:
             if (!stack.inputs(0)) return false;
             out[0] = operation.a; produced = 1;
@@ -1242,6 +1283,7 @@ private:
 
 PYBIND11_MODULE(_megaforth_native, module) {
     megapad::scalar_fp::register_bindings(module);
+    module.attr("SEMANTIC_API_VERSION") = 1;
     module.doc() = "Native execution of generic hosted Forth semantic plans";
     py::class_<NativeProgram>(module, "NativeProgram")
         .def(py::init<const py::iterable&, Cell, py::object>(), py::arg("regions"),
@@ -1252,7 +1294,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
              py::arg("bounds"), py::arg("continuations") = py::none())
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
              py::arg("data_state"), py::arg("return_state"),
-             py::arg("continuations"), py::arg("remaining_steps"));
+             py::arg("continuations"), py::arg("remaining_steps"),
+             py::arg("fpcsr") = 0);
 #define EXPORT_OPCODE(name) module.attr(#name) = py::int_(static_cast<uint32_t>(name))
     EXPORT_OPCODE(OP_STOP);
     EXPORT_OPCODE(OP_LITERAL); EXPORT_OPCODE(OP_BRANCH); EXPORT_OPCODE(OP_BRANCH_ZERO);
@@ -1261,6 +1304,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_R_PUSH); EXPORT_OPCODE(OP_R_POP); EXPORT_OPCODE(OP_R_PEEK);
     EXPORT_OPCODE(OP_DO); EXPORT_OPCODE(OP_QUESTION_DO); EXPORT_OPCODE(OP_LOOP);
     EXPORT_OPCODE(OP_PLUS_LOOP); EXPORT_OPCODE(OP_UNLOOP);
+    EXPORT_OPCODE(OP_SCALAR_FP); EXPORT_OPCODE(OP_FPCSR_FETCH);
+    EXPORT_OPCODE(OP_FPCSR_STORE);
     py::dict primitives;
 #define PRIMITIVE(word, name) EXPORT_OPCODE(name); primitives[py::bytes(word)] = py::int_(static_cast<uint32_t>(name))
     PRIMITIVE("DUP", OP_DUP); PRIMITIVE("DROP", OP_DROP); PRIMITIVE("SWAP", OP_SWAP);

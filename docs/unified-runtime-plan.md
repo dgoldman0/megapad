@@ -298,7 +298,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
 | 2 — workload profiles | Bounded kernels recorded; representative work pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
-| 3A — native scalar FP | Shared exact kernel/adapters complete; direct semantic words next | 200 kernel/machine/adapter checks; 53 hosted checks in each executor; paired FP measurements |
+| 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio complete; further work profile-driven | 57 audio checks; paired headless transfer measurements |
 | 4 — initial hybrid ABI and execution | Pending | |
 | 5 — expanded interoperability | Pending | |
@@ -468,3 +468,25 @@ ordering remains intact. All 57 focused audio tests passed through sequential
 Make execution. Read-only independent review prompted late-helper replacement
 and aperture-overlap regressions before commit. Paired hosted measurements
 are recorded in the performance report; physical playback is not claimed.
+
+### Phase 3A direct semantic FP calls — 2026-09-30
+
+Compiled calls to original BIOS FP and FPCSR words now use two-tick native
+operations. Plans bind original Word identity and the service captured by BIOS
+closures; public attribute replacement, shadowing and XT reuse do not retarget
+those calls. Each native interval imports and settles one FPCSR cell before
+clocks or fallback. The raw semantic API is versioned with this new state.
+
+Invalid operation/RM descriptors, insufficient operands, stack capacity and
+unavailable output backing decline without effects or ticks. Python executes
+the original operation with its partial pops, fault callback and budget order.
+Direct primitive execution and primitive XTs reached via EXECUTE retain the
+service path; no additional execution profiles are silently admitted.
+
+All 399 selected checks passed through `make test-simulator`: the 104 new
+direct-FP cases, the existing 228 native executor cases, 53 hosted scalar word
+cases and 14 shared kernel/service cases. Coverage includes all BIOS words,
+rounding/flags, tiny budgets, stack faults/retained bytes, missing/fragmented
+backing, fault observers, callbacks/quanta and original service/word identities.
+Independent read-only review found no additional issue. The native extension
+built successfully and paired timings are recorded in the performance report.

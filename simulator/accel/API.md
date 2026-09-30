@@ -3,6 +3,9 @@
 The extension and its Python owner are built from the same checkout and use
 one current internal interface. Rebuild the extension after changing this
 boundary with `python setup_simulator_accel.py build_ext --inplace --force`.
+The extension exports `SEMANTIC_API_VERSION = 1`; its Python owner checks this
+version before admission. An explicit native request rejects older builds;
+automatic selection keeps the reference executor when the version mismatches.
 
 `_megaforth_native.NativeProgram(regions, page_size, continuation_type)` retains the ordinary
 regions as `(base, size, pages)` triples. `pages` is the existing sparse
@@ -63,15 +66,18 @@ This keeps byte-span allocation and exception cleanup out of the hot loop;
 the ordinary preflight, stack commit and original instruction boundary are
 unchanged.
 
-`run(xt, ip, data_state, return_state, continuations, remaining_steps)` accepts:
+`run(xt, ip, data_state, return_state, continuations, remaining_steps, fpcsr=0)` accepts:
 
 - `data_state = (floor, empty_pointer, pointer)`;
 - `return_state = (floor, empty_pointer, pointer, continuation_cookie)`;
 - the return stack's ordinary slot-to-`(Continuation, raw_cookie)` dictionary;
-- a nonnegative allowance in the existing semantic-step units.
+- a nonnegative allowance in the existing semantic-step units;
+- the scalar service's current FPCSR cell (zero by default for raw callers).
 
 It returns `(xt, ip, completed_steps, data_pointer, return_pointer,
-continuation_cookie, continuation_updates, pointer_captures)`. Each continuation update is
+continuation_cookie, continuation_updates, pointer_captures, fpcsr)`. The FPCSR
+cell is returned on every exit, including zero progress and unsupported stack
+states. Each continuation update is
 `(slot_address, caller_xt, return_ip, raw_cookie)`. The Python owner installs
 these as ordinary non-root, non-fault continuations, preserving updates to
 already-popped slots, and updates the stack pointers and cookie counter. A zero
@@ -124,7 +130,7 @@ These objects remain stable through map rehash and body replacement; an empty
 replacement still falls through, and `clear()` destroys every cached target
 with its containing plan. The dispatch loop carries the current plan directly
 across calls and returns. Instruction records remain 24 bytes on the current
-64-bit build, and the public install/run interface is unchanged.
+64-bit build. The extra FPCSR run argument/result does not change plan records.
 
 Within a native interval, continuation changes use growable arrays indexed
 relative to the entry return pointer, separately above and below it. They
@@ -134,7 +140,8 @@ all changed inactive slots are exported for subsequent `RP!`. Allocation for
 paired loop slots finishes before either type changes.
 
 Native still excludes pair return-stack operations,
-stack-pointer restoration, other dynamic execution, services, and any
+stack-pointer restoration, other dynamic execution, services other than the
+identity-bound scalar FP operations described below, and any
 ordinary memory access intersecting the return-stack backing interval.
 
 `OP_LITERAL`, `OP_BRANCH`, `OP_BRANCH_ZERO`, `OP_CALL`, `OP_RETURN`,
@@ -151,6 +158,29 @@ primitive. The original hosted `COREID` and `TASK-ID` callbacks both push zero
 and share the native false opcode. These remain two-tick primitive calls;
 admission binds to the original installed word objects, so later colon or
 host-callback definitions with those names retain their ordinary behavior.
+
+`OP_SCALAR_FP` uses `(a, b)` for an FC operation byte and its operand count:
+one for unary operations, two for binary operations, three for fused
+multiply-add/subtract. Reading inputs top-first as `v`, the exact shared value
+kernel receives `(Rd, Rs, Rt)` as `(v[0], v[0], 0)`, `(v[1], v[0], 0)`, or
+`(v[0], v[2], v[1])`, respectively. FCMP has no cell result and is not admitted.
+Invalid operation/arity descriptors, reserved rounding modes, missing operands
+and unavailable output storage return unchanged before kernel execution.
+Successful execution writes one full result cell and ORs its sticky flags
+into the native FPCSR state. `OP_FPCSR_FETCH` pushes that state;
+`OP_FPCSR_STORE` pops one cell and applies the existing `0x1f7` write mask,
+which permits reserved rounding modes for later operation validation. Both
+ignore `a` and `b`. These three opcodes each cost two semantic ticks.
+
+The Python owner derives scalar plans from `shared.scalar_fp.BIOS_WORDS` and
+binds the original installed Word identities. It captures the scalar service
+owned by those BIOS closures; replacing `runtime.scalar_float` does not retarget
+an existing word. Native FPCSR is settled into that captured service before
+clock accounting, profiling, Python fallback, or a host boundary. A declined
+operation leaves reference dispatch responsible for sequential operand pops,
+fault callbacks and tick order. Direct primitive dispatch and `EXECUTE` of a
+scalar primitive retain the Python service path; only compiled direct calls
+use these native opcodes.
 
 Every operation is preflighted before its ticks or effects. Unsupported
 operations, missing plans, insufficient allowance, missing destination pages,

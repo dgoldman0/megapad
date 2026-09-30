@@ -111,3 +111,22 @@ All 57 audio tests pass, including late callback replacement, sparse page
 boundaries/holes, all emulator windows, partial aperture overlap, malformed
 bulk returns, capture immutability, failure publication and sink lifecycle.
 Raw evidence: [runtime-hotspots-audio-2026-09-30.json](runtime-hotspots-audio-2026-09-30.json).
+
+## Direct semantic FP calls
+
+Original compiled BIOS FP words now execute inside the native semantic interval,
+with one authoritative FPCSR settled before returning to host accounting. The
+same case, trial count and validation checks produced these wall medians:
+
+| Executor | Baseline ms | Value kernel ms | Direct semantic FP ms |
+|---|---:|---:|---:|
+| simulator-python | 4.243 | 3.895 | 3.583 |
+| simulator-native | 3.577 | 2.155 | 0.119 |
+
+Native attribution now accounts for 1,603 semantic steps in one productive
+native entry. No scalar operation crosses the service boundary in this loop.
+Focused tests prove this independently with a service hook that fails if called.
+The reference timing continues to vary; small absolute timings should not be
+read as a precision ranking or a full-program result.
+
+Raw evidence: [runtime-hotspots-semantic-fp-2026-09-30.json](runtime-hotspots-semantic-fp-2026-09-30.json).
