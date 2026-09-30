@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def _cold_launch(arguments: list[str], *, block_servers: bool = False):
     blocked = ["_mp64_accel", "_megaforth_native"]
     if block_servers:
-        blocked += ["session_server", "simulator_server"]
+        blocked += ["session_server", "simulator_server", "hybrid"]
     source = f"""
 import importlib.abc
 import sys
@@ -45,13 +45,12 @@ raise SystemExit(main(sys.argv[1:]))
 def test_top_level_help_requires_no_backend_or_native_import(help_option):
     result = _cold_launch([help_option], block_servers=True)
     assert result.returncode == 0, result.stderr
-    assert "--mode {emulator,simulator}" in result.stdout
+    assert "--mode {emulator,simulator,hybrid}" in result.stdout
     assert "default mode: emulator" in result.stdout
-    assert "Hybrid execution is planned" in " ".join(result.stdout.split())
-    assert "unavailable" in result.stdout
+    assert "declared bounded integer machine routines" in " ".join(result.stdout.split())
 
 
-@pytest.mark.parametrize("mode", ["hybrid", "unknown"])
+@pytest.mark.parametrize("mode", ["unknown"])
 def test_unavailable_mode_fails_before_importing_a_backend(mode):
     result = _cold_launch(["--mode", mode], block_servers=True)
     assert result.returncode == 2
@@ -110,6 +109,7 @@ def test_launcher_forwards_arguments_and_return_code(
     [
         ("emulator", "--bios", "--semantic-step-budget"),
         ("simulator", "--semantic-step-budget", "--bios"),
+        ("hybrid", "--hybrid-routines", "--bios"),
     ],
 )
 def test_selected_help_uses_backend_options_without_native_imports(

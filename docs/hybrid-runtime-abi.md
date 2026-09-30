@@ -1,7 +1,8 @@
 # Initial hybrid runtime ABI
 
-Status: locked contract for staged implementation, 2026-09-30. No hybrid
-executor or launcher selection is implemented by this document.
+Status: implemented and qualified for the bounded integer-routine profile,
+2026-09-30. See the implementation ledger in `docs/unified-runtime-plan.md`
+for the checks run and capabilities that remain outside this profile.
 
 ABI identity: `megapad.hybrid.integer-routine`, version `1`.
 
@@ -284,7 +285,7 @@ separate machine instruction/cycle counts and transition counts.
 The first application invocation is opt-in:
 
 ```console
-python megapad.py --mode hybrid --executor native --hybrid-routines routines-v1.json
+python megapad.py --mode hybrid --storage hybrid.img --executor native --hybrid-routines routines-v1.json
 ```
 
 Other admitted source/image/session arguments retain the simulator frontend's
@@ -374,6 +375,16 @@ word body in Bank 0. Private machine call-stack accesses target only the
 separate private control arena. These roles never grant ordinary buffer
 permission to protected bytes. Do not relax stack protection merely to admit
 an address.
+
+Host-created contexts must use this same canonical memory. Wrapper calls and
+routine entries introduce their complete stack allocations automatically;
+`hybrid.register_context(context)` introduces an otherwise inactive context
+before host code permits any routine to borrow from its arena. Once introduced,
+each stack allocation remains protected while its stack object is alive, even
+when another context is current. This registry holds weak stack references and
+does not keep abandoned contexts alive. Raw host allocations that have never
+been introduced are the host caller's responsibility; ordinary source execution
+uses the already registered main context.
 
 After successful return, the bridge replaces the N inputs with the M outputs
 using the already-qualified semantic stack capacity. No service state is

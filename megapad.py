@@ -11,6 +11,7 @@ import sys
 _SERVER_MODULES = {
     "emulator": "session_server",
     "simulator": "simulator_server",
+    "hybrid": "hybrid.server",
 }
 
 
@@ -20,10 +21,9 @@ def _argument_parser(*, selector_only: bool = False) -> argparse.ArgumentParser:
         add_help=not selector_only,
         allow_abbrev=False,
         epilog=(
-            "Use --mode emulator --help or --mode simulator --help for "
-            "mode-specific options. Both modes use session_ctl.py and "
-            "session_viewer.py. Hybrid execution is planned and is currently "
-            "unavailable."
+            "Use --mode MODE --help for mode-specific options. All modes "
+            "use session_ctl.py and session_viewer.py. Hybrid mode combines "
+            "source execution with declared bounded integer machine routines."
         ),
     )
     parser.add_argument(

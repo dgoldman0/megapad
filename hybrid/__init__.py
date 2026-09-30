@@ -1,7 +1,8 @@
 """Composition helpers for the declared hybrid ABI.
 
-Only declaration loading is available in this implementation slice. Importing
-this package does not load either engine, create a runtime, or enable a mode.
+Importing this package or loading a manifest does not select an engine. Import
+HybridRuntime from hybrid.runtime and HybridSession from hybrid.session when
+constructing a bounded integer-routine session.
 """
 
 from hybrid.manifest import HybridManifestError, load_manifest_v1

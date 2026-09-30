@@ -333,7 +333,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
-| 4 — initial hybrid ABI and execution | Integer-routine v1 ABI locked; shared backing qualified, execution integration underway | `docs/hybrid-runtime-abi.md`; 56 dense backing checks and 664 existing runtime regressions |
+| 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
 | 5 — expanded interoperability | Pending | |
 
 ### Phase 1A implementation and validation — 2026-09-30
@@ -699,3 +699,56 @@ and wire decoding remain visible Python work, but each further extraction still
 needs a targeted compatibility and paired-performance gate. No external project
 was accessed or modified. Live Desktop and executor default promotion remain
 open; recorded offers cannot establish those outcomes.
+
+### Phase 4 composition and application admission — 2026-09-30
+
+`HybridRuntime` now owns the semantic runtime, fixed shared ordinary memory,
+bounded machine runner and exact declaration registry. Original registered
+words are callable through interpreted names, compiled calls and `EXECUTE`.
+Lease identity and sealed bytes are rechecked before machine entry. Inputs are
+peeked and final capacity is checked before execution; only successful returns
+replace those inputs. Completed shared-memory effects and machine accounting
+settle before a structured failure reaches the semantic caller.
+
+Machine allowance is cumulative across the outer semantic meter, including
+nested calls, direct semantic session entry, host quanta and idle/resume. It is
+never charged as semantic timer work. Full main/current/enclosing stack spans
+are excluded from borrowed memory. Introduced custom stacks remain protected
+through inactive periods while their stack objects live; `register_context`
+introduces host arenas otherwise unknown to the composition owner. Closing
+revokes machine calls before releasing private mapping ownership.
+
+Independent review identified a registration rollback gap: word publication
+could update the guest dictionary index before a later failure. Publication is
+now guarded from the first definition, with dictionary rollback and index
+rebuild. Six injected failure checks prove prior metadata/index restoration,
+successful retry and preservation of the original error if cleanup itself
+fails; an unsuccessfully repaired machine registry is then unusable.
+
+`HybridSession` uses the existing semantic terminal and continuation owner.
+The server validates every manifest/image before creating a visible session,
+registers declared words before boot source, and uses a narrow preconstructed
+runtime seam in the existing image bootstrap. Status exposes its bounded
+capabilities and separate machine counters. `megapad.py --mode hybrid` is now
+available with required `--hybrid-routines`, and all three modes retain the
+same viewer/control protocol. Semantic executor defaults are unchanged; native
+machine execution is mandatory even when semantics use Python or auto.
+
+Validation: the unified `make build` succeeded. The application acceptance gate
+passed 194 cases with two environment-dependent socket skips. The final gate
+after registration cleanup passed all 149 selected cases: 93 bridge cases,
+six publication failures, 18 hybrid session cases, 20 existing bootstrap/server
+cases and 12 launcher cases. The bridge includes an explicit compiled-call
+comparison against standalone MP64 execution for output cells, complete shared
+buffer contents, instructions and cycles in both semantic executors. Unknown
+XTs, stale allocation/code, inactive stack bytes, failure prefixes and resumed
+budgets retain their required behavior. Help remains usable without importing
+native extensions. No physical presentation, native-default promotion or live
+Desktop performance claim follows from these gates.
+
+This completes the initial bounded hybrid application profile. Phase 5 remains
+a separate capability expansion: machine-to-source callbacks, guest JIT/native
+dictionary integration, arbitrary binaries and multicore hybrid execution are
+not implied by selecting hybrid mode. The math-team solver's original latency
+and scaling figures likewise remain outside reproduced evidence until its
+MegaPad-side reproducer is supplied.

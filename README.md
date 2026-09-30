@@ -291,13 +291,14 @@ cd megapad-64
 
 `megapad.py` starts one shared session using the selected execution mode.
 The emulator is the default. The existing session viewer and control client
-attach to either mode through the same socket protocol.
+attach to all three modes through the same socket protocol.
 
 ```bash
 make build
 python megapad.py --help
 python megapad.py --mode emulator --bios bios.asm --storage sample.img
 python megapad.py --mode simulator --storage desktop.img --executor native
+python megapad.py --mode hybrid --storage hybrid.img --executor native --hybrid-routines routines-v1.json
 
 # Each mode documents its own supported options.
 python megapad.py --mode simulator --help
@@ -308,21 +309,29 @@ make serve ARGS='--mode simulator --storage desktop.img --executor native'
 Use a prepared MP64FS source image with the ordinary KDOS autoexec entry for
 simulator sessions; the existing Akashic image preparation remains applicable.
 Each running session needs its own writable image and socket/runtime namespace.
-`--executor python|native|auto` applies to simulator preparation and live
+`--executor python|native|auto` applies to simulator and hybrid preparation and live
 execution. Omission preserves `MEGAFORTH_EXECUTOR`, otherwise Python; explicit
 `native` requires the extension, and `auto` uses it when available. Emulator
 lane and clock controls remain emulator options. Python-only simulation and
 launcher help do not require the emulator extension. The simulator and viewer
 also import no architectural backend.
 
-Both modes report a common `runtime` object in session status: selected mode
+All modes report a common `runtime` object in session status: selected mode
 and executor, work/step units, timer and RTC policy, and supported diagnostic
 and reset actions. A native executor may still use Python service fallbacks.
 See [the session API](docs/development-session.md) for the boundary and status
 fields. Executor defaults remain unchanged.
 
-Hybrid execution is planned in [the unified runtime plan](docs/unified-runtime-plan.md).
-Available modes are currently emulator and simulator. The architectural
+Hybrid mode uses the semantic dictionary and services, with explicit calls to
+bounded MP64 integer routines declared in a local manifest. Both engines share
+one fixed ordinary-memory image. Machine routines always require the native
+architectural interpreter; their instructions/cycles are reported separately
+from semantic work. This initial profile excludes machine MMIO/services,
+callbacks into source, native BIOS images, and multicore hybrid execution.
+See [the v1 ABI and manifest format](docs/hybrid-runtime-abi.md) and
+[the implementation plan](docs/unified-runtime-plan.md).
+
+The architectural
 monitor in `cli.py` and the existing `session_server.py` and
 `simulator_server.py` entry points remain available during consolidation.
 

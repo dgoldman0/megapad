@@ -72,22 +72,32 @@ removed when the benchmark's support for older runtime roots is migrated.
 
 Both detailed and lightweight status contain the same `runtime` descriptor:
 
-| Field | Emulator | Simulator |
-|---|---|---|
-| `mode` | `emulator` | `simulator` |
-| `executor` | `native` | Selected `python` or `native` |
-| `step_unit` | `mp64_instruction` | `semantic_step` |
-| `step_request_unit` | `mp64_instruction` | `semantic_boundary` |
-| `batch_unit` | `instruction_batch` | `semantic_boundary` |
-| `timing.model` | `instruction_batched` | `semantic` |
-| `timing.models_shared_clock_latency` | `false` | `false` |
-| `timing.timer_unit` | `mp64_system_cycle` | `semantic_step` |
-| `timing.rtc_mode` | `virtual` or `realtime` | `manual` or `host_monotonic` |
-| `capabilities.machine_code` | `true` | `false` |
-| `capabilities.cpu_diagnostics` | `true` | `false` |
-| `capabilities.network_diagnostics` | `true` | `false` |
-| `capabilities.reset` | `true` | `false` |
-| `capabilities.host_profiling` | `true` | `false` |
+| Field | Emulator | Simulator | Hybrid |
+|---|---|---|---|
+| `mode` | `emulator` | `simulator` | `hybrid` |
+| `executor` | `native` | Selected `python` or `native` | Selected semantic `python` or `native` |
+| `step_unit` | `mp64_instruction` | `semantic_step` | `semantic_step` |
+| `step_request_unit` | `mp64_instruction` | `semantic_boundary` | `semantic_boundary` |
+| `batch_unit` | `instruction_batch` | `semantic_boundary` | `semantic_boundary` |
+| `timing.model` | `instruction_batched` | `semantic` | `semantic` |
+| `timing.models_shared_clock_latency` | `false` | `false` | `false` |
+| `timing.timer_unit` | `mp64_system_cycle` | `semantic_step` | `semantic_step` |
+| `timing.rtc_mode` | `virtual` or `realtime` | `manual` or `host_monotonic` | `manual` or `host_monotonic` |
+| `capabilities.machine_code` | `true` | `false` | `true`, declared routines only |
+| `capabilities.cpu_diagnostics` | `true` | `false` | `false` |
+| `capabilities.network_diagnostics` | `true` | `false` | `false` |
+| `capabilities.reset` | `true` | `false` | `false` |
+| `capabilities.host_profiling` | `true` | `false` | `false` |
+
+`hybrid.session.HybridSession` retains the semantic session backend and its
+terminal/continuation authority. Registered primitive words enter the bounded
+architectural interpreter over the same ordinary buffers. `HybridSharedMachine`
+adds `machine_execution` with the native interpreter, ABI identity and separate
+lifetime instruction, cycle and transition counts. Machine cycles do not advance
+the semantic timer or claim whole-application shared-clock timing. Status also
+explicitly denies arbitrary machine code, machine MMIO, callbacks into source,
+native BIOS boot, multicore execution and native snapshots. The v1 manifest and
+host entry contract are in [the hybrid ABI](hybrid-runtime-abi.md).
 
 The executor identifies the selected engine; native execution can include
 Python fallbacks. Capabilities identify supported session operations,
