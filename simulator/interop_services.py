@@ -14,11 +14,15 @@ from types import BuiltinFunctionType, FunctionType, ModuleType
 import sys
 
 from shared import cells, ieee_fp, scalar_fp
-from shared.hybrid_services import ServiceExportV5
+from shared.hybrid_services import CallbackRequestV5, CallbackSiteV5, ServiceExportV5
 from simulator import core_words, scalar_float
 from simulator.dictionary import Dictionary, Word
 from simulator.errors import IllegalInstructionFault, InstructionFault, ExecutionError, SimulatorError
-from simulator.interop_exports import CallbackExportError
+from simulator.errors import StepBudgetExceeded
+from simulator.interop_exports import CallbackExportEngine, CallbackExportError
+from simulator.interop_closed import (
+    ClosedDispatch, CapturedWord, _CLASS_ROUTES, _METADATA_ROUTES, repair_meter,
+)
 from simulator.native_execution import NativeExecutor
 from simulator.runtime import MegaForthRuntime, PrimitiveDefinition
 from simulator.scalar_float import HostedScalarFloatService
@@ -476,4 +480,375 @@ class _ServiceValidationScope:
         return False
 
 
-__all__ = ["ScalarServiceCatalog", "ScalarServiceCapture", "ScalarValidationFailure"]
+@dataclass(slots=True, kw_only=True)
+class _ServiceAccounting:
+    """One pending service variant of the engine's existing accounting slot.
+
+    Engine issuance and receipt consumption are deliberately separate from
+    this isolated guard. Constructing/copying this record grants no export or
+    request authority. The eventual engine must retain its exact identity.
+    """
+
+    token: object
+    handle: object
+    binding: object
+    request: CallbackRequestV5
+    meter: object
+    namespace: object = None
+    starting_steps: int = 0
+    semantic_steps: int = 0
+    entered: bool = False
+    completed: bool = False
+    admitting: bool = False
+    dispatch: object = None
+    scope: object = None
+    error: BaseException | None = None
+    validation_failure: ScalarValidationFailure | None = None
+    consumed_input_cells: int | None = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ServiceDispatchCapture:
+    scalar: ScalarServiceCapture
+    entry: CapturedWord
+
+    def verify(self, engine):
+        self.scalar.verify()
+        if engine._runtime is not self.scalar.catalog._runtime:
+            raise _capture_error("scalar service capture belongs to another runtime")
+        engine._require_owner("verify a private scalar service")
+
+
+def _service_request_values(request):
+    site, export = request.site, request.site.export
+    return (request.invocation_id, request.sequence, request.abi, request.version,
+            site.call_offset, site.stub_offset, site.abi, site.version,
+            export.export_id, export.name, export.input_cells, export.output_cells,
+            export.max_semantic_steps, export.effect, export.abi, export.version)
+
+
+class ServiceDispatch(ClosedDispatch):
+    """One original primitive on the existing finite private-frame guard.
+
+    This is not a dispatcher or export registry. runtime.py owns the actual
+    tick and primitive call; the guard authorizes precisely that one root
+    primitive and observes its validation scope. No colon, child call, return
+    continuation, fault handler, or suspension belongs to this profile.
+    """
+
+    def __init__(self, engine, binding, context, meter, semantic_step_limit):
+        if semantic_step_limit is not None and (
+                type(semantic_step_limit) is not int or not 0 <= semantic_step_limit <= 65536):
+            raise _capture_error("scalar service semantic allowance must be an exact bounded integer")
+        scalar = binding.service
+        if type(scalar) is not ScalarServiceCapture:
+            raise _capture_error("service dispatch requires its original scalar capture")
+        scalar.verify()
+        record = engine._closed_accounting
+        _SERVICE_ACCOUNTING_CLASS.instance(record)
+        if (record.binding is not binding or record.handle is not binding.handle
+                or record.meter is not meter or record.dispatch is not None
+                or record.entered is not True or record.completed is not False
+                or record.scope is not None or record.error is not None
+                or record.validation_failure is not None):
+            raise _capture_error("service dispatch requires its exact pending accounting record")
+        _SERVICE_REQUEST_CLASS.instance(record.request)
+        _SERVICE_SITE_CLASS.instance(record.request.site)
+        CallbackRequestV5.__post_init__(record.request)
+        if record.request.site.export != binding.descriptor or scalar.descriptor != binding.descriptor:
+            raise _capture_error("service dispatch request does not match its binding")
+        super().__init__(engine, binding, context, meter, semantic_step_limit)
+        original = scalar.original
+        self.capture = _ServiceDispatchCapture(
+            scalar, CapturedWord(original.word, original.xt, original.implementation,
+                                 None, (), original.name, original.function.function),
+        )
+        self.arguments = record.request.arguments
+        self._request = record.request
+        self._request_values = _service_request_values(record.request)
+        self._scalar = scalar
+        self._scope = None
+        self._pending_tick = None
+        self._ready = False
+        self._primitive_entered = False
+        self._primitive_completed = False
+        self._entry_evidence = None
+        self._engine_namespace = _SERVICE_ENGINE_CLASS.instance(engine)
+        if (record.namespace is not self.meter_namespace
+                or type(record.starting_steps) is not int or record.starting_steps != self.starting_steps
+                or type(record.semantic_steps) is not int or record.semantic_steps != 0
+                or type(record.consumed_input_cells) is not int or record.consumed_input_cells != 0):
+            raise _capture_error("service dispatch accounting origin changed")
+        record.dispatch = self
+
+    def failure(self, message):
+        dict.__setitem__(self._engine_namespace, "_registration_failure",
+                         "scalar service dispatch integrity validation failed")
+        return _capture_error(message)
+
+    def require_state(self, *, parked=False):
+        _SERVICE_DISPATCH_CLASS.verify()
+        _CLOSED_DISPATCH_CLASS.verify()
+        if type(self) is not ServiceDispatch:
+            raise _capture_error("scalar service guard must be its exact issued type")
+        namespace = _keys(_CLOSED_DISPATCH_CLASS.dictionary_descriptor.__get__(self, ServiceDispatch))
+        if any(name in namespace for name in _SERVICE_GUARD_METHODS):
+            raise _capture_error("scalar service guard method route changed")
+        if type(self._scalar) is not ScalarServiceCapture:
+            raise _capture_error("scalar service guard capture changed")
+        # Check the scalar/error routes before inherited guards can construct
+        # an admission diagnostic through a shared exception ancestor.
+        self._scalar.verify()
+        for seal in _SERVICE_PRIVATE_CLASSES:
+            seal.verify()
+        if parked:
+            raise self.failure("private scalar service cannot park a semantic child")
+        engine_namespace = _SERVICE_ENGINE_CLASS.instance(self.engine)
+        if engine_namespace is not self._engine_namespace:
+            raise self.failure("scalar service engine namespace changed")
+        if any(name in engine_namespace for name in ("_require_owner", "_budget_error")):
+            raise self.failure("scalar service engine method route changed")
+        ClosedDispatch.require_state(self)
+        _SERVICE_CAPTURE_CLASS.instance(self.capture)
+        record = self.accounting_record
+        _SERVICE_ACCOUNTING_CLASS.instance(record)
+        _SERVICE_REQUEST_CLASS.instance(record.request)
+        _SERVICE_SITE_CLASS.instance(record.request.site)
+        _EXPORT_CLASS.instance(record.request.site.export)
+        values = _service_request_values(record.request)
+        if (record.request is not self._request or len(values) != len(self._request_values)
+                or any(type(value) is not type(original) or value != original
+                       for value, original in zip(values, self._request_values))
+                or self.binding.descriptor != self._scalar.descriptor):
+            raise self.failure("scalar service issued request metadata changed")
+        if (self.engine._closed_accounting is not record or record.dispatch is not self
+                or record.binding is not self.binding or record.handle is not self.binding.handle
+                or self.binding.service is not self._scalar or self.capture.scalar is not self._scalar
+                or self.capture.entry.word is not self._scalar.word
+                or self.capture.entry.callback is not self._scalar.callback
+                or record.meter is not self.meter or record.namespace is not self.meter_namespace
+                or type(record.starting_steps) is not int or record.starting_steps != self.starting_steps
+                or type(record.semantic_steps) is not int or record.semantic_steps != self.charged_ticks
+                or record.entered is not True or record.completed is not False
+                or record.scope is not self._scope
+                or self.local_limit != 1 or type(self.local_limit) is not int
+                or type(self.charged_ticks) is not int or not 0 <= self.charged_ticks <= 1):
+            raise self.failure("scalar service pending accounting identity changed")
+        if (self.engine._nested_chain is not None or self.engine._registration is not None
+                or type(record.request) is not CallbackRequestV5
+                or record.request.arguments is not self.arguments
+                or record.request.site.export != self.binding.descriptor):
+            raise self.failure("scalar service request escaped its single-frame profile")
+        if self.returns.depth() != 0 or self.returns._continuations:
+            raise self.failure("scalar service cannot own return continuations")
+
+    def before_tick(self, word, ip=None, operation=None, *, caller=None, call_ip=None):
+        self.require_state()
+        self.capture.verify(self.engine)
+        if (word is not self._scalar.word or ip is not None or operation is not None
+                or caller is not None or call_ip is not None or self._pending_tick is not None
+                or self._ready is not False or self._primitive_entered is not False
+                or self.charged_ticks != 0 or self.data.snapshot() != self.arguments):
+            raise self.failure("scalar service admits one captured root primitive")
+        if self.semantic_step_limit is not None and self.semantic_step_limit == 0:
+            raise self.engine._budget_error("callback_semantic_limit", 0, 0)
+        evidence = (self._scalar, self.binding, self.accounting_record,
+                    self._evidence(), self.meter.steps, self._request, self._request_values)
+        self._entry_evidence = evidence[3]
+        self._pending_tick = evidence
+        return evidence
+
+    def after_tick(self, evidence):
+        self.require_state()
+        self.capture.verify(self.engine)
+        if (evidence is not self._pending_tick or self._scalar is not evidence[0]
+                or self.binding is not evidence[1] or self.accounting_record is not evidence[2]
+                or self._request is not evidence[5] or self._request_values is not evidence[6]
+                or self._evidence() != evidence[3] or self.meter.steps != evidence[4] + 1
+                or self.charged_ticks != 1 or self._ready is not False
+                or self._primitive_entered is not False):
+            raise self.failure("scalar service identity or private inputs changed during its tick")
+        self._pending_tick = None
+        self._ready = True
+        return self._scalar.callback
+
+    def tick(self):
+        # The local receipt remains independent of the hook-visible record,
+        # guard counters and meter. Settle it before returning or propagating
+        # the hook's original exception; none of those projections can refund
+        # the actual tick.
+        _SERVICE_REQUIRE_STATE(self)
+        namespace = _CLOSED_DISPATCH_CLASS.dictionary_descriptor.__get__(self, ServiceDispatch)
+        record, meter = self.accounting_record, self.meter
+        meter_namespace, starting = self.meter_namespace, self.starting_steps
+        engine_namespace, on_tick, budget = self._engine_namespace, self.on_tick, self.meter_budget
+        if self.charged_ticks != 0:
+            raise _capture_error("scalar service already charged its primitive tick")
+        if budget is not None and starting >= budget:
+            raise StepBudgetExceeded(budget)
+        after = starting + 1
+        charged = False
+        original = None
+        try:
+            try:
+                dict.__setitem__(meter_namespace, "steps", after)
+            finally:
+                published = dict.get(meter_namespace, "steps")
+                charged = type(published) is int and published == after
+            dict.__setitem__(namespace, "charged_ticks", 1)
+            _SERVICE_STEPS_SLOT.__set__(record, 1)
+            on_tick()
+            _SERVICE_REQUIRE_STATE(self)
+        except BaseException as error:
+            original = error
+            raise
+        finally:
+            if not charged:
+                # An escape on the first line of the inner finally can still
+                # occur after publication. No hook has run while the receipt
+                # is unset, so this exact value is independent evidence too.
+                published = dict.get(meter_namespace, "steps")
+                charged = type(published) is int and published == after
+            if charged:
+                try:
+                    changed = _SERVICE_REPAIR_METER(meter, meter_namespace, after)
+                    current_namespace = _CLOSED_DISPATCH_CLASS.dictionary_descriptor.__get__(self, ServiceDispatch)
+                    if current_namespace is not namespace:
+                        _CLOSED_DISPATCH_CLASS.dictionary_descriptor.__set__(self, namespace)
+                        changed = True
+                    for name, value in (("accounting_record", record), ("meter", meter),
+                                        ("meter_namespace", meter_namespace), ("_engine_namespace", engine_namespace),
+                                        ("on_tick", on_tick)):
+                        if dict.get(namespace, name) is not value:
+                            changed = True
+                            dict.__setitem__(namespace, name, value)
+                    for name, value in (("starting_steps", starting), ("charged_ticks", 1), ("meter_budget", budget)):
+                        previous = dict.get(namespace, name)
+                        if type(previous) is not type(value) or previous != value:
+                            changed = True
+                            dict.__setitem__(namespace, name, value)
+                    steps = _SERVICE_STEPS_SLOT.__get__(record)
+                    if type(steps) is not int or steps != 1:
+                        changed = True
+                        _SERVICE_STEPS_SLOT.__set__(record, 1)
+                    if changed:
+                        _SERVICE_CLEANUP_FAILED(self, original)
+                except BaseException:
+                    dict.__setitem__(engine_namespace, "_registration_failure",
+                                     "scalar service tick settlement failed")
+                    if original is None:
+                        raise
+                    try:
+                        BaseException.add_note(original, "scalar service tick settlement failed")
+                    except BaseException:
+                        pass
+
+    def invoke_primitive(self, target, callback, context, *, caller=None, call_ip=None):
+        self.require_state()
+        if (target is not self._scalar.word or callback is not self._scalar.callback
+                or context is not self.context or caller is not None or call_ip is not None
+                or self._ready is not True or self._primitive_entered is not False):
+            raise self.failure("scalar service primitive escaped its post-tick admission")
+        self._ready = False
+        self._primitive_entered = True
+        scope = self._scalar.validation_boundary()
+        self._scope = scope
+        self.accounting_record.scope = scope
+        try:
+            with scope:
+                result = callback(context)
+            self._primitive_completed = True
+            self.require_state()
+            if result is not None:
+                raise self.failure("scalar service primitive returned dynamic control")
+            self.accounting_record.consumed_input_cells = len(self.arguments)
+            return None
+        except BaseException as error:
+            try:
+                _SERVICE_OBSERVE_ESCAPE(self, error)
+            except BaseException:
+                _SERVICE_CLEANUP_FAILED(self, error)
+            raise
+
+    def _observe_escape(self, error):
+        record = self.accounting_record
+        record.error = error
+        record.validation_failure = None
+        record.consumed_input_cells = None
+        _SERVICE_REQUIRE_STATE(self)
+        if self._entry_evidence is None:
+            if self._primitive_entered:
+                raise self.failure("scalar service has no original operand boundary")
+            record.consumed_input_cells = 0
+            return
+        current = self._evidence()
+        original = self._entry_evidence
+        if current[0][64:] != original[0][64:] or current[2:] != original[2:]:
+            raise self.failure("scalar service return state changed during its primitive")
+        consumed = len(self.arguments) if self._primitive_completed else (current[1] - original[1]) // 8
+        if (not 0 <= consumed <= len(self.arguments)
+                or (not self._primitive_completed
+                    and self.data.snapshot() != self.arguments[:len(self.arguments) - consumed])):
+            raise self.failure("scalar service consumed operand prefix cannot be proved")
+        record.consumed_input_cells = consumed
+        observation = None if self._scope is None else self._scope.failure
+        if observation is not None:
+            if (type(observation) is not ScalarValidationFailure or observation.cause is not error
+                    or self._scope._capture is not self._scalar or self._scope._boundary is not None
+                    or self._scope._entered is not True or self._primitive_completed
+                    or observation.operation != self._scalar.original.operation
+                    or consumed != len(self.arguments) or self.data.snapshot() != ()
+                    or self.charged_ticks != 1
+                    or _FPCSR_SLOT.__get__(self._scalar.catalog._service) != observation.fpcsr):
+                raise self.failure("scalar service validation evidence does not match its issued scope")
+            # Still an observation. Only the engine's exact checkpoint consume
+            # may turn this retained scope/error pair into a V5 failure receipt.
+            record.validation_failure = observation
+
+    def prepare_unwind(self, error):
+        try:
+            _SERVICE_OBSERVE_ESCAPE(self, error)
+        except BaseException:
+            _SERVICE_CLEANUP_FAILED(self, error)
+        _SERVICE_BASE_UNWIND(self, error)
+
+    def cursor(self, word, ip):
+        raise self.failure("private scalar service cannot enter a colon body")
+
+    def call_target(self, operation):
+        raise self.failure("private scalar service cannot call a semantic child")
+
+    def returned_target(self, continuation):
+        raise self.failure("private scalar service cannot consume a return continuation")
+
+    def cleanup_failed(self, original):
+        dict.__setitem__(self._engine_namespace, "_registration_failure",
+                         "scalar service dispatch ownership could not be restored")
+        if original is None:
+            raise _capture_error("scalar service dispatch ownership could not be restored")
+        try:
+            BaseException.add_note(original, "scalar service dispatch ownership could not be restored")
+        except BaseException:
+            pass
+
+
+_SERVICE_ACCOUNTING_CLASS = _ClassSeal(_ServiceAccounting, functions=True)
+_SERVICE_CAPTURE_CLASS = _ClassSeal(_ServiceDispatchCapture, functions=True)
+_SERVICE_REQUEST_CLASS = _ClassSeal(CallbackRequestV5, functions=True)
+_SERVICE_SITE_CLASS = _ClassSeal(CallbackSiteV5, functions=True)
+_SERVICE_ENGINE_CLASS = _ClassSeal(CallbackExportEngine, functions=True)
+_SERVICE_PRIVATE_CLASSES = tuple(_ClassSeal(cls, functions=True)
+                                 for cls, _routes in _CLASS_ROUTES + _METADATA_ROUTES)
+_CLOSED_DISPATCH_CLASS = _ClassSeal(ClosedDispatch, functions=True)
+_SERVICE_DISPATCH_CLASS = _ClassSeal(ServiceDispatch, functions=True)
+_SERVICE_GUARD_METHODS = tuple(name for seal in (_CLOSED_DISPATCH_CLASS, _SERVICE_DISPATCH_CLASS)
+                             for name, value in seal.entries if callable(value))
+_SERVICE_OBSERVE_ESCAPE = ServiceDispatch._observe_escape
+_SERVICE_CLEANUP_FAILED = ServiceDispatch.cleanup_failed
+_SERVICE_REQUIRE_STATE = ServiceDispatch.require_state
+_SERVICE_BASE_UNWIND = ClosedDispatch.prepare_unwind
+_SERVICE_REPAIR_METER = repair_meter
+_SERVICE_STEPS_SLOT = _ServiceAccounting.__dict__["semantic_steps"]
+
+
+__all__ = ["ScalarServiceCatalog", "ScalarServiceCapture", "ScalarValidationFailure", "ServiceDispatch"]
