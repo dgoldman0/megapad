@@ -9,8 +9,11 @@ bulk audio are qualified. The hardened AES transfer candidate showed no gain
 against a fresh scalar baseline, so existing AES routing is retained. Native
 page access and longer continuation intervals need no further rewrite on
 current evidence. Kernel/source/captured-frame evidence and strict multicore
-FP/timing checks are recorded. Expanded hybrid interoperability and remaining
-Desktop acceptance remain open.
+FP/timing checks are recorded. Prepared Desktop journeys are complete in the
+documented direct-dispatch scope, with Python requiring expanded diagnostic
+deadlines. Closed integer callbacks are qualified; nesting, shared-task
+exceptions/suspension and service execution remain in progress. The pinned
+retained frontend changes are integrated and qualified locally.
 Production semantic sessions now default to required native execution; explicit
 CLI/environment choices and Python embedding defaults remain available.
 
@@ -401,13 +404,44 @@ limits. Machine-level claims continue to require the architectural oracle.
 |---|---|---|
 | Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
-| 1B — common session boundary | Extraction complete; production native default qualified | Original boundary gates plus 30 default-selection cases and the 317-check application gate; all three native-selected prepared Desktop modes passed; socket scope remains unqualified |
+| 1B — common session boundary | Extraction complete; production native default and pinned frontend integration qualified | Original boundary gates plus 30 default-selection cases and the 317-check application gate; merged frontend passed 1,346 checks with three socket skips and another 30 default-selection checks; all three native-selected prepared Desktop modes passed |
 | 2 — workload profiles | Kernels, KDOS controls/attribution and prepared Desktop subsets recorded | 56 Desktop harness checks; eight-step emulator/native, simulator/native and hybrid/native journeys passed through direct session dispatch; Python completed the identical assertions in 758.105 seconds under explicit expanded diagnostic deadlines, exceeding the standard step bound |
 | 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Bulk audio, shared Keccak, SHA3 and NTT transfer work qualified; AES candidate declined on current measurements | Existing oracle gates plus 109 NTT checks; 200 AES candidate checks with no measured speed benefit; retained raw comparisons |
 | 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
-| 5 — expanded interoperability | Synchronous canonical integer callbacks (5A) qualified; closed policies, nesting, task exceptions, suspension and services remain | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
+| 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
+| 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
+| 5B2 — nested callbacks | Contract locked; native owner implementation in progress | One-owner legacy facade and complete parent-field audit specified before implementation |
+| 5C/5D — shared task callbacks | Contract and neutral value protocol complete; runtime execution pending | 206 protocol/ABI checks, including 48 new continuation, receipt and cancellation cases |
+| 5E — private scalar services | Contract and explicit metadata loader complete; execution pending | 532 service metadata and existing manifest checks; no service capability advertised |
+| Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
+
+### Qualified closed callbacks and frontend integration — 2026-09-30
+
+Closed version 3 policies now use the existing export registry, private
+eight-cell stacks and native transport 2. The reference dispatcher checks
+captured Words, IR, method routes and control evidence around every admitted
+tick. One-shot engine receipts settle actual work on the original meter even
+when host callbacks mutate it or raise after completed work. Raw host errors
+retain identity; failed cleanup closes the affected owner. Manifest policies
+are proved and installed before machine publication and unchanged bootstrap.
+
+The [clamp comparison](performance/hybrid-closed-clamp-2026-09-30.md) records
+identical bytes, guards, checksum and exact work for 128 values. Hybrid medians
+are 485.114 ms with Python outer execution and 477.469 ms with native outer
+execution, versus 6.218 ms and 0.149 ms for the semantic controls. This is a
+functional interoperability result with substantial callback overhead. It
+does not justify moving a small integer policy out of native semantic code.
+
+The reviewed peer integration `b71e6fc` was merged locally into this branch.
+Its peer parent is exactly `b847c5bddc7ab861df0f534816ddb0e888e47af4`; newer
+parallel work was excluded. The merged tree passed 1,346 model, wire, input,
+rendering, guest-source and unified session checks, with three AF_UNIX skips
+because this environment denies socket creation. A separate 30-case gate
+confirmed the required-native production default. Prepared Desktop reports
+retain their original source identities and do not claim that the later
+frontend families were exercised by those historical images.
 
 ### Phase 1A implementation and validation — 2026-09-30
 
