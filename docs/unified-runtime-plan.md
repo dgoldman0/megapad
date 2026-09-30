@@ -4,8 +4,8 @@ Started: 2026-09-30
 
 Status: The unified emulator/simulator/hybrid application and bounded hybrid
 integer-routine v1 are implemented and qualified locally. Shared native scalar
-FP, Keccak, checked SHA3 input transfers and bulk audio are qualified; native tile extraction and remaining
-measured runtime costs are next. Kernel/source/captured-frame evidence and
+FP, tile values, Keccak, checked SHA3 input transfers and bulk audio are
+qualified; residual runtime costs are being measured. Kernel/source/captured-frame evidence and
 strict multicore FP/timing checks are recorded. Live Desktop acceptance,
 executor default promotion and expanded hybrid interoperability remain open.
 
@@ -316,6 +316,12 @@ limits. Machine-level claims continue to require the architectural oracle.
 
 ### Continuation checkpoints — 2026-09-30
 
+- Shared native tile values and per-operation identity admission are qualified.
+  The first Python-guard extraction regressed the FP64 add probe; moving the
+  exact checks into the binding reduced its median from the 83.986 ms baseline
+  to 65.133 ms for 4,096 operations. Python control variation and exact scope
+  are recorded in
+  [`performance/runtime-tile-values-2026-09-30.md`](performance/runtime-tile-values-2026-09-30.md).
 - Removed the final root session import shim after migrating the benchmark's
   current/legacy layout selection. Its ownership/provenance gates passed.
 - Added a MegaPad-owned bounded prepared-image Desktop harness. Its 28 checks

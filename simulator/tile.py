@@ -14,6 +14,7 @@ from typing import Protocol
 from shared import ieee_fp, tile_float, tile_formats
 from shared.cells import MASK64, u64
 from simulator.errors import IllegalInstructionFault
+from simulator.field import HostedFieldALUService
 from simulator.memory import SparseAddressSpace
 
 
@@ -123,6 +124,8 @@ class HostedTileService:
         "_core_id",
         "_memory",
         "_mode",
+        "_native_guard_matches",
+        "_native_values",
         "_registers",
         "_source1",
     )
@@ -150,8 +153,82 @@ class HostedTileService:
         self._mode = 0
         self._control = 0
         self._source1 = 0
+        self._native_values = None
+        self._native_guard_matches = None
         # Validate the injected shared-register view at construction.
         self._registers.accumulator_words(core_id)
+
+    def bind_native_values(
+        self, execute: Callable | None, *, guard_factory: Callable | None = None,
+    ) -> bool:
+        """Select optional value math while retaining all hosted effects.
+
+        Subclasses, customized memory/register views and reference helper
+        overrides retain the Python implementation. Method identities
+        are checked again at each operation so later overrides do too. The
+        accountant remains an ordinary callback after memory/ACC publication.
+        A native guard factory moves these checks into the binding layer;
+        callers that omit it retain the portable Python admission checks.
+        """
+
+        if execute is not None and not callable(execute):
+            raise TypeError("tile value executor must be callable or None")
+        if guard_factory is not None and not callable(guard_factory):
+            raise TypeError("native tile guard factory must be callable")
+        if type(self) is not HostedTileService:
+            return False
+        self._native_values = None
+        self._native_guard_matches = None
+        if execute is None:
+            return True
+        if not self._native_context_is_canonical():
+            return False
+        if guard_factory is not None:
+            guard = guard_factory(
+                HostedTileService, _REFERENCE_TILE_METHODS,
+                SparseAddressSpace, _REFERENCE_MEMORY_METHODS,
+                HostedFieldALUService, _REFERENCE_REGISTER_METHODS,
+                tile_float, _REFERENCE_VALUE_HELPERS,
+            )
+            matches = guard.matches
+            if not callable(matches):
+                raise TypeError("native tile guard matches must be callable")
+            if not matches(self, self._memory, self._registers):
+                return False
+            self._native_guard_matches = matches
+        self._native_values = execute
+        return True
+
+    def _native_context_is_canonical(self) -> bool:
+        return (
+            _canonical_methods(self, HostedTileService, _REFERENCE_TILE_METHODS)
+            and _canonical_methods(
+                self._memory, SparseAddressSpace, _REFERENCE_MEMORY_METHODS
+            )
+            and _canonical_methods(
+                self._registers, HostedFieldALUService, _REFERENCE_REGISTER_METHODS
+            )
+            and all(
+                getattr(tile_float, name) is value
+                for name, value in _REFERENCE_VALUE_HELPERS
+            )
+        )
+
+    def _native_value_executor(self) -> Callable | None:
+        execute = self._native_values
+        if execute is not None:
+            matches = self._native_guard_matches
+            canonical = (
+                HostedTileService is _REFERENCE_NATIVE_CONTEXT[0]
+                and SparseAddressSpace is _REFERENCE_NATIVE_CONTEXT[1]
+                and HostedFieldALUService is _REFERENCE_NATIVE_CONTEXT[2]
+                and tile_float is _REFERENCE_NATIVE_CONTEXT[3]
+                and matches(self, self._memory, self._registers)
+                if matches is not None else self._native_context_is_canonical()
+            )
+            if canonical:
+                return execute
+        return None
 
     @property
     def mode(self) -> int:
@@ -237,19 +314,26 @@ class HostedTileService:
         element_bytes, signed, _saturating, floating_format = self._mode_format(
             tile_formats.TMUL, tile_formats.TMUL_WMUL
         )
+        native = (
+            self._native_value_executor() if floating_format is not None else None
+        )
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         output0 = bytearray(TILE_BYTES)
         output1 = bytearray(TILE_BYTES)
 
         if floating_format is not None:
-            products = tile_float.pack_lanes(
-                ieee_fp.accumulation_format(floating_format),
-                tile_float.widening_multiply(
-                    floating_format,
-                    tile_float.unpack_lanes(floating_format, left),
-                    tile_float.unpack_lanes(floating_format, right),
-                ),
+            products = (
+                native("widening_multiply", self._mode, left, right)
+                if native is not None else
+                tile_float.pack_lanes(
+                    ieee_fp.accumulation_format(floating_format),
+                    tile_float.widening_multiply(
+                        floating_format,
+                        tile_float.unpack_lanes(floating_format, left),
+                        tile_float.unpack_lanes(floating_format, right),
+                    ),
+                )
             )
             output0[:] = products[:TILE_BYTES]
             output1[:] = products[TILE_BYTES:]
@@ -289,13 +373,17 @@ class HostedTileService:
         element_bytes, signed, _saturating, floating_format = self._mode_format(
             tile_formats.TMUL, tile_formats.TMUL_DOT
         )
+        native = (
+            self._native_value_executor() if floating_format is not None else None
+        )
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
 
         if floating_format is not None:
             self._publish_float_sum(
                 floating_format,
-                tile_float.dot(
+                native("dot", self._mode, left, right)
+                if native is not None else tile_float.dot(
                     floating_format,
                     tile_float.unpack_lanes(floating_format, left),
                     tile_float.unpack_lanes(floating_format, right),
@@ -350,11 +438,15 @@ class HostedTileService:
         element_bytes, signed, _saturating, floating_format = self._mode_format(
             tile_formats.TRED, tile_formats.TRED_L1
         )
+        native = (
+            self._native_value_executor() if floating_format is not None else None
+        )
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
         if floating_format is not None:
             self._publish_float_sum(
                 floating_format,
-                tile_float.l1_norm(
+                native("l1_norm", self._mode, tile)
+                if native is not None else tile_float.l1_norm(
                     floating_format,
                     tile_float.unpack_lanes(floating_format, tile),
                 ),
@@ -396,13 +488,15 @@ class HostedTileService:
         """TVSEL: msb([TDST]) ? [TSRC0] : [TSRC1] per lane (§6.4)."""
 
         lane_format = self._extended_format(tile_formats.EXT_VSEL, 0)
+        native = self._native_value_executor()
         bits = lane_format.lane_bits
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         masks = self._memory.read_bytes(self.destination, TILE_BYTES)
         self._memory.write_bytes(
             self.destination,
-            bytes(tile_float.pack_bits(bits, tile_float.select(
+            native("select", self._mode, left, right, masks)
+            if native is not None else bytes(tile_float.pack_bits(bits, tile_float.select(
                 lane_format,
                 tile_float.unpack_bits(bits, masks),
                 tile_float.unpack_bits(bits, left),
@@ -419,12 +513,14 @@ class HostedTileService:
         funct_byte = (predicate << 3 | tile_formats.EXT_TCMP
                       if predicate < 8 else 0xC7)
         lane_format = self._extended_format(tile_formats.EXT_TCMP, funct_byte)
+        native = self._native_value_executor()
         bits = lane_format.lane_bits
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         self._memory.write_bytes(
             self.destination,
-            bytes(tile_float.pack_bits(bits, tile_float.compare_mask(
+            native("compare_mask", self._mode, left, right, argument=predicate)
+            if native is not None else bytes(tile_float.pack_bits(bits, tile_float.compare_mask(
                 lane_format,
                 predicate,
                 tile_float.unpack_bits(bits, left),
@@ -440,6 +536,7 @@ class HostedTileService:
         target = self._cell(target, label="conversion target")
         code = target if target < 16 else 15  # reserved, as the BIOS word
         source = self._extended_format(tile_formats.EXT_TCVT, code << 4 | 6)
+        native = self._native_value_executor()
         target_format = tile_formats.decode(code)
         k = tile_formats.tcvt_ratio(source, target_format)
         reads = k if target_format.lane_bytes < source.lane_bytes else 1
@@ -449,15 +546,18 @@ class HostedTileService:
                                     TILE_BYTES)
             for index in range(reads)
         )
-        converted = tile_float.pack_bits(
-            target_format.lane_bits,
-            tile_float.convert_region(
-                source,
-                target_format,
-                tile_float.unpack_bits(source.lane_bits, region),
-                bool(self._mode & tile_formats.TMODE_SIGNED),
-                bool(self._mode & tile_formats.TMODE_ROUNDING),
-            ),
+        converted = (
+            native("convert", self._mode, region, argument=code)
+            if native is not None else tile_float.pack_bits(
+                target_format.lane_bits,
+                tile_float.convert_region(
+                    source,
+                    target_format,
+                    tile_float.unpack_bits(source.lane_bits, region),
+                    bool(self._mode & tile_formats.TMODE_SIGNED),
+                    bool(self._mode & tile_formats.TMODE_ROUNDING),
+                ),
+            )
         )
         for index in range(writes):
             self._memory.write_bytes(
@@ -471,12 +571,14 @@ class HostedTileService:
 
         lane_format = self._extended_format(tile_formats.EXT_TDIV,
                                             tile_formats.EXT_TDIV)
+        native = self._native_value_executor()
         bits = lane_format.lane_bits
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         self._memory.write_bytes(
             self.destination,
-            bytes(tile_float.pack_bits(bits, tile_float.divide(
+            native("divide", self._mode, left, right)
+            if native is not None else bytes(tile_float.pack_bits(bits, tile_float.divide(
                 lane_format,
                 tile_float.unpack_bits(bits, left),
                 tile_float.unpack_bits(bits, right),
@@ -489,11 +591,13 @@ class HostedTileService:
 
         lane_format = self._extended_format(tile_formats.EXT_TSQRT,
                                             tile_formats.EXT_TSQRT)
+        native = self._native_value_executor()
         bits = lane_format.lane_bits
         source = self._memory.read_bytes(self.source0, TILE_BYTES)
         self._memory.write_bytes(
             self.destination,
-            bytes(tile_float.pack_bits(bits, tile_float.square_root(
+            native("square_root", self._mode, source)
+            if native is not None else bytes(tile_float.pack_bits(bits, tile_float.square_root(
                 lane_format, tile_float.unpack_bits(bits, source)))),
         )
         self._account()
@@ -514,8 +618,15 @@ class HostedTileService:
         element_bytes, signed, saturating, floating_format = self._mode_format(
             op, funct
         )
+        native = self._native_value_executor()
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
+        if native is not None:
+            self._memory.write_bytes(
+                self.destination, native(operation, self._mode, left, right)
+            )
+            self._account()
+            return
         bits = element_bytes * 8
         lane_mask = (1 << bits) - 1
         low = -(1 << (bits - 1))
@@ -607,6 +718,9 @@ class HostedTileService:
         element_bytes, signed, _saturating, floating_format = self._mode_format(
             tile_formats.TMUL, tile_formats.TMUL_MAC
         )
+        native = (
+            self._native_value_executor() if floating_format is not None else None
+        )
         left = self._memory.read_bytes(self.source0, TILE_BYTES)
         right = self._memory.read_bytes(self.source1, TILE_BYTES)
         existing = self._memory.read_bytes(self.destination, TILE_BYTES)
@@ -617,7 +731,8 @@ class HostedTileService:
         if floating_format is not None:
             self._memory.write_bytes(
                 self.destination,
-                tile_float.pack_lanes(
+                native("fused_multiply_add", self._mode, left, right, existing)
+                if native is not None else tile_float.pack_lanes(
                     floating_format,
                     tile_float.fused_multiply_add(
                         floating_format,
@@ -658,7 +773,23 @@ class HostedTileService:
         element_bytes, signed, _saturating, floating_format = self._mode_format(
             tile_formats.TRED, _REDUCTION_FUNCTIONS[operation]
         )
+        native = (
+            self._native_value_executor() if floating_format is not None else None
+        )
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
+        if native is not None:
+            if operation in ("minimum", "maximum"):
+                self._publish_float_extreme(
+                    floating_format,
+                    native("reduction_" + operation, self._mode, tile),
+                    operation == "maximum",
+                )
+            else:
+                self._publish_float_sum(
+                    floating_format, native(operation, self._mode, tile)
+                )
+            self._account()
+            return
         raw_values = [
             int.from_bytes(tile[offset : offset + element_bytes], "little")
             for offset in range(0, TILE_BYTES, element_bytes)
@@ -718,16 +849,22 @@ class HostedTileService:
             tile_formats.TRED,
             tile_formats.TRED_MINIDX if minimum else tile_formats.TRED_MAXIDX,
         )
+        native = (
+            self._native_value_executor() if floating_format is not None else None
+        )
         tile = self._memory.read_bytes(self.source0, TILE_BYTES)
         raw_values = [
             int.from_bytes(tile[offset : offset + element_bytes], "little")
             for offset in range(0, TILE_BYTES, element_bytes)
-        ]
+        ] if native is None else []
 
         if floating_format is not None:
             wide = ieee_fp.accumulation_format(floating_format)
-            index, value = tile_float.extreme_index(
-                floating_format, raw_values, not minimum
+            index, value = (
+                native("minimum_index" if minimum else "maximum_index",
+                       self._mode, tile)
+                if native is not None else
+                tile_float.extreme_index(floating_format, raw_values, not minimum)
             )
             _zero, accumulate = self._take_accumulator_controls()
             words = list(self.accumulator)
@@ -915,6 +1052,55 @@ class HostedTileService:
         if isinstance(value, bool) or not isinstance(value, int):
             raise TypeError(f"{label} must be an integer")
         return u64(value)
+
+
+def _canonical_methods(instance, expected_type, methods) -> bool:
+    """Check both class replacements and instance-level method injection."""
+
+    if type(instance) is not expected_type:
+        return False
+    local = getattr(instance, "__dict__", {})
+    current = vars(expected_type)
+    return all(
+        name not in local and current.get(name) is value
+        for name, value in methods
+    )
+
+
+# Capture implementations rather than bound instances. The runtime owns the
+# optional callable, and portable services never import the native extension.
+_REFERENCE_NATIVE_CONTEXT = (
+    HostedTileService, SparseAddressSpace, HostedFieldALUService, tile_float,
+)
+_REFERENCE_TILE_METHODS = tuple(
+    (name, value)
+    for name, value in vars(HostedTileService).items()
+    if callable(value) or isinstance(value, (property, staticmethod))
+)
+_REFERENCE_MEMORY_METHODS = tuple(
+    (name, vars(SparseAddressSpace)[name])
+    for name in (
+        "read_bytes", "write_bytes", "_resolve", "_region_at",
+        "_read_integer", "_write_integer",
+    )
+)
+_REFERENCE_REGISTER_METHODS = tuple(
+    (name, vars(HostedFieldALUService)[name])
+    for name in (
+        "accumulator_words", "replace_accumulator_words", "operand_address",
+        "result_address", "_state", "_cell",
+    )
+)
+_REFERENCE_VALUE_HELPERS = tuple(
+    (name, getattr(tile_float, name))
+    for name in (
+        "unpack_bits", "pack_bits", "unpack_lanes", "pack_lanes",
+        "elementwise", "multiply", "fused_multiply_add", "widening_multiply",
+        "dot", "sum_lanes", "sum_squares", "l1_norm", "extreme",
+        "extreme_index", "select", "compare_mask", "divide", "square_root",
+        "convert_region",
+    )
+)
 
 
 __all__ = [

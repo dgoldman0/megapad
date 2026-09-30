@@ -11,7 +11,7 @@ from setuptools.command.build_ext import build_ext
 sanitizer = os.environ.get("MEGAFORTH_NATIVE_SANITIZER", "none")
 if sanitizer not in ("none", "address-undefined"):
     raise SystemExit("MEGAFORTH_NATIVE_SANITIZER must be none or address-undefined")
-flags = ["-std=c++17", "-Wall", "-Wextra", "-fvisibility=hidden"]
+flags = ["-std=c++17", "-ffp-contract=off", "-frounding-math", "-Wall", "-Wextra", "-fvisibility=hidden"]
 links = []
 if sanitizer == "none":
     flags += ["-O3"]
@@ -34,9 +34,12 @@ setup(
     ext_modules=[Extension(
         "_megaforth_native", [
             "simulator/accel/semantic_executor.cpp", "shared/accel/scalar_fp.cpp", "shared/accel/keccak.cpp",
+            "shared/accel/tile_values.cpp",
         ],
         depends=["shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h",
-                 "shared/accel/keccak.h", "shared/accel/keccak_bindings.h"],
+                 "shared/accel/keccak.h", "shared/accel/keccak_bindings.h",
+                 "shared/accel/tile_values.h", "shared/accel/tile_values_bindings.h",
+                 "shared/accel/tile_guard_bindings.h"],
         include_dirs=[pybind11.get_include()], language="c++",
         extra_compile_args=flags, extra_link_args=links,
     )],

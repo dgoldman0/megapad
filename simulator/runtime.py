@@ -824,6 +824,11 @@ class MegaForthRuntime:
                     self.sha3.bind_native_permutation(
                         self._native_execution.extension.keccak_f1600
                     )
+                if type(self.tile) is HostedTileService:
+                    self.tile.bind_native_values(
+                        self._native_execution.extension.tile_execute_values,
+                        guard_factory=self._native_execution.extension.TileIdentityGuard,
+                    )
         self.storage.claim()
 
     @property

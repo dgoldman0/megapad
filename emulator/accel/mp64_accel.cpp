@@ -43,6 +43,7 @@
 
 #include "../../shared/accel/scalar_fp_bindings.h"
 #include "../../shared/accel/keccak_bindings.h"
+#include "../../shared/accel/tile_values_bindings.h"
 #include "dbt/executable_arena.h"
 #include "dbt/x86_64/lowering.h"
 #include "cpu/mp64/block_ir.h"
@@ -63,6 +64,7 @@
 namespace py = pybind11;
 namespace mp64_x86_64 = mp64::dbt::x86_64;
 namespace mp64_scalar_fp = megapad::scalar_fp;
+namespace mp64_tile_values = megapad::tile_values;
 namespace mp64_routine = mp64::cpu::routine_v1;
 
 using mp64::machine::SystemClock;
@@ -187,41 +189,10 @@ static constexpr uint64_t TMODE_WRITE_MASK = 0x7F;
 static constexpr uint64_t FPCSR_WRITE_MASK = 0x1F7;  // RM[2:0], flags[8:4]
 static constexpr uint64_t TCTRL_WRITE_MASK = 0x03;
 
-// One binary interchange format (docs/floating-point.md §2).
-struct TileFloatFormat {
-    int width;
-    int exponent_bits;
-    int fraction_bits;
-};
-
-static constexpr TileFloatFormat TILE_FP16{16, 5, 10};
-static constexpr TileFloatFormat TILE_BF16{16, 8, 7};
-static constexpr TileFloatFormat TILE_FP32{32, 8, 23};
-static constexpr TileFloatFormat TILE_FP64{64, 11, 52};
-
-// One descriptor per TMODE.EW code.  Lane geometry, float-ness, and the
-// accumulation format come from this table rather than per-site arithmetic.
-struct TileFormat {
-    int lane_bytes;                        // 0 for a reserved code
-    const TileFloatFormat* floating;       // null for integer formats
-    const TileFloatFormat* accumulation;   // the float format A of §4
-
-    constexpr bool defined() const { return lane_bytes != 0; }
-    constexpr bool is_float() const { return floating != nullptr; }
-    constexpr int lanes() const { return 64 / lane_bytes; }
-    constexpr int lane_bits() const { return lane_bytes * 8; }
-};
-
-static constexpr TileFormat TILE_FORMATS[TMODE_EW_MASK + 1] = {
-    {1, nullptr, nullptr},
-    {2, nullptr, nullptr},
-    {4, nullptr, nullptr},
-    {8, nullptr, nullptr},
-    {2, &TILE_FP16, &TILE_FP32},
-    {2, &TILE_BF16, &TILE_FP32},
-    {4, &TILE_FP32, &TILE_FP64},
-    {8, &TILE_FP64, &TILE_FP64},
-};
+// Shared lane geometry and values; CPU state and tile transport remain here.
+using mp64_tile_values::TileFloatFormat;
+using mp64_tile_values::TileFormat;
+using mp64_tile_values::TILE_FORMATS;
 
 static constexpr int tmode_ew(uint64_t tmode) {
     return static_cast<int>(tmode & TMODE_EW_MASK);
@@ -8001,247 +7972,15 @@ static int next_instruction_size(CPUState& s) {
     }
 }
 
-// ---------------------------------------------------------------------------
-//  Floating-point tile lanes.  docs/floating-point.md defines every result and
-//  shared/ieee_fp.py is the executable reference.  Host binary64 is used only
-//  where it is provably identical to that reference: FP16/BF16/FP32 values and
-//  their products are exact in binary64; one binary64 addition or
-//  multiplication rounded once to a format of precision p <= 24 is correctly
-//  rounded (53 >= 2p + 2); and a fused multiply-add rounds the round-to-odd
-//  binary64 sum once (53 >= p + 2).  Rounding to a tile format uses integer
-//  arithmetic on the binary64 encoding, and the build disables floating-point
-//  contraction so the two-sum steps stay separate.
-// ---------------------------------------------------------------------------
-
-static constexpr uint64_t tile_float_mask(const TileFloatFormat& f) {
-    return f.width == 64 ? ~0ULL : (1ULL << f.width) - 1;
-}
-
-static constexpr uint64_t tile_float_sign(const TileFloatFormat& f) {
-    return 1ULL << (f.width - 1);
-}
-
-static constexpr uint64_t tile_float_infinity(const TileFloatFormat& f) {
-    return ((1ULL << f.exponent_bits) - 1) << f.fraction_bits;
-}
-
-static constexpr uint64_t tile_float_canonical_nan(const TileFloatFormat& f) {
-    return tile_float_infinity(f) | (1ULL << (f.fraction_bits - 1));
-}
-
-static_assert(tile_float_canonical_nan(TILE_FP16) == 0x7E00);
-static_assert(tile_float_canonical_nan(TILE_BF16) == 0x7FC0);
-static_assert(tile_float_canonical_nan(TILE_FP32) == 0x7FC0'0000);
-static_assert(
-    tile_float_canonical_nan(TILE_FP64) == 0x7FF8'0000'0000'0000ULL);
-
-static inline const TileFloatFormat& tile_float_format(int ew) {
-    return *TILE_FORMATS[ew].floating;
-}
-
-static inline bool tile_float_is_nan(
-        const TileFloatFormat& f,
-        uint64_t bits) {
-    return (bits & tile_float_mask(f) & ~tile_float_sign(f)) >
-           tile_float_infinity(f);
-}
-
-static inline uint64_t tile_float_order_key(
-        const TileFloatFormat& f,
-        uint64_t bits) {
-    bits &= tile_float_mask(f);
-    return (bits & tile_float_sign(f))
-        ? (tile_float_mask(f) ^ bits)
-        : (bits | tile_float_sign(f));
-}
-
-static inline double tile_float_to_double(
-        const TileFloatFormat& f,
-        uint64_t bits) {
-    bits &= tile_float_mask(f);
-    const int bias = (1 << (f.exponent_bits - 1)) - 1;
-    const uint64_t exponent_max = (1ULL << f.exponent_bits) - 1;
-    const uint64_t exponent = (bits >> f.fraction_bits) & exponent_max;
-    const uint64_t fraction = bits & ((1ULL << f.fraction_bits) - 1);
-    double magnitude;
-    if (exponent == exponent_max) {
-        magnitude = fraction
-            ? std::numeric_limits<double>::quiet_NaN()
-            : std::numeric_limits<double>::infinity();
-    } else if (exponent == 0) {
-        magnitude = std::ldexp(
-            static_cast<double>(fraction),
-            1 - bias - f.fraction_bits);
-    } else {
-        magnitude = std::ldexp(
-            static_cast<double>(fraction | (1ULL << f.fraction_bits)),
-            static_cast<int>(exponent) - bias - f.fraction_bits);
-    }
-    return (bits & tile_float_sign(f)) ? -magnitude : magnitude;
-}
-
-static inline uint64_t double_bits(double value) {
-    uint64_t bits;
-    std::memcpy(&bits, &value, sizeof(bits));
-    return bits;
-}
-
-// Round a binary64 value once to a tile format: RNE, canonical NaN.
-static inline uint64_t tile_float_from_double(
-        const TileFloatFormat& f,
-        double value) {
-    if (std::isnan(value))
-        return tile_float_canonical_nan(f);
-    const uint64_t raw = double_bits(value);
-    if (f.width == 64)
-        return raw;
-    const uint64_t sign_bits = (raw >> 63) ? tile_float_sign(f) : 0;
-    const uint64_t biased64 = (raw >> 52) & 0x7FF;
-    if (biased64 == 0x7FF)
-        return sign_bits | tile_float_infinity(f);
-    // Zero, or a binary64 subnormal far below every tile format's range.
-    if (biased64 == 0)
-        return sign_bits;
-    const int precision = f.fraction_bits + 1;
-    const int bias = (1 << (f.exponent_bits - 1)) - 1;
-    const int emin = 1 - bias;
-    const uint64_t significand =
-        (raw & ((1ULL << 52) - 1)) | (1ULL << 52);
-    const int exponent = static_cast<int>(biased64) - 1075;
-    int quantum = std::max(
-        exponent + 52 - (precision - 1),
-        emin - (precision - 1));
-    const int shift = quantum - exponent;  // at least 53 - precision
-    if (shift > 63)
-        return sign_bits;
-    uint64_t mantissa = significand >> shift;
-    const uint64_t remainder = significand & ((1ULL << shift) - 1);
-    const uint64_t half = 1ULL << (shift - 1);
-    if (remainder > half || (remainder == half && (mantissa & 1))) {
-        mantissa++;
-        if (mantissa >> precision) {
-            mantissa >>= 1;
-            quantum++;
-        }
-    }
-    const uint64_t hidden = 1ULL << (precision - 1);
-    if (mantissa >= hidden) {
-        const int biased = quantum + (precision - 1) + bias;
-        if (biased >= (1 << f.exponent_bits) - 1)
-            return sign_bits | tile_float_infinity(f);
-        return sign_bits |
-               (static_cast<uint64_t>(biased) << f.fraction_bits) |
-               (mantissa - hidden);
-    }
-    return sign_bits | mantissa;
-}
-
-// The round-to-odd binary64 value of the exact sum of two binary64 values.
-static inline double round_to_odd_sum(double product, double addend) {
-    double total = product + addend;
-    if (!std::isfinite(total))
-        return total;
-    const double partial = total - addend;
-    const double error =
-        (product - partial) + (addend - (total - partial));
-    if (error != 0.0 && !(double_bits(total) & 1)) {
-        total = std::nextafter(
-            total,
-            error > 0.0
-                ? std::numeric_limits<double>::infinity()
-                : -std::numeric_limits<double>::infinity());
-    }
-    return total;
-}
-
-static inline uint64_t tile_float_add(
-        const TileFloatFormat& f,
-        uint64_t a,
-        uint64_t b) {
-    return tile_float_from_double(
-        f, tile_float_to_double(f, a) + tile_float_to_double(f, b));
-}
-
-static inline uint64_t tile_float_sub(
-        const TileFloatFormat& f,
-        uint64_t a,
-        uint64_t b) {
-    return tile_float_from_double(
-        f, tile_float_to_double(f, a) - tile_float_to_double(f, b));
-}
-
-static inline uint64_t tile_float_product(
-        const TileFloatFormat& dst,
-        const TileFloatFormat& src,
-        uint64_t a,
-        uint64_t b) {
-    return tile_float_from_double(
-        dst, tile_float_to_double(src, a) * tile_float_to_double(src, b));
-}
-
-// RN_dst(a * b + c) with a, b in src and c in dst, rounded once.  Products
-// of precision <= 26 operands are exact in binary64, and the round-to-odd
-// sum rounds once more correctly for dst precision <= 51.  Binary64 operands
-// use the host's correctly rounded fused multiply-add.
-static inline uint64_t tile_float_fma(
-        const TileFloatFormat& dst,
-        const TileFloatFormat& src,
-        uint64_t a,
-        uint64_t b,
-        uint64_t c) {
-    const double x = tile_float_to_double(src, a);
-    const double y = tile_float_to_double(src, b);
-    const double z = tile_float_to_double(dst, c);
-    if (src.width == 64)
-        return tile_float_from_double(dst, std::fma(x, y, z));
-    const double product = x * y;
-    if (dst.width == 64)
-        return tile_float_from_double(dst, product + z);
-    return tile_float_from_double(dst, round_to_odd_sum(product, z));
-}
-
-static inline uint64_t tile_float_convert(
-        const TileFloatFormat& dst,
-        const TileFloatFormat& src,
-        uint64_t bits) {
-    return tile_float_from_double(dst, tile_float_to_double(src, bits));
-}
-
-// IEEE 754-2019 minimum/maximum: NaN propagates and -0 orders below +0.
-static inline uint64_t tile_float_extreme2(
-        const TileFloatFormat& f,
-        uint64_t a,
-        uint64_t b,
-        bool largest) {
-    if (tile_float_is_nan(f, a) || tile_float_is_nan(f, b))
-        return tile_float_canonical_nan(f);
-    const uint64_t key_a = tile_float_order_key(f, a);
-    const uint64_t key_b = tile_float_order_key(f, b);
-    if (largest)
-        return (key_a >= key_b ? a : b) & tile_float_mask(f);
-    return (key_a <= key_b ? a : b) & tile_float_mask(f);
-}
-
-// The canonical pairwise tree over leaves held as exact doubles, rounding
-// once to the accumulation format at every node.  A binary64 host addition
-// is RN_64 itself, and for binary32 leaves RN_32(RN_64(x + y)) = RN_32(x + y)
-// because 53 >= 2 * 24 + 2.
-static inline uint64_t tile_float_tree(
-        const TileFloatFormat& wide,
-        double* values,
-        int count) {
-    while (count > 1) {
-        for (int j = 0; j < count / 2; j++) {
-            values[j] = tile_float_to_double(
-                wide,
-                tile_float_from_double(
-                    wide,
-                    values[2 * j] + values[2 * j + 1]));
-        }
-        count /= 2;
-    }
-    return tile_float_from_double(wide, values[0]);
-}
+// Pure floating-point lane helpers are shared with semantic execution.
+using mp64_tile_values::tile_float_mask;
+using mp64_tile_values::tile_float_sign;
+using mp64_tile_values::tile_float_format;
+using mp64_tile_values::tile_float_from_double;
+using mp64_tile_values::tile_float_add;
+using mp64_tile_values::tile_float_fma;
+using mp64_tile_values::tile_float_skip_nan_extreme;
+using mp64_tile_values::tile_float_index_replaces;
 
 static inline uint32_t fp32_to_bits(float f) {
     uint32_t b; std::memcpy(&b, &f, 4); return b;
@@ -9500,50 +9239,55 @@ static int exec_native_tacc_tamac(
     const int lane_count =
         static_cast<int>(TILE_BYTES * 8) /
         source_bits;
-    for (int lane = 0; lane < lane_count; lane++) {
-        const uint64_t a = tile_get_elem(
-            source_a,
-            lane,
-            source_bytes);
-        const uint64_t b = tile_get_elem(
-            source_b,
-            lane,
-            source_bytes);
-        const uint64_t old =
-            native_tacc_image_read(
+    {
+        std::optional<mp64_tile_values::ScopedFloatEnvironment> environment;
+        if (floating)
+            environment.emplace();
+        for (int lane = 0; lane < lane_count; lane++) {
+            const uint64_t a = tile_get_elem(
+                source_a,
+                lane,
+                source_bytes);
+            const uint64_t b = tile_get_elem(
+                source_b,
+                lane,
+                source_bytes);
+            const uint64_t old =
+                native_tacc_image_read(
+                    staged,
+                    lane,
+                    accumulator_bits);
+            uint64_t result = 0;
+            if (floating) {
+                result = tile_float_fma(
+                    *lane_format.accumulation, tile_float_format(ew), a, b, old);
+            } else if (signed_mode) {
+                const __int128 product =
+                    static_cast<__int128>(
+                        native_tacc_sign_extend(
+                            a,
+                            source_bits)) *
+                    static_cast<__int128>(
+                        native_tacc_sign_extend(
+                            b,
+                            source_bits));
+                result = old +
+                    static_cast<uint64_t>(product);
+            } else {
+                const __uint128_t product =
+                    static_cast<__uint128_t>(a) *
+                    static_cast<__uint128_t>(b);
+                result = old +
+                    static_cast<uint64_t>(product);
+            }
+            if (accumulator_bits == 32)
+                result &= 0xFFFF'FFFFULL;
+            native_tacc_image_write(
                 staged,
                 lane,
-                accumulator_bits);
-        uint64_t result = 0;
-        if (floating) {
-            result = tile_float_fma(
-                *lane_format.accumulation, tile_float_format(ew), a, b, old);
-        } else if (signed_mode) {
-            const __int128 product =
-                static_cast<__int128>(
-                    native_tacc_sign_extend(
-                        a,
-                        source_bits)) *
-                static_cast<__int128>(
-                    native_tacc_sign_extend(
-                        b,
-                        source_bits));
-            result = old +
-                static_cast<uint64_t>(product);
-        } else {
-            const __uint128_t product =
-                static_cast<__uint128_t>(a) *
-                static_cast<__uint128_t>(b);
-            result = old +
-                static_cast<uint64_t>(product);
+                accumulator_bits,
+                result);
         }
-        if (accumulator_bits == 32)
-            result &= 0xFFFF'FFFFULL;
-        native_tacc_image_write(
-            staged,
-            lane,
-            accumulator_bits,
-            result);
     }
     const std::size_t active =
         native_tacc_active_bytes(ew);
@@ -9585,6 +9329,7 @@ static void publish_float_sums(
         const TileFloatFormat& wide,
         const uint64_t* results,
         int count) {
+    const mp64_tile_values::ScopedFloatEnvironment environment;
     const bool accumulate = take_accumulator_controls(s);
     const uint64_t mask = tile_float_mask(wide);
     const uint64_t magnitude = mask ^ tile_float_sign(wide);
@@ -9602,108 +9347,6 @@ static void publish_float_sums(
     s.flag_z = all_zero ? 1 : 0;
 }
 
-// The running NaN-skipping extreme of TRED MIN/MAX under ACC_ACC.
-static inline uint64_t tile_float_skip_nan_extreme(
-        const TileFloatFormat& wide,
-        uint64_t old_value,
-        uint64_t value,
-        bool largest) {
-    if (tile_float_is_nan(wide, old_value))
-        return tile_float_is_nan(wide, value)
-            ? tile_float_canonical_nan(wide) : value;
-    if (tile_float_is_nan(wide, value))
-        return old_value;
-    const uint64_t old_key = tile_float_order_key(wide, old_value);
-    const uint64_t key = tile_float_order_key(wide, value);
-    return (largest ? key > old_key : key < old_key) ? value : old_value;
-}
-
-// Whether a MINIDX/MAXIDX tile result replaces ACC0/ACC1 under ACC_ACC.
-static inline bool tile_float_index_replaces(
-        const TileFloatFormat& wide,
-        uint64_t candidate,
-        uint64_t old_value,
-        bool largest) {
-    if (tile_float_is_nan(wide, candidate))
-        return false;
-    if (tile_float_is_nan(wide, old_value))
-        return true;
-    const uint64_t candidate_key = tile_float_order_key(wide, candidate);
-    const uint64_t old_key = tile_float_order_key(wide, old_value);
-    return largest ? candidate_key > old_key : candidate_key < old_key;
-}
-
-// Round an exact integer, given as a sign and magnitude, once to a tile
-// float format (RNE).  Integer magnitudes are never subnormal.
-static inline uint64_t tile_float_from_integer(
-        const TileFloatFormat& f,
-        bool negative,
-        uint64_t magnitude) {
-    if (magnitude == 0)
-        return 0;
-    const uint64_t sign_bits = negative ? tile_float_sign(f) : 0;
-    const int precision = f.fraction_bits + 1;
-    const int bias = (1 << (f.exponent_bits - 1)) - 1;
-    int exponent = 63 - __builtin_clzll(magnitude);
-    uint64_t mantissa;
-    if (exponent < precision) {
-        mantissa = magnitude << (precision - 1 - exponent);
-    } else {
-        const int shift = exponent - (precision - 1);
-        mantissa = magnitude >> shift;
-        const uint64_t remainder = magnitude & ((1ULL << shift) - 1);
-        const uint64_t half = 1ULL << (shift - 1);
-        if (remainder > half || (remainder == half && (mantissa & 1))) {
-            mantissa++;
-            if (mantissa >> precision) {
-                mantissa >>= 1;
-                exponent++;
-            }
-        }
-    }
-    const int biased = exponent + bias;
-    if (biased >= (1 << f.exponent_bits) - 1)
-        return sign_bits | tile_float_infinity(f);
-    return sign_bits |
-           (static_cast<uint64_t>(biased) << f.fraction_bits) |
-           (mantissa & ((1ULL << f.fraction_bits) - 1));
-}
-
-// A float lane converted to a saturating integer lane of width bits: NaN
-// gives 0, and the value rounds toward zero or to nearest-even first.  Every
-// tile float format converts exactly to double.
-static inline uint64_t tile_float_to_integer(
-        const TileFloatFormat& f,
-        uint64_t bits,
-        int width,
-        bool is_signed,
-        bool nearest) {
-    const double x = tile_float_to_double(f, bits);
-    if (std::isnan(x))
-        return 0;
-    double r = std::trunc(x);
-    if (nearest) {
-        r = std::floor(x);
-        const double fraction = x - r;
-        if (fraction > 0.5 || (fraction == 0.5 && std::fmod(r, 2.0) != 0.0))
-            r += 1.0;
-    }
-    const uint64_t mask = width == 64 ? ~0ULL : (1ULL << width) - 1;
-    if (is_signed) {
-        const double bound = std::ldexp(1.0, width - 1);
-        if (r >= bound)
-            return (mask >> 1);
-        if (r < -bound)
-            return (1ULL << (width - 1)) & mask;
-        return static_cast<uint64_t>(static_cast<int64_t>(r)) & mask;
-    }
-    if (r >= std::ldexp(1.0, width))
-        return mask;
-    if (r <= 0.0)
-        return 0;
-    return static_cast<uint64_t>(r) & mask;
-}
-
 // TCVT: convert a region from TMODE.EW to function bits [7:4] (§6.3).
 // Widening reads TSRC0 and writes k tiles from TDST; narrowing reads k tiles
 // from TSRC0 and writes one tile.  Every source tile is read before any
@@ -9715,39 +9358,25 @@ static int exec_native_tcvt(
         int funct_byte) {
     const TileFormat& source = TILE_FORMATS[source_ew];
     const TileFormat& target = TILE_FORMATS[(funct_byte >> 4) & 0xF];
-    const bool is_signed = (s.tmode >> 4) & 1;
-    const bool nearest = (s.tmode >> 6) & 1;
     const int wide = std::max(source.lane_bytes, target.lane_bytes);
     const int k = wide / std::min(source.lane_bytes, target.lane_bytes);
     const int reads = target.lane_bytes < source.lane_bytes ? k : 1;
     const int writes = target.lane_bytes > source.lane_bytes ? k : 1;
-    std::array<Tile, 8> region{};
-    for (int index = 0; index < reads; index++)
-        tile_read_64bytes(s, cb, s.tsrc0 + 64ULL * index, region[index]);
-    std::array<Tile, 8> output{};
-    const int lanes = reads * source.lanes();
-    for (int lane = 0; lane < lanes; lane++) {
-        const uint64_t x = tile_get_elem(
-            region[lane / source.lanes()], lane % source.lanes(),
-            source.lane_bytes);
-        uint64_t y = 0;
-        if (source.is_float() && target.is_float()) {
-            y = tile_float_convert(*target.floating, *source.floating, x);
-        } else if (source.is_float()) {
-            y = tile_float_to_integer(*source.floating, x,
-                                      target.lane_bits(), is_signed, nearest);
-        } else {
-            const bool negative =
-                is_signed && (x >> (source.lane_bits() - 1)) & 1;
-            const uint64_t magnitude = negative
-                ? (0ULL - static_cast<uint64_t>(
-                      to_signed_eb(x, source.lane_bytes)))
-                : x;
-            y = tile_float_from_integer(*target.floating, negative, magnitude);
-        }
-        tile_set_elem(output[lane / target.lanes()], lane % target.lanes(),
-                      target.lane_bytes, y);
+    std::array<uint8_t, 8 * TILE_BYTES> region{};
+    for (int index = 0; index < reads; index++) {
+        Tile tile{};
+        tile_read_64bytes(s, cb, s.tsrc0 + 64ULL * index, tile);
+        std::copy(tile.begin(), tile.end(), region.begin() + index * TILE_BYTES);
     }
+    const auto result = mp64_tile_values::execute(
+        mp64_tile_values::Operation::Convert,
+        static_cast<unsigned>(s.tmode & TMODE_WRITE_MASK),
+        {region.data(), static_cast<std::size_t>(reads) * TILE_BYTES},
+        {}, {}, static_cast<unsigned>((funct_byte >> 4) & 0xF));
+    std::array<Tile, 8> output{};
+    for (int index = 0; index < writes; index++)
+        std::copy_n(result.bytes.data() + index * TILE_BYTES,
+                    TILE_BYTES, output[index].data());
     for (int index = 0; index < writes; index++)
         tile_write_64bytes(s, cb, s.tdst + 64ULL * index, output[index]);
     return 4 + (k - 1);
@@ -9882,8 +9511,8 @@ static int exec_mex(
         funct = 0;
 
     // Python owns the 256-bit integer accumulator semantics, the current
-    // TSYS instruction map, the EXT.8 ALU in float formats, and every trap
-    // for an operation the format does not admit.  Decide this before
+    // TSYS instruction map, and every trap for an operation the format does
+    // not admit.  Decide this before
     // reading sources or changing ACC/TCTRL/destination state so
     // rewind-and-fallback is transactional.  FP POPCNT counts raw bits into
     // the integer accumulator.
@@ -9921,6 +9550,7 @@ static int exec_mex(
         src_b = src_a;
         if (is_fp) {
             // The unsigned immediate converted exactly to the lane format.
+            const mp64_tile_values::ScopedFloatEnvironment environment;
             const uint64_t immediate = tile_float_from_double(
                 tile_float_format(ew_bits), static_cast<double>(funct_byte));
             for (int lane = 0; lane < num_lanes; lane++)
@@ -9933,77 +9563,43 @@ static int exec_mex(
         tile_read_64bytes(s, cb, s.tsrc0, src_b);
     }
 
+    // Value execution never reads CPU memory or invokes a callback. Preserve
+    // source/destination transport order around each shared operation.
+    using TileOperation = mp64_tile_values::Operation;
+    const auto evaluate = [&](TileOperation operation,
+                              const Tile* destination = nullptr,
+                              unsigned argument = 0) {
+        return mp64_tile_values::execute(
+            operation, static_cast<unsigned>(s.tmode & TMODE_WRITE_MASK),
+            {src_a.data(), src_a.size()}, {src_b.data(), src_b.size()},
+            destination == nullptr ? mp64_tile_values::ByteView{} :
+                mp64_tile_values::ByteView{destination->data(), destination->size()},
+            argument);
+    };
+    const auto write_result = [&](const mp64_tile_values::Outcome& result) {
+        for (std::size_t offset = 0; offset < result.size; offset += TILE_BYTES) {
+            Tile tile{};
+            std::copy_n(result.bytes.data() + offset, TILE_BYTES, tile.data());
+            tile_write_64bytes(s, cb, s.tdst + offset, tile);
+        }
+    };
+
     // Extended Tile ALU (EXT modifier 8)
     if (s.ext_modifier == 8 && op == 0x0) {
         if (funct == 4 || funct == 5) {  // TDIV, TSQRT (§6.1, §6.2)
-            // binary64 division and square root are correctly rounded, and
-            // rounding them once to a narrower lane format is exact because
-            // 53 >= 2p + 2 for every lane format.
-            const TileFloatFormat& fmt = tile_float_format(ew_bits);
-            for (int lane = 0; lane < num_lanes; lane++) {
-                const double x = tile_float_to_double(
-                    fmt, tile_get_elem(src_a, lane, elem_bytes));
-                const double r = funct == 4
-                    ? x / tile_float_to_double(
-                          fmt, tile_get_elem(src_b, lane, elem_bytes))
-                    : std::sqrt(x);
-                tile_set_elem(dst, lane, elem_bytes,
-                              tile_float_from_double(fmt, r));
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
+            write_result(evaluate(funct == 4
+                ? TileOperation::Divide : TileOperation::SquareRoot));
             return tile_divide_extra_cycles(ew_bits);
         }
         if (funct == 2) {  // VSEL: msb(M) ? A : B, M = old [TDST] (§6.4)
             Tile masks{};
             tile_read_64bytes(s, cb, s.tdst, masks);
-            const uint64_t top = 1ULL << (elem_bytes * 8 - 1);
-            for (int lane = 0; lane < num_lanes; lane++) {
-                tile_set_elem(dst, lane, elem_bytes,
-                    (tile_get_elem(masks, lane, elem_bytes) & top)
-                        ? tile_get_elem(src_a, lane, elem_bytes)
-                        : tile_get_elem(src_b, lane, elem_bytes));
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
+            write_result(evaluate(TileOperation::Select, &masks));
             return 1;
         }
         if (funct == 7) {  // TCMP: all-ones or zero lane masks (§6.5)
-            const int predicate = (funct_byte >> 3) & 0x7;
-            for (int lane = 0; lane < num_lanes; lane++) {
-                const uint64_t a = tile_get_elem(src_a, lane, elem_bytes);
-                const uint64_t b = tile_get_elem(src_b, lane, elem_bytes);
-                bool less = false, equal = false, unordered = false;
-                if (is_fp) {
-                    const TileFloatFormat& fmt = tile_float_format(ew_bits);
-                    const double x = tile_float_to_double(fmt, a);
-                    const double y = tile_float_to_double(fmt, b);
-                    unordered = std::isnan(x) || std::isnan(y);
-                    less = x < y;
-                    equal = x == y;
-                } else if (is_signed) {
-                    const int64_t x = to_signed_eb(a, elem_bytes);
-                    const int64_t y = to_signed_eb(b, elem_bytes);
-                    less = x < y;
-                    equal = x == y;
-                } else {
-                    less = a < b;
-                    equal = a == b;
-                }
-                const bool greater = !unordered && !less && !equal;
-                bool result = false;
-                switch (predicate) {
-                    case 0: result = equal; break;
-                    case 1: result = !equal; break;
-                    case 2: result = less; break;
-                    case 3: result = less || equal; break;
-                    case 4: result = greater; break;
-                    case 5: result = greater || equal; break;
-                    case 6: result = unordered; break;
-                    default: result = !unordered; break;
-                }
-                tile_set_elem(dst, lane, elem_bytes,
-                              result ? elem_mask(elem_bytes) : 0);
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
+            write_result(evaluate(TileOperation::Compare, nullptr,
+                                  static_cast<unsigned>((funct_byte >> 3) & 0x7)));
             return 1;
         }
         bool rounding = (s.tmode >> 6) & 1;
@@ -10040,224 +9636,44 @@ static int exec_mex(
         return 1;
     }
 
-    if (op == 0x0) {  // TALU
-        if (is_fp) {
-            const TileFloatFormat& fmt = tile_float_format(ew_bits);
-            const uint64_t magnitude =
-                tile_float_mask(fmt) ^ tile_float_sign(fmt);
-            for (int lane = 0; lane < num_lanes; lane++) {
-                const uint64_t a = tile_get_elem(src_a, lane, elem_bytes);
-                const uint64_t b = tile_get_elem(src_b, lane, elem_bytes);
-                uint64_t r = 0;
-                switch (funct) {
-                    case 0: r = tile_float_add(fmt, a, b); break;
-                    case 1: r = tile_float_sub(fmt, a, b); break;
-                    case 2: r = a & b; break;
-                    case 3: r = a | b; break;
-                    case 4: r = a ^ b; break;
-                    case 5: r = tile_float_extreme2(fmt, a, b, false); break;
-                    case 6: r = tile_float_extreme2(fmt, a, b, true); break;
-                    default: r = a & magnitude; break;  // ABS
-                }
-                tile_set_elem(dst, lane, elem_bytes, r);
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
-            return tile_float_extra_cycles(ew_bits, op, funct);
-        }
-
-        // ---- Integer TALU ----
-        bool saturate = (s.tmode >> 5) & 1;
-        for (int lane = 0; lane < num_lanes; lane++) {
-            uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
-            uint64_t eb_val = tile_get_elem(src_b, lane, elem_bytes);
-            int bits = elem_bytes * 8;
-            uint64_t mask = elem_mask(elem_bytes);
-            uint64_t r = 0;
-
-            switch (funct) {
-                case 0: {  // ADD
-                    if (saturate) {
-                        if (is_signed) {
-                            __int128 sum = static_cast<__int128>(
-                                               to_signed_eb(ea, elem_bytes)) +
-                                           static_cast<__int128>(
-                                               to_signed_eb(eb_val, elem_bytes));
-                            const __int128 bound =
-                                static_cast<__int128>(1) << (bits - 1);
-                            const __int128 hi = bound - 1;
-                            const __int128 lo = -bound;
-                            if (sum > hi) sum = hi;
-                            if (sum < lo) sum = lo;
-                            r = static_cast<uint64_t>(sum) & mask;
-                        } else {
-                            const __uint128_t sum =
-                                static_cast<__uint128_t>(ea) + eb_val;
-                            r = sum > static_cast<__uint128_t>(mask)
-                                    ? mask : static_cast<uint64_t>(sum);
-                        }
-                    } else {
-                        r = (ea + eb_val) & mask;
-                    }
-                    break;
-                }
-                case 1: {  // SUB
-                    if (saturate) {
-                        if (is_signed) {
-                            __int128 diff = static_cast<__int128>(
-                                                to_signed_eb(ea, elem_bytes)) -
-                                            static_cast<__int128>(
-                                                to_signed_eb(eb_val, elem_bytes));
-                            const __int128 bound =
-                                static_cast<__int128>(1) << (bits - 1);
-                            const __int128 hi = bound - 1;
-                            const __int128 lo = -bound;
-                            if (diff > hi) diff = hi;
-                            if (diff < lo) diff = lo;
-                            r = static_cast<uint64_t>(diff) & mask;
-                        } else {
-                            r = ea < eb_val ? 0 : ea - eb_val;
-                        }
-                    } else {
-                        r = (ea - eb_val) & mask;
-                    }
-                    break;
-                }
-                case 2: r = ea & eb_val; break;   // AND
-                case 3: r = ea | eb_val; break;   // OR
-                case 4: r = ea ^ eb_val; break;   // XOR
-                case 5: {  // MIN
-                    if (is_signed)
-                        r = (to_signed_eb(ea, elem_bytes) < to_signed_eb(eb_val, elem_bytes))
-                            ? ea : eb_val;
-                    else
-                        r = (ea < eb_val) ? ea : eb_val;
-                    break;
-                }
-                case 6: {  // MAX
-                    if (is_signed)
-                        r = (to_signed_eb(ea, elem_bytes) > to_signed_eb(eb_val, elem_bytes))
-                            ? ea : eb_val;
-                    else
-                        r = (ea > eb_val) ? ea : eb_val;
-                    break;
-                }
-                case 7: {  // ABS
-                    if (is_signed) {
-                        const int64_t sv = to_signed_eb(ea, elem_bytes);
-                        // Compute the magnitude in unsigned arithmetic so
-                        // abs(INT64_MIN) is defined and wraps like Python.
-                        r = (sv < 0 ? (~ea + 1) : ea) & mask;
-                    } else {
-                        r = ea;
-                    }
-                    break;
-                }
-            }
-            tile_set_elem(dst, lane, elem_bytes, r);
-        }
-        tile_write_64bytes(s, cb, s.tdst, dst);
-        return 0;
+    if (op == 0x0) {  // TALU, integer and floating-point lane values
+        static constexpr TileOperation operations[] = {
+            TileOperation::Add, TileOperation::Subtract, TileOperation::And,
+            TileOperation::Or, TileOperation::Xor, TileOperation::Minimum,
+            TileOperation::Maximum, TileOperation::Absolute,
+        };
+        write_result(evaluate(operations[funct]));
+        return is_fp ? tile_float_extra_cycles(ew_bits, op, funct) : 0;
     }
 
     if (op == 0x1) {  // TMUL
-        if (is_fp) {
-            // ---- Floating-point TMUL ----
-            const TileFloatFormat& fmt = tile_float_format(ew_bits);
-            const int cycles = tile_float_extra_cycles(ew_bits, op, funct);
-            if (funct == 0) {  // MUL
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    tile_set_elem(dst, lane, elem_bytes, tile_float_product(
-                        fmt, fmt,
-                        tile_get_elem(src_a, lane, elem_bytes),
-                        tile_get_elem(src_b, lane, elem_bytes)));
-                }
-                tile_write_64bytes(s, cb, s.tdst, dst);
-                return cycles;
-            }
-            if (funct == 1 || funct == 5) {  // DOT, DOTACC
-                const TileFloatFormat& wide = *lane_format.accumulation;
-                double products[32];
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    products[lane] = tile_float_to_double(
-                        wide,
-                        tile_float_product(
-                            wide, fmt,
-                            tile_get_elem(src_a, lane, elem_bytes),
-                            tile_get_elem(src_b, lane, elem_bytes)));
-                }
-                uint64_t results[4]{};
-                if (funct == 1) {
-                    results[0] = tile_float_tree(wide, products, num_lanes);
-                    publish_float_sums(s, wide, results, 1);
-                } else {
-                    const int chunk = num_lanes / 4;
-                    for (int k = 0; k < 4; k++) {
-                        results[k] = tile_float_tree(
-                            wide, products + k * chunk, chunk);
-                    }
-                    publish_float_sums(s, wide, results, 4);
-                }
-                return cycles;
-            }
-            if (funct == 2) {  // WMUL — products rounded once to format A
-                const TileFloatFormat& wide = *lane_format.accumulation;
-                const int wide_bytes = 2 * elem_bytes;
-                const int half = num_lanes / 2;
-                Tile dst0{}, dst1{};
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    const uint64_t product = tile_float_product(
-                        wide, fmt,
-                        tile_get_elem(src_a, lane, elem_bytes),
-                        tile_get_elem(src_b, lane, elem_bytes));
-                    if (lane < half)
-                        tile_set_elem(dst0, lane, wide_bytes, product);
-                    else
-                        tile_set_elem(dst1, lane - half, wide_bytes, product);
-                }
-                tile_write_64bytes(s, cb, s.tdst, dst0);
-                tile_write_64bytes(s, cb, s.tdst + 64, dst1);
-                return cycles;
-            }
-            if (funct == 3 || funct == 4) {  // MAC, FMA — fused, addend [TDST]
-                Tile addend{};
-                tile_read_64bytes(s, cb, s.tdst, addend);
-                for (int lane = 0; lane < num_lanes; lane++) {
-                    tile_set_elem(dst, lane, elem_bytes, tile_float_fma(
-                        fmt, fmt,
-                        tile_get_elem(src_a, lane, elem_bytes),
-                        tile_get_elem(src_b, lane, elem_bytes),
-                        tile_get_elem(addend, lane, elem_bytes)));
-                }
-                tile_write_64bytes(s, cb, s.tdst, dst);
-                return cycles;
-            }
-            return 1;  // unknown FP TMUL funct
-        }
-
-        // ---- Integer TMUL ----
-        if (funct == 0) {  // MUL (element-wise)
-            for (int lane = 0; lane < num_lanes; lane++) {
-                uint64_t ea = tile_get_elem(src_a, lane, elem_bytes);
-                uint64_t eb_val = tile_get_elem(src_b, lane, elem_bytes);
-                const uint64_t mask = elem_mask(elem_bytes);
-                uint64_t r = 0;
-                if (is_signed) {
-                    const __int128 product =
-                        static_cast<__int128>(to_signed_eb(ea, elem_bytes)) *
-                        static_cast<__int128>(to_signed_eb(eb_val, elem_bytes));
-                    r = static_cast<uint64_t>(product) & mask;
-                } else {
-                    const __uint128_t product =
-                        static_cast<__uint128_t>(ea) * eb_val;
-                    r = static_cast<uint64_t>(product) & mask;
-                }
-                tile_set_elem(dst, lane, elem_bytes, r);
-            }
-            tile_write_64bytes(s, cb, s.tdst, dst);
-            return 1;
+        const int cycles = is_fp
+            ? tile_float_extra_cycles(ew_bits, op, funct) : 1;
+        if (funct == 0) {  // MUL, integer or floating-point
+            write_result(evaluate(TileOperation::Multiply));
+            return cycles;
         }
         // Non-MUL integer functions were routed to Python before source reads.
-        return -1;
+        if (!is_fp)
+            return -1;
+        if (funct == 1 || funct == 5) {  // DOT, DOTACC
+            const auto result = evaluate(funct == 1
+                ? TileOperation::Dot : TileOperation::DotChunks);
+            publish_float_sums(s, *lane_format.accumulation,
+                               result.values.data(), funct == 1 ? 1 : 4);
+            return cycles;
+        }
+        if (funct == 2) {  // WMUL, preserving the two destination beats
+            write_result(evaluate(TileOperation::WideningMultiply));
+            return cycles;
+        }
+        if (funct == 3 || funct == 4) {  // MAC, FMA: addend [TDST]
+            Tile addend{};
+            tile_read_64bytes(s, cb, s.tdst, addend);
+            write_result(evaluate(TileOperation::FusedMultiplyAdd, &addend));
+            return cycles;
+        }
+        return 1;  // unknown FP TMUL funct
     }
 
     if (op == 0x2) {  // TRED (reductions)
@@ -10267,45 +9683,22 @@ static int exec_mex(
         if (!is_fp || funct == 3)
             return -1;
 
-        const TileFloatFormat& fmt = tile_float_format(ew_bits);
         const TileFloatFormat& wide = *lane_format.accumulation;
         if (funct == 0 || funct == 4 || funct == 5) {  // SUM, L1, SUMSQ
-            const uint64_t magnitude =
-                tile_float_mask(fmt) ^ tile_float_sign(fmt);
-            double leaves[32];
-            for (int lane = 0; lane < num_lanes; lane++) {
-                const uint64_t x = tile_get_elem(src_a, lane, elem_bytes);
-                const uint64_t leaf =
-                    funct == 5 ? tile_float_product(wide, fmt, x, x)
-                    : tile_float_convert(
-                          wide, fmt, funct == 4 ? (x & magnitude) : x);
-                leaves[lane] = tile_float_to_double(wide, leaf);
-            }
-            const uint64_t result = tile_float_tree(wide, leaves, num_lanes);
-            publish_float_sums(s, wide, &result, 1);
+            const auto result = evaluate(funct == 0 ? TileOperation::Sum :
+                funct == 4 ? TileOperation::L1 : TileOperation::SumSquares);
+            publish_float_sums(s, wide, result.values.data(), 1);
             return tile_float_extra_cycles(ew_bits, op, funct);
         }
 
         // MIN, MAX, MINIDX, MAXIDX: NaN-skipping, -0 below +0, lowest index.
         const bool largest = funct == 2 || funct == 7;
-        int best_index = -1;
-        uint64_t best_key = 0;
-        for (int lane = 0; lane < num_lanes; lane++) {
-            const uint64_t x = tile_get_elem(src_a, lane, elem_bytes);
-            if (tile_float_is_nan(fmt, x))
-                continue;
-            const uint64_t key = tile_float_order_key(fmt, x);
-            if (best_index < 0 ||
-                (largest ? key > best_key : key < best_key)) {
-                best_index = lane;
-                best_key = key;
-            }
-        }
-        const uint64_t value = best_index < 0
-            ? tile_float_canonical_nan(wide)
-            : tile_float_convert(
-                  wide, fmt, tile_get_elem(src_a, best_index, elem_bytes));
-        const int index = best_index < 0 ? 0 : best_index;
+        const bool indexed = funct == 6 || funct == 7;
+        const auto result = evaluate(indexed
+            ? (largest ? TileOperation::MaximumIndex : TileOperation::MinimumIndex)
+            : (largest ? TileOperation::ReductionMaximum : TileOperation::ReductionMinimum));
+        const uint64_t value = result.values[indexed ? 1 : 0];
+        const uint64_t index = indexed ? result.values[0] : 0;
         const bool accumulate = take_accumulator_controls(s);
         const uint64_t wide_mask = tile_float_mask(wide);
         if (funct == 1 || funct == 2) {
@@ -30552,6 +29945,7 @@ build_system_dma_callbacks(
 PYBIND11_MODULE(_mp64_accel, m) {
     megapad::scalar_fp::register_bindings(m);
     megapad::keccak::register_bindings(m);
+    megapad::tile_values::register_bindings(m);
     m.doc() = "C++ accelerated core for Megapad-64 emulator";
 
     py::class_<PythonMemoryUseScope>(m, "_MemoryUseScope")
