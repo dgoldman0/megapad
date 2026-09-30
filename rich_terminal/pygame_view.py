@@ -14,7 +14,7 @@ from . import text_rules
 from .appearance import Appearance, REFERENCE_APPEARANCE, paint_channel
 from .apt1 import UINT32_MAX, UINT64_MAX
 from .retained_model import ResourceFormat
-from .retained_scene import ControlKind, ControlState, ImageFit
+from .retained_scene import ControlKind, ControlState, ImageFit, StatusSeverity
 from .retained_view import (
     GlyphRunDraw,
     ImageDraw,
@@ -31,6 +31,7 @@ from .retained_view import (
     ReadoutDraw,
     RetainedDrawPlane,
     StatusDraw,
+    StatusFieldDraw,
     TabDraw,
     TabSetDraw,
     TextAreaDraw,
@@ -839,6 +840,7 @@ _OBJECT_DRAWS = (
     ReadoutDraw,
     MeterDraw,
     StatusDraw,
+    StatusFieldDraw,
     PlotDraw,
     WaveformDraw,
 )
@@ -3107,6 +3109,50 @@ def _paint_pane(pygame_module, surface, font, region, region_rect, draw, *,
         surface.set_clip(prior_clip)
 
 
+def _paint_status_field(pygame_module, surface, font, region, region_rect, draw, *,
+                        appearance: Appearance = REFERENCE_APPEARANCE) -> None:
+    """Paint two explicit text slots without adding padding or input targets."""
+    rect, clip = _object_clip(pygame_module, surface, region, region_rect, draw)
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    cell_w = region_rect.width // region.logical_cols
+    split = rect.left + draw.label_cols * cell_w
+    colors = {
+        StatusSeverity.NEUTRAL: _TEXT,
+        StatusSeverity.INFO: (143, 199, 245),
+        StatusSeverity.SUCCESS: (132, 246, 218),
+        StatusSeverity.WARNING: (248, 202, 126),
+        StatusSeverity.ERROR: (250, 145, 146),
+    }
+    color = colors[draw.severity]
+    if appearance.flowing:
+        background = appearance.selection if draw.emphasized else appearance.channel
+    else:
+        background = _TEXT_SELECTION if draw.emphasized else _COLLECTION_SURFACE
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(clip)
+        # These one-row fields can occupy every text slot. Square material
+        # leaves the original geometry intact even when there is no padding.
+        surface.fill(background, clip)
+        if draw.emphasized:
+            _alpha_line(pygame_module, surface, color,
+                        (rect.left, rect.bottom - 1), (rect.right - 1, rect.bottom - 1))
+        for text, left, right, foreground in (
+            (draw.label, rect.left, split, _MUTED_TEXT),
+            (draw.value, split, rect.right, color),
+        ):
+            slot = _WideRect(left, rect.top, right - left, rect.height)
+            visible = _bounded_pygame_rect(pygame_module, slot, clip)
+            _paint_bounded_text(
+                pygame_module, surface, font, text, foreground, visible,
+                left=left, right=right, top=rect.top, bottom=rect.bottom,
+                tab_advance=max(1, cell_w * 4),
+            )
+    finally:
+        surface.set_clip(prior_clip)
+
+
 def _paint_readout(pygame_module, surface, font, region, region_rect, draw, *, appearance: Appearance = REFERENCE_APPEARANCE) -> None:
     object_rect, clip = _object_clip(
         pygame_module, surface, region, region_rect, draw
@@ -4071,6 +4117,11 @@ def _paint_draw(
             region,
             region_rect,
             draw,
+            appearance=appearance,
+        )
+    elif isinstance(draw, StatusFieldDraw):
+        _paint_status_field(
+            pygame_module, surface, font, region, region_rect, draw,
             appearance=appearance,
         )
     elif isinstance(draw, MeterDraw):

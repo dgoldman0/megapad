@@ -232,8 +232,9 @@ Feature bits are:
 | 9 | `RET_CONTROL_COLLECTIONS` | text-area, text-grid, tabset, and tab CONTROL kinds |
 | 10 | `RET_CONTROL_ITEMS` | the item-view CONTROL kind and its item events |
 | 11 | `RET_PANES` | explicit pane chrome, title, focus, and content-region relationship |
+| 12 | `RET_STATUS_FIELDS` | structured single-row label/value status fields |
 
-Bits 12 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 13 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -279,6 +280,12 @@ aggregate UTF-8 bounds limit each title. Its smallest PANE has a 104-byte
 payload and a 304-byte complete transaction. A caller must explicitly enable
 the family; implementations must not enlarge an existing product policy's
 advertised features merely because its decoder supports PANE.
+`RET_STATUS_FIELDS` likewise depends only on CORE and requires positive object
+and aggregate UTF-8 capacity. Its smallest STATUS_FIELD has a 96-byte payload
+and a 296-byte complete transaction. Each label and value is bounded by the
+existing frame, transaction and aggregate UTF-8 limits; there is no per-string
+maximum. A caller explicitly opts into this family only when the full display
+path supports it. Existing product policies retain their selected features.
 Advertising a payload maximum that cannot be used in one valid transaction is
 inconsistent discovery.
 
@@ -326,7 +333,7 @@ exactly when CADENCE is set and otherwise zero. It is a renderer admission
 bound, not a clock source or permission to invent samples.
 CONTROLS adds no field to `RET_FORMATS`; its count and string storage consume
 the existing object and aggregate UTF-8 bounds.
-PANES likewise adds no `RET_FORMATS` field and uses those same bounds.
+PANES and STATUS_FIELDS likewise add no `RET_FORMATS` field and use those same bounds.
 
 Advertised maxima must describe at least one usable maximum-sized item:
 `total_utf8_bytes >= max_glyph_run_bytes` when glyph runs are enabled;
@@ -1168,6 +1175,7 @@ Object type values are:
 | 8 | `PLOT` | SERIES |
 | 9 | `WAVEFORM` | SERIES |
 | 10 | `PANE` | PANES |
+| 11 | `STATUS_FIELD` | STATUS_FIELDS |
 
 No object type in this table defines an input-producing semantic UI control.
 PANE explicitly describes pane chrome and a region relationship; it preserves
@@ -1402,6 +1410,66 @@ transaction under Section 15; they are never silently skipped or partially
 applied. CELL remains the independent complete visual fallback. A sink may
 advertise PANES only when its complete compose and exact-acknowledgement path
 supports the family.
+
+### 11.11 STATUS_FIELD
+
+STATUS_FIELD publishes one row of descriptive status as separate label and
+value strings. It uses ordinary OBJECT identity, DEFINE/REPLACE, visibility,
+drop, owner quota, transaction, and revision rules. The CELL_RECT32 bounds must
+have exactly one row. `parent_object_id` may be zero or reference a same-owner,
+same-region GROUP under the existing object graph rules; GROUP publication
+still independently requires VECTOR. STATUS_FIELDS itself requires only CORE.
+
+The body is a 32-byte `<IHHIIIIQ>` header followed immediately by the exact
+label bytes and then the exact value bytes, with no padding:
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | tag = `0x31465453` (`STF1`) | u32 |
+| 4 | version = 1 | u16 |
+| 6 | flags, bit 0 = `EMPHASIZED`; other bits zero | u16 |
+| 8 | severity | u32 |
+| 12 | label columns | u32 |
+| 16 | label byte count | u32 |
+| 20 | value byte count | u32 |
+| 24 | reserved = 0 | u64 |
+
+Severity is `NEUTRAL=0`, `INFO=1`, `SUCCESS=2`, `WARNING=3`, or `ERROR=4`.
+Other values are reserved. Severity and emphasis are guest-authored committed
+metadata; the host chooses their material and colors. Neither creates an
+activation, keyboard-focus transition, or host-generated status change.
+
+The label occupies the first `label_cols` columns; the value occupies all
+remaining columns in the declared bounds. `0 <= label_cols <= bounds.cols`.
+A nonempty label requires positive label columns, and a nonempty value requires
+at least one value column. An empty label may reserve positive label columns.
+Both strings may be empty. The host clips or shortens each string within its
+own assigned slot and keeps both slot origins and the outer geometry fixed.
+It must not transfer unused label columns to the value, enlarge a row, wrap,
+or infer slot boundaries from text content. Partial graphemes must not be
+painted across slot boundaries.
+
+Both strings are independently valid single-line Unicode-scalar UTF-8. C0
+(`U+0000..001F`), DEL and C1 (`U+007F..009F`), and `U+2028` and `U+2029` are
+forbidden. A byte split within a UTF-8 scalar is invalid even if concatenating
+the strings would produce valid text. The sum of exact label and value byte
+counts consumes owner aggregate UTF-8 quota, including hidden objects. Each
+field consumes one object slot. Empty strings consume zero text bytes. Complete
+payloads and transactions must fit the advertised limits.
+
+STATUS_FIELD is pointer-transparent like other OBJECTs. It has no semantic
+input event and grants no input authority; revision-bound raw POINTER routing
+continues under existing rules. `OBJECT_SET_VALUE` does not apply. Label,
+value, split, severity, and emphasis changes use complete OBJECT_REPLACE, which
+preserves the committed object's identity and fixed guest-authored geometry
+unless the producer explicitly supplies new bounds.
+
+A client must retain complete CELL fallback and must not publish STATUS_FIELD
+when bit 12 is absent. Old clients that reject the new discovery bit retain
+CELL under the existing unsupported-discovery rule. Unsupported STF1 versions,
+reserved flags or severity, malformed text, and invalid slot geometry reject
+the whole transaction under Section 15. A renderer must not silently omit an
+advertised status field or infer status fields from ordinary CELL glyphs.
 
 ## 12. Bounded i64 series
 

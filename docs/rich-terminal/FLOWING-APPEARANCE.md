@@ -89,13 +89,14 @@ application status bar. A retained region also does not by itself identify
 an application pane or its focus state.
 
 The full pane-and-channel design needs the following semantic publication.
-MegaPad now implements the pane family; its Akashic producer remains the next
-integration step. Border curves and material treatment remain host choices.
+MegaPad now implements pane and structured-status families; their Akashic
+producers remain integration work. Border curves and material treatment
+remain host choices.
 
 | Family | Required meaning | Producer work after the MegaPad side |
 | --- | --- | --- |
 | Pane (MegaPad implemented) | Stable identity, outer/content bounds, title metadata, visibility and focus; exact-owner content-region binding | Desk/app-host publication using existing pane state and explicit content clips |
-| Structured status | Stable fields with label/value, severity or state, order and bounds | Shared UIDL status/label observation and lowering, covering existing app status strips |
+| Structured status (MegaPad implemented) | Stable fields with separate label/value slots, severity, emphasis, order and bounds | Shared UIDL status/label observation and lowering, covering existing app status strips |
 | Taskbar | Running-app and launcher entries, selected/minimized/enabled state, bounds, and activation intent | Desk shell publication from the same entries used for painting and hit testing |
 | Editable field | Label/value, type, limits or choices when applicable, selected/enabled/read-only state, and revision-bound edit intents | Reusable widget with normal CELL drawing and ordinary event routing; migrate Sound Lab's parameter rows to it |
 | Spreadsheet | Logical cells, row/column headers, selection, viewport, and existing edit actions | Targeted migration of Grid's custom drawing into a canonical reusable grid model |
@@ -309,3 +310,38 @@ pane, retained-view, or shared-session contracts, so no additional runtime
 merge was needed. The next integration must rebuild both native extensions
 for their changed exported APIs. The runtime team's uncommitted dense-memory
 work remains in its own worktree.
+
+## Structured status fields and producer handoff
+
+`STATUS_FIELD` is object kind 11, gated by `RET_STATUS_FIELDS` (feature bit 12).
+Each object identifies one read-only status field with an exact one-row cell
+rectangle. `STF1` carries separate label and value strings, the number of cell
+columns reserved for the label, severity, and emphasis. Multiple fields use
+ordinary object identities, bounds, and paint order to form a status strip.
+No text parsing or implicit rearrangement is needed. The normative schema is
+in APT-1-RETAINED-1 Section 11.11; guest writers are
+`PT-STATUS-FIELD-DEFINE` / `PT-STATUS-FIELD-REPLACE`.
+
+The renderer starts the value at the published cell split and clips each
+string to its own slot. It adds no padding or pointer target. One-row fields
+use square material so edge text retains its occupied space. Severity and
+emphasis change appearance; complete replacement changes published content.
+The existing numeric `STATUS` indicator remains a separate object family.
+
+The capability depends on CORE, positive object and aggregate UTF-8 capacity,
+a 96-byte inbound payload, and a 296-byte retained transaction. Both strings
+count toward the owner's UTF-8 reservation. Existing product profiles stay
+unchanged until paired producers adopt the new capability. Updated guests
+return unsupported without emitting a frame when it is absent.
+
+Akashic should derive each field's strings, split, and bounds from the same
+status-widget state and layout used for CELL drawing. Preserve CELL fallback;
+omit only the corresponding retained glyph runs when publishing semantic
+fields. Changes in application state must publish through the existing
+presentation transaction rather than updating terminal-owned text locally.
+
+The status-field checkpoint passed 679 supervised tests in 59.71 seconds,
+including emulator and Python/native simulator publication, malformed frames,
+quota and transaction rejection, full/delta offers and acknowledgment, exact
+label/value clipping, and complete/partial repaint equivalence. No live
+Akashic status-field publication is claimed by this checkpoint.

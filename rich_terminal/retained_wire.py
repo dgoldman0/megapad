@@ -33,6 +33,8 @@ from .retained_scene import (
     ObjectBounds,
     ObjectKind,
     PaneBody,
+    StatusFieldBody,
+    StatusSeverity,
     PlotBody,
     Point,
     PolylineBody,
@@ -46,6 +48,7 @@ from .retained_scene import (
     validate_control_shape,
     WaveformBody,
     validate_pane_shape,
+    validate_status_field_shape,
 )
 from .semantic_content import (
     SemanticContentError,
@@ -61,7 +64,7 @@ from .semantic_items import (
 
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0xF3F
+_RETAINED_FEATURE_MASK = 0x1F3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -86,6 +89,8 @@ _IMAGE_BODY = struct.Struct("<QIB3s")
 _GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
 _PANE_BODY = struct.Struct("<IHHQiiIIII")
 PANE_BODY_TAG = 0x31454E50
+_STATUS_FIELD_BODY = struct.Struct("<IHHIIIIQ")
+STATUS_FIELD_BODY_TAG = 0x31465453
 _READOUT_BODY = struct.Struct("<8BIIqqII")
 _METER_BODY = struct.Struct("<8BIIqqqQ")
 _STATUS_BODY = struct.Struct("<8BqIIQ")
@@ -409,6 +414,8 @@ class RetainedCaps:
             raise ValueError("CONTROLS requires object capacity")
         if features & RetainedFeature.PANES and self.max_objects == 0:
             raise ValueError("PANES requires object capacity")
+        if features & RetainedFeature.STATUS_FIELDS and self.max_objects == 0:
+            raise ValueError("STATUS_FIELDS requires object capacity")
         if features & RetainedFeature.PANES and self.max_regions < 2:
             raise ValueError("PANES requires at least two regions")
 
@@ -941,6 +948,7 @@ class RegionWireDefinition:
 ObjectWireBody = (
     GroupBody
     | PaneBody
+    | StatusFieldBody
     | PolylineBody
     | ImageBody
     | GlyphRunBody
@@ -955,6 +963,7 @@ ObjectWireBody = (
 _WIRE_BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
     PaneBody: ObjectKind.PANE,
+    StatusFieldBody: ObjectKind.STATUS_FIELD,
     PolylineBody: ObjectKind.POLYLINE,
     ImageBody: ObjectKind.IMAGE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
@@ -1194,6 +1203,8 @@ class ObjectWireDefinition:
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         if type(self.body) not in _WIRE_BODY_KIND:
             raise TypeError("body is not a supported RETAINED-1 wire body")
+        if isinstance(self.body, StatusFieldBody):
+            validate_status_field_shape(self.body, bounds=self.bounds)
         if isinstance(self.body, PaneBody):
             validate_pane_shape(
                 self.body, bounds=self.bounds, region_id=self.region_id,
@@ -1726,6 +1737,15 @@ def _body_size(raw: bytes, expected: int, name: str) -> None:
 def _encode_object_body(body: ObjectWireBody) -> bytes:
     if isinstance(body, GroupBody):
         return b""
+    if isinstance(body, StatusFieldBody):
+        label = body.label.encode("utf-8", "strict")
+        value = body.value.encode("utf-8", "strict")
+        label_bytes = _integer("label_bytes", len(label), minimum=0, maximum=UINT32_MAX)
+        value_bytes = _integer("value_bytes", len(value), minimum=0, maximum=UINT32_MAX)
+        return _STATUS_FIELD_BODY.pack(
+            STATUS_FIELD_BODY_TAG, 1, int(body.emphasized), int(body.severity),
+            body.label_cols, label_bytes, value_bytes, 0,
+        ) + label + value
     if isinstance(body, PaneBody):
         title = body.title.encode("utf-8", "strict")
         title_bytes = _integer("title_bytes", len(title), minimum=0, maximum=UINT32_MAX)
@@ -1856,6 +1876,21 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
         if kind is ObjectKind.GROUP:
             _body_size(raw, 0, "GROUP")
             return GroupBody()
+        if kind is ObjectKind.STATUS_FIELD:
+            if len(raw) < _STATUS_FIELD_BODY.size:
+                _body_size(raw, _STATUS_FIELD_BODY.size, "STATUS_FIELD prefix")
+            tag, version, flags, severity, label_cols, label_bytes, value_bytes, reserved = _STATUS_FIELD_BODY.unpack_from(raw)
+            if tag != STATUS_FIELD_BODY_TAG or version != 1:
+                raise RetainedWireError(RetainedWireErrorCode.ENUM, "STATUS_FIELD tag or version is unsupported")
+            if flags & ~0x1 or reserved:
+                raise RetainedWireError(RetainedWireErrorCode.RESERVED, "STATUS_FIELD flags or reserved field is noncanonical")
+            _body_size(raw, _STATUS_FIELD_BODY.size + label_bytes + value_bytes, "STATUS_FIELD")
+            value_start = _STATUS_FIELD_BODY.size + label_bytes
+            return StatusFieldBody(
+                _wire_text(raw[_STATUS_FIELD_BODY.size:value_start], "STATUS_FIELD label"),
+                _wire_text(raw[value_start:], "STATUS_FIELD value"), label_cols,
+                severity, bool(flags),
+            )
         if kind is ObjectKind.PANE:
             if len(raw) < _PANE_BODY.size:
                 _body_size(raw, _PANE_BODY.size, "PANE prefix")
@@ -2542,6 +2577,7 @@ __all__ = [
     "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
     "PaneBody", "PANE_BODY_TAG",
+    "StatusFieldBody", "StatusSeverity", "STATUS_FIELD_BODY_TAG",
     "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RetainedItemReference",
     "RET1_TAG", "RetStatus", "SeriesWireBatch", "SeriesWireDefinition", "SeriesWireSamples",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",

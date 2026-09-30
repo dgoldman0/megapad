@@ -262,6 +262,12 @@ PT-PANE-REPLACE   ( owner generation object region parent
                       x y cols rows z visible content-region content-x
                       content-y content-cols content-rows pane-state
                       title-a title-u session -- status )
+PT-STATUS-FIELD-DEFINE ( owner generation object region parent
+                      x y cols rows z visible label-cols severity field-state
+                      label-a label-u value-a value-u session -- status )
+PT-STATUS-FIELD-REPLACE ( owner generation object region parent
+                      x y cols rows z visible label-cols severity field-state
+                      label-a label-u value-a value-u session -- status )
 PT-OBJECT-SET-VALUE ( owner generation object value session -- status )
 PT-OBJECT-SET-VISIBILITY ( owner generation object visible session -- status )
 PT-OBJECT-DROP      ( owner generation object session -- status )
@@ -551,8 +557,36 @@ new capability bit retain their established deterministic CELL-only outcome.
 The terminal validates final same-owner content-region binding, explicit clip
 containment, and unique binding at commit; the guest keeps no graph cache.
 
+`PT-STATUS-FIELD-DEFINE` and `PT-STATUS-FIELD-REPLACE` require the additive
+`RET_STATUS_FIELDS` feature (bit 12) and use `PT-OBJECT-STATUS-FIELD` (11).
+The standard OBJECT prefix is followed by the canonical 32-byte STF1 header
+and exact label then value bytes. `rows` must be one. `label-cols` fixes the
+label's share of the object width, from zero through `cols`; a nonempty label
+requires a positive label width and a nonempty value requires `label-cols`
+strictly below `cols`. Text clips to these declared slots without shifting
+either one. `parent` may identify a same-region GROUP under the ordinary
+OBJECT hierarchy rules, which the terminal validates at commit.
+
+Severity accepts `PT-SEVERITY-NEUTRAL`, `PT-SEVERITY-INFO`,
+`PT-SEVERITY-SUCCESS`, `PT-SEVERITY-WARNING`, or `PT-SEVERITY-ERROR` (0–4).
+`PT-STATUS-FIELD-EMPHASIZED` is the sole field-state bit. Both strings follow
+the pane title's canonical UTF-8 and control-character exclusions. Empty
+strings use `0 0`; nonempty borrowed spans must avoid session storage and TX
+scratch. Label and value may share read-only source storage. All borrowed
+addresses are cleared before return, including rejected calls. Fields are
+display objects, so they introduce no control or input identity. Replace
+the complete field to change its text, severity, emphasis, or width split.
+
+STATUS_FIELDS requires CORE, positive shared object and aggregate UTF-8
+capacities, an inbound payload limit of at least 96 bytes, and a retained
+transaction maximum of at least 296 bytes. Actual strings must fit the
+negotiated frame and transaction bounds. It adds no private string quota or
+local scene table. Unsupported writers return `PT-S-UNSUPPORTED` without
+emission or accounting changes, leaving the caller's CELL fallback intact.
+
 The object writers expose the protocol's renderer-neutral GROUP, POLYLINE,
-IMAGE, GLYPH_RUN, READOUT, METER, STATUS, PLOT, WAVEFORM, and PANE records. POLYLINE
+IMAGE, GLYPH_RUN, READOUT, METER, STATUS, PLOT, WAVEFORM, PANE, and STATUS_FIELD
+records. POLYLINE
 accepts an aligned borrowed span of native coordinate-cell pairs and derives
 the point count; READOUT accepts a borrowed canonical UTF-8 unit span. Both are
 range-checked and caller-bounded; scalar fields and coordinate cells are

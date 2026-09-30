@@ -18,6 +18,7 @@ from rich_terminal.retained_scene import (
     ObjectBounds,
     ObjectKind,
     PaneBody,
+    StatusFieldBody,
     Point,
     PolylineBody,
     RGBA,
@@ -832,6 +833,11 @@ def test_every_non_image_object_oracle_round_trips_through_typed_bodies():
     )
     assert decode_object_definition(encode_object_definition(pane)) == pane
     kinds.add(pane.kind)
+
+    status_field = ObjectWireDefinition(1, 1, 3, 1, 0, ObjectBounds(0, 0, 20, 1),
+                                        0, True, StatusFieldBody("State", "Ready", 8))
+    assert decode_object_definition(encode_object_definition(status_field)) == status_field
+    kinds.add(status_field.kind)
 
     assert kinds == set(ObjectKind) - {ObjectKind.IMAGE}
 

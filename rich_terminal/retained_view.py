@@ -44,9 +44,12 @@ from .retained_scene import (
     SceneModelState,
     SeriesDefinition,
     StatusBody,
+    StatusFieldBody,
+    StatusSeverity,
     WaveformBody,
     validate_control_shape,
     validate_pane_shape,
+    validate_status_field_shape,
 )
 from .semantic_content import SemanticTextContent
 from .semantic_items import ItemViewContent
@@ -424,6 +427,44 @@ class PaneDraw:
         object.__setattr__(self, "content_region_id", body.content_region_id)
         object.__setattr__(self, "focused", body.focused)
         object.__setattr__(self, "parent_bounds", parent_bounds)
+
+
+@dataclass(frozen=True, slots=True)
+class StatusFieldDraw:
+    """One read-only status field with guest-assigned label and value slots."""
+
+    object_id: int
+    z_order: int
+    bounds: ObjectBounds
+    label: str
+    value: str
+    label_cols: int
+    severity: StatusSeverity = StatusSeverity.NEUTRAL
+    emphasized: bool = False
+    parent_bounds: tuple[ObjectBounds, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "object_id",
+            _integer("object_id", self.object_id, minimum=1, maximum=UINT64_MAX),
+        )
+        object.__setattr__(
+            self, "z_order",
+            _integer("z_order", self.z_order, minimum=INT32_MIN, maximum=INT32_MAX),
+        )
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("bounds must be ObjectBounds")
+        body = StatusFieldBody(
+            self.label, self.value, self.label_cols, self.severity, self.emphasized
+        )
+        validate_status_field_shape(body, bounds=self.bounds)
+        object.__setattr__(self, "label_cols", body.label_cols)
+        object.__setattr__(self, "severity", body.severity)
+        object.__setattr__(self, "emphasized", body.emphasized)
+        object.__setattr__(
+            self, "parent_bounds",
+            _object_bounds_path("parent_bounds", self.parent_bounds),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1222,6 +1263,7 @@ ObjectDraw = (
     | PolylineDraw
     | ImageDraw
     | PaneDraw
+    | StatusFieldDraw
     | ReadoutDraw
     | MeterDraw
     | StatusDraw
@@ -1236,6 +1278,7 @@ _OBJECT_DRAW_TYPES = (
     PolylineDraw,
     ImageDraw,
     PaneDraw,
+    StatusFieldDraw,
     ReadoutDraw,
     MeterDraw,
     StatusDraw,
@@ -1350,6 +1393,7 @@ class RetainedRegionDraw:
                     PolylineDraw,
                     ImageDraw,
                     PaneDraw,
+                    StatusFieldDraw,
                     ReadoutDraw,
                     MeterDraw,
                     StatusDraw,
@@ -2208,6 +2252,21 @@ def project_composite_draw_plane(
                         )
                     )
                     continue
+                if isinstance(body, StatusFieldBody):
+                    draws.append(
+                        StatusFieldDraw(
+                            object_id=definition.object_id,
+                            z_order=definition.z_order,
+                            bounds=bounds,
+                            label=body.label,
+                            value=body.value,
+                            label_cols=body.label_cols,
+                            severity=body.severity,
+                            emphasized=body.emphasized,
+                            parent_bounds=parent_bounds,
+                        )
+                    )
+                    continue
                 if isinstance(body, GlyphRunBody):
                     draws.append(
                         GlyphRunDraw(
@@ -2448,6 +2507,7 @@ __all__ = [
     "SemanticRootDraw",
     "SeriesHistoryDraw",
     "StatusDraw",
+    "StatusFieldDraw",
     "TabDraw",
     "TabSetDraw",
     "TextAreaDraw",

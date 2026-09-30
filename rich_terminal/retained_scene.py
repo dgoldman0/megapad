@@ -114,6 +114,15 @@ class ObjectKind(IntEnum):
     PLOT = 8
     WAVEFORM = 9
     PANE = 10
+    STATUS_FIELD = 11
+
+
+class StatusSeverity(IntEnum):
+    NEUTRAL = 0
+    INFO = 1
+    SUCCESS = 2
+    WARNING = 3
+    ERROR = 4
 
 
 class ImageFit(IntEnum):
@@ -400,6 +409,44 @@ def validate_pane_shape(
 
 
 @dataclass(frozen=True, slots=True)
+class StatusFieldBody:
+    """Guest-authored label/value slots and descriptive status severity."""
+
+    label: str
+    value: str
+    label_cols: int
+    severity: StatusSeverity = StatusSeverity.NEUTRAL
+    emphasized: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("label", "value"):
+            text = getattr(self, name)
+            _control_text_bytes(name, text)
+            if any(0x7F <= ord(character) <= 0x9F
+                   or character in "\u2028\u2029" for character in text):
+                raise ValueError(f"{name} contains a control or line-separator character")
+        object.__setattr__(self, "label_cols", _integer(
+            "label_cols", self.label_cols, minimum=0, maximum=UINT32_MAX,
+        ))
+        severity = _integer("severity", self.severity, minimum=0, maximum=4)
+        object.__setattr__(self, "severity", StatusSeverity(severity))
+        object.__setattr__(self, "emphasized", _boolean("emphasized", self.emphasized))
+        if self.label and self.label_cols == 0:
+            raise ValueError("a nonempty STATUS_FIELD label requires label columns")
+
+
+def validate_status_field_shape(body: StatusFieldBody, *, bounds: ObjectBounds) -> None:
+    """Share fixed-slot geometry checks between wire and immutable model."""
+
+    if bounds.cell_rows != 1:
+        raise ValueError("STATUS_FIELD requires exactly one row")
+    if body.label_cols > bounds.cell_cols:
+        raise ValueError("STATUS_FIELD label columns exceed its bounds")
+    if body.value and body.label_cols == bounds.cell_cols:
+        raise ValueError("a nonempty STATUS_FIELD value requires value columns")
+
+
+@dataclass(frozen=True, slots=True)
 class PolylineBody:
     points: tuple[Point, ...]
     stroke_width: int
@@ -669,6 +716,7 @@ def _validate_series_consumer(body, *, include_zero_line: bool) -> None:
 ObjectBody = (
     GroupBody
     | PaneBody
+    | StatusFieldBody
     | PolylineBody
     | ImageBody
     | GlyphRunBody
@@ -683,6 +731,7 @@ ObjectBody = (
 _BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
     PaneBody: ObjectKind.PANE,
+    StatusFieldBody: ObjectKind.STATUS_FIELD,
     PolylineBody: ObjectKind.POLYLINE,
     ImageBody: ObjectKind.IMAGE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
@@ -722,6 +771,8 @@ class ObjectDefinition:
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         if type(self.body) not in _BODY_KIND:
             raise TypeError("body is not a supported retained object body")
+        if isinstance(self.body, StatusFieldBody):
+            validate_status_field_shape(self.body, bounds=self.bounds)
         if isinstance(self.body, PaneBody):
             validate_pane_shape(
                 self.body, bounds=self.bounds, region_id=self.region_id,
@@ -2285,6 +2336,8 @@ class RetainedSceneModel:
 
     def _object_utf8_bytes(self, definition: ObjectDefinition) -> int:
         body = definition.body
+        if isinstance(body, StatusFieldBody):
+            return len(body.label.encode("utf-8")) + len(body.value.encode("utf-8"))
         if isinstance(body, PaneBody):
             return len(_control_text_bytes("title", body.title))
         if isinstance(body, GlyphRunBody):
@@ -2468,6 +2521,8 @@ class RetainedSceneModel:
             required = RetainedFeature.CORE
         elif kind is ObjectKind.PANE:
             required = RetainedFeature.PANES
+        elif kind is ObjectKind.STATUS_FIELD:
+            required = RetainedFeature.STATUS_FIELDS
         elif kind in (ObjectKind.GROUP, ObjectKind.POLYLINE):
             required = RetainedFeature.VECTOR
         elif kind is ObjectKind.IMAGE:
@@ -2478,6 +2533,11 @@ class RetainedSceneModel:
             required = RetainedFeature.INSTRUMENT
         if not policy.features & required:
             self._fail(SceneErrorCode.FEATURE, f"{kind.name} feature was not advertised")
+        if isinstance(definition.body, StatusFieldBody):
+            text_bytes = self._object_utf8_bytes(definition)
+            if (96 + text_bytes > policy.client_to_terminal_max_payload
+                    or 296 + text_bytes > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA, "STATUS_FIELD text exceeds payload or transaction capacity")
         if isinstance(definition.body, PaneBody):
             title_bytes = len(_control_text_bytes("title", definition.body.title))
             if (104 + title_bytes > policy.client_to_terminal_max_payload
@@ -2812,9 +2872,12 @@ __all__ = [
     "SceneUsage",
     "SeriesDefinition",
     "StatusBody",
+    "StatusFieldBody",
+    "StatusSeverity",
     "TimestampMode",
     "UniformSamples",
     "validate_control_shape",
     "validate_pane_shape",
+    "validate_status_field_shape",
     "WaveformBody",
 ]

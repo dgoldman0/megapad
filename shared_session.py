@@ -43,6 +43,7 @@ from rich_terminal.retained_view import (
     RetainedRegionDraw,
     SeriesHistoryDraw,
     StatusDraw,
+    StatusFieldDraw,
     TabDraw,
     TabSetDraw,
     TextAreaDraw,
@@ -59,6 +60,7 @@ from rich_terminal.retained_scene import (
     Point,
     RGBA,
     Sample,
+    StatusSeverity,
     validate_control_shape,
 )
 from rich_terminal.retained_resources import RGBAResource
@@ -654,6 +656,18 @@ _PANE_WIRE_FIELDS = (
     "title",
     "focused",
 )
+_STATUS_FIELD_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "label",
+    "value",
+    "label_cols",
+    "severity",
+    "emphasized",
+)
 _READOUT_WIRE_FIELDS = (
     "kind",
     "object_id",
@@ -1077,6 +1091,7 @@ def _retained_draw_to_wire(
         | PolylineDraw
         | ImageDraw
         | PaneDraw
+        | StatusFieldDraw
         | ReadoutDraw
         | MeterDraw
         | StatusDraw
@@ -1149,6 +1164,19 @@ def _retained_draw_to_wire(
             "content_bounds": _bounds_to_wire(draw.content_bounds),
             "title": draw.title,
             "focused": draw.focused,
+        }
+    if isinstance(draw, StatusFieldDraw):
+        return {
+            "kind": "status_field",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "label": draw.label,
+            "value": draw.value,
+            "label_cols": draw.label_cols,
+            "severity": int(draw.severity),
+            "emphasized": draw.emphasized,
         }
     if isinstance(draw, ReadoutDraw):
         return {
@@ -1642,7 +1670,7 @@ def _tabset_from_wire(data, name: str) -> TabSetDraw:
     )
 
 
-def _pane_bounds_from_wire(value, name: str) -> ObjectBounds:
+def _cell_bounds_from_wire(value, name: str) -> ObjectBounds:
     """Decode signed CELL_RECT32 offsets and positive unsigned dimensions."""
 
     if not isinstance(value, (list, tuple)) or len(value) != 4:
@@ -1659,6 +1687,15 @@ def _pane_bounds_from_wire(value, name: str) -> ObjectBounds:
     )
 
 
+def _cell_bounds_path_from_wire(value, name: str) -> tuple[ObjectBounds, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{name} must be an array")
+    return tuple(
+        _cell_bounds_from_wire(item, f"{name}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+
 def _retained_draw_from_wire(
     data,
     name: str,
@@ -1667,6 +1704,7 @@ def _retained_draw_from_wire(
     | PolylineDraw
     | ImageDraw
     | PaneDraw
+    | StatusFieldDraw
     | ReadoutDraw
     | MeterDraw
     | StatusDraw
@@ -1806,17 +1844,41 @@ def _retained_draw_from_wire(
                 wire["z_order"], f"{name} z_order",
                 minimum=INT32_MIN, maximum=INT32_MAX,
             ),
-            bounds=_pane_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
             content_region_id=_wire_integer(
                 wire["content_region_id"], f"{name} content_region_id",
                 minimum=1, maximum=UINT64_MAX,
             ),
-            content_bounds=_pane_bounds_from_wire(
+            content_bounds=_cell_bounds_from_wire(
                 wire["content_bounds"], f"{name} content_bounds"
             ),
             title=_wire_text(wire["title"], f"{name} title"),
             focused=_wire_boolean(wire["focused"], f"{name} focused"),
             parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+        )
+    if kind == "status_field":
+        wire = _wire_object(data, name, _STATUS_FIELD_WIRE_FIELDS)
+        return StatusFieldDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"], f"{name} z_order",
+                minimum=INT32_MIN, maximum=INT32_MAX,
+            ),
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            label=_wire_text(wire["label"], f"{name} label"),
+            value=_wire_text(wire["value"], f"{name} value"),
+            label_cols=_wire_integer(
+                wire["label_cols"], f"{name} label_cols", minimum=0, maximum=UINT32_MAX
+            ),
+            severity=StatusSeverity(_wire_integer(
+                wire["severity"], f"{name} severity", minimum=0, maximum=4
+            )),
+            emphasized=_wire_boolean(wire["emphasized"], f"{name} emphasized"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
         )

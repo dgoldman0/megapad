@@ -155,7 +155,7 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
     assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
-    assert "0xF3F    CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x1F3F   CONSTANT _PT-RET-FEATURE-MASK" in source
     assert (
         "_PT-RV-FEATURES @ _PT-RET-CONTROL-ITEMS AND\n"
         "    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND"
@@ -1404,6 +1404,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
         ("_PT-RET-RGBA-IMAGE?", "_PT-RET-RGBA-IMAGE"),
         ("_PT-RET-INSTRUMENT?", "_PT-RET-INSTRUMENT"),
         ("_PT-RET-SERIES?", "_PT-RET-SERIES"),
+        ("_PT-RET-STATUS-FIELDS?", "_PT-RET-STATUS-FIELDS"),
     ):
         definition = _definition(source, helper)
         assert "PT-RETAINED-AVAILABLE? 0=" in definition
@@ -1442,6 +1443,10 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
             "trace-alpha zero-red zero-green zero-blue zero-alpha zero-value "
             "waveform-flags session -- status"
         ),
+        "STATUS-FIELD": (
+            f"{common} label-cols severity field-state label-a label-u "
+            "value-a value-u session -- status"
+        ),
     }
     helpers = {
         "GROUP": "_PT-GROUP-WRITE",
@@ -1452,6 +1457,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
         "STATUS": "_PT-STATUS-WRITE",
         "PLOT": "_PT-PLOT-WRITE",
         "WAVEFORM": "_PT-WAVEFORM-WRITE",
+        "STATUS-FIELD": "_PT-STATUS-FIELD-WRITE",
     }
     for family, signature in signatures.items():
         for operation, message in (
@@ -1476,7 +1482,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
 
     # There is no public kind-plus-bytes escape hatch and no guest-side scene
     # cache or object-count policy.  The copied spans are READOUT's checked
-    # semantic UTF-8 unit and PANE's title, never prepacked object bodies.
+    # semantic UTF-8 unit, pane title, and status label/value, never prepacked bodies.
     assert re.search(r"^:\s+PT-OBJECT-(?:DEFINE|REPLACE)\b", source, re.MULTILINE) is None
     objects = source[
         source.index("\\ The remaining OBJECT families share") :
@@ -1486,7 +1492,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
     assert "CREATE " not in objects
     assert "ALLOT" not in objects
     assert " CONSTANT " not in objects
-    assert objects.count(" MOVE") == 2
+    assert objects.count(" MOVE") == 4
     assert "_PT-FRAME-PAYLOAD 104 + SWAP MOVE" in objects
     lowered = objects.lower()
     for consumer in ("pad", "desk", "daybook", "uidl", "applet"):
@@ -1514,7 +1520,7 @@ def test_object_common_prefix_group_and_polyline_are_exact_and_bounded() -> None
     assert "_PT-OB-REGION @ 0= OR" in fields
     assert "_PT-M-OBJECT-DEFINE =" in fields
     assert "_PT-M-OBJECT-REPLACE = OR" in fields
-    assert "_PT-OB-KIND @ DUP 1 U< SWAP PT-OBJECT-PANE U> OR" in fields
+    assert "_PT-OB-KIND @ DUP 1 U< SWAP PT-OBJECT-STATUS-FIELD U> OR" in fields
     assert "_PT-OB-X @ _PT-OB-COLS @ _PT-I32-EXTENT? 0=" in fields
     assert "_PT-OB-Y @ _PT-OB-ROWS @ _PT-I32-EXTENT? 0=" in fields
     assert "_PT-OB-Z @ _PT-I32? 0=" in fields
