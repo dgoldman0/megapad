@@ -2,7 +2,8 @@
 
 Started: 2026-09-30
 
-Status: plan locked for implementation; no hybrid execution is implemented.
+Status: Phase 1A implemented and qualified; Phase 1B is next. Hybrid execution
+is not implemented.
 
 Branch: `feature/unified-runtime`
 
@@ -291,11 +292,63 @@ limits. Machine-level claims continue to require the architectural oracle.
 
 | Slice | Status | Evidence |
 |---|---|---|
-| Plan | Locked | Read-only source review at the base above; initial plan commit |
-| 1A — unified launcher/build | Pending | |
+| Plan | Locked | Read-only source review at the base above; local commit `512ed32` |
+| 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Pending | |
 | 2 — workload profiles | Pending | |
 | 3A — native scalar FP | Pending | |
 | 3B/3C — remaining native extraction | Pending, profile-driven | |
 | 4 — initial hybrid ABI and execution | Pending | |
 | 5 — expanded interoperability | Pending | |
+
+### Phase 1A implementation and validation — 2026-09-30
+
+`megapad.py` selects emulator or simulator and delegates unchanged backend
+arguments to their existing server lifecycle. Emulator is the default.
+Top-level help and unavailable-mode errors load no backend; selected-mode
+help needs no native extension. Hybrid remains an invalid selection.
+
+`session_server.py` now exposes a parser factory and `main(argv=None)`.
+`simulator_server.py --executor python|native|auto` passes an explicit choice
+through image preparation into the runtime used by the live session. Omission
+retains the existing environment/default behavior; this does not mutate the
+process environment. Missing required native execution fails before boot
+source or autoexec runs.
+
+The architectural system import in `session.py` now occurs only in
+`MachineSession.from_bios`. A fresh-process test prepares a real MP64FS fixture
+and runs its semantic root with emulator-extension imports forbidden. The
+remaining Python architectural imports and frontend inheritance are Phase 1B
+work; this slice makes no claim of complete package separation.
+
+`make build` builds both extensions through sequential recursive recipes.
+`make serve ARGS='...'` invokes the new application; the existing interactive
+`make run` target retains its behavior. Existing separate server launchers
+remain available while consumers migrate.
+
+Validation used CPython 3.12.14 with the existing pybind11/pytest environment,
+`VENV_PY` set to that interpreter, and
+`MP64_RUNTIME_NAMESPACE=unified-runtime`. Builds and test commands ran
+sequentially:
+
+- `CC=gcc CXX=g++ make build`: both engines built successfully from this
+  worktree. The interpreter's default compiler was unavailable (`clang++`);
+  selecting installed GCC resolved the environment issue.
+- `make test-simulator` with `SIMULATOR_TEST_PATH` selecting
+  `tests/test_unified_launcher.py`,
+  `tests/simulator/test_simulator_server.py`, and
+  `tests/simulator/test_image_bootstrap.py`: **32 passed**.
+- The same simulator server/bootstrap files with
+  `MEGAFORTH_EXECUTOR=native`: **20 passed**. These overlap the preceding
+  selector and are not 20 additional distinct tests.
+- `make test-sequential TEST_PATH=tests/test_session.py` with the selector
+  `session_server or machine_session_boots_interacts_and_captures or
+  machine_session_starts_its_clock_at_a_given_time or
+  machine_session_owns_injected_nic_backend or machine_session_close`:
+  **11 passed, 32 deselected**. This includes real BIOS boot, Forth evaluation,
+  capture, clock construction, device ownership, and existing server policy.
+- `git diff --check`: passed.
+
+The execution engines, arithmetic, guest scheduling, display implementation,
+and source workloads are unchanged. This is launcher/lifecycle qualification;
+no performance improvement or complete physical Desktop acceptance is claimed.

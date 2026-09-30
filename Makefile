@@ -20,6 +20,8 @@
 #   make test-kill             Kill stuck background run
 #   make test-quick            Quick BIOS+CPU smoke test     (~3 sec)
 #   make test-simulator        Focused hosted-simulator units (no accel build)
+#   make build                 Build both native engines sequentially
+#   make serve ARGS='--mode simulator --storage desktop.img --executor native'
 #
 # Real-network tests (requires TAP — see tests/test_live_net.py):
 #   make test-net       All live-net tests against TAP device
@@ -63,6 +65,16 @@ endef
 .PHONY: runtime-paths
 runtime-paths:
 	@$(RUNTIME_PATHS) all
+
+# One application build. Recipe sub-makes deliberately serialize the two
+# extensions even when the caller selects parallel make jobs.
+.PHONY: build serve
+build:
+	$(MAKE) accel
+	$(MAKE) simulator-accel
+
+serve:
+	$(VENV_PY) megapad.py $(ARGS)
 
 # --- Hosted source simulator ---
 # This target intentionally does not depend on accel.  Simulator units are

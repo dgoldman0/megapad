@@ -70,6 +70,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cols", type=_positive_int, default=80)
     parser.add_argument("--rows", type=_positive_int, default=30)
     parser.add_argument(
+        "--executor",
+        choices=("python", "native", "auto"),
+        help=(
+            "semantic executor for source preparation and live execution; "
+            "defaults to MEGAFORTH_EXECUTOR, otherwise python"
+        ),
+    )
+    parser.add_argument(
         "--semantic-step-budget",
         type=_positive_int,
         help="optional cumulative budget for autoexec preparation and live dispatch",
@@ -149,6 +157,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         terminal_cols=args.cols,
         terminal_rows=args.rows,
         semantic_step_budget=args.semantic_step_budget,
+        execution_backend=args.executor,
     )
     session = SimulatorMachineSession(
         preparation.runtime,

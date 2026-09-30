@@ -142,6 +142,7 @@ def prepare_image_bootstrap(
     terminal_cols: int = 80,
     terminal_rows: int = 30,
     semantic_step_budget: int | None = None,
+    execution_backend: str | None = None,
 ) -> ImageBootstrapPreparation:
     """Construct and prepare a runtime from one explicit memory/storage pair.
 
@@ -151,7 +152,9 @@ def prepare_image_bootstrap(
     tokens captured from the initial semantic BIOS, then runs ordinary autoexec
     source preparation before returning the exact live root XT. The optional
     budget covers autoexec; callers subtract its reported work from that same
-    budget before dispatching the live entry.
+    budget before dispatching the live entry. An explicit execution backend
+    applies to preparation and live dispatch; None retains the runtime's
+    environment/default selection.
     """
 
     if not isinstance(memory, SparseAddressSpace):
@@ -159,7 +162,9 @@ def prepare_image_bootstrap(
     if not isinstance(storage, HostedStorageService):
         raise TypeError("storage must be a HostedStorageService")
 
-    runtime = MegaForthRuntime(memory=memory, storage=storage)
+    runtime = MegaForthRuntime(
+        memory=memory, storage=storage, execution_backend=execution_backend,
+    )
     # Establish the caller's baseline before any boot source can query it.
     # The later session owns its own geometry state at this same baseline;
     # initial construction does not invent a pending resize notification.

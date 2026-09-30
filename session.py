@@ -37,10 +37,10 @@ from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_model import RetainedPolicy
 from rich_terminal.retained_wire import ControlEventKind
 from devices import RTC
-from system import MegapadSystem, SystemRunStats
 
 if TYPE_CHECKING:
     from nic_backends import NICBackend
+    from system import MegapadSystem, SystemRunStats
 
 
 _BIOS_CACHE: dict[tuple[str, int, int], tuple[bytes, dict[str, int]]] = {}
@@ -706,6 +706,10 @@ class MachineSession:
         Unix epoch, when one is given; otherwise at the host's time for a
         real-time clock, or at zero.
         """
+
+        # Semantic sessions reuse the terminal frontend without constructing
+        # an architectural machine or requiring its native extension.
+        from system import MegapadSystem
 
         code, labels = _load_bios(Path(bios_path))
         system = MegapadSystem(

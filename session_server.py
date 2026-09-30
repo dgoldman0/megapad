@@ -50,7 +50,7 @@ def _retained_policy(value: str) -> RetainedPolicy:
         raise argparse.ArgumentTypeError(f"invalid retained policy: {exc}") from exc
 
 
-def main() -> int:
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a shared MegaPad session")
     parser.add_argument("--bios", type=Path, default=ROOT / "bios.asm")
     parser.add_argument("--storage", type=Path)
@@ -112,7 +112,12 @@ def main() -> int:
         ),
     )
     parser.add_argument("--paused", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_argument_parser()
+    args = parser.parse_args(argv)
 
     if (
         args.retained_terminal_policy is not None
