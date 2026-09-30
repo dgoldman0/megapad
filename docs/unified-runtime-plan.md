@@ -2,10 +2,12 @@
 
 Started: 2026-09-30
 
-Status: Phase 1A and the Phase 1B session extraction are implemented and
-qualified locally. Executor default promotion remains deferred to workload
-qualification. Bounded Phase 2 kernel baselines are recorded; broader workload qualification
-remains open. Hybrid execution is not implemented.
+Status: The unified emulator/simulator/hybrid application and bounded hybrid
+integer-routine v1 are implemented and qualified locally. Shared native scalar
+FP, Keccak and bulk audio are qualified; native tile extraction and remaining
+measured runtime costs are next. Kernel/source/captured-frame evidence and
+strict multicore FP/timing checks are recorded. Live Desktop acceptance,
+executor default promotion and expanded hybrid interoperability remain open.
 
 Branch: `feature/unified-runtime`
 
@@ -20,9 +22,11 @@ bookkeeping from Python to native code while retaining exact reference
 models and the existing compatibility contracts.
 
 The user authorized local branch work, beginning with a local commit of this
-plan. Implementation and its evidence are committed in reviewable slices on
-this branch. Publishing, merging, and modifying the separate rich-terminal
-worktree are outside this work.
+plan. The 2026-09-30 continuation authorizes work through the remaining roadmap
+with regular local commits. Implementation and evidence stay in reviewable
+slices on this branch. Reconcile reviewed parallel MegaPad changes on an
+isolated branch without modifying the other team's active worktree. Publishing
+and final integration into main await authorization; Akashic remains untouched.
 
 ## Starting evidence
 
