@@ -183,6 +183,12 @@ class CallbackExportEngine:
         self._registration_failure: str | None = None
         self._budget_failure: CallbackExportBudgetExceeded | None = None
         self._closed_accounting = None
+        # The nested profile has its own bounded chain ledger. Installation
+        # supplies no execution capability; the native/composition seam must
+        # still explicitly admit V4 before any export can use it.
+        self._nested_owner = None
+        self._nested_chain = None
+        self._nested_calls = {}
         self._unwind_error = None
         self._unwind_contexts = ()
         runtime._closed_cleanup_guard = self._guard_outer_unwind
@@ -209,6 +215,8 @@ class CallbackExportEngine:
         self._closed_dispatch_type = ClosedDispatch
 
     def _guard_accounting_entry(self, operation):
+        if self._nested_chain is not None:
+            raise CallbackExportError(f"cannot {operation} during nested callback accounting")
         record = self._closed_accounting
         if record is not None and not record.admitting:
             raise CallbackExportError(f"cannot {operation} during closed callback accounting")
@@ -220,10 +228,53 @@ class CallbackExportEngine:
             raise CallbackExportError("closed callback accounting route changed")
         return callback(self, *arguments)
 
+    def _install_nested_owner(self, owner):
+        """Bind the exact creating HybridRuntime, never a generic callable."""
+        with self._runtime._session_owner_lock:
+            self._require_owner("install the nested machine owner")
+            self._runtime._require_no_suspension("install the nested machine owner")
+            if (self._nested_owner is not None or self._active is not None
+                    or self._registration is not None or self._closed_accounting is not None
+                    or self._runtime._active_dispatches or self._runtime._active_input_states):
+                raise CallbackExportError("nested machine owner installation requires one fresh idle owner")
+            from simulator.interop_nested import NestedMachineOwner
+            self._nested_owner = NestedMachineOwner(self, owner)
+
+    def _begin_nested_chain(self, owner, meter, semantic_limit):
+        with self._runtime._session_owner_lock:
+            self._require_owner("begin nested callback accounting")
+            if (self._nested_owner is None or self._nested_chain is not None
+                    or self._active is not None or self._registration is not None
+                    or self._closed_accounting is not None):
+                raise CallbackExportError("nested callback accounting requires its idle installed owner")
+            states, frames = self._runtime._active_input_states, self._runtime._active_dispatches
+            active_meter = states[0].meter if states else (frames[0].meter if frames else None)
+            if active_meter is None or meter is not active_meter:
+                raise CallbackExportError("nested callback accounting requires the original outer meter")
+            from simulator.interop_nested import NestedChainAccounting
+            chain = NestedChainAccounting(self, self._nested_owner, owner, meter, semantic_limit)
+            self._nested_chain = chain
+            return chain.token
+
+    def _require_nested_chain(self, token):
+        chain = self._nested_chain
+        if chain is None or chain.token is not token:
+            raise CallbackExportError("nested callback chain token is not issued here")
+        return chain
+
+    def _finish_nested_chain(self, token, *, cancelled=False):
+        with self._runtime._session_owner_lock:
+            # The exact issued cleanup path remains usable after fail-closing.
+            chain = self._require_nested_chain(token)
+            receipt = chain.finish(cancelled=cancelled)
+            self._nested_chain = None
+            return receipt
+
     def begin_closed_accounting(self, handle):
         with self._runtime._session_owner_lock:
             self._require_owner("begin closed callback accounting")
-            if self._active is not None or self._registration is not None or self._closed_accounting is not None:
+            if (self._active is not None or self._registration is not None
+                    or self._closed_accounting is not None or self._nested_chain is not None):
                 raise CallbackExportError("closed callback accounting already has an active owner")
             if self._binding(handle).closed is None:
                 raise CallbackExportError("closed callback accounting requires a closed export")

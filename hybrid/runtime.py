@@ -142,8 +142,16 @@ class HybridRuntime:
         dispatch_instruction_limit: int = MAX_DISPATCH_INSTRUCTIONS,
         dispatch_callback_limit: int = MAX_DISPATCH_CALLBACKS,
         dispatch_callback_semantic_limit: int = MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
+        require_nested_callbacks: bool = False,
         **runtime_kwargs: Any,
     ) -> HybridRuntime:
+        if type(require_nested_callbacks) is not bool:
+            raise TypeError("require_nested_callbacks must be an exact boolean")
+        if require_nested_callbacks:
+            raise RuntimeError(
+                "hybrid nested callbacks require the fully qualified semantic V4 "
+                "profile and native V3 transport; this build does not enable them"
+            )
         limit = _positive_limit(dispatch_instruction_limit,
                                 MAX_DISPATCH_INSTRUCTIONS, "dispatch instruction limit")
         callback_limit = _positive_limit(
@@ -190,7 +198,11 @@ class HybridRuntime:
             machine[1].close()
             machine = None
             raise
-        return cls(semantic, native, limit, machine, callback_limit, callback_semantic_limit)
+        try:
+            return cls(semantic, native, limit, machine, callback_limit, callback_semantic_limit)
+        except BaseException:
+            machine[1].close()
+            raise
 
     def __init__(self, semantic: MegaForthRuntime, native: Any, limit: int,
                  machine: tuple, callback_limit: int = MAX_DISPATCH_CALLBACKS,
@@ -239,6 +251,31 @@ class HybridRuntime:
         self._dictionary_guard = mutation_guard
         self._dictionary._mutation_guard = mutation_guard
         self._remember_context(semantic.main_context)
+        # Legacy embedders may subclass this owner. Only the new nested
+        # profile requires the exact canonical owner and its pinned methods.
+        if type(self) is HybridRuntime:
+            semantic._callback_exports._install_nested_owner(self)
+
+    def _capture_nested_target(self, word):
+        """Resolve only this owner's exact explicitly V4 registration."""
+        registration = self._registrations.get(id(word))
+        if registration is None or registration.word is not word:
+            raise HybridExecutionError("stale_registration", "machine target is not registered here")
+        self._verify_nested_target(registration)
+        return registration
+
+    def _verify_nested_target(self, registration):
+        from shared.hybrid_nested import RoutineDeclarationV4
+
+        if (type(registration) is not _Registration
+                or type(registration.declaration) is not RoutineDeclarationV4):
+            raise HybridExecutionError("invalid_child", "nested targets require an explicit V4 registration")
+        self._validate_registration(registration)
+
+    def _invoke_nested_child(self, use, arguments):
+        # The authority/accounting foundation is installed at creation; it
+        # deliberately grants no entry until native V3 composition is ready.
+        raise HybridExecutionError("nested_unavailable", "nested machine execution is not enabled")
 
     @staticmethod
     def _supports_callbacks(native: Any) -> bool:
@@ -330,6 +367,11 @@ class HybridRuntime:
             and callable(getattr(self.semantic, "begin_closed_callback_accounting", None))
             and callable(getattr(self.semantic, "consume_closed_callback_accounting", None))
         )
+
+    @property
+    def nested_callback_abi_available(self) -> bool:
+        """Foundation ownership alone never advertises executable V4 support."""
+        return False
 
     @property
     def callback_requests(self) -> int:
@@ -1090,6 +1132,22 @@ class HybridRuntime:
             self._cpu = None
             self._control_buffer = None
             self._allowances.clear()
+
+
+_NESTED_OWNER_ROUTES = tuple((name, vars(HybridRuntime)[name]) for name in (
+    "_capture_nested_target", "_verify_nested_target", "_invoke_nested_child",
+    "_validate_registration", "_require_open", "_require_authority",
+))
+_NESTED_OWNER_SPECIAL_ROUTES = tuple((name, getattr(HybridRuntime, name)) for name in (
+    "__getattribute__", "__setattr__", "__delattr__",
+))
+_NESTED_OWNER_DICT_DESCRIPTOR = vars(HybridRuntime)["__dict__"]
+_NESTED_OWNER_ABSENT = object()
+_NESTED_OWNER_FIELD_ROUTES = tuple((name, vars(HybridRuntime).get(name, _NESTED_OWNER_ABSENT))
+                                 for name in (
+    "semantic", "_registrations", "_by_nonce", "_session_nonce", "_closed",
+    "_registration_failure", "_dictionary", "_dictionary_guard", "_memory",
+))
 
 
 __all__ = ["HybridExecutionError", "HybridRunReport", "HybridRuntime"]
