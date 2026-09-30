@@ -295,6 +295,12 @@ and repeated transitions. The unknown-XT error path remains intact.
 
 ## Phase 5 — Expanded hybrid interoperability
 
+The staged callback, ownership, budget and continuation contracts are locked
+in [`hybrid-interop-plan.md`](hybrid-interop-plan.md). The first implementation
+gate is opt-in v2 with sealed local CALL/RET sites and canonical integer
+callbacks; v1 remains unchanged. General task exceptions require their own
+shared-task ABI before admission.
+
 Add machine-to-semantic callbacks, nested transitions, exceptions,
 suspension/wake, and selected service access in separate qualified slices.
 Then specify native compiler/dictionary integration for guest JIT, machine
