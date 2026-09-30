@@ -132,9 +132,9 @@ def test_prepared_session_preserves_task_stacks_and_settles_real_work(
         assert before["semantic_execution"]["backend"] == executor
         assert before["machine_execution"]["instructions"] == 0
         capabilities = before["runtime"]["capabilities"]
-        assert capabilities["callback_suspension"] is False
-        assert capabilities.get("shared_task_exceptions", False) is False
-        assert capabilities.get("composite_suspension", False) is False
+        assert capabilities["callback_suspension"] is True
+        assert capabilities["shared_task_exceptions"] is True
+        assert capabilities["composite_suspension"] is True
         stepped = server.dispatch("step", {"count": 1})
         assert stepped["stop_reason"] == "completed"
         assert session.halted and not session.backend.suspended

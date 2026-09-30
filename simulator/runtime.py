@@ -41,6 +41,7 @@ from simulator.errors import (
 from simulator.field import HostedFieldALUService
 from simulator.foreign_control import ForeignContinuation
 from simulator.foreign_types import ForeignCallbackTarget, ForeignDefinition, ForeignResumeTarget
+from simulator.foreign_cursor import MachineTurn, ForeignMachineCursor
 from simulator.ir import (
     AbortIf,
     Branch,
@@ -532,6 +533,7 @@ class _DispatchFrame:
     root_id: int
     closed_guard: object = None
     task_root: object = None
+    machine_turn: MachineTurn | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,13 +554,14 @@ class _SuspendedExecution:
     meter: _StepMeter
     starting_steps: int
     root_id: int
-    cursor: _DispatchCursor
+    cursor: _DispatchCursor | ForeignMachineCursor
     return_snapshot: tuple[ReturnEntry, ...]
     capture_checkpoint: int
     had_pointer_capture: bool
     blocked_data_snapshot: tuple[int, ...]
     blocked_return_snapshot: tuple[ReturnEntry, ...]
     quantum_steps: int | None = None
+    machine_quantum_instructions: int | None = None
     wake_receipt: IdleWakeReceipt | None = None
     task_root: object = None
 
@@ -617,7 +620,7 @@ _TASK_DISPATCH_ALIASES = tuple((kind.__name__, kind) for kind in (
     Literal, Call, CallSelf, StoreValue, Branch, BranchZero, QuestionDo, Loop,
     PlusLoop, Return, Do, Unloop, RPush, RPop, RPeek, RPushPair, RPopPair,
     RPeekPair, RestoreDataStackPointer, RestoreReturnStackPointer, Idle, IdleUntil,
-    _DispatchCursor, _SuspendedExecution, ExecutionSuspension,
+    _DispatchCursor, _SuspendedExecution, ExecutionSuspension, MachineTurn, ForeignMachineCursor,
 ))
 
 
@@ -2672,6 +2675,7 @@ class MegaForthRuntime:
         context: ExecutionContext | None = None,
         step_budget: int | None = None,
         quantum_steps: int | None = None,
+        machine_quantum_instructions: int | None = None,
     ) -> RunResult:
         """Run to completion, IDL, or an optional host semantic quantum.
 
@@ -2691,6 +2695,7 @@ class MegaForthRuntime:
                     context=context,
                     step_budget=step_budget,
                     quantum_steps=quantum_steps,
+                    machine_quantum_instructions=machine_quantum_instructions,
                 )
             except BaseException:
                 # This entry point rejects nested dispatch before execution, so
@@ -2706,10 +2711,16 @@ class MegaForthRuntime:
         context: ExecutionContext | None,
         step_budget: int | None,
         quantum_steps: int | None,
+        machine_quantum_instructions: int | None,
     ) -> RunResult:
         """Implement :meth:`run_until_blocked` under its host guard."""
 
         active_context = self.main_context if context is None else context
+        if machine_quantum_instructions is not None:
+            if type(machine_quantum_instructions) is not int:
+                raise TypeError("machine_quantum_instructions must be an exact integer or None")
+            if not 1 <= machine_quantum_instructions <= 10_000_000:
+                raise ValueError("machine_quantum_instructions must be in 1..10000000")
         if quantum_steps is not None:
             if isinstance(quantum_steps, bool):
                 raise TypeError("quantum_steps must be an integer or None")
@@ -2739,6 +2750,7 @@ class MegaForthRuntime:
             allow_idle=True,
             starting_steps=starting_steps,
             quantum_steps=quantum_steps,
+            machine_quantum_instructions=machine_quantum_instructions,
         )
         semantic_steps = meter.steps - starting_steps
         if suspended is None:
@@ -2877,6 +2889,7 @@ class MegaForthRuntime:
     def _cancel_failed_task_suspension(self, blocked, failure):
         """Consume failed composite proof before restoring ordinary returns."""
         engine = self._foreign_tasks
+        machine_namespace = object.__getattribute__(engine, "__dict__")
         root = engine.task_suspension_owner(blocked=blocked)
         if root is None:
             root = engine._root_ownership[0] if engine._root_ownership is not None else blocked.task_root
@@ -2896,6 +2909,8 @@ class MegaForthRuntime:
         finally:
             self._suspended_execution = None
             self._idle_deadline_ms = None
+            dict.__setitem__(machine_namespace, "_machine_host_turn", None)
+            dict.__setitem__(machine_namespace, "_machine_selection", None)
             self._foreign_tasks.release_suspension_lease()
 
     def _continue_suspension_locked(
@@ -2903,14 +2918,23 @@ class MegaForthRuntime:
         blocked: _SuspendedExecution,
     ) -> RunResult:
         suspension = blocked.handle
+        machine_engine = self._foreign_tasks
+        machine_call, machine_call_seal = machine_engine._machine_methods[0][1:]
         if self.task_suspension_pending(suspension) or blocked.task_root is not None:
             try:
+                machine_call_seal.verify()
+                machine_call(machine_engine, "require_machine_selection", blocked.meter,
+                             blocked.machine_quantum_instructions)
                 self._foreign_tasks.resume_suspension(blocked)
             except BaseException as failure:
                 self._cancel_failed_task_suspension(blocked, failure)
                 raise
             if not blocked.cursor.host_yield:
                 self._idle_deadline_ms = None
+        elif blocked.machine_quantum_instructions is not None or machine_engine._machine_selection is not None:
+            machine_call_seal.verify()
+            machine_call(machine_engine, "require_machine_selection", blocked.meter,
+                         blocked.machine_quantum_instructions)
         if self._stack_snapshot(blocked.context.data) != blocked.blocked_data_snapshot:
             raise ExecutionError("data stack changed while dispatch was suspended")
         if self._stack_snapshot(blocked.context.returns) != blocked.blocked_return_snapshot:
@@ -2935,6 +2959,7 @@ class MegaForthRuntime:
 
         handle: ExecutionSuspension | None = None
         lease_installed = False
+        machine_namespace = object.__getattribute__(self._foreign_tasks, "__dict__")
         try:
             handle = self._allocate_suspension_handle()
             blocked.handle = handle
@@ -2947,6 +2972,8 @@ class MegaForthRuntime:
             lease_installed = True
             self._suspended_execution = blocked
         except BaseException as exc:
+            dict.__setitem__(machine_namespace, "_machine_host_turn", None)
+            dict.__setitem__(machine_namespace, "_machine_selection", None)
             if blocked.task_root is not None:
                 self._cancel_failed_task_suspension(blocked, exc)
             else:
@@ -2974,6 +3001,7 @@ class MegaForthRuntime:
     ) -> None:
         blocked = self._require_suspension(suspension, validate_task=False)
         engine = self._foreign_tasks
+        machine_namespace = object.__getattribute__(engine, "__dict__")
         root = engine.task_suspension_owner(blocked=blocked)
         if root is None:
             root = blocked.task_root
@@ -3005,6 +3033,8 @@ class MegaForthRuntime:
                 raise
         finally:
             self._suspended_execution = None
+            dict.__setitem__(machine_namespace, "_machine_host_turn", None)
+            dict.__setitem__(machine_namespace, "_machine_selection", None)
             self._idle_deadline_ms = None
             if root is None:
                 blocked.context._release_suspension(suspension.sequence)
@@ -3632,6 +3662,7 @@ class MegaForthRuntime:
         allow_idle: bool = False,
         starting_steps: int = 0,
         quantum_steps: int | None = None,
+        machine_quantum_instructions: int | None = None,
         closed_guard=None,
     ) -> _SuspendedExecution | None:
         """Execute atomically with respect to internal return-stack state."""
@@ -3690,8 +3721,16 @@ class MegaForthRuntime:
         primary_error = None
         suspended: _SuspendedExecution | None = None
         candidate: _SuspendedExecution | None = None
+        machine_outer = not self._active_dispatches
+        machine_engine = self._foreign_tasks
+        machine_namespace = object.__getattribute__(machine_engine, "__dict__")
+        machine_call, machine_call_seal = machine_engine._machine_methods[0][1:]
         self._active_dispatches.append(frame)
         try:
+            if machine_quantum_instructions is not None:
+                machine_call_seal.verify()
+                machine_call(machine_engine, "begin_host_machine_turn", frame,
+                             machine_quantum_instructions, resumed=False)
             host_abort_capture_leaf(word, context)
             cursor = self._execute_top(
                 word,
@@ -3703,6 +3742,9 @@ class MegaForthRuntime:
                     None if quantum_steps is None else meter.steps + quantum_steps
                 ),
             )
+            if machine_quantum_instructions is not None:
+                machine_call_seal.verify()
+                machine_call(machine_engine, "require_machine_turn", frame)
             if cursor is None:
                 completed_successfully = True
             else:
@@ -3724,6 +3766,7 @@ class MegaForthRuntime:
                     blocked_data_snapshot=self._stack_snapshot(context.data),
                     blocked_return_snapshot=self._stack_snapshot(context.returns),
                     quantum_steps=quantum_steps,
+                    machine_quantum_instructions=machine_quantum_instructions,
                     task_root=frame.task_root,
                 )
                 if frame.task_root is not None:
@@ -3840,6 +3883,10 @@ class MegaForthRuntime:
                         preserve_capture_evidence = True
                 if not unsafe_closed_cleanup and not preserve_capture_evidence:
                     context.returns.restore_pointer_captures(capture_checkpoint)
+                if machine_outer:
+                    dict.__setitem__(machine_namespace, "_machine_host_turn", None)
+                    if suspended is None:
+                        dict.__setitem__(machine_namespace, "_machine_selection", None)
                 active = self._active_dispatches.pop()
                 if active is not frame:
                     raise AssertionError("active semantic dispatch stack is corrupted")
@@ -3848,7 +3895,7 @@ class MegaForthRuntime:
     def _resume_guarded(
         self,
         suspended: _SuspendedExecution,
-    ) -> _DispatchCursor | None:
+    ) -> _DispatchCursor | ForeignMachineCursor | None:
         """Continue a detached dispatch under its original host guard."""
 
         context = suspended.context
@@ -3865,9 +3912,19 @@ class MegaForthRuntime:
         preserve_capture_evidence = False
         completed_successfully = False
         primary_error = None
-        cursor: _DispatchCursor | None = None
+        cursor: _DispatchCursor | ForeignMachineCursor | None = None
+        machine_engine = self._foreign_tasks
+        machine_namespace = object.__getattribute__(machine_engine, "__dict__")
+        machine_call, machine_call_seal = machine_engine._machine_methods[0][1:]
         self._active_dispatches.append(frame)
         try:
+            turn = None
+            if suspended.machine_quantum_instructions is not None:
+                machine_call_seal.verify()
+                turn = machine_call(machine_engine, "begin_host_machine_turn",
+                                    frame, suspended.machine_quantum_instructions, resumed=True)
+            if frame.task_root is not None:
+                frame.task_root.begin_machine_turn(turn)
             cursor = self._execute_top(
                 None,
                 context,
@@ -3881,6 +3938,9 @@ class MegaForthRuntime:
                     else suspended.meter.steps + suspended.quantum_steps
                 ),
             )
+            if suspended.machine_quantum_instructions is not None:
+                machine_call_seal.verify()
+                machine_call(machine_engine, "require_machine_turn", frame)
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -4013,6 +4073,9 @@ class MegaForthRuntime:
                     context.returns.restore_pointer_captures(
                         suspended.capture_checkpoint
                     )
+                dict.__setitem__(machine_namespace, "_machine_host_turn", None)
+                if primary_error is not None or cursor is None:
+                    dict.__setitem__(machine_namespace, "_machine_selection", None)
                 active = self._active_dispatches.pop()
                 if active is not frame:
                     raise AssertionError("active semantic dispatch stack is corrupted")
@@ -4245,6 +4308,8 @@ class MegaForthRuntime:
     def _continue_foreign(self, action, context, meter):
         while type(action) is ForeignCallbackTarget and action.word is None:
             action = self._current_task_root(context).callback_return()
+        if type(action) is ForeignMachineCursor:
+            return action
         if type(action) is ForeignResumeTarget:
             return None if action.word is None else (action.word, action.ip)
         if type(action) is not ForeignCallbackTarget:
@@ -4261,21 +4326,30 @@ class MegaForthRuntime:
         *,
         root_id: int,
         fault_request: _GuestFaultRequest | None = None,
-        resume_cursor: _DispatchCursor | None = None,
+        resume_cursor: _DispatchCursor | ForeignMachineCursor | None = None,
         allow_idle: bool = False,
         quantum_limit: int | None = None,
         closed_guard=None,
-    ) -> _DispatchCursor | None:
+    ) -> _DispatchCursor | ForeignMachineCursor | None:
         if closed_guard is not None:
             closed_guard.begin(word, root_id)
         fault_entry = fault_request is not None
         if resume_cursor is not None:
             if word is not None or fault_request is not None:
                 raise AssertionError("resumed dispatch cannot have a new entry target")
-            current = self._resolve_dispatch_word(resume_cursor.xt)
-            if not isinstance(current.implementation, ColonDefinition):
-                raise ExecutionError("suspended definition is no longer executable")
-            ip = resume_cursor.ip
+            if type(resume_cursor) is ForeignMachineCursor:
+                task = self._current_task_root(context)
+                if task is None:
+                    raise ExecutionError("machine cursor lost its original task root")
+                entered = self._continue_foreign(task.resume_machine(resume_cursor), context, meter)
+                if entered is None or type(entered) is ForeignMachineCursor:
+                    return entered
+                current, ip = entered
+            else:
+                current = self._resolve_dispatch_word(resume_cursor.xt)
+                if not isinstance(current.implementation, ColonDefinition):
+                    raise ExecutionError("suspended definition is no longer executable")
+                ip = resume_cursor.ip
         else:
             current = None
             ip = 0
@@ -4295,8 +4369,8 @@ class MegaForthRuntime:
                 if type(implementation) is ForeignDefinition:
                     entered = self._call_from_colon(target, caller=None, return_ip=0,
                                                     context=context, meter=meter)
-                    if entered is None:
-                        return
+                    if entered is None or type(entered) is ForeignMachineCursor:
+                        return entered
                     target, entry_ip = entered
                     fault_entry = True
                     break
@@ -4473,6 +4547,8 @@ class MegaForthRuntime:
                         meter=meter,
                         closed_guard=closed_guard,
                     )
+                    if type(entered) is ForeignMachineCursor:
+                        return entered
                     if entered is None:
                         ip += 1
                     else:
@@ -4485,6 +4561,8 @@ class MegaForthRuntime:
                         context=context,
                         meter=meter,
                     )
+                    if type(entered) is ForeignMachineCursor:
+                        return entered
                     if entered is None:
                         ip += 1
                     else:
@@ -4629,8 +4707,8 @@ class MegaForthRuntime:
                         if type(entry) is ForeignContinuation:
                             task.ordinary_return(entry)
                             entered = self._continue_foreign(task.callback_return(entry), context, meter)
-                            if entered is None:
-                                return
+                            if entered is None or type(entered) is ForeignMachineCursor:
+                                return entered
                             current, ip = entered
                             continue
                     continuation = context.returns.pop_continuation()
@@ -4707,7 +4785,7 @@ class MegaForthRuntime:
         meter: _StepMeter,
         closed_guard=None,
         callback_entry=False,
-    ) -> tuple[Word, int] | None:
+    ) -> tuple[Word, int] | ForeignMachineCursor | None:
         if closed_guard is not None:
             implementation = target.implementation
             if type(implementation) is PrimitiveDefinition:
@@ -4801,6 +4879,8 @@ class MegaForthRuntime:
                 action = task.callback_return()
             while type(action) is ForeignCallbackTarget and action.word is None:
                 action = task.callback_return()
+            if type(action) is ForeignMachineCursor:
+                return action
             if type(action) is ForeignResumeTarget:
                 return None if action.word is None else (action.word, action.ip)
             if type(action) is not ForeignCallbackTarget:

@@ -921,3 +921,14 @@ class _RegistrationBatch:
 
 _ADAPTER_ROUTES = tuple((name, value) for name, value in vars(NativeTaskAdapter).items()
                         if type(value) in (FunctionType, property))
+
+
+# Keep original function bodies alongside the existing eager route identities.
+# Read-only application capability checks must not create a new late baseline.
+_ADAPTER_CAPABILITY_ROUTES = tuple(
+    (NativeTaskAdapter, name, route, (callback, callback.__code__, callback.__globals__,
+        callback.__defaults__, callback.__kwdefaults__,
+        tuple(cell.cell_contents for cell in (callback.__closure__ or ()))))
+    for name, route in _ADAPTER_ROUTES
+    for callback in ((route.fget if type(route) is property else route),)
+)

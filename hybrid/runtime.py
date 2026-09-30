@@ -143,6 +143,7 @@ class _TaskOwnerAuthority:
     cleanup: object
     closed: object
     engine: object
+    capabilities: object
 
 
 _TASK_OWNER_AUTHORITIES = {}
@@ -166,6 +167,194 @@ def _task_owner_authority(owner, adapter=None):
     return held, changed
 
 
+
+def _task_capability_authority(owner, adapter):
+    """Read original selected support without entering either execution engine."""
+    from types import FunctionType
+    from hybrid.task_adapter import NativeTaskAdapter, _ADAPTER_CAPABILITY_ROUTES, _NATIVE_METHODS
+    from simulator.foreign_runtime import (
+        ForeignTaskEngine, _FunctionSeal, _TASK_CAPABILITY_ROUTES, _TASK_CAPABILITY_SEAL_FIELDS,
+    )
+    from simulator.foreign_dispatch import TaskDispatchRoot
+
+    runtime, engine, native, runner = adapter._semantic, adapter._engine, adapter._native, adapter._runner
+    classes = (HybridRuntime, NativeTaskAdapter, MegaForthRuntime, ForeignTaskEngine)
+    instances = (owner, adapter, runtime, engine)
+    namespaces = tuple(object.__getattribute__(instance, "__dict__") for instance in instances)
+    namespace_routes = tuple(vars(kind)["__dict__"] for kind in classes)
+    owner_ns, adapter_ns, runtime_ns, engine_ns = namespaces
+    memory, dictionary, context = runtime.memory, runtime.dictionary, runtime.main_context
+    runner_kind = type(runner)
+    native_types, native_routes = adapter._native_types, adapter._runner_routes
+    machine_methods = dict.get(engine_ns, "_machine_methods")
+    machine_api = dict.get(engine_ns, "_machine_api")
+    machine_runtime_functions = dict.get(engine_ns, "_machine_runtime_functions")
+    dispatch_routes = dict.get(engine_ns, "_dispatch_routes")
+    dispatch_functions = dict.get(engine_ns, "_dispatch_functions")
+    versions = tuple((name, vars(ForeignTaskEngine).get(name)) for name in (
+        "TASK_CALLBACK_ABI_VERSION", "TASK_CALLBACK_SUSPENSION_VERSION", "TASK_MACHINE_QUANTUM_VERSION"))
+
+    def from_seal(seal):
+        if type(seal) is not _FunctionSeal:
+            return None
+        return tuple(slot.__get__(seal, _FunctionSeal) for slot in _TASK_CAPABILITY_SEAL_FIELDS)
+
+    dispatch_evidence = (tuple(from_seal(seal) for seal in dispatch_functions)
+                         if type(dispatch_functions) is tuple else ())
+    machine_evidence = (tuple(from_seal(row[2]) for row in machine_methods)
+                        if type(machine_methods) is tuple else ())
+    machine_runtime_evidence = (tuple(from_seal(seal) for seal in machine_runtime_functions)
+                                if type(machine_runtime_functions) is tuple else ())
+
+    def unchanged(evidence):
+        # Exact Python function fields and cell identities require no user
+        # callable, including the mutable _FunctionSeal.verify function body.
+        if evidence is None:
+            return False
+        callback, code, globals_, defaults, kwdefaults, closure = evidence
+        if (type(callback) is not FunctionType or callback.__code__ is not code
+                or callback.__globals__ is not globals_ or callback.__defaults__ is not defaults
+                or callback.__kwdefaults__ is not kwdefaults):
+            return False
+        live = callback.__closure__ or ()
+        if len(live) != len(closure):
+            return False
+        try:
+            return all(cell.cell_contents is expected for cell, expected in zip(live, closure))
+        except ValueError:
+            return False
+
+    def selected(kind, names):
+        # These tables were built with their defining modules, not when a host
+        # later installs an adapter over an already constructed runtime.
+        table = _ADAPTER_CAPABILITY_ROUTES if kind is NativeTaskAdapter else _TASK_CAPABILITY_ROUTES
+        result = []
+        for name in names:
+            row = next((row for row in table if row[0] is kind and row[1] == name), None)
+            if row is None:
+                return None
+            result.append(row)
+        return tuple(result)
+
+    synchronous = (
+        selected(_FunctionSeal, ("verify",)),
+        selected(NativeTaskAdapter, tuple(row[1] for row in _ADAPTER_CAPABILITY_ROUTES
+                                         if row[1] != "validate_parked")),
+        selected(ForeignTaskEngine, ("registration_batch", "root_for", "finish_root",
+            "adapter_root_policy", "task_export_dependencies", "task_semantic_receipt",
+            "claim_machine_profile", "_require_task")),
+        selected(MegaForthRuntime, ("execute", "run_until_blocked", "_run_until_blocked",
+            "_execute_guarded", "_execute_top", "_execute_top_inner", "_continue_foreign")),
+    )
+    suspension = (
+        selected(NativeTaskAdapter, ("validate_parked",)),
+        selected(ForeignTaskEngine, ("park_suspension", "resume_suspension", "task_suspension_owner",
+            "parked_idle_wake_due", "parked_idle_uptime", "restore_suspension_cleanup",
+            "release_suspension_lease", "_validate_parked_adapter")),
+        selected(MegaForthRuntime, ("task_suspension_pending", "deliver_idle_wake", "resume",
+            "cancel_suspension", "idle_wake_due", "idle_wake_delay_s")),
+    )
+    composite = (
+        selected(ForeignTaskEngine, ("begin_host_machine_turn", "require_machine_turn",
+            "require_machine_selection", "_machine_call", "_machine_host_caller")),
+        selected(MegaForthRuntime, ("resume_yielded", "_resume_guarded", "_continue_suspension_locked")),
+    )
+
+    def routes_valid(groups):
+        for group in groups:
+            if group is None:
+                return False
+            for kind, name, route, evidence in group:
+                if vars(kind).get(name) is not route or not unchanged(evidence):
+                    return False
+                if any(current is kind and name in namespace
+                       for current, namespace in zip(classes, namespaces)):
+                    return False
+        return True
+
+    def original_engine_routes():
+        if (dict.get(engine_ns, "_dispatch_kind") is not TaskDispatchRoot
+                or dict.get(engine_ns, "_dispatch_routes") is not dispatch_routes
+                or dict.get(engine_ns, "_dispatch_functions") is not dispatch_functions
+                or type(dispatch_routes) is not tuple or type(dispatch_functions) is not tuple):
+            return False
+        return (all(vars(TaskDispatchRoot).get(name) is route for name, route in dispatch_routes)
+                and all(unchanged(evidence) for evidence in dispatch_evidence))
+
+    def original_machine_routes():
+        if (dict.get(engine_ns, "_machine_methods") is not machine_methods
+                or dict.get(engine_ns, "_machine_api") is not machine_api
+                or dict.get(engine_ns, "_machine_runtime_functions") is not machine_runtime_functions
+                or dict.get(engine_ns, "_machine_namespace") is not engine_ns
+                or type(machine_methods) is not tuple or len(machine_methods) != 5
+                or type(machine_api) is not tuple or len(machine_api) != 2
+                or type(machine_runtime_functions) is not tuple):
+            return False
+        return (machine_api[0] is machine_methods[0][1] and machine_api[1] is machine_methods[0][2]
+                and all(name not in engine_ns and vars(ForeignTaskEngine).get(name) is route
+                        for name, route, _seal in machine_methods)
+                and all(unchanged(evidence) for evidence in (*machine_evidence, *machine_runtime_evidence)))
+
+    def version(index):
+        name, value = versions[index]
+        current = vars(ForeignTaskEngine).get(name)
+        return type(value) is int and value == 1 and type(current) is int and current == value
+
+    def native_route(name):
+        for key, route, bound in native_routes:
+            if key == name:
+                return (vars(runner_kind).get(name) is route
+                        and ((type(bound) is BuiltinMethodType and bound.__self__ is runner)
+                             or (type(bound) is MethodType and bound.__self__ is runner
+                                 and type(bound.__func__) is BuiltinFunctionType)))
+        return False
+
+    def query():
+        unavailable = (False, False, False)
+        for instance, kind, namespace, descriptor in zip(instances, classes, namespaces, namespace_routes):
+            if (type(instance) is not kind or vars(kind).get("__dict__") is not descriptor
+                    or kind.__getattribute__ is not object.__getattribute__
+                    or "__getattr__" in vars(kind)
+                    or descriptor.__get__(instance, kind) is not namespace
+                    or any(type(key) is not str for key in namespace)):
+                return unavailable
+        if (dict.get(owner_ns, "_closed") is not False
+                or dict.get(owner_ns, "_registration_failure") is not None
+                or dict.get(owner_ns, "semantic") is not runtime
+                or dict.get(owner_ns, "_native") is not native
+                or dict.get(owner_ns, "_memory") is not memory
+                or dict.get(owner_ns, "_dictionary") is not dictionary
+                or dict.get(adapter_ns, "_owner") is not owner
+                or dict.get(adapter_ns, "_semantic") is not runtime
+                or dict.get(adapter_ns, "_engine") is not engine
+                or dict.get(adapter_ns, "_runner") is not runner
+                or dict.get(adapter_ns, "_native_types") is not native_types
+                or dict.get(adapter_ns, "_runner_routes") is not native_routes
+                or dict.get(adapter_ns, "_closed") is not False
+                or dict.get(adapter_ns, "_failed") is not None
+                or dict.get(adapter_ns, "_delivery_failed") is not False
+                or dict.get(runtime_ns, "_foreign_tasks") is not engine
+                or dict.get(runtime_ns, "memory") is not memory
+                or dict.get(runtime_ns, "dictionary") is not dictionary
+                or dict.get(runtime_ns, "main_context") is not context
+                or dict.get(engine_ns, "_runtime") is not runtime
+                or dict.get(engine_ns, "_dictionary") is not dictionary
+                or dict.get(engine_ns, "_context") is not context
+                or dict.get(engine_ns, "_publication_failure") is not None
+                or dict.get(engine_ns, "_execution_failure") is not None):
+            return unavailable
+        revision = getattr(native, "_TASK_ROUTINE_TRANSPORT_REVISION", None)
+        if (type(revision) is not int or revision != 2
+                or type(runner) is not runner_kind
+                or any(getattr(native, name, None) is not kind for name, kind in native_types)
+                or not all(native_route(name) for name in _NATIVE_METHODS)
+                or not version(0) or not routes_valid(synchronous) or not original_engine_routes()):
+            return unavailable
+        parked = version(1) and native_route("validate_parked") and routes_valid(suspension)
+        scheduled = parked and version(2) and routes_valid(composite) and original_machine_routes()
+        return True, parked, scheduled
+
+    return query
 def _task_accounting_authority(owner, adapter):
     """Retain one root's counter proof independently of public projections."""
     from hybrid.task_adapter import NativeTaskAdapter
@@ -1436,7 +1625,16 @@ class HybridRuntime:
             authority, changed = _task_owner_authority(self)
             if changed:
                 raise HybridExecutionError("callback_accounting", "task installation authority changed")
-            return authority.accounting("status")
+            from shared.foreign_abi import FOREIGN_ABI, FOREIGN_ABI_VERSION, MAX_DEPTH
+            result = authority.accounting("status")
+            shared, parked, composite = authority.capabilities()
+            result.update(
+                abi=FOREIGN_ABI, abi_version=FOREIGN_ABI_VERSION,
+                native_transport_revision=2, max_depth=MAX_DEPTH, prepared_only=True,
+                shared_task_exceptions=shared, callback_suspension=parked,
+                composite_suspension=composite,
+            )
+            return result
 
     def _require_open(self) -> None:
         if self._closed:
@@ -1459,7 +1657,7 @@ class HybridRuntime:
             raise HybridExecutionError("invalid_entry", "this owner already has its task adapter")
         accounting = _task_accounting_authority(self, adapter)
         authority = _TaskOwnerAuthority(self, adapter, accounting, adapter._native_cleanup,
-                                        adapter._native_closed, adapter._engine)
+                                        adapter._native_closed, adapter._engine, _task_capability_authority(self, adapter))
         owner_id = id(self)
         table = _TASK_OWNER_AUTHORITIES
 

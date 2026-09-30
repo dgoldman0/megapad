@@ -28,6 +28,7 @@ class HybridSession(SimulatorMachineSession):
         rows: int = 30,
         semantic_step_budget: int | None = None,
         semantic_quantum_steps: int | None = None,
+        machine_quantum_instructions: int | None = None,
         rich_terminal: RichTerminalSessionConfig | None = None,
         manifest_abi_version: int | None = None,
     ) -> None:
@@ -46,6 +47,16 @@ class HybridSession(SimulatorMachineSession):
         if (manifest_abi_version == 5
                 and getattr(hybrid, "service_callback_abi_available", False) is not True):
             raise RuntimeError("hybrid scalar callbacks require qualified private scalar services and native transport v2")
+        if machine_quantum_instructions is not None:
+            from shared.foreign_abi import MAX_ROOT_INSTRUCTIONS
+            if type(machine_quantum_instructions) is not int:
+                raise TypeError("machine_quantum_instructions must be an exact integer or None")
+            if not 1 <= machine_quantum_instructions <= MAX_ROOT_INSTRUCTIONS:
+                raise ValueError(
+                    f"machine_quantum_instructions must be in 1..{MAX_ROOT_INSTRUCTIONS}")
+            task = hybrid.task_execution_status
+            if task is None or task["composite_suspension"] is not True:
+                raise RuntimeError("finite machine quantum requires qualified composite task transport")
         self.hybrid = hybrid
         self._manifest_abi_version = manifest_abi_version
         super().__init__(
@@ -55,6 +66,7 @@ class HybridSession(SimulatorMachineSession):
             rows=rows,
             semantic_step_budget=semantic_step_budget,
             semantic_quantum_steps=semantic_quantum_steps,
+            machine_quantum_instructions=machine_quantum_instructions,
             rich_terminal=rich_terminal,
         )
 
@@ -121,6 +133,10 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 profiles.append("closed_integer_nested")
             if "scalar_fp_state" in effects:
                 profiles.append("scalar_fp_state")
+            task_execution = hybrid.task_execution_status
+            task_shared = task_execution is not None and task_execution["shared_task_exceptions"] is True
+            task_parked = task_execution is not None and task_execution["callback_suspension"] is True
+            task_composite = task_execution is not None and task_execution["composite_suspension"] is True
             result["backend"] = "hybrid"
             result["runtime"]["mode"] = "hybrid"
             result["runtime"]["capabilities"].update(
@@ -128,12 +144,14 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 declared_machine_routines=True,
                 arbitrary_machine_code=False,
                 machine_mmio=False,
-                semantic_callbacks=bool(exports),
+                semantic_callbacks=bool(exports) or task_shared,
                 closed_integer_callbacks=closed_policies,
                 arbitrary_semantic_callbacks=False,
                 nested_machine_callbacks=nested_profile and nested_available,
                 private_scalar_fp_v1=service_profile and service_available,
-                callback_suspension=False,
+                callback_suspension=task_parked,
+                shared_task_exceptions=task_shared,
+                composite_suspension=task_composite,
                 native_bios_boot=False,
                 multicore=False,
                 native_snapshot=False,
@@ -174,6 +192,12 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 "dispatch_callback_limit": hybrid.dispatch_callback_limit,
                 "dispatch_callback_semantic_limit": hybrid.dispatch_callback_semantic_limit,
             }
+            if task_execution is not None:
+                result["task_execution"] = {
+                    **task_execution,
+                    "registered_words": list(task_execution["registered_words"]),
+                    "quantum_instructions": self.semantic_session.machine_quantum_instructions,
+                }
             if detailed:
                 result["hybrid"] = result.pop("simulator")
             return result

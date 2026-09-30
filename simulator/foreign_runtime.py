@@ -15,7 +15,7 @@ from sys import _getframe as _task_getframe
 
 from shared.cells import CELL_BYTES, MASK64
 from shared.foreign_abi import (
-    ForeignAccessV1, ForeignCallbackRequestV1, ForeignCancellationV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1,
+    ForeignAccessV1, ForeignCallbackRequestV1, ForeignCancellationV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1, ForeignRunnableYieldV1,
     ForeignSignatureV1, ForeignSpanV1, ForeignStateV1, MAX_CALLBACK_REQUESTS, MAX_DEPTH,
     MAX_ROOT_CALLBACK_SEMANTIC_STEPS, MAX_ROOT_ENTRIES, MAX_ROOT_INSTRUCTIONS,
 )
@@ -23,6 +23,7 @@ from simulator import core_words, stacks as _stack_module, runtime as _runtime_m
 from simulator import foreign_effects as _effect_module
 from simulator import memory as _memory_module
 from simulator.foreign_effects import TaskEffectGuard, TaskEffectScope, _EFFECT_ROUTES
+from simulator.foreign_cursor import MachineTurn, ForeignMachineCursor
 from simulator.foreign_control import ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn
 from simulator.dictionary import BodyAllocationLease, Dictionary, Word
 from simulator.errors import ExecutionError, ForthAbort
@@ -38,7 +39,7 @@ from simulator.memory import SparseAddressSpace, _QualifiedOrdinarySpan, _Sparse
 from simulator.runtime import (
     ColonDefinition, ConstantDefinition, CreatedDefinition, DoesBodyRef,
     ExecutionContext, MegaForthRuntime, PrimitiveDefinition, ValueDefinition,
-    _StepMeter, _DispatchCursor, _SuspendedExecution, ExecutionSuspension, _TASK_METER_NAMESPACE,
+    _StepMeter, _DispatchFrame, _DispatchCursor, _SuspendedExecution, ExecutionSuspension, _TASK_METER_NAMESPACE,
     _TASK_DISPATCH_ALIASES,
 )
 from simulator.stacks import DataStack, ReturnStack, Continuation, FaultAbort
@@ -83,9 +84,9 @@ _CORE_HELPERS = tuple((name, value) for name, value in vars(core_words).items()
 _METADATA_ROUTES = tuple((kind, tuple(vars(kind).items())) for kind in (
     Word, BodyAllocationLease, PrimitiveDefinition, ColonDefinition, ConstantDefinition, ValueDefinition,
     CreatedDefinition, DoesBodyRef, *_OPERATION_FIELDS,
-    ForeignSignatureV1, ForeignSpanV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1, ForeignCallbackRequestV1, ForeignCancellationV1,
+    ForeignSignatureV1, ForeignSpanV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1, ForeignCallbackRequestV1, ForeignRunnableYieldV1, ForeignCancellationV1,
     ExecutionContext, ForeignDefinition, ForeignResumeTarget, ForeignCallbackTarget, TaskSemanticReceiptV1,
-    _DispatchCursor, _SuspendedExecution, ExecutionSuspension,
+    _DispatchFrame, _DispatchCursor, _SuspendedExecution, ExecutionSuspension, MachineTurn, ForeignMachineCursor,
     _QualifiedOrdinarySpan, _SparseRegion, _DenseRegion, RegionSpec, _ResolvedSpan,
     Continuation, FaultAbort, ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn,
 )) + _EFFECT_ROUTES
@@ -589,6 +590,11 @@ class TaskRegistrationBatch:
 class ForeignTaskEngine:
     """One runtime's opt-in task registrations and exact captured dependencies."""
 
+    # Application qualifications; value metadata never grants entry authority.
+    TASK_CALLBACK_ABI_VERSION = 1
+    TASK_CALLBACK_SUSPENSION_VERSION = 1
+    TASK_MACHINE_QUANTUM_VERSION = 1
+
     def __init__(self, runtime, *, core_installed):
         self._runtime = runtime
         self._dictionary = runtime.dictionary
@@ -610,6 +616,17 @@ class ForeignTaskEngine:
         self._parked_task = None
         self._parked_ownership = None
         self._native_chain = None
+        self._machine_selection = None
+        self._machine_host_turn = None
+        self._machine_runtime_functions = tuple(_FunctionSeal.capture(vars(MegaForthRuntime)[name])
+            for name in ("_execute_guarded", "_resume_guarded"))
+        machine_names = ("_machine_call", "_machine_host_caller", "begin_host_machine_turn",
+                         "require_machine_selection", "require_machine_turn")
+        self._machine_methods = tuple((name, vars(ForeignTaskEngine)[name],
+                                        _FunctionSeal.capture(vars(ForeignTaskEngine)[name]))
+                                       for name in machine_names)
+        self._machine_namespace = vars(ForeignTaskEngine)["__dict__"].__get__(self, ForeignTaskEngine)
+        self._machine_api = (self._machine_methods[0][1], self._machine_methods[0][2])
         self._publication_failure = None
         self._execution_failure = None
         self._memory_evidence = None
@@ -643,8 +660,8 @@ class ForeignTaskEngine:
             _Invocation, _Tail, _LedgerState, _RootPolicy, _InvocationAccount, _SemanticAccount))
         self._ledger_namespace_route = vars(ForeignRootLedger)["__dict__"]
         self._parked_value_kinds = tuple(kind for kind, _fields in self._parked_metadata) + (
-            _DispatchCursor, ExecutionSuspension, Continuation, FaultAbort, ForeignContinuation,
-            ForeignCallbackRequestV1, ForeignReceiptV1, ForeignResumeTarget, ForeignCallbackTarget,
+            _DispatchFrame, _DispatchCursor, MachineTurn, ForeignMachineCursor, ExecutionSuspension, Continuation, FaultAbort, ForeignContinuation,
+            ForeignCallbackRequestV1, ForeignRunnableYieldV1, ForeignReceiptV1, ForeignResumeTarget, ForeignCallbackTarget,
             TaskEffectScope, _LiveReturn)
         self._dispatch_kind = TaskDispatchRoot
         self._dispatch_routes = tuple(vars(TaskDispatchRoot).items())
@@ -778,6 +795,109 @@ class ForeignTaskEngine:
             values["root_id"], sequence, values["semantic_steps"], receipt)
         self._semantic_receipt = record
         return receipt
+
+    def _machine_call(self, name, *args, **kwargs):
+        """Call only originally captured helpers, rejecting late shadows first."""
+        fields = vars(ForeignTaskEngine)
+        namespace = vars(ForeignTaskEngine)["__dict__"].__get__(self, ForeignTaskEngine)
+        if (namespace is not self._machine_namespace or any(type(key) is not str for key in fields)
+                or any(type(key) is not str for key in namespace)):
+            raise ForeignTaskError("machine scheduling helper namespace changed")
+        api = dict.get(namespace, "_machine_api")
+        original_api = self._machine_methods[0]
+        if (type(api) is not tuple or len(api) != 2
+                or api[0] is not original_api[1] or api[1] is not original_api[2]):
+            raise ForeignTaskError("machine scheduling helper API identity changed")
+        callback = None
+        for method, original, seal in self._machine_methods:
+            if method in namespace or fields.get(method) is not original:
+                raise ForeignTaskError("machine scheduling helper route changed")
+            seal.verify()
+            if method == name:
+                callback = original
+        if callback is None or name == "_machine_call":
+            raise ForeignTaskError("unknown machine scheduling helper")
+        return callback(self, *args, **kwargs)
+
+    def _machine_host_caller(self, frame):
+        caller = _task_getframe(3)
+        for seal in self._machine_runtime_functions:
+            seal.verify()
+        if (not any(caller.f_code is seal.code for seal in self._machine_runtime_functions)
+                or caller.f_locals.get("self") is not self._runtime
+                or caller.f_locals.get("frame") is not frame):
+            raise ForeignTaskError("machine turn requires its original runtime host boundary")
+
+    def begin_host_machine_turn(self, frame, limit, *, resumed):
+        """Pin the original selection before even the first semantic tick."""
+        self._machine_host_caller(frame)
+        _require_metadata()
+        if type(frame) is not _DispatchFrame or type(resumed) is not bool:
+            raise ForeignTaskError("machine turn requires its exact outer dispatch frame")
+        frames = self._runtime._active_dispatches
+        if not frames or frames[-1] is not frame:
+            raise ForeignTaskError("machine turn frame is not active")
+        if len(frames) != 1:
+            if limit is not None or resumed:
+                raise ForeignTaskError("nested host dispatch cannot select machine scheduling")
+            return None
+        if resumed:
+            self.require_machine_selection(frame.meter, limit)
+        elif self._machine_selection is not None or self._machine_host_turn is not None:
+            raise ForeignTaskError("machine scheduling selection is already owned")
+        if limit is None:
+            if frame.machine_turn is not None:
+                raise ForeignTaskError("synchronous host frame acquired a machine turn")
+            return None
+        _uint(limit, "machine quantum instructions", minimum=1, maximum=MAX_ROOT_INSTRUCTIONS)
+        kind = next(kind for kind, _routes in _METADATA_ROUTES if kind is MachineTurn)
+        turn = object.__new__(kind)
+        slot = next(value for owner, routes in _METADATA_ROUTES if owner is kind
+                    for name, value in routes if name == "limit")
+        slot.__set__(turn, limit)
+        frame_slot = next(value for owner, routes in _METADATA_ROUTES if owner is _DispatchFrame
+                          for name, value in routes if name == "machine_turn")
+        record = (frame, turn, limit, frame.context, frame.meter, frame.root_id, frames)
+        if not resumed:
+            self._machine_selection = (frame.meter, limit)
+        frame_slot.__set__(frame, turn)
+        self._machine_host_turn = record
+        return turn
+
+    def require_machine_selection(self, meter, limit):
+        selection = self._machine_selection
+        if selection is None:
+            if limit is not None:
+                raise ForeignTaskError("machine scheduling has no original selected limit")
+            return
+        if (type(selection) is not tuple or len(selection) != 2
+                or selection[0] is not meter or type(limit) is not int or limit != selection[1]):
+            raise ForeignTaskError("machine scheduling changed its original selected limit")
+
+    def require_machine_turn(self, frame):
+        _require_metadata()
+        if type(frame) is not _DispatchFrame:
+            raise ForeignTaskError("machine scheduling lost its exact outer frame")
+        record = self._machine_host_turn
+        if record is None:
+            if frame.machine_turn is not None:
+                raise ForeignTaskError("machine turn was not issued by the original runtime")
+            return None
+        original, turn, limit, context, meter, root_id, frames = record
+        if frame is not original:
+            if (frame.machine_turn is None and self._runtime._active_dispatches is frames
+                    and frames and frames[0] is original and any(item is frame for item in frames[1:])):
+                return None
+            raise ForeignTaskError("machine turn belongs to a different host frame")
+        if (self._runtime._active_dispatches is not frames or not frames or frames[0] is not frame
+                or frame.machine_turn is not turn or type(turn) is not MachineTurn
+                or type(turn.limit) is not int or turn.limit != limit
+                or frame.context is not context or frame.meter is not meter
+                or type(frame.root_id) is not int or frame.root_id != root_id
+                or frame.closed_guard is not None):
+            raise ForeignTaskError("machine turn changed after its original host admission")
+        self.require_machine_selection(meter, limit)
+        return turn
 
     def _native_transition_caller(self, root, names):
         frame = _task_getframe(2)
@@ -971,8 +1091,15 @@ class ForeignTaskEngine:
                     or type(frame.invocation_id) is not int
                     or frame.invocation_id != account.invocation_id
                     or frame.binding is not self.require_definition(frame.binding.word)
-                    or account.registration is not frame.binding.metadata.registration
-                    or type(frame.request) is not ForeignCallbackRequestV1
+                    or account.registration is not frame.binding.metadata.registration):
+                raise ForeignTaskError("task suspension lost its exact frame binding")
+            if frame.request is None:
+                if (frame is not frames[-1] or account.state is not ForeignStateV1.YIELDED
+                        or frame.capture is not None or frame.scope is not None or frame.cookie is not None
+):
+                    raise ForeignTaskError("task suspension lost its exact runnable leaf")
+                continue
+            if (type(frame.request) is not ForeignCallbackRequestV1
                     or frame.token is not frame.request.operation_token
                     or frame.capture is not self.require_export(frame.request.export)
                     or frame.scope is None or frame.cookie is None
@@ -982,11 +1109,15 @@ class ForeignTaskEngine:
                 raise ForeignTaskError("task suspension lost its exact callback frame")
             _value(frame.request, ForeignCallbackRequestV1)
         capture, scope = root._scope()
+        runnable = bool(frames and frames[-1].request is None)
         if capture is not None:
             self._verify_export(capture)
-            root.effects.require_binding(root.issuer, scope)
-        elif root.context.data._task_effect_guard is not None or root.context.returns._task_effect_guard is not None:
-            raise ForeignTaskError("empty task scope retained foreign effect authority")
+            if not runnable:
+                root.effects.require_binding(root.issuer, scope)
+        if (capture is None or runnable) and (root.effects._scope is not None
+                or root.context.data._task_effect_guard is not None
+                or root.context.returns._task_effect_guard is not None):
+            raise ForeignTaskError("runnable or empty task scope retained foreign effect authority")
         if ledger.last_receipt is not None:
             ledger.settle(ledger.last_receipt, issued_receipt=ledger.last_receipt)
         return dict(
@@ -997,16 +1128,18 @@ class ForeignTaskEngine:
             control_generation=root.control._generation, effects_scope=root.effects._scope,
             effect_scopes=root.effects._scopes, data_pointer=self._context.data.pointer,
             return_pointer=self._context.returns.pointer,
+            machine_turn=root.machine_turn_evidence(),
         )
 
     @staticmethod
     def _parked_blocked_values(blocked):
-        if type(blocked) is not _SuspendedExecution or type(blocked.cursor) is not _DispatchCursor:
-            raise ForeignTaskError("task suspension requires its exact semantic cursor")
+        if (type(blocked) is not _SuspendedExecution
+                or type(blocked.cursor) not in (_DispatchCursor, ForeignMachineCursor)):
+            raise ForeignTaskError("task suspension requires its exact semantic or machine cursor")
         return {name: getattr(blocked, name) for name in (
             "handle", "context", "meter", "starting_steps", "root_id", "cursor",
             "return_snapshot", "capture_checkpoint", "had_pointer_capture",
-            "blocked_data_snapshot", "blocked_return_snapshot", "quantum_steps", "task_root")}
+            "blocked_data_snapshot", "blocked_return_snapshot", "quantum_steps", "machine_quantum_instructions", "task_root")}
 
     def _capture_parked(self, blocked):
         root = blocked.task_root
@@ -1014,7 +1147,10 @@ class ForeignTaskEngine:
                 or blocked.meter is not root.ledger.meter or blocked.root_id != root.ledger.root_id):
             raise ForeignTaskError("task suspension changed original dispatcher ownership")
         values = self._parked_root_values(root)
-        if root.active:
+        self.require_machine_selection(blocked.meter, blocked.machine_quantum_instructions)
+        if type(blocked.cursor) is ForeignMachineCursor:
+            values["machine_cursor"] = root.machine_cursor_evidence(blocked.cursor)
+        elif root.active:
             root.require_target(self._runtime._resolve_dispatch_word(blocked.cursor.xt), blocked.cursor.ip)
         kinds = self._parked_value_kinds
         data = self._context.data.snapshot()
@@ -1041,6 +1177,9 @@ class ForeignTaskEngine:
         for name, evidence in witness.blocked_values:
             _match_parked(actual[name], evidence)
         values = self._parked_root_values(witness.root)
+        self.require_machine_selection(blocked.meter, blocked.machine_quantum_instructions)
+        if type(blocked.cursor) is ForeignMachineCursor:
+            values["machine_cursor"] = witness.root.machine_cursor_evidence(blocked.cursor)
         for name, evidence in witness.root_values:
             _match_parked(values[name], evidence)
         for current, evidence in ((self._context.data.snapshot(), witness.data),
@@ -1065,7 +1204,8 @@ class ForeignTaskEngine:
         before = root._owned_call("last_receipt")
         if before is not expected:
             raise ForeignTaskError("task parked receipt changed before validation")
-        valid = root._owned_call("validate_parked", root.ledger.root_token, top.token, top.request.request_token)
+        request_token = None if top.request is None else top.request.request_token
+        valid = root._owned_call("validate_parked", root.ledger.root_token, top.token, request_token)
         after = root._owned_call("last_receipt")
         if valid is not True or after is not before:
             raise ForeignTaskError("task parked validation changed authority or did not return True")
@@ -1279,14 +1419,26 @@ class ForeignTaskEngine:
         if not frames:
             raise ForeignTaskError("task entry has no owning semantic dispatch")
         root = next((frame.task_root for frame in frames if frame.task_root is not None), None)
+        machine_call, machine_call_seal = self._machine_methods[0][1:]
+        machine_call_seal.verify()
+        turn = machine_call(self, "require_machine_turn", frames[0])
         if root is None:
-            root = self._dispatch_kind(self, meter, frames[0].root_id, self._limits)
+            fields = vars(self._dispatch_kind)
+            if (any(type(name) is not str for name in fields)
+                    or any(fields.get(name) is not original for name, original in self._dispatch_routes)
+                    or any(name in fields and not any(key == name for key, _ in self._dispatch_routes)
+                           for name in ("__new__", "__getattribute__", "__getattr__"))):
+                raise ForeignTaskError("task original dispatcher constructor routes changed")
+            for seal in self._dispatch_functions:
+                seal.verify()
+            root = self._dispatch_kind(self, meter, frames[0].root_id, self._limits, machine_turn=turn)
             try:
                 namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
                 self._native_chain = (root, 0, None, None, (), None)
                 self._root_ownership = (root, namespace, tuple((name, getattr(root, name)) for name in (
                     "engine", "context", "ledger", "issuer", "effects", "control", "frames",
-                    "_meter_namespace", "_meter_policy", "_effects_close", "_control_close", "_cleanup_functions")),
+                    "_meter_namespace", "_meter_policy", "_effects_close", "_control_close", "_cleanup_functions",
+                    "_machine_scheduled", "_machine_schedule", "_machine_routes")),
                     binding.adapter)
             except BaseException as failure:
                 # No host callback or machine instruction has run; release
@@ -1309,6 +1461,7 @@ class ForeignTaskEngine:
         self._task_root = root
         for frame in frames:
             object.__setattr__(frame, "task_root", root)
+        root.begin_machine_turn(turn)
         return root
 
     def _cancel_damaged_native_projection(self, root):
@@ -2228,6 +2381,36 @@ class ForeignRootLedger:
 
 _CORE_FUNCTION_SEALS = tuple((name, _FunctionSeal.capture(function))
                              for name, function in _CORE_HELPERS)
+
+
+
+# Original source evidence for application support observations. This table is
+# intentionally eager: adapter installation must not bless later replacements.
+_TASK_CAPABILITY_ROUTES = tuple(
+    (kind, name, route, (callback, callback.__code__, callback.__globals__,
+        callback.__defaults__, callback.__kwdefaults__,
+        tuple(cell.cell_contents for cell in (callback.__closure__ or ()))))
+    for kind, names in (
+        (_FunctionSeal, ("verify",)),
+        (ForeignTaskEngine, ("registration_batch", "root_for", "finish_root",
+            "adapter_root_policy", "task_export_dependencies", "task_semantic_receipt",
+            "claim_machine_profile", "_require_task", "park_suspension", "resume_suspension",
+            "task_suspension_owner", "parked_idle_wake_due", "parked_idle_uptime",
+            "restore_suspension_cleanup", "release_suspension_lease", "_validate_parked_adapter",
+            "begin_host_machine_turn", "require_machine_turn", "require_machine_selection",
+            "_machine_call", "_machine_host_caller")),
+        (MegaForthRuntime, ("execute", "run_until_blocked", "_run_until_blocked",
+            "_execute_guarded", "_execute_top", "_execute_top_inner", "_continue_foreign",
+            "task_suspension_pending", "deliver_idle_wake", "resume", "cancel_suspension",
+            "idle_wake_due", "idle_wake_delay_s", "resume_yielded", "_resume_guarded",
+            "_continue_suspension_locked")),
+    )
+    for name in names
+    for route in (vars(kind)[name],)
+    for callback in ((route.fget if type(route) is property else route),)
+)
+_TASK_CAPABILITY_SEAL_FIELDS = tuple(vars(_FunctionSeal)[name] for name in (
+    "callback", "code", "globals", "defaults", "kwdefaults", "closure"))
 
 
 __all__ = [
