@@ -12614,9 +12614,12 @@ static mp64_routine::Spec make_routine_spec_v1(
     return spec;
 }
 
-class RoutineRunnerV1 {
+// Internal execution and resource ownership only. Python transports below
+// retain shared ownership of one RoutineOwner; no facade pins another mapping
+// or duplicates this decoder/interpreter/admission path.
+class RoutineExecutionCore {
 public:
-    RoutineRunnerV1(
+    RoutineExecutionCore(
             py::object state_owner, py::handle control_base,
             py::buffer control_buffer)
         : state_owner_(std::move(state_owner)),
@@ -12652,9 +12655,9 @@ public:
         owns_mapping_pin_ = true;
     }
 
-    virtual ~RoutineRunnerV1() { release(); }
-    RoutineRunnerV1(const RoutineRunnerV1&) = delete;
-    RoutineRunnerV1& operator=(const RoutineRunnerV1&) = delete;
+    virtual ~RoutineExecutionCore() { release(); }
+    RoutineExecutionCore(const RoutineExecutionCore&) = delete;
+    RoutineExecutionCore& operator=(const RoutineExecutionCore&) = delete;
 
     virtual void close() {
         if (active_)
@@ -12768,8 +12771,8 @@ public:
 
 protected:
     struct ActiveBoundary {
-        RoutineRunnerV1& owner;
-        explicit ActiveBoundary(RoutineRunnerV1& value, const void* permitted_owner = nullptr) : owner(value) {
+        RoutineExecutionCore& owner;
+        explicit ActiveBoundary(RoutineExecutionCore& value, const void* permitted_owner = nullptr) : owner(value) {
             if (owner.closed_)
                 throw std::runtime_error("routine runner is closed");
             if (owner.active_)
@@ -12797,7 +12800,7 @@ protected:
     };
 
     struct Operations {
-        RoutineRunnerV1& runner;
+        RoutineExecutionCore& runner;
         const mp64_routine::Spec& spec;
         const std::vector<mp64_routine::BufferSpan>& spans;
         DecodedOperation operation = DecodedOperation::INVALID;
@@ -13131,10 +13134,13 @@ static std::shared_ptr<mp64_callbacks::Spec> make_routine_spec_v2(
     return spec;
 }
 
-class RoutineRunnerV2 : public RoutineRunnerV1 {
+// One CPU/control pin, boundary admission, sealed-publication ledger and V2
+// sequence space. Future V3 state belongs here with its own receipt sequence;
+// selecting another Python facade must never replenish owner-wide resources.
+class RoutineOwner : public RoutineExecutionCore {
 public:
-    using RoutineRunnerV1::RoutineRunnerV1;
-    ~RoutineRunnerV2() { frame_.reset(); }
+    using RoutineExecutionCore::RoutineExecutionCore;
+    ~RoutineOwner() { frame_.reset(); }
 
     void close() override {
         if (active_)
@@ -13142,7 +13148,17 @@ public:
         frame_.reset();
         publications_.clear();
         identity_.reset();
-        RoutineRunnerV1::close();
+        RoutineExecutionCore::close();
+    }
+
+    void close_v3_owner() {
+        if (active_)
+            throw std::runtime_error("routine runner cannot close during an active boundary");
+        // A parked V2 invocation retains its existing cancel/close protocol.
+        // The V3 view cannot cancel another transport's pending callback.
+        if (frame_)
+            throw std::runtime_error("V3 owner cannot close a parked V2 invocation");
+        close();
     }
 
     void publish_code_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
@@ -13524,6 +13540,98 @@ private:
     uint64_t segment_sequence_ = 0;
     std::optional<mp64_callbacks::Receipt> last_segment_;
     std::unique_ptr<Frame> frame_;
+};
+
+// Public facades intentionally own no CPU state, pins, publication registry,
+// frame or counters. Destruction releases a reference; explicit close revokes
+// the owner through every retained facade. V1/V2 public inheritance is stable.
+class RoutineRunnerV1 {
+public:
+    RoutineRunnerV1(py::object state, py::handle control_base, py::buffer control_buffer)
+        : owner_(std::make_shared<RoutineOwner>(
+            std::move(state), control_base, std::move(control_buffer))) {}
+    virtual ~RoutineRunnerV1() = default;
+    RoutineRunnerV1(const RoutineRunnerV1&) = delete;
+    RoutineRunnerV1& operator=(const RoutineRunnerV1&) = delete;
+
+    virtual void close() { owner_->close(); }
+    uint64_t control_base() const noexcept { return owner_->control_base(); }
+    uint64_t control_size() const noexcept { return owner_->control_size(); }
+    void publish_code(const mp64_routine::Spec& spec) { owner_->publish_code(spec); }
+    mp64_routine::Result run(
+            const mp64_routine::Spec& spec, py::handle arguments, py::handle spans,
+            py::handle instruction_limit, py::handle protected_spans, bool cancelled) {
+        return owner_->run(spec, arguments, spans, instruction_limit, protected_spans, cancelled);
+    }
+
+protected:
+    explicit RoutineRunnerV1(std::shared_ptr<RoutineOwner> owner) : owner_(std::move(owner)) {}
+    std::shared_ptr<RoutineOwner> owner_;
+};
+
+class RoutineRunnerV3;
+
+class RoutineRunnerV2 : public RoutineRunnerV1 {
+public:
+    using RoutineRunnerV1::RoutineRunnerV1;
+    void close() override { owner_->close(); }
+    void publish_code_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        owner_->publish_code_v2(spec);
+    }
+    void revoke_code_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        owner_->revoke_code_v2(spec);
+    }
+    bool is_code_published_v2(const std::shared_ptr<mp64_callbacks::Spec>& spec) {
+        return owner_->is_code_published_v2(spec);
+    }
+    mp64_callbacks::Result begin_v2(
+            const std::shared_ptr<mp64_callbacks::Spec>& spec,
+            py::handle arguments, py::handle spans, py::handle instruction_limit,
+            py::handle callback_limit, py::handle protected_spans) {
+        return owner_->begin_v2(spec, arguments, spans, instruction_limit,
+                                callback_limit, protected_spans);
+    }
+    mp64_callbacks::Result resume_callback(
+            const std::shared_ptr<mp64_callbacks::Token>& token, py::handle outputs) {
+        return owner_->resume_callback(token, outputs);
+    }
+    mp64_callbacks::Result cancel_invocation(py::object token) {
+        return owner_->cancel_invocation(std::move(token));
+    }
+    bool owner_cancel_is_inactive() const { return owner_->owner_cancel_is_inactive(); }
+    std::optional<mp64_callbacks::Receipt> last_segment_v2() const noexcept {
+        return owner_->last_segment_v2();
+    }
+    void abandon_marshaled_result(uint64_t invocation_id) noexcept {
+        owner_->abandon_marshaled_result(invocation_id);
+    }
+
+private:
+    friend class RoutineRunnerV3;
+    explicit RoutineRunnerV2(std::shared_ptr<RoutineOwner> owner)
+        : RoutineRunnerV1(std::move(owner)) {}
+};
+
+// Deliberately no public V1/V2 base: this view cannot acquire an inherited entry
+// method. The nested capability marker and child methods remain unavailable
+// until the complete V3 frame/receipt protocol has been implemented and gated.
+class RoutineRunnerV3 {
+public:
+    RoutineRunnerV3(py::object state, py::handle control_base, py::buffer control_buffer)
+        : owner_(std::make_shared<RoutineOwner>(
+            std::move(state), control_base, std::move(control_buffer))),
+          legacy_(std::shared_ptr<RoutineRunnerV2>(new RoutineRunnerV2(owner_))) {}
+    RoutineRunnerV3(const RoutineRunnerV3&) = delete;
+    RoutineRunnerV3& operator=(const RoutineRunnerV3&) = delete;
+
+    std::shared_ptr<RoutineRunnerV2> legacy_v2() const noexcept { return legacy_; }
+    uint64_t control_base() const noexcept { return owner_->control_base(); }
+    uint64_t control_size() const noexcept { return owner_->control_size(); }
+    void close() { owner_->close_v3_owner(); }
+
+private:
+    std::shared_ptr<RoutineOwner> owner_;
+    std::shared_ptr<RoutineRunnerV2> legacy_;
 };
 
 template <typename Execute>
@@ -36296,7 +36404,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
             return output;
         });
 
-    py::class_<RoutineRunnerV1>(m, "RoutineRunnerV1")
+    py::class_<RoutineRunnerV1, std::shared_ptr<RoutineRunnerV1>>(m, "RoutineRunnerV1")
         .def(py::init<py::object, py::handle, py::buffer>(),
             py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
         .def_property_readonly("control_base", &RoutineRunnerV1::control_base)
@@ -36387,7 +36495,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly("invocation_callbacks", &mp64_callbacks::Receipt::invocation_callbacks)
         .def_readonly("callback_request", &mp64_callbacks::Receipt::callback_request);
 
-    py::class_<RoutineRunnerV2, RoutineRunnerV1>(m, "RoutineRunnerV2")
+    py::class_<RoutineRunnerV2, RoutineRunnerV1, std::shared_ptr<RoutineRunnerV2>>(m, "RoutineRunnerV2")
         .def(py::init<py::object, py::handle, py::buffer>(),
             py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
         .def("close", &RoutineRunnerV2::close)
@@ -36426,6 +36534,16 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return runner.cancel_invocation(token);
             });
         }, py::arg("token") = py::none());
+
+    // Owner/facade foundation only. No HYBRID_NESTED_ROUTINE_ABI_VERSION
+    // advertisement until the full distinct-registration child path qualifies.
+    py::class_<RoutineRunnerV3>(m, "RoutineRunnerV3")
+        .def(py::init<py::object, py::handle, py::buffer>(),
+            py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
+        .def_property_readonly("control_base", &RoutineRunnerV3::control_base)
+        .def_property_readonly("control_size", &RoutineRunnerV3::control_size)
+        .def("legacy_v2", &RoutineRunnerV3::legacy_v2)
+        .def("close", &RoutineRunnerV3::close);
 
     // Expose RunResult
     py::class_<RunResult>(m, "RunResult")
