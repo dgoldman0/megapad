@@ -331,3 +331,489 @@ def test_failed_legacy_facade_factory_closes_constructed_v3_owner(monkeypatch):
             HybridRuntime.create(geometry={"bank0_size": 65536, "external_size": 4096})
     assert caught.value is failure and closed == [True] and len(buffers) == 1
     buffers[0].extend(b"released")
+
+
+# The public profile stays unavailable through staged qualification. These
+# tests call the permanent private implementation from an ordinary primitive,
+# so they retain a real original meter without changing capability metadata.
+def private_entry(owner, word, name="PRIVATE-TEST-ENTRY"):
+    return owner.semantic.define_primitive(name, lambda context: owner._invoke_published_nested(word, context))
+
+
+def leaf_export(export_id=1):
+    return CallbackExportV4(export_id=export_id, name="ABS", input_cells=1,
+                            output_cells=1, max_semantic_steps=1, effect="integer_leaf")
+
+
+@pytest.mark.parametrize("kind", ("machine", "leaf", "closed"))
+def test_private_root_uses_real_native_segments_and_original_meter(owner, kind):
+    from shared.cells import MASK64
+    if kind == "closed":
+        owner.semantic.define_colon("POLICY", (Call(owner.semantic.find("ABS").xt), Return()))
+        export = descriptor(steps=3, effect="closed_integer_colon")
+    else:
+        export = leaf_export() if kind == "leaf" else None
+    word = owner._publish_nested_routine(image(export=export))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(MASK64 if export is not None else 41)
+    returns = owner.semantic.main_context.returns.snapshot()
+    timer = owner.semantic.timer.counter
+    report = owner.execute(entry.xt)
+    assert owner.semantic.main_context.data.snapshot() == ((1,) if export is not None else (42,))
+    assert owner.semantic.main_context.returns.snapshot() == returns
+    work = 3 if kind == "closed" else (1 if kind == "leaf" else 0)
+    assert report.callback_semantic_steps == work
+    assert report.semantic_result.semantic_steps == work + 1
+    assert owner.semantic.timer.counter - timer == work + 1
+    assert (report.machine_instructions, report.machine_cycles, report.transitions,
+            report.machine_segments, report.callback_requests) == (
+                (5, 8, 1, 2, 1) if export is not None else (2, 3, 1, 1, 0))
+    assert owner.max_machine_depth == 1
+    assert owner.semantic._callback_exports._nested_chain is None
+    assert not owner.nested_callback_abi_available
+
+
+def test_child_callback_counts_once_at_root_and_inclusively_in_parent(owner):
+    from shared.cells import MASK64
+    if not hasattr(native.RoutineRunnerV3, "begin_child_v3"):
+        pytest.skip("native child transport has not been qualified yet")
+    child = owner._publish_nested_routine(image(export=leaf_export()))
+    owner.semantic.define_colon("POLICY", (Call(child.xt), Return()))
+    parent = owner._publish_nested_routine(image("PARENT", 1, descriptor(steps=4)))
+    entry = private_entry(owner, parent)
+    owner.semantic.main_context.data.push(MASK64)
+    returns = owner.semantic.main_context.returns.snapshot()
+    report = owner.execute(entry.xt)
+    assert owner.semantic.main_context.data.snapshot() == (1,)
+    assert owner.semantic.main_context.returns.snapshot() == returns
+    assert (report.machine_instructions, report.machine_cycles, report.transitions,
+            report.machine_segments, report.callback_requests,
+            report.callback_semantic_steps, report.semantic_result.semantic_steps) == (10, 16, 2, 4, 2, 4, 5)
+    assert owner.max_machine_depth == 2
+    assert owner.semantic._callback_exports._nested_dispatches == []
+    assert owner.semantic._callback_exports._nested_chain is None
+
+
+@pytest.mark.parametrize("error_kind", ("plain", "export", "budget"))
+def test_nested_host_exception_preserves_identity_and_independent_actual_work(owner, monkeypatch, error_kind):
+    from simulator.interop_exports import CallbackExportBudgetExceeded
+    owner.semantic.define_colon("POLICY", (Call(owner.semantic.find("ABS").xt), Return()))
+    word = owner._publish_nested_routine(image(export=descriptor(steps=3, effect="closed_integer_colon")))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    account = owner.semantic._account_semantic_step
+    error = (CallbackExportBudgetExceeded("callback_semantic_limit", 100, 100) if error_kind == "budget"
+             else CallbackExportError("host error") if error_kind == "export" else RuntimeError("host error"))
+    def fail():
+        account()
+        if owner.semantic._callback_exports._active_context is not None:
+            raise error
+    with monkeypatch.context() as patch:
+        patch.setattr(owner.semantic, "_account_semantic_step", fail)
+        with pytest.raises(type(error)) as caught:
+            owner.execute(entry.xt)
+    assert caught.value is error
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+    assert owner.callback_semantic_steps == 1
+    assert (owner.machine_instructions, owner.callback_requests, owner.transitions) == (3, 1, 1)
+    assert owner._nested_execution is None
+    assert owner.semantic._callback_exports._nested_chain is None
+    assert owner.execute(entry.xt).callback_semantic_steps == 3
+
+
+@pytest.mark.parametrize("operation", ("checkpoint", "arguments", "public"))
+def test_nested_hook_cannot_forge_another_admission(owner, monkeypatch, operation):
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    engine = owner.semantic._callback_exports
+    handle = owner._registrations[id(word)].exports[0][1]
+    account = owner.semantic._account_semantic_step
+    rejected = []
+    def probe():
+        account()
+        if engine._active_context is None:
+            return
+        active = engine._nested_dispatches[-1]
+        with pytest.raises((CallbackExportError, HybridExecutionError)):
+            if operation == "checkpoint":
+                engine._invoke_nested_callback(object(), handle, (7,))
+            elif operation == "arguments":
+                engine._invoke_nested_callback(active.checkpoint, handle, (99,))
+            else:
+                owner.semantic.execute("ABS")
+        rejected.append(True)
+    with monkeypatch.context() as patch:
+        patch.setattr(owner.semantic, "_account_semantic_step", probe)
+        report = owner.execute(entry.xt)
+    assert rejected == [True]
+    assert report.callback_semantic_steps == 1
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+
+
+def test_child_budget_exhaustion_cancels_entire_chain_preserving_parent_input(owner):
+    if not hasattr(native.RoutineRunnerV3, "begin_child_v3"):
+        pytest.skip("native child transport has not been qualified yet")
+    child, policy, parent = publish_pair(owner)
+    entry = private_entry(owner, parent)
+    owner.semantic.main_context.data.push(41)
+    with pytest.raises(HybridExecutionError) as caught:
+        owner.execute(entry.xt, machine_instruction_limit=4)
+    assert caught.value.reason == "instruction_limit"
+    assert owner.semantic.main_context.data.snapshot() == (41,)
+    assert owner.machine_instructions == 4
+    assert owner.callback_semantic_steps == 2
+    assert owner.semantic._callback_exports._nested_chain is None
+    assert owner.execute(entry.xt).semantic_result.semantic_steps == 4
+    assert owner.semantic.main_context.data.snapshot() == (42,)
+
+
+def test_full_eight_distinct_machine_depth_and_private_callback_contexts(owner):
+    from shared.cells import MASK64
+    if not hasattr(native.RoutineRunnerV3, "begin_child_v3"):
+        pytest.skip("native child transport has not been qualified yet")
+    word = owner._publish_nested_routine(image("M0", 0, leaf_export(0)))
+    for depth in range(1, 8):
+        name = f"P{depth}"
+        owner.semantic.define_colon(name, (Call(word.xt), Return()))
+        export = descriptor(name, depth, policy_id=depth, steps=1 + 3 * depth)
+        word = owner._publish_nested_routine(image(f"M{depth}", depth, export))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(MASK64)
+    report = owner.execute(entry.xt)
+    assert owner.semantic.main_context.data.snapshot() == (1,)
+    assert (report.machine_instructions, report.machine_cycles, report.transitions,
+            report.machine_segments, report.callback_requests,
+            report.callback_semantic_steps, report.semantic_result.semantic_steps) == (40, 64, 8, 16, 8, 22, 23)
+    assert owner.max_machine_depth == 8
+    assert owner.semantic._callback_exports._nested_dispatches == []
+
+
+def test_repeated_child_uses_fresh_authority_and_resumes_parent_each_time(owner):
+    if not hasattr(native.RoutineRunnerV3, "begin_child_v3"):
+        pytest.skip("native child transport has not been qualified yet")
+    child = owner._publish_nested_routine(image())
+    owner.semantic.define_colon("POLICY", (Call(child.xt), Call(child.xt), Return()))
+    parent = owner._publish_nested_routine(image("PARENT", 1, descriptor(steps=5)))
+    entry = private_entry(owner, parent)
+    owner.semantic.main_context.data.push(40)
+    report = owner.execute(entry.xt)
+    assert owner.semantic.main_context.data.snapshot() == (42,)
+    assert (report.machine_instructions, report.machine_cycles, report.transitions,
+            report.machine_segments, report.callback_requests, report.callback_semantic_steps) == (9, 14, 3, 4, 1, 5)
+    assert owner.max_machine_depth == 2
+
+
+@pytest.mark.parametrize("parent_access,child_access,accepted", (
+    ("read_write", "write", True), ("read", "write", False),
+))
+def test_child_borrow_never_escalates_immediate_parent_permissions(owner, parent_access, child_access, accepted):
+    from shared.hybrid_abi import BufferRuleV1
+    from simulator.memory import EXTERNAL_BASE
+    if not hasattr(native.RoutineRunnerV3, "begin_child_v3"):
+        pytest.skip("native child transport has not been qualified yet")
+    def rule(access):
+        return BufferRuleV1(address_argument=0, length_argument=1, element_bytes=1,
+                            max_bytes=256, access=access)
+    child_image = RoutineImageV4(
+        name="CHILD", routine_id=0, code=bytes(assemble("st.b r4, r5\nret.l")),
+        entry_offset=0, input_cells=2, output_cells=2, buffers=(rule(child_access),),
+        return_stack_cells=16, max_instructions=10, max_callback_requests=0, callbacks=(),
+    )
+    child = owner._publish_nested_routine(child_image)
+    owner.semantic.define_colon("POLICY", (Call(child.xt), Return()))
+    export = replace(descriptor(steps=3), input_cells=2, output_cells=2)
+    parent = owner._publish_nested_routine(replace(image("PARENT", 1, export), buffers=(rule(parent_access),)))
+    entry = private_entry(owner, parent)
+    owner.semantic.main_context.data.push(EXTERNAL_BASE)
+    owner.semantic.main_context.data.push(8)
+    if accepted:
+        report = owner.execute(entry.xt)
+        assert report.callback_semantic_steps == 3
+        assert owner.semantic.memory.read8(EXTERNAL_BASE) == 8
+    else:
+        with pytest.raises(HybridExecutionError) as caught:
+            owner.execute(entry.xt)
+        assert caught.value.reason == "rejected_access"
+        assert owner.semantic.memory.read8(EXTERNAL_BASE) == 0
+        assert owner.transitions == 1
+        assert owner.callback_semantic_steps == 2
+    assert owner.semantic.main_context.data.snapshot() == (EXTERNAL_BASE, 8)
+
+
+def test_completed_native_request_cannot_issue_a_second_callback_checkpoint(owner):
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    runner = owner._nested_runner
+    blocked = []
+    class ReplayProbe:
+        def __getattr__(self, name):
+            return getattr(runner, name)
+        def resume_callback_v3(self, token, outputs):
+            state = owner._nested_execution
+            frame = state.frames[-1]
+            callback = frame.raw.callback
+            handle = frame.registration.exports[callback.site_index][1]
+            with pytest.raises(HybridExecutionError, match="already issued"):
+                owner.semantic._callback_exports._begin_nested_callback(
+                    state.chain_token, handle, callback.invocation_id, tuple(callback.arguments),
+                )
+            blocked.append(True)
+            return runner.resume_callback_v3(token, outputs)
+    owner._nested_runner = ReplayProbe()
+    try:
+        report = owner.execute(entry.xt)
+    finally:
+        owner._nested_runner = runner
+    assert blocked == [True]
+    assert report.callback_semantic_steps == 1
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+
+
+def test_receipt_allocation_error_preserves_raw_identity_and_settles_chain(owner, monkeypatch):
+    import simulator.interop_nested as nested
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    error = MemoryError("receipt allocation failed")
+    def unavailable(*args, **kwargs):
+        raise error
+    with monkeypatch.context() as patch:
+        patch.setattr(nested, "NestedCallbackReceipt", unavailable)
+        with pytest.raises(MemoryError) as caught:
+            owner.execute(entry.xt)
+    assert caught.value is error
+    assert owner.callback_semantic_steps == 1
+    assert owner.machine_instructions == 3
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+    assert owner.semantic._callback_exports._nested_chain is None
+    assert owner._registration_failure is not None
+
+
+@pytest.mark.parametrize("route", ("release_frame", "cleanup_failed", "returned_target"))
+def test_nested_hook_cannot_override_inherited_guard_or_cleanup(owner, monkeypatch, route):
+    from simulator.interop_nested import NestedDispatch
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    account = owner.semantic._account_semantic_step
+    invoked = []
+    def replaced(*args, **kwargs):
+        invoked.append(True)
+    def mutate():
+        account()
+        if owner.semantic._callback_exports._active_context is not None:
+            monkeypatch.setattr(NestedDispatch, route, replaced)
+    monkeypatch.setattr(owner.semantic, "_account_semantic_step", mutate)
+    with pytest.raises(CallbackExportError):
+        owner.execute(entry.xt)
+    assert not invoked
+    assert owner.callback_semantic_steps == 1
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+
+
+@pytest.mark.parametrize("field", ("semantic_steps", "allowance_instructions", "allowance_semantics", "owner_steps", "frame_request"))
+def test_nested_hook_cannot_refund_or_replace_published_accounting(owner, monkeypatch, field):
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    account = owner.semantic._account_semantic_step
+    meters = []
+    def corrupt():
+        account()
+        if owner.semantic._callback_exports._active_context is None:
+            return
+        state = owner._nested_execution
+        meters.append(state.meter)
+        if field == "semantic_steps":
+            state.semantic_steps = 1
+        elif field == "allowance_instructions":
+            state.allowance.instructions = 0
+        elif field == "allowance_semantics":
+            state.allowance.callback_semantic_steps = 100
+        elif field == "owner_steps":
+            owner._callback_semantic_steps = 100
+        else:
+            state.frames[-1].raw = None
+    with monkeypatch.context() as patch:
+        patch.setattr(owner.semantic, "_account_semantic_step", corrupt)
+        with pytest.raises((CallbackExportError, HybridExecutionError)):
+            owner.execute(entry.xt)
+    assert owner.callback_semantic_steps == 1
+    assert owner.machine_instructions == 3
+    assert owner._allowances[meters[0]].instructions == 3
+    assert owner._allowances[meters[0]].callback_semantic_steps == 1
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+    assert owner._registration_failure is not None
+    assert owner.semantic._callback_exports._nested_chain is None
+
+
+def test_nested_stale_native_result_cannot_repeat_a_semantic_callback(owner):
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    runner = owner._nested_runner
+    class Replay:
+        def __getattr__(self, name):
+            return getattr(runner, name)
+        def resume_callback_v3(self, token, outputs):
+            return owner._nested_execution.frames[-1].raw
+    owner._nested_runner = Replay()
+    try:
+        with pytest.raises(RuntimeError, match="accounting receipt"):
+            owner.execute(entry.xt)
+    finally:
+        owner._nested_runner = runner
+    assert owner.callback_semantic_steps == 1
+    assert owner.machine_instructions == 3
+    assert owner.semantic._callback_exports._nested_chain is None
+
+
+def test_nested_state_allocation_failure_precedes_chain_publication(owner, monkeypatch):
+    import hybrid.runtime as bridge
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    error = MemoryError("execution owner allocation failed")
+    def fail(*args, **kwargs):
+        raise error
+    with monkeypatch.context() as patch:
+        patch.setattr(bridge, "_NestedExecution", fail)
+        with pytest.raises(MemoryError) as caught:
+            owner.execute(entry.xt)
+    assert caught.value is error
+    assert owner.semantic._callback_exports._nested_chain is None
+    assert owner.machine_instructions == owner.callback_semantic_steps == 0
+
+
+def test_interrupted_native_accounting_projection_retains_whole_committed_receipt(owner):
+    import sys
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    error = KeyboardInterrupt("interrupt between accounting projections")
+    fired = []
+    previous = sys.gettrace()
+    def interrupt(frame, event, arg):
+        if (event == "line" and frame.f_code.co_name == "project" and not fired
+                and owner.machine_instructions == 3 and owner._v3_segment_id == 0):
+            fired.append(True)
+            raise error
+        return interrupt
+    try:
+        sys.settrace(interrupt)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            owner.execute(entry.xt)
+    finally:
+        sys.settrace(previous)
+    assert caught.value is error and fired == [True]
+    assert (owner.machine_instructions, owner.machine_cycles, owner.callback_requests,
+            owner.transitions, owner.machine_segments, owner.callback_semantic_steps) == (3, 4, 1, 1, 1, 0)
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+    assert owner.semantic._callback_exports._nested_chain is None
+    assert owner._registration_failure is not None
+
+
+def test_replaced_exposed_composition_authority_is_never_invoked(owner, monkeypatch):
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    account = owner.semantic._account_semantic_step
+    invoked = []
+    def fake(*args, **kwargs):
+        invoked.append(True)
+    def corrupt():
+        account()
+        chain = owner.semantic._callback_exports._nested_chain
+        if owner.semantic._callback_exports._active_context is not None:
+            chain._composition_authority = fake
+    with monkeypatch.context() as patch:
+        patch.setattr(owner.semantic, "_account_semantic_step", corrupt)
+        with pytest.raises(CallbackExportError, match="accounting authority changed"):
+            owner.execute(entry.xt)
+    assert not invoked
+    assert owner.machine_instructions == 3
+    assert owner.callback_semantic_steps == 1
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+    assert owner.semantic._callback_exports._nested_chain is None
+
+
+def test_prepublication_receipt_interruption_recovers_completed_native_work(owner):
+    import sys
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    error = MemoryError("receipt publication allocation interrupted")
+    fired = []
+    previous = sys.gettrace()
+    def interrupt(frame, event, arg):
+        if (event == "line" and frame.f_code.co_name == "dispatch" and not fired
+                and frame.f_locals.get("operation") == "native"
+                and frame.f_locals.get("receipt") is not None
+                and frame.f_locals["receipt"].segment_id == 1
+                and owner._v3_segment_id == 0):
+            fired.append(True)
+            raise error
+        return interrupt
+    try:
+        sys.settrace(interrupt)
+        with pytest.raises(MemoryError) as caught:
+            owner.execute(entry.xt)
+    finally:
+        sys.settrace(previous)
+    assert caught.value is error and fired == [True]
+    assert (owner.machine_instructions, owner.machine_cycles, owner.callback_requests,
+            owner.transitions, owner.machine_segments, owner.callback_semantic_steps) == (3, 4, 1, 1, 1, 0)
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+    assert owner.semantic._callback_exports._nested_chain is None
+
+
+@pytest.mark.parametrize("route", ("last_segment_v3", "cancel_chain_v3"))
+def test_native_cleanup_getter_failure_precedes_chain_publication(owner, route):
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(7)
+    runner = owner._nested_runner
+    error = MemoryError("native cleanup method acquisition failed")
+    class Unavailable:
+        def __getattr__(self, name):
+            if name == route:
+                raise error
+            return getattr(runner, name)
+    owner._nested_runner = Unavailable()
+    try:
+        with pytest.raises(MemoryError) as caught:
+            owner.execute(entry.xt)
+    finally:
+        owner._nested_runner = runner
+    assert caught.value is error
+    assert owner.semantic._callback_exports._nested_chain is None
+    assert owner._nested_execution is None
+    assert owner.machine_instructions == owner.callback_semantic_steps == 0
+    assert owner.semantic.main_context.data.snapshot() == (7,)
+
+
+def test_terminal_native_authority_corruption_settles_work_but_commits_no_outputs(owner):
+    from shared.cells import MASK64
+    word = owner._publish_nested_routine(image(export=leaf_export()))
+    entry = private_entry(owner, word)
+    owner.semantic.main_context.data.push(MASK64)
+    runner = owner._nested_runner
+    class CorruptAfterReturn:
+        def __getattr__(self, name):
+            return getattr(runner, name)
+        def resume_callback_v3(self, token, outputs):
+            result = runner.resume_callback_v3(token, outputs)
+            owner.semantic._callback_exports._nested_chain._composition_authority = lambda *args: None
+            return result
+    owner._nested_runner = CorruptAfterReturn()
+    try:
+        with pytest.raises(HybridExecutionError):
+            owner.execute(entry.xt)
+    finally:
+        owner._nested_runner = runner
+    assert owner.machine_instructions == 5
+    assert owner.callback_semantic_steps == 1
+    assert owner.semantic.main_context.data.snapshot() == (MASK64,)
+    assert owner.semantic._callback_exports._nested_chain is None

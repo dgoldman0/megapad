@@ -190,6 +190,7 @@ class CallbackExportEngine:
         self._nested_owner = None
         self._nested_chain = None
         self._nested_calls = {}
+        self._nested_dispatches = []
         self._unwind_error = None
         self._unwind_contexts = ()
         runtime._closed_cleanup_guard = self._guard_outer_unwind
@@ -270,6 +271,97 @@ class CallbackExportEngine:
             receipt = chain.finish(cancelled=cancelled)
             self._nested_chain = None
             return receipt
+
+    def _begin_nested_callback(self, chain_token, handle, invocation_id, arguments):
+        chain = self._require_nested_chain(chain_token)
+        binding = self._binding(handle)
+        if type(binding.descriptor) is not CallbackExportV4:
+            raise CallbackExportError("nested dispatch requires an exact V4 export")
+        _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
+        via_use = self._nested_owner.call("_admit_nested_callback", handle, invocation_id, arguments, True)
+        self._budget_failure = None
+        return chain.begin_callback(handle, invocation_id, binding.descriptor.max_semantic_steps,
+                                    via_use=via_use)
+
+    def _invoke_nested_callback(self, checkpoint, handle, arguments):
+        from simulator.interop_nested import NestedDispatch
+        chain = self._nested_chain
+        if chain is None:
+            raise CallbackExportError("nested callback requires its issued chain")
+        record = chain._record(checkpoint)
+        binding = self._binding(handle)
+        self._nested_owner.call("_admit_nested_callback", handle, record.invocation_id, arguments)
+        _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
+        chain.enter_callback(checkpoint, handle)
+        previous = self._active
+        dispatches = self._nested_dispatches
+        prefix = tuple(dispatches)
+        namespace = object.__getattribute__(self, "__dict__")
+        active = None
+        prepare_unwind = cleanup_failed = None
+        completed = False
+        original = None
+        try:
+            memory = SparseAddressSpace(bank0_size=128, page_size=128)
+            memory.write8(0, 0)
+            context = ExecutionContext(
+                data=DataStack(arguments, memory=memory, floor=0, empty_pointer=64),
+                returns=ReturnStack(memory=memory, floor=64, empty_pointer=128),
+            )
+            active = NestedDispatch(self, binding, context, chain, checkpoint)
+            prepare_unwind, cleanup_failed = active.prepare_unwind, active.cleanup_failed
+            self._nested_dispatches.append(active)
+            self._active = active
+            active.require_state()
+            self._runtime._execute_guarded(active.capture.entry.word, context, chain.meter,
+                                           closed_guard=active)
+            active.require_state()
+            active.capture.verify(self)
+            if not active.completed or context.returns.depth() != 0:
+                raise CallbackExportError("nested callback did not return balanced private state")
+            outputs = context.data.snapshot()
+            _cells(outputs, count=binding.descriptor.output_cells, label="outputs")
+            result = CallbackExportResult(outputs, chain._inclusive_steps(checkpoint))
+            completed = True
+            return result
+        except BaseException as error:
+            original = error
+            if active is not None:
+                try:
+                    prepare_unwind(error)
+                except BaseException:
+                    cleanup_failed(error)
+            raise
+        finally:
+            try:
+                clean = (dict.get(namespace, "_nested_dispatches") is dispatches
+                         and len(dispatches) == len(prefix) + (active is not None)
+                         and all(item is dispatches[index] for index, item in enumerate(prefix))
+                         and (active is None or dispatches[-1] is active))
+                list.__setitem__(dispatches, slice(None), prefix)
+                dict.__setitem__(namespace, "_nested_dispatches", dispatches)
+                dict.__setitem__(namespace, "_active", previous)
+                chain.leave_callback(checkpoint, completed=completed)
+                if not clean:
+                    raise CallbackExportError("nested callback dispatch ownership changed")
+            except BaseException as cleanup:
+                self._registration_failure = "nested callback dispatch cleanup could not be proved"
+                if original is None:
+                    raise
+                try:
+                    BaseException.add_note(original, self._registration_failure)
+                except BaseException:
+                    pass
+
+    def _consume_nested_callback(self, chain_token, checkpoint):
+        return self._require_nested_chain(chain_token).consume_callback(checkpoint)
+
+    def _nested_private_context(self, context):
+        for active in self._nested_dispatches:
+            if active.context is context:
+                active.require_state(parked=active is not self._active)
+                return True
+        return False
 
     def begin_closed_accounting(self, handle):
         with self._runtime._session_owner_lock:

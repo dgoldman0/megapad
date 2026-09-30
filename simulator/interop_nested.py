@@ -149,11 +149,22 @@ class NestedMachineOwner:
         from hybrid.runtime import (
             HybridRuntime, _NESTED_OWNER_ROUTES, _NESTED_OWNER_SPECIAL_ROUTES,
             _NESTED_OWNER_DICT_DESCRIPTOR, _NESTED_OWNER_FIELD_ROUTES, _NESTED_OWNER_ABSENT,
+            _nested_accounting_authority,
         )
 
         if type(owner) is not HybridRuntime:
             raise CallbackExportError("nested machine owner must be this runtime's exact HybridRuntime")
         self._engine = engine
+        self._composition_binding = None
+        self._accounting_factory = _nested_accounting_authority
+        self._engine_type = type(engine)
+        self._engine_dictionary = vars(type(engine))["__dict__"]
+        self._engine_namespace = self._engine_dictionary.__get__(engine, type(engine))
+        self._engine_routes = tuple((name, vars(type(engine))[name]) for name in (
+            "_begin_nested_chain", "_require_nested_chain", "_finish_nested_chain",
+            "_begin_nested_callback", "_invoke_nested_callback", "_consume_nested_callback",
+            "_nested_private_context", "_binding", "_require_binding", "_require_owner", "_require_leaf",
+        ))
         self._owner = weakref.ref(owner)
         self._owner_type = HybridRuntime
         self._routes = _NESTED_OWNER_ROUTES
@@ -164,6 +175,18 @@ class NestedMachineOwner:
         self.require(owner)
 
     def require(self, owner=None):
+        if (type(self) is not NestedMachineOwner
+                or any(name in vars(self) or vars(NestedMachineOwner).get(name) is not route
+                       for name, route in _NESTED_ADAPTER_ROUTES)):
+            raise CallbackExportError("nested composition adapter routes changed")
+        if (type(self._engine) is not self._engine_type
+                or self._engine_type.__getattribute__ is not object.__getattribute__
+                or hasattr(self._engine_type, "__getattr__")
+                or vars(self._engine_type).get("__dict__") is not self._engine_dictionary
+                or self._engine_dictionary.__get__(self._engine, self._engine_type) is not self._engine_namespace
+                or any(name in self._engine_namespace or vars(self._engine_type).get(name) is not route
+                       for name, route in self._engine_routes)):
+            raise CallbackExportError("nested semantic engine routes changed")
         current = self._owner()
         if current is None or (owner is not None and owner is not current):
             raise CallbackExportError("nested machine owner is no longer the issued owner")
@@ -180,7 +203,41 @@ class NestedMachineOwner:
         for name, original in self._routes:
             if name in namespace or vars(type(current)).get(name) is not original:
                 raise CallbackExportError("nested machine owner route changed")
+        route = next(original for name, original in self._routes if name == "_require_nested_execution")
+        route(current)
         return current
+
+    def bind_composition(self, chain, state):
+        if (self._composition_binding is not None or self._engine._nested_chain is not chain
+                or chain.adapter is not self or chain._composition_authority is not None):
+            raise CallbackExportError("nested composition accounting already has an owner")
+        owner = self._owner()
+        if owner is None or owner._nested_execution is not state:
+            raise CallbackExportError("nested composition requires its exact creating owner")
+        authority = self._accounting_factory(owner, state)
+        self._composition_binding = (chain, authority)
+        chain._composition_authority = authority
+        return authority
+
+    def composition_for(self, chain, *, cleanup=False):
+        binding = self._composition_binding
+        if binding is None or binding[0] is not chain:
+            raise CallbackExportError("nested accounting authority is not bound to this chain")
+        authority = binding[1]
+        if chain._composition_authority is not authority:
+            chain._composition_authority = authority
+            owner = self._owner()
+            if owner is not None:
+                owner._registration_failure = "nested composition accounting authority changed"
+            if not cleanup:
+                raise CallbackExportError("nested composition accounting authority changed")
+        return authority
+
+    def release_composition(self, chain):
+        if self._composition_binding is not None:
+            if self._composition_binding[0] is not chain:
+                raise CallbackExportError("nested accounting cleanup named another chain")
+            self._composition_binding = None
 
     def call(self, operation, *arguments):
         owner = self.require()
@@ -219,6 +276,7 @@ class NestedChainAccounting:
         self.maximum_depth = 0
         self._callbacks = []
         self._closed = False
+        self._composition_authority = None
 
     @property
     def steps(self):
@@ -394,8 +452,8 @@ class NestedChainAccounting:
         use.consumed = True
         return captured, use.native_edge
 
-    def finish_machine_use(self, token):
-        self._require()
+    def finish_machine_use(self, token, *, cleanup=False):
+        self._require(cleanup=cleanup)
         if not self._callbacks:
             raise CallbackExportError("machine Call authority has no active callback")
         use = self._callbacks[-1].machine_use
@@ -798,3 +856,187 @@ class NestedCapture:
         if value is None:
             raise CallbackExportError("nested callback escaped its captured targets")
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class _NestedLeafCapture:
+    entry: object
+    leaf: object
+
+    def verify(self, engine):
+        engine._require_leaf(self.leaf)
+        self.entry.verify(engine._dictionary)
+
+    def target(self, xt):
+        if type(xt) is not int or xt != self.entry.xt:
+            raise CallbackExportError("nested leaf escaped its exact captured target")
+        return self.entry
+
+
+# Loaded after interop_exports has installed its types. This reuses the same
+# private-stack/IR/continuation checks and the same runtime dispatcher as V3.
+from simulator.interop_closed import ClosedDispatch, CapturedWord
+
+
+class NestedDispatch(ClosedDispatch):
+    def __init__(self, engine, binding, context, chain, checkpoint):
+        super().__init__(engine, binding, context, chain.meter, None)
+        self.chain, self.checkpoint = chain, checkpoint
+        self.parked_evidence = None
+        self.dispatch_stack = engine._nested_dispatches
+        self.dispatch_prefix = tuple(self.dispatch_stack)
+        if binding.closed is None:
+            leaf = binding.leaf
+            self.capture = _NestedLeafCapture(
+                CapturedWord(leaf.word, leaf.word.xt, leaf.implementation, None, (),
+                             binding.descriptor.name, leaf.callback), leaf,
+            )
+
+    def require_state(self, *, parked=False):
+        # Check methods before reading guard-owned state or entering inherited
+        # checks. A host accounting hook cannot replace the invoked adapter.
+        if (type(self) is not NestedDispatch or type(self).__getattribute__ is not object.__getattribute__
+                or any(name in vars(self) or vars(NestedDispatch).get(name) is not route
+                       for name, route in _NESTED_DISPATCH_ROUTES)
+                or any(vars(ClosedDispatch).get(name) is not route for name, route in _BASE_DISPATCH_ROUTES)
+                or any(name in vars(NestedDispatch) for name in _NESTED_INHERITED_ROUTES)
+                or any(name in vars(NestedDispatch) or name in vars(ClosedDispatch)
+                       for name in _NESTED_GUARD_FIELDS)):
+            raise CallbackExportError("nested private dispatch routes changed")
+        self.chain.adapter.require()
+        ClosedDispatch.require_state(self, parked=parked)
+        dispatches = self.engine._nested_dispatches
+        position = len(self.dispatch_prefix)
+        if (dispatches is not self.dispatch_stack or type(dispatches) is not list
+                or len(dispatches) <= position or dispatches[position] is not self
+                or any(item is not dispatches[index] for index, item in enumerate(self.dispatch_prefix))
+                or (not parked and len(dispatches) != position + 1)):
+            raise self.failure("nested private dispatch is not the issued current context")
+        self.chain._require_meter()
+        if parked and (self.parked_evidence is None or self._evidence() != self.parked_evidence):
+            raise self.failure("parked callback private state changed during child execution")
+        if not parked:
+            for parent in self.dispatch_prefix:
+                if type(parent) is not NestedDispatch:
+                    raise self.failure("nested ancestor dispatch identity changed")
+                NestedDispatch.require_state(parent, parked=True)
+
+    def _verify_target(self, captured):
+        if type(captured) is CapturedMachineTarget:
+            self.engine._nested_owner.call("_verify_nested_target", captured)
+        else:
+            captured.verify(self.engine._dictionary, all_operations=False)
+
+    def before_tick(self, word, ip=None, operation=None, *, caller=None, call_ip=None):
+        from simulator.ir import Call
+        self.require_state()
+        captured = self.capture.target(word.xt)
+        self._verify_target(captured)
+        item = None
+        if ip is not None:
+            captured = self.cursor(word, ip)
+            item = captured.evidence[ip]
+            if item.operation is not operation:
+                raise self.failure("nested callback operation identity changed")
+            item.verify()
+        elif type(captured) is not CapturedMachineTarget and captured.core_name is None:
+            raise self.failure("nested callback primitive target changed")
+        parent = None
+        if caller is not None:
+            parent = self.cursor(caller, call_ip).evidence[call_ip]
+            parent.verify()
+            if parent.kind is not Call or parent.value != captured.xt:
+                raise self.failure("nested callback primitive call edge changed")
+        return captured, item, parent, self._evidence(), self.chain.steps
+
+    def tick(self):
+        self.chain.tick(self.checkpoint)
+        self.charged_ticks = self.chain._inclusive_steps(self.checkpoint)
+        _NESTED_REQUIRE_STATE(self)
+
+    def after_tick(self, evidence):
+        from simulator.ir import Call
+        captured, item, parent, state, before = evidence
+        self.require_state()
+        self._verify_target(captured)
+        if item is not None:
+            item.verify()
+            if item.kind is Call:
+                self._verify_target(self.capture.target(item.value))
+        if parent is not None:
+            parent.verify()
+        if self.chain.steps != before + 1 or self._evidence() != state:
+            raise self.failure("nested private evidence changed during accounting")
+        return captured.callback
+
+    def call_target(self, operation):
+        target = self.capture.target(operation.xt)
+        self._verify_target(target)
+        return target.word
+
+    def invoke_primitive(self, target, callback, context, *, caller=None, call_ip=None):
+        from simulator.interop_exports import _cells
+        self.require_state()
+        captured = self.capture.target(target.xt)
+        if type(captured) is not CapturedMachineTarget:
+            return callback(context)
+        if caller is None or context is not self.context:
+            raise self.failure("machine child requires a captured static Call cursor")
+        matches = [token for token in self.capture.calls
+                   if (self.engine._nested_calls[token].word is caller
+                       and self.engine._nested_calls[token].operation_index == call_ip
+                       and self.engine._nested_calls[token].target is captured)]
+        if len(matches) != 1:
+            raise self.failure("machine child Call has no exact captured site")
+        declaration = captured.declaration
+        arguments = tuple(self.data.peek(index) for index in reversed(range(declaration.input_cells)))
+        self.data.require_push_capacity(max(0, declaration.output_cells - declaration.input_cells))
+        edge = self.engine._nested_owner.call("_nested_child_edge", self.checkpoint, matches[0])
+        use = self.chain.issue_machine_use(self.checkpoint, matches[0], edge)
+        self.parked_evidence = self._evidence()
+        try:
+            outputs = self.engine._nested_owner.call("_invoke_nested_child", use, arguments)
+            self.require_state()
+            if self._evidence() != self.parked_evidence:
+                raise self.failure("machine child changed its caller's private stack")
+            _cells(outputs, count=declaration.output_cells, label="child outputs")
+            self.chain.finish_machine_use(use)
+        except BaseException as error:
+            try:
+                self.chain.finish_machine_use(use, cleanup=True)
+            except BaseException:
+                _BASE_CLEANUP_FAILED(self, error)
+            raise
+        finally:
+            self.parked_evidence = None
+        for _ in range(declaration.input_cells):
+            self.data.pop()
+        for cell in outputs:
+            self.data.push(cell)
+        return None
+
+    def prepare_unwind(self, error):
+        self.charged_ticks = self.chain._inclusive_steps(self.checkpoint)
+        _BASE_PREPARE_UNWIND(self, error)
+
+
+_NESTED_REQUIRE_STATE = NestedDispatch.require_state
+_BASE_CLEANUP_FAILED = ClosedDispatch.cleanup_failed
+_BASE_PREPARE_UNWIND = ClosedDispatch.prepare_unwind
+_BASE_DISPATCH_ROUTES = tuple((name, value) for name, value in vars(ClosedDispatch).items()
+                              if callable(value))
+_NESTED_DISPATCH_ROUTES = tuple((name, value) for name, value in vars(NestedDispatch).items()
+                                if callable(value))
+
+_NESTED_INHERITED_ROUTES = tuple(name for name, _ in _BASE_DISPATCH_ROUTES
+                                 if name not in vars(NestedDispatch))
+_NESTED_GUARD_FIELDS = (
+    "engine", "binding", "context", "meter", "capture", "data", "returns", "data_seal", "return_seal",
+    "starting_steps", "local_limit", "semantic_step_limit", "meter_budget", "on_tick", "dictionary_guard",
+    "private_regions", "region_spec", "root_id", "frames", "frame", "completed", "outer_contexts",
+    "charged_ticks", "meter_namespace", "accounting_record", "chain", "checkpoint", "parked_evidence",
+    "dispatch_stack", "dispatch_prefix",
+)
+
+_NESTED_ADAPTER_ROUTES = tuple((name, value) for name, value in vars(NestedMachineOwner).items()
+                               if callable(value))

@@ -296,7 +296,7 @@ class ClosedDispatch:
         self.engine._registration_failure = "closed callback integrity validation failed"
         return CallbackExportError(message)
 
-    def require_state(self):
+    def require_state(self, *, parked=False):
         _require_metadata_routes()
         _require_routes(self.engine._runtime, MegaForthRuntime, _RUNTIME_ROUTES)
         _require_routes(self.engine._dictionary, Dictionary, _DICTIONARY_ROUTES)
@@ -313,7 +313,8 @@ class ClosedDispatch:
         self.engine._require_owner("dispatch a closed callback")
         if self.frames is not None:
             if (self.engine._runtime._active_dispatches is not self.frames
-                    or type(self.frames) is not list or not self.frames or self.frames[-1] is not self.frame
+                    or type(self.frames) is not list or not self.frames
+                    or (not any(item is self.frame for item in self.frames) if parked else self.frames[-1] is not self.frame)
                     or self.frame.context is not self.context or self.frame.meter is not self.meter
                     or type(self.frame.root_id) is not int or self.frame.root_id != self.root_id
                     or self.frame.closed_guard is not self):
@@ -322,7 +323,7 @@ class ClosedDispatch:
             for value in (seal.stack._floor, seal.stack._empty_pointer, seal.view._base, seal.view._offset):
                 if type(value) is not int:
                     raise self.failure("closed callback private geometry is not exact")
-        if (self.engine._active is not self or type(self.context) is not ExecutionContext
+        if ((not parked and self.engine._active is not self) or type(self.context) is not ExecutionContext
                 or self.context.data is not self.data or self.context.returns is not self.returns
                 or not self.data_seal.matches() or not self.return_seal.matches()
                 or self.context._host_control_fault is not None
@@ -382,15 +383,16 @@ class ClosedDispatch:
         self.on_tick()
 
     def prepare_unwind(self, error):
+        cleanup_failed = _CLOSED_CLEANUP_FAILED.__get__(self, type(self))
         expected = self.starting_steps + self.charged_ticks
         if repair_meter(self.meter, self.meter_namespace, expected):
-            self.cleanup_failed(error)
+            cleanup_failed(error)
         if self.engine._registration_failure is None:
             try:
                 self.require_state()
                 self.capture.verify(self.engine)
             except BaseException:
-                self.cleanup_failed(error)
+                cleanup_failed(error)
         unsafe = False
         try:
             # These are all shared routes ordinary stack cleanup can traverse.
@@ -410,7 +412,7 @@ class ClosedDispatch:
             for context in self.outer_contexts:
                 if type(context) is ExecutionContext:
                     descriptor.__set__(context, "closed callback cleanup routes changed")
-            self.cleanup_failed(error)
+            cleanup_failed(error)
 
     def cursor(self, word, ip):
         self.require_state()
@@ -490,6 +492,9 @@ class ClosedDispatch:
             raise self.failure("closed callback private evidence changed during accounting")
         return captured.callback
 
+    def invoke_primitive(self, target, callback, context, *, caller=None, call_ip=None):
+        return callback(context)
+
     def call_target(self, operation):
         target = self.capture.target(operation.xt)
         target.verify(self.engine._dictionary)
@@ -520,3 +525,6 @@ class ClosedDispatch:
                 pass
         else:
             raise CallbackExportError(self.engine._registration_failure)
+
+
+_CLOSED_CLEANUP_FAILED = ClosedDispatch.cleanup_failed

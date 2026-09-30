@@ -3454,6 +3454,8 @@ class MegaForthRuntime:
         if closed_guard is not None:
             # Private storage is discarded, never restored through mutable routes.
             closed_guard.require_state()
+            release_frame = closed_guard.release_frame
+            cleanup_failed = closed_guard.cleanup_failed
             root_id = self._allocate_dispatch_root_id()
             frame = _DispatchFrame(context, meter, root_id, closed_guard)
             namespace = object.__getattribute__(self, "__dict__")
@@ -3477,13 +3479,13 @@ class MegaForthRuntime:
                     # Repair only the issued host list, using its original namespace.
                     list.__setitem__(frames, slice(None), prefix)
                     dict.__setitem__(namespace, "_active_dispatches", frames)
-                    closed_guard.release_frame(frame)
+                    release_frame(frame)
                     if not clean:
-                        closed_guard.cleanup_failed(original)
+                        cleanup_failed(original)
                 except BaseException:
                     if original is None:
-                        closed_guard.cleanup_failed(None)
-                    closed_guard.cleanup_failed(original)
+                        cleanup_failed(None)
+                    cleanup_failed(original)
 
         closed_cleanup_guard = self._closed_cleanup_guard
         unsafe_closed_cleanup = False
@@ -3942,6 +3944,17 @@ class MegaForthRuntime:
                     break
                 if not isinstance(implementation, PrimitiveDefinition):
                     break
+                if closed_guard is not None:
+                    evidence = closed_guard.before_tick(target)
+                    invoke = closed_guard.invoke_primitive
+                    closed_guard.tick()
+                    callback = closed_guard.after_tick(evidence)
+                    result = invoke(target, callback, context)
+                    if result is not None:
+                        from simulator.interop_exports import CallbackExportError
+                        raise CallbackExportError("closed callback primitive returned dynamic control")
+                    closed_guard.completed = True
+                    return
                 exports = getattr(self, "_callback_exports", None)
                 export_guard = (
                     exports._guard_primitive
@@ -4284,9 +4297,10 @@ class MegaForthRuntime:
             implementation = target.implementation
             if type(implementation) is PrimitiveDefinition:
                 evidence = closed_guard.before_tick(target, caller=caller, call_ip=return_ip - 1)
+                invoke = closed_guard.invoke_primitive
                 closed_guard.tick()
                 callback = closed_guard.after_tick(evidence)
-                result = callback(context)
+                result = invoke(target, callback, context, caller=caller, call_ip=return_ip - 1)
                 if result is not None:
                     from simulator.interop_exports import CallbackExportError
 

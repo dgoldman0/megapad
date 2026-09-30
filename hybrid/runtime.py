@@ -8,7 +8,7 @@ both engines retain the same fixed ordinary-memory buffers.
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import os
 from typing import Any, Callable
 import weakref
@@ -25,7 +25,8 @@ from shared.hybrid_abi import (
     HYBRID_CLOSED_ABI_VERSION, CallbackRequestV3, MachineSegmentResultV3,
     RoutineDeclarationV3, RoutineImageV3,
 )
-from shared.hybrid_nested import RoutineImageV4, RoutineDeclarationV4, MAX_CHILD_EDGES
+from shared.hybrid_nested import (RoutineImageV4, RoutineDeclarationV4, MAX_CHILD_EDGES,
+                                  CallbackRequestV4, MachineSegmentResultV4)
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES, Word
 from simulator.errors import ExecutionBlocked, ExecutionError
 from simulator.interop_exports import (
@@ -88,6 +89,193 @@ class _MachineAllowance:
     instructions: int = 0
     callback_requests: int = 0
     callback_semantic_steps: int = 0
+
+
+
+@dataclass(slots=True)
+class _NestedMachineFrame:
+    registration: _Registration
+    spans: tuple
+    protected: tuple
+    via_use: object = None
+    raw: object = None
+    callback_started: bool = False
+
+
+@dataclass(slots=True)
+class _NestedExecution:
+    chain_token: object
+    meter: object
+    allowance: _MachineAllowance
+    semantic_limit: int
+    frames: list = field(default_factory=list)
+    semantic_steps: int = 0
+    root_invocation_id: int = 0
+    machine_instructions: int = 0
+    machine_cycles: int = 0
+    callback_requests: int = 0
+
+
+def _nested_accounting_authority(owner, state):
+    """Retain authoritative counters in one private, atomically replaced value.
+
+    The exposed owner/state/allowance fields are projections, never sources of
+    deltas. A hook may corrupt them, or an interruption may split projection;
+    cleanup can always replay the last complete host-accounting publication.
+    """
+    namespace = object.__getattribute__(owner, "__dict__")
+    allowance = state.allowance
+    allowance_fields = tuple(vars(_MachineAllowance)[name] for name in (
+        "limit", "callback_limit", "callback_semantic_limit", "instructions",
+        "callback_requests", "callback_semantic_steps",
+    ))
+    allowance_values = tuple(field.__get__(allowance, _MachineAllowance) for field in allowance_fields)
+    counters = ("_machine_instructions", "_machine_cycles", "_callback_requests",
+                "_callback_semantic_steps", "_transitions", "_machine_segments", "_max_machine_depth")
+    baseline = tuple(dict.__getitem__(namespace, name) for name in counters)
+    state_fields = tuple(vars(_NestedExecution)[name] for name in (
+        "allowance", "meter", "semantic_limit", "frames", "chain_token",
+        "root_invocation_id", "machine_instructions", "machine_cycles", "callback_requests", "semantic_steps",
+    ))
+    fixed = (allowance, state.meter, state.semantic_limit, state.frames, state.chain_token)
+    runner = dict.__getitem__(namespace, "_nested_runner")
+    # segment, root, instructions, cycles, requests, semantic, entries, segments, depth
+    snapshot = (dict.__getitem__(namespace, "_v3_segment_id"), 0, 0, 0, 0, 0, 0, 0, 0)
+    frame_evidence = ()
+    frame_fields = tuple(vars(_NestedMachineFrame)[name] for name in (
+        "registration", "spans", "protected", "via_use", "raw", "callback_started",
+    ))
+
+    def values():
+        _, _, instructions, cycles, requests, semantic, entries, segments, depth = snapshot
+        return (baseline[0] + instructions, baseline[1] + cycles, baseline[2] + requests,
+                baseline[3] + semantic, baseline[4] + entries, baseline[5] + segments,
+                max(baseline[6], depth))
+
+    def project():
+        dict.__setitem__(namespace, "_nested_execution", state)
+        dict.__setitem__(namespace, "_active_machine", True)
+        dict.__setitem__(namespace, "_nested_runner", runner)
+        for name, value in zip(counters, values()):
+            dict.__setitem__(namespace, name, value)
+        dict.__setitem__(namespace, "_v3_segment_id", snapshot[0])
+        projected = allowance_values[:3] + (
+            allowance_values[3] + snapshot[2], allowance_values[4] + snapshot[4],
+            allowance_values[5] + snapshot[5],
+        )
+        for field, value in zip(allowance_fields, projected):
+            field.__set__(allowance, value)
+        projected_state = fixed + (snapshot[1], snapshot[2], snapshot[3], snapshot[4], snapshot[5])
+        for field, value in zip(state_fields, projected_state):
+            field.__set__(state, value)
+        list.__setitem__(fixed[3], slice(None), tuple(row[0] for row in frame_evidence))
+        for frame, recorded in frame_evidence:
+            for field, value in zip(frame_fields, recorded):
+                field.__set__(frame, value)
+
+    def identical(value, expected):
+        return value is expected if type(expected) not in (int, bool) else type(value) is type(expected) and value == expected
+
+    original_classes = tuple((cls, cls.__getattribute__, tuple(vars(cls).items()))
+                             for cls in (_NestedExecution, _NestedMachineFrame, _MachineAllowance))
+
+    def require():
+        routes_changed = any(
+            cls.__getattribute__ is not route or hasattr(cls, "__getattr__")
+            or len(vars(cls)) != len(fields)
+            or any(vars(cls).get(name) is not original for name, original in fields)
+            for cls, route, fields in original_classes
+        )
+        if (routes_changed or dict.get(namespace, "_nested_execution") is not state
+                or dict.get(namespace, "_active_machine") is not True
+                or dict.get(namespace, "_nested_runner") is not runner
+                or any(not identical(dict.get(namespace, name), expected)
+                       for name, expected in zip(counters, values()))
+                or not identical(dict.get(namespace, "_v3_segment_id"), snapshot[0])
+                or any(not identical(field.__get__(state, _NestedExecution), expected)
+                       for field, expected in zip(state_fields, fixed + (
+                           snapshot[1], snapshot[2], snapshot[3], snapshot[4], snapshot[5])))
+                or any(not identical(field.__get__(allowance, _MachineAllowance), expected)
+                       for field, expected in zip(allowance_fields, allowance_values[:3] + (
+                           allowance_values[3] + snapshot[2], allowance_values[4] + snapshot[4],
+                           allowance_values[5] + snapshot[5])))
+                or len(fixed[3]) != len(frame_evidence)
+                or any(fixed[3][index] is not frame
+                       or any(not identical(field.__get__(frame, _NestedMachineFrame), expected)
+                              for field, expected in zip(frame_fields, recorded))
+                       for index, (frame, recorded) in enumerate(frame_evidence))):
+            project()
+            dict.__setitem__(namespace, "_registration_failure", "nested execution accounting authority changed")
+            raise HybridExecutionError("callback_accounting", "nested execution accounting authority changed")
+
+    def publish(next_snapshot):
+        nonlocal snapshot
+        snapshot = next_snapshot
+        try:
+            project()
+        except BaseException as error:
+            dict.__setitem__(namespace, "_registration_failure", "nested accounting projection was interrupted")
+            try:
+                project()
+            except BaseException:
+                try:
+                    BaseException.add_note(error, "nested accounting projection could not be restored")
+                except BaseException:
+                    pass
+            raise
+
+    def dispatch(operation, value=None):
+        nonlocal frame_evidence
+        mismatch = None
+        try:
+            require()
+        except HybridExecutionError as error:
+            mismatch = error
+        if operation == "native":
+            receipt = value
+            if receipt is not None and receipt.segment_id != snapshot[0]:
+                if (receipt.segment_id != snapshot[0] + 1
+                        or not 1 <= receipt.depth <= 8
+                        or receipt.instructions < 0 or receipt.cycles < receipt.instructions
+                        or receipt.chain_instructions != snapshot[2] + receipt.instructions
+                        or receipt.chain_cycles != snapshot[3] + receipt.cycles
+                        or receipt.chain_callbacks != snapshot[4] + int(receipt.callback_request)
+                        or (snapshot[1] and receipt.root_invocation_id != snapshot[1])):
+                    raise RuntimeError("nested native accounting receipt is inconsistent")
+                publish((receipt.segment_id, receipt.root_invocation_id,
+                         receipt.chain_instructions, receipt.chain_cycles, receipt.chain_callbacks,
+                         snapshot[5], snapshot[6] + int(receipt.invocation_started), snapshot[7] + 1,
+                         max(snapshot[8], receipt.depth if receipt.invocation_started else 0)))
+        elif operation == "semantic":
+            steps = value.chain_semantic_steps
+            if type(steps) is not int or not snapshot[5] <= steps <= fixed[2]:
+                raise RuntimeError("nested semantic receipt changed its cumulative allowance")
+            publish(snapshot[:5] + (steps,) + snapshot[6:])
+        elif mismatch is None:
+            if operation == "push":
+                frame_evidence += ((value, tuple(field.__get__(value, _NestedMachineFrame) for field in frame_fields)),)
+                project()
+            elif operation == "raw":
+                frame, raw = value
+                if not frame_evidence or frame_evidence[-1][0] is not frame:
+                    raise RuntimeError("native frame is not the current issued identity")
+                frame_evidence = frame_evidence[:-1] + ((frame, frame_evidence[-1][1][:4] + (raw, False)),)
+                project()
+            elif operation == "begin":
+                if not frame_evidence or frame_evidence[-1][0] is not value or frame_evidence[-1][1][5]:
+                    raise HybridExecutionError("invalid_callback", "native request already issued its callback checkpoint")
+                frame_evidence = frame_evidence[:-1] + ((value, frame_evidence[-1][1][:5] + (True,)),)
+                project()
+            elif operation == "pop":
+                if not frame_evidence or frame_evidence[-1][0] is not value:
+                    raise RuntimeError("native frame cleanup is not the current issued identity")
+                frame_evidence = frame_evidence[:-1]
+                project()
+            elif operation != "check":
+                raise RuntimeError("unknown nested accounting operation")
+        if mismatch is not None:
+            raise mismatch
+    return dispatch
 
 
 def _positive_limit(value: int, maximum: int, label: str) -> int:
@@ -233,6 +421,9 @@ class HybridRuntime:
         self._machine_segments = 0
         self._v2_segment_id = 0
         self._v2_invocation_id = 0
+        self._v3_segment_id = 0
+        self._max_machine_depth = 0
+        self._nested_execution = None
         self._allowances: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._stack_allocations: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._wrapper_limits: list[tuple[int, int, int]] = []
@@ -278,10 +469,330 @@ class HybridRuntime:
             raise HybridExecutionError("invalid_child", "nested targets require an explicit V4 registration")
         target.verify_owner(self)
 
+    def _require_nested_execution(self):
+        chain = self.semantic._callback_exports._nested_chain
+        if chain is not None and chain.adapter._composition_binding is not None:
+            chain.adapter.composition_for(chain)("check")
+        elif self._nested_execution is not None:
+            raise HybridExecutionError("callback_accounting", "nested execution lost its issued ledger")
+
+    def _admit_nested_callback(self, handle, invocation_id, arguments, begin=False):
+        self.semantic._callback_exports._nested_owner.require(self)
+        state = self._nested_execution
+        if state is None or not state.frames or not self._active_machine:
+            raise HybridExecutionError("invalid_callback", "no owned native callback is pending")
+        frame = state.frames[-1]
+        raw = frame.raw
+        if (type(raw) is not self._native.RoutineSegmentResultV3
+                or raw.exit_kind != "callback_request" or raw.token is None
+                or type(invocation_id) is not int or invocation_id != raw.invocation_id
+                or type(arguments) is not tuple or any(type(value) is not int for value in arguments)):
+            raise HybridExecutionError("invalid_callback", "callback has no exact pending native request")
+        callback = raw.callback
+        if (type(callback) is not self._native.RoutineCallbackRequestV3
+                or callback.site_index >= len(frame.registration.exports)):
+            raise HybridExecutionError("invalid_callback", "native callback site is unavailable")
+        site, issued = frame.registration.exports[callback.site_index]
+        if (issued is not handle or arguments != tuple(callback.arguments)
+                or callback.invocation_id != raw.invocation_id
+                or callback.call_offset != site.call_offset or callback.stub_offset != site.stub_offset
+                or callback.export_id != site.export.export_id):
+            raise HybridExecutionError("invalid_callback", "callback differs from its declared native site")
+        self._validate_registration(frame.registration)
+        if type(begin) is not bool:
+            raise TypeError("callback checkpoint admission flag must be exact")
+        if begin:
+            chain = self.semantic._callback_exports._nested_chain
+            chain.adapter.composition_for(chain)("begin", frame)
+        return frame.via_use
+
+    def _nested_child_edge(self, checkpoint, captured_call):
+        state = self._nested_execution
+        if state is None or not state.frames:
+            raise HybridExecutionError("invalid_child", "child Call has no active native parent")
+        engine = self.semantic._callback_exports
+        record = engine._require_nested_chain(state.chain_token)._record(checkpoint)
+        frame = state.frames[-1]
+        raw = frame.raw
+        self._admit_nested_callback(record.handle, record.invocation_id, tuple(raw.callback.arguments))
+        matches = [edge for site, call, target, edge in frame.registration.child_edges
+                   if site == raw.callback.site_index and call is captured_call]
+        if len(matches) != 1:
+            raise HybridExecutionError("invalid_child", "Call is not issued at the current callback site")
+        return matches[0]
+
     def _invoke_nested_child(self, use, arguments):
-        # The authority/accounting foundation is installed at creation; it
-        # deliberately grants no entry until native V3 composition is ready.
-        raise HybridExecutionError("nested_unavailable", "nested machine execution is not enabled")
+        state = self._nested_execution
+        if state is None or not state.frames:
+            raise HybridExecutionError("invalid_child", "child entry has no owned root invocation")
+        chain = self.semantic._callback_exports._require_nested_chain(state.chain_token)
+        captured, edge = chain.consume_machine_use(use)
+        registration = captured.target.registration
+        parent = state.frames[-1]
+        if len(state.frames) >= 8 or any(frame.registration is registration for frame in state.frames):
+            raise HybridExecutionError("invalid_child", "children require at most eight distinct registrations")
+        self._verify_nested_target(captured.target)
+        active = self.semantic._callback_exports._nested_dispatches[-1]
+        protected = self._protected_spans(active.context)
+        spans = self._nested_borrows(registration, arguments, protected, parent.spans)
+        frame = _NestedMachineFrame(registration, spans, protected, use)
+        result = self._drive_nested_frame(
+            frame, self._nested_runner.begin_child_v3, parent.raw.token, edge, arguments, spans,
+            protected_spans=protected,
+        )
+        if result.exit_kind != "returned":
+            raise HybridExecutionError(result.exit_kind.value, result.detail, result=result)
+        if len(result.outputs) != registration.declaration.output_cells:
+            raise HybridExecutionError("invalid_return", "child output arity changed", result=result)
+        return result.outputs
+
+    def _nested_borrows(self, registration, arguments, protected, parent_spans=None):
+        declaration = registration.declaration
+        if (type(arguments) is not tuple or len(arguments) != declaration.input_cells
+                or any(type(value) is not int or not 0 <= value <= MASK64 for value in arguments)):
+            raise HybridExecutionError("invalid_entry", "machine arguments differ from their declared signature")
+        spans = []
+        try:
+            for rule in declaration.buffers:
+                span = rule.resolve(arguments)
+                if span.size:
+                    if not any(region.base <= span.base and span.limit <= region.limit
+                               for region in self._memory.regions):
+                        raise ValueError("borrowed buffer must fit one ordinary shared region")
+                    if any(_overlap(span.base, span.size, base, size) for base, size in protected):
+                        raise ValueError("borrowed buffer overlaps protected stack, code, or header bytes")
+                    if parent_spans is not None and not any(
+                        base <= span.base and span.limit <= base + size
+                        and (access == "read_write" or access == span.access.value)
+                        for base, size, access in parent_spans
+                    ):
+                        raise ValueError("child borrow must fit one immediate parent grant without escalation")
+                spans.append((span.base, span.size, span.access.value))
+        except (TypeError, ValueError) as error:
+            raise HybridExecutionError("rejected_access", str(error)) from error
+        return tuple(spans)
+
+    def _settle_nested_receipt(self):
+        receipt = self._nested_runner.last_segment_v3()
+        if receipt is not None and type(receipt) is not self._native.RoutineSegmentReceiptV3:
+            raise RuntimeError("nested native accounting returned a foreign receipt")
+        chain = self.semantic._callback_exports._nested_chain
+        chain.adapter.composition_for(chain, cleanup=True)("native", receipt)
+
+    def _nested_native_boundary(self, operation, *args, **kwargs):
+        before_segment = self._v3_segment_id
+        try:
+            raw = operation(*args, **kwargs)
+        except BaseException as error:
+            try:
+                self._settle_nested_receipt()
+            except BaseException as cleanup:
+                self._registration_cleanup_error(error, cleanup)
+            raise
+        try:
+            self._settle_nested_receipt()
+            self._require_open()
+            if (type(raw) is not self._native.RoutineSegmentResultV3
+                    or raw.segment_id != self._v3_segment_id or raw.segment_id != before_segment + 1):
+                raise RuntimeError("nested native result differs from its accounting receipt")
+        except BaseException as error:
+            self._registration_failure = f"nested native accounting failed: {_error_detail(error)}"
+            raise
+        return raw
+
+    def _settle_nested_semantics(self, receipt):
+        chain = self.semantic._callback_exports._nested_chain
+        chain.adapter.composition_for(chain, cleanup=True)("semantic", receipt)
+
+    def _nested_callback_boundary(self, handle, request):
+        from simulator.interop_nested import NestedCallbackReceipt
+        engine = self.semantic._callback_exports
+        state = self._nested_execution
+        consume = engine._consume_nested_callback
+        checkpoint = engine._begin_nested_callback(
+            state.chain_token, handle, request.invocation_id, request.arguments,
+        )
+        def settle():
+            receipt = consume(state.chain_token, checkpoint)
+            if type(receipt) is not NestedCallbackReceipt:
+                raise RuntimeError("nested callback returned a foreign accounting receipt")
+            self._settle_nested_semantics(receipt)
+            if (type(receipt.entered) is not bool or type(receipt.completed) is not bool
+                    or type(receipt.inclusive_semantic_steps) is not int
+                    or not 0 <= receipt.inclusive_semantic_steps <= request.site.export.max_semantic_steps
+                    or (not receipt.entered and (receipt.completed or receipt.inclusive_semantic_steps))):
+                raise RuntimeError("nested callback receipt is inconsistent")
+            return receipt
+        try:
+            result = engine._invoke_nested_callback(checkpoint, handle, request.arguments)
+        except BaseException as error:
+            try:
+                settle()
+            except BaseException as cleanup:
+                self._registration_cleanup_error(error, cleanup)
+            raise
+        try:
+            receipt = settle()
+            if (not receipt.entered or not receipt.completed or type(result) is not CallbackExportResult
+                    or result.semantic_steps != receipt.inclusive_semantic_steps):
+                raise RuntimeError("nested callback has no completed issued invocation")
+        except BaseException as error:
+            self._registration_failure = f"nested callback accounting failed: {_error_detail(error)}"
+            raise
+        return result
+
+    def _drive_nested_frame(self, frame, operation, *arguments, **kwargs):
+        state = self._nested_execution
+        chain = self.semantic._callback_exports._nested_chain
+        accounting = chain.adapter.composition_for(chain)
+        accounting("push", frame)
+        original = None
+        try:
+            raw = self._nested_native_boundary(operation, *arguments, **kwargs)
+            while True:
+                accounting("raw", (frame, raw))
+                request = None
+                handle = None
+                if raw.exit_kind == "callback_request":
+                    callback = raw.callback
+                    if not 0 <= callback.site_index < len(frame.registration.exports):
+                        raise HybridExecutionError("invalid_callback", "native callback site is undeclared")
+                    site, handle = frame.registration.exports[callback.site_index]
+                    request = CallbackRequestV4(invocation_id=callback.invocation_id,
+                                                sequence=callback.sequence, site=site,
+                                                arguments=tuple(callback.arguments))
+                    self._admit_nested_callback(handle, raw.invocation_id, request.arguments)
+                result = MachineSegmentResultV4(
+                    **self._result_fields(raw), invocation_id=raw.invocation_id,
+                    invocation_instructions=raw.invocation_instructions,
+                    invocation_cycles=raw.invocation_cycles, callback=request,
+                    segment_id=raw.segment_id, root_invocation_id=raw.root_invocation_id,
+                    parent_invocation_id=raw.parent_invocation_id, depth=raw.depth,
+                    invocation_started=raw.invocation_started,
+                    chain_instructions=raw.chain_instructions, chain_cycles=raw.chain_cycles,
+                )
+                if result.exit_kind != "callback_request":
+                    return result
+                if (state.allowance.instructions >= state.allowance.limit
+                        or raw.invocation_instructions >= frame.registration.declaration.max_instructions):
+                    raise HybridExecutionError("instruction_limit", "machine allowance exhausted before callback",
+                                               result=result)
+                if state.allowance.callback_semantic_steps >= state.allowance.callback_semantic_limit:
+                    raise HybridExecutionError("callback_semantic_limit", "outer semantic callback allowance exhausted",
+                                               result=result)
+                try:
+                    callback_result = self._nested_callback_boundary(handle, request)
+                except CallbackExportBudgetExceeded as error:
+                    if (self._registration_failure is None
+                            and self.semantic.consume_callback_budget_failure(error)):
+                        raise HybridExecutionError(error.reason, str(error), result=result) from error
+                    raise
+                self._validate_registration(frame.registration)
+                raw = self._nested_native_boundary(self._nested_runner.resume_callback_v3,
+                                                   raw.token, callback_result.outputs)
+        except BaseException as error:
+            original = error
+            raise
+        finally:
+            try:
+                accounting("pop", frame)
+            except BaseException as cleanup:
+                if original is None:
+                    raise
+                self._registration_cleanup_error(original, cleanup)
+
+    def _invoke_published_nested(self, word, context):
+        """Internal core; public source admission remains capability-gated."""
+        with self.semantic._session_owner_lock:
+            self._require_open()
+            if self._active_machine or self._nested_execution is not None:
+                raise HybridExecutionError("active_dispatch", "root machine entry is not reentrant")
+            registration = self._registrations.get(id(word))
+            if (registration is None or registration.word is not word
+                    or type(registration.declaration) is not RoutineDeclarationV4):
+                raise HybridExecutionError("stale_registration", "root requires an issued V4 registration")
+            self._validate_registration(registration)
+            meter = self._current_meter()
+            if meter is None:
+                raise HybridExecutionError("invalid_entry", "root requires the original semantic dispatch")
+            allowance = self._allowance(meter)
+            remaining = allowance.limit - allowance.instructions
+            if remaining <= 0:
+                raise HybridExecutionError("instruction_limit", "outer machine allowance exhausted")
+            declaration = registration.declaration
+            arguments = tuple(context.data.peek(index) for index in reversed(range(declaration.input_cells)))
+            context.data.require_push_capacity(max(0, declaration.output_cells - declaration.input_cells))
+            protected = self._protected_spans(context)
+            spans = self._nested_borrows(registration, arguments, protected)
+            engine = self.semantic._callback_exports
+            semantic_limit = allowance.callback_semantic_limit - allowance.callback_semantic_steps
+            finish_chain = engine._finish_nested_chain
+            adapter = engine._nested_owner
+            release_composition = adapter.release_composition
+            bind_composition = adapter.bind_composition
+            runner = self._nested_runner
+            last_native_receipt = runner.last_segment_v3
+            cancel_native = runner.cancel_chain_v3
+            state = _NestedExecution(None, meter, allowance, semantic_limit)
+            accounting = None
+            chain = None
+            original = None
+            chain_token = engine._begin_nested_chain(self, meter, semantic_limit)
+            try:
+                chain = engine._nested_chain
+                state.chain_token = chain_token
+                self._nested_execution, self._active_machine = state, True
+                accounting = bind_composition(chain, state)
+                frame = _NestedMachineFrame(registration, spans, protected)
+                result = self._drive_nested_frame(
+                    frame, self._nested_runner.begin_root_v3, registration.spec, arguments, spans, remaining,
+                    callback_limit=max(0, allowance.callback_limit - allowance.callback_requests),
+                    protected_spans=protected,
+                )
+                if result.exit_kind != "returned":
+                    raise HybridExecutionError(result.exit_kind.value, result.detail, result=result)
+                if len(result.outputs) != declaration.output_cells:
+                    raise HybridExecutionError("invalid_return", "root output arity changed", result=result)
+                receipt = finish_chain(chain_token)
+                accounting("semantic", receipt)
+            except BaseException as error:
+                original = error
+                # Recovery uses the original owner/query and local authority,
+                # including failures before the next snapshot was allocated.
+                if accounting is not None:
+                    try:
+                        receipt = last_native_receipt()
+                        if receipt is not None and type(receipt) is not self._native.RoutineSegmentReceiptV3:
+                            raise RuntimeError("nested native recovery returned a foreign receipt")
+                        accounting("native", receipt)
+                    except BaseException as cleanup:
+                        self._registration_cleanup_error(error, cleanup)
+                try:
+                    cancel_native()
+                except BaseException as cleanup:
+                    self._registration_cleanup_error(error, cleanup)
+                try:
+                    if engine._nested_chain is not None:
+                        receipt = finish_chain(chain_token, cancelled=True)
+                        if accounting is not None:
+                            accounting("semantic", receipt)
+                except BaseException as cleanup:
+                    self._registration_cleanup_error(error, cleanup)
+                raise
+            finally:
+                try:
+                    if chain is not None:
+                        release_composition(chain)
+                except BaseException as cleanup:
+                    if original is None:
+                        raise
+                    self._registration_cleanup_error(original, cleanup)
+                finally:
+                    self._nested_execution, self._active_machine = None, False
+            for _ in range(declaration.input_cells):
+                context.data.pop()
+            for cell in result.outputs:
+                context.data.push(cell)
 
     @staticmethod
     def _supports_callbacks(native: Any) -> bool:
@@ -403,6 +914,10 @@ class HybridRuntime:
         return False
 
     @property
+    def max_machine_depth(self) -> int:
+        return self._max_machine_depth
+
+    @property
     def callback_requests(self) -> int:
         return self._callback_requests
 
@@ -471,7 +986,10 @@ class HybridRuntime:
         self._registration_failure = (
             f"registration rollback failed: {_error_detail(cleanup)}"
         )
-        BaseException.add_note(error, self._registration_failure)
+        try:
+            BaseException.add_note(error, self._registration_failure)
+        except BaseException:
+            pass
 
     def _register_routine(self, image, image_type, values: dict[str, Any]) -> Word:
         with self.semantic._session_owner_lock:
@@ -786,6 +1304,8 @@ class HybridRuntime:
             if id(current) in seen:
                 continue
             seen.add(id(current))
+            if self.semantic._callback_exports._nested_private_context(current):
+                continue
             self._remember_context(current)
         spans = list(self._stack_allocations.values())
         for word in self.semantic.dictionary.words:
@@ -1235,6 +1755,10 @@ class HybridRuntime:
 
 _NESTED_OWNER_ROUTES = tuple((name, vars(HybridRuntime)[name]) for name in (
     "_capture_nested_target", "_verify_nested_target", "_invoke_nested_child",
+    "_admit_nested_callback", "_nested_child_edge", "_nested_borrows", "_protected_spans",
+    "_require_nested_execution",
+    "_drive_nested_frame", "_nested_native_boundary", "_nested_callback_boundary",
+    "_settle_nested_receipt", "_settle_nested_semantics",
     "_validate_registration", "_require_open", "_require_authority",
 ))
 _NESTED_OWNER_SPECIAL_ROUTES = tuple((name, getattr(HybridRuntime, name)) for name in (
@@ -1247,6 +1771,7 @@ _NESTED_OWNER_FIELD_ROUTES = tuple((name, vars(HybridRuntime).get(name, _NESTED_
     "semantic", "_registrations", "_by_nonce", "_session_nonce", "_closed",
     "_registration_failure", "_dictionary", "_dictionary_guard", "_memory",
     "_nested_runner", "_dispatch_callback_limit", "dispatch_callback_limit",
+    "_nested_execution", "_active_machine", "_native", "_v3_segment_id",
 ))
 
 
