@@ -1348,12 +1348,12 @@ module tb_tile;
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
                            "TRED SUM in a reserved EW traps");
                 end else begin
-                    // TDIV lands in Phase 8; PACK, VSHR, and FP64 WMUL are
+                    // TSQRT takes only SS=0; PACK, VSHR, and FP64 WMUL are
                     // illegal.
-                    mex_dispatch_ext(2'd0, MEX_TALU, ETALU_TDIV, 64'd0,
+                    mex_dispatch_ext(2'd1, MEX_TALU, ETALU_TSQRT, 64'd0,
                                      8'd0, 4'd8);
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
-                           "FP32/FP64 TDIV traps");
+                           "broadcast TSQRT traps");
                     mex_dispatch(2'd0, MEX_TSYS, TSYS_PACK, 64'd0, 8'd0);
                     check3(mex_fault, MEX_FAULT_ILLEGAL,
                            "float PACK traps");

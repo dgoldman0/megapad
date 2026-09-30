@@ -340,8 +340,14 @@ module mp64_tile #(
                     ETALU_TCMP:
                         tile_op_admitted =
                             (ss != 2'd2) && (funct_byte[7:6] == 2'b00);
-                    default:  // TDIV and TSQRT land in Phase 8
-                        tile_op_admitted = 1'b0;
+                    ETALU_TDIV:
+                        tile_op_admitted =
+                            tile_format_is_float(ew) && (ss != 2'd2) &&
+                            (funct_byte[7:3] == 5'd0);
+                    default:  // ETALU_TSQRT
+                        tile_op_admitted =
+                            tile_format_is_float(ew) && (ss == 2'd0) &&
+                            (funct_byte[7:3] == 5'd0);
                 endcase
             else if (ext8 && (op == MEX_TSYS))
                 tile_op_admitted = 1'b1;
@@ -405,6 +411,7 @@ module mp64_tile #(
     localparam S_CVT_CONVERT    = 5'd27;  // one sixteen-lane TCVT beat
     localparam S_CVT_WRITE_WAIT = 5'd28;  // TCVT destination tile write
     localparam S_CVT_PAD        = 5'd29;  // idle TCVT beats to 4 + (k - 1)
+    localparam S_DIV            = 5'd30;  // TDIV/TSQRT lane groups
 
     reg [4:0]   state;
     reg         mex_done_reg;
@@ -437,6 +444,10 @@ module mp64_tile #(
     reg [3:0]   ext_mod_reg;
     reg         ext_active_reg;
     reg         needs_load_c;
+    // TSQRT reads only operand A (docs/floating-point.md §6.2).
+    wire        operation_reads_b =
+        !(ext_active_reg && ext_mod_reg == 4'd8 && op_reg == MEX_TALU &&
+          funct_reg == ETALU_TSQRT);
 
     // Captured dispatch context.  Later TACC landings consume the protection
     // and identity fields; the epoch fields are already live so cancellation
@@ -1577,6 +1588,60 @@ module mp64_tile #(
                 .c1   (c1),
                 .r0   (fma_r0_bus[fmu*64 +: 64]),
                 .r1   (fma_r1_bus[fmu*64 +: 64])
+            );
+        end
+    endgenerate
+
+    // ------------------------------------------------------------------
+    // TDIV and TSQRT (docs/floating-point.md §6.1, §6.2)
+    // ------------------------------------------------------------------
+    // FMA_UNITS divide and square-root units (mp64_fp_divsqrt.v, the
+    // recurrence the scalar FPU uses) take the lanes in groups of
+    // FMA_UNITS.  Each group takes one start cycle, bits / 2 recurrence
+    // cycles, and one capture cycle, so the extra cycles are
+    // lanes / FMA_UNITS * (bits / 2 + 2): 144 for FP16 and BF16 and 120 for
+    // FP32 and FP64 at FMA_UNITS = 2.
+    localparam [1:0] DIV_START   = 2'd0;
+    localparam [1:0] DIV_RUN     = 2'd1;
+    localparam [1:0] DIV_CAPTURE = 2'd2;
+
+    reg  [1:0] div_phase;
+    reg  [5:0] div_group;
+    reg  [5:0] div_wait;
+    wire [1:0] div_fmt =
+        (mode_ew == TMODE_FP16) ? 2'd0 :
+        (mode_ew == TMODE_BF16) ? 2'd1 :
+        (mode_ew == TMODE_FP32) ? 2'd2 : 2'd3;
+    wire [5:0] div_half_bits =
+        (div_fmt[1] == 1'b0) ? 6'd7 :
+        (div_fmt == 2'd2)    ? 6'd13 : 6'd28;
+    wire [6:0] div_lanes  = 7'd64 >> lane_ew;
+    wire [6:0] div_groups = div_lanes / FMA_UNITS;
+    wire       div_sqrt   = funct_reg == ETALU_TSQRT;
+    wire [64*FMA_UNITS-1:0] div_result_bus;
+
+    genvar dvu;
+    generate
+        for (dvu = 0; dvu < FMA_UNITS; dvu = dvu + 1) begin : div_units
+            wire [6:0]  lane  = div_group * FMA_UNITS + dvu;
+            wire [63:0] mask  = lane_width_mask(lane_ew);
+            wire [63:0] lane_a =
+                (tile_a >> (lane * (8 << lane_ew))) & {448'd0, mask};
+            wire [63:0] lane_b =
+                (src_b_selected >> (lane * (8 << lane_ew))) & {448'd0, mask};
+
+            mp64_fp_divsqrt u_divsqrt (
+                .clk   (clk),
+                .rst   (!rst_n),
+                .start (state == S_DIV && div_phase == DIV_START),
+                .sqrt  (div_sqrt),
+                .fmt   (div_fmt),
+                .rm    (3'd0),
+                .a     (lane_a),
+                .b     (div_sqrt ? lane_a : lane_b),
+                .ready (),
+                .result(div_result_bus[dvu*64 +: 64]),
+                .flags ()
             );
         end
     endgenerate
@@ -3637,7 +3702,8 @@ module mp64_tile #(
                         end else
                             state <= S_COMPUTE;
                     end
-                    else if (ss_reg == 2'd0 || ss_reg == 2'd3) begin
+                    else if ((ss_reg == 2'd0 || ss_reg == 2'd3) &&
+                             operation_reads_b) begin
                         // Operand B: [TSRC1] tile x tile, [TSRC0] in place.
                         if ((ss_reg == 2'd0) ? src1_internal : src0_internal) begin
                             tile_req  <= 1'b1;
@@ -3800,9 +3866,51 @@ module mp64_tile #(
                     fma_beat <= 4'd0;
                     state    <= S_FMA;
                 end
+                else if (ext_active_reg && ext_mod_reg == 4'd8 &&
+                         op_reg == MEX_TALU &&
+                         (funct_reg == ETALU_TDIV ||
+                          funct_reg == ETALU_TSQRT)) begin
+                    div_group <= 6'd0;
+                    div_phase <= DIV_START;
+                    state     <= S_DIV;
+                end
                 else begin
                     state <= S_STORE;
                 end
+            end
+
+            // TDIV/TSQRT: start a lane group, run its recurrence, capture.
+            S_DIV: begin
+                case (div_phase)
+                    DIV_START: begin
+                        div_wait  <= div_half_bits;
+                        div_phase <= DIV_RUN;
+                    end
+                    DIV_RUN: begin
+                        div_wait <= div_wait - 6'd1;
+                        if (div_wait == 6'd1)
+                            div_phase <= DIV_CAPTURE;
+                    end
+                    default: begin
+                        for (fma_i = 0; fma_i < FMA_UNITS; fma_i = fma_i + 1) begin
+                            fma_j = div_group * FMA_UNITS + fma_i;
+                            case (lane_ew)
+                                2'd1: result[fma_j*16 +: 16] <=
+                                          div_result_bus[fma_i*64 +: 16];
+                                2'd2: result[fma_j*32 +: 32] <=
+                                          div_result_bus[fma_i*64 +: 32];
+                                default: result[fma_j*64 +: 64] <=
+                                          div_result_bus[fma_i*64 +: 64];
+                            endcase
+                        end
+                        if (div_group == div_groups - 7'd1) begin
+                            state <= S_STORE;
+                        end else begin
+                            div_group <= div_group + 6'd1;
+                            div_phase <= DIV_START;
+                        end
+                    end
+                endcase
             end
 
             // One beat of the FP32/FP64 element-wise datapath: capture each
@@ -4167,7 +4275,8 @@ module mp64_tile #(
                             state         <= S_EXT_LOAD_B;
                         end
                     end
-                    else if (ss_reg == 2'd0 || ss_reg == 2'd3) begin
+                    else if ((ss_reg == 2'd0 || ss_reg == 2'd3) &&
+                             operation_reads_b) begin
                         if ((ss_reg == 2'd0) ? src1_internal : src0_internal) begin
                             tile_req  <= 1'b1;
                             tile_addr <= (ss_reg == 2'd0) ?

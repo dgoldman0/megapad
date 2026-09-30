@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Generate EXT.8 VSEL, TCMP, and TCVT golden vectors for tb_tile_ext.v.
+"""Generate EXT.8 VSEL, TCMP, TCVT, TDIV, and TSQRT vectors for tb_tile_ext.v.
 
 Every expected value comes from executing the instruction on the Python
 emulator, whose results come from the shared exact reference
 (shared/ieee_fp.py, docs/floating-point.md §6).  The vectors cover VSEL and
 every TCMP predicate in all twelve integer and float modes with tile,
-broadcast, and (TCMP) in-place sources, and TCVT for every legal format pair
+broadcast, and (TCMP) in-place sources, TCVT for every legal format pair
 under all four signedness and rounding settings, including the multi-tile
-widening and narrowing regions.
+widening and narrowing regions, and TDIV (tile, broadcast, in-place) and
+TSQRT in all four float formats.
 
 Each row is:
 
@@ -16,9 +17,9 @@ Each row is:
 
 ``source`` holds ``reads`` tiles from TSRC0 and ``expected`` the ``writes``
 tiles the operation leaves at TDST; every other destination tile must keep
-``dst_init``.  ``cycles`` is the TCVT conversion cycle count 4 + (k - 1), or
-0 for VSEL and TCMP.  Within every hex token, byte offset zero is the
-least-significant byte.
+``dst_init``.  ``cycles`` is the §10 extra cycle count for TCVT, TDIV, and
+TSQRT, or 0 for VSEL and TCMP.  Within every hex token, byte offset zero is
+the least-significant byte.
 
 Regenerate from the repository root with:
 
@@ -138,6 +139,21 @@ def _rows() -> list[str]:
                     f"tcmp_{label}_m{tmode:02x}_ss{ss}", ss,
                     predicate << 3 | 7, tmode, rng.getrandbits(64), source,
                     src1, src1 if ss == 3 else _tile(rng, tmode), 1, 0))
+    for tmode in (4, 5, 6, 7):
+        cycles = tile_formats.divide_extra_cycles(tile_formats.decode(tmode))
+        for index in range(4):
+            for ss in (0, 1, 3):
+                source = _tile(rng, tmode)
+                src1 = _tile(rng, tmode)
+                rows.append(_row(
+                    f"tdiv_m{tmode:02x}_ss{ss}_{index}", ss,
+                    tile_formats.EXT_TDIV, tmode, rng.getrandbits(64), source,
+                    src1, src1 if ss == 3 else _tile(rng, tmode), 1, cycles))
+            source = _tile(rng, tmode)
+            rows.append(_row(
+                f"tsqrt_m{tmode:02x}_{index}", 0, tile_formats.EXT_TSQRT,
+                tmode, 0, source, _tile(rng, tmode), _tile(rng, tmode), 1,
+                cycles))
     widths = (1, 2, 4, 8, 2, 2, 4, 8)
     for source_ew in range(8):
         for target_ew in range(8):
