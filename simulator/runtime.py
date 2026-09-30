@@ -787,6 +787,13 @@ class MegaForthRuntime:
             from simulator.core_words import install_core
 
             install_core(self)
+        # Capture only the original installed leaves, before any user can
+        # shadow their names. Shared ABI metadata never carries Word authority.
+        from simulator.interop_exports import CallbackExportEngine
+
+        self._callback_exports = CallbackExportEngine(
+            self, core_installed=install_core_words
+        )
         # BIOS S" interpret mode owns one reusable 255-byte payload plus its
         # terminator. Keep it in the protected Bank-0 prefix rather than at
         # transient HERE, so later definitions cannot change its address.
@@ -2413,6 +2420,21 @@ class MegaForthRuntime:
                     capture_checkpoint
                 )
 
+    def bind_callback_export(self, descriptor):
+        """Bind bounded value metadata to an original installed integer leaf."""
+
+        return self._callback_exports.bind(descriptor)
+
+    def verify_callback_export(self, handle):
+        """Return metadata for a live issued handle, without exposing its Word."""
+
+        return self._callback_exports.verify(handle)
+
+    def invoke_callback_export(self, handle, arguments: tuple[int, ...]):
+        """Invoke one approved leaf using the existing outer semantic meter."""
+
+        return self._callback_exports.invoke(handle, arguments)
+
     def execute(
         self,
         name_or_xt: bytes | str | int,
@@ -3735,9 +3757,22 @@ class MegaForthRuntime:
                     break
                 if not isinstance(implementation, PrimitiveDefinition):
                     break
+                exports = getattr(self, "_callback_exports", None)
+                export_guard = (
+                    exports._guard_primitive
+                    if exports is not None and exports._active_context is context
+                    else None
+                )
                 meter.tick()
                 try:
-                    invocation = self._invoke_primitive(implementation, context)
+                    if export_guard is not None:
+                        # Pin this bound authority before accounting can run
+                        # host hooks. Only the dispatcher invokes the checked
+                        # primitive, without translating faults into FAULT-XT!.
+                        callback = export_guard(implementation, context)
+                        invocation = callback(context)
+                    else:
+                        invocation = self._invoke_primitive(implementation, context)
                 except _GuestFaultRequest as request:
                     if request.context is not context:
                         raise

@@ -2,9 +2,9 @@
 
 Date: 2026-09-30
 
-Status: Phase 5A value contract for review. This slice defines and validates
-backend-neutral metadata only. It does not implement callback execution,
-native continuation tokens, a v2 manifest loader, or a new launcher capability.
+Status: Phase 5A value contract is locked and the semantic export engine is
+qualified. Native request/resume tokens, composition, a v2 manifest loader and
+launcher admission remain separate implementation gates.
 The locked implementation direction is
 [`hybrid-interop-plan.md`](hybrid-interop-plan.md).
 
@@ -164,7 +164,35 @@ validation, but a v1 API that requires exact v1 values must continue to reject
 them. In particular, `RoutineManifestV1` does not accept `RoutineImageV2`.
 There is no v2 manifest type or parser in this slice.
 
+## Qualified semantic export engine
+
+`MegaForthRuntime.bind_callback_export(descriptor)` returns an opaque issued
+handle. `verify_callback_export(handle)` returns a fresh metadata copy, and
+`invoke_callback_export(handle, arguments)` returns an exact output tuple and
+the charged semantic-step count. The engine captures the six original core
+Words at installation, before user shadowing. Removal, XT reuse or changed
+implementations revoke their eligibility; a copied handle grants no authority.
+
+Invocation uses the ordinary semantic dispatcher and outer meter. Its private
+128-byte memory bounds both data and return stacks to eight cells. The approved
+dispatch guard is pinned before accounting hooks run, and rechecks the Word,
+implementation, owner and private backing immediately before invocation. It
+does not enter an installed guest fault callback. The caller's stack bytes and
+retained return metadata are not copied or restored. Native-selected semantic
+execution can use its reference path for this separate private context.
+
+The final engine gate passed 74 checks across both selected semantic backends.
+The existing hybrid bridge and registration-failure gates also passed 99
+checks. This engine does not yet connect an actual machine callback or enable
+v2 manifests in the application.
+
 ## `CallbackRequestV2`
+
+The native `begin_v2` callback limit represents remaining allowance and may be
+zero. A callback-free path can still return normally. If the routine executes
+a declared call with no remaining callback allowance, its real CALL effects
+and work are retained, then it exits `callback_limit` without issuing a request
+or token. Configured session and shared-value callback limits remain positive.
 
 | Field | Type and constraint |
 |---|---|
