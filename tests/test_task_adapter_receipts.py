@@ -33,10 +33,16 @@ def test_exact_semantic_receipt_replay_is_idempotent_and_copies_or_old_roots_are
     receipt = semantic_receipt(hybrid, adapter)
     assert receipt.sequence == receipt.semantic_steps == report.callback_semantic_steps == 1
     assert hybrid.callback_semantic_steps == 1
+    task_status = hybrid.task_execution_status
+    assert task_status["callback_semantic_steps"] == 1
+    assert task_status["instructions"] == adapter.machine_instructions == 5
+    assert task_status["cycles"] == adapter.machine_cycles
+    assert task_status["callback_requests"] == 1 and task_status["active_depth"] == 0
     before = totals(hybrid), machine_snapshot(hybrid), adapter.last_receipt()
     for _ in range(3):
         adapter.settle_semantic_receipt(receipt)
         assert (totals(hybrid), machine_snapshot(hybrid), adapter.last_receipt()) == before
+        assert hybrid.task_execution_status == task_status
     copied = replace(receipt)
     with pytest.raises(ForeignTaskError):
         adapter.settle_semantic_receipt(copied)
@@ -51,12 +57,18 @@ def test_exact_semantic_receipt_replay_is_idempotent_and_copies_or_old_roots_are
     assert current.root_id > receipt.root_id and current.sequence == 1
     assert current.semantic_steps == second.callback_semantic_steps == 1
     assert hybrid.callback_semantic_steps == 2
+    task_status = hybrid.task_execution_status
+    assert task_status["callback_semantic_steps"] == 2
+    assert task_status["instructions"] == adapter.machine_instructions == 10
+    assert task_status["cycles"] == adapter.machine_cycles
+    assert task_status["callback_requests"] == 2
     before = totals(hybrid), machine_snapshot(hybrid)
     with pytest.raises(ForeignTaskError):
         adapter.settle_semantic_receipt(receipt)
     assert (totals(hybrid), machine_snapshot(hybrid)) == before
     adapter.settle_semantic_receipt(current)
     assert (totals(hybrid), machine_snapshot(hybrid)) == before
+    assert hybrid.task_execution_status == task_status
     assert_idle(hybrid, adapter)
 
 
@@ -69,14 +81,20 @@ def test_settled_task_receipt_replay_cannot_refund_later_private_callback_work(o
     hybrid.execute(task.xt)
     receipt = semantic_receipt(hybrid, adapter)
     assert hybrid.callback_semantic_steps == receipt.semantic_steps == 1
+    task_status = hybrid.task_execution_status
+    assert task_status["callback_semantic_steps"] == 1
+    assert task_status["instructions"] == adapter.machine_instructions == 5
     runtime.main_context.data.clear()
     runtime.main_context.data.push(11)
     report = hybrid.execute(private.xt)
     assert report.callback_semantic_steps == 1 and hybrid.callback_semantic_steps == 2
+    assert hybrid.machine_instructions > adapter.machine_instructions
+    assert hybrid.task_execution_status == task_status
     assert semantic_receipt(hybrid, adapter) is receipt
     before = totals(hybrid), machine_snapshot(hybrid), adapter.last_receipt()
     adapter.settle_semantic_receipt(receipt)
     assert (totals(hybrid), machine_snapshot(hybrid), adapter.last_receipt()) == before
+    assert hybrid.task_execution_status == task_status
     assert runtime.main_context.data.snapshot() == (11,)
     assert_idle(hybrid, adapter)
 
@@ -100,7 +118,7 @@ def test_interrupted_semantic_projection_retains_exact_work_and_original_error(o
             snapshot = frame.f_locals.get("semantic_state")
             # The immutable receipt has been published, but its projection has
             # not yet been acknowledged. Interrupt either side of the raw write.
-            if (receipt is not None and type(snapshot) is tuple and len(snapshot) == 7
+            if (receipt is not None and type(snapshot) is tuple and len(snapshot) == 8
                     and snapshot[3] is receipt and snapshot[6] is True
                     and hybrid.callback_semantic_steps == (0 if stage == "before_projection" else 1)):
                 fired.append(True)
@@ -118,12 +136,16 @@ def test_interrupted_semantic_projection_retains_exact_work_and_original_error(o
     report = runtime._foreign_tasks.last_dispatch
     assert receipt.semantic_steps == report.semantic_steps == hybrid.callback_semantic_steps == 1
     assert adapter.machine_instructions == report.machine_instructions == hybrid.machine_instructions == 5
+    task_status = hybrid.task_execution_status
+    assert task_status["callback_semantic_steps"] == 1
+    assert task_status["instructions"] == 5 and task_status["cycles"] == adapter.machine_cycles
     assert adapter.last_receipt().state == "returned"
     assert runtime.main_context.data.snapshot() == (99, 7, 7)
     assert report.cancelled and not report.completed
     before = totals(hybrid), machine_snapshot(hybrid)
     adapter.settle_semantic_receipt(receipt)
     assert (totals(hybrid), machine_snapshot(hybrid)) == before
+    assert hybrid.task_execution_status == task_status
     assert_idle(hybrid, adapter)
 
 

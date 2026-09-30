@@ -231,6 +231,36 @@ class NativeTaskAdapter:
 
             self._native_cleanup = native_cleanup
             self._native_closed = lambda: native_closed
+            registration_word = vars(_Registration)["word"]
+            word_name = vars(Word)["name"]
+            settlement_frames = vars(_Settlement)["frames"]
+
+            def status_metadata():
+                # These names describe issued registrations, including ones
+                # later revoked by the dictionary. They grant no live lease.
+                registrations = raw_get(namespace, "_registrations")
+                state = raw_get(namespace, "_settlement")
+                if type(registrations) is not dict or len(registrations) > MAX_ROUTINES:
+                    raise ForeignTaskError("task diagnostic registration table changed")
+                if type(state) is not settlement_kind:
+                    raise ForeignTaskError("task diagnostic settlement changed")
+                frames = settlement_frames.__get__(state, settlement_kind)
+                if type(frames) is not tuple or len(frames) > 8:
+                    raise ForeignTaskError("task diagnostic frame list changed")
+                names = []
+                for registration in dict.values(registrations):
+                    if type(registration) is not _Registration:
+                        raise ForeignTaskError("task diagnostic registration changed")
+                    word = registration_word.__get__(registration, _Registration)
+                    if type(word) is not Word:
+                        raise ForeignTaskError("task diagnostic word changed")
+                    name = word_name.__get__(word, Word)
+                    if type(name) is not bytes:
+                        raise ForeignTaskError("task diagnostic name changed")
+                    names.append(name.decode("utf-8", errors="replace"))
+                return tuple(sorted(names)), len(frames)
+
+            self._status_metadata = status_metadata
             self._owner_call("_install_task_adapter", self)
 
     def _owner_call(self, name, *args):
