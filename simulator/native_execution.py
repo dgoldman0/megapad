@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 1
+SEMANTIC_API_VERSION = 2
 
 
 class NativeExecutor:
@@ -51,11 +51,20 @@ class NativeExecutor:
     def __init__(self, runtime, extension, *, admit_core: bool):
         self.runtime = runtime
         self.extension = extension
+        memory = runtime.memory
+        if memory.dense_backing is None:
+            sparse_regions = [(region.spec.base, region.spec.size, region.pages)
+                              for region in memory._regions]
+            dense_regions = ()
+        else:
+            sparse_regions = ()
+            dense_regions = [(spec.base, spec.size, memory.dense_backing.buffer_at(spec.base))
+                             for spec in memory.regions]
         self.program = extension.NativeProgram(
-            [(region.spec.base, region.spec.size, region.pages)
-             for region in runtime.memory._regions],
-            runtime.memory.page_size,
+            sparse_regions,
+            memory.page_size,
             Continuation,
+            dense_regions=dense_regions,
         )
         # Only original installed BIOS callbacks may become native primitives.
         # Later same-named host callbacks and source definitions keep their XT.

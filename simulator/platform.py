@@ -9,7 +9,10 @@ defaults.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from shared.cells import MASK64
+from shared.memory_backing import DenseMemoryBacking
 from shared.audio_output import AUDIO_LIMIT, AUDIO_OFFSET
 from shared.crypto_caps import (
     CRYPTO_CAP_CRC_REFLECT_RAW,
@@ -348,13 +351,14 @@ def create_one_core_address_space(
     vram_size: int = 0,
     hbw_size: int = 0,
     page_size: int = DEFAULT_PAGE_SIZE,
+    dense_backing: DenseMemoryBacking | Literal[True] | None = None,
     crypto_capabilities: int = HOSTED_CRYPTO_CAPABILITIES,
     entropy_seed: bytes = DEFAULT_TRNG_SEED,
     entropy_usable: bool = True,
     initial_epoch_ms: int = 0,
     initial_uptime_ms: int = 0,
 ) -> SparseAddressSpace:
-    """Return sparse guest memory with the one-core platform router attached."""
+    """Return guest memory with the one-core router; sparse unless explicit."""
 
     sysinfo = OneCoreSysInfo(crypto_capabilities=crypto_capabilities)
     platform = OneCorePlatformMMIO(
@@ -380,6 +384,7 @@ def create_one_core_address_space(
         hbw_size=hbw_size,
         mmio=platform,
         page_size=page_size,
+        dense_backing=dense_backing,
     )
     sysinfo.bind(memory)
     platform.audio.bind(memory)

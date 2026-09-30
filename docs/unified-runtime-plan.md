@@ -332,7 +332,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 2 — workload profiles | Bounded kernels and KDOS load controls recorded; Desktop/attribution pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
-| 4 — initial hybrid ABI and execution | Integer-routine v1 ABI locked; implementation pending | `docs/hybrid-runtime-abi.md`; source-reviewed memory, lifetime and return-stack constraints |
+| 4 — initial hybrid ABI and execution | Integer-routine v1 ABI locked; shared backing qualified, execution integration underway | `docs/hybrid-runtime-abi.md`; 56 dense backing checks and 664 existing runtime regressions |
 | 5 — expanded interoperability | Pending | |
 
 ### Phase 1A implementation and validation — 2026-09-30
@@ -576,3 +576,19 @@ reports retain preparation versus loading time, source/binary identities and
 peak memory. No compiler optimization or loading speedup is claimed; this is
 a representative compatibility/control workload. Desktop and source-loading
 attribution remain open, as does executor default promotion.
+
+### Phase 4 shared backing foundation — 2026-09-30
+
+`DenseMemoryBacking` owns a fixed buffer for each ordinary guest region.
+Independent pinned views keep each buffer alive and prevent resizing. The
+existing semantic address-space type accepts this owner explicitly; its sparse
+default remains unchanged. Native semantic execution receives direct dense
+descriptors and retains independent buffer leases. Complete range, stack and
+geometry checks precede pointer access, and dense mappings cannot physically
+alias each other. The native API is version 2 so stale binaries fail admission.
+
+The semantic extension built successfully. All 56 new dense owner/adapter tests
+and 664 existing memory, platform, stack, native execution, bulk memory,
+suspension and FP regressions passed. Independent review verified pin lifetime
+and checked access ordering. This establishes shared bytes, not hybrid calls;
+the launcher remains disabled until registration, runner and session gates pass.

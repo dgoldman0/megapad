@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -66,6 +67,10 @@ struct Region {
     Cell base;
     Cell size;
     py::dict pages;
+    // A dense descriptor owns a buffer export for the program's full
+    // lifetime. The pointer cannot be invalidated by exporter resizing.
+    std::unique_ptr<py::buffer_info> dense_lease;
+    uint8_t* dense = nullptr;
 };
 
 struct ByteChunk {
@@ -220,6 +225,12 @@ public:
             const Cell offset = address - region.base;
             if (width > region.size - offset)
                 return false;
+            if (region.dense != nullptr) {
+                scalar.fragmented = false;
+                scalar.contiguous = region.dense + offset;
+                hot = HotPage{region.base, region.size, region.dense};
+                return true;
+            }
             Cell page_index = offset >> page_shift_;
             Cell page_offset = offset & (page_size_ - 1);
             scalar.fragmented = width > page_size_ - page_offset;
@@ -283,6 +294,11 @@ public:
             if (address < region.base || address - region.base >= region.size) continue;
             Cell offset = address - region.base;
             if (length > region.size - offset) return false;
+            if (region.dense != nullptr) {
+                span.append(region.dense + offset, length);
+                ordinary_page_ = HotPage{region.base, region.size, region.dense};
+                return true;
+            }
             while (length != 0) {
                 uint8_t* page = nullptr;
                 if (!resolve_page(r, offset >> page_shift_, page) ||
@@ -520,16 +536,11 @@ private:
 class NativeProgram {
 public:
     NativeProgram(const py::iterable& regions, Cell page_size,
-                  py::object continuation_type)
+                  py::object continuation_type, const py::iterable& dense_regions)
         : page_size_(page_size), continuation_type_(std::move(continuation_type)) {
         if (page_size == 0 || (page_size & (page_size - 1)) != 0)
             throw py::value_error("page size must be a positive power of two");
-        for (py::handle item : regions) {
-            auto entry = py::cast<py::tuple>(item);
-            if (entry.size() != 3)
-                throw py::value_error("region must be (base, size, pages)");
-            const Cell base = entry[0].cast<Cell>();
-            const Cell size = entry[1].cast<Cell>();
+        auto validate_region = [&](Cell base, Cell size) {
             if (size == 0 || base > MASK - (size - 1))
                 throw py::value_error("region has an invalid ordinary span");
             for (const Region& previous : regions_) {
@@ -537,7 +548,52 @@ public:
                     previous.base <= base + size - 1)
                     throw py::value_error("ordinary regions must not overlap");
             }
-            regions_.push_back(Region{base, size, entry[2].cast<py::dict>()});
+        };
+        for (py::handle item : regions) {
+            auto entry = py::cast<py::tuple>(item);
+            if (entry.size() != 3)
+                throw py::value_error("region must be (base, size, pages)");
+            const Cell base = entry[0].cast<Cell>();
+            const Cell size = entry[1].cast<Cell>();
+            validate_region(base, size);
+            regions_.push_back(Region{base, size, entry[2].cast<py::dict>(), nullptr});
+        }
+        for (py::handle item : dense_regions) {
+            auto entry = py::cast<py::tuple>(item);
+            if (entry.size() != 3)
+                throw py::value_error("dense region must be (base, size, buffer)");
+            const Cell base = entry[0].cast<Cell>();
+            const Cell size = entry[1].cast<Cell>();
+            validate_region(base, size);
+            auto buffer = entry[2].cast<py::buffer>();
+            // Export from an independent view, not a caller-owned memoryview:
+            // releasing the caller's view must not detach or invalidate us.
+            PyObject* raw_view = PyMemoryView_FromObject(buffer.ptr());
+            if (raw_view == nullptr) throw py::error_already_set();
+            auto owned_view = py::reinterpret_steal<py::buffer>(raw_view);
+            auto lease = std::make_unique<py::buffer_info>(owned_view.request(true));
+            if (lease->readonly)
+                throw py::buffer_error("dense region requires a writable buffer");
+            if (lease->ndim != 1 || lease->itemsize != 1 ||
+                lease->shape.size() != 1 || lease->shape[0] < 0)
+                throw py::value_error("dense region requires a one-dimensional byte buffer");
+            if (lease->strides.size() != 1 || lease->strides[0] != 1 ||
+                !lease->view() || !PyBuffer_IsContiguous(lease->view(), 'C'))
+                throw py::value_error("dense region requires a C-contiguous buffer");
+            if (static_cast<Cell>(lease->shape[0]) != size)
+                throw py::value_error("dense region size must equal buffer capacity");
+            if (lease->ptr == nullptr)
+                throw py::value_error("dense region exposes a null data pointer");
+            auto* pointer = static_cast<uint8_t*>(lease->ptr);
+            const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+            for (const Region& previous : regions_) {
+                if (previous.dense == nullptr) continue;
+                const auto prior = reinterpret_cast<std::uintptr_t>(previous.dense);
+                if (address <= prior ? prior - address < size
+                                     : address - prior < previous.size)
+                    throw py::value_error("dense region buffers must not alias");
+            }
+            regions_.push_back(Region{base, size, py::dict(), std::move(lease), pointer});
         }
     }
 
@@ -1285,11 +1341,12 @@ private:
 PYBIND11_MODULE(_megaforth_native, module) {
     megapad::scalar_fp::register_bindings(module);
     megapad::keccak::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 1;
+    module.attr("SEMANTIC_API_VERSION") = 2;
     module.doc() = "Native execution of generic hosted Forth semantic plans";
     py::class_<NativeProgram>(module, "NativeProgram")
-        .def(py::init<const py::iterable&, Cell, py::object>(), py::arg("regions"),
-             py::arg("page_size"), py::arg("continuation_type"))
+        .def(py::init<const py::iterable&, Cell, py::object, const py::iterable&>(),
+             py::arg("regions"), py::arg("page_size"), py::arg("continuation_type"),
+             py::arg("dense_regions") = py::tuple())
         .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"))
         .def("clear", &NativeProgram::clear)
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
