@@ -43,6 +43,7 @@ from shared.hybrid_closed import (
     ClosedPolicyV3, PolicyLiteralV3, PolicyCoreCallV3, PolicyCallV3,
     PolicyBranchV3, PolicyBranchZeroV3, PolicyReturnV3, prove_policies,
 )
+from shared.hybrid_nested import HYBRID_NESTED_ABI_VERSION, RoutineManifestV4
 
 
 class HybridManifestError(ValueError):
@@ -536,7 +537,7 @@ def load_manifest_v3(path: str | os.PathLike[str]) -> RoutineManifestV3:
     return _load_manifest_v3(*_read_manifest(path))
 
 
-def load_manifest(path: str | os.PathLike[str]) -> RoutineManifestV1 | RoutineManifestV2 | RoutineManifestV3:
+def load_manifest(path: str | os.PathLike[str]) -> RoutineManifestV1 | RoutineManifestV2 | RoutineManifestV3 | RoutineManifestV4:
     """Select a strict loader from one bounded read of the declared version."""
 
     manifest_path, decoded = _read_manifest(path)
@@ -545,12 +546,16 @@ def load_manifest(path: str | os.PathLike[str]) -> RoutineManifestV1 | RoutineMa
     if "version" not in decoded:
         raise HybridManifestError("manifest is missing fields: version")
     version = _integer(decoded["version"], "ABI version", HYBRID_ABI_VERSION,
-                       HYBRID_CLOSED_ABI_VERSION)
+                       HYBRID_NESTED_ABI_VERSION)
     if version == HYBRID_ABI_VERSION:
         return _load_manifest_v1(manifest_path, decoded)
     if version == HYBRID_CALLBACK_ABI_VERSION:
         return _load_manifest_v2(manifest_path, decoded)
-    return _load_manifest_v3(manifest_path, decoded)
+    if version == HYBRID_CLOSED_ABI_VERSION:
+        return _load_manifest_v3(manifest_path, decoded)
+    from hybrid.nested_manifest import _load_nested_manifest_v4
+
+    return _load_nested_manifest_v4(manifest_path, decoded)
 
 
 __all__ = ["HybridManifestError", "load_manifest", "load_manifest_v1", "load_manifest_v2", "load_manifest_v3"]

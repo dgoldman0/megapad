@@ -418,10 +418,76 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
 | 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
 | 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
-| 5B2 — nested callbacks | Contract locked; native owner implementation in progress | One-owner legacy facade and complete parent-field audit specified before implementation |
-| 5C/5D — shared task callbacks | Contract and neutral value protocol complete; runtime execution pending | 206 protocol/ABI checks, including 48 new continuation, receipt and cancellation cases |
-| 5E — private scalar services | Contract and explicit metadata loader complete; execution pending | 532 service metadata and existing manifest checks; no service capability advertised |
+| 5B2 — nested callbacks | Qualified through the generic unified application path | 302 native child/root/publication/legacy checks; 767 private composition checks; rebuilt isolated activation candidate passed all 1,977 checks, including all 11 formerly deferred application journeys |
+| 5C/5D — shared task callbacks | Capture/publication and immutable ledger foundations qualified; dispatcher and native task execution in progress | 206 protocol/ABI checks and 409 stack/private-profile checks; 45 task-foundation checks and combined 714-check clean foundation gate; native transport contract locked before implementation; no task capability exposed |
+| 5E — private scalar services | Metadata and canonical service capture qualified; private dispatcher and registry integration in progress | 532 metadata/manifest checks and 367 capture/service checks; combined 714-check clean foundation gate; no service capability advertised |
 | Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
+
+### Nested publication and root execution — 2026-09-30
+
+Native V3 now shares one CPU owner, publication budget and memory pin with
+its legacy V2 facade. Transactional child-edge publication binds exact parent
+sites and child generations. Semantic V4 capture binds original Words and IR
+positions, proves the combined graph, and rejects stale code, changed leases,
+malformed descriptors and publication failures without exposing partial state.
+Older metadata continues through the same qualified legacy routes.
+
+Root V3 begin/resume/cancel uses the existing sealed integer interpreter.
+Independent V3 receipts retain completed work across allocation failures;
+the CPU reservation remains held through Python result delivery. Root work,
+callback limits, output values, stores, cache observations and cycles were
+compared with ordinary MP64 execution. The differential fixture explicitly
+initializes the same integer controls, including the inactive modifier.
+
+Commit `dd971ee`, including capture commit `6d47b1f`, passed 929 checks on a
+clean checkpoint with its matching GCC accelerator and the unchanged qualified
+semantic extension. This qualifies root segments and publication only.
+Public V4 registration, required creation, generic manifest dispatch and full
+capability status remain closed until child execution, private semantic
+composition and production session journeys pass together. The 11 staged V4
+journeys remain deferred, not counted as passes.
+
+The task profile separately has issued foreign-return control and permanent
+retirement after RP!, raw-cell changes and snapshot operations. It has no
+task dispatcher or native task adapter yet. Its contract now makes zero-quantum
+begin admission-only, retains the original ledger across empty-chain quanta,
+and bounds the semantic THROW tail after discarded machine authority expires.
+These foundations do not imply shared-task CATCH/THROW or suspension support.
+
+### Complete private nesting and application activation — 2026-09-30
+
+Native child execution now validates issued parent/site/child authority,
+immediate-parent grants and disjoint control storage before entry. A real
+child return validates and restores the parked parent's integer state without
+rewinding memory, cache or cycle effects. The native child/root/publication
+gate passed 302 checks. The semantic bridge subsequently passed 767 checks
+covering exact requests, child calls, private stacks, inclusive ancestor
+semantic budgets, interrupted settlement and raw host exception identity.
+
+The generic manifest loader now admits strict version 4 after one bounded
+manifest read. It shares validation-error normalization with the explicit
+loader. Required creation, registration, public machine Words and session
+status require the complete semantic profile 4 and native transport 3.
+Older schemas and native transport routes remain supported. The format and
+limits are documented in
+[hybrid-nested-callback-manifest.md](hybrid-nested-callback-manifest.md).
+
+An isolated activation snapshot, with its accelerator rebuilt using GCC,
+passed all 1,977 hybrid metadata, native, bridge, export, runtime and session
+checks. All 11 previously deferred application journeys ran successfully,
+including Python/native outer executors, dependency-ordered startup, empty
+manifest admission, failure cleanup and mixed legacy/version-4 diagnostics.
+The parent/policy/child/ABS journey counts 10 machine instructions, 16 cycles,
+two entries, four segments, two callback requests, four callback semantic
+steps and maximum machine depth two. Callback execution remains the Python
+reference path. These are direct session-dispatch results, with no claim of
+socket, physical display, or shared-task exception/suspension qualification.
+
+Task capture/registration and scalar service capture were separately committed
+and passed a combined 714-check clean-checkout gate. The native task transport
+contract is locked in `5bf9d6f`; its separate facade uses the same CPU owner,
+admission-only zero-quantum entry, retained root receipts and suffix cancellation.
+Task dispatch and service execution are still separate inactive work streams.
 
 ### Qualified closed callbacks and frontend integration — 2026-09-30
 

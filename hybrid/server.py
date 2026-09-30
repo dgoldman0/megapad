@@ -46,13 +46,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="MANIFEST",
-        help="version 1, 2 or 3 JSON manifest of bounded integer machine routines",
+        help="version 1 through 4 JSON manifest of bounded integer machine routines",
     )
     parser.epilog = (
         "Hybrid mode requires the native MP64 interpreter. Machine routines "
         "use declared buffers and fixed call bounds. Version 2 admits declared "
         "MIN/MAX/ABS/AND/OR/XOR callbacks; version 3 adds declared closed integer "
-        "policies. Machine MMIO, arbitrary or nested machine callbacks, "
+        "policies; version 4 adds bounded distinct-registration nested callbacks. "
+        "Machine MMIO, arbitrary callbacks, "
         "native BIOS boot, and multicore execution are unavailable."
     )
     return parser

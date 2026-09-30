@@ -16,6 +16,7 @@ from shared.hybrid_abi import (
     CallbackExportV2, CallbackExportV3, MAX_CALLBACK_EXPORTS, MAX_SIGNATURE_CELLS,
     MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
 )
+from shared.hybrid_nested import CallbackExportV4
 from simulator import core_words
 from simulator.dictionary import Word
 from simulator.errors import ExecutionError
@@ -144,6 +145,7 @@ class _PrivateStackSeal:
         stack = self.stack
         return (
             type(stack) is self.stack_type
+            and stack._task_effect_guard is None
             and (self.stack_type is not ReturnStack or stack._foreign_control is None)
             and stack._memory is self.memory and stack._memory_view is self.view
             and self.view._region is self.region and self.region.pages is self.pages
@@ -154,8 +156,8 @@ class _PrivateStackSeal:
 
 
 def _descriptor(value):
-    if type(value) not in (CallbackExportV2, CallbackExportV3):
-        raise TypeError("callback descriptor must be an exact CallbackExportV2 or CallbackExportV3")
+    if type(value) not in (CallbackExportV2, CallbackExportV3, CallbackExportV4):
+        raise TypeError("callback descriptor must be an exact admitted callback value")
     # Revalidate even a forged frozen value and keep our own metadata copy.
     return replace(value)
 
@@ -189,6 +191,7 @@ class CallbackExportEngine:
         self._nested_owner = None
         self._nested_chain = None
         self._nested_calls = {}
+        self._nested_dispatches = []
         self._unwind_error = None
         self._unwind_contexts = ()
         runtime._closed_cleanup_guard = self._guard_outer_unwind
@@ -270,13 +273,107 @@ class CallbackExportEngine:
             self._nested_chain = None
             return receipt
 
+    def _begin_nested_callback(self, chain_token, handle, invocation_id, arguments):
+        chain = self._require_nested_chain(chain_token)
+        binding = self._binding(handle)
+        if type(binding.descriptor) is not CallbackExportV4:
+            raise CallbackExportError("nested dispatch requires an exact V4 export")
+        _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
+        via_use = self._nested_owner.call("_admit_nested_callback", handle, invocation_id, arguments, True)
+        self._budget_failure = None
+        return chain.begin_callback(handle, invocation_id, binding.descriptor.max_semantic_steps,
+                                    via_use=via_use)
+
+    def _invoke_nested_callback(self, checkpoint, handle, arguments):
+        from simulator.interop_nested import NestedDispatch
+        chain = self._nested_chain
+        if chain is None:
+            raise CallbackExportError("nested callback requires its issued chain")
+        record = chain._record(checkpoint)
+        binding = self._binding(handle)
+        self._nested_owner.call("_admit_nested_callback", handle, record.invocation_id, arguments)
+        _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
+        chain.enter_callback(checkpoint, handle)
+        previous = self._active
+        dispatches = self._nested_dispatches
+        prefix = tuple(dispatches)
+        namespace = object.__getattribute__(self, "__dict__")
+        active = None
+        prepare_unwind = cleanup_failed = None
+        completed = False
+        original = None
+        try:
+            memory = SparseAddressSpace(bank0_size=128, page_size=128)
+            memory.write8(0, 0)
+            context = ExecutionContext(
+                data=DataStack(arguments, memory=memory, floor=0, empty_pointer=64),
+                returns=ReturnStack(memory=memory, floor=64, empty_pointer=128),
+            )
+            active = NestedDispatch(self, binding, context, chain, checkpoint)
+            prepare_unwind, cleanup_failed = active.prepare_unwind, active.cleanup_failed
+            self._nested_dispatches.append(active)
+            self._active = active
+            active.require_state()
+            self._runtime._execute_guarded(active.capture.entry.word, context, chain.meter,
+                                           closed_guard=active)
+            active.require_state()
+            active.capture.verify(self)
+            if not active.completed or context.returns.depth() != 0:
+                raise CallbackExportError("nested callback did not return balanced private state")
+            outputs = context.data.snapshot()
+            _cells(outputs, count=binding.descriptor.output_cells, label="outputs")
+            result = CallbackExportResult(outputs, chain._inclusive_steps(checkpoint))
+            completed = True
+            return result
+        except BaseException as error:
+            original = error
+            if active is not None:
+                try:
+                    prepare_unwind(error)
+                except BaseException:
+                    cleanup_failed(error)
+            raise
+        finally:
+            try:
+                clean = (dict.get(namespace, "_nested_dispatches") is dispatches
+                         and len(dispatches) == len(prefix) + (active is not None)
+                         and all(item is dispatches[index] for index, item in enumerate(prefix))
+                         and (active is None or dispatches[-1] is active))
+                list.__setitem__(dispatches, slice(None), prefix)
+                dict.__setitem__(namespace, "_nested_dispatches", dispatches)
+                dict.__setitem__(namespace, "_active", previous)
+                chain.leave_callback(checkpoint, completed=completed)
+                if not clean:
+                    raise CallbackExportError("nested callback dispatch ownership changed")
+            except BaseException as cleanup:
+                self._registration_failure = "nested callback dispatch cleanup could not be proved"
+                if original is None:
+                    raise
+                try:
+                    BaseException.add_note(original, self._registration_failure)
+                except BaseException:
+                    pass
+
+    def _consume_nested_callback(self, chain_token, checkpoint):
+        return self._require_nested_chain(chain_token).consume_callback(checkpoint)
+
+    def _nested_private_context(self, context):
+        for active in self._nested_dispatches:
+            if active.context is context:
+                active.require_state(parked=active is not self._active)
+                return True
+        return False
+
     def begin_closed_accounting(self, handle):
         with self._runtime._session_owner_lock:
             self._require_owner("begin closed callback accounting")
             if (self._active is not None or self._registration is not None
                     or self._closed_accounting is not None or self._nested_chain is not None):
                 raise CallbackExportError("closed callback accounting already has an active owner")
-            if self._binding(handle).closed is None:
+            binding = self._binding(handle)
+            if type(binding.descriptor) is CallbackExportV4:
+                raise CallbackExportError("V4 callbacks require their admitted nested chain")
+            if binding.closed is None:
                 raise CallbackExportError("closed callback accounting requires a closed export")
             frames = self._runtime._active_dispatches
             states = self._runtime._active_input_states
@@ -374,23 +471,35 @@ class CallbackExportEngine:
             return existing.handle
         closed = None
         leaf = None
-        if descriptor.effect == "closed_integer_colon":
-            closed = self._closed_capture_type.create(self, descriptor)
-        else:
-            leaf = self._canonical.get(descriptor.name)
-            if leaf is None:
-                raise CallbackExportError("canonical installed callback Word is unavailable")
-            self._require_leaf(leaf)
         if len(self._exports) >= MAX_CALLBACK_EXPORTS:
             raise CallbackExportError("callback export table is full")
         handle = CallbackExportHandle(descriptor.export_id, self._owner)
-        binding = _ExportBinding(handle, descriptor, leaf, closed)
-        if self._registration is not None:
-            # Record the exact identity before insertion, so a failure after
-            # publication but before return still has complete rollback data.
-            self._registration.issued.append((descriptor.export_id, binding))
-        self._exports[descriptor.export_id] = binding
-        return handle
+        binding = None
+        try:
+            if type(descriptor) is CallbackExportV4 and descriptor.effect != "integer_leaf":
+                from simulator.interop_nested import NestedCapture
+                closed = NestedCapture.create(self, descriptor, handle)
+            elif descriptor.effect == "closed_integer_colon":
+                closed = self._closed_capture_type.create(self, descriptor)
+            else:
+                leaf = self._canonical.get(descriptor.name)
+                if leaf is None:
+                    raise CallbackExportError("canonical installed callback Word is unavailable")
+                self._require_leaf(leaf)
+            binding = _ExportBinding(handle, descriptor, leaf, closed)
+            if self._registration is not None:
+                # Record the exact identity before insertion, so a failure after
+                # publication but before return still has complete rollback data.
+                self._registration.issued.append((descriptor.export_id, binding))
+            self._exports[descriptor.export_id] = binding
+            return handle
+        except BaseException:
+            if binding is not None and self._exports.get(descriptor.export_id) is binding:
+                del self._exports[descriptor.export_id]
+            for token, captured in tuple(self._nested_calls.items()):
+                if captured.handle is handle:
+                    del self._nested_calls[token]
+            raise
 
     def _check_registration(self, registration: _ExportRegistration) -> None:
         self._require_owner("finish semantic callback export registration")
@@ -411,6 +520,9 @@ class CallbackExportEngine:
             # merely carrying the same numerical export ID.
             if table.get(export_id) is binding:
                 del table[export_id]
+            for token, captured in tuple(self._nested_calls.items()):
+                if captured.handle is binding.handle:
+                    del self._nested_calls[token]
         if (self._registration is not registration or self._exports is not table
                 or len(table) != len(registration.previous)
                 or any(table.get(key) is not binding
@@ -540,6 +652,8 @@ class CallbackExportEngine:
                 record.entered = True
             self._budget_failure = None
             binding = self._binding(handle)
+            if type(binding.descriptor) is CallbackExportV4:
+                raise CallbackExportError("V4 callbacks require their admitted nested chain")
             _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
             if semantic_step_limit is not None:
                 if type(semantic_step_limit) is not int:

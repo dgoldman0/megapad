@@ -56,9 +56,14 @@ class Owner:
                 self.state.icache_misses, bytes(self.ram), bytes(self.control))
 
 
-def test_owner_shell_withholds_nested_capability_and_legacy_entry_routes():
+def test_owner_advertises_qualified_nested_capability_without_legacy_entry_routes():
     owner = Owner()
-    assert not hasattr(native, "HYBRID_NESTED_ROUTINE_ABI_VERSION")
+    assert type(native.HYBRID_NESTED_ROUTINE_ABI_VERSION) is int
+    assert native.HYBRID_NESTED_ROUTINE_ABI_VERSION == 3
+    assert type(native.HYBRID_NESTED_ROUTINE_CAPABILITY) is str
+    assert native.HYBRID_NESTED_ROUTINE_CAPABILITY == "distinct_registration_children"
+    assert type(native.HYBRID_NESTED_ROUTINE_MAX_DEPTH) is int
+    assert native.HYBRID_NESTED_ROUTINE_MAX_DEPTH == 8
     assert type(owner.root) is native.RoutineRunnerV3
     assert not isinstance(owner.root, (native.RoutineRunnerV1, native.RoutineRunnerV2))
     assert isinstance(owner.legacy, native.RoutineRunnerV1)
@@ -67,7 +72,7 @@ def test_owner_shell_withholds_nested_capability_and_legacy_entry_routes():
     assert owner.root.control_base == owner.legacy.control_base == CONTROL_BASE
     assert owner.root.control_size == owner.legacy.control_size == CONTROL_SIZE
     for name in ("run", "publish_code", "begin_v2", "resume_callback", "cancel_invocation",
-                 "publish_code_v2", "begin_root_v3", "begin_child_v3"):
+                 "publish_code_v2"):
         assert not hasattr(owner.root, name)
     owner.root.close()
 

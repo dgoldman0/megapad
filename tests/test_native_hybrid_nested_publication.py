@@ -84,7 +84,7 @@ def _pair(owner, *, sites=1):
     return parent, child
 
 
-def test_spec_is_distinct_immutable_and_does_not_advertise_execution():
+def test_spec_is_distinct_immutable_and_does_not_advertise_nested_execution():
     owner = Owner()
     spec = owner.spec(sites=1, max_callback_requests=1024)
     assert type(spec) is native.RoutineSpecV3
@@ -94,8 +94,13 @@ def test_spec_is_distinct_immutable_and_does_not_advertise_execution():
     for name in SPEC_FIELDS:
         with pytest.raises(AttributeError):
             setattr(spec, name, getattr(spec, name))
-    assert not hasattr(native, "HYBRID_NESTED_ROUTINE_ABI_VERSION")
-    for name in ("begin_root_v3", "begin_child_v3", "resume_callback_v3", "run", "begin_v2"):
+    assert type(native.HYBRID_NESTED_ROUTINE_ABI_VERSION) is int
+    assert native.HYBRID_NESTED_ROUTINE_ABI_VERSION == 3
+    assert type(native.HYBRID_NESTED_ROUTINE_CAPABILITY) is str
+    assert native.HYBRID_NESTED_ROUTINE_CAPABILITY == "distinct_registration_children"
+    assert type(native.HYBRID_NESTED_ROUTINE_MAX_DEPTH) is int
+    assert native.HYBRID_NESTED_ROUTINE_MAX_DEPTH == 8
+    for name in ("run", "begin_v2"):
         assert not hasattr(owner.runner, name)
     with pytest.raises(TypeError):
         owner.legacy.publish_code_v2(spec)
