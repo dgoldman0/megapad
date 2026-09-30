@@ -10,6 +10,8 @@ from hybrid.manifest import (
     load_manifest,
     load_manifest_v1,
     load_manifest_v2,
+    load_manifest_v3,
 )
 
-__all__ = ["HybridManifestError", "load_manifest", "load_manifest_v1", "load_manifest_v2"]
+__all__ = ["HybridManifestError", "load_manifest", "load_manifest_v1", "load_manifest_v2",
+           "load_manifest_v3"]

@@ -11,6 +11,7 @@ from shared.hybrid_abi import (
     HYBRID_ABI,
     HYBRID_ABI_VERSION,
     HYBRID_CALLBACK_ABI_VERSION,
+    HYBRID_CLOSED_ABI_VERSION,
     CODE_ALIGNMENT,
     MAX_BUFFER_RULES,
     MAX_CALL_INSTRUCTIONS,
@@ -27,11 +28,20 @@ from shared.hybrid_abi import (
     MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
     BufferRuleV1,
     CallbackExportV2,
+    CallbackExportV3,
     CallbackSiteV2,
+    CallbackSiteV3,
     RoutineImageV1,
     RoutineImageV2,
+    RoutineImageV3,
     RoutineManifestV1,
     RoutineManifestV2,
+    RoutineManifestV3,
+)
+from shared.hybrid_closed import (
+    MAX_CLOSED_POLICIES, MAX_CLOSED_OPERATIONS,
+    ClosedPolicyV3, PolicyLiteralV3, PolicyCoreCallV3, PolicyCallV3,
+    PolicyBranchV3, PolicyBranchZeroV3, PolicyReturnV3, prove_policies,
 )
 
 
@@ -53,6 +63,18 @@ _MANIFEST_V2_FIELDS = _MANIFEST_FIELDS | frozenset((
 _ROUTINE_V2_FIELDS = _ROUTINE_FIELDS | frozenset(("callbacks",))
 _EXPORT_FIELDS = frozenset(("export_id", "name", "input_cells", "output_cells"))
 _CALLBACK_FIELDS = frozenset(("call_offset", "stub_offset", "export_id"))
+_MANIFEST_V3_FIELDS = _MANIFEST_V2_FIELDS | frozenset(("policies",))
+_POLICY_FIELDS = frozenset(("policy_id", "name", "input_cells", "output_cells", "operations"))
+_LEAF_EXPORT_V3_FIELDS = _EXPORT_FIELDS | frozenset(("effect", "max_semantic_steps"))
+_CLOSED_EXPORT_V3_FIELDS = frozenset(("export_id", "effect", "policy_id", "max_semantic_steps"))
+_POLICY_OPERATIONS = {
+    "literal": (PolicyLiteralV3, frozenset(("op", "value"))),
+    "call_core": (PolicyCoreCallV3, frozenset(("op", "name"))),
+    "call_policy": (PolicyCallV3, frozenset(("op", "policy_id"))),
+    "branch": (PolicyBranchV3, frozenset(("op", "target"))),
+    "branch_zero": (PolicyBranchZeroV3, frozenset(("op", "target"))),
+    "return": (PolicyReturnV3, frozenset(("op",))),
+}
 
 
 def _object(value: object, fields: frozenset[str], label: str) -> dict:
@@ -242,8 +264,8 @@ def _exports_metadata(value: object) -> tuple[CallbackExportV2, ...]:
     return tuple(exports)
 
 
-def _callbacks_metadata(value: object, exports: dict[int, CallbackExportV2],
-                        routine_index: int) -> tuple[CallbackSiteV2, ...]:
+def _callbacks_metadata(value: object, exports: dict[int, CallbackExportV2 | CallbackExportV3],
+                        routine_index: int, *, site_type=CallbackSiteV2) -> tuple:
     if type(value) is not list or len(value) > MAX_CALLBACK_SITES:
         raise HybridManifestError("callbacks must be an array of at most 16 sites")
     callbacks = []
@@ -256,8 +278,8 @@ def _callbacks_metadata(value: object, exports: dict[int, CallbackExportV2],
         if export is None:
             raise HybridManifestError(f"undeclared callback export ID: {export_id}")
         try:
-            site = CallbackSiteV2(call_offset=fields["call_offset"],
-                                  stub_offset=fields["stub_offset"], export=export)
+            site = site_type(call_offset=fields["call_offset"],
+                             stub_offset=fields["stub_offset"], export=export)
         except (TypeError, ValueError) as exc:
             raise HybridManifestError(str(exc)) from exc
         offsets = (site.call_offset, site.call_offset + 1, site.stub_offset)
@@ -327,6 +349,163 @@ def _load_manifest_v2(manifest_path: Path, decoded: object) -> RoutineManifestV2
         raise HybridManifestError(str(exc)) from exc
 
 
+def _policies_metadata(value: object) -> tuple[tuple[ClosedPolicyV3, ...], tuple]:
+    if type(value) is not list or len(value) > MAX_CLOSED_POLICIES:
+        raise HybridManifestError("policies must be an array of at most 64 declarations")
+    policies = []
+    total_operations = 0
+    for index, raw in enumerate(value):
+        row = _object(raw, _POLICY_FIELDS, f"policy {index}")
+        rows = row["operations"]
+        if type(rows) is not list:
+            raise HybridManifestError("policy operations must be an array")
+        total_operations += len(rows)
+        if total_operations > MAX_CLOSED_OPERATIONS:
+            raise HybridManifestError("policy table may contain at most 4096 operations")
+        operations = []
+        for operation_index, raw_operation in enumerate(rows):
+            label = f"policy {index} operation {operation_index}"
+            if type(raw_operation) is not dict:
+                raise HybridManifestError(f"{label} must be an object")
+            if "op" not in raw_operation:
+                raise HybridManifestError(f"{label} is missing fields: op")
+            name = raw_operation["op"]
+            if type(name) is not str or name not in _POLICY_OPERATIONS:
+                raise HybridManifestError(f"{label} has an unsupported policy operation")
+            operation_type, fields = _POLICY_OPERATIONS[name]
+            arguments = _object(raw_operation, fields, label)
+            try:
+                operations.append(operation_type(**{
+                    key: item for key, item in arguments.items() if key != "op"
+                }))
+            except (TypeError, ValueError) as exc:
+                raise HybridManifestError(f"{label}: {exc}") from exc
+        try:
+            policies.append(ClosedPolicyV3(
+                **{key: item for key, item in row.items() if key != "operations"},
+                operations=tuple(operations),
+            ))
+        except (TypeError, ValueError) as exc:
+            raise HybridManifestError(f"policy {index}: {exc}") from exc
+    try:
+        values = tuple(policies)
+        proofs = prove_policies(values)
+        by_id = {policy.policy_id: policy for policy in values}
+        for proof in proofs:
+            policy = by_id[proof.policy_id]
+            proof.validate_signature(policy.input_cells, policy.output_cells)
+        return values, proofs
+    except (TypeError, ValueError) as exc:
+        raise HybridManifestError(str(exc)) from exc
+
+
+def _exports_v3_metadata(value: object, policies: tuple[ClosedPolicyV3, ...],
+                         proofs: tuple) -> tuple[CallbackExportV3, ...]:
+    if type(value) is not list or len(value) > MAX_CALLBACK_EXPORTS:
+        raise HybridManifestError("exports must be an array of at most 64 descriptors")
+    policies_by_id = {policy.policy_id: policy for policy in policies}
+    proofs_by_id = {proof.policy_id: proof for proof in proofs}
+    exports = []
+    identifiers = set()
+    for index, raw in enumerate(value):
+        label = f"export {index}"
+        if type(raw) is not dict:
+            raise HybridManifestError(f"{label} must be an object")
+        if "effect" not in raw:
+            raise HybridManifestError(f"{label} is missing fields: effect")
+        effect = raw["effect"]
+        if type(effect) is not str or effect not in ("integer_leaf", "closed_integer_colon"):
+            raise HybridManifestError("callback effect must be integer_leaf or closed_integer_colon")
+        fields = _object(raw, _LEAF_EXPORT_V3_FIELDS if effect == "integer_leaf"
+                         else _CLOSED_EXPORT_V3_FIELDS, label)
+        if effect == "closed_integer_colon":
+            policy_id = _integer(fields["policy_id"], "policy ID", 0, MAX_CLOSED_POLICIES - 1)
+            policy = policies_by_id.get(policy_id)
+            if policy is None:
+                raise HybridManifestError(f"undeclared policy ID: {policy_id}")
+            fields = {key: item for key, item in fields.items() if key != "policy_id"}
+            fields.update(name=policy.name, input_cells=policy.input_cells,
+                          output_cells=policy.output_cells)
+        try:
+            export = CallbackExportV3(**fields)
+            if effect == "closed_integer_colon":
+                proofs_by_id[policy_id].validate_signature(
+                    policy.input_cells, policy.output_cells,
+                    max_semantic_steps=export.max_semantic_steps,
+                )
+        except (TypeError, ValueError) as exc:
+            raise HybridManifestError(f"{label}: {exc}") from exc
+        if export.export_id in identifiers:
+            raise HybridManifestError(f"duplicate callback export ID: {export.export_id}")
+        identifiers.add(export.export_id)
+        exports.append(export)
+    return tuple(exports)
+
+
+def _load_manifest_v3(manifest_path: Path, decoded: object) -> RoutineManifestV3:
+    root = _object(decoded, _MANIFEST_V3_FIELDS, "manifest")
+    if type(root["abi"]) is not str or root["abi"] != HYBRID_ABI:
+        raise HybridManifestError("unsupported hybrid ABI identity")
+    version = _integer(root["version"], "ABI version", HYBRID_CLOSED_ABI_VERSION,
+                       HYBRID_CLOSED_ABI_VERSION)
+    dispatch_limit = _integer(root["dispatch_instruction_limit"], "dispatch instructions", 1,
+                              MAX_DISPATCH_INSTRUCTIONS)
+    callback_limit = _integer(root["dispatch_callback_limit"], "dispatch callback requests", 1,
+                              MAX_DISPATCH_CALLBACKS)
+    semantic_limit = _integer(root["dispatch_callback_semantic_limit"],
+                              "dispatch callback semantic steps", 1,
+                              MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS)
+    policies, proofs = _policies_metadata(root["policies"])
+    exports = _exports_v3_metadata(root["exports"], policies, proofs)
+    by_id = {export.export_id: export for export in exports}
+    rows = root["routines"]
+    if type(rows) is not list or len(rows) > MAX_ROUTINES:
+        raise HybridManifestError("routines must be an array of at most 64 declarations")
+    pending = []
+    policy_names = {policy.name.upper() for policy in policies}
+    names = set()
+    for index, raw in enumerate(rows):
+        row = _object(raw, _ROUTINE_V2_FIELDS, f"routine {index}")
+        fields, image = _routine_metadata(
+            {key: item for key, item in row.items() if key != "callbacks"},
+            manifest_path.parent, index,
+        )
+        fields["callbacks"] = _callbacks_metadata(
+            row["callbacks"], by_id, index, site_type=CallbackSiteV3,
+        )
+        key = fields["name"].upper()
+        if key in policy_names:
+            raise HybridManifestError(f"policy and routine names collide: {fields['name']}")
+        if key in names:
+            raise HybridManifestError(f"duplicate routine name: {fields['name']}")
+        names.add(key)
+        pending.append((fields, image))
+
+    # Entire policy proofs, export budgets and every independent routine field
+    # have passed before this first code-image read. Publication remains later.
+    routines = []
+    total_bytes = 0
+    for fields, image in pending:
+        remaining = MAX_TOTAL_CODE_BYTES - total_bytes
+        if remaining <= 0:
+            raise HybridManifestError("total code image bytes exceed 16 MiB")
+        code = _read_bounded(image, min(MAX_CODE_BYTES, remaining), "routine image")
+        total_bytes += ((len(code) + CODE_ALIGNMENT - 1) // CODE_ALIGNMENT) * CODE_ALIGNMENT
+        try:
+            routines.append(RoutineImageV3(code=code, **fields))
+        except (TypeError, ValueError) as exc:
+            raise HybridManifestError(f"routine {fields['name']}: {exc}") from exc
+    try:
+        return RoutineManifestV3(
+            abi=root["abi"], version=version, dispatch_instruction_limit=dispatch_limit,
+            dispatch_callback_limit=callback_limit,
+            dispatch_callback_semantic_limit=semantic_limit,
+            policies=policies, exports=exports, routines=tuple(routines),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HybridManifestError(str(exc)) from exc
+
+
 def load_manifest_v1(path: str | os.PathLike[str]) -> RoutineManifestV1:
     """Load only strict v1 metadata and images, without publishing or executing.
 
@@ -347,7 +526,17 @@ def load_manifest_v2(path: str | os.PathLike[str]) -> RoutineManifestV2:
     return _load_manifest_v2(*_read_manifest(path))
 
 
-def load_manifest(path: str | os.PathLike[str]) -> RoutineManifestV1 | RoutineManifestV2:
+def load_manifest_v3(path: str | os.PathLike[str]) -> RoutineManifestV3:
+    """Validate closed declarative policy proofs before reading bounded images.
+
+    Loading creates only immutable values. It neither imports a runtime nor
+    publishes dictionary words, evaluates source or grants export authority.
+    """
+
+    return _load_manifest_v3(*_read_manifest(path))
+
+
+def load_manifest(path: str | os.PathLike[str]) -> RoutineManifestV1 | RoutineManifestV2 | RoutineManifestV3:
     """Select a strict loader from one bounded read of the declared version."""
 
     manifest_path, decoded = _read_manifest(path)
@@ -356,10 +545,12 @@ def load_manifest(path: str | os.PathLike[str]) -> RoutineManifestV1 | RoutineMa
     if "version" not in decoded:
         raise HybridManifestError("manifest is missing fields: version")
     version = _integer(decoded["version"], "ABI version", HYBRID_ABI_VERSION,
-                       HYBRID_CALLBACK_ABI_VERSION)
+                       HYBRID_CLOSED_ABI_VERSION)
     if version == HYBRID_ABI_VERSION:
         return _load_manifest_v1(manifest_path, decoded)
-    return _load_manifest_v2(manifest_path, decoded)
+    if version == HYBRID_CALLBACK_ABI_VERSION:
+        return _load_manifest_v2(manifest_path, decoded)
+    return _load_manifest_v3(manifest_path, decoded)
 
 
-__all__ = ["HybridManifestError", "load_manifest", "load_manifest_v1", "load_manifest_v2"]
+__all__ = ["HybridManifestError", "load_manifest", "load_manifest_v1", "load_manifest_v2", "load_manifest_v3"]

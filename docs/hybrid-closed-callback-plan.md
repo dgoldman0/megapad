@@ -444,6 +444,12 @@ and record only observed evidence in the local implementation commit.
 
 ## Work remaining after this slice
 
+The value/proof and strict manifest layer passed 483 Make-selected checks on
+2026-09-30: 68 closed-ABI cases, 133 v3 manifest cases, and 282 existing v1/v2
+callback/manifest cases. This qualifies metadata admission only. Live export
+authority, composition, application startup and bounded timing remain separate
+gates below this checkpoint.
+
 - **5B2:** at most eight parked machine frames, distinct registrations only,
   parent integer-state restoration, disjoint control leases, narrowing child
   borrows, transitive local/root budgets and chain-wide failure cleanup. Shared

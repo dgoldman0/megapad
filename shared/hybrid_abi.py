@@ -9,13 +9,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from shared.cells import MASK64
+
+if TYPE_CHECKING:
+    from shared.hybrid_closed import ClosedPolicyV3
 
 
 HYBRID_ABI = "megapad.hybrid.integer-routine"
 HYBRID_ABI_VERSION = 1
 HYBRID_CALLBACK_ABI_VERSION = 2
+HYBRID_CLOSED_ABI_VERSION = 3
 MAX_CODE_BYTES = 1 << 20
 MAX_TOTAL_CODE_BYTES = 16 << 20
 MAX_MANIFEST_BYTES = 1 << 20
@@ -156,6 +161,9 @@ def _routine_values(value: object, *, version: int = HYBRID_ABI_VERSION) -> None
     for rule in value.buffers:
         if type(rule) is not BufferRuleV1:
             raise TypeError("buffer rules must be BufferRuleV1 values")
+        if version == HYBRID_CLOSED_ABI_VERSION:
+            # V3 containers revalidate nested values before using their fields.
+            BufferRuleV1.__post_init__(rule)
         if max(rule.address_argument, rule.length_argument) >= value.input_cells:
             raise ValueError("buffer rule argument is outside the input signature")
     _integer(value.max_instructions, "per-call instructions", 1, MAX_CALL_INSTRUCTIONS)
@@ -409,7 +417,7 @@ class CallbackSiteV2:
             raise TypeError("callback export must be a CallbackExportV2 value")
 
 
-def _callback_sites(value: object) -> None:
+def _callback_sites(value: object, *, site_type: type = CallbackSiteV2) -> None:
     if type(value.callbacks) is not tuple:
         raise TypeError("callback sites must be an immutable tuple")
     if len(value.callbacks) > MAX_CALLBACK_SITES:
@@ -417,8 +425,10 @@ def _callback_sites(value: object) -> None:
     exports: dict[int, CallbackExportV2] = {}
     occupied: set[int] = set()
     for site in value.callbacks:
-        if type(site) is not CallbackSiteV2:
-            raise TypeError("callback sites must be CallbackSiteV2 values")
+        if type(site) is not site_type:
+            raise TypeError(f"callback sites must be {site_type.__name__} values")
+        if site_type is not CallbackSiteV2:
+            site_type.__post_init__(site)
         if site.call_offset + 2 > len(value.code) or site.stub_offset >= len(value.code):
             raise ValueError("complete callback call and stub must lie inside the code image")
         offsets = (site.call_offset, site.call_offset + 1, site.stub_offset)
@@ -455,7 +465,13 @@ class RoutineManifestV2:
     version: int = HYBRID_CALLBACK_ABI_VERSION
 
     def __post_init__(self) -> None:
-        _version(self.abi, self.version, expected=HYBRID_CALLBACK_ABI_VERSION)
+        self._validate_manifest()
+
+    def _validate_manifest(
+        self, *, version: int = HYBRID_CALLBACK_ABI_VERSION,
+        export_type: type = CallbackExportV2, routine_type: type = RoutineImageV2,
+    ) -> None:
+        _version(self.abi, self.version, expected=version)
         _integer(self.dispatch_instruction_limit, "dispatch instructions", 1,
                  MAX_DISPATCH_INSTRUCTIONS)
         _integer(self.dispatch_callback_limit, "dispatch callback requests", 1,
@@ -468,8 +484,10 @@ class RoutineManifestV2:
             raise ValueError("a manifest may declare at most 64 callback exports")
         exports = {}
         for export in self.exports:
-            if type(export) is not CallbackExportV2:
-                raise TypeError("manifest exports must be CallbackExportV2 values")
+            if type(export) is not export_type:
+                raise TypeError(f"manifest exports must be {export_type.__name__} values")
+            if export_type is not CallbackExportV2:
+                export_type.__post_init__(export)
             if export.export_id in exports:
                 raise ValueError(f"duplicate callback export ID: {export.export_id}")
             exports[export.export_id] = export
@@ -480,8 +498,10 @@ class RoutineManifestV2:
         names: set[str] = set()
         total = 0
         for routine in self.routines:
-            if type(routine) is not RoutineImageV2:
-                raise TypeError("manifest routines must be RoutineImageV2 values")
+            if type(routine) is not routine_type:
+                raise TypeError(f"manifest routines must be {routine_type.__name__} values")
+            if routine_type is not RoutineImageV2:
+                routine_type.__post_init__(routine)
             key = routine.name.upper()
             if key in names:
                 raise ValueError(f"duplicate routine name: {routine.name}")
@@ -569,7 +589,13 @@ class MachineSegmentResultV2(MachineRoutineResultV1):
     version: int = HYBRID_CALLBACK_ABI_VERSION
 
     def __post_init__(self) -> None:
-        self._validate_result(version=HYBRID_CALLBACK_ABI_VERSION, exit_type=MachineExitKindV2)
+        self._validate_segment()
+
+    def _validate_segment(
+        self, *, version: int = HYBRID_CALLBACK_ABI_VERSION,
+        request_type: type = CallbackRequestV2,
+    ) -> None:
+        self._validate_result(version=version, exit_type=MachineExitKindV2)
         _integer(self.invocation_id, "invocation ID", 1, MASK64)
         _integer(self.invocation_instructions, "invocation instructions", 0,
                  MAX_CALL_INSTRUCTIONS)
@@ -586,8 +612,10 @@ class MachineSegmentResultV2(MachineRoutineResultV1):
         if self.exit_kind is MachineExitKindV2.RETURNED and self.instructions == 0:
             raise ValueError("returned exit requires a completed RET instruction")
         if self.exit_kind is MachineExitKindV2.CALLBACK_REQUEST:
-            if type(self.callback) is not CallbackRequestV2:
-                raise TypeError("callback request exit requires a CallbackRequestV2 value")
+            if type(self.callback) is not request_type:
+                raise TypeError(f"callback request exit requires a {request_type.__name__} value")
+            if request_type is not CallbackRequestV2:
+                request_type.__post_init__(self.callback)
             if self.callback.invocation_id != self.invocation_id:
                 raise ValueError("callback request belongs to a different invocation")
             if self.instructions == 0:
@@ -596,6 +624,141 @@ class MachineSegmentResultV2(MachineRoutineResultV1):
                 raise ValueError("callback request sequence exceeds completed calls")
         elif self.callback is not None:
             raise ValueError("only callback request exits may carry a callback request")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CallbackExportV3(CallbackExportV2):
+    """Versioned signature; a closed Word's proof and authority stay external."""
+
+    version: int = HYBRID_CLOSED_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _version(self.abi, self.version, expected=HYBRID_CLOSED_ABI_VERSION)
+        if type(self.effect) is not str:
+            raise TypeError("callback effect must be a string")
+        if self.effect == "integer_leaf":
+            # Reuse the frozen leaf catalog and bounds without broadening v2.
+            CallbackExportV2(
+                export_id=self.export_id, name=self.name,
+                input_cells=self.input_cells, output_cells=self.output_cells,
+                max_semantic_steps=self.max_semantic_steps, effect=self.effect,
+                abi=self.abi,
+            )
+        elif self.effect == "closed_integer_colon":
+            _integer(self.export_id, "callback export ID", 0, MAX_CALLBACK_EXPORTS - 1)
+            _name(self.name)
+            _integer(self.input_cells, "callback input cells", 0, MAX_SIGNATURE_CELLS)
+            _integer(self.output_cells, "callback output cells", 0, MAX_SIGNATURE_CELLS)
+            _integer(self.max_semantic_steps, "closed callback semantic steps", 1,
+                     MAX_CALLBACK_SEMANTIC_STEPS)
+        else:
+            raise ValueError("callback effect must be integer_leaf or closed_integer_colon")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CallbackSiteV3(CallbackSiteV2):
+    export: CallbackExportV3
+    version: int = HYBRID_CLOSED_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _version(self.abi, self.version, expected=HYBRID_CLOSED_ABI_VERSION)
+        _integer(self.call_offset, "callback call offset", 0, MAX_CODE_BYTES - 2)
+        _integer(self.stub_offset, "callback stub offset", 0, MAX_CODE_BYTES - 1)
+        if self.call_offset <= self.stub_offset < self.call_offset + 2:
+            raise ValueError("callback call and stub byte spans must be disjoint")
+        if type(self.export) is not CallbackExportV3:
+            raise TypeError("callback export must be a CallbackExportV3 value")
+        CallbackExportV3.__post_init__(self.export)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutineImageV3(RoutineImageV1):
+    callbacks: tuple[CallbackSiteV3, ...]
+    version: int = HYBRID_CLOSED_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _routine_values(self, version=HYBRID_CLOSED_ABI_VERSION)
+        _callback_sites(self, site_type=CallbackSiteV3)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutineDeclarationV3(RoutineDeclarationV1):
+    callbacks: tuple[CallbackSiteV3, ...]
+    dispatch_callback_limit: int = MAX_DISPATCH_CALLBACKS
+    dispatch_callback_semantic_limit: int = MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS
+    version: int = HYBRID_CLOSED_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        self._validate_declaration(version=HYBRID_CLOSED_ABI_VERSION)
+        _callback_sites(self, site_type=CallbackSiteV3)
+        _integer(self.dispatch_callback_limit, "dispatch callback requests", 1,
+                 MAX_DISPATCH_CALLBACKS)
+        _integer(self.dispatch_callback_semantic_limit, "dispatch callback semantic steps", 1,
+                 MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutineManifestV3(RoutineManifestV2):
+    policies: tuple[ClosedPolicyV3, ...]
+    exports: tuple[CallbackExportV3, ...]
+    routines: tuple[RoutineImageV3, ...]
+    version: int = HYBRID_CLOSED_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        from shared.hybrid_closed import ClosedPolicyV3, prove_policies
+
+        self._validate_manifest(version=HYBRID_CLOSED_ABI_VERSION,
+                                export_type=CallbackExportV3, routine_type=RoutineImageV3)
+        if type(self.policies) is not tuple:
+            raise TypeError("manifest policies must be an exact immutable tuple")
+        if any(type(policy) is not ClosedPolicyV3 for policy in self.policies):
+            raise TypeError("manifest policies must be ClosedPolicyV3 values")
+        proofs = {proof.policy_id: proof for proof in prove_policies(self.policies)}
+        policies = {policy.name: policy for policy in self.policies}
+        routine_names = {routine.name.upper() for routine in self.routines}
+        if any(policy.name.upper() in routine_names for policy in self.policies):
+            raise ValueError("policy and machine routine names must not collide")
+        for export in self.exports:
+            if export.effect != "closed_integer_colon":
+                continue
+            policy = policies.get(export.name)
+            if policy is None:
+                raise ValueError("closed manifest export must name a declared policy")
+            if (export.input_cells, export.output_cells) != (policy.input_cells, policy.output_cells):
+                raise ValueError("closed export arity must match its declared policy")
+            proofs[policy.policy_id].validate_signature(
+                export.input_cells, export.output_cells, export.max_semantic_steps,
+            )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CallbackRequestV3(CallbackRequestV2):
+    site: CallbackSiteV3
+    version: int = HYBRID_CLOSED_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _version(self.abi, self.version, expected=HYBRID_CLOSED_ABI_VERSION)
+        _integer(self.invocation_id, "invocation ID", 1, MASK64)
+        _integer(self.sequence, "callback request sequence", 1, MAX_DISPATCH_CALLBACKS)
+        if type(self.site) is not CallbackSiteV3:
+            raise TypeError("callback request site must be a CallbackSiteV3 value")
+        CallbackSiteV3.__post_init__(self.site)
+        if type(self.arguments) is not tuple:
+            raise TypeError("callback arguments must be an immutable tuple")
+        if len(self.arguments) != self.site.export.input_cells:
+            raise ValueError("callback argument count does not match its export")
+        for argument in self.arguments:
+            _integer(argument, "callback argument cell", 0, MASK64)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MachineSegmentResultV3(MachineSegmentResultV2):
+    callback: CallbackRequestV3 | None = None
+    version: int = HYBRID_CLOSED_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        self._validate_segment(version=HYBRID_CLOSED_ABI_VERSION,
+                               request_type=CallbackRequestV3)
 
 
 __all__ = [
@@ -610,4 +773,7 @@ __all__ = [
     "MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS", "CallbackExportV2", "CallbackSiteV2",
     "RoutineImageV2", "RoutineManifestV2", "RoutineDeclarationV2", "CallbackRequestV2",
     "MachineExitKindV2", "MachineSegmentResultV2",
+    "HYBRID_CLOSED_ABI_VERSION", "CallbackExportV3", "CallbackSiteV3",
+    "RoutineImageV3", "RoutineDeclarationV3", "RoutineManifestV3",
+    "CallbackRequestV3", "MachineSegmentResultV3",
 ]
