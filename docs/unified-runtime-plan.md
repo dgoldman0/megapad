@@ -592,3 +592,20 @@ and 664 existing memory, platform, stack, native execution, bulk memory,
 suspension and FP regressions passed. Independent review verified pin lifetime
 and checked access ordering. This establishes shared bytes, not hybrid calls;
 the launcher remains disabled until registration, runner and session gates pass.
+
+### Phase 4 allocation and declaration validation — 2026-09-30
+
+Dictionary body leases now bind the exact live Word, original initial-body
+extent and a monotonic allocation serial. Allocator writes, reclamation,
+rollback and zone reopening revoke overlapping leases before reuse; unrelated
+definitions and ordinary stores do not. Reusing the XT and identical bytes
+cannot revive a revoked lease. All 66 new lease and existing dictionary/rollback
+checks passed, including inactive zones and forged lease objects.
+
+Immutable v1 declaration values and the local manifest loader validate bounded
+signatures, code sizes, stack and instruction limits, buffer expressions and
+duplicate names. Every metadata row is validated before any image is read, and
+all images are read before publication. Names must be printable nonwhitespace
+ASCII; paths must be filesystem encodable. All 94 manifest/value cases passed.
+Independent review found and closed name, path-encoding and forged-lease gaps.
+These foundations do not yet publish an executable hybrid session.

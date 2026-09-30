@@ -76,6 +76,23 @@ class Word:
 
 
 @dataclass(frozen=True, slots=True)
+class BodyAllocationLease:
+    """Identity of one word's exact, nonempty ``initial_body`` allocation.
+
+    Only the canonical object issued by its dictionary is a valid lease.
+    Neither copying these coordinates nor restoring reclaimed bytes can
+    recreate allocation ownership. Ordinary guest stores do not revoke it;
+    users that require immutable code must separately verify those bytes.
+    """
+
+    word: Word
+    body_address: int
+    body_limit: int
+    allocation_serial: int
+    _owner: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
 class _DictionaryCheckpointSeal:
     """Canonical state that detects copied checkpoints with altered fields."""
 
@@ -143,6 +160,9 @@ class Dictionary:
         self._by_xt: dict[int, Word] = {}
         self._owner = object()
         self._execution_generation = 0
+        self._body_allocations: dict[int, BodyAllocationLease] = {}
+        self._body_allocation_limit = 0
+        self._body_allocation_serial = 0
 
     @property
     def execution_generation(self) -> int:
@@ -255,6 +275,7 @@ class Dictionary:
             + bytes(SEMANTIC_CODE_SLOT_BYTES)
             + initial_body
         )
+        self._prepare_body_write(header_address, allocation_limit)
         if self._memory is not None:
             # Publish metadata only after the complete guest-visible header has
             # passed memory preflight and been emitted contiguously.
@@ -271,6 +292,18 @@ class Dictionary:
         self._definitions.append(word)
         self._bindings.setdefault(key, []).append(word)
         self._by_xt[xt] = word
+        if initial_body:
+            self._body_allocation_serial += 1
+            self._body_allocations[xt] = BodyAllocationLease(
+                word=word,
+                body_address=word.body_address,
+                body_limit=allocation_limit,
+                allocation_serial=self._body_allocation_serial,
+                _owner=self._owner,
+            )
+            self._body_allocation_limit = max(
+                self._body_allocation_limit, allocation_limit
+            )
         self._header_limit = max(self._header_limit, word.body_address)
         self._here = allocation_limit
         self._execution_generation += 1
@@ -308,6 +341,7 @@ class Dictionary:
             raise OverflowError("ALLOT would wrap the uint64 address space")
         if candidate > self._active_limit:
             raise OverflowError("ALLOT would move HERE beyond its memory region")
+        self._revoke_body_span(candidate, self._here)
         self._here = candidate
 
     def move_here(self, target: int, *, floor: int, limit: int) -> None:
@@ -335,6 +369,10 @@ class Dictionary:
                 "dictionary zone must fit one mapped ordinary-memory region"
             )
 
+        # Only the selected zone's writable tail becomes available for reuse.
+        # This also handles reopening an old arena or expanding its bounds;
+        # storage excluded from the new zone is not reclaimed numerically.
+        self._revoke_body_span(target, limit)
         self._active_floor = floor
         self._active_limit = limit
         self._here = target
@@ -365,12 +403,41 @@ class Dictionary:
             raise RuntimeError(
                 "transient dictionary writes require a shared address space"
             )
-        self._checked_advance(
+        limit = self._checked_advance(
             len(payload),
             operation="transient dictionary write",
         )
+        self._prepare_body_write(self._here, limit)
         self._memory.write_bytes(self._here, payload)
         return self._here
+
+    def acquire_body_lease(self, word: Word) -> BodyAllocationLease:
+        """Return the live identity of *word*'s original body allocation.
+
+        Later comma/ALLOT growth does not extend this extent. A reclaimed
+        initial body cannot acquire a fresh lease, even while its semantic
+        Word remains resolvable; a new definition must own the replacement.
+        """
+
+        if not isinstance(word, Word):
+            raise TypeError("body lease requires a Word")
+        if self._by_xt.get(word.xt) is not word:
+            raise ValueError("body lease requires this dictionary's exact live word")
+        lease = self._body_allocations.get(word.xt)
+        if lease is None:
+            raise ValueError("word has no live nonempty initial body allocation")
+        return lease
+
+    def is_body_lease_live(self, lease: object) -> bool:
+        """Check exact allocation identity without minting or renewing it."""
+
+        return (
+            isinstance(lease, BodyAllocationLease)
+            and lease._owner is self._owner
+            and isinstance(lease.word, Word)
+            and self._body_allocations.get(lease.word.xt) is lease
+            and self._by_xt.get(lease.word.xt) is lease.word
+        )
 
     def find(self, name: bytes | str) -> Word | None:
         """Return the newest case-insensitive binding for *name*, if present."""
@@ -584,6 +651,25 @@ class Dictionary:
             if any(binding is not word for binding, word in zip(suffix, words)):
                 raise RuntimeError("dictionary binding history is inconsistent")
 
+        if active_floor is not None and active_limit is None:
+            raise AssertionError("rollback zone limit is missing")
+
+        # Finish every lineage check before revoking allocations. Removals
+        # revoke even when LATEST! leaves HERE unchanged, while a retained
+        # word can lose only its body through a partial frontier rewind.
+        if active_floor is None:
+            self._revoke_body_span(here, self._here)
+        else:
+            assert active_limit is not None
+            self._revoke_body_span(here, active_limit)
+        self._revoke_body_allocations(
+            tuple(
+                lease
+                for word in removed
+                if (lease := self._body_allocations.get(word.xt)) is not None
+            )
+        )
+
         for word in reversed(removed):
             key = word.name.upper()
             bindings = self._bindings[key]
@@ -598,8 +684,7 @@ class Dictionary:
                 (word.body_address for word in self._definitions), default=0
             )
         if active_floor is not None:
-            if active_limit is None:
-                raise AssertionError("rollback zone limit is missing")
+            assert active_limit is not None
             self._active_floor = active_floor
             self._active_limit = active_limit
         self._here = here
@@ -623,14 +708,58 @@ class Dictionary:
         if self._memory is None:
             raise RuntimeError("dictionary stores require a shared address space")
         candidate = self._checked_advance(width, operation="dictionary store")
+        if not isinstance(cell, int):
+            raise TypeError("stored value must be an integer")
+        self._prepare_body_write(self._here, candidate)
         if width == CELL_BYTES:
             self._memory.write64(self._here, cell)
         else:
             self._memory.write8(self._here, cell)
         self._here = candidate
 
+    def _overlapping_body_allocations(
+        self, address: int, limit: int
+    ) -> tuple[BodyAllocationLease, ...]:
+        # Forward compilation normally starts beyond all existing bodies.
+        # Keep that common path constant time rather than scanning all words.
+        if address >= limit or address >= self._body_allocation_limit:
+            return ()
+        return tuple(
+            lease
+            for lease in self._body_allocations.values()
+            if address < lease.body_limit and lease.body_address < limit
+        )
+
+    def _revoke_body_span(self, address: int, limit: int) -> None:
+        self._revoke_body_allocations(
+            self._overlapping_body_allocations(address, limit)
+        )
+
+    def _revoke_body_allocations(
+        self, leases: tuple[BodyAllocationLease, ...]
+    ) -> None:
+        if not leases:
+            return
+        for lease in leases:
+            del self._body_allocations[lease.word.xt]
+        self._body_allocation_limit = max(
+            (lease.body_limit for lease in self._body_allocations.values()),
+            default=0,
+        )
+
+    def _prepare_body_write(self, address: int, limit: int) -> None:
+        """Preflight overlapping emission, then revoke before its first byte."""
+
+        leases = self._overlapping_body_allocations(address, limit)
+        if not leases:
+            return
+        if self._memory is not None:
+            self._memory._qualify_ordinary_span(address, limit - address)
+        self._revoke_body_allocations(leases)
+
 
 __all__ = [
+    "BodyAllocationLease",
     "Dictionary",
     "DictionaryCheckpoint",
     "HEADER_FIXED_BYTES",
