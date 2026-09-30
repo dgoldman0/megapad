@@ -13160,12 +13160,15 @@ static std::shared_ptr<mp64_nested::Spec> make_routine_spec_v3(
 class RoutineOwner : public RoutineExecutionCore {
 public:
     using RoutineExecutionCore::RoutineExecutionCore;
-    ~RoutineOwner() { frame_.reset(); }
+    ~RoutineOwner() { nested_chain_.reset(); frame_.reset(); }
 
     void close() override {
         if (active_)
             throw std::runtime_error("routine runner cannot close during an active boundary");
+        if (nested_chain_)
+            throw std::runtime_error("legacy close cannot cancel a V3 chain");
         frame_.reset();
+        nested_marshal_fail_after_ = 0;
         publications_.clear();
         nested_publications_.clear();
         published_count_ = published_bytes_ = published_edges_ = 0;
@@ -13181,6 +13184,8 @@ public:
         // The V3 view cannot cancel another transport's pending callback.
         if (frame_)
             throw std::runtime_error("V3 owner cannot close a parked V2 invocation");
+        consume_nested_tokens();
+        nested_chain_.reset();
         close();
     }
 
@@ -13344,6 +13349,141 @@ public:
         return nested_publications_.find(spec.get()) != nested_publications_.end();
     }
 
+    mp64_nested::Result begin_root_v3(
+            const std::shared_ptr<mp64_nested::Spec>& spec,
+            py::handle arguments, py::handle spans, py::handle instruction_limit,
+            py::handle callback_limit, py::handle protected_spans) {
+        ActiveBoundary boundary(*this);
+        if (!spec)
+            throw py::type_error("entry requires a RoutineSpecV3");
+        const uint64_t requested = routine_exact_uint64(instruction_limit, "instruction_limit");
+        const uint64_t callbacks = routine_exact_uint64(callback_limit, "callback_limit");
+        if (requested == 0 || requested > mp64_routine::MAX_DISPATCH_INSTRUCTIONS)
+            throw py::value_error("instruction_limit must be in [1, 10000000]");
+        if (callbacks > mp64_callbacks::MAX_CALLBACKS)
+            throw py::value_error("remaining callback_limit must be in [0, 1024]");
+        const auto args = parse_arguments(arguments, spec->sealed.routine.input_cells);
+        auto borrowed = parse_spans(spans);
+        const auto protected_values = parse_protected(protected_spans);
+        const auto publication = nested_publications_.find(spec.get());
+        if (publication == nested_publications_.end())
+            throw py::value_error("v3 specification was not published by this owner");
+        if (nested_invocation_sequence_ == std::numeric_limits<uint64_t>::max())
+            throw std::runtime_error("native V3 invocation identity space is exhausted");
+        require_nested_segment_identity();
+        auto next = std::make_unique<NestedChain>();
+        next->frames[0] = std::make_unique<NestedFrame>();
+        next->depth = 1;
+        next->allowance = requested;
+        next->callback_allowance = callbacks;
+        auto& frame = *next->frames[0];
+        frame.publication = publication->second;
+        frame.spans = std::move(borrowed);
+        next->reservation = std::make_unique<RoutineCPUReservation>(*state_, this);
+        auto execution_guard = acquire_execution(this);
+        validate_spec(spec->sealed.routine);
+        validate_borrowed(spec->sealed.routine, frame.spans, protected_values);
+        validate_seal(spec->sealed, true);
+        validate_nested_closure(*frame.publication);
+        frame.invocation_id = ++nested_invocation_sequence_;
+        next->root_id = frame.invocation_id;
+        nested_chain_ = std::move(next);
+        initialize_entry(spec->sealed.routine, args);
+        return drive_nested(false, true);
+    }
+
+    mp64_nested::Result resume_callback_v3(
+            const std::shared_ptr<mp64_nested::Token>& token, py::handle outputs) {
+        ActiveBoundary boundary(*this, this);
+        validate_nested_token(token);
+        auto& frame = nested_top();
+        const auto& spec = *frame.publication->spec;
+        const auto& site = spec.sealed.callbacks[frame.pending_site];
+        const auto values = parse_arguments(outputs, site.output_cells);
+        auto execution_guard = acquire_execution(this);
+        validate_nested_token(token);
+        validate_seal(spec.sealed, true);
+        validate_nested_closure(*frame.publication);
+        validate_nested_parked();
+        require_nested_segment_identity();
+        if (frame.instructions == spec.sealed.routine.max_instructions ||
+                nested_chain_->instructions == nested_chain_->allowance) {
+            // Allocate diagnostic text before consuming retryable authority.
+            auto result = make_nested_result(false);
+            result.detail = "machine instruction allowance exhausted before callback return";
+            token->consumed = true;
+            frame.pending.reset();
+            record_nested_segment(frame.instructions, frame.cycles, frame.callbacks, false);
+            result.segment_id = last_nested_segment_->segment_id;
+            nested_chain_->terminal = true;
+            return result;
+        }
+        token->consumed = true;
+        frame.pending.reset();
+        for (std::size_t index = 0; index < values.size(); ++index)
+            state_->regs[4 + index] = values[index];
+        return drive_nested(true, false);
+    }
+
+    mp64_nested::Result cancel_chain_v3(py::object token) {
+        ActiveBoundary boundary(*this, this);
+        if (frame_)
+            throw std::runtime_error("V3 cannot cancel a V2 invocation");
+        if (!nested_chain_ || nested_chain_->terminal)
+            throw std::runtime_error("no V3 chain is active");
+        if (!token.is_none())
+            validate_nested_token(token.cast<std::shared_ptr<mp64_nested::Token>>());
+        auto result = make_nested_result(false);
+        result.exit_kind = "cancelled";
+        result.detail = "callback chain cancelled by its owner";
+        consume_nested_tokens();
+        // Hold reservation until this diagnostic has also been delivered.
+        nested_chain_->terminal = true;
+        return result;
+    }
+
+    bool nested_cancel_is_inactive() const {
+        if (active_)
+            throw std::runtime_error("routine runner boundary is already active");
+        if (frame_)
+            throw std::runtime_error("V3 cannot cancel a V2 invocation");
+        return !nested_chain_;
+    }
+
+    std::optional<mp64_nested::Receipt> last_segment_v3() const noexcept {
+        return last_nested_segment_;
+    }
+
+    void test_fail_marshalling_after_results(py::handle count) {
+        ActiveBoundary boundary(*this);
+        const auto value = routine_exact_uint64(count, "result count");
+        if (value == 0 || value > 64)
+            throw py::value_error("result count must be in [1, 64]");
+        nested_marshal_fail_after_ = value;
+    }
+
+    void begin_nested_delivery(uint64_t root_id) {
+        if (active_ || !nested_chain_ || nested_chain_->root_id != root_id)
+            throw std::runtime_error("V3 result delivery has lost its exact root owner");
+        // The CPU reservation is still owned by the chain, even on terminal
+        // segments. No execution lock or GIL release spans Python conversion.
+        active_ = true;
+    }
+
+    void maybe_fail_nested_delivery() {
+        if (nested_marshal_fail_after_ && --nested_marshal_fail_after_ == 0)
+            throw std::bad_alloc();
+    }
+
+    void finish_nested_delivery(uint64_t root_id, bool failed) noexcept {
+        if (nested_chain_ && nested_chain_->root_id == root_id &&
+                (failed || nested_chain_->terminal)) {
+            consume_nested_tokens();
+            nested_chain_.reset();
+        }
+        active_ = false;
+    }
+
     mp64_callbacks::Result begin_v2(
             const std::shared_ptr<mp64_callbacks::Spec>& spec,
             py::handle arguments, py::handle spans, py::handle instruction_limit,
@@ -13428,6 +13568,8 @@ public:
     bool owner_cancel_is_inactive() const {
         if (active_)
             throw std::runtime_error("routine runner boundary is already active");
+        if (nested_chain_)
+            throw std::runtime_error("V2 cannot cancel a V3 chain");
         return !frame_;
     }
 
@@ -13474,6 +13616,204 @@ private:
         uint64_t generation = 0, depth = 1;
         std::vector<std::shared_ptr<mp64_nested::ChildEdge>> edges;
     };
+
+    struct NestedFrame {
+        std::shared_ptr<NestedPublication> publication;
+        std::vector<mp64_routine::BufferSpan> spans;
+        uint64_t invocation_id = 0, parent_invocation_id = 0;
+        uint64_t instructions = 0, cycles = 0, callbacks = 0;
+        std::shared_ptr<mp64_nested::Token> pending;
+        std::size_t pending_site = 0;
+        std::array<uint64_t, 32> registers{};
+        uint8_t flags = 0;
+        uint64_t live_stack_base = 0;
+        std::vector<uint8_t> live_control;
+    };
+
+    struct NestedChain {
+        std::array<std::unique_ptr<NestedFrame>, mp64_nested::MAX_DEPTH> frames;
+        std::unique_ptr<RoutineCPUReservation> reservation;
+        uint64_t root_id = 0, depth = 0;
+        uint64_t allowance = 0, callback_allowance = 0;
+        uint64_t instructions = 0, cycles = 0, callbacks = 0;
+        uint64_t cycle_frontier = 0;
+        bool terminal = false;
+    };
+
+    NestedFrame& nested_top() const noexcept {
+        return *nested_chain_->frames[nested_chain_->depth - 1];
+    }
+
+    void consume_nested_tokens() noexcept {
+        if (!nested_chain_) return;
+        for (auto& frame : nested_chain_->frames)
+            if (frame && frame->pending) frame->pending->consumed = true;
+    }
+
+    void validate_nested_token(const std::shared_ptr<mp64_nested::Token>& token) const {
+        if (!nested_chain_ || nested_chain_->terminal || !token)
+            throw py::value_error("V3 callback token is foreign, consumed, or stale");
+        const auto& frame = nested_top();
+        const auto& publication = *frame.publication;
+        if (!frame.pending || token != frame.pending || token->consumed ||
+                token->owner.lock() != nested_identity_ ||
+                token->root_invocation_id != nested_chain_->root_id ||
+                token->invocation_id != frame.invocation_id || token->sequence != frame.callbacks ||
+                token->spec != publication.spec.get() || token->generation != publication.generation ||
+                token->publication.lock() != publication.identity)
+            throw py::value_error("V3 callback token is foreign, consumed, or stale");
+        const auto found = nested_publications_.find(token->spec);
+        if (found == nested_publications_.end() || found->second != frame.publication)
+            throw py::value_error("V3 callback publication is stale");
+    }
+
+    void validate_nested_profile() const {
+        if (state_->profile != CoreProfile::FULL ||
+                state_->psel != 3 || state_->xsel != 2 || state_->spsel != 15 || state_->sw != 1 ||
+                state_->flag_i != 0 || state_->flag_s != 0 ||
+                state_->d_reg != 0 || state_->q_out != 0 || state_->t_reg != 0 || state_->ef_flags != 0 ||
+                state_->halted || state_->idle || state_->ext_modifier != -1 ||
+                state_->ivt_base != 0 || state_->ivec_id != 0 || state_->trap_addr != 0 || state_->wake_ms != 0 ||
+                state_->priv_level != 0 || state_->core_id != 0 || state_->num_cores != 1 ||
+                state_->private_irq_ipi.load(std::memory_order_acquire) ||
+                state_->instruction_bus_access != nullptr || state_->icache_enabled != 1)
+            throw py::value_error("parked V3 integer profile controls changed");
+    }
+
+    void capture_nested_parked() {
+        validate_nested_profile();
+        auto& frame = nested_top();
+        const auto& spec = frame.publication->spec->sealed.routine;
+        std::copy(std::begin(state_->regs), std::end(state_->regs), frame.registers.begin());
+        frame.flags = flags_pack(*state_);
+        nested_chain_->cycle_frontier = state_->cycle_count;
+        frame.live_stack_base = state_->regs[15];
+        const uint8_t* begin = control_access(spec, frame.live_stack_base, "callback_stack_seal");
+        frame.live_control.assign(begin, begin + (spec.stack_empty() - frame.live_stack_base));
+    }
+
+    void validate_nested_parked() const {
+        validate_nested_profile();
+        const auto& frame = nested_top();
+        if (!std::equal(frame.registers.begin(), frame.registers.end(), state_->regs) ||
+                frame.flags != flags_pack(*state_) ||
+                nested_chain_->cycle_frontier != state_->cycle_count ||
+                frame.pending->control_slot != state_->regs[15] ||
+                std::memcmp(control_bytes_ + (frame.live_stack_base - control_.base),
+                    frame.live_control.data(), frame.live_control.size()) != 0)
+            throw py::value_error("parked V3 CPU or private control state changed");
+    }
+
+    mp64_nested::Result make_nested_result(bool started) const {
+        const auto& frame = nested_top();
+        mp64_nested::Result result;
+        result.root_invocation_id = nested_chain_->root_id;
+        result.invocation_id = frame.invocation_id;
+        result.parent_invocation_id = frame.parent_invocation_id;
+        result.depth = nested_chain_->depth;
+        result.invocation_started = started;
+        result.invocation_instructions = frame.instructions;
+        result.invocation_cycles = frame.cycles;
+        result.invocation_callbacks = frame.callbacks;
+        result.chain_instructions = nested_chain_->instructions;
+        result.chain_cycles = nested_chain_->cycles;
+        result.chain_callbacks = nested_chain_->callbacks;
+        result.entry_pc = frame.publication->spec->sealed.routine.entry();
+        result.instruction_pc = result.pc = pc(*state_);
+        return result;
+    }
+
+    void require_nested_segment_identity() const {
+        if (nested_segment_sequence_ == std::numeric_limits<uint64_t>::max())
+            throw std::runtime_error("native V3 segment identity space is exhausted");
+    }
+
+    void record_nested_segment(uint64_t instructions_before, uint64_t cycles_before,
+                               uint64_t callbacks_before, bool started) noexcept {
+        const auto& frame = nested_top();
+        nested_chain_->cycle_frontier = state_->cycle_count;
+        last_nested_segment_ = mp64_nested::Receipt{
+            ++nested_segment_sequence_, nested_chain_->root_id, frame.invocation_id,
+            frame.parent_invocation_id, nested_chain_->depth, started,
+            frame.instructions - instructions_before, frame.cycles - cycles_before,
+            frame.instructions, frame.cycles, frame.callbacks,
+            nested_chain_->instructions, nested_chain_->cycles, nested_chain_->callbacks,
+            frame.callbacks > callbacks_before};
+    }
+
+    mp64_nested::Result drive_nested(bool resume_stub, bool started) {
+        auto& frame = nested_top();
+        const auto& publication = *frame.publication;
+        const auto& spec = *publication.spec;
+        const uint64_t instructions_before = frame.instructions;
+        const uint64_t cycles_before = frame.cycles;
+        const uint64_t callbacks_before = frame.callbacks;
+        try {
+            auto result = make_nested_result(started);
+            const uint64_t remaining = std::min(
+                spec.sealed.routine.max_instructions - frame.instructions,
+                nested_chain_->allowance - nested_chain_->instructions);
+            const auto site_index = execute_sealed_segment(spec.sealed, frame.spans,
+                frame.instructions + remaining, frame.instructions, frame.cycles,
+                resume_stub, result, &nested_chain_->instructions, &nested_chain_->cycles);
+            if (site_index) {
+                if (frame.callbacks == spec.max_callback_requests ||
+                        nested_chain_->callbacks == nested_chain_->callback_allowance) {
+                    result.exit_kind = "callback_limit";
+                    result.detail = "callback request allowance exhausted";
+                } else {
+                    // Admission is counted before any request/token allocation.
+                    // Even allocation failure retains this exact completed CALL.
+                    ++frame.callbacks;
+                    ++nested_chain_->callbacks;
+                    frame.pending_site = *site_index;
+                    const auto& site = spec.sealed.callbacks[*site_index];
+                    frame.pending = std::make_shared<mp64_nested::Token>();
+                    auto& token = *frame.pending;
+                    token.owner = nested_identity_;
+                    token.publication = publication.identity;
+                    token.spec = &spec;
+                    token.generation = publication.generation;
+                    token.root_invocation_id = nested_chain_->root_id;
+                    token.invocation_id = frame.invocation_id;
+                    token.sequence = frame.callbacks;
+                    token.control_slot = state_->regs[15];
+                    token.return_pc = result.instruction_pc + 2;
+                    capture_nested_parked();
+                    result.callback = std::make_shared<mp64_nested::Callback>();
+                    auto& callback = *result.callback;
+                    callback.invocation_id = frame.invocation_id;
+                    callback.sequence = frame.callbacks;
+                    callback.site_index = *site_index;
+                    callback.call_offset = site.call_offset;
+                    callback.stub_offset = site.stub_offset;
+                    callback.export_id = site.export_id;
+                    for (uint64_t index = 0; index < site.input_cells; ++index)
+                        callback.arguments.push_back(state_->regs[4 + index]);
+                    result.token = frame.pending;
+                    result.exit_kind = "callback_request";
+                }
+            }
+            result.pc = pc(*state_);
+            result.invocation_instructions = frame.instructions;
+            result.invocation_cycles = frame.cycles;
+            result.invocation_callbacks = frame.callbacks;
+            result.chain_instructions = nested_chain_->instructions;
+            result.chain_cycles = nested_chain_->cycles;
+            result.chain_callbacks = nested_chain_->callbacks;
+            if (result.exit_kind == "instruction_limit")
+                result.detail = "machine instruction allowance exhausted before root return";
+            record_nested_segment(instructions_before, cycles_before, callbacks_before, started);
+            result.segment_id = last_nested_segment_->segment_id;
+            nested_chain_->terminal = result.exit_kind != "callback_request";
+            return result;
+        } catch (...) {
+            record_nested_segment(instructions_before, cycles_before, callbacks_before, started);
+            consume_nested_tokens();
+            nested_chain_.reset();
+            throw;
+        }
+    }
 
     const NestedPublication& nested_child(
             const NestedPublication& parent,
@@ -13608,6 +13948,91 @@ private:
             frame.sequence, frame.sequence > callbacks_before};
     }
 
+    // Both sealed transports use this exact decoder/interpreter loop. The
+    // wrapper alone owns callback authority, limits, snapshots and receipts.
+    std::optional<std::size_t> execute_sealed_segment(
+            const mp64_callbacks::Spec& spec,
+            const std::vector<mp64_routine::BufferSpan>& spans,
+            uint64_t allowance, uint64_t& instructions, uint64_t& total_cycles,
+            bool resume_stub, mp64_routine::Result& result,
+            uint64_t* chain_instructions = nullptr, uint64_t* chain_cycles = nullptr) {
+        Operations operations{*this, spec.routine, spans};
+        Reader reader{*state_, spec.routine};
+        while (instructions < allowance) {
+            result.instruction_pc = pc(*state_);
+            const uint64_t offset = result.instruction_pc - spec.routine.code_base;
+            if (!spec.routine.code().contains(result.instruction_pc, 1) ||
+                !spec.boundaries[static_cast<std::size_t>(offset)]) {
+                result.exit_kind = "invalid_callback";
+                result.detail = "machine target is not a sealed instruction boundary";
+                break;
+            }
+            const mp64_callbacks::Site* call = nullptr;
+            bool stub = false;
+            for (const auto& site : spec.callbacks) {
+                if (site.call_offset == offset) call = &site;
+                if (site.stub_offset == offset) stub = true;
+            }
+            if (stub && !resume_stub) {
+                result.exit_kind = "invalid_callback";
+                result.detail = "callback stub reached without its exact completed CALL.L";
+                break;
+            }
+            resume_stub = false;
+            try {
+                icache_begin_instruction(*state_);
+                const DecodeResult decoded = decode_instruction(reader, state_->ext_modifier);
+                if (decoded.status != DecodeStatus::DECODED ||
+                    !mp64_routine::admitted(decoded.instruction)) {
+                    result.exit_kind = "decode_fault";
+                    result.trap_id = IVEC_ILLEGAL_OP;
+                    result.detail = "sealed v2 decode became unavailable";
+                    break;
+                }
+                operations.operation = decoded.instruction.operation;
+                const uint64_t previous_sp = state_->regs[15];
+                const int cycles = execute_decoded_instruction(*state_, operations, decoded.instruction);
+                commit_decoded_instruction(*state_, decoded.instruction, cycles);
+                ++instructions;
+                total_cycles += static_cast<uint64_t>(cycles);
+                if (chain_instructions) ++*chain_instructions;
+                if (chain_cycles) *chain_cycles += static_cast<uint64_t>(cycles);
+                ++result.instructions;
+                result.cycles += static_cast<uint64_t>(cycles);
+                if (call != nullptr) {
+                    if (pc(*state_) != spec.routine.code_base + call->stub_offset) {
+                        result.exit_kind = "invalid_callback";
+                        result.detail = "declared CALL.L did not reach its declared stub";
+                        break;
+                    }
+                    return static_cast<std::size_t>(call - spec.callbacks.data());
+                }
+                if (pc(*state_) == mp64_routine::ROOT_RETURN) {
+                    if (decoded.instruction.operation == DecodedOperation::RETURN_LONG &&
+                        previous_sp == spec.routine.stack_empty() - 8 &&
+                        state_->regs[15] == spec.routine.stack_empty() &&
+                        state_->psel == 3 && state_->xsel == 2 && state_->spsel == 15) {
+                        result.exit_kind = "returned";
+                        for (uint64_t i = 0; i < spec.routine.output_cells; ++i)
+                            result.outputs.push_back(state_->regs[4 + i]);
+                    } else {
+                        result.exit_kind = "invalid_return";
+                        result.detail = "root return requires RET.L from original root slot";
+                    }
+                    break;
+                }
+            } catch (const mp64_routine::AccessFault& fault) {
+                result.exit_kind = "rejected_access";
+                result.access_address = fault.address;
+                result.access_width = fault.width;
+                result.access_operation = fault.operation;
+                result.detail = fault.detail;
+                break;
+            }
+        }
+        return std::nullopt;
+    }
+
     mp64_callbacks::Result drive(bool resume_stub) {
         const uint64_t instructions_before = frame_->instructions;
         const uint64_t cycles_before = frame_->cycles;
@@ -13616,104 +14041,37 @@ private:
             auto result = make_result();
             Frame& frame = *frame_;
             const auto& spec = *frame.spec;
-            Operations operations{*this, spec.routine, frame.spans};
-            Reader reader{*state_, spec.routine};
-            while (frame.instructions < frame.allowance) {
-                result.instruction_pc = pc(*state_);
-                const uint64_t offset = result.instruction_pc - spec.routine.code_base;
-                if (!spec.routine.code().contains(result.instruction_pc, 1) ||
-                    !spec.boundaries[static_cast<std::size_t>(offset)]) {
-                    result.exit_kind = "invalid_callback";
-                    result.detail = "machine target is not a sealed instruction boundary";
-                    break;
-                }
-                const mp64_callbacks::Site* call = nullptr;
-                bool stub = false;
-                for (const auto& site : spec.callbacks) {
-                    if (site.call_offset == offset) call = &site;
-                    if (site.stub_offset == offset) stub = true;
-                }
-                if (stub && !resume_stub) {
-                    result.exit_kind = "invalid_callback";
-                    result.detail = "callback stub reached without its exact completed CALL.L";
-                    break;
-                }
-                resume_stub = false;
-                try {
-                    icache_begin_instruction(*state_);
-                    const DecodeResult decoded = decode_instruction(reader, state_->ext_modifier);
-                    if (decoded.status != DecodeStatus::DECODED ||
-                        !mp64_routine::admitted(decoded.instruction)) {
-                        result.exit_kind = "decode_fault";
-                        result.trap_id = IVEC_ILLEGAL_OP;
-                        result.detail = "sealed v2 decode became unavailable";
-                        break;
-                    }
-                    operations.operation = decoded.instruction.operation;
-                    const uint64_t previous_sp = state_->regs[15];
-                    const int cycles = execute_decoded_instruction(*state_, operations, decoded.instruction);
-                    commit_decoded_instruction(*state_, decoded.instruction, cycles);
-                    ++frame.instructions;
-                    frame.cycles += static_cast<uint64_t>(cycles);
-                    ++result.instructions;
-                    result.cycles += static_cast<uint64_t>(cycles);
-                    if (call != nullptr) {
-                        if (pc(*state_) != spec.routine.code_base + call->stub_offset) {
-                            result.exit_kind = "invalid_callback";
-                            result.detail = "declared CALL.L did not reach its declared stub";
-                            break;
-                        }
-                        if (frame.sequence == frame.callback_allowance) {
-                            result.exit_kind = "callback_limit";
-                            result.detail = "callback request allowance exhausted";
-                            break;
-                        }
-                        ++frame.sequence;
-                        frame.pending_site = *call;
-                        frame.pending = std::make_shared<mp64_callbacks::Token>();
-                        auto& token = *frame.pending;
-                        token.owner = identity_;
-                        token.invocation_id = frame.invocation_id;
-                        token.sequence = frame.sequence;
-                        token.publication = frame.publication;
-                        token.control_slot = state_->regs[15];
-                        token.return_pc = result.instruction_pc + 2;
-                        token.spec = &spec;
-                        capture_parked_frame();
-                        result.callback = std::make_shared<mp64_callbacks::Callback>();
-                        auto& callback = *result.callback;
-                        callback.invocation_id = frame.invocation_id;
-                        callback.sequence = frame.sequence;
-                        callback.call_offset = call->call_offset;
-                        callback.stub_offset = call->stub_offset;
-                        callback.export_id = call->export_id;
-                        for (uint64_t i = 0; i < call->input_cells; ++i)
-                            callback.arguments.push_back(state_->regs[4 + i]);
-                        result.token = frame.pending;
-                        result.exit_kind = "callback_request";
-                        break;
-                    }
-                    if (pc(*state_) == mp64_routine::ROOT_RETURN) {
-                        if (decoded.instruction.operation == DecodedOperation::RETURN_LONG &&
-                            previous_sp == spec.routine.stack_empty() - 8 &&
-                            state_->regs[15] == spec.routine.stack_empty() &&
-                            state_->psel == 3 && state_->xsel == 2 && state_->spsel == 15) {
-                            result.exit_kind = "returned";
-                            for (uint64_t i = 0; i < spec.routine.output_cells; ++i)
-                                result.outputs.push_back(state_->regs[4 + i]);
-                        } else {
-                            result.exit_kind = "invalid_return";
-                            result.detail = "root return requires RET.L from original root slot";
-                        }
-                        break;
-                    }
-                } catch (const mp64_routine::AccessFault& fault) {
-                    result.exit_kind = "rejected_access";
-                    result.access_address = fault.address;
-                    result.access_width = fault.width;
-                    result.access_operation = fault.operation;
-                    result.detail = fault.detail;
-                    break;
+            const auto site_index = execute_sealed_segment(spec, frame.spans,
+                frame.allowance, frame.instructions, frame.cycles, resume_stub, result);
+            if (site_index) {
+                const auto* call = &spec.callbacks[*site_index];
+                if (frame.sequence == frame.callback_allowance) {
+                    result.exit_kind = "callback_limit";
+                    result.detail = "callback request allowance exhausted";
+                } else {
+                    ++frame.sequence;
+                    frame.pending_site = *call;
+                    frame.pending = std::make_shared<mp64_callbacks::Token>();
+                    auto& token = *frame.pending;
+                    token.owner = identity_;
+                    token.invocation_id = frame.invocation_id;
+                    token.sequence = frame.sequence;
+                    token.publication = frame.publication;
+                    token.control_slot = state_->regs[15];
+                    token.return_pc = result.instruction_pc + 2;
+                    token.spec = &spec;
+                    capture_parked_frame();
+                    result.callback = std::make_shared<mp64_callbacks::Callback>();
+                    auto& callback = *result.callback;
+                    callback.invocation_id = frame.invocation_id;
+                    callback.sequence = frame.sequence;
+                    callback.call_offset = call->call_offset;
+                    callback.stub_offset = call->stub_offset;
+                    callback.export_id = call->export_id;
+                    for (uint64_t i = 0; i < call->input_cells; ++i)
+                        callback.arguments.push_back(state_->regs[4 + i]);
+                    result.token = frame.pending;
+                    result.exit_kind = "callback_request";
                 }
             }
             result.pc = pc(*state_);
@@ -13742,6 +14100,10 @@ private:
     uint64_t publication_sequence_ = 0, invocation_sequence_ = 0;
     uint64_t segment_sequence_ = 0;
     std::optional<mp64_callbacks::Receipt> last_segment_;
+    uint64_t nested_invocation_sequence_ = 0, nested_segment_sequence_ = 0;
+    uint64_t nested_marshal_fail_after_ = 0;
+    std::optional<mp64_nested::Receipt> last_nested_segment_;
+    std::unique_ptr<NestedChain> nested_chain_;
     std::unique_ptr<Frame> frame_;
 };
 
@@ -13842,6 +14204,33 @@ public:
         return owner_->is_code_published_v3(spec);
     }
 
+    mp64_nested::Result begin_root_v3(
+            const std::shared_ptr<mp64_nested::Spec>& spec,
+            py::handle arguments, py::handle spans, py::handle instruction_limit,
+            py::handle callback_limit, py::handle protected_spans) {
+        return owner_->begin_root_v3(spec, arguments, spans, instruction_limit,
+                                     callback_limit, protected_spans);
+    }
+    mp64_nested::Result resume_callback_v3(
+            const std::shared_ptr<mp64_nested::Token>& token, py::handle outputs) {
+        return owner_->resume_callback_v3(token, outputs);
+    }
+    mp64_nested::Result cancel_chain_v3(py::object token) {
+        return owner_->cancel_chain_v3(std::move(token));
+    }
+    bool nested_cancel_is_inactive() const { return owner_->nested_cancel_is_inactive(); }
+    std::optional<mp64_nested::Receipt> last_segment_v3() const noexcept {
+        return owner_->last_segment_v3();
+    }
+    void test_fail_marshalling_after_results(py::handle count) {
+        owner_->test_fail_marshalling_after_results(count);
+    }
+    void begin_delivery(uint64_t root_id) { owner_->begin_nested_delivery(root_id); }
+    void maybe_fail_delivery() { owner_->maybe_fail_nested_delivery(); }
+    void finish_delivery(uint64_t root_id, bool failed) noexcept {
+        owner_->finish_nested_delivery(root_id, failed);
+    }
+
 private:
     std::shared_ptr<RoutineOwner> owner_;
     std::shared_ptr<RoutineRunnerV2> legacy_;
@@ -13856,6 +14245,25 @@ static py::object marshal_routine_segment_v2(
         return py::cast(std::move(result));
     } catch (...) {
         runner.abandon_marshaled_result(invocation_id);
+        throw;
+    }
+}
+
+template <typename Execute>
+static py::object marshal_routine_segment_v3(
+        RoutineRunnerV3& runner, Execute execute, bool accepted_segment = true) {
+    auto result = execute();
+    const uint64_t root_id = result.root_invocation_id;
+    try {
+        runner.begin_delivery(root_id);
+        if (accepted_segment) runner.maybe_fail_delivery();
+        auto delivered = py::cast(std::move(result));
+        runner.finish_delivery(root_id, false);
+        return delivered;
+    } catch (...) {
+        // Includes terminal-root and future child-pop delivery: the exact root
+        // reservation survives until all Python result allocation has ended.
+        runner.finish_delivery(root_id, true);
         throw;
     }
 }
@@ -36786,7 +37194,62 @@ PYBIND11_MODULE(_mp64_accel, m) {
             throw py::type_error("child edges cannot be serialized");
         });
 
-    // Publication foundation only. No HYBRID_NESTED_ROUTINE_ABI_VERSION
+    py::class_<mp64_nested::Token, std::shared_ptr<mp64_nested::Token>>(m, "RoutineCallbackTokenV3")
+        .def("__copy__", [](const mp64_nested::Token&) -> py::object {
+            throw py::type_error("callback tokens cannot be copied");
+        })
+        .def("__deepcopy__", [](const mp64_nested::Token&, py::object) -> py::object {
+            throw py::type_error("callback tokens cannot be copied");
+        })
+        .def("__reduce_ex__", [](const mp64_nested::Token&, py::object) -> py::object {
+            throw py::type_error("callback tokens cannot be serialized");
+        });
+    py::class_<mp64_nested::Callback, std::shared_ptr<mp64_nested::Callback>>(m, "RoutineCallbackRequestV3")
+        .def_readonly("invocation_id", &mp64_nested::Callback::invocation_id)
+        .def_readonly("sequence", &mp64_nested::Callback::sequence)
+        .def_readonly("site_index", &mp64_nested::Callback::site_index)
+        .def_readonly("call_offset", &mp64_nested::Callback::call_offset)
+        .def_readonly("stub_offset", &mp64_nested::Callback::stub_offset)
+        .def_readonly("export_id", &mp64_nested::Callback::export_id)
+        .def_property_readonly("arguments", [](const mp64_nested::Callback& request) {
+            py::tuple values(request.arguments.size());
+            for (std::size_t index = 0; index < request.arguments.size(); ++index)
+                values[index] = py::int_(request.arguments[index]);
+            return values;
+        });
+    py::class_<mp64_nested::Result, mp64_routine::Result>(m, "RoutineSegmentResultV3")
+        .def_readonly("segment_id", &mp64_nested::Result::segment_id)
+        .def_readonly("root_invocation_id", &mp64_nested::Result::root_invocation_id)
+        .def_readonly("invocation_id", &mp64_nested::Result::invocation_id)
+        .def_readonly("parent_invocation_id", &mp64_nested::Result::parent_invocation_id)
+        .def_readonly("depth", &mp64_nested::Result::depth)
+        .def_readonly("invocation_started", &mp64_nested::Result::invocation_started)
+        .def_readonly("invocation_instructions", &mp64_nested::Result::invocation_instructions)
+        .def_readonly("invocation_cycles", &mp64_nested::Result::invocation_cycles)
+        .def_readonly("invocation_callbacks", &mp64_nested::Result::invocation_callbacks)
+        .def_readonly("chain_instructions", &mp64_nested::Result::chain_instructions)
+        .def_readonly("chain_cycles", &mp64_nested::Result::chain_cycles)
+        .def_readonly("chain_callbacks", &mp64_nested::Result::chain_callbacks)
+        .def_readonly("callback", &mp64_nested::Result::callback)
+        .def_readonly("token", &mp64_nested::Result::token);
+    py::class_<mp64_nested::Receipt>(m, "RoutineSegmentReceiptV3")
+        .def_readonly("segment_id", &mp64_nested::Receipt::segment_id)
+        .def_readonly("root_invocation_id", &mp64_nested::Receipt::root_invocation_id)
+        .def_readonly("invocation_id", &mp64_nested::Receipt::invocation_id)
+        .def_readonly("parent_invocation_id", &mp64_nested::Receipt::parent_invocation_id)
+        .def_readonly("depth", &mp64_nested::Receipt::depth)
+        .def_readonly("invocation_started", &mp64_nested::Receipt::invocation_started)
+        .def_readonly("instructions", &mp64_nested::Receipt::instructions)
+        .def_readonly("cycles", &mp64_nested::Receipt::cycles)
+        .def_readonly("invocation_instructions", &mp64_nested::Receipt::invocation_instructions)
+        .def_readonly("invocation_cycles", &mp64_nested::Receipt::invocation_cycles)
+        .def_readonly("invocation_callbacks", &mp64_nested::Receipt::invocation_callbacks)
+        .def_readonly("chain_instructions", &mp64_nested::Receipt::chain_instructions)
+        .def_readonly("chain_cycles", &mp64_nested::Receipt::chain_cycles)
+        .def_readonly("chain_callbacks", &mp64_nested::Receipt::chain_callbacks)
+        .def_readonly("callback_request", &mp64_nested::Receipt::callback_request);
+
+    // Root-only foundation. No HYBRID_NESTED_ROUTINE_ABI_VERSION
     // advertisement until the full distinct-registration child path qualifies.
     py::class_<RoutineRunnerV3>(m, "RoutineRunnerV3")
         .def(py::init<py::object, py::handle, py::buffer>(),
@@ -36807,7 +37270,34 @@ PYBIND11_MODULE(_mp64_accel, m) {
             return result;
         }, py::arg("spec").none(false), py::arg("child_edges") = py::tuple())
         .def("revoke_code_v3", &RoutineRunnerV3::revoke_code_v3, py::arg("spec").none(false))
-        .def("is_code_published_v3", &RoutineRunnerV3::is_code_published_v3, py::arg("spec").none(false));
+        .def("is_code_published_v3", &RoutineRunnerV3::is_code_published_v3, py::arg("spec").none(false))
+        .def("last_segment_v3", &RoutineRunnerV3::last_segment_v3)
+        .def("_test_fail_marshalling_after_results", &RoutineRunnerV3::test_fail_marshalling_after_results,
+            py::arg("count"))
+        .def("begin_root_v3", [](RoutineRunnerV3& runner,
+                const std::shared_ptr<mp64_nested::Spec>& spec,
+                py::handle arguments, py::handle spans, py::handle instruction_limit,
+                py::handle callback_limit, py::handle protected_spans) {
+            return marshal_routine_segment_v3(runner, [&] {
+                return runner.begin_root_v3(spec, arguments, spans,
+                    instruction_limit, callback_limit, protected_spans);
+            });
+        }, py::arg("spec").none(false), py::arg("arguments"), py::arg("spans"),
+            py::arg("instruction_limit"), py::arg("callback_limit") = py::int_(1024),
+            py::arg("protected_spans") = py::tuple())
+        .def("resume_callback_v3", [](RoutineRunnerV3& runner,
+                const std::shared_ptr<mp64_nested::Token>& token, py::handle outputs) {
+            return marshal_routine_segment_v3(runner, [&] {
+                return runner.resume_callback_v3(token, outputs);
+            });
+        }, py::arg("token").none(false), py::arg("outputs"))
+        .def("cancel_chain_v3", [](RoutineRunnerV3& runner, py::object token) -> py::object {
+            if (token.is_none() && runner.nested_cancel_is_inactive())
+                return py::none();
+            return marshal_routine_segment_v3(runner, [&] {
+                return runner.cancel_chain_v3(token);
+            }, false);
+        }, py::arg("token") = py::none());
 
     // Expose RunResult
     py::class_<RunResult>(m, "RunResult")
