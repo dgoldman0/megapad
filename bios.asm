@@ -13022,6 +13022,133 @@ priv_fault_handler:
     halt
 
 ; =====================================================================
+;  Instruction Fault Handlers (IVT slots 2, 3, 4)
+; =====================================================================
+;
+;  ILLEGAL OP, ALIGN FAULT, and DIV ZERO report the fault and recover
+;  instead of vectoring through an empty IVT slot to address 0, which
+;  silently restarted the machine.  The trap frame holds the PC after the
+;  faulting instruction ([R15]) and the saved flags ([R15+8]); an
+;  alignment fault also records its address in TRAP_ADDR (CSR 0x25).
+;
+;  The report is one line: the fault, the address for an alignment fault,
+;  the PC after the faulting instruction, and the core ID.  Core 0 then
+;  recovers as an undefined word does, with clean stacks: interpret STATE,
+;  a closed temporary IF block, the EVALUATE depth reset, and the prompt.
+;  A worker core clears its worker slot so CORE-STATUS reports it idle,
+;  resets its stacks, and returns to its idle loop.
+;
+illegal_op_handler:
+    ldi64 r10, str_fault_illegal
+    ldi r9, 0                         ; no fault address to report
+    lbr fault_report
+align_fault_handler:
+    ldi64 r10, str_fault_align
+    ldi r9, 1                         ; report TRAP_ADDR
+    lbr fault_report
+div_zero_handler:
+    ldi64 r10, str_fault_divzero
+    ldi r9, 0
+
+fault_report:
+    ; The fault may have hit inside a SEP routine, so move to R3 as the
+    ; program counter the way secondary_core_entry does.  With PSEL = 3
+    ; already, the LDI64 itself continues at the body.
+    ldi64 r3, .fault_body
+    sep r3
+.fault_body:
+    ; Restore the BIOS fixed-role registers the faulting code may have
+    ; left mid-use: UART base, SEP-dispatched I/O, TX ring, JIT dispatch.
+    ldi64 r8, 0xFFFF_FF00_0000_0000
+    ldi64 r4, emit_char
+    ldi64 r5, key_char
+    ldi64 r6, print_hex_byte
+    ldi64 r11, tx_ring
+    mov r19, r11
+    ldi64 r11, forth_next
+    mov r16, r11
+    ldi64 r11, forth_exit
+    mov r17, r11
+    ; R9, R12, and R13 survive print_str, print_hex32, and SEP R6.
+    ldn r12, r15                      ; PC after the faulting instruction
+    csrr r0, 0x25                     ; TRAP_ADDR
+    mov r13, r0
+    ldi64 r11, print_str
+    call.l r11                        ; the fault name from R10
+    cmpi r9, 0
+    breq .fault_pc
+    mov r1, r13
+    ldi64 r11, print_fault_hex64
+    call.l r11
+.fault_pc:
+    ldi64 r10, str_fault_pc
+    ldi64 r11, print_str
+    call.l r11
+    mov r1, r12
+    ldi64 r11, print_fault_hex64
+    call.l r11
+    ldi64 r10, str_fault_core
+    ldi64 r11, print_str
+    call.l r11
+    csrr r1, 0x20                     ; COREID
+    sep r6
+    ldi64 r11, print_crlf
+    call.l r11
+
+    csrr r0, 0x20
+    cmpi r0, 0
+    lbrne .fault_worker
+
+    ; ---- Core 0: back to the prompt ----
+    ; The trap masked interrupts; restore the enable the faulting code had.
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11                       ; saved flags
+    lsri r1, 6
+    andi r1, 1
+    csrw 0x09, r1                     ; IE
+    ldi r1, 0
+    ldi64 r11, var_state
+    str r11, r1                       ; interpret
+    ldi64 r11, var_compile_active
+    str r11, r1
+    ldi64 r11, w_abort                ; stacks, EVALUATE depth, QUIT
+    call.l r11
+    halt
+
+.fault_worker:
+    ; ---- Worker core: end the job and idle ----
+    ldi r1, 3
+    shl r0, r1                        ; core_id * 8
+    ldi64 r11, worker_xt_table
+    add r11, r0
+    ldi r1, 0
+    str r11, r1                       ; worker_xt[core_id] = 0
+    mov r15, r2                       ; RSP = zone top
+    mov r14, r2
+    ldi64 r11, 0x8000
+    sub r14, r11                      ; DSP = zone top - 0x8000
+    ei
+    lbr secondary_idle_loop
+
+; print_fault_hex64: R1 -> 16 hex chars.  Clobbers R0, R1, R7, and R11;
+;   the value waits on the return stack while the high half prints.
+print_fault_hex64:
+    subi r15, 8
+    str r15, r1                       ; keep the value
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8
+    lsri r1, 8                        ; high 32 bits
+    ldi64 r11, print_hex32
+    call.l r11
+    ldn r1, r15
+    addi r15, 8
+    ldi64 r11, print_hex32
+    call.l r11
+    ret.l
+
+; =====================================================================
 ;  User-Mode Transition Words
 ; =====================================================================
 
@@ -24074,6 +24201,16 @@ str_busfault:
     .asciiz "\n*** BUS FAULT @ "
 str_privfault:
     .asciiz "\n*** PRIVILEGE FAULT @ "
+str_fault_illegal:
+    .asciiz "\n*** ILLEGAL INSTRUCTION"
+str_fault_align:
+    .asciiz "\n*** ALIGNMENT FAULT @ "
+str_fault_divzero:
+    .asciiz "\n*** DIVIDE BY ZERO"
+str_fault_pc:
+    .asciiz " PC="
+str_fault_core:
+    .asciiz " CORE="
 str_fault_sep:
     .asciiz " SEP="
 str_fault_t:
@@ -24102,9 +24239,9 @@ str_jit_tail:
 ivt_table:
     .dq 0                            ; [0] RESET
     .dq 0                            ; [1] NMI
-    .dq 0                            ; [2] ILLEGAL OP
-    .dq 0                            ; [3] ALIGN FAULT
-    .dq 0                            ; [4] DIV ZERO
+    .dq illegal_op_handler           ; [2] ILLEGAL OP
+    .dq align_fault_handler          ; [3] ALIGN FAULT
+    .dq div_zero_handler             ; [4] DIV ZERO
     .dq bus_fault_handler            ; [5] BUS FAULT
     .dq sw_trap_handler               ; [6] SW TRAP
     .dq 0                            ; [7] TIMER — installed by KDOS via ISR!

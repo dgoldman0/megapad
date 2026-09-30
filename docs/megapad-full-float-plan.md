@@ -793,6 +793,17 @@ Progress:
     and can use `TCVT`, `TCMP`, `TVSEL`, `TDIV`, and `TSQRT`.
   - The planned KDOS `B.CVT` buffer-conversion word was deferred in Phase 6;
     `TCVT` covers the need.
+- **Instruction fault handlers.** Phases 7 and 8 made reserved encodings,
+  reserved rounding modes, and F7/FD–FF trap, and the BIOS left the
+  illegal-op, alignment, and divide-by-zero IVT slots empty, so each of
+  those faults jumped to address 0 and silently restarted the machine. The
+  BIOS now reports each one (fault, address, PC, core) and recovers: core 0
+  returns to the prompt with clean stacks, and a worker core ends its job
+  and idles. A fault does not reach a KDOS `CATCH` yet, and after a fault
+  inside `CATCH` the KDOS handler chain still names the dead frame. Routing
+  faults to `THROW` needs a KDOS hook and matching hosted words, which is
+  KDOS's own work. An uncaught `THROW` on KDOS already runs away without any
+  fault (§7).
 
 ## 6. Testing and resource rules
 
@@ -869,6 +880,8 @@ without fixing them.
     and
     `TestKDOSDynamicModuleRegistry::test_nested_throw_rolls_back_all_provisional_ids_then_retries`
     fail with the same output before and after Phase 7.
+- **Uncaught KDOS `THROW`.** With no `CATCH`, `THROW` does `0 RP!` and
+  runs into wild code (`: T5 5 THROW ; T5` on a fresh KDOS never returns).
 - **`test_system.py` memory in one process.** Run as one pytest process,
   the file's memory grows past the 3.5 GiB guard around the network-stack
   tests, although each test alone stays under 500 MiB. Run it in chunks of

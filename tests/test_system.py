@@ -5888,6 +5888,61 @@ class TestBIOSTACC(unittest.TestCase):
 #  Multicore BIOS tests (4-core)
 # ---------------------------------------------------------------------------
 
+class TestBIOSInstructionFaults(unittest.TestCase):
+    """ILLEGAL OP, ALIGN FAULT, and DIV ZERO report and return to the prompt.
+
+    Before these IVT slots had handlers, each fault vectored to address 0
+    and silently restarted the machine.
+    """
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def _run(self, lines):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(
+            sys_obj, buf, ["VARIABLE KEEP 7 KEEP !"] + lines)
+        # A restart would print the banner again and forget KEEP.
+        self.assertNotIn("Megapad-64 Forth BIOS", text)
+        return text
+
+    def test_illegal_instructions_report_and_keep_the_session(self):
+        text = self._run([
+            "11 22 5 FPCSR! 1 S>F64",
+            '." A=" KEEP @ . DEPTH . FPCSR@ .',
+            "0 FPCSR!",
+            "CREATE BADCODE 247 C,",
+            "BADCODE EXECUTE",
+            '." B=" KEEP @ . DEPTH .',
+        ])
+        self.assertEqual(text.count("*** ILLEGAL INSTRUCTION PC="), 2)
+        self.assertIn(" CORE=00", text)
+        # The stacks are clean, and the reserved mode stays where it was
+        # put: FPCSR! stores RM and only the operation traps.
+        self.assertIn("A=7 0 5 ", text)
+        self.assertIn("B=7 0 ", text)
+
+    def test_divide_by_zero_reports_and_keeps_the_session(self):
+        text = self._run([
+            ": BAD 1 2 3 1 0 / ; BAD",
+            '." A=" KEEP @ . DEPTH .',
+            ": HALF 2 / ; 10 HALF .",
+        ])
+        self.assertIn("*** DIVIDE BY ZERO PC=", text)
+        self.assertIn("A=7 0 ", text)
+        self.assertIn("5 ", text.split("10 HALF .", 1)[1])
+
+    def test_alignment_fault_reports_the_address(self):
+        text = self._run([
+            "TACC-TRY DROP 1 TSRC0! TACC-LOAD",
+            '." A=" KEEP @ . DEPTH .',
+            "TACC-RELEASE",
+        ])
+        self.assertIn("*** ALIGNMENT FAULT @ 0000000000000001 PC=", text)
+        self.assertIn("A=7 0 ", text)
+
+
 class TestBIOSTileModes(unittest.TestCase):
     """Tile format words and the TMODE/TCTRL register widths."""
 
@@ -6232,6 +6287,41 @@ class TestMulticore(unittest.TestCase):
         # Core 1 should be back to idle after executing
         self.assertTrue(sys.cores[1].idle,
                         "Core 1 should be idle after worker returns")
+
+    def test_worker_faults_end_the_job_and_leave_the_core_usable(self):
+        """A faulting worker reports with its core ID, ends its job, and
+        returns to idle; core 0 keeps its session."""
+        sys, buf = self._boot_multicore(num_cores=4)
+        text = self._run_forth(sys, buf, [
+            ": DIVBAD 1 0 / 99 48879 C! ;",
+            ": FPBAD 5 FPCSR! 1 S>F64 98 48878 C! ;",
+            ": ALIGNBAD TACC-TRY DROP 1 TSRC0! TACC-LOAD 97 48876 C! ;",
+            ": GOOD 66 48877 C! ;",
+            "' DIVBAD 1 WAKE-CORE",
+            "' FPBAD 2 WAKE-CORE",
+            "' ALIGNBAD 3 WAKE-CORE",
+            ": DELAY 3000 0 DO LOOP ; DELAY",
+            '." S=" 1 CORE-STATUS . 2 CORE-STATUS . 3 CORE-STATUS .',
+            '." M=" 48879 C@ . 48878 C@ . 48876 C@ .',
+            "' GOOD 1 WAKE-CORE DELAY",
+            '." G=" 48877 C@ . 1 CORE-STATUS .',
+        ])
+        self.assertEqual(text.count("Megapad-64 Forth BIOS"), 1)
+        self.assertIn("*** DIVIDE BY ZERO PC=", text)
+        self.assertIn("CORE=01", text)
+        self.assertIn("*** ILLEGAL INSTRUCTION PC=", text)
+        self.assertIn("CORE=02", text)
+        self.assertIn("*** ALIGNMENT FAULT @ 0000000000000001", text)
+        self.assertIn("CORE=03", text)
+        # Each job stopped at its fault, and each core is idle again.
+        self.assertIn("S=0 0 0 ", text)
+        self.assertIn("M=0 0 0 ", text)
+        self.assertIn("G=66 0 ", text)
+        for _ in range(50_000):
+            if all(core.idle for core in sys.cores[1:]):
+                break
+            sys.step()
+        self.assertTrue(all(core.idle for core in sys.cores[1:]))
 
     def test_core_status_word(self):
         """CORE-STATUS should return 0 for idle cores."""

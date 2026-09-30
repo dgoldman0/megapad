@@ -1315,7 +1315,9 @@ overhead.
 The full boot process from power-on to the KDOS REPL:
 
 1. **CPU reset** — PSEL=3, SPSEL=15, PC=0, SP=top of RAM
-2. **BIOS initializes** — sets up IVT (bus fault handler), configures
+2. **BIOS initializes** — sets up the IVT (illegal-instruction,
+   alignment, divide-by-zero, bus, software-trap, IPI, and privilege
+   handlers), configures
    UART, initializes the Forth dictionary (HERE, LATEST, base number,
    compilation state)
 3. **Disk detection** — BIOS checks `DISK@` status register bit 7

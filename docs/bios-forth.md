@@ -612,6 +612,31 @@ capability, plus an interrupt enable/disable mechanism.
 | `DI!` | `( -- )` | Disable interrupts globally. |
 | `ISR!` | `( addr -- )` | Set the interrupt vector table base address. |
 
+### Instruction faults
+
+An illegal instruction, an alignment fault, or a divide by zero prints one
+line and recovers instead of restarting the machine:
+
+```
+*** ILLEGAL INSTRUCTION PC=000000000000E090 CORE=00
+*** ALIGNMENT FAULT @ 0000000000000001 PC=000000000000224C CORE=00
+*** DIVIDE BY ZERO PC=0000000000001330 CORE=00
+```
+
+`PC` is the address after the faulting instruction; the alignment fault
+also gives the misaligned address. Illegal instructions include reserved
+`FC` encodings, a floating-point operation that uses a reserved `FPCSR.RM`,
+the unassigned prefixes F7 and FD–FF, and tile operations a format does not
+admit (`docs/floating-point.md`).
+
+On core 0 the BIOS then recovers as it does for an undefined word, with
+clean stacks: interpret state, the `EVALUATE` depth reset, interrupts
+enabled as they were, and the prompt. Definitions and variables survive.
+On a worker core the BIOS ends the job, so `CORE-STATUS` reports the core
+idle, resets the core's stacks, and returns it to its idle loop, ready for
+the next `WAKE-CORE`. A fault does not reach a KDOS `CATCH`; it aborts to
+the prompt as the BIOS does for other errors.
+
 ---
 
 ## Tile Engine (47 words)
