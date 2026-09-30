@@ -299,7 +299,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
 | 2 — workload profiles | Bounded kernels recorded; representative work pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 3A — native scalar FP | Shared exact kernel/adapters complete; direct semantic words next | 200 kernel/machine/adapter checks; 53 hosted checks in each executor; paired FP measurements |
-| 3B/3C — remaining native extraction | Pending, profile-driven | |
+| 3B/3C — remaining native extraction | Qualified bulk audio complete; further work profile-driven | 57 audio checks; paired headless transfer measurements |
 | 4 — initial hybrid ABI and execution | Pending | |
 | 5 — expanded interoperability | Pending | |
 
@@ -451,3 +451,20 @@ Two additional service-bypass/stale-build checks passed. All 53 hosted scalar
 word tests passed in Python selection and again with native selected. Both
 extensions built with GCC; no RTL change or new RTL parity claim is involved.
 The paired bounded FP evidence is recorded in the performance report.
+
+### Phase 3C qualified audio transfers — 2026-09-30
+
+The shared audio model accepts a backend-qualified synchronous span reader.
+After existing descriptor validation it rechecks exact scalar/validator
+identities and backend method/span eligibility. Canonical ordinary spans copy
+once to immutable PCM; custom or replaced methods retain byte-level dispatch.
+The emulator additionally excludes spans intersecting overlapping apertures,
+whose byte-priority routing can differ from an accepted Bank0 span. Sparse
+hosted reads preserve absent-page zeros without allocating pages.
+
+No capture/generation is published on a short, invalid or failed bulk read,
+and no retry or sink call follows that failure. Existing sink/reset/close
+ordering remains intact. All 57 focused audio tests passed through sequential
+Make execution. Read-only independent review prompted late-helper replacement
+and aperture-overlap regressions before commit. Paired hosted measurements
+are recorded in the performance report; physical playback is not claimed.

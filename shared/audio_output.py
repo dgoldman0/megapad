@@ -6,6 +6,7 @@ memory, advances time, or assumes a CPU or scheduler.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Callable
 
 AUDIO_OFFSET = 0xC00
@@ -54,6 +55,16 @@ AUDIO_ERR_SINK = 8
 AUDIO_MAX_CAPTURE_BYTES = 1024 * 1024
 
 
+@dataclass(frozen=True)
+class _AudioMemoryBinding:
+    """A bulk reader qualified for one exact pair of scalar callbacks."""
+
+    read_byte: Callable[[int], int]
+    span_valid: Callable[[int, int], bool]
+    read_span: Callable[[int, int], bytes | bytearray | memoryview] | None
+    span_eligible: Callable[[int, int], bool] | None
+
+
 class AudioOutputModel:
     """One-shot signed-PCM output with deterministic headless capture.
 
@@ -84,9 +95,33 @@ class AudioOutputModel:
         self.last_frames = 0
         self._mem_read: Callable[[int], int] | None = None
         self._mem_span_valid: Callable[[int, int], bool] | None = None
+        self._memory_binding: _AudioMemoryBinding | None = None
         self.on_submit: Callable[[bytes, int, int], object] | None = None
         self.on_stop: Callable[[], object] | None = None
         self.on_playing: Callable[[], bool] | None = None
+
+    def _bind_memory(
+        self,
+        *,
+        read_byte: Callable[[int], int],
+        span_valid: Callable[[int, int], bool],
+        read_span: Callable[[int, int], bytes | bytearray | memoryview] | None = None,
+        span_eligible: Callable[[int, int], bool] | None = None,
+    ) -> None:
+        """Attach checked memory and an optional equivalent ordinary-span copy.
+
+        Backends qualify the bulk reader for these exact scalar callbacks.
+        Replacing either callback restores byte reads, preserving customized
+        memory observations. Bulk readers must be synchronous and non-reentrant.
+        An optional eligibility guard rechecks backend method and span
+        equivalence for each submission after descriptor validation.
+        """
+        binding = _AudioMemoryBinding(
+            read_byte, span_valid, read_span, span_eligible,
+        )
+        self._mem_read = binding.read_byte
+        self._mem_span_valid = binding.span_valid
+        self._memory_binding = binding
 
     @property
     def byte_count(self) -> int:
@@ -211,10 +246,28 @@ class AudioOutputModel:
         self.busy = True
         self.error = AUDIO_ERR_NONE
         try:
-            pcm = bytes(
-                self._mem_read(self.dma_addr + i) & 0xFF
-                for i in range(self.byte_count)
-            )
+            # Validation can replace a callback, so qualify the binding only
+            # after it succeeds. A stale capability must never bypass the
+            # current scalar memory behavior.
+            binding = self._memory_binding
+            if (binding is not None
+                    and binding.read_span is not None
+                    and self._mem_read is binding.read_byte
+                    and self._mem_span_valid is binding.span_valid
+                    and (binding.span_eligible is None or binding.span_eligible(
+                        self.dma_addr, self.byte_count))):
+                count = self.byte_count
+                payload = binding.read_span(self.dma_addr, count)
+                if not isinstance(payload, (bytes, bytearray, memoryview)):
+                    raise TypeError("audio memory span must be bytes-like")
+                pcm = bytes(payload)
+                if len(pcm) != count:
+                    raise ValueError("audio memory span has incorrect length")
+            else:
+                pcm = bytes(
+                    self._mem_read(self.dma_addr + i) & 0xFF
+                    for i in range(self.byte_count)
+                )
         except Exception:
             self.busy = False
             self.error = AUDIO_ERR_MEMORY

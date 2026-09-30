@@ -1406,8 +1406,41 @@ class MegapadSystem:
             read_span=self._raw_mem_read_span,
             write_span=self._raw_mem_write_span,
         )
-        self.audio._mem_read = self._raw_mem_read
-        self.audio._mem_span_valid = self._raw_mem_span_valid
+        # Only the ordinary system methods establish equivalence between
+        # scalar reads and direct span copies. Subclasses and customized
+        # callbacks retain their byte-visible behavior from the first submit.
+        def ordinary_audio_memory():
+            if type(self) is not MegapadSystem:
+                return False
+            for name, implementation in _CANONICAL_AUDIO_MEMORY_METHODS:
+                callback = getattr(self, name)
+                if (getattr(callback, "__self__", None) is not self
+                        or getattr(callback, "__func__", None) is not implementation):
+                    return False
+            return True
+
+        def audio_span_eligible(address, count):
+            if not ordinary_audio_memory():
+                return False
+            address = u64(address)
+            end = address + count
+            # A span can fit Bank 0 while partly overlapping a higher-priority
+            # aperture. Such descriptors retain scalar routing at each byte.
+            windows = (
+                (0, self.ram_size),
+                (HBW_BASE, self.hbw_end),
+                (self.ext_mem_base, self.ext_mem_end),
+                (self.vram_base, self.vram_end),
+            )
+            return sum(base < limit and base < end and address < limit
+                       for base, limit in windows) == 1
+
+        self.audio._bind_memory(
+            read_byte=self._raw_mem_read,
+            span_valid=self._raw_mem_span_valid,
+            read_span=self._raw_mem_read_span if ordinary_audio_memory() else None,
+            span_eligible=audio_span_eligible,
+        )
 
         # ── Shared native NIC, TRNG, and UART ─────────────────
         # DMA uses SystemState's central mappings. TX calls back to Python
@@ -3621,4 +3654,11 @@ _CANONICAL_SYSTEM_ADVANCE = MegapadSystem.advance_system_cycles
 _CANONICAL_SYSTEM_ADVANCE_LOCKED = MegapadSystem._advance_system_cycles_locked
 _CANONICAL_NO_EVENT_SETTLEMENT_PROOF = (
     MegapadSystem._native_no_event_settlement_eligible
+)
+_CANONICAL_AUDIO_MEMORY_METHODS = tuple(
+    (name, getattr(MegapadSystem, name))
+    for name in (
+        "_raw_mem_read", "_raw_mem_span_valid", "_raw_mem_read_span",
+        "_raw_mem_window",
+    )
 )

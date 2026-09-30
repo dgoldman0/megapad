@@ -89,3 +89,25 @@ FP case does not execute. This comparison supports the scalar path only, with
 no Desktop, full program, or hardware timing claim.
 
 Raw evidence: [runtime-hotspots-fp-kernel-2026-09-30.json](runtime-hotspots-fp-kernel-2026-09-30.json).
+
+## Qualified PCM span capture
+
+The original 64 × 4096-byte guest MMIO submission case now uses one checked
+span copy per buffer on canonical hosted memory. The method keeps captured
+bytes immutable and preserves generation, metadata and error publication.
+
+| Executor | Before wall ms | Bulk capture wall ms | Before / after |
+|---|---:|---:|---:|
+| simulator-python | 207.966 | 1.037 | 200.54× |
+| simulator-native | 191.241 | 1.102 | 173.54× |
+
+This isolates headless submission overhead, not audio rendering or host playback.
+Both paths previously called Python for each of 262,144 sample bytes. The new
+per-submission checks retain byte dispatch for customized callbacks/helpers or
+overlapping architectural apertures. Emulator audio correctness is tested, but
+its transfer latency is not measured in this harness.
+
+All 57 audio tests pass, including late callback replacement, sparse page
+boundaries/holes, all emulator windows, partial aperture overlap, malformed
+bulk returns, capture immutability, failure publication and sink lifecycle.
+Raw evidence: [runtime-hotspots-audio-2026-09-30.json](runtime-hotspots-audio-2026-09-30.json).
