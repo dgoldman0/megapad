@@ -68,7 +68,16 @@ overall run allowance. The first two Python inputs took about 21 seconds each,
 versus 0.18–0.23 seconds in the native run; the longest native step took 1.64
 seconds. Expanded deadlines allow a bounded completion investigation without
 changing the standard fixture, guest image, default quantum or failed report.
-A diagnostic completion would not satisfy the standard 30-second step bound.
+A diagnostic completion does not satisfy the standard 30-second step bound.
+
+That expanded Python diagnostic completed all eight steps on 2026-09-30:
+412.557 seconds to retained readiness, 758.105 seconds overall, 12 presented
+offers, quantum 8,192 and 250,957,824 bytes peak RSS. Prompt, commit and date
+steps took 70.261, 86.472 and 78.693 seconds, respectively; each exceeds the
+standard 30-second bound. Every assertion and cleanup check passed, with the
+original image preserved. This qualifies functional completion with the
+explicit diagnostic deadlines, not production responsiveness. The report is
+[`performance/unified-desktop-simulator-python-diagnostic-2026-09-30.json`](performance/unified-desktop-simulator-python-diagnostic-2026-09-30.json).
 
 ## Scope
 
