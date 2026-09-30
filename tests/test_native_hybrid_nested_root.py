@@ -240,7 +240,6 @@ def test_root_segments_match_ordinary_calls_returns_registers_control_bytes_and_
         assert first_receipt.instructions == 7 and first_receipt.invocation_started is True
         assert int.from_bytes(harness.external[:8], "little") == MASK64 - 2
     assert not hasattr(native, "HYBRID_NESTED_ROUTINE_ABI_VERSION")
-    assert not hasattr(harness.runner, "begin_child_v3")
     harness.runner.close()
 
 
@@ -488,12 +487,13 @@ def test_every_legacy_route_and_public_cpu_mutation_rejects_parked_v3_chain():
         lambda: harness.state.icache_reset(),
         lambda: harness.begin(), lambda: harness.runner.publish_code_v3(harness.spec),
         lambda: harness.runner.revoke_code_v3(harness.spec),
-        lambda: harness.runner.is_code_published_v3(harness.spec),
     ):
         with pytest.raises(RuntimeError):
             operation()
         assert harness.snapshot() == before
     assert harness.legacy.last_segment_v2() is None
+    assert harness.runner.is_code_published_v3(harness.spec)
+    assert harness.snapshot() == before
     assert harness.runner.last_segment_v3().segment_id == first.segment_id
     assert harness.runner.resume_callback_v3(first.token, (3,)).outputs == (3,)
     harness.runner.close()

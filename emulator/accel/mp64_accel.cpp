@@ -13160,7 +13160,7 @@ static std::shared_ptr<mp64_nested::Spec> make_routine_spec_v3(
 class RoutineOwner : public RoutineExecutionCore {
 public:
     using RoutineExecutionCore::RoutineExecutionCore;
-    ~RoutineOwner() { nested_chain_.reset(); frame_.reset(); }
+    ~RoutineOwner() { consume_nested_tokens(); nested_chain_.reset(); frame_.reset(); }
 
     void close() override {
         if (active_)
@@ -13343,7 +13343,10 @@ public:
     }
 
     bool is_code_published_v3(const std::shared_ptr<mp64_nested::Spec>& spec) {
-        ActiveBoundary boundary(*this);
+        // Exact publication identity is readable while this owner's V3 chain
+        // is parked. Active native/delivery boundaries and parked V2 remain
+        // excluded; this observation grants no execution or mutation authority.
+        ActiveBoundary boundary(*this, nested_chain_ ? this : nullptr);
         if (!spec)
             throw py::type_error("publication query requires a RoutineSpecV3");
         return nested_publications_.find(spec.get()) != nested_publications_.end();
@@ -13392,6 +13395,57 @@ public:
         return drive_nested(false, true);
     }
 
+    mp64_nested::Result begin_child_v3(
+            const std::shared_ptr<mp64_nested::Token>& parent_token,
+            const std::shared_ptr<mp64_nested::ChildEdge>& child_edge,
+            py::handle arguments, py::handle spans, py::handle protected_spans) {
+        ActiveBoundary boundary(*this, this);
+        validate_nested_token(parent_token);
+        const auto publication = validate_nested_edge(child_edge);
+        const auto& spec = publication->spec->sealed.routine;
+        const auto args = parse_arguments(arguments, spec.input_cells);
+        auto borrowed = parse_spans(spans);
+        const auto protected_values = parse_protected(protected_spans);
+        if (nested_invocation_sequence_ == std::numeric_limits<uint64_t>::max())
+            throw std::runtime_error("native V3 invocation identity space is exhausted");
+        require_nested_segment_identity();
+        auto next = std::make_unique<NestedFrame>();
+        next->publication = publication;
+        next->spans = std::move(borrowed);
+        auto execution_guard = acquire_execution(this);
+        // Acquiring the segment lock released the GIL. Repeat authority and
+        // all live parent evidence before touching registers or child storage.
+        validate_nested_token(parent_token);
+        if (validate_nested_edge(child_edge) != publication)
+            throw py::value_error("child publication changed during entry preflight");
+        validate_nested_parked();
+        validate_nested_ancestors(nested_chain_->depth);
+        if (nested_chain_->depth == mp64_nested::MAX_DEPTH)
+            throw py::value_error("nested invocation depth exceeds eight frames");
+        for (uint64_t index = 0; index < nested_chain_->depth; ++index) {
+            const auto& ancestor = *nested_chain_->frames[index]->publication;
+            if (ancestor.spec == publication->spec || ancestor.identity == publication->identity)
+                throw py::value_error("child registration is already active in this chain");
+            if (ancestor.spec->sealed.routine.stack().overlaps(spec.stack()))
+                throw py::value_error("child private stack overlaps an active ancestor");
+        }
+        validate_spec(spec);
+        validate_borrowed(spec, next->spans, protected_values);
+        validate_narrowed_grants(nested_top().spans, next->spans);
+        validate_seal(publication->spec->sealed, true);
+        validate_nested_closure(*publication);
+        if (nested_chain_->instructions == nested_chain_->allowance)
+            throw py::value_error("no machine instruction allowance remains for child entry");
+        // Everything after this admission point is nonthrowing until drive,
+        // whose exception receipt owns and cancels the newly entered frame.
+        next->parent_invocation_id = nested_top().invocation_id;
+        next->invocation_id = ++nested_invocation_sequence_;
+        nested_chain_->frames[nested_chain_->depth] = std::move(next);
+        ++nested_chain_->depth;
+        initialize_entry(spec, args);
+        return drive_nested(false, true);
+    }
+
     mp64_nested::Result resume_callback_v3(
             const std::shared_ptr<mp64_nested::Token>& token, py::handle outputs) {
         ActiveBoundary boundary(*this, this);
@@ -13405,6 +13459,7 @@ public:
         validate_seal(spec.sealed, true);
         validate_nested_closure(*frame.publication);
         validate_nested_parked();
+        validate_nested_ancestors(nested_chain_->depth);
         require_nested_segment_identity();
         if (frame.instructions == spec.sealed.routine.max_instructions ||
                 nested_chain_->instructions == nested_chain_->allowance) {
@@ -13631,8 +13686,10 @@ private:
     };
 
     struct NestedChain {
-        std::array<std::unique_ptr<NestedFrame>, mp64_nested::MAX_DEPTH> frames;
+        // Reverse member/array destruction drops deepest frames first and the
+        // one CPU reservation last, including exception and owner-GC cleanup.
         std::unique_ptr<RoutineCPUReservation> reservation;
+        std::array<std::unique_ptr<NestedFrame>, mp64_nested::MAX_DEPTH> frames;
         uint64_t root_id = 0, depth = 0;
         uint64_t allowance = 0, callback_allowance = 0;
         uint64_t instructions = 0, cycles = 0, callbacks = 0;
@@ -13646,8 +13703,8 @@ private:
 
     void consume_nested_tokens() noexcept {
         if (!nested_chain_) return;
-        for (auto& frame : nested_chain_->frames)
-            if (frame && frame->pending) frame->pending->consumed = true;
+        for (auto frame = nested_chain_->frames.rbegin(); frame != nested_chain_->frames.rend(); ++frame)
+            if (*frame && (*frame)->pending) (*frame)->pending->consumed = true;
     }
 
     void validate_nested_token(const std::shared_ptr<mp64_nested::Token>& token) const {
@@ -13665,6 +13722,72 @@ private:
         const auto found = nested_publications_.find(token->spec);
         if (found == nested_publications_.end() || found->second != frame.publication)
             throw py::value_error("V3 callback publication is stale");
+    }
+
+    std::shared_ptr<NestedPublication> validate_nested_edge(
+            const std::shared_ptr<mp64_nested::ChildEdge>& edge) const {
+        const auto& frame = nested_top();
+        const auto& parent = *frame.publication;
+        if (!edge || edge->site_index != frame.pending_site ||
+                std::find(parent.edges.begin(), parent.edges.end(), edge) == parent.edges.end())
+            throw py::value_error("child edge was not issued for this exact pending callback site");
+        const auto& child = nested_child(parent, edge);
+        return nested_publications_.at(child.spec.get());
+    }
+
+    static void validate_narrowed_grants(
+            const std::vector<mp64_routine::BufferSpan>& parent,
+            const std::vector<mp64_routine::BufferSpan>& child) {
+        for (const auto& requested : child) {
+            if (requested.size == 0) continue;
+            const bool narrowed = std::any_of(parent.begin(), parent.end(),
+                [&](const mp64_routine::BufferSpan& granted) {
+                    return granted.contains(requested.base, requested.size) &&
+                        (!requested.read || granted.read) && (!requested.write || granted.write);
+                });
+            if (!narrowed)
+                throw py::value_error("child borrow must narrow one immediate-parent grant");
+        }
+    }
+
+    void validate_nested_frame_evidence(const NestedFrame& frame) const {
+        const auto& publication = *frame.publication;
+        const auto found = nested_publications_.find(publication.spec.get());
+        const auto& token = frame.pending;
+        if (found == nested_publications_.end() || found->second != frame.publication ||
+                !token || token->consumed || token->owner.lock() != nested_identity_ ||
+                token->root_invocation_id != nested_chain_->root_id ||
+                token->invocation_id != frame.invocation_id || token->sequence != frame.callbacks ||
+                token->spec != publication.spec.get() || token->generation != publication.generation ||
+                token->publication.lock() != publication.identity ||
+                token->control_slot != frame.live_stack_base ||
+                std::memcmp(control_bytes_ + (frame.live_stack_base - control_.base),
+                    frame.live_control.data(), frame.live_control.size()) != 0)
+            throw py::value_error("parked ancestor publication or private control evidence changed");
+        validate_spec(publication.spec->sealed.routine);
+        validate_seal(publication.spec->sealed, true);
+        validate_nested_closure(*frame.publication);
+    }
+
+    void validate_nested_ancestors(uint64_t count) const {
+        for (uint64_t index = 0; index < count; ++index)
+            validate_nested_frame_evidence(*nested_chain_->frames[index]);
+    }
+
+    void restore_nested_parent() {
+        // The child has really returned. Evidence is checked while its final
+        // integer state is still live; any failure leaves that prefix intact.
+        validate_nested_profile();
+        validate_nested_ancestors(nested_chain_->depth - 1);
+        auto& parent = *nested_chain_->frames[nested_chain_->depth - 2];
+        std::copy(parent.registers.begin(), parent.registers.end(), std::begin(state_->regs));
+        flags_unpack(*state_, parent.flags);
+        // Selectors, modifier and initialization-owned control fields were
+        // proved invariant in both saved parent and completed child. Cycles,
+        // performance state, all memory and architectural cache stay current.
+        state_->ifetch_window_valid = false;
+        nested_chain_->frames[nested_chain_->depth - 1].reset();
+        --nested_chain_->depth;
     }
 
     void validate_nested_profile() const {
@@ -13748,6 +13871,7 @@ private:
         const uint64_t instructions_before = frame.instructions;
         const uint64_t cycles_before = frame.cycles;
         const uint64_t callbacks_before = frame.callbacks;
+        bool recorded = false;
         try {
             auto result = make_nested_result(started);
             const uint64_t remaining = std::min(
@@ -13804,11 +13928,16 @@ private:
             if (result.exit_kind == "instruction_limit")
                 result.detail = "machine instruction allowance exhausted before root return";
             record_nested_segment(instructions_before, cycles_before, callbacks_before, started);
+            recorded = true;
             result.segment_id = last_nested_segment_->segment_id;
-            nested_chain_->terminal = result.exit_kind != "callback_request";
+            if (result.exit_kind == "returned" && nested_chain_->depth > 1)
+                restore_nested_parent();
+            else
+                nested_chain_->terminal = result.exit_kind != "callback_request";
             return result;
         } catch (...) {
-            record_nested_segment(instructions_before, cycles_before, callbacks_before, started);
+            if (!recorded)
+                record_nested_segment(instructions_before, cycles_before, callbacks_before, started);
             consume_nested_tokens();
             nested_chain_.reset();
             throw;
@@ -14178,8 +14307,8 @@ private:
 };
 
 // Deliberately no public V1/V2 base: this view cannot acquire an inherited entry
-// method. The nested capability marker and child methods remain unavailable
-// until the complete V3 frame/receipt protocol has been implemented and gated.
+// method. The nested capability marker remains unavailable until the complete
+// distinct-registration child protocol has passed its qualification gate.
 class RoutineRunnerV3 {
 public:
     RoutineRunnerV3(py::object state, py::handle control_base, py::buffer control_buffer)
@@ -14210,6 +14339,12 @@ public:
             py::handle callback_limit, py::handle protected_spans) {
         return owner_->begin_root_v3(spec, arguments, spans, instruction_limit,
                                      callback_limit, protected_spans);
+    }
+    mp64_nested::Result begin_child_v3(
+            const std::shared_ptr<mp64_nested::Token>& parent_token,
+            const std::shared_ptr<mp64_nested::ChildEdge>& child_edge,
+            py::handle arguments, py::handle spans, py::handle protected_spans) {
+        return owner_->begin_child_v3(parent_token, child_edge, arguments, spans, protected_spans);
     }
     mp64_nested::Result resume_callback_v3(
             const std::shared_ptr<mp64_nested::Token>& token, py::handle outputs) {
@@ -37249,8 +37384,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly("chain_callbacks", &mp64_nested::Receipt::chain_callbacks)
         .def_readonly("callback_request", &mp64_nested::Receipt::callback_request);
 
-    // Root-only foundation. No HYBRID_NESTED_ROUTINE_ABI_VERSION
-    // advertisement until the full distinct-registration child path qualifies.
+    // No HYBRID_NESTED_ROUTINE_ABI_VERSION advertisement until the full
+    // distinct-registration child path passes its qualification gate.
     py::class_<RoutineRunnerV3>(m, "RoutineRunnerV3")
         .def(py::init<py::object, py::handle, py::buffer>(),
             py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
@@ -37285,6 +37420,15 @@ PYBIND11_MODULE(_mp64_accel, m) {
         }, py::arg("spec").none(false), py::arg("arguments"), py::arg("spans"),
             py::arg("instruction_limit"), py::arg("callback_limit") = py::int_(1024),
             py::arg("protected_spans") = py::tuple())
+        .def("begin_child_v3", [](RoutineRunnerV3& runner,
+                const std::shared_ptr<mp64_nested::Token>& parent_token,
+                const std::shared_ptr<mp64_nested::ChildEdge>& child_edge,
+                py::handle arguments, py::handle spans, py::handle protected_spans) {
+            return marshal_routine_segment_v3(runner, [&] {
+                return runner.begin_child_v3(parent_token, child_edge, arguments, spans, protected_spans);
+            });
+        }, py::arg("parent_token").none(false), py::arg("child_edge").none(false),
+            py::arg("arguments"), py::arg("spans"), py::arg("protected_spans") = py::tuple())
         .def("resume_callback_v3", [](RoutineRunnerV3& runner,
                 const std::shared_ptr<mp64_nested::Token>& token, py::handle outputs) {
             return marshal_routine_segment_v3(runner, [&] {
