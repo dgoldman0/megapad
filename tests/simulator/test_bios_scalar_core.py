@@ -17,7 +17,7 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
 
     frontier = tuple(
         name.encode("ascii") for name, _, _ in scalar_fp.BIOS_WORDS
-    ) + (b"TDIV", b"TSQRT", b"FAULT-XT!")
+    ) + (b"TDIV", b"TSQRT", b"FAULT-XT!", b"IDLE-UNTIL", b"IDLE-MS")
     assert len(runtime.dictionary.words) == 380 + len(frontier)
     words = runtime.dictionary.words[:-len(frontier)]
     assert tuple(

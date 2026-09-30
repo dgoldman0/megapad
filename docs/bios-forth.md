@@ -281,7 +281,7 @@ step, including the `CYCLES` operation before its read. The counter is shared
 by contexts in one runtime, isolated between runtimes, and unaffected by
 `PERF-RESET`. `TIMER!`, `TIMER-CTRL!`, and `TIMER-ACK` preserve compare,
 enable/freeze, auto-reload, sticky match, and conditional IRQ-latch semantics.
-Raw Timer MMIO, vector delivery, and automatic IDL wake remain unadmitted. This
+Raw Timer MMIO and vector delivery remain unadmitted. This
 Timer is distinct from the hosted 64-bit semantic-work/performance diagnostics
 and is deterministic semantic time, not hardware timing.
 
@@ -598,7 +598,7 @@ The result enum and extended MMIO registers are frozen in
 
 ---
 
-## Timer & Interrupts (6 words)
+## Timer & Interrupts (9 words)
 
 The Megapad-64 has a 32-bit free-running timer with compare-match
 capability, plus an interrupt enable/disable mechanism.
@@ -611,6 +611,36 @@ capability, plus an interrupt enable/disable mechanism.
 | `EI!` | `( -- )` | Enable interrupts globally. |
 | `DI!` | `( -- )` | Disable interrupts globally. |
 | `ISR!` | `( addr -- )` | Set the interrupt vector table base address. |
+| `IDLE-UNTIL` | `( deadline-ms -- )` | Sleep this core until input, an interrupt, or `MS@` reaching the deadline. |
+| `IDLE-MS` | `( ms -- )` | `IDLE-UNTIL` at `MS@` + ms, saturating. 0 returns at once. |
+
+### Sleeping until input or a deadline
+
+`IDLE-UNTIL` and `IDLE-MS` let a loop sleep instead of polling. A loop that
+waits for a key or its next tick checks for work, then sleeps until the next
+tick time:
+
+```forth
+BEGIN  KEY? IF KEY HANDLE-KEY THEN
+       MS@ NEXT-TICK @ >= IF TICK THEN
+       NEXT-TICK @ IDLE-UNTIL
+AGAIN
+```
+
+The sleep ends when an interrupt is requested, when `MS@` reaches the
+deadline, or, on core 0, when terminal input is waiting or a new network
+frame arrives. It returns at once when the deadline has passed or terminal
+input is already waiting, and it may return early, so callers re-check their
+events. The words use `IDL` with interrupts masked and the UART and NIC
+receive requests enabled, then restore both (docs/isa-reference.md, Waiting
+with IDL). Terminal input is a level, so a byte that arrives while the word
+prepares still ends the sleep. A network frame wakes it only by arriving
+while it sleeps: frames nobody reads stay queued and must not keep every
+sleep awake, so the word clears the NIC receive-pending latch first. A frame
+that lands in those few instructions waits for the deadline, so callers that
+wait for frames use a short one. A worker core wakes on IPIs, interrupts, and
+its deadline. The BIOS key wait sleeps the same way with no deadline, and
+`NET-IDLE` is `20 IDLE-MS`.
 
 ### Instruction faults
 

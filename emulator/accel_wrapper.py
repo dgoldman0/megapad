@@ -49,7 +49,7 @@ from .megapad64 import (
     CSR_ACC0, CSR_ACC1, CSR_ACC2, CSR_ACC3,
     CSR_TACC_STATUS, CSR_TACC_CTL,
     CSR_COREID, CSR_NCORES, CSR_MBOX, CSR_IPIACK,
-    CSR_IVEC_ID, CSR_TRAP_ADDR,
+    CSR_IVEC_ID, CSR_TRAP_ADDR, CSR_WAKE_MS,
     CSR_TSTRIDE_R, CSR_TSTRIDE_C, CSR_TTILE_H, CSR_TTILE_W,
     CSR_MEGAPAD_SZ, CSR_CPUID,
     CSR_BIST_CMD, CSR_BIST_STATUS, CSR_BIST_FAIL_ADDR, CSR_BIST_FAIL_DATA,
@@ -374,7 +374,7 @@ class Megapad64:
         'd_reg', 'q_out', 't_reg',
         'sb', 'sr', 'sc', 'sw',
         'tmode', 'tctrl', 'tsrc0', 'tsrc1', 'tdst',
-        'ivt_base', 'ivec_id', 'trap_addr',
+        'ivt_base', 'ivec_id', 'trap_addr', 'wake_ms',
         'ef_flags', 'halted', 'idle', 'cycle_count',
         'tstride_r', 'tstride_c', 'ttile_h', 'ttile_w',
         'perf_enable', 'perf_cycles', 'perf_stalls',
@@ -1066,6 +1066,7 @@ def {_attr}(self, v):
         self._cs.ttile_w = 8
         self._cs.ivt_base = 0
         self._cs.ivec_id = 0
+        self._cs.wake_ms = 0
         self.irq_ipi = False
         self._cs.halted = False
         self._cs.idle = False
@@ -1441,6 +1442,7 @@ def _sync_cs_to_py(cs, py_cpu: _PyMegapad64):
     py_cpu.ivt_base = cs.ivt_base
     py_cpu.ivec_id = cs.ivec_id
     py_cpu.trap_addr = cs.trap_addr
+    py_cpu.wake_ms = cs.wake_ms
     py_cpu.ef_flags = cs.ef_flags
     py_cpu.halted = cs.halted
     py_cpu.idle = cs.idle
@@ -1589,6 +1591,7 @@ def _sync_py_to_cs(
     cs.ivt_base = py_cpu.ivt_base
     cs.ivec_id = py_cpu.ivec_id
     cs.trap_addr = py_cpu.trap_addr
+    cs.wake_ms = py_cpu.wake_ms
     cs.ef_flags = py_cpu.ef_flags
     cs.halted = py_cpu.halted
     cs.idle = py_cpu.idle
@@ -1689,6 +1692,7 @@ def _csr_read_py(cpu, addr: int) -> int:
         CSR_IPIACK: lambda: 0,
         CSR_IVEC_ID: lambda: cs.ivec_id,
         CSR_TRAP_ADDR: lambda: cs.trap_addr,
+        CSR_WAKE_MS: lambda: cs.wake_ms,
         CSR_MEGAPAD_SZ: lambda: 64,
         CSR_CPUID: lambda: 0x4D503634,
         CSR_TSTRIDE_R: lambda: cs.tstride_r,

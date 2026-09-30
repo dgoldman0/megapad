@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <ctime>
 #include <mutex>
+#include <optional>
 
 struct RTCDevice {
     static constexpr uint32_t RTC_BASE = 0x0B00;
@@ -207,6 +208,26 @@ struct RTCDevice {
         } else if (off == 0x1A) alarm_sec = value & 0x3F;
         else if (off == 0x1B) alarm_min = value & 0x3F;
         else if (off == 0x1C) alarm_hour = value & 0x1F;
+    }
+
+    // The current uptime, following host time in realtime mode.  IDL wake
+    // checks read it without disturbing the MMIO latches.
+    uint64_t current_uptime_ms() {
+        std::lock_guard<std::mutex> guard(mutex);
+        sync_realtime_unlocked();
+        return uptime_ms;
+    }
+
+    // Virtual clock only: the cycles until uptime reaches ``target``, or
+    // nothing while the clock is stopped or follows host time.
+    std::optional<uint64_t> cycles_until_uptime(uint64_t target) const {
+        std::lock_guard<std::mutex> guard(mutex);
+        if (!enabled || realtime || !(ctrl & 1))
+            return std::nullopt;
+        if (uptime_ms >= target)
+            return 0;
+        return (target - uptime_ms - 1) * MS_DIVISOR +
+            (MS_DIVISOR - ms_prescaler);
     }
 
     void tick(uint64_t cycles) {

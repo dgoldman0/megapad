@@ -395,3 +395,33 @@ def test_host_handoffs_preserve_each_semantic_boundary_without_per_batch_sleep(m
     else:
         assert records == [("boundary", 1), ("wait", 0.002)]
         assert machine.total_steps == machine.total_external_events == 0
+
+
+def test_owner_sleeps_until_a_blocked_idle_deadline() -> None:
+    # The root naps in IDLE-MS.  The owner waits for each deadline instead of
+    # spinning, so the guest does only a few steps per nap.
+    import time as _time
+
+    runtime = MegaForthRuntime()
+    runtime.rtc.bind_monotonic_clock(_time.monotonic_ns)
+    runtime.evaluate(
+        b"VARIABLE NAPS 0 NAPS ! "
+        b": SIM-NAP-ROOT BEGIN 30 IDLE-MS 1 NAPS +! AGAIN ;",
+        source_name="simulator-nap-root.f",
+    )
+    naps = runtime.find("NAPS").body_address
+    session = SimulatorMachineSession(runtime, "SIM-NAP-ROOT")
+    machine = SimulatorSharedMachine(session)
+    machine.start()
+    try:
+        started = _time.monotonic()
+        deadline = started + 5.0
+        while runtime.memory.read64(naps) < 3 and _time.monotonic() < deadline:
+            _time.sleep(0.01)
+        elapsed = _time.monotonic() - started
+        assert runtime.memory.read64(naps) >= 3
+        assert elapsed >= 0.08              # three 30 ms naps
+        assert machine.total_steps < 200    # asleep between naps
+        assert machine.last_error is None
+    finally:
+        machine.stop()

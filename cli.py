@@ -27,6 +27,7 @@ import sys
 import readline
 import shlex
 import threading
+import time
 import traceback
 from typing import Optional
 
@@ -632,8 +633,9 @@ class MegapadCLI(cmd.Cmd):
                 print(f"\nCPU halted after {total} cycles.")
                 break
             if self.sys.cpu.idle:
-                if self.sys.uart.has_rx_data:
-                    self.sys.cpu.idle = False
+                self.sys.wake_idle_cores()
+                if not self.sys.cpu.idle:
+                    continue
                 else:
                     print(f"\nCPU idle after {total} cycles (waiting for input).")
                     print("  Use 'send <text>' to provide input, then 'run' to continue.")
@@ -987,6 +989,22 @@ _HEADLESS_STATUS = headless_status_path()
 _HEADLESS_BATCH = 1_000_000
 
 
+def _sleep_while_idle(sys_emu: MegapadSystem, cap_s: float) -> None:
+    """Sleep while the guest sleeps: up to ``cap_s`` or its next timed wake.
+
+    Emulated time then advances by the host time that passed, and the IDL
+    wake rule wakes any core whose input, interrupt, or deadline is due.
+    """
+    timeout = cap_s
+    timed_wake = sys_emu.idle_wake_delay_s()
+    if timed_wake is not None:
+        timeout = min(timeout, timed_wake)
+    started = time.monotonic()
+    if timeout > 0:
+        time.sleep(timeout)
+    sys_emu.advance_idle_time(time.monotonic() - started)
+
+
 class HeadlessServer:
     """TCP terminal server — run the emulator headless with remote access.
 
@@ -1093,10 +1111,7 @@ class HeadlessServer:
                 continue
             if (cpu.idle and not self.sys_emu.uart.has_rx_data
                     and not self.sys_emu._any_nic_rx()):
-                _time.sleep(0.002)        # 2ms — short enough for NIC frames
-                # Tick bus so timer/RTC advance through idle gaps
-                self.sys_emu.bus.tick(200_000)   # ~2ms at 100 MHz
-                cpu.idle = False
+                _sleep_while_idle(self.sys_emu, 0.002)
                 continue
             try:
                 self.sys_emu.run_batch(_HEADLESS_BATCH)
@@ -1404,16 +1419,7 @@ def _console_raw(sys_emu: MegapadSystem, old_tx, old_tx_batch, out_fd) -> bool:
             # we only need to sleep here to avoid busy-waiting and to
             # advance the bus timer through idle gaps.
             if sys_emu.cpu.idle:
-                if sys_emu._any_nic_rx():
-                    timeout = 0.001      # 1ms — fast network turnaround
-                else:
-                    timeout = 0.02       # 20ms — normal idle wait
-                time.sleep(timeout)
-                # Tick bus so timer/RTC advance through idle gaps
-                cycles_slept = int(timeout * 100_000_000)  # 100 MHz nominal
-                if cycles_slept > 0:
-                    sys_emu.bus.tick(cycles_slept)
-                sys_emu.cpu.idle = False
+                _sleep_while_idle(sys_emu, 0.02)
     except KeyboardInterrupt:
         return False
     finally:
@@ -1448,12 +1454,7 @@ def _console_pipe(sys_emu: MegapadSystem, old_tx, old_tx_batch, out_fd) -> bool:
                 return False
 
             if sys_emu.cpu.idle and not sys_emu.uart.has_rx_data and not sys_emu._any_nic_rx():
-                # Brief pause then wake CPU so Forth polling loops advance
-                import time as _time
-                _time.sleep(0.002)        # 2ms — short enough for NIC frames
-                # Tick bus so timer/RTC advance through idle gaps
-                sys_emu.bus.tick(200_000)  # ~2ms at 100 MHz
-                sys_emu.cpu.idle = False
+                _sleep_while_idle(sys_emu, 0.002)
                 # Try to read from pipe (non-blocking via select)
                 if select.select([sys.stdin], [], [], 0)[0]:
                     ch = os.read(fd, 1)

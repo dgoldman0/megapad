@@ -2301,15 +2301,19 @@ class SharedMachine:
         self,
         session: MachineSession,
         *,
-        idle_tick_cycles: int = 200_000,
         idle_sleep_s: float = 0.002,
+        idle_wait_cap_s: float = 0.02,
         host_profile: bool = False,
     ):
         if not isinstance(host_profile, bool):
             raise TypeError("host_profile must be a boolean")
         self.session = session
-        self.idle_tick_cycles = int(idle_tick_cycles)
+        # idle_sleep_s paces a boundary that made no progress.  When every
+        # core sleeps, the owner instead waits for input (which notifies the
+        # condition) or the next timed wake, rechecking at least every
+        # idle_wait_cap_s for sources that do not notify, such as NIC frames.
         self.idle_sleep_s = float(idle_sleep_s)
+        self.idle_wait_cap_s = float(idle_wait_cap_s)
         self._host_profile_enabled = host_profile
         # Screen encodings reuse the runs of rows unchanged since the last.
         self._wire_rows = WireRowRuns()
@@ -2663,27 +2667,22 @@ class SharedMachine:
                     self.condition.wait(timeout=self.idle_sleep_s)
             elif idle_wait:
                 with self.condition:
-                    self.condition.wait(timeout=self.idle_sleep_s)
+                    system = self.session.system
+                    timed_wake = system.idle_wake_delay_s()
+                    timeout = self.idle_wait_cap_s
+                    if timed_wake is not None:
+                        timeout = min(timeout, timed_wake)
+                    started = time.monotonic()
+                    if timeout > 0:
+                        self.condition.wait(timeout=timeout)
                     if self._stopping or self.paused:
                         continue
                     system = self.session.system
                     try:
-                        system.bus.tick(self.idle_tick_cycles)
-
-                        # Settle wake lines after the shared owner's larger
-                        # idle tick. Without this handoff an interrupt can
-                        # become pending while every core stays asleep.
-                        if system.timer.irq_pending:
-                            for cpu in system.cores:
-                                if cpu.idle and cpu.flag_i:
-                                    cpu.idle = False
-                                    break
-                        for cpu in system.cores:
-                            if cpu.idle and cpu.irq_ipi and cpu.flag_i:
-                                cpu.idle = False
-                        core0 = system.cores[0]
-                        if core0.idle and system._any_nic_rx():
-                            core0.idle = False
+                        # Emulated time follows host time while every core
+                        # sleeps, so timers and WAKE_MS deadlines come due
+                        # on time, then the IDL wake rule settles.
+                        system.advance_idle_time(time.monotonic() - started)
                     except Exception as exc:
                         self.last_error = f"{type(exc).__name__}: {exc}"
                         self.paused = True

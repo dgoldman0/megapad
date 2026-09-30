@@ -506,6 +506,18 @@ suspension is detached. Resumption retains the original cumulative step
 budget rather than silently granting a fresh quantum. This is an IDL
 block/wake contract, not BIOS `PAUSE` or KDOS task scheduling.
 
+`IDLE-UNTIL ( deadline-ms -- )` and `IDLE-MS ( ms -- )` follow `FAULT-XT!` at
+the frontier. `IDLE-UNTIL` is one semantic operation that pops the deadline.
+In a compiled-word dispatch that can suspend, it blocks at the IDL boundary
+with the deadline recorded (`idle_deadline_ms`); the backend then resumes it
+when UART input arrives or the RTC uptime reaches the deadline
+(`idle_wake_due`). The shared owner waits for input or that deadline instead
+of polling. When the deadline has passed, or the dispatch cannot suspend (source
+evaluation or a nested host dispatch), it continues at once, which the BIOS
+contract allows since the word may return early. `IDLE-MS` adds `MS@` with
+saturation and tail-calls `IDLE-UNTIL`; 0 returns at once. The simulator has no
+NIC or IPI wake source, so only input and the deadline end the wait.
+
 The session host also has a distinct runnable execution boundary. A caller may
 pass `quantum_steps` to `run_until_blocked`; between safe outer semantic IR
 operations it returns `YieldedExecution` with an opaque continuation.

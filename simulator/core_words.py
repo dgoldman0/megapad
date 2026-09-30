@@ -28,7 +28,14 @@ from simulator.entropy import (
     TRNG_STATUS,
     TRNGUnavailableError,
 )
-from simulator.ir import Branch, BranchZero, Idle, Return, UartReadAttempt
+from simulator.ir import (
+    Branch,
+    BranchZero,
+    Idle,
+    IdleUntil,
+    Return,
+    UartReadAttempt,
+)
 from simulator.memory import MMIO_BASE, SparseAddressSpace
 from simulator.mp64fs import validate_attached_mp64fs
 from simulator.platform import (
@@ -607,6 +614,20 @@ def _fault_xt_store(
     context: ExecutionContext,
 ) -> None:
     runtime.set_fault_xt(context.data.pop())
+
+
+def _idle_ms(
+    runtime: MegaForthRuntime,
+    idle_until_xt: int,
+    context: ExecutionContext,
+) -> Invoke | None:
+    """IDLE-MS: IDLE-UNTIL at MS@ + ms, saturating; 0 returns at once."""
+
+    ms = context.data.pop()
+    if ms == 0:
+        return None
+    context.data.push(min(runtime.rtc.uptime_ms + ms, MASK64))
+    return Invoke(idle_until_xt)
 
 
 def _dictionary_index_store(
@@ -2869,6 +2890,14 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.define_primitive(
         b"FAULT-XT!",
         lambda context: _fault_xt_store(runtime, context),
+    )
+
+    # IDLE-UNTIL and IDLE-MS follow it.  A blocked dispatch resumes on input
+    # or at the deadline; elsewhere the wait returns at once.
+    idle_until = runtime.define_colon(b"IDLE-UNTIL", (IdleUntil(), Return()))
+    runtime.define_primitive(
+        b"IDLE-MS",
+        lambda context: _idle_ms(runtime, idle_until.xt, context),
     )
 
 

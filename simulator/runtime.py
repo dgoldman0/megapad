@@ -47,6 +47,7 @@ from simulator.ir import (
     CallSelf,
     Do,
     Idle,
+    IdleUntil,
     InstallDoes,
     Literal,
     Loop,
@@ -762,6 +763,8 @@ class MegaForthRuntime:
         self._dictionary_limit = 0
         self._dictionary_fault_xt = 0
         self._fault_xt = 0
+        # The MS@ time that ends the current IDLE-UNTIL wait, if any.
+        self._idle_deadline_ms: int | None = None
         # Hardware user mode was removed from MegaPad, but its public BIOS
         # compatibility surface still exposes inert MPU registers.  Preserve
         # their guest-visible state without using it to restrict semantic
@@ -946,6 +949,22 @@ class MegaForthRuntime:
         """Whether at least one byte is waiting in the hosted UART RX FIFO."""
 
         return bool(self._uart_input)
+
+    @property
+    def idle_deadline_ms(self) -> int | None:
+        """Return the ``MS@`` deadline of a blocked IDLE-UNTIL, if any."""
+
+        return self._idle_deadline_ms
+
+    @property
+    def idle_wake_due(self) -> bool:
+        """Whether a dispatch blocked at IDL may resume: input is waiting, or
+        its IDLE-UNTIL deadline has passed."""
+
+        if self._uart_input:
+            return True
+        deadline = self._idle_deadline_ms
+        return deadline is not None and self.rtc.uptime_ms >= deadline
 
     @property
     def uart_input_pending(self) -> int:
@@ -2565,6 +2584,7 @@ class MegaForthRuntime:
             or blocked.wake_receipt is not wake_receipt
         ):
             raise ExecutionError("wake receipt is stale, foreign, or already consumed")
+        self._idle_deadline_ms = None
         return self._continue_suspension_locked(blocked)
 
     def resume_yielded(self, suspension: ExecutionSuspension) -> RunResult:
@@ -3848,7 +3868,14 @@ class MegaForthRuntime:
                         "IDL cannot suspend source evaluation or a nested host "
                         "dispatch; use run_until_blocked on a compiled word"
                     )
+                self._idle_deadline_ms = None
                 return _DispatchCursor(current.xt, ip + 1)
+            elif isinstance(operation, IdleUntil):
+                deadline = context.data.pop()
+                ip += 1
+                if allow_idle and deadline > self.rtc.uptime_ms:
+                    self._idle_deadline_ms = deadline
+                    return _DispatchCursor(current.xt, ip)
             elif isinstance(operation, UartReadAttempt):
                 # Native KEY flushes its buffered TX stream before polling.
                 # Hosted UART output is published immediately, so that flush

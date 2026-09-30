@@ -100,6 +100,13 @@ class Idle:
 
 
 @dataclass(frozen=True, slots=True)
+class IdleUntil:
+    """Pop an ``MS@`` deadline and wait at the IDL boundary until input or
+    that time.  Continue at once when the deadline has passed or the dispatch
+    cannot suspend; IDLE-UNTIL may always return early."""
+
+
+@dataclass(frozen=True, slots=True)
 class UartReadAttempt:
     """Publish one queued UART byte and TRUE, or publish only FALSE."""
 
@@ -237,6 +244,7 @@ Operation: TypeAlias = (
     | BranchZero
     | Return
     | Idle
+    | IdleUntil
     | UartReadAttempt
     | RPush
     | RPop
@@ -266,6 +274,7 @@ __all__ = [
     "CallSelf",
     "Do",
     "Idle",
+    "IdleUntil",
     "InstallDoes",
     "Literal",
     "Loop",

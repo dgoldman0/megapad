@@ -342,7 +342,7 @@ class SimulatorSessionBackend:
                     )
                 elif (
                     isinstance(suspended, BlockedExecution)
-                    and not self._runtime.uart_input_available
+                    and not self._runtime.idle_wake_due
                 ):
                     result = SemanticBatchResult(
                         0,

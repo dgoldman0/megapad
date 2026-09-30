@@ -147,7 +147,7 @@ enum CSR {
     CSR_ACC0=0x19, CSR_ACC1=0x1A, CSR_ACC2=0x1B, CSR_ACC3=0x1C,
     CSR_TACC_STATUS=0x1D, CSR_TACC_CTL=0x1E,
     CSR_COREID=0x20, CSR_NCORES=0x21, CSR_MBOX=0x22, CSR_IPIACK=0x23,
-    CSR_IVEC_ID=0x24, CSR_TRAP_ADDR=0x25,
+    CSR_IVEC_ID=0x24, CSR_TRAP_ADDR=0x25, CSR_WAKE_MS=0x26,
     CSR_MEGAPAD_SZ=0x30, CSR_CPUID=0x31,
     CSR_TSTRIDE_R=0x40, CSR_TSTRIDE_C=0x41,
     CSR_TTILE_H=0x42, CSR_TTILE_W=0x43,
@@ -1794,6 +1794,8 @@ struct CPUState {
     uint64_t ivt_base;
     uint64_t ivec_id;
     uint64_t trap_addr;
+    // Full cores only: the RTC uptime (ms) at which IDL ends; 0 = none.
+    uint64_t wake_ms = 0;
 
     // External flags
     uint8_t  ef_flags;
@@ -2286,6 +2288,7 @@ struct CPUState {
     X(uint64_t, ivt_base) \
     X(uint64_t, ivec_id) \
     X(uint64_t, trap_addr) \
+    X(uint64_t, wake_ms) \
     X(uint8_t, ef_flags) \
     X(bool, halted) \
     X(bool, idle) \
@@ -7698,6 +7701,8 @@ static uint64_t csr_read(CPUState& s, int addr) {
         case CSR_IPIACK:    return 0;
         case CSR_IVEC_ID:   return s.ivec_id;
         case CSR_TRAP_ADDR: return s.trap_addr;
+        case CSR_WAKE_MS:
+            return s.profile == CoreProfile::FULL ? s.wake_ms : 0;
         case CSR_MEGAPAD_SZ:return 64;
         case CSR_CPUID:     return 0x4D503634;  // "MP64"
         case CSR_TSTRIDE_R: return s.tstride_r;
@@ -7767,6 +7772,10 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
             if (s.interrupts != nullptr)
                 s.interrupts->acknowledge_ipi(
                     s.core_id, static_cast<uint8_t>(val));
+            break;
+        case CSR_WAKE_MS:
+            if (s.profile == CoreProfile::FULL)
+                s.wake_ms = val;
             break;
         case CSR_TSTRIDE_R: s.tstride_r = val; break;
         case CSR_TSTRIDE_C: s.tstride_c = val; break;
@@ -14987,6 +14996,37 @@ static int pending_enabled_core_interrupt(
     return -1;
 }
 
+// The IDL wake rule (docs/isa-reference.md).  An idle core resumes when it
+// has an interrupt request from an enabled source, whatever its I flag, or
+// when the RTC uptime reaches its WAKE_MS deadline.  UART and NIC requests
+// reach core 0 only.  A core with I set still takes a timer or IPI trap;
+// device requests and the deadline never vector here.  The cycle scheduler
+// passes false for ``take_interrupts`` because its interrupt entry wakes an
+// enabled core itself.
+static bool idle_wake_due(
+        SystemState& system,
+        const CPUState& core,
+        bool take_interrupts) {
+    if ((system.shared_interrupts.ipi_line(core.core_id) ||
+         system.shared_timer.irq_pending) &&
+        (take_interrupts || !core.flag_i))
+        return true;
+    if (core.core_id == 0 &&
+        (system.shared_uart.rx_irq_request() ||
+         system.shared_nic.irq_pending()))
+        return true;
+    return core.wake_ms != 0 &&
+        system.shared_rtc.current_uptime_ms() >= core.wake_ms;
+}
+
+static void wake_idle_cores(SystemState& system) {
+    for (CPUState* core : system.execution_cores) {
+        if (core->idle && !core->halted &&
+            idle_wake_due(system, *core, true))
+            core->idle = false;
+    }
+}
+
 static bool unbounded_settlement_requires_python_interrupt(
         const SystemState& system,
         uint64_t elapsed_cycles) {
@@ -15601,6 +15641,8 @@ static SystemBatchResult run_native_system_batch(
 
     int64_t remaining = max_steps;
     while (remaining > 0 && !system_all_halted(system)) {
+        // Each equal-credit round is the unbounded scheduler's wake point.
+        wake_idle_cores(system);
         if (system_all_idle_or_halted(system))
             break;
 
@@ -18577,23 +18619,47 @@ static void validate_external_event(
     }
 }
 
-static void wake_cycle_input_core(
+// Apply the IDL wake rule at a settled cycle frontier.  A woken core issues
+// no earlier than the frontier that made it runnable.
+static void wake_cycle_idle_cores(
         SystemState& system,
         uint64_t cycle) {
-    if (system.cores.empty())
-        return;
-    CPUState& core = *system.cores.front();
-    if (!core.halted && core.idle &&
-        (system.shared_uart.has_rx_data() ||
-         system.shared_nic.has_rx())) {
+    for (std::size_t index = 0;
+         index < system.cores.size();
+         index++) {
+        CPUState& core = *system.cores[index];
+        if (core.halted || !core.idle ||
+            !idle_wake_due(system, core, false))
+            continue;
         core.idle = false;
         FullCoreCycleState& state =
-            system.full_core_cycle_states.front();
+            system.full_core_cycle_states[index];
         if (!state.instruction &&
             state.ready_cycle < cycle) {
             state.ready_cycle = cycle;
         }
     }
+}
+
+// The first cycle at which a sleeping core's WAKE_MS deadline comes due.
+static std::optional<uint64_t> next_cycle_idle_wake(
+        const SystemState& system) {
+    std::optional<uint64_t> earliest;
+    for (const std::unique_ptr<CPUState>& core : system.cores) {
+        if (core->halted || !core->idle || core->wake_ms == 0)
+            continue;
+        const std::optional<uint64_t> delta =
+            system.shared_rtc.cycles_until_uptime(core->wake_ms);
+        if (!delta.has_value())
+            continue;
+        const uint64_t cycle = checked_cycle_add(
+            system.shared_clock.cycles(),
+            *delta,
+            "idle wake frontier");
+        if (!earliest.has_value() || cycle < *earliest)
+            earliest = cycle;
+    }
+    return earliest;
 }
 
 static uint64_t apply_due_external_events(
@@ -18664,7 +18730,7 @@ static uint64_t apply_due_external_events(
                     "external event inbox contains an unknown kind");
         }
     }
-    wake_cycle_input_core(system, cycle);
+    wake_cycle_idle_cores(system, cycle);
     return static_cast<uint64_t>(due.size());
 }
 
@@ -19155,7 +19221,7 @@ static SystemBatchResult run_full_core_cycle_batch(
 
     result.external_events_applied =
         apply_due_external_events(system, clock_start);
-    wake_cycle_input_core(system, clock_start);
+    wake_cycle_idle_cores(system, clock_start);
     if (!accept_cycle_interrupts(
             system,
             clock_start,
@@ -19176,10 +19242,13 @@ static SystemBatchResult run_full_core_cycle_batch(
         next_cycle_timer_irq(system);
     const std::optional<uint64_t> initial_external_cycle =
         system.external_events.next_cycle();
+    const std::optional<uint64_t> initial_idle_wake_cycle =
+        next_cycle_idle_wake(system);
     const bool has_future_virtual_work =
         stops_at_event_horizon ||
         initial_timer_cycle.has_value() ||
-        initial_external_cycle.has_value();
+        initial_external_cycle.has_value() ||
+        initial_idle_wake_cycle.has_value();
 
     if (pending_instruction_count(system) == 0 &&
         !system.cycle_target_completion_cycle.has_value() &&
@@ -19224,6 +19293,8 @@ static SystemBatchResult run_full_core_cycle_batch(
             next_cycle_timer_irq(system);
         const std::optional<uint64_t> next_external_cycle =
             system.external_events.next_cycle();
+        const std::optional<uint64_t> next_idle_wake_cycle =
+            next_cycle_idle_wake(system);
         if (next_timer_cycle.has_value() &&
             *next_timer_cycle < scheduler_cycle) {
             throw std::logic_error(
@@ -19350,6 +19421,11 @@ static SystemBatchResult run_full_core_cycle_batch(
                 next_cycle,
                 *next_external_cycle);
         }
+        if (next_idle_wake_cycle.has_value()) {
+            next_cycle = std::min(
+                next_cycle,
+                *next_idle_wake_cycle);
+        }
         if (next_cycle < scheduler_cycle)
             next_cycle = scheduler_cycle;
         scheduler_cycle = next_cycle;
@@ -19361,6 +19437,9 @@ static SystemBatchResult run_full_core_cycle_batch(
         const bool external_frontier =
             next_external_cycle.has_value() &&
             *next_external_cycle == scheduler_cycle;
+        const bool idle_wake_frontier =
+            next_idle_wake_cycle.has_value() &&
+            *next_idle_wake_cycle == scheduler_cycle;
         const bool target_frontier =
             system.cycle_target_completion_cycle.has_value() &&
             *system.cycle_target_completion_cycle ==
@@ -19374,6 +19453,7 @@ static SystemBatchResult run_full_core_cycle_batch(
         // timestamped host input, snapshot interrupt lines, then dispatch.
         if (timer_frontier ||
             external_frontier ||
+            idle_wake_frontier ||
             target_frontier ||
             tile_target_frontier) {
             settle_cycle_clock_to(
@@ -19412,6 +19492,9 @@ static SystemBatchResult run_full_core_cycle_batch(
                 dma_callbacks,
                 scheduler_cycle);
         }
+        // Every round re-applies the IDL wake rule: a peer's IPI or a timer
+        // line can wake a core that sleeps with I clear.
+        wake_cycle_idle_cores(system, scheduler_cycle);
         if (scheduler_cycle < effective_deadline &&
             !accept_cycle_interrupts(
                 system,
@@ -30076,6 +30159,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readwrite("ivt_base", &CPUState::ivt_base)
         .def_readwrite("ivec_id", &CPUState::ivec_id)
         .def_readwrite("trap_addr", &CPUState::trap_addr)
+        .def_readwrite("wake_ms", &CPUState::wake_ms)
         .def_readwrite("ef_flags", &CPUState::ef_flags)
         .def_readwrite("halted", &CPUState::halted)
         .def_readwrite("idle", &CPUState::idle)
@@ -31880,6 +31964,41 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "all_core_count", &SystemState::all_core_count)
         .def_property_readonly(
             "worker_count", &SystemState::worker_count)
+        .def(
+            "wake_idle_cores",
+            [](SystemState& system) { wake_idle_cores(system); },
+            "Apply the IDL wake rule to every idle execution core.")
+        .def(
+            "idle_wake_delay_s",
+            [](SystemState& system) -> py::object {
+                // A sleeping core's WAKE_MS deadline, or the timer's next
+                // interrupt request, whichever comes first.
+                std::optional<double> earliest;
+                auto consider = [&earliest](double seconds) {
+                    if (!earliest.has_value() || seconds < *earliest)
+                        earliest = seconds;
+                };
+                for (const CPUState* core : system.execution_cores) {
+                    if (core->halted || !core->idle || core->wake_ms == 0)
+                        continue;
+                    const uint64_t now =
+                        system.shared_rtc.current_uptime_ms();
+                    consider(now >= core->wake_ms
+                        ? 0.0
+                        : static_cast<double>(core->wake_ms - now) / 1000.0);
+                }
+                if (system.shared_timer.irq_pending)
+                    consider(0.0);
+                if (const std::optional<uint64_t> cycles =
+                        system.shared_timer.next_irq_assertion_delta()) {
+                    consider(static_cast<double>(*cycles) /
+                             static_cast<double>(RTCDevice::CLOCK_HZ));
+                }
+                if (!earliest.has_value())
+                    return py::none();
+                return py::float_(*earliest);
+            },
+            "Seconds until a sleeping core's next timed wake, or None.")
         .def(
             "_worker_pool_diagnostics",
             [](const SystemState& system) {

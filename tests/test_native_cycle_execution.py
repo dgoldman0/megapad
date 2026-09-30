@@ -1549,6 +1549,7 @@ def test_timestamped_external_events_apply_at_cycle_then_wake_without_vector():
     owner = system._native_system
     cpu.flag_i = True
     cpu.idle = True
+    system.uart.write8(0x03, 1)          # the UART receive request wakes IDL
     system.uart_geom.cols = 80
     system.uart_geom.rows = 24
     system.uart_geom.status = 0
@@ -3497,3 +3498,111 @@ def test_warm_boot_drains_accepted_wots_response_and_releases_owner() -> None:
     assert snapshot["private_zeroized"]
     assert owner._main_bus_snapshot().active_grant is None
     assert not owner.cycle_execution_pending
+
+
+# --- IDL wake rule (docs/isa-reference.md): enabled requests wake IDL
+# whatever the I flag, and WAKE_MS ends it at an RTC millisecond. ---
+
+
+def test_masked_timer_request_wakes_idl_without_vectoring():
+    system = _system(assemble("halt"))
+    cpu = system.cpu
+    cpu.flag_i = False
+    cpu.idle = True
+    system.timer.counter = 0
+    system.timer.compare = 2
+    system.timer.status = 0
+    system.timer.irq_pending = False
+    system.timer.control = 0x03
+
+    result = system.run_cycle_batch(10, max_instructions=1)
+
+    # No IVT is installed, so taking the interrupt would have stopped here.
+    assert cpu.halted
+    assert result.interrupts_delivered == 0
+    assert result.pending_interrupt_core == -1
+    assert cpu.ivec_id == 0
+    assert system.timer.irq_pending      # software still owns the ack
+
+
+def test_idle_deadline_wakes_at_the_rtc_millisecond():
+    system = _system(assemble("csrw 0x26, r1\nidl\nhalt"))
+    cpu = system.cpu
+    owner = system._native_system
+    cpu.regs[1] = 2                      # wake once uptime reaches 2 ms
+
+    system.run_cycle_batch(10, max_instructions=2)
+    assert cpu.idle and cpu.wake_ms == 2
+
+    system.run_cycle_batch(150_000, max_instructions=1)
+    assert cpu.idle and not cpu.halted
+    assert system.rtc.uptime_ms == 1
+
+    result = system.run_cycle_batch(100_000, max_instructions=1)
+
+    # 100 MHz: the RTC reaches 2 ms at cycle 200,000, and the core resumes
+    # there without an interrupt.
+    assert cpu.halted
+    assert result.interrupts_delivered == 0
+    assert system.rtc.uptime_ms == 2
+    assert 200_000 <= owner.system_cycles <= 200_010
+
+
+def test_wake_ms_is_a_full_core_csr():
+    system = _system(assemble("csrw 0x26, r1\ncsrr r2, 0x26\nhalt"))
+    system.cpu.regs[1] = 0x1234_5678_9ABC
+    system.run_batch(10)
+    assert system.cpu.regs[2] == 0x1234_5678_9ABC
+    assert system.cpu.wake_ms == 0x1234_5678_9ABC
+
+
+def test_device_requests_wake_core_zero_only_when_enabled():
+    system = _system(assemble("halt"), cores=2)
+    primary, secondary = system.cores
+    primary.idle = secondary.idle = True
+
+    system.uart.inject_input(b"K")
+    system.wake_idle_cores()
+    assert primary.idle                  # receive request disabled
+    system.uart.write8(0x03, 1)
+    system.wake_idle_cores()
+    assert not primary.idle
+    assert secondary.idle                # UART reaches core 0 only
+
+    system.uart.write8(0x03, 0)
+    primary.idle = True
+    primary._cs.nic_inject_frame(bytes(64))
+    system.wake_idle_cores()
+    assert primary.idle
+    primary._cs.nic_write8(0x40C, 1)
+    system.wake_idle_cores()
+    assert not primary.idle
+    assert secondary.idle
+
+
+def test_wake_ms_deadline_ends_idle_in_the_batch_scheduler():
+    system = _system(assemble("halt"))
+    cpu = system.cpu
+    cpu.idle = True
+    cpu.wake_ms = 3
+    system.bus.tick(2 * 100_000)
+    system.wake_idle_cores()
+    assert cpu.idle
+    system.bus.tick(100_000)
+    system.wake_idle_cores()
+    assert not cpu.idle
+
+
+def test_masked_ipi_wakes_an_idle_peer_inside_one_batch():
+    # Core 0 sends core 1 an IPI.  Core 1 sleeps with I clear and no IVT, so
+    # it resumes at its next instruction instead of vectoring.
+    system = _system(assemble("ldi r1, 1\ncsrw 0x22, r1\nhalt"), cores=2)
+    primary, secondary = system.cores
+    secondary.flag_i = False
+    secondary.idle = True
+
+    system.run_batch(100)
+
+    assert primary.halted
+    assert secondary.halted
+    assert secondary.ivec_id == 0

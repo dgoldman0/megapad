@@ -60,6 +60,12 @@ struct UARTDevice {
         return !rx.empty();
     }
 
+    // CONTROL bit 0 enables the receive interrupt request.
+    bool rx_irq_request() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return (control & 1) && !rx.empty();
+    }
+
     size_t rx_size() const {
         std::lock_guard<std::mutex> lock(mutex);
         return rx.size();

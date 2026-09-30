@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import threading
 import time
 from dataclasses import replace
@@ -1785,11 +1786,7 @@ def test_shared_failed_reset_remains_paused_and_visible(monkeypatch):
 
 def test_shared_machine_wakes_idle_cpu_for_timer_irq():
     session = MachineSession.from_bios(BIOS)
-    machine = SharedMachine(
-        session,
-        idle_tick_cycles=1_000,
-        idle_sleep_s=0.001,
-    )
+    machine = SharedMachine(session, idle_sleep_s=0.001)
     machine.start()
     try:
         wait_until(lambda: session.system.all_idle_or_halted)
@@ -2462,3 +2459,25 @@ def test_shared_server_clients_control_one_machine(tmp_path):
         server.stop()
 
     assert not socket_path.exists()
+
+
+def test_shared_machine_wakes_a_sleeping_guest_at_its_deadline():
+    # Emulated time follows host time while every core sleeps, so a guest in
+    # IDLE-MS wakes after the host time it asked for, not on the next input.
+    session = MachineSession.from_bios(BIOS)
+    machine = SharedMachine(session)
+    machine.start()
+    try:
+        wait_until(lambda: session.system.all_idle_or_halted)
+        machine.send_text("MS@ 40 IDLE-MS MS@ SWAP - .\n")
+        printed = wait_until(
+            lambda: re.search(
+                r"SWAP - \.\r?\n(\d+)\s+ok",
+                machine.raw(since=0)["text"],
+            )
+        )
+        assert 40 <= int(printed.group(1)) < 200
+        assert session.system.cpu.wake_ms == 0
+        assert machine.last_error is None
+    finally:
+        machine.stop()

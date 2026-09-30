@@ -169,7 +169,7 @@ Single-byte system operations (except CALL.L which is 2 bytes).
 
 | Opcode | Mnemonic | Cycles | Description |
 |--------|----------|--------|-------------|
-| `00` | **IDL** | 1 | Enter idle state — halt until interrupt or DMA. |
+| `00` | **IDL** | 1 | Wait for an interrupt request or the core's `WAKE_MS` time; see [Waiting with IDL](#waiting-with-idl). |
 | `01` | **NOP** | 1 | No operation. |
 | `02` | **HALT** | 1 | Stop the CPU permanently. |
 | `03` | **RESET** | 1 | Full CPU state reset (all registers zeroed, PSEL=3, etc.). |
@@ -1209,6 +1209,7 @@ when the operands are unordered; test VS first or use `FLE`.
 | `0x23` | **IPIACK** | 64 | W | Acknowledge IPI from core N |
 | `0x24` | **IVEC_ID** | 8 | RW | Last interrupt/trap vector ID |
 | `0x25` | **TRAP_ADDR** | 64 | R | Faulting address (bus fault) |
+| `0x26` | **WAKE_MS** | 64 | RW | Full cores: RTC uptime in ms at which `IDL` ends; 0 disables. Micro-cores read 0 and ignore writes. |
 | | | | | |
 | `0x30` | **MEGAPAD_SZ** | 64 | R | Memory size (returns 0) |
 | `0x31` | **CPUID** | 64 | R | CPU ID: `0x4D503634_00010000` ("MP64" v1.0) |
@@ -1262,10 +1263,11 @@ The IVT is an array of 64-bit handler addresses in memory, starting at
 | 4 | `IVEC_DIV_ZERO` | Division by Zero | DIV/UDIV/MOD/UMOD with Rs=0 |
 | 5 | `IVEC_BUS_FAULT` | Bus Fault | Synchronous response error for an access beyond RAM/MMIO bounds or an unmapped/timeout MMIO access; the fabric sentinel is suppressed before architectural publication |
 | 6 | `IVEC_SW_TRAP` | Software Trap | TRAP instruction |
-| 7 | `IVEC_TIMER` | Timer | Timer compare-match (when IE=1) |
-| 8 | `IVEC_UART` | UART | UART RX data available (when IE=1 and UART IRQ enabled) |
-| 9 | `IVEC_NIC` | NIC | NIC RX frame available (when IE=1 and NIC IRQ enabled) |
-| … | | | *(vectors 10–14 reserved)* |
+| 7 | `IVEC_TIMER` | Timer | Timer compare-match (when IE=1 and the timer IRQ is enabled) |
+| 8 | `IVEC_IPI` | IPI | Inter-processor interrupt (when IE=1) |
+| 9 | `IVEC_UART` | UART | Core 0 only: UART RX data available (when IE=1 and the UART RX IRQ is enabled) |
+| 10 | `IVEC_NIC` | NIC | Core 0 only: NIC RX frame pending (when IE=1 and the NIC RX IRQ is enabled) |
+| … | | | *(vectors 11–14 reserved)* |
 | 15 | `IVEC_PRIV_FAULT` | Privilege Fault | User-mode code executed a supervisor-only instruction, wrote a protected CSR, or triggered an MPU violation (access outside [MPU_BASE, MPU_LIMIT) or to HBW) |
 
 ### Memory Protection Unit (MPU)
@@ -1303,6 +1305,29 @@ three CSRs but explicitly omits scalar MPU enforcement, while the current RTL
 and Python paths do not enforce the documented supervisor-only restriction on
 cluster-state writes. These are implementation discrepancies, not additional
 portable privilege guarantees.
+
+### Waiting with IDL
+
+`IDL` stops fetching until the core has an interrupt request from an enabled
+source, or until its wake time passes:
+
+- an IPI to this core;
+- the timer compare-match, when the timer's IRQ enable (control bit 1) is set;
+- core 0 only: UART receive data, when UART `CONTROL` bit 0 is set;
+- core 0 only: a NIC receive-pending latch, when NIC `IRQ_CTRL` bit 0 is set;
+- full cores: the RTC uptime reaching a nonzero `WAKE_MS`.
+
+The `I` flag does not affect the wait. With `I` set, the core then takes the
+interrupt as usual, and the saved PC is the instruction after `IDL`. With `I`
+clear, the core continues with that instruction without vectoring. The
+`WAKE_MS` deadline never vectors. This is the RISC-V `WFI` rule with a
+per-core deadline: software masks interrupts, enables the requests it wants,
+checks its condition, and sleeps with no lost-wakeup window, because every
+source is a level that stays asserted until software clears it. `HALT` is
+unchanged and ends only by taking an interrupt.
+
+UART and NIC interrupt requests are routed to core 0 only. The timer
+compare-match and IPIs reach every core.
 
 ### Trap Entry Sequence
 

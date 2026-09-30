@@ -292,14 +292,11 @@ VARIABLE ETH-RX-COUNT   0 ETH-RX-COUNT !
     NET-TX-RELEASE
     R> ?DUP IF THROW THEN ;
 
-\ -- NET-IDLE: yield to host for network I/O --
-\   Burns CPU cycles in a busy loop to give the emulator's host-side
-\   TAP thread real wall-clock time to deliver inbound frames.
-\   Compiles the IDL machine instruction (opcode 0x00) inline,
-\   which suspends the CPU until an interrupt or NIC-RX event
-\   wakes it.  The emulator's run_batch returns on IDL, giving
-\   the host loop a chance to sleep and let TAP frames arrive.
-: NET-IDLE  ( -- )  [ 0 C, ] ;
+\ -- NET-IDLE: sleep until network or terminal input, or 20 ms --
+\   One wait of a polling loop.  Callers count NET-IDLE calls as their
+\   timeout, so the 20 ms bound keeps those timeouts in real time: 200
+\   calls are about 4 s with no traffic.  Input ends the wait at once.
+: NET-IDLE  ( -- )  20 IDLE-MS ;
 
 \ -- ETH-RECV-WAIT: blocking receive with timeout (in attempts) --
 \   ( max-attempts -- len | 0 )

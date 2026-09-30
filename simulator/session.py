@@ -163,9 +163,17 @@ class SimulatorMachineSession(MachineSession):
         return bool(
             not self._halted
             and backend.waiting_for_interrupt
-            and not self.runtime.uart_input_available
+            and not self.runtime.idle_wake_due
             and not self.rich_terminal_work_pending
         )
+
+    @property
+    def idle_wake_delay_s(self) -> float | None:
+        """Seconds until a blocked IDLE-UNTIL deadline, or None."""
+        deadline = self.runtime.idle_deadline_ms
+        if deadline is None:
+            return None
+        return max(deadline - self.runtime.rtc.uptime_ms, 0) / 1000
 
     @property
     def semantic_steps_total(self) -> int:
@@ -344,7 +352,6 @@ class SimulatorSharedMachine(SharedMachine):
             raise ValueError("host profiling is unavailable for semantic sessions")
         super().__init__(
             session,
-            idle_tick_cycles=0,
             idle_sleep_s=idle_sleep_s,
             host_profile=False,
         )
@@ -399,6 +406,7 @@ class SimulatorSharedMachine(SharedMachine):
         next_handoff = time.monotonic() + sys.getswitchinterval()
         while True:
             should_wait = False
+            guest_idle = False
             with self.condition:
                 if self._stopping:
                     return
@@ -417,6 +425,7 @@ class SimulatorSharedMachine(SharedMachine):
                     session.rich_terminal_work_pending
                 ):
                     should_wait = True
+                    guest_idle = True
                 else:
                     try:
                         result = session.run_boundary()
@@ -433,7 +442,16 @@ class SimulatorSharedMachine(SharedMachine):
 
             if should_wait:
                 with self.condition:
-                    self.condition.wait(timeout=self.idle_sleep_s)
+                    timeout = self.idle_sleep_s
+                    if guest_idle:
+                        # Input notifies the condition; a guest blocked in
+                        # IDLE-UNTIL resumes at its deadline.
+                        timeout = self.idle_wait_cap_s
+                        timed_wake = self.semantic_session.idle_wake_delay_s
+                        if timed_wake is not None:
+                            timeout = min(timeout, timed_wake)
+                    if timeout > 0:
+                        self.condition.wait(timeout=timeout)
                 next_handoff = time.monotonic() + sys.getswitchinterval()
             elif time.monotonic() >= next_handoff:
                 time.sleep(0)

@@ -154,6 +154,26 @@ def uart_text(buf: list[int]) -> str:
     )
 
 
+# A core asleep in the BIOS key wait has the UART and NIC receive requests
+# enabled, so they wake its IDL (docs/isa-reference.md).  Snapshots of that
+# core carry the two device enables, which only core 0 uses.
+_UART_CONTROL = 0x003
+_NIC_IRQ_CTRL = 0x40C
+
+
+def _save_wake_enables(cpu, state):
+    if cpu.core_id == 0:
+        state['uart_control'] = cpu._cs.uart_read8(_UART_CONTROL)
+        state['nic_irq_ctrl'] = cpu._cs.nic_read8(_NIC_IRQ_CTRL)
+    return state
+
+
+def _restore_wake_enables(cpu, state):
+    if 'uart_control' in state:
+        cpu._cs.uart_write8(_UART_CONTROL, state['uart_control'])
+        cpu._cs.nic_write8(_NIC_IRQ_CTRL, state['nic_irq_ctrl'])
+
+
 def _next_line_chunk(data: bytes, pos: int) -> bytes:
     """Return bytes from *pos* up to and including the next newline.
 
@@ -1488,7 +1508,7 @@ class TestBIOS(unittest.TestCase):
     @classmethod
     def _save_cpu_state(cls, cpu):
         """Capture all CPU register/flag state for snapshot."""
-        return {
+        return _save_wake_enables(cpu, {
             'pc': cpu.pc,
             'regs': list(cpu.regs),
             'psel': cpu.psel, 'xsel': cpu.xsel, 'spsel': cpu.spsel,
@@ -1498,11 +1518,11 @@ class TestBIOS(unittest.TestCase):
             'flag_i': cpu.flag_i, 'flag_s': cpu.flag_s,
             'd_reg': cpu.d_reg, 'q_out': cpu.q_out, 't_reg': cpu.t_reg,
             'ivt_base': cpu.ivt_base, 'ivec_id': cpu.ivec_id,
-            'trap_addr': cpu.trap_addr,
+            'trap_addr': cpu.trap_addr, 'wake_ms': cpu.wake_ms,
             'halted': cpu.halted, 'idle': cpu.idle,
             'cycle_count': cpu.cycle_count,
             '_ext_modifier': cpu._ext_modifier,
-        }
+        })
 
     @classmethod
     def _restore_cpu_state(cls, cpu, state):
@@ -1513,9 +1533,10 @@ class TestBIOS(unittest.TestCase):
                    'flag_z', 'flag_c', 'flag_n', 'flag_v',
                    'flag_p', 'flag_g', 'flag_i', 'flag_s',
                    'd_reg', 'q_out', 't_reg',
-                   'ivt_base', 'ivec_id', 'trap_addr',
+                   'ivt_base', 'ivec_id', 'trap_addr', 'wake_ms',
                    'halted', 'idle', 'cycle_count', '_ext_modifier'):
             setattr(cpu, k, state[k])
+        _restore_wake_enables(cpu, state)
 
     @classmethod
     def _ensure_bios_snapshot(cls):
@@ -5677,7 +5698,9 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_latest_store", "d_dict_rollback"),
             ("d_dict_rollback", "d_dict_index_fetch"),
             ("d_dict_index_fetch", "d_dict_index_store"),
-            ("d_dict_index_store", "d_fault_xt_store"),
+            ("d_dict_index_store", "d_idle_ms"),
+            ("d_idle_ms", "d_idle_until"),
+            ("d_idle_until", "d_fault_xt_store"),
             ("d_fault_xt_store", "d_dict_fault_xt_store"),
             ("d_dict_fault_xt_store", "d_dict_limit_fetch"),
             ("d_dict_limit_fetch", "d_dict_base_fetch"),
@@ -5711,7 +5734,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 541)
+        self.assertEqual(len(seen), 543)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -5962,6 +5985,95 @@ class TestBIOSInstructionFaults(unittest.TestCase):
         self.assertIn("B=-10 0 ", text)
         self.assertIn("C=-23 0 ", text)
 
+
+class TestBIOSIdle(unittest.TestCase):
+    """IDLE-UNTIL and IDLE-MS sleep until input, an interrupt, or a deadline.
+
+    Time only passes here when the test ticks the bus, so each test controls
+    exactly when a deadline comes due.
+    """
+
+    CYCLES_PER_MS = 100_000
+
+    def setUp(self):
+        self._bios_harness = TestBIOS(methodName="test_print_zero")
+        self._bios_harness.setUp()
+
+    def _settle(self, sys_obj):
+        for _ in range(200):
+            if sys_obj.all_idle_or_halted:
+                return
+            sys_obj.run_batch(100_000)
+        self.fail("the guest did not return to sleep")
+
+    def _type(self, sys_obj, line):
+        sys_obj.uart.inject_input((line + "\n").encode())
+        sys_obj.run_batch(100_000)
+        self._settle(sys_obj)
+
+    def _sleep_for(self, sys_obj, ms):
+        sys_obj.bus.tick(ms * self.CYCLES_PER_MS)
+        sys_obj.run_batch(100_000)
+        self._settle(sys_obj)
+
+    def test_idle_ms_sleeps_until_its_deadline(self):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        cpu = sys_obj.cpu
+        self._type(sys_obj, 'MS@ 5 IDLE-MS MS@ SWAP - ." D=" .')
+        deadline = cpu.wake_ms
+        self.assertTrue(cpu.idle)
+        self.assertEqual(deadline - sys_obj.rtc.uptime_ms, 5)
+        self._sleep_for(sys_obj, 4)
+        self.assertEqual(cpu.wake_ms, deadline)   # still asleep
+        self.assertNotIn("D=5", uart_text(buf))
+        self._sleep_for(sys_obj, 1)
+        self.assertIn("D=5 ", uart_text(buf))
+        self.assertEqual(cpu.wake_ms, 0)     # back in the key wait
+
+    def test_input_ends_the_sleep_early(self):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        self._type(sys_obj, '1000 IDLE-MS ." A=" MS@ .')
+        self.assertNotEqual(sys_obj.cpu.wake_ms, 0)
+        start = sys_obj.rtc.uptime_ms
+        self._type(sys_obj, '." B"')
+        text = uart_text(buf)
+        self.assertIn("A=%d " % start, text)
+        self.assertIn("B", text.split("A=", 1)[1])
+
+    def test_a_passed_deadline_returns_at_once(self):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        self._type(sys_obj, '0 IDLE-UNTIL MS@ IDLE-UNTIL 0 IDLE-MS ." C"')
+        self.assertIn("C", uart_text(buf))
+        self.assertEqual(sys_obj.cpu.wake_ms, 0)
+
+    def test_a_new_frame_ends_the_sleep_but_a_queued_one_does_not(self):
+        sys_obj, buf = self._bios_harness._boot_bios()
+        nic = sys_obj.cpu._cs
+        nic.nic_inject_frame(bytes(64))      # nobody reads it
+        sys_obj.run_batch(100_000)
+        self._settle(sys_obj)                # asleep, not spinning
+        self._type(sys_obj, '100 IDLE-MS ." N=" MS@ .')
+        self.assertNotEqual(sys_obj.cpu.wake_ms, 0)
+        start = sys_obj.rtc.uptime_ms
+        nic.nic_inject_frame(bytes(64))      # arrives while asleep
+        sys_obj.run_batch(100_000)
+        self._settle(sys_obj)
+        self.assertIn("N=%d " % start, uart_text(buf))
+        self.assertEqual(nic.nic_rx_queue_size(), 2)
+
+    def test_a_worker_sleeps_until_its_deadline(self):
+        mc = TestMulticore(methodName="test_core_status_word")
+        sys_obj, buf = mc._boot_multicore(num_cores=2)
+        worker = sys_obj.cores[1]
+        self._type(sys_obj, "VARIABLE MK 0 MK ! : NAP 3 IDLE-MS 77 MK ! ;")
+        self._type(sys_obj, "' NAP 1 WAKE-CORE")
+        self.assertTrue(worker.idle)
+        self.assertNotEqual(worker.wake_ms, 0)
+        self._sleep_for(sys_obj, 3)
+        self._type(sys_obj, '." MK=" MK @ . 1 CORE-STATUS .')
+        self.assertIn("MK=77 0 ", uart_text(buf))
+        self.assertTrue(worker.idle)
+        self.assertEqual(worker.wake_ms, 0)
 
 class TestBIOSTileModes(unittest.TestCase):
     """Tile format words and the TMODE/TCTRL register widths."""
@@ -6313,18 +6425,20 @@ class TestMulticore(unittest.TestCase):
         returns to idle; core 0 keeps its session."""
         sys, buf = self._boot_multicore(num_cores=4)
         text = self._run_forth(sys, buf, [
-            ": DIVBAD 1 0 / 99 48879 C! ;",
-            ": FPBAD 5 FPCSR! 1 S>F64 98 48878 C! ;",
-            ": ALIGNBAD TACC-TRY DROP 1 TSRC0! TACC-LOAD 97 48876 C! ;",
-            ": GOOD 66 48877 C! ;",
+            # Each job marks its own byte only if it runs past its fault.
+            "CREATE MARKS 4 ALLOT MARKS 4 0 FILL",
+            ": DIVBAD 1 0 / 99 MARKS C! ;",
+            ": FPBAD 5 FPCSR! 1 S>F64 98 MARKS 1+ C! ;",
+            ": ALIGNBAD TACC-TRY DROP 1 TSRC0! TACC-LOAD 97 MARKS 2 + C! ;",
+            ": GOOD 66 MARKS 3 + C! ;",
             "' DIVBAD 1 WAKE-CORE",
             "' FPBAD 2 WAKE-CORE",
             "' ALIGNBAD 3 WAKE-CORE",
             ": DELAY 3000 0 DO LOOP ; DELAY",
             '." S=" 1 CORE-STATUS . 2 CORE-STATUS . 3 CORE-STATUS .',
-            '." M=" 48879 C@ . 48878 C@ . 48876 C@ .',
+            '." M=" MARKS C@ . MARKS 1+ C@ . MARKS 2 + C@ .',
             "' GOOD 1 WAKE-CORE DELAY",
-            '." G=" 48877 C@ . 1 CORE-STATUS .',
+            '." G=" MARKS 3 + C@ . 1 CORE-STATUS .',
         ])
         self.assertEqual(text.count("Megapad-64 Forth BIOS"), 1)
         self.assertIn("*** DIVIDE BY ZERO PC=", text)
@@ -7283,7 +7397,7 @@ class _KDOSTestBase(unittest.TestCase):
     @staticmethod
     def _save_cpu_state(cpu):
         """Capture all CPU register/flag state for snapshot."""
-        return {
+        return _save_wake_enables(cpu, {
             'pc': cpu.pc,
             'regs': list(cpu.regs),
             'psel': cpu.psel, 'xsel': cpu.xsel, 'spsel': cpu.spsel,
@@ -7293,14 +7407,14 @@ class _KDOSTestBase(unittest.TestCase):
             'flag_i': cpu.flag_i, 'flag_s': cpu.flag_s,
             'd_reg': cpu.d_reg, 'q_out': cpu.q_out, 't_reg': cpu.t_reg,
             'ivt_base': cpu.ivt_base, 'ivec_id': cpu.ivec_id,
-            'trap_addr': cpu.trap_addr,
+            'trap_addr': cpu.trap_addr, 'wake_ms': cpu.wake_ms,
             'halted': cpu.halted, 'idle': cpu.idle,
             'cycle_count': cpu.cycle_count,
             '_ext_modifier': cpu._ext_modifier,
             'priv_level': getattr(cpu, 'priv_level', 0),
             'mpu_base': getattr(cpu, 'mpu_base', 0),
             'mpu_limit': getattr(cpu, 'mpu_limit', 0),
-        }
+        })
 
     @staticmethod
     def _restore_cpu_state(cpu, state):
@@ -7311,10 +7425,11 @@ class _KDOSTestBase(unittest.TestCase):
                    'flag_z', 'flag_c', 'flag_n', 'flag_v',
                    'flag_p', 'flag_g', 'flag_i', 'flag_s',
                    'd_reg', 'q_out', 't_reg',
-                   'ivt_base', 'ivec_id', 'trap_addr',
+                   'ivt_base', 'ivec_id', 'trap_addr', 'wake_ms',
                    'halted', 'idle', 'cycle_count', '_ext_modifier',
                    'priv_level', 'mpu_base', 'mpu_limit'):
             setattr(cpu, k, state.get(k, 0) if isinstance(state, dict) else getattr(state, k, 0))
+        _restore_wake_enables(cpu, state)
 
     @classmethod
     def _ensure_snapshot(cls):
@@ -7390,6 +7505,8 @@ class _KDOSTestBase(unittest.TestCase):
                     break
                 continue
             batch = sys.run_batch(min(100_000, max_steps - total))
+            if batch == 0 and sys.cpu.idle:
+                break  # asleep with input it has not enabled as a wake source
             total += max(batch, 1)
 
         return uart_text(buf)
@@ -7454,6 +7571,8 @@ class _KDOSTestBase(unittest.TestCase):
                     break  # all input sent, CPU idle → done
                 continue
             batch = sys.run_batch(min(100_000, max_steps - steps))
+            if batch == 0 and sys.cpu.idle:
+                break  # asleep with input it has not enabled as a wake source
             steps += max(batch, 1)
 
         return uart_text(buf)
@@ -15748,7 +15867,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 541)
+        self.assertEqual(len(seen), 543)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -17297,7 +17416,9 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ("d_latest_store", "d_dict_rollback"),
             ("d_dict_rollback", "d_dict_index_fetch"),
             ("d_dict_index_fetch", "d_dict_index_store"),
-            ("d_dict_index_store", "d_fault_xt_store"),
+            ("d_dict_index_store", "d_idle_ms"),
+            ("d_idle_ms", "d_idle_until"),
+            ("d_idle_until", "d_fault_xt_store"),
             ("d_fault_xt_store", "d_dict_fault_xt_store"),
             ("d_dict_fault_xt_store", "d_dict_limit_fetch"),
             ("d_dict_limit_fetch", "d_dict_base_fetch"),
@@ -20903,7 +21024,7 @@ class TestKDOSMulticore(unittest.TestCase):
 
     @classmethod
     def _save_cpu_state(cls, cpu):
-        return {
+        return _save_wake_enables(cpu, {
             'pc': cpu.pc,
             'regs': list(cpu.regs),
             'psel': cpu.psel, 'xsel': cpu.xsel, 'spsel': cpu.spsel,
@@ -20913,11 +21034,11 @@ class TestKDOSMulticore(unittest.TestCase):
             'flag_i': cpu.flag_i, 'flag_s': cpu.flag_s,
             'd_reg': cpu.d_reg, 'q_out': cpu.q_out, 't_reg': cpu.t_reg,
             'ivt_base': cpu.ivt_base, 'ivec_id': cpu.ivec_id,
-            'trap_addr': cpu.trap_addr,
+            'trap_addr': cpu.trap_addr, 'wake_ms': cpu.wake_ms,
             'halted': cpu.halted, 'idle': cpu.idle,
             'cycle_count': cpu.cycle_count,
             '_ext_modifier': cpu._ext_modifier,
-        }
+        })
 
     @classmethod
     def _restore_cpu_state(cls, cpu, state):
@@ -20927,9 +21048,10 @@ class TestKDOSMulticore(unittest.TestCase):
                    'flag_z', 'flag_c', 'flag_n', 'flag_v',
                    'flag_p', 'flag_g', 'flag_i', 'flag_s',
                    'd_reg', 'q_out', 't_reg',
-                   'ivt_base', 'ivec_id', 'trap_addr',
+                   'ivt_base', 'ivec_id', 'trap_addr', 'wake_ms',
                    'halted', 'idle', 'cycle_count', '_ext_modifier'):
             setattr(cpu, k, state[k])
+        _restore_wake_enables(cpu, state)
 
     @classmethod
     def _ensure_mc_snapshot(cls):

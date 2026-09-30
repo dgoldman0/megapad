@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **541** entries.  The numbered
+The `bios.asm` dictionary link chain contains **543** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -596,7 +596,7 @@ the nonzero path emits the parsed message and resets through `ABORT`.
 | 221 | `DISK-WRITE-GEN-CHECKED` | `( dma lba count generation -- completed status )` | | Generation-bound checked write; rejects a stale identity before media mutation |
 | 222 | `DISK-FLUSH-GEN-CHECKED` | `( generation -- status )` | | Generation-bound ordering and durability barrier |
 
-### Timer & Interrupts (7 words)
+### Timer & Interrupts (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -606,6 +606,8 @@ the nonzero path emits the parsed message and resets through `ABORT`.
 | 206 | `EI!` | `( -- )` | | Enable interrupts globally (EI instruction) |
 | 207 | `DI!` | `( -- )` | | Disable interrupts globally (DI instruction) |
 | 208 | `ISR!` | `( xt slot -- )` | | Install xt at IVT slot: writes to `ivt_table + slot*8` |
+| 542 | `IDLE-UNTIL` | `( deadline-ms -- )` | | Sleep this core until input, an interrupt, or `MS@` reaching the deadline; returns at once if it has passed and may return early |
+| 543 | `IDLE-MS` | `( ms -- )` | | `IDLE-UNTIL` at `MS@` + ms, saturating; 0 returns at once |
 | 541 | `FAULT-XT!` | `( xt -- )` | | Install the instruction-fault callback; it receives the throw code (-21 illegal instruction, -23 alignment, -10 divide by zero) before the BIOS reports; 0 removes it |
 
 ### RTC / System Clock (7 words)
@@ -1125,7 +1127,7 @@ machine reset.
 | Tile Engine | 39 |
 | NIC | 4 |
 | Disk / Storage | 17 |
-| Timer & Interrupts | 7 |
+| Timer & Interrupts | 9 |
 | RTC / System Clock | 7 |
 | Multicore | 11 |
 | Performance Counters | 5 |
@@ -1150,7 +1152,7 @@ machine reset.
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **392** |
+| **Catalogued subtotal** | **394** |
 
 ### All Immediate Words (34)
 
@@ -1163,7 +1165,7 @@ The checked WOTS word closes the newest appended segment:
 
 ```
 WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
-→ FAULT-XT! → DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!
+→ IDLE-MS → IDLE-UNTIL → FAULT-XT! → DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!
 → TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 → TACC-CLEAR → TACC-TRY → TAMAC → CALLER-SPAN-STATUS
 → ENTROPY-READY? → ENTROPY-FILL → SHA2-SPAN-STATUS

@@ -57,7 +57,7 @@ from .devices import (
     AudioOutput,
     MailboxDevice, SpinlockDevice, NTTDevice, KemDevice,
     FramebufferDevice, CppFramebufferProxy, CppTimerProxy, CppUartGeomProxy,
-    CppRTCProxy, CppWotsProxy,
+    RTC, CppRTCProxy, CppWotsProxy,
     SECTOR_SIZE, UART_BASE, UART_GEOM_BASE, TIMER_BASE, STORAGE_BASE,
     SYSINFO_BASE, NIC_BASE, MBOX_BASE, SPINLOCK_BASE,
     NTT_BASE, KEM_BASE, FB_BASE, NIC_MTU, NIC_MAX_FRAME,
@@ -2883,18 +2883,34 @@ class MegapadSystem:
             and self.timer._cs is self.cpu._cs
         )
 
+    def wake_idle_cores(self) -> None:
+        """Apply the IDL wake rule (docs/isa-reference.md) to idle cores.
+
+        An idle core resumes when it has an interrupt request from an enabled
+        source, whatever its I flag, or when the RTC uptime reaches its
+        WAKE_MS deadline. UART and NIC requests reach core 0 only. A core
+        with I set then takes a timer or IPI trap as before.
+        """
+        self._native_system.wake_idle_cores()
+
+    def idle_wake_delay_s(self) -> Optional[float]:
+        """Seconds until a sleeping core's next timed wake, or None.
+
+        A timed wake is a WAKE_MS deadline on an idle core or the timer's next
+        interrupt request. A host runner whose cores all sleep waits for
+        input at most this long.
+        """
+        return self._native_system.idle_wake_delay_s()
+
+    def advance_idle_time(self, seconds: float) -> None:
+        """Advance every device by ``seconds`` of the 100 MHz system clock
+        while all cores sleep, then apply the IDL wake rule."""
+        self.bus.tick(max(1, round(seconds * RTC.CLOCK_HZ)))
+        self.wake_idle_cores()
+
     def _prepare_native_system_batch(self) -> None:
         """Apply wake checks for every native execution core."""
-        for cpu in self.cores:
-            if cpu.idle and cpu.irq_ipi and cpu.flag_i:
-                cpu.idle = False
-            if cpu.idle and cpu.core_id == 0:
-                if self.uart.has_rx_data:
-                    cpu.idle = False
-                elif self.timer.irq_pending and cpu.flag_i:
-                    cpu.idle = False
-                elif self._any_nic_rx():
-                    cpu.idle = False
+        self.wake_idle_cores()
 
     @staticmethod
     def _prepare_native_cycle_batch() -> None:
@@ -3354,20 +3370,8 @@ class MegapadSystem:
         elapsed_cycles = 0
         pending_error = None
 
+        self.wake_idle_cores()
         for cpu in self.cores:
-            # Wake CPU from idle on IPI
-            if cpu.idle and cpu.irq_ipi and cpu.flag_i:
-                cpu.idle = False
-
-            # Wake core 0 from idle on UART RX or timer IRQ or NIC RX
-            if cpu.idle and cpu.core_id == 0:
-                if self.uart.has_rx_data:
-                    cpu.idle = False
-                elif self.timer.irq_pending and cpu.flag_i:
-                    cpu.idle = False
-                elif self._any_nic_rx():
-                    cpu.idle = False
-
             if cpu.halted or cpu.idle:
                 continue
 

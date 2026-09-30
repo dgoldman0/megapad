@@ -166,16 +166,36 @@ _CPU_STATE_KEYS = (
     'flag_z', 'flag_c', 'flag_n', 'flag_v',
     'flag_p', 'flag_g', 'flag_i', 'flag_s',
     'd_reg', 'q_out', 't_reg',
-    'ivt_base', 'ivec_id', 'trap_addr',
+    'ivt_base', 'ivec_id', 'trap_addr', 'wake_ms',
     'halted', 'idle', 'cycle_count', '_ext_modifier',
 )
+
+
+# A core asleep in the BIOS key wait has the UART and NIC receive requests
+# enabled, so they wake its IDL (docs/isa-reference.md).  Snapshots of that
+# core carry the two device enables, which only core 0 uses.
+_UART_CONTROL = 0x003
+_NIC_IRQ_CTRL = 0x40C
+
+
+def _save_wake_enables(cpu, state):
+    if cpu.core_id == 0:
+        state['uart_control'] = cpu._cs.uart_read8(_UART_CONTROL)
+        state['nic_irq_ctrl'] = cpu._cs.nic_read8(_NIC_IRQ_CTRL)
+    return state
+
+
+def _restore_wake_enables(cpu, state):
+    if 'uart_control' in state:
+        cpu._cs.uart_write8(_UART_CONTROL, state['uart_control'])
+        cpu._cs.nic_write8(_NIC_IRQ_CTRL, state['nic_irq_ctrl'])
 
 
 def _save_cpu_state(cpu) -> dict:
     state = {'pc': cpu.pc, 'regs': list(cpu.regs)}
     for k in _CPU_STATE_KEYS:
         state[k] = getattr(cpu, k)
-    return state
+    return _save_wake_enables(cpu, state)
 
 
 def _restore_cpu_state(cpu, state: dict):
@@ -183,6 +203,7 @@ def _restore_cpu_state(cpu, state: dict):
     cpu.regs[:] = state['regs']
     for k in _CPU_STATE_KEYS:
         setattr(cpu, k, state[k])
+    _restore_wake_enables(cpu, state)
 
 
 # ---------------------------------------------------------------------------

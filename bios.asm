@@ -758,13 +758,83 @@ kc_poll:
     andi r1, 0x02
     cmpi r1, 0
     brne kc_ready
-    idl
+    ldi r1, 0                   ; no deadline: wait for input or an interrupt
+    ldi64 r11, idle_until
+    call.l r11
     br kc_poll
 kc_ready:
     ldi64 r13, 0xFFFF_FF00_0000_0001
     ld.b r1, r13
     sep  r3                     ; return via register switch
     br   key_char               ; re-entry trampoline
+
+; idle_until: sleep this core until an interrupt request or the RTC uptime
+;   reaching R1 (R1 = 0 sets no deadline).  See IDL and WAKE_MS in
+;   docs/isa-reference.md.  Interrupts stay masked while it sleeps, so IDL
+;   wakes on the UART and NIC receive requests it enables without vectoring
+;   (the IVT has no handler for them).  Then WAKE_MS, the device enables,
+;   and IE are restored, and a pending timer or IPI interrupt is taken as
+;   usual.  UART and NIC requests reach core 0 only.  Clobbers R11.
+idle_until:
+    subi r15, 8
+    str r15, r0
+    subi r15, 8
+    str r15, r7
+    csrr r0, 0x09
+    subi r15, 8
+    str r15, r0                 ; saved IE
+    ldi r7, 0
+    csrw 0x09, r7
+    csrw 0x26, r1               ; WAKE_MS
+    csrr r0, 0x20               ; COREID
+    cmpi r0, 0
+    lbrne .iu_sleep
+    ; UART: enable the receive request.  A byte already waiting asserts it,
+    ; so IDL falls straight through.
+    ldi64 r11, 0xFFFF_FF00_0000_0003   ; UART CONTROL
+    ld.b r0, r11
+    subi r15, 8
+    str r15, r0                 ; saved UART CONTROL
+    ldi r7, 1
+    or r7, r0
+    st.b r11, r7
+    ; NIC: wake on a frame that arrives while asleep.  The receive-pending
+    ; latch stays set after earlier frames, and frames nobody reads stay
+    ; queued, so clear the latch and enable its request rather than waking
+    ; on a queued frame.  Callers that wait for frames use a deadline.
+    ldi64 r11, 0xFFFF_FF00_0000_040D   ; NIC IRQ_STATUS
+    ldi r7, 1
+    st.b r11, r7                ; write 1 to clear RX pending
+    ldi64 r11, 0xFFFF_FF00_0000_040C   ; NIC IRQ_CTRL
+    ld.b r0, r11
+    subi r15, 8
+    str r15, r0                 ; saved NIC IRQ_CTRL
+    ldi r7, 1
+    or r7, r0
+    st.b r11, r7
+    idl
+    ldn r0, r15
+    addi r15, 8
+    ldi64 r11, 0xFFFF_FF00_0000_040C
+    st.b r11, r0                ; NIC IRQ_CTRL
+    ldn r0, r15
+    addi r15, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0003
+    st.b r11, r0                ; UART CONTROL
+    br .iu_done
+.iu_sleep:
+    idl
+.iu_done:
+    ldi r7, 0
+    csrw 0x26, r7               ; clear WAKE_MS
+    ldn r0, r15
+    addi r15, 8
+    csrw 0x09, r0               ; restore IE
+    ldn r7, r15
+    addi r15, 8
+    ldn r0, r15
+    addi r15, 8
+    ret.l
 
 ; print_str: null-terminated string at R10, \n → \r\n
 print_str:
@@ -9904,6 +9974,44 @@ w_ms_fetch:
     ; Push result
     subi r14, 8
     str r14, r1
+    ret.l
+
+; IDLE-UNTIL ( deadline-ms -- )
+;   Sleep this core until input, an interrupt, or MS@ reaching the deadline.
+;   It returns at once when the deadline has passed, and it may return early,
+;   so callers re-check their events.
+w_idle_until:
+    ldn r1, r14
+    addi r14, 8
+    cmpi r1, 0
+    breq .wiu_done              ; 0 has passed (WAKE_MS 0 means no deadline)
+    ldi64 r11, idle_until
+    call.l r11
+.wiu_done:
+    ret.l
+
+; IDLE-MS ( ms -- )
+;   IDLE-UNTIL at MS@ + ms, saturating.  0 returns at once.
+w_idle_ms:
+    ldn r1, r14
+    cmpi r1, 0
+    breq .wim_none
+    ldi64 r11, w_ms_fetch
+    call.l r11                  ; ( ms now )
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    add r0, r1                  ; deadline
+    cmp r0, r1
+    brcc .wim_saturate          ; wrapped past 2^64
+    br .wim_store
+.wim_saturate:
+    ldi64 r0, 0xFFFF_FFFF_FFFF_FFFF
+.wim_store:
+    str r14, r0
+    lbr w_idle_until
+.wim_none:
+    addi r14, 8
     ret.l
 
 ; EPOCH@ ( -- epoch-ms-u64 )
@@ -23872,9 +23980,27 @@ d_fault_xt_store:
     call.l r11
     ret.l
 
+; === IDLE-UNTIL ===
+d_idle_until:
+    .dq d_fault_xt_store
+    .db 10
+    .ascii "IDLE-UNTIL"
+    ldi64 r11, w_idle_until
+    call.l r11
+    ret.l
+
+; === IDLE-MS ===
+d_idle_ms:
+    .dq d_idle_until
+    .db 7
+    .ascii "IDLE-MS"
+    ldi64 r11, w_idle_ms
+    call.l r11
+    ret.l
+
 ; === DICT-INDEX! ===
 d_dict_index_store:
-    .dq d_fault_xt_store
+    .dq d_idle_ms
     .db 11
     .ascii "DICT-INDEX!"
     ldi64 r11, w_dict_index_store

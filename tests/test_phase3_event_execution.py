@@ -416,6 +416,7 @@ def _post_batch_staged_ingress_case(
         cores=4,
         worker_count=worker_count,
     )
+    system.uart.write8(0x03, 1)          # the UART receive request wakes IDL
     if recording is None:
         original_settle = system._settle_native_system_round
         injected = False
@@ -736,6 +737,7 @@ def test_event_wake_rebases_serial_instruction_ready_cycle_across_lanes():
         )
         system.cpu.flag_i = False
         system.cpu.idle = True
+        system.uart.write8(0x03, 1)      # the UART receive request wakes IDL
         system.schedule_uart_input(b"W", at_cycle=3)
 
         result = system.run_cycle_batch(

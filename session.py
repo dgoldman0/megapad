@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import operator
 import os
 import time
@@ -35,6 +36,7 @@ from rich_terminal.retained_view import (
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_model import RetainedPolicy
 from rich_terminal.retained_wire import ControlEventKind
+from devices import RTC
 from system import MegapadSystem, SystemRunStats
 
 if TYPE_CHECKING:
@@ -1663,18 +1665,13 @@ class MachineSession:
             return until_text in haystack
 
         def advance_idle_devices() -> None:
-            self.system.bus.tick(idle_tick_cycles)
-            if self.system.timer.irq_pending:
-                for cpu in self.system.cores:
-                    if cpu.idle and cpu.flag_i:
-                        cpu.idle = False
-                        break
-            for cpu in self.system.cores:
-                if cpu.idle and cpu.irq_ipi and cpu.flag_i:
-                    cpu.idle = False
-            core0 = self.system.cores[0]
-            if core0.idle and self.system._any_nic_rx():
-                core0.idle = False
+            # Jump straight to a sleeping core's next timed wake, if any.
+            timed_wake = self.system.idle_wake_delay_s()
+            cycles = idle_tick_cycles
+            if timed_wake is not None:
+                cycles = max(cycles, math.ceil(timed_wake * RTC.CLOCK_HZ))
+            self.system.bus.tick(cycles)
+            self.system.wake_idle_cores()
 
         while steps < max_steps:
             if has_match():

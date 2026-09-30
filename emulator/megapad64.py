@@ -79,6 +79,7 @@ CSR_MBOX        = 0x22  # Read: pending IPI mask, Write: send IPI
 CSR_IPIACK      = 0x23  # Write: acknowledge IPI from core N
 CSR_IVEC_ID     = 0x24  # Current interrupt vector ID
 CSR_TRAP_ADDR   = 0x25  # Faulting address
+CSR_WAKE_MS     = 0x26  # RTC uptime (ms) at which IDL ends; 0 = none
 # Strided / 2D tile addressing CSRs (§2.5)
 CSR_TSTRIDE_R   = 0x40   # Row stride in bytes
 CSR_TSTRIDE_C   = 0x41   # Column stride in bytes (reserved)
@@ -622,6 +623,8 @@ class Megapad64:
         self.ivt_base: int  = 0
         self.ivec_id: int   = 0
         self.trap_addr: int = 0
+        # Full cores only: the MS@ time at which IDL ends (0 = none).
+        self.wake_ms: int = 0
 
         # External flag inputs (EF1-EF4) — directly settable
         self.ef_flags: int = 0  # 4 bits
@@ -1752,6 +1755,7 @@ class Megapad64:
             CSR_IPIACK:     lambda: 0,  # write-only
             CSR_IVEC_ID:    lambda: self.ivec_id,
             CSR_TRAP_ADDR:  lambda: self.trap_addr,
+            CSR_WAKE_MS:    lambda: self.wake_ms,
             CSR_MEGAPAD_SZ: lambda: self.mem_size,
             CSR_CPUID:      lambda: 0x4D50_3634_0001_4350,  # "MP64" v1 "CP"
             CSR_PERF_CYCLES:  lambda: u64(self.perf_cycles),
@@ -1831,6 +1835,7 @@ class Megapad64:
             CSR_MBOX:     lambda v: self._ipi_send(v),
             CSR_IPIACK:   lambda v: self._ipi_ack(v),
             CSR_IVEC_ID:  lambda v: setattr(self, 'ivec_id', v & 0xFF),
+            CSR_WAKE_MS:  lambda v: setattr(self, 'wake_ms', v),
             CSR_PERF_CTRL: lambda v: self._perf_ctrl_write(v),
             CSR_BIST_CMD:  lambda v: self._bist_cmd_write(v),
             CSR_TILE_SELFTEST: lambda v: self._tile_selftest_write(v),
@@ -4857,6 +4862,7 @@ class Megapad64:
         self.ttile_w = 8
         self.ivt_base = 0
         self.ivec_id = 0
+        self.wake_ms = 0
         self.irq_ipi = False
         self.halted = False
         self.idle = False
