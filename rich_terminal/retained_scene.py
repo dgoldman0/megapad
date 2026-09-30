@@ -143,6 +143,9 @@ class ControlKind(IntEnum):
     TABSET = 7
     TAB = 8
     ITEM_VIEW = 9
+    TASKBAR = 10
+    TASK = 11
+    LAUNCHER = 12
 
 
 class ControlState(IntFlag):
@@ -153,6 +156,7 @@ class ControlState(IntFlag):
     OPEN = 1 << 2
     SELECTED = 1 << 3
     CHECKED = 1 << 4
+    MINIMIZED = 1 << 5
 
 
 CONTROL_STATE_MASK = (
@@ -161,6 +165,7 @@ CONTROL_STATE_MASK = (
     | ControlState.OPEN
     | ControlState.SELECTED
     | ControlState.CHECKED
+    | ControlState.MINIMIZED
 )
 
 
@@ -857,6 +862,12 @@ def validate_control_shape(
         ControlKind.ITEM_VIEW: (
             ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
         ),
+        ControlKind.TASKBAR: ControlState.VISIBLE | ControlState.ENABLED,
+        ControlKind.TASK: (
+            ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+            | ControlState.MINIMIZED
+        ),
+        ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
     }[normalized_kind]
     if int(normalized_state) & ~int(allowed):
         raise ValueError(
@@ -867,6 +878,9 @@ def validate_control_shape(
         and normalized_state & ControlState.ENABLED
     ):
         raise ValueError("open or selected controls must be visible and enabled")
+    if (normalized_state & ControlState.SELECTED
+            and normalized_state & ControlState.MINIMIZED):
+        raise ValueError("a TASK cannot be selected and minimized")
 
     root_kinds = {
         ControlKind.MENU_BAR,
@@ -874,6 +888,7 @@ def validate_control_shape(
         ControlKind.TEXT_GRID,
         ControlKind.TABSET,
         ControlKind.ITEM_VIEW,
+        ControlKind.TASKBAR,
     }
     if normalized_kind in root_kinds:
         if parent_control_id or order or bounds is None:
@@ -884,7 +899,11 @@ def validate_control_shape(
             raise ValueError(
                 f"{normalized_kind.name} carries no label or shortcut"
             )
-        if normalized_kind in (ControlKind.MENU_BAR, ControlKind.TABSET):
+        if normalized_kind is ControlKind.TASKBAR and bounds.cell_rows != 1:
+            raise ValueError("TASKBAR requires exactly one row")
+        if normalized_kind in (
+            ControlKind.MENU_BAR, ControlKind.TABSET, ControlKind.TASKBAR,
+        ):
             if content is not None:
                 raise ValueError(
                     f"{normalized_kind.name} carries no semantic text content"
@@ -918,6 +937,20 @@ def validate_control_shape(
                 raise ValueError("TEXT_GRID has more than one current item")
             if content.style_run_count:
                 raise ValueError("TEXT_GRID items carry no style runs")
+    elif normalized_kind in (ControlKind.TASK, ControlKind.LAUNCHER):
+        if (parent_control_id == 0 or z_order != 0 or bounds is None
+                or bounds.cell_x < 0 or bounds.cell_y != 0
+                or bounds.cell_rows != 1):
+            raise ValueError(
+                f"{normalized_kind.name} requires a parent and explicit single-row slots"
+            )
+        if not label_bytes:
+            raise ValueError(f"{normalized_kind.name} requires a nonempty label")
+        if content is not None:
+            raise ValueError(f"{normalized_kind.name} carries no semantic text content")
+        if any(0x7F <= ord(character) <= 0x9F or character in "\u2028\u2029"
+               for text in (label, shortcut) for character in text):
+            raise ValueError("task entry text contains a control or line-separator character")
     else:
         if parent_control_id == 0 or bounds is not None or z_order != 0:
             raise ValueError(
@@ -947,9 +980,10 @@ def validate_control_shape(
 class ControlDefinition:
     """One semantic control node whose visual representation belongs to the view.
 
-    Root controls carry an anchor rectangle and z order.  Descendants carry
-    semantic ordering and state, leaving typography, padding, clipping,
-    rasterization, and hit targets to the selected renderer.  TEXT_AREA and
+    Root controls carry an anchor rectangle and z order. Taskbar entries also
+    carry explicit parent-relative slots; other descendants carry semantic
+    ordering and state. Typography, padding, clipping, and rasterization
+    belong to the selected renderer. TEXT_AREA and
     TEXT_GRID roots use one immutable logical text collection; menu and tab
     controls carry no renderer-specific payload.
     """
@@ -1478,6 +1512,16 @@ class RetainedSceneModel:
         """Resolve one exact active semantic target without mutating guest state."""
 
         owner_scene, definition = self._active_control(owner, control_id)
+        if definition.kind in (ControlKind.TASK, ControlKind.LAUNCHER):
+            parent = owner_scene.controls.get(definition.parent_control_id)
+            if (parent is None or parent.kind is not ControlKind.TASKBAR
+                    or not parent.visible or not parent.enabled):
+                raise SceneModelError(
+                    SceneErrorCode.GRAPH, "task entry parent is not an interactive TASKBAR"
+                )
+            if not definition.visible or not definition.enabled:
+                raise SceneModelError(SceneErrorCode.STATE, "control is hidden or disabled")
+            return definition
         if definition.kind is ControlKind.TAB:
             parent = owner_scene.controls.get(definition.parent_control_id)
             if (
@@ -1704,6 +1748,7 @@ class RetainedSceneModel:
             ControlKind.MENU_ITEM,
             ControlKind.MENU_SEPARATOR,
             ControlKind.TABSET,
+            ControlKind.TASKBAR,
         }:
             compatible = replace(definition, state=current.state) == current
             failure = "control replacement may change only the control state"
@@ -1735,7 +1780,7 @@ class RetainedSceneModel:
                     SceneErrorCode.STATE,
                     "changed semantic content requires a newer content revision",
                 )
-        else:  # TAB
+        else:  # TAB, TASK, LAUNCHER
             compatible = (
                 replace(
                     definition,
@@ -1745,7 +1790,9 @@ class RetainedSceneModel:
                 )
                 == current
             )
-            failure = "TAB replacement may change only state, label, and shortcut"
+            failure = (
+                f"{definition.kind.name} replacement may change only state, label, and shortcut"
+            )
         if not compatible:
             self._fail(SceneErrorCode.STATE, failure)
         self._validate_control_policy(definition)
@@ -2575,6 +2622,16 @@ class RetainedSceneModel:
             and not features & RetainedFeature.CONTROL_ITEMS
         ):
             self._fail(SceneErrorCode.FEATURE, "CONTROL_ITEMS was not advertised")
+        if definition.kind in {
+            ControlKind.TASKBAR, ControlKind.TASK, ControlKind.LAUNCHER,
+        }:
+            if not features & RetainedFeature.TASKBARS:
+                self._fail(SceneErrorCode.FEATURE, "TASKBARS was not advertised")
+            text_bytes = self._control_utf8_bytes(definition)
+            policy = self._owners.policy
+            if (80 + text_bytes > policy.client_to_terminal_max_payload
+                    or 280 + text_bytes > policy.max_retained_transaction_bytes):
+                self._fail(SceneErrorCode.QUOTA, "TASKBAR text exceeds payload or transaction capacity")
 
     def _validate_control_dependencies(
         self,
@@ -2592,6 +2649,7 @@ class RetainedSceneModel:
             ControlKind.TEXT_GRID,
             ControlKind.TABSET,
             ControlKind.ITEM_VIEW,
+            ControlKind.TASKBAR,
         }:
             return
         parent = owner_scene.controls.get(definition.parent_control_id)
@@ -2600,6 +2658,8 @@ class RetainedSceneModel:
             ControlKind.MENU_ITEM: ControlKind.MENU,
             ControlKind.MENU_SEPARATOR: ControlKind.MENU,
             ControlKind.TAB: ControlKind.TABSET,
+            ControlKind.TASK: ControlKind.TASKBAR,
+            ControlKind.LAUNCHER: ControlKind.TASKBAR,
         }[definition.kind]
         if parent is None or parent.kind is not expected:
             self._fail(
@@ -2608,6 +2668,11 @@ class RetainedSceneModel:
             )
         if parent.region_id != definition.region_id:
             self._fail(SceneErrorCode.GRAPH, "control parent belongs to another region")
+        if definition.kind in (ControlKind.TASK, ControlKind.LAUNCHER):
+            assert definition.bounds is not None and parent.bounds is not None
+            if (definition.bounds.cell_x + definition.bounds.cell_cols
+                    > parent.bounds.cell_cols):
+                self._fail(SceneErrorCode.GRAPH, "task entry bounds exceed TASKBAR slots")
 
     def _validate_object_dependencies(
         self,
@@ -2758,6 +2823,8 @@ class RetainedSceneModel:
             selected_menu_by_bar: set[int] = set()
             selected_item_by_menu: set[int] = set()
             selected_tab_by_tabset: set[int] = set()
+            selected_task_by_taskbar: set[int] = set()
+            taskbar_intervals: dict[int, list[tuple[int, int]]] = {}
             for control_key, definition in owner_scene.controls.items():
                 if (
                     control_key != definition.control_id
@@ -2774,12 +2841,23 @@ class RetainedSceneModel:
                     ControlKind.TEXT_GRID,
                     ControlKind.TABSET,
                     ControlKind.ITEM_VIEW,
+                    ControlKind.TASKBAR,
                 }:
                     continue
                 order_key = (definition.parent_control_id, definition.order)
                 if order_key in sibling_orders:
                     self._fail(SceneErrorCode.GRAPH, "control sibling order is duplicated")
                 sibling_orders.add(order_key)
+                if definition.kind in (ControlKind.TASK, ControlKind.LAUNCHER):
+                    assert definition.bounds is not None
+                    start = definition.bounds.cell_x
+                    taskbar_intervals.setdefault(definition.parent_control_id, []).append(
+                        (start, start + definition.bounds.cell_cols)
+                    )
+                    if definition.state & ControlState.SELECTED:
+                        if definition.parent_control_id in selected_task_by_taskbar:
+                            self._fail(SceneErrorCode.GRAPH, "TASKBAR has multiple selected tasks")
+                        selected_task_by_taskbar.add(definition.parent_control_id)
                 if definition.kind is ControlKind.MENU:
                     if definition.state & ControlState.OPEN:
                         if definition.parent_control_id in open_menu_by_bar:
@@ -2809,6 +2887,12 @@ class RetainedSceneModel:
                             "TABSET has multiple selected tabs",
                         )
                     selected_tab_by_tabset.add(definition.parent_control_id)
+            for intervals in taskbar_intervals.values():
+                previous_end = 0
+                for start, end in sorted(intervals):
+                    if start < previous_end:
+                        self._fail(SceneErrorCode.GRAPH, "TASKBAR child bounds overlap")
+                    previous_end = end
 
     def _require_staging(self) -> _SceneStaging:
         if self._staging is None:

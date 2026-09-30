@@ -89,7 +89,7 @@ application status bar. A retained region also does not by itself identify
 an application pane or its focus state.
 
 The full pane-and-channel design needs the following semantic publication.
-MegaPad now implements pane and structured-status families; their Akashic
+MegaPad now implements pane, structured-status, and taskbar families; their Akashic
 producers remain integration work. Border curves and material treatment
 remain host choices.
 
@@ -97,7 +97,7 @@ remain host choices.
 | --- | --- | --- |
 | Pane (MegaPad implemented) | Stable identity, outer/content bounds, title metadata, visibility and focus; exact-owner content-region binding | Desk/app-host publication using existing pane state and explicit content clips |
 | Structured status (MegaPad implemented) | Stable fields with separate label/value slots, severity, emphasis, order and bounds | Shared UIDL status/label observation and lowering, covering existing app status strips |
-| Taskbar | Running-app and launcher entries, selected/minimized/enabled state, bounds, and activation intent | Desk shell publication from the same entries used for painting and hit testing |
+| Taskbar (MegaPad implemented) | Running-app and launcher entries, selected/minimized/enabled state, bounds, and activation intent | Desk shell publication from the same entries used for painting and hit testing |
 | Editable field | Label/value, type, limits or choices when applicable, selected/enabled/read-only state, and revision-bound edit intents | Reusable widget with normal CELL drawing and ordinary event routing; migrate Sound Lab's parameter rows to it |
 | Spreadsheet | Logical cells, row/column headers, selection, viewport, and existing edit actions | Targeted migration of Grid's custom drawing into a canonical reusable grid model |
 | Waveform | Plot bounds, actual sample/series source, scale, and clip | Shared waveform widget/projector backed by Sound Lab's rendered PCM; the terminal already has a retained `WAVEFORM` object |
@@ -345,3 +345,42 @@ including emulator and Python/native simulator publication, malformed frames,
 quota and transaction rejection, full/delta offers and acknowledgment, exact
 label/value clipping, and complete/partial repaint equivalence. No live
 Akashic status-field publication is claimed by this checkpoint.
+
+## Taskbar entries and producer handoff
+
+`RET_TASKBARS` (feature bit 13) adds CONTROL kinds `TASKBAR` (10), `TASK` (11),
+and `LAUNCHER` (12). It requires CONTROLS and uses the existing CONTROL wire
+envelope and ACTIVATE event. `PT-CONTROL-DEFINE` / `PT-CONTROL-REPLACE` publish
+these kinds with explicit geometry; there is no new event payload.
+
+A taskbar root occupies one guest-defined cell row. Its children have exact
+one-row rectangles relative to that root, stable identities and order, and
+separate task or launcher meaning. Their slots must fit and remain disjoint,
+including slots of hidden entries. Only TASK can be selected or minimized;
+at most one task is selected and selection excludes minimization. Disabled or
+hidden roots and entries cannot activate. Minimized tasks remain activatable
+so the guest can restore them through its existing focus action.
+
+The compositor clips material and labels to each entry, preserves separator
+holes, and never derives hit widths from text measurement. Curves use only
+unused text space. Changing label, state, font, or appearance leaves activation
+bounds unchanged. The same acknowledged-frame input rules as existing menus
+and tabs apply; the host does not select, restore, minimize, or launch an app
+locally in response to an activation.
+
+Desk should publish the same entry bounds and application IDs used by its
+current bottom-row drawing and hit testing, and route TASK activation to its
+existing focus/restore operation. LAUNCHER activation remains a guest action.
+Keep title truncation and entry placement in the producer's existing layout.
+When geometry, order, or ancestry changes, rebuild the subtree under the
+existing identity and transaction rules; CONTROL_REPLACE changes only state
+and, for entries, label/shortcut metadata. Preserve the CELL taskbar for
+fallback and omit its replaced retained glyph runs during rich publication.
+
+Taskbar qualification passed 688 checks in the broad supervised gate, including
+exact Forth publication on emulator and both simulator executors. Three test
+fixtures were corrected for the existing RET_CAPS header offset and CELL
+fallback geometry minima; the focused model/wire rerun passed all 114 checks.
+The production input test crosses projection, JSON, actual Pygame hit maps,
+sink acknowledgment, shared RPC, and binary ACTIVATE. It verifies that an old
+press or backpressured activation cannot cross to a replacement display.

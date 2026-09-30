@@ -31,6 +31,7 @@ class RetainedFeature(IntFlag):
     CONTROL_ITEMS = 1 << 10
     PANES = 1 << 11
     STATUS_FIELDS = 1 << 12
+    TASKBARS = 1 << 13
 
 
 class ResourceFormat(IntEnum):
@@ -49,6 +50,7 @@ _ALL_FEATURES = (
     | RetainedFeature.CONTROL_ITEMS
     | RetainedFeature.PANES
     | RetainedFeature.STATUS_FIELDS
+    | RetainedFeature.TASKBARS
 )
 
 
@@ -256,6 +258,8 @@ class RetainedPolicy:
         control_collections = bool(features & RetainedFeature.CONTROL_COLLECTIONS)
         if control_collections and not controls:
             raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
+        if features & RetainedFeature.TASKBARS and not controls:
+            raise ValueError("TASKBARS requires CONTROLS")
         # Item views need no larger minimum: the smallest ITM1 body and the
         # 64-byte item events fit CONTROL_COLLECTIONS's minima.
         if features & RetainedFeature.CONTROL_ITEMS and not control_collections:

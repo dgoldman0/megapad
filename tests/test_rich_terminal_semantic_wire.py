@@ -261,7 +261,7 @@ def test_control_values_enforce_kind_canonical_state_and_geometry(changes) -> No
             "",
         )
     with pytest.raises(ValueError, match="reserved CONTROL-1 bits"):
-        _menu_item(state=1 << 5)
+        _menu_item(state=1 << 6)
     with pytest.raises(ValueError, match="control character"):
         _menu_item(label="bad\tlabel")
 
@@ -270,7 +270,7 @@ def test_control_decoder_rejects_reserved_lengths_bounds_and_text() -> None:
     valid = bytearray(encode_control_definition(_menu_item()))
 
     reserved_state = bytearray(valid)
-    reserved_state[26:28] = (1 << 5).to_bytes(2, "little")
+    reserved_state[26:28] = (1 << 6).to_bytes(2, "little")
     with pytest.raises(RetainedWireError) as state:
         decode_control_definition(reserved_state)
     assert state.value.code is RetainedWireErrorCode.RESERVED

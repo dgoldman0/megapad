@@ -46,6 +46,8 @@ from rich_terminal.retained_view import (
     StatusFieldDraw,
     TabDraw,
     TabSetDraw,
+    TaskBarDraw,
+    TaskDraw,
     TextAreaDraw,
     TextGridDraw,
     WaveformDraw,
@@ -813,6 +815,12 @@ _TAB_WIRE_FIELDS = (
     "label",
     "shortcut",
 )
+_TASKBAR_WIRE_FIELDS = (
+    "kind", "control_id", "state", "order", "z_order", "bounds", "tasks",
+)
+_TASK_WIRE_FIELDS = (
+    "kind", "control_id", "state", "order", "bounds", "label", "shortcut",
+)
 _REGION_HEADER_FIELDS = (
     "owner_id",
     "owner_generation",
@@ -1052,6 +1060,20 @@ def _tab_to_wire(tab: TabDraw) -> dict:
     }
 
 
+def _task_to_wire(task: TaskDraw) -> dict:
+    if not isinstance(task, TaskDraw):
+        raise TypeError("task must be TaskDraw")
+    return {
+        "kind": "task" if task.kind is ControlKind.TASK else "launcher",
+        "control_id": task.control_id,
+        "state": int(task.state),
+        "order": task.order,
+        "bounds": _bounds_to_wire(task.bounds),
+        "label": task.label,
+        "shortcut": task.shortcut,
+    }
+
+
 def _menu_entry_to_wire(entry: MenuItemDraw | MenuSeparatorDraw) -> dict:
     if isinstance(entry, MenuItemDraw):
         return {
@@ -1101,6 +1123,7 @@ def _retained_draw_to_wire(
         | TextAreaDraw
         | TextGridDraw
         | TabSetDraw
+        | TaskBarDraw
     ),
 ) -> dict:
     if isinstance(draw, GlyphRunDraw):
@@ -1346,6 +1369,16 @@ def _retained_draw_to_wire(
             "z_order": draw.z_order,
             "bounds": _bounds_to_wire(draw.bounds),
             "tabs": [_tab_to_wire(tab) for tab in draw.tabs],
+        }
+    if isinstance(draw, TaskBarDraw):
+        return {
+            "kind": "taskbar",
+            "control_id": draw.control_id,
+            "state": int(draw.state),
+            "order": draw.order,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "tasks": [_task_to_wire(task) for task in draw.tasks],
         }
     raise TypeError("retained draw is outside the shared-viewer vocabulary")
 
@@ -1670,6 +1703,47 @@ def _tabset_from_wire(data, name: str) -> TabSetDraw:
     )
 
 
+def _task_from_wire(data, name: str) -> TaskDraw:
+    wire = _wire_object(data, name, _TASK_WIRE_FIELDS)
+    if wire["kind"] not in ("task", "launcher"):
+        raise ValueError(f"{name} kind must be task or launcher")
+    return TaskDraw(
+        control_id=_wire_integer(
+            wire["control_id"], f"{name} control_id", minimum=1, maximum=UINT64_MAX,
+        ),
+        kind=ControlKind.TASK if wire["kind"] == "task" else ControlKind.LAUNCHER,
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(wire["order"], f"{name} order", minimum=0, maximum=UINT32_MAX),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+        label=_wire_text(wire["label"], f"{name} label"),
+        shortcut=_wire_text(wire["shortcut"], f"{name} shortcut"),
+    )
+
+
+def _taskbar_from_wire(data, name: str) -> TaskBarDraw:
+    wire = _wire_object(data, name, _TASKBAR_WIRE_FIELDS)
+    if wire["kind"] != "taskbar":
+        raise ValueError(f"{name} kind must be taskbar")
+    tasks_wire = wire["tasks"]
+    if not isinstance(tasks_wire, (list, tuple)):
+        raise TypeError(f"{name} tasks must be an array")
+    return TaskBarDraw(
+        control_id=_wire_integer(
+            wire["control_id"], f"{name} control_id", minimum=1, maximum=UINT64_MAX,
+        ),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(wire["order"], f"{name} order", minimum=0, maximum=UINT32_MAX),
+        z_order=_wire_integer(
+            wire["z_order"], f"{name} z_order", minimum=INT32_MIN, maximum=INT32_MAX,
+        ),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+        tasks=tuple(
+            _task_from_wire(task, f"{name} task {index}")
+            for index, task in enumerate(tasks_wire)
+        ),
+    )
+
+
 def _cell_bounds_from_wire(value, name: str) -> ObjectBounds:
     """Decode signed CELL_RECT32 offsets and positive unsigned dimensions."""
 
@@ -1714,6 +1788,7 @@ def _retained_draw_from_wire(
     | TextAreaDraw
     | TextGridDraw
     | TabSetDraw
+    | TaskBarDraw
     | ItemViewDraw
 ):
     if not isinstance(data, Mapping):
@@ -2114,6 +2189,8 @@ def _retained_draw_from_wire(
         return _text_collection_from_wire(data, name, ControlKind.TEXT_GRID)
     if kind == "tabset":
         return _tabset_from_wire(data, name)
+    if kind == "taskbar":
+        return _taskbar_from_wire(data, name)
     if kind == "item_view":
         return _item_view_from_wire(data, name)
     raise ValueError(f"{name} kind is not a retained draw kind")

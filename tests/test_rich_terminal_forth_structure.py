@@ -155,7 +155,12 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
     assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
-    assert "0x1F3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x3F3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x2000   CONSTANT _PT-RET-TASKBARS" in source
+    assert (
+        "_PT-RV-FEATURES @ _PT-RET-TASKBARS AND\n"
+        "    _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND"
+    ) in caps
     assert (
         "_PT-RV-FEATURES @ _PT-RET-CONTROL-ITEMS AND\n"
         "    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND"
@@ -577,6 +582,8 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     assert "_PT-RET-CONTROLS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
     assert "_PT-CT-KIND @ _PT-CT-COLLECTION-KIND? IF" in body
     assert "_PT-RET-CONTROL-COLLECTIONS? 0= IF" in body
+    assert "_PT-CT-KIND @ _PT-CT-TASKBAR-KIND? IF" in body
+    assert "_PT-RET-TASKBARS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
     assert body.index("_PT-PO-ADMIT") < body.index("_PT-CT-PAYLOAD!")
     assert body.index("_PT-CT-PAYLOAD!") < body.index("_PT-PO-SEND")
 
@@ -612,7 +619,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     assert "_PT-CT-X @ _PT-CT-COLS @ _PT-I32-EXTENT?" in root_bounds
     assert "_PT-CT-Y @ _PT-CT-ROWS @ _PT-I32-EXTENT?" in root_bounds
     assert "_PT.S.PEER-MAX-PAY @ U>" in fields
-    assert "_PT-CT-STATE @ 0x1F INVERT AND" in fields
+    assert "_PT-CT-STATE @ 0x3F INVERT AND" in fields
     assert "PT-CONTROL-F-OPEN PT-CONTROL-F-SELECTED OR AND" in fields
     for kind in (
         "PT-CONTROL-MENU-BAR",
@@ -624,6 +631,9 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
         "PT-CONTROL-TABSET",
         "PT-CONTROL-TAB",
         "PT-CONTROL-ITEM-VIEW",
+        "PT-CONTROL-TASKBAR",
+        "PT-CONTROL-TASK",
+        "PT-CONTROL-LAUNCHER",
     ):
         assert kind in kinds
     for value, kind in enumerate(
@@ -633,6 +643,9 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
             "PT-CONTROL-TABSET",
             "PT-CONTROL-TAB",
             "PT-CONTROL-ITEM-VIEW",
+            "PT-CONTROL-TASKBAR",
+            "PT-CONTROL-TASK",
+            "PT-CONTROL-LAUNCHER",
         ),
         start=5,
     ):

@@ -106,6 +106,12 @@ _CONTROL_ALLOWED_STATES = {
         ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
     ),
     ControlKind.TABSET: ControlState.VISIBLE | ControlState.ENABLED,
+    ControlKind.TASKBAR: ControlState.VISIBLE | ControlState.ENABLED,
+    ControlKind.TASK: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+        | ControlState.MINIMIZED
+    ),
+    ControlKind.LAUNCHER: ControlState.VISIBLE | ControlState.ENABLED,
     ControlKind.TAB: (
         ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
     ),
@@ -139,6 +145,8 @@ def _control_state(
         state & ControlState.VISIBLE and state & ControlState.ENABLED
     ):
         raise ValueError("open or selected controls must be visible and enabled")
+    if kind is ControlKind.TASK and state & ControlState.SELECTED and state & ControlState.MINIMIZED:
+        raise ValueError("TASK cannot be selected and minimized")
     if visible_draw and not state & ControlState.VISIBLE:
         raise ValueError(f"{kind.name} draw must be visible")
     return state
@@ -936,7 +944,7 @@ MenuEntryDraw = MenuItemDraw | MenuSeparatorDraw
 
 
 def _semantic_order_key(
-    draw: MenuEntryDraw | MenuDraw | TabDraw,
+    draw: MenuEntryDraw | MenuDraw | TabDraw | TaskDraw,
 ) -> tuple[int, int]:
     return draw.order, draw.control_id
 
@@ -1258,6 +1266,108 @@ class TabSetDraw:
         object.__setattr__(self, "tabs", tabs)
 
 
+@dataclass(frozen=True, slots=True)
+class TaskDraw:
+    """One visible task or launcher with exact TASKBAR-relative geometry."""
+
+    control_id: int
+    kind: ControlKind
+    state: ControlState
+    order: int
+    bounds: ObjectBounds
+    label: str
+    shortcut: str = ""
+
+    def __post_init__(self) -> None:
+        control_id = _integer("control_id", self.control_id, minimum=1, maximum=UINT64_MAX)
+        if isinstance(self.kind, bool):
+            raise TypeError("task kind must not be bool")
+        try:
+            kind = ControlKind(self.kind)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("task kind is not a CONTROL-1 kind") from exc
+        if kind not in (ControlKind.TASK, ControlKind.LAUNCHER):
+            raise ValueError("task kind must be TASK or LAUNCHER")
+        state = _control_state("state", self.state, kind, visible_draw=True)
+        order = _integer("order", self.order, minimum=0, maximum=UINT32_MAX)
+        if not isinstance(self.bounds, ObjectBounds):
+            raise TypeError("task bounds must be ObjectBounds")
+        bounds = ObjectBounds(
+            self.bounds.cell_x, self.bounds.cell_y,
+            self.bounds.cell_cols, self.bounds.cell_rows,
+        )
+        label = _control_text("label", self.label, nonempty=True)
+        shortcut = _control_text("shortcut", self.shortcut, nonempty=False)
+        validate_control_shape(
+            kind=kind, state=state, z_order=0, parent_control_id=1,
+            order=order, bounds=bounds, label=label, shortcut=shortcut, content=None,
+        )
+        for name, value in (
+            ("control_id", control_id), ("kind", kind), ("state", state),
+            ("order", order), ("bounds", bounds), ("label", label), ("shortcut", shortcut),
+        ):
+            object.__setattr__(self, name, value)
+
+
+def _validate_task_bounds(root_bounds: ObjectBounds, bounds) -> None:
+    """Check all authored slots, including slots of hidden scene children."""
+
+    intervals = []
+    for child in bounds:
+        if child.cell_rows != 1 or child.cell_y != 0 or child.cell_x < 0:
+            raise ValueError("TASKBAR children require nonnegative one-row bounds")
+        right = child.cell_x + child.cell_cols
+        if right > root_bounds.cell_cols:
+            raise ValueError("TASKBAR child bounds exceed root bounds")
+        intervals.append((child.cell_x, right))
+    intervals.sort()
+    if any(left[1] > right[0] for left, right in zip(intervals, intervals[1:])):
+        raise ValueError("TASKBAR child bounds overlap")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskBarDraw:
+    """One visible taskbar whose tasks retain guest-assigned cell slots."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    z_order: int
+    bounds: ObjectBounds
+    tasks: tuple[TaskDraw, ...]
+
+    def __post_init__(self) -> None:
+        control_id, state, order, z_order, bounds, content = _root_draw_fields(
+            ControlKind.TASKBAR, self.control_id, self.state, self.order,
+            self.z_order, self.bounds, None,
+        )
+        assert content is None
+        validate_control_shape(
+            kind=ControlKind.TASKBAR, state=state, z_order=z_order,
+            parent_control_id=0, order=order, bounds=bounds,
+            label="", shortcut="", content=None,
+        )
+        for name, value in (
+            ("control_id", control_id), ("state", state), ("order", order),
+            ("z_order", z_order), ("bounds", bounds),
+        ):
+            object.__setattr__(self, name, value)
+        tasks = tuple(self.tasks)
+        if any(not isinstance(task, TaskDraw) for task in tasks):
+            raise TypeError("tasks must contain only TaskDraw values")
+        if len({task.order for task in tasks}) != len(tasks):
+            raise ValueError("task order is duplicated")
+        if tuple(sorted(tasks, key=_semantic_order_key)) != tasks:
+            raise ValueError("tasks are not in semantic order")
+        if sum(bool(task.state & ControlState.SELECTED) for task in tasks) > 1:
+            raise ValueError("TASKBAR has multiple selected tasks")
+        task_ids = tuple(task.control_id for task in tasks)
+        if len(set(task_ids)) != len(task_ids) or self.control_id in task_ids:
+            raise ValueError("TASKBAR control IDs are duplicated")
+        _validate_task_bounds(bounds, (task.bounds for task in tasks))
+        object.__setattr__(self, "tasks", tasks)
+
+
 ObjectDraw = (
     GlyphRunDraw
     | PolylineDraw
@@ -1270,7 +1380,7 @@ ObjectDraw = (
     | PlotDraw
     | WaveformDraw
 )
-SemanticRootDraw = MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw | ItemViewDraw
+SemanticRootDraw = MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw | ItemViewDraw | TaskBarDraw
 RetainedDraw = ObjectDraw | SemanticRootDraw
 
 _OBJECT_DRAW_TYPES = (
@@ -1295,6 +1405,8 @@ def _semantic_draw_control_ids(draw: SemanticRootDraw) -> set[int]:
             control_ids.update(entry.control_id for entry in menu.entries)
     elif isinstance(draw, TabSetDraw):
         control_ids.update(tab.control_id for tab in draw.tabs)
+    elif isinstance(draw, TaskBarDraw):
+        control_ids.update(task.control_id for task in draw.tasks)
     return control_ids
 
 
@@ -1403,6 +1515,7 @@ class RetainedRegionDraw:
                     TextAreaDraw,
                     TextGridDraw,
                     TabSetDraw,
+                    TaskBarDraw,
                     ItemViewDraw,
                 ),
             )
@@ -1762,6 +1875,7 @@ def _validate_control_graph(
     selected_menu_by_bar: set[int] = set()
     selected_item_by_menu: set[int] = set()
     selected_tab_by_tabset: set[int] = set()
+    selected_task_by_bar: set[int] = set()
     roots_by_region: dict[int, list[int]] = {}
     root_kinds = {
         ControlKind.MENU_BAR,
@@ -1769,12 +1883,15 @@ def _validate_control_graph(
         ControlKind.TEXT_GRID,
         ControlKind.TABSET,
         ControlKind.ITEM_VIEW,
+        ControlKind.TASKBAR,
     }
     expected_parent = {
         ControlKind.MENU: ControlKind.MENU_BAR,
         ControlKind.MENU_ITEM: ControlKind.MENU,
         ControlKind.MENU_SEPARATOR: ControlKind.MENU,
         ControlKind.TAB: ControlKind.TABSET,
+        ControlKind.TASK: ControlKind.TASKBAR,
+        ControlKind.LAUNCHER: ControlKind.TASKBAR,
     }
     for control_id, (definition, kind, state, _) in validated.items():
         if kind in root_kinds:
@@ -1814,6 +1931,22 @@ def _validate_control_graph(
             if definition.parent_control_id in selected_tab_by_tabset:
                 raise RetainedViewError("retained TABSET has multiple selected tabs")
             selected_tab_by_tabset.add(definition.parent_control_id)
+
+        elif kind is ControlKind.TASK and state & ControlState.SELECTED:
+            if definition.parent_control_id in selected_task_by_bar:
+                raise RetainedViewError("retained TASKBAR has multiple selected tasks")
+            selected_task_by_bar.add(definition.parent_control_id)
+
+    for root_id, child_ids in children.items():
+        root, root_kind, _, _ = validated[root_id]
+        if root_kind is ControlKind.TASKBAR:
+            assert root.bounds is not None
+            try:
+                _validate_task_bounds(root.bounds, (
+                    validated[child_id][0].bounds for child_id in child_ids
+                ))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise RetainedViewError(f"retained TASKBAR geometry is invalid: {exc}") from exc
 
     ordered_children = {
         parent_id: tuple(
@@ -1979,6 +2112,30 @@ def _project_tabset(
     )
 
 
+def _project_taskbar(
+    root_id: int,
+    controls: _ValidatedControlMap,
+    children: dict[int, tuple[int, ...]],
+) -> TaskBarDraw:
+    root, kind, state, _ = controls[root_id]
+    if kind is not ControlKind.TASKBAR or root.bounds is None:
+        raise RetainedViewError("semantic root is not a bounded TASKBAR")
+    tasks = []
+    for task_id in children.get(root_id, ()):
+        task, task_kind, task_state, _ = controls[task_id]
+        if task_kind not in (ControlKind.TASK, ControlKind.LAUNCHER):
+            raise RetainedViewError("semantic TASKBAR child is not a TASK or LAUNCHER")
+        if task_state & ControlState.VISIBLE:
+            tasks.append(TaskDraw(
+                control_id=task.control_id, kind=task_kind, state=task_state,
+                order=task.order, bounds=task.bounds, label=task.label, shortcut=task.shortcut,
+            ))
+    return TaskBarDraw(
+        control_id=root.control_id, state=state, order=root.order,
+        z_order=root.z_order, bounds=root.bounds, tasks=tuple(tasks),
+    )
+
+
 def _project_semantic_root(
     root_id: int,
     controls: _ValidatedControlMap,
@@ -1993,6 +2150,8 @@ def _project_semantic_root(
         return _project_tabset(root_id, controls, children)
     if kind is ControlKind.ITEM_VIEW:
         return _project_item_view(root_id, controls)
+    if kind is ControlKind.TASKBAR:
+        return _project_taskbar(root_id, controls, children)
     raise RetainedViewError(f"semantic root has unsupported kind {kind.name}")
 
 
@@ -2510,6 +2669,8 @@ __all__ = [
     "StatusFieldDraw",
     "TabDraw",
     "TabSetDraw",
+    "TaskBarDraw",
+    "TaskDraw",
     "TextAreaDraw",
     "TextGridDraw",
     "WaveformDraw",

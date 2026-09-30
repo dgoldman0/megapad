@@ -233,8 +233,9 @@ Feature bits are:
 | 10 | `RET_CONTROL_ITEMS` | the item-view CONTROL kind and its item events |
 | 11 | `RET_PANES` | explicit pane chrome, title, focus, and content-region relationship |
 | 12 | `RET_STATUS_FIELDS` | structured single-row label/value status fields |
+| 13 | `RET_TASKBARS` | fixed-slot taskbar, task, and launcher CONTROL kinds |
 
-Bits 13 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 14 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -244,6 +245,13 @@ in Sections 5, 6, and 9.1. `RET_CONTROL_COLLECTIONS` requires `RET_CONTROLS` and
 uses the same limits; it adds no item-count or content-byte policy maximum.
 `RET_CONTROL_ITEMS` requires `RET_CONTROL_COLLECTIONS` and likewise adds no
 maximum of its own.
+`RET_TASKBARS` requires `RET_CONTROLS`, independently of the collection and
+item-view features. It adds no capacity field: roots and entries consume the
+existing object and UTF-8 reservations. Its minimum inbound payload is the
+existing 80-byte CONTROL prefix and its complete transaction floor is 280
+bytes for one empty TASKBAR root. Entry label and shortcut bytes must fit the
+actual negotiated payload, transaction, and aggregate UTF-8 bounds. Support
+does not automatically enable the feature in existing product policies.
 
 All maxima are terminal policy supplied by its caller. This contract does not
 assign desktop-, application-, or implementation-specific numeric caps.
@@ -915,7 +923,7 @@ renderer-neutral semantic extension rather than pixel inference.
 A region barrier point that no control surface covers shows CELL or residual
 content, so a pointer gesture may start there and reach the client as raw
 `POINTER` at that cell (APT-1 Section 12). The visible root bounds of every
-`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, and `ITEM_VIEW`, and every
+`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, and `TASKBAR`, and every
 open menu popup, are control surfaces laid out by the renderer: a point on
 one never starts a raw gesture. It resolves to an activatable target, to a
 `TEXT_AREA`/`TEXT_GRID` position or an `ITEM_VIEW` item under
@@ -929,7 +937,8 @@ is invalid until every surviving region is stamped with the new generation.
 
 `RET_CONTROLS` defines the independent CONTROL identity namespace and its menu
 kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds, and
-`RET_CONTROL_ITEMS` the item view, in that same namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
+`RET_CONTROL_ITEMS` the item view, and `RET_TASKBARS` taskbar roots and entries,
+in that same namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
 80-byte prefix `<QQQHHiQQIiiIIIII>`, followed immediately by `label_bytes`
 bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
 
@@ -974,8 +983,12 @@ Control kinds are:
 | 7 | `TABSET` (requires `RET_CONTROL_COLLECTIONS`) |
 | 8 | `TAB` (requires `RET_CONTROL_COLLECTIONS`) |
 | 9 | `ITEM_VIEW` (requires `RET_CONTROL_ITEMS`) |
+| 10 | `TASKBAR` (requires `RET_TASKBARS`) |
+| 11 | `TASK` (requires `RET_TASKBARS`) |
+| 12 | `LAUNCHER` (requires `RET_TASKBARS`) |
 
-Menu controls, `TABSET`, and `TAB` require `content_bytes = 0`. `TEXT_AREA`
+Menu controls, `TABSET`, `TAB`, `TASKBAR`, `TASK`, and `LAUNCHER` require
+`content_bytes = 0`. `TEXT_AREA`
 and `TEXT_GRID` require one canonical STX1 text collection, and `ITEM_VIEW`
 one canonical ITM1 item collection. Their exact header, item, graph, state,
 replacement, and quota rules are specified in the MegaPad-owned
@@ -991,11 +1004,13 @@ State bits are:
 | 2 | `OPEN` | this menu's child surface is open |
 | 3 | `SELECTED` | this kind's authoritative selection/focus state |
 | 4 | `CHECKED` | this menu item carries checked state |
+| 5 | `MINIMIZED` | this task's application is minimized |
 
-Bits 5 through 15 are zero. The all-zero bound tuple means bounds are absent;
+Bits 6 through 15 are zero. The all-zero bound tuple means bounds are absent;
 otherwise the cell origins are signed i32 and both extents are positive u32.
 Their exact endpoints use the same wider-integer rule as every CELL_RECT32, and
-the bounds are relative to the named region's logical origin. Bounds constrain
+root bounds are relative to the named region's logical origin. TASK and
+LAUNCHER bounds are instead relative to their TASKBAR root. Bounds constrain
 the renderer-neutral root placement/available rectangle but do not prescribe
 fonts, menu metrics, popup direction, pixels, or hit boxes. The selected
 renderer owns exact descendant menu geometry, bounded clipping,
@@ -1008,7 +1023,7 @@ The final menu control graph is canonical:
 * `MENU` has a same-owner, same-generation, same-region `MENU_BAR` parent;
 * `MENU_ITEM` and `MENU_SEPARATOR` have a same-owner, same-generation,
   same-region `MENU` parent;
-* every non-root control has zero bounds and `z_order = 0`; `order` is unique
+* every non-root menu control has zero bounds and `z_order = 0`; `order` is unique
   among children of one parent, need not be contiguous, and determines sibling
   order before `control_id` is used as the final tie-breaker;
 * `MENU_BAR` has empty label and shortcut and permits only `VISIBLE` and
@@ -1029,16 +1044,52 @@ effectively invisible while that menu lacks `OPEN`, even if their local
 `VISIBLE` bit remains set. These rules make the fixed-depth parent graph
 acyclic without a separate depth or control-count limit.
 
+The taskbar graph uses explicit guest-authored cell slots:
+
+* `TASKBAR` is a root with `parent_control_id = 0`, `order = 0`, one positive
+  row of bounds, and caller-selected signed `z_order`. Its label, shortcut,
+  and content are empty. It permits only `VISIBLE` and `ENABLED`.
+* `TASK` and `LAUNCHER` have a same-owner, same-generation, same-region
+  TASKBAR parent and `z_order = 0`. Their bounds are present, with nonnegative
+  `cell_x`, `cell_y = 0`, positive `cell_cols`, and `cell_rows = 1`. The exact
+  wider-integer right endpoint must not exceed the root's width.
+* Each entry has a nonempty label and optional shortcut. Both strings are
+  strict UTF-8 scalar text and exclude C0, DEL/C1, U+2028, and U+2029. The
+  additional single-line exclusions apply only to these new control kinds.
+* TASK permits `VISIBLE`, `ENABLED`, `SELECTED`, and `MINIMIZED`. A selected
+  task must be locally visible and enabled and cannot also be minimized.
+  LAUNCHER permits only `VISIBLE` and `ENABLED`.
+* All child slots, including hidden or disabled entries, are pairwise
+  disjoint. Abutting slots and unclaimed gaps are valid. Child `order` values
+  are unique within the root and need not be contiguous. At most one TASK
+  per root is selected. The complete transaction's final graph determines
+  these sibling constraints, so an atomic selection transfer can publish
+  either entry first.
+
+Taskbar visibility and enablement cascade from its root. Minimized tasks
+remain activatable when effectively visible and enabled. The guest decides
+what activation means for its task or launcher; the terminal emits the
+existing ACTIVATE event and never changes task selection, minimization,
+application lifecycle, or launcher state itself. The renderer keeps the exact
+entry slot and root geometry across appearances, clips its material and
+typography to those slots, and claims the entire visible taskbar root as a
+control surface. Empty gaps and disabled entries do not become raw POINTER
+targets. App titles or CELL glyphs never supply inferred task identity.
+
 `CONTROL_DEFINE` requires a nonzero ID strictly greater than the owner's prior
 CONTROL high-water. That high-water is independent of the OBJECT high-water;
 equal numeric IDs in the two namespaces are distinct. `CONTROL_REPLACE`
 requires an existing exact-target control and resends its complete wire record.
-Menu and TABSET records remain state-only replacements; TAB may replace state,
-label, and shortcut; TEXT_AREA, TEXT_GRID, and ITEM_VIEW may replace state
+Menu, TABSET, and TASKBAR records remain state-only replacements; TAB, TASK,
+and LAUNCHER may replace state, label, and shortcut; TEXT_AREA, TEXT_GRID, and ITEM_VIEW may replace state
 and their complete content with a strictly newer content revision. Every identity, kind,
 authority, hierarchy, order, bounds, and geometry field remains exact. The
 proposed value still undergoes normal control policy, dependency, quota, and
 final-graph validation.
+Taskbar geometry and hierarchy follow the same stable-identity rule: resize
+or layout changes use the existing rebuild flow, dropping old controls and
+defining new controls with fresh IDs where their bounds, parent, or order
+change. TASKBAR does not add a geometry-changing CONTROL_REPLACE exception.
 `CONTROL_DROP <QQQ>` names owner, generation, and control ID. A surviving child
 of a dropped control makes commit invalid. IDs are not reused within an owner
 generation.
@@ -1079,7 +1130,7 @@ resulting authoritative state in a later transaction.
 
 | Kind | Name | Exact payload | Target kinds | Feature |
 |---:|---|---:|---|---|
-| 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB` | 8; `TAB` also 9 |
+| 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER` | 8; `TAB` also 9; task entries also 13 |
 | 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
 | 3 | `EXTEND` | 64 bytes | `TEXT_AREA` | 8 and 9 |
 | 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW` | 8 and 9; `ITEM_VIEW` also 10 |
@@ -1104,7 +1155,7 @@ item names ITM1 content.
 The terminal may emit an event only for the exact active owner generation and
 control ID of a target kind listed for it, when the complete current control
 and all of its ancestors are effectively visible and enabled. `MENU_BAR`,
-`MENU_SEPARATOR`, and `TABSET` never emit `CONTROL_EVENT`.
+`MENU_SEPARATOR`, `TABSET`, and `TASKBAR` never emit `CONTROL_EVENT`.
 
 The event's `model_revision` is exactly the current global revision of the
 complete composite containing the hit-tested control, after that same revision

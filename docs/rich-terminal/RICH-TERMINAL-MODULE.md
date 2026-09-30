@@ -314,7 +314,9 @@ means fully clipped; otherwise the positive clip is within the selected
 surface and its intersection with the logical rectangle. Object and optional
 root-control `x y cols rows` use the same signed-origin/positive-extent cell
 contract, relative to the region logical origin or parent-object origin.
-Descendant controls pass the canonical all-zero absent tuple. PT does not
+Menu and tab descendants pass the canonical all-zero absent tuple. TASK and
+LAUNCHER descendants instead carry explicit one-row rectangles relative to
+their TASKBAR parent, preserving the guest's exact cell slots. PT does not
 normalize, clamp, or crop these values. POLYLINE's inner point coordinates and
 stroke width remain UNORM32 within the resolved object.
 
@@ -519,6 +521,32 @@ the same borrowed-span discipline, reject C0 and DEL, and are bounded by the
 caller-provided TX scratch, exact negotiated payload and declared transaction
 bytes, plus the owner's terminal-side aggregate UTF-8 quota. No separate
 control-text capacity is introduced.
+
+`PT-CONTROL-TASKBAR`, `PT-CONTROL-TASK`, and `PT-CONTROL-LAUNCHER` (10–12)
+extend the existing typed `PT-CONTROL-DEFINE` and `PT-CONTROL-REPLACE` writers
+under the additive `RET_TASKBARS` feature (bit 13). TASKBARS depends on CONTROLS
+and inherits its 80-byte inbound payload and 280-byte retained-transaction
+minima; no new body format, input action, or private capacity is introduced.
+The writers return `PT-S-UNSUPPORTED` without output or accounting changes
+when this family is unavailable. `PT-CONTROL-DROP` keeps its existing tuple
+and terminal-side kind lookup.
+
+A TASKBAR is a root with parent and order zero, positive width and exactly one
+row, empty label/shortcut/content, and only VISIBLE and ENABLED state bits.
+TASK and LAUNCHER have a nonzero TASKBAR parent, zero z, u32 order, and explicit
+parent-local bounds with nonnegative x, y zero, positive width, and one row.
+Their label is nonempty, shortcut optional, and content empty. TASK accepts
+VISIBLE, ENABLED, SELECTED, and `PT-CONTROL-F-MINIMIZED` (bit 5); SELECTED
+requires VISIBLE and ENABLED and excludes MINIMIZED. LAUNCHER accepts only
+VISIBLE and ENABLED. The new family rejects C1 and U+2028/U+2029 in addition
+to existing label/shortcut UTF-8, C0, DEL, span-alias, and quota checks.
+Earlier control kinds keep their established text rules.
+
+The terminal validates same-owner/same-region parentage, child containment,
+nonoverlap, and at most one selected task in the final graph. PT keeps no
+parallel control table. Task and launcher activation uses the existing
+revision-bound `PT-CONTROL-ACTIVATE` event; the guest decides which application
+to activate or launch, then publishes the resulting state.
 
 `PT-SERIES-TIMESTAMP-EXPLICIT` and `PT-SERIES-TIMESTAMP-UNIFORM` select the
 two protocol timestamp modes. APPEND and REPLACE take an aligned borrowed span

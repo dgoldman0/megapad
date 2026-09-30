@@ -34,6 +34,7 @@ from .retained_view import (
     StatusFieldDraw,
     TabDraw,
     TabSetDraw,
+    TaskBarDraw,
     TextAreaDraw,
     TextGridDraw,
     WaveformDraw,
@@ -270,8 +271,10 @@ class ControlHitTarget:
             ControlKind.MENU,
             ControlKind.MENU_ITEM,
             ControlKind.TAB,
+            ControlKind.TASK,
+            ControlKind.LAUNCHER,
         ):
-            raise ValueError("only MENU, MENU_ITEM, and TAB can be hit targets")
+            raise ValueError("only MENU, MENU_ITEM, and TAB, TASK, or LAUNCHER can be hit targets")
         object.__setattr__(self, "kind", kind)
         if not isinstance(self.rect, PixelRect):
             raise TypeError("rect must be PixelRect")
@@ -844,7 +847,7 @@ _OBJECT_DRAWS = (
     PlotDraw,
     WaveformDraw,
 )
-_ROOT_CONTROLS = (TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw)
+_ROOT_CONTROLS = (TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw, TaskBarDraw)
 
 
 def _draw_extent(
@@ -2726,6 +2729,78 @@ def _paint_item_view(
     ]
 
 
+def _paint_taskbar(
+    pygame_module, surface, font, region, region_rect, draw: TaskBarDraw,
+    cell_width: int, cell_height: int, *, hovered, pressed,
+    appearance: Appearance = REFERENCE_APPEARANCE,
+) -> list[HitMapEntry]:
+    """Paint task entries in their authored slots; gaps never become targets."""
+    anchor, visible_anchor = _semantic_root_rects(
+        pygame_module, surface, region, region_rect, draw.bounds,
+    )
+    if visible_anchor.width <= 0 or visible_anchor.height <= 0:
+        return []
+    entries: list[HitMapEntry] = [ControlSurface(
+        region.owner_id, region.owner_generation, draw.control_id,
+        _pixel_rect(visible_anchor),
+    )]
+    root_enabled = bool(draw.state & ControlState.ENABLED)
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(visible_anchor)
+        surface.fill(appearance.surface if appearance.flowing else _COLLECTION_SURFACE,
+                     visible_anchor)
+        for task in draw.tasks:
+            rect = _bounds_rect(pygame_module, anchor, task.bounds, cell_width, cell_height)
+            visible = _bounded_pygame_rect(pygame_module, rect, visible_anchor)
+            if visible.width <= 0 or visible.height <= 0:
+                continue
+            surface.set_clip(visible)
+            identity = _identity(region, task.control_id)
+            enabled = root_enabled and bool(task.state & ControlState.ENABLED)
+            selected = enabled and bool(task.state & ControlState.SELECTED)
+            minimized = bool(task.state & ControlState.MINIMIZED)
+            text = task.label + ("  " + task.shortcut if task.shortcut else "")
+            advance = max(1, cell_width * 4)
+            width = _bounded_text_width(font, text, rect.width, advance)
+            # Use only genuinely unused space for curves; long labels retain
+            # the whole slot and square edges rather than losing edge text.
+            spare = max(0, rect.width - width)
+            padding = min(cell_width, spare // 2)
+            inset_x = min(2, max(0, padding - 1))
+            inset_y = min(2, max(0, (rect.height - _font_height(font, cell_height)) // 2))
+            material = _WideRect(rect.left + inset_x, rect.top + inset_y,
+                                 rect.width - 2 * inset_x, rect.height - 2 * inset_y)
+            if appearance.flowing:
+                bright = selected
+                fill = (appearance.accent if bright else appearance.selection
+                        if enabled and identity in (hovered, pressed) else appearance.channel)
+                paint_channel(pygame_module, surface, material, fill,
+                              radius=_flow_text_radius(padding - inset_x),
+                              border=appearance.accent if selected else appearance.border)
+                foreground = appearance.surface if bright else _TEXT
+            else:
+                fill = _control_surface(identity, task.state, effectively_enabled=enabled,
+                                        hovered=hovered, pressed=pressed)
+                _rounded_rect(pygame_module, surface, material,
+                              fill or _TITLE_IDLE, radius=0)
+                foreground = _TEXT
+            if not enabled:
+                foreground = _DISABLED_TEXT
+            elif minimized:
+                foreground = _MUTED_TEXT
+            _paint_bounded_text(
+                pygame_module, surface, font, text, foreground, visible,
+                left=rect.left + padding, right=rect.right - padding,
+                top=rect.top, bottom=rect.bottom, tab_advance=advance,
+            )
+            if enabled:
+                entries.append(ControlHitTarget(identity, task.kind, _pixel_rect(visible)))
+    finally:
+        surface.set_clip(prior_clip)
+    return entries
+
+
 def _tab_width(
     font,
     tab: TabDraw,
@@ -4218,6 +4293,11 @@ def _paint_draw(
                 appearance=appearance,
             )
         )
+    elif isinstance(draw, TaskBarDraw):
+        hit_entries.extend(_paint_taskbar(
+            pygame_module, surface, control_font, region, region_rect, draw,
+            cell_w, cell_h, hovered=hovered, pressed=pressed, appearance=appearance,
+        ))
     elif isinstance(draw, TabSetDraw):
         hit_entries.extend(
             _paint_tabset(

@@ -64,7 +64,7 @@ from .semantic_items import (
 
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0x1F3F
+_RETAINED_FEATURE_MASK = 0x3F3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -378,6 +378,11 @@ class RetainedCaps:
             and not features & RetainedFeature.CONTROL_COLLECTIONS
         ):
             raise ValueError("CONTROL_ITEMS requires CONTROL_COLLECTIONS")
+        if (
+            features & RetainedFeature.TASKBARS
+            and not features & RetainedFeature.CONTROLS
+        ):
+            raise ValueError("TASKBARS requires CONTROLS")
         object.__setattr__(self, "features", features)
         for name in (
             "max_owner_records",
