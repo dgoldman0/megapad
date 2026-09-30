@@ -33,6 +33,7 @@ class RetainedFeature(IntFlag):
     STATUS_FIELDS = 1 << 12
     TASKBARS = 1 << 13
     FIELDS = 1 << 14
+    GRID_CELLS = 1 << 15
 
 
 class ResourceFormat(IntEnum):
@@ -53,6 +54,7 @@ _ALL_FEATURES = (
     | RetainedFeature.STATUS_FIELDS
     | RetainedFeature.TASKBARS
     | RetainedFeature.FIELDS
+    | RetainedFeature.GRID_CELLS
 )
 
 
@@ -260,6 +262,8 @@ class RetainedPolicy:
         control_collections = bool(features & RetainedFeature.CONTROL_COLLECTIONS)
         if control_collections and not controls:
             raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
+        if features & RetainedFeature.GRID_CELLS and not control_collections:
+            raise ValueError("GRID_CELLS requires CONTROL_COLLECTIONS")
         fields = bool(features & RetainedFeature.FIELDS)
         if fields and not controls:
             raise ValueError("FIELDS requires CONTROLS")

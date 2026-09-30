@@ -175,7 +175,7 @@ class TestTaskbarForth(_KDOSTestBase):
             '  S" TBCAPS " TYPE TB-S _PT-RET-CAPS-VALID? .',
             "  0x2001 TB-CAPS 8 + _PT-U64! TB-S _PT-RET-CAPS-VALID? .",
             "  0x2100 TB-CAPS 8 + _PT-U64! TB-S _PT-RET-CAPS-VALID? .",
-            "  0xA101 TB-CAPS 8 + _PT-U64! TB-S _PT-RET-CAPS-VALID? .",
+            "  0x12101 TB-CAPS 8 + _PT-U64! TB-S _PT-RET-CAPS-VALID? .",
             "  0x2101 TB-CAPS 8 + _PT-U64! TB-S _PT-RET-CAPS-VALID? .",
             "  TB-CAPS TB-S _PT.S.RET-CAPS 64 MOVE",
             "  TB-FORMATS _PT-RX-P ! TB-S _PT-RET-FORMATS-VALID? .",

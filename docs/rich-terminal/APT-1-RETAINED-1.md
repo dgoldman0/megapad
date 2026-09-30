@@ -235,8 +235,9 @@ Feature bits are:
 | 12 | `RET_STATUS_FIELDS` | structured single-row label/value status fields |
 | 13 | `RET_TASKBARS` | fixed-slot taskbar, task, and launcher CONTROL kinds |
 | 14 | `RET_FIELDS` | typed FIELD controls with explicit label/value slots |
+| 15 | `RET_GRID_CELLS` | typed NUMBER, FORMULA, and ERROR roles in TEXT_GRID |
 
-Bits 15 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 16 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -260,6 +261,12 @@ choices consume the existing object reservation; its outer label and content
 text consume aggregate UTF-8 capacity. Its smallest payload is 176 bytes and
 its complete transaction floor is 376 bytes. The caller must explicitly enable
 the family only on a complete supported display path.
+
+`RET_GRID_CELLS` requires `RET_CONTROL_COLLECTIONS` and extends only the role
+values accepted in TEXT_GRID STX1 content. It adds no format field, payload
+layout, capacity, or event kind. Existing collection payload, transaction,
+object, and UTF-8 bounds apply unchanged. A caller explicitly advertises the
+family; ordinary CONTENT grids remain valid without it.
 
 All maxima are terminal policy supplied by its caller. This contract does not
 assign desktop-, application-, or implementation-specific numeric caps.
@@ -1006,7 +1013,11 @@ and `TEXT_GRID` require one canonical STX1 text collection, and `ITEM_VIEW`
 one canonical ITM1 item collection. Their exact header, item, graph, state,
 replacement, and quota rules are specified in the MegaPad-owned
 `docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract. Menu and collection
-roots use the same CELL_RECT32 geometry contract. FIELD requires the canonical
+roots use the same CELL_RECT32 geometry contract. TEXT_GRID content carrying NUMBER, FORMULA,
+or ERROR roles requires `RET_GRID_CELLS`; headers and ordinary CONTENT cells
+remain part of `RET_CONTROL_COLLECTIONS`. These roles describe guest-supplied
+display text and never authorize host numeric parsing or formula evaluation.
+FIELD requires the canonical
 FDC1 content specified in Section 9.2.
 
 State bits are:
