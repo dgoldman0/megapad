@@ -7,6 +7,9 @@
 namespace mp64::cpu::routine_task_v1 {
 
 inline constexpr uint64_t MAX_ENTRIES = 1024;
+inline constexpr uint64_t MAX_DEPTH = 8;
+inline constexpr uint64_t MAX_CHILD_EDGES = 1024;
+inline constexpr uint64_t MAX_OWNER_CHILD_EDGES = 65536;
 
 // Separate types grant no authority through the private callback transports.
 struct Spec {
@@ -21,6 +24,7 @@ struct Budget {
     uint64_t quantum_instructions = 0;
 };
 struct OwnerIdentity {};
+struct PublicationIdentity {};
 struct RootToken {
     std::weak_ptr<OwnerIdentity> owner;
     uint64_t root_id = 0, generation = 0;
@@ -35,8 +39,15 @@ struct RequestToken {
     uint64_t root_generation = 0, invocation_id = 0, sequence = 0;
     bool consumed = false;
 };
-// Child authority is deliberately not issued by the one-frame foundation.
-struct ChildEdge {};
+// Weak publication identities allow cyclic potential graphs without ownership
+// cycles. Only the exact issued handle and both live generations admit entry.
+struct ChildEdge {
+    std::weak_ptr<OwnerIdentity> owner;
+    std::weak_ptr<PublicationIdentity> parent_publication, child_publication;
+    const Spec* parent_spec = nullptr;
+    const Spec* child_spec = nullptr;
+    uint64_t parent_generation = 0, child_generation = 0, site_index = 0;
+};
 
 enum class State : uint8_t { CALLBACK, RETURNED, YIELDED, FAILED };
 inline const char* state_name(State value) noexcept {

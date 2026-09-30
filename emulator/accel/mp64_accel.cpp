@@ -13193,7 +13193,7 @@ static mp64_task::Budget make_task_budget(py::handle own_instructions, py::handl
 class RoutineOwner : public RoutineExecutionCore {
 public:
     using RoutineExecutionCore::RoutineExecutionCore;
-    ~RoutineOwner() { discard_task_frame(); task_reservation_.reset();
+    ~RoutineOwner() { discard_all_task_frames(); task_reservation_.reset();
         consume_nested_tokens(); nested_chain_.reset(); frame_.reset(); }
 
     void close() override {
@@ -13211,6 +13211,7 @@ public:
         task_identity_.reset();
         task_root_.reset();
         task_marshal_fail_after_ = 0;
+        task_cancel_marshal_fail_ = false;
         published_count_ = published_bytes_ = published_edges_ = 0;
         nested_identity_.reset();
         identity_.reset();
@@ -13706,6 +13707,7 @@ public:
             throw std::runtime_error("native publication identity space is exhausted");
         auto publication = std::make_shared<TaskPublication>();
         publication->spec = spec;
+        publication->identity = std::make_shared<mp64_task::PublicationIdentity>();
         publication->generation = publication_sequence_ + 1;
         task_publications_.emplace(spec.get(), publication);
         ++publication_sequence_;
@@ -13713,7 +13715,7 @@ public:
         published_bytes_ += spec->sealed.code.size();
     }
 
-    std::size_t seal_task_publications(py::handle batch) {
+    std::vector<std::vector<std::shared_ptr<mp64_task::ChildEdge>>> seal_task_publications(py::handle batch) {
         ActiveBoundary boundary(*this);
         require_task_usable();
         if (!PyTuple_CheckExact(batch.ptr()))
@@ -13721,7 +13723,11 @@ public:
         const auto rows = py::reinterpret_borrow<py::tuple>(batch);
         if (rows.size() > mp64_callbacks::MAX_PUBLICATIONS)
             throw py::value_error("task publication batch exceeds 64 entries");
-        std::vector<std::shared_ptr<TaskPublication>> proposed;
+        struct Proposed {
+            std::shared_ptr<TaskPublication> publication;
+            std::vector<std::shared_ptr<mp64_task::ChildEdge>> edges;
+        };
+        std::vector<Proposed> proposed;
         proposed.reserve(rows.size());
         for (py::handle row : rows) {
             if (!PyTuple_CheckExact(row.ptr()))
@@ -13735,28 +13741,94 @@ public:
             const auto found = task_publications_.find(spec.get());
             if (found == task_publications_.end())
                 throw py::value_error("task specification was not prepared by this owner");
-            if (std::find(proposed.begin(), proposed.end(), found->second) != proposed.end())
+            if (std::any_of(proposed.begin(), proposed.end(), [&](const Proposed& prior) {
+                    return prior.publication == found->second;
+                }))
                 throw py::value_error("duplicate task parent in publication batch");
             py::handle children(PyTuple_GET_ITEM(row.ptr(), 1));
             if (!PyTuple_CheckExact(children.ptr()))
                 throw py::type_error("task child rows must be an exact tuple");
-            if (PyTuple_GET_SIZE(children.ptr()) != 0)
-                throw py::value_error("task child publication is unavailable in the one-frame profile");
-            proposed.push_back(found->second);
+            if (PyTuple_GET_SIZE(children.ptr()) > mp64_task::MAX_CHILD_EDGES)
+                throw py::value_error("task child table exceeds 1024 edges");
+            proposed.push_back({found->second, {}});
         }
+        uint64_t added_edges = 0;
+        for (std::size_t index = 0; index < proposed.size(); ++index) {
+            auto& next = proposed[index];
+            const auto& parent = *next.publication;
+            py::handle row(PyTuple_GET_ITEM(rows.ptr(), index));
+            const auto children = py::reinterpret_borrow<py::tuple>(PyTuple_GET_ITEM(row.ptr(), 1));
+            next.edges.reserve(children.size());
+            for (py::handle child_row : children) {
+                if (!PyTuple_CheckExact(child_row.ptr()))
+                    throw py::type_error("task child edge must be an exact tuple");
+                if (PyTuple_GET_SIZE(child_row.ptr()) != 2)
+                    throw py::value_error("task child edge requires site and child specification");
+                const auto site = routine_exact_uint64(py::handle(PyTuple_GET_ITEM(child_row.ptr(), 0)), "site_index");
+                if (site >= parent.spec->sealed.callbacks.size())
+                    throw py::value_error("task child edge site is outside declared callbacks");
+                py::handle child_value(PyTuple_GET_ITEM(child_row.ptr(), 1));
+                if (!py::isinstance<mp64_task::Spec>(child_value))
+                    throw py::type_error("task child edge requires a TaskRoutineSpecV1");
+                const auto spec = child_value.cast<std::shared_ptr<mp64_task::Spec>>();
+                const auto found = task_publications_.find(spec.get());
+                if (found == task_publications_.end() || (!found->second->sealed &&
+                        std::none_of(proposed.begin(), proposed.end(), [&](const Proposed& entry) {
+                            return entry.publication == found->second;
+                        })))
+                    throw py::value_error("task child must be sealed or prepared in this same batch");
+                if (std::any_of(next.edges.begin(), next.edges.end(), [&](const auto& edge) {
+                        return edge->site_index == site && edge->child_spec == spec.get();
+                    }))
+                    throw py::value_error("duplicate task child edge site and registration");
+                auto edge = std::make_shared<mp64_task::ChildEdge>();
+                edge->owner = task_identity_;
+                edge->parent_publication = parent.identity;
+                edge->child_publication = found->second->identity;
+                edge->parent_spec = parent.spec.get();
+                edge->child_spec = spec.get();
+                edge->parent_generation = parent.generation;
+                edge->child_generation = found->second->generation;
+                edge->site_index = site;
+                next.edges.push_back(std::move(edge));
+            }
+            if (parent.sealed) {
+                if (parent.edges.size() != next.edges.size())
+                    throw py::value_error("sealed task child table cannot be replaced");
+                for (std::size_t edge_index = 0; edge_index < parent.edges.size(); ++edge_index) {
+                    const auto& first = parent.edges[edge_index];
+                    const auto& second = next.edges[edge_index];
+                    if (first->site_index != second->site_index || first->child_spec != second->child_spec ||
+                            first->child_generation != second->child_generation ||
+                            first->child_publication.lock() != second->child_publication.lock())
+                        throw py::value_error("sealed task child table cannot be rebound");
+                }
+                next.edges = parent.edges;
+            } else {
+                added_edges += next.edges.size();
+            }
+        }
+        if (added_edges > mp64_task::MAX_OWNER_CHILD_EDGES - published_edges_)
+            throw py::value_error("owner child edge limit of 65536 exceeded");
+        std::vector<std::vector<std::shared_ptr<mp64_task::ChildEdge>>> result;
+        result.reserve(proposed.size());
+        for (const auto& next : proposed) result.push_back(next.edges);
         auto guard = acquire_execution();
-        for (const auto& publication : proposed) {
-            validate_spec(publication->spec->sealed.routine);
-            validate_seal(publication->spec->sealed, false);
+        for (const auto& next : proposed) {
+            validate_spec(next.publication->spec->sealed.routine);
+            validate_seal(next.publication->spec->sealed, false);
         }
-        // All throwing checks and native allocations precede publication.
-        for (const auto& publication : proposed) {
-            publication->sealed = true;
-            const auto& spec = publication->spec->sealed.routine;
+        // Potential cycles are legal. No frame-overlap or path-depth proof is
+        // imposed here; runtime admission checks the actual bounded ancestry.
+        for (auto& next : proposed) {
+            next.publication->edges = std::move(next.edges);
+            next.publication->sealed = true;
+            const auto& spec = next.publication->spec->sealed.routine;
             icache_invalidate_span(*state_, spec.code_base, spec.code_size);
         }
+        published_edges_ += added_edges;
         if (!proposed.empty()) state_->ifetch_window_valid = false;
-        return proposed.size();
+        return result;
     }
 
     bool is_task_code_registered(const std::shared_ptr<mp64_task::Spec>& spec, bool sealed) {
@@ -13775,6 +13847,7 @@ public:
             throw py::value_error("task specification was not prepared by this owner");
         --published_count_;
         published_bytes_ -= spec->sealed.code.size();
+        published_edges_ -= found->second->edges.size();
         task_publications_.erase(found);
     }
 
@@ -13814,22 +13887,34 @@ public:
             const std::shared_ptr<mp64_task::RootToken>& root_token,
             const mp64_task::Budget& budget, py::handle parent_token,
             py::handle child_edge, py::handle protected_spans) {
-        ActiveBoundary boundary(*this);
+        ActiveBoundary boundary(*this, task_reservation_ ? this : nullptr);
         require_task_usable();
         validate_task_root(root_token);
-        if (!parent_token.is_none() || !child_edge.is_none())
-            throw py::value_error("task child entry is unavailable in the one-frame profile");
         if (!spec) throw py::type_error("entry requires a TaskRoutineSpecV1");
         if (budget.quantum_instructions != 0)
             throw py::value_error("task begin is admission-only and requires zero quantum");
+        const bool child = !parent_token.is_none();
+        if (child != !child_edge.is_none())
+            throw py::value_error("task child entry requires both parent request and issued edge");
+        if (!child && task_depth_)
+            throw py::value_error("unrelated task root cannot replace live frames");
+        std::shared_ptr<mp64_task::RequestToken> parent;
+        std::shared_ptr<mp64_task::ChildEdge> edge;
+        if (child) {
+            parent = parent_token.cast<std::shared_ptr<mp64_task::RequestToken>>();
+            edge = child_edge.cast<std::shared_ptr<mp64_task::ChildEdge>>();
+            validate_task_request(parent);
+            if (validate_task_edge(edge)->spec != spec)
+                throw py::value_error("task child specification differs from its issued edge");
+        }
         const auto found = task_publications_.find(spec.get());
         if (found == task_publications_.end() || !found->second->sealed)
             throw py::value_error("task specification is not sealed by this owner");
         const auto args = parse_arguments(arguments, spec->sealed.routine.input_cells);
         auto borrowed = parse_spans(spans);
         const auto protected_values = parse_protected(protected_spans);
-        if (task_root_->entries == task_root_->entry_allowance)
-            throw py::value_error("task root entry allowance is exhausted");
+        if (task_depth_ == mp64_task::MAX_DEPTH || task_root_->entries == task_root_->entry_allowance)
+            throw py::value_error("task depth or root entry allowance is exhausted");
         if (!budget.invocation_instructions_remaining || !budget.root_instructions_remaining ||
                 task_root_->instructions == task_root_->allowance)
             throw py::value_error("task entry requires positive own and root instruction fuel");
@@ -13846,18 +13931,38 @@ public:
         next->callback_allowance = std::min(spec->max_callback_requests,
                                             budget.invocation_callbacks_remaining);
         next->invocation_id = task_invocation_sequence_ + 1;
+        next->parent_invocation_id = child ? task_frame_->invocation_id : 0;
         auto token = std::make_shared<mp64_task::OperationToken>();
         mp64_task::Result result;
         result.exit_kind = "yielded";
         result.entry_pc = spec->sealed.routine.entry();
-        auto reservation = std::make_unique<RoutineCPUReservation>(*state_, this);
+        std::unique_ptr<RoutineCPUReservation> reservation;
+        if (!task_reservation_) reservation = std::make_unique<RoutineCPUReservation>(*state_, this);
         auto guard = acquire_execution(this);
         validate_task_root(root_token);
+        if (child) {
+            validate_task_request(parent);
+            if (validate_task_edge(edge) != next->publication)
+                throw py::value_error("task child publication changed during entry preflight");
+            validate_task_evidence();
+            validate_narrowed_grants(task_frame_->spans, next->spans);
+            for (uint64_t index = 0; index < task_depth_; ++index) {
+                const auto& ancestor = *task_frames_[index]->publication;
+                if (ancestor.spec == spec || ancestor.identity == next->publication->identity)
+                    throw py::value_error("task child registration is already active");
+                if (ancestor.spec->sealed.routine.stack().overlaps(spec->sealed.routine.stack()))
+                    throw py::value_error("task child control stack overlaps an active ancestor");
+            }
+        }
         validate_spec(spec->sealed.routine);
         validate_borrowed(spec->sealed.routine, next->spans, protected_values);
         validate_seal(spec->sealed, true);
-        task_reservation_ = std::move(reservation);
-        task_frame_ = std::move(next);
+        validate_task_closure(*next->publication);
+        // Admission publishes only host authority. CPU initialization and the
+        // child's sentinel remain deferred until its first positive advance.
+        if (reservation) task_reservation_ = std::move(reservation);
+        task_frames_[task_depth_++] = std::move(next);
+        task_frame_ = task_frames_[task_depth_ - 1].get();
         ++task_invocation_sequence_;
         ++task_root_->entries;
         lower_task_budget(budget);
@@ -13907,14 +14012,43 @@ public:
         ActiveBoundary boundary(*this, task_reservation_ ? this : nullptr);
         if (frame_ || nested_chain_)
             throw std::runtime_error("task cancellation cannot cancel private transport");
-        if (exact_token) validate_task_operation(token, false);
-        mp64_task::Cancellation result;
-        result.receipt = last_task_receipt_;
-        if (task_frame_) result.retired_invocation_ids.push_back(task_frame_->invocation_id);
-        discard_task_frame();
-        task_delivery_failed_ = false;
-        // Keep the reservation until cancellation result delivery completes.
-        return result;
+        uint64_t first = 0;
+        if (exact_token) {
+            require_task_usable();
+            if (!token || token->consumed || token->owner.lock() != task_identity_ ||
+                    token->root_generation != task_root_generation_)
+                throw py::value_error("task cancellation token is foreign or stale");
+            for (; first < task_depth_; ++first)
+                if (task_frames_[first]->operation == token &&
+                        task_frames_[first]->invocation_id == token->invocation_id) break;
+            if (first == task_depth_)
+                throw py::value_error("task cancellation token is not the latest live operation");
+        }
+        try {
+            mp64_task::Cancellation result;
+            result.receipt = last_task_receipt_;
+            result.retired_invocation_ids.reserve(task_depth_ - first);
+            for (uint64_t index = task_depth_; index > first; --index)
+                result.retired_invocation_ids.push_back(task_frames_[index - 1]->invocation_id);
+            if (first) {
+                auto& parent = *task_frames_[first - 1];
+                result.surviving_parent_id = parent.invocation_id;
+                result.surviving_parent_token = parent.request;
+                auto guard = acquire_execution(this);
+                validate_task_ancestors(first);
+                // No discarded frame is consulted as restoration authority.
+                // Child stores/control bytes, cache and cycle counters remain.
+                restore_task_parent(first - 1);
+            }
+            while (task_depth_ > first) discard_task_frame();
+            task_delivery_failed_ = false;
+            // Keep reservation through delivery, including already-retired
+            // suffixes. A failed conversion may only all-cancel or close.
+            return result;
+        } catch (...) {
+            task_integrity_failed_ = true;
+            throw;
+        }
     }
 
     std::optional<mp64_task::Receipt> last_task_receipt() const noexcept {
@@ -13924,7 +14058,7 @@ public:
     void close_task_owner() {
         if (active_ || frame_ || nested_chain_)
             throw std::runtime_error("task close cannot cancel an active private transport");
-        discard_task_frame();
+        discard_all_task_frames();
         task_reservation_.reset();
         task_delivery_failed_ = false;
         close();
@@ -13937,12 +14071,23 @@ public:
         if (!value || value > 64) throw py::value_error("result count must be in [1, 64]");
         task_marshal_fail_after_ = value;
     }
+    void test_fail_task_cancel_delivery() {
+        ActiveBoundary boundary(*this);
+        require_task_usable();
+        task_cancel_marshal_fail_ = true;
+    }
     void begin_task_delivery() {
         if (active_) throw std::runtime_error("task result delivery boundary is active");
         active_ = true;
     }
     void maybe_fail_task_delivery() {
         if (task_marshal_fail_after_ && --task_marshal_fail_after_ == 0) throw std::bad_alloc();
+    }
+    void maybe_fail_task_cancel_delivery() {
+        if (task_cancel_marshal_fail_) {
+            task_cancel_marshal_fail_ = false;
+            throw std::bad_alloc();
+        }
     }
     void finish_task_delivery(bool failed) noexcept {
         if (failed) task_delivery_failed_ = true;
@@ -13953,6 +14098,8 @@ public:
 private:
     struct TaskPublication {
         std::shared_ptr<mp64_task::Spec> spec;
+        std::shared_ptr<mp64_task::PublicationIdentity> identity;
+        std::vector<std::shared_ptr<mp64_task::ChildEdge>> edges;
         uint64_t generation = 0;
         bool sealed = false;
     };
@@ -13965,7 +14112,7 @@ private:
         std::shared_ptr<TaskPublication> publication;
         std::vector<mp64_routine::BufferSpan> spans;
         std::vector<uint64_t> arguments, staged_outputs;
-        uint64_t invocation_id = 0, allowance = 0, callback_allowance = 0;
+        uint64_t invocation_id = 0, parent_invocation_id = 0, allowance = 0, callback_allowance = 0;
         uint64_t instructions = 0, cycles = 0, callbacks = 0;
         bool initialized = false, resume_stub = false;
         mp64_task::State phase = mp64_task::State::YIELDED;
@@ -13979,6 +14126,8 @@ private:
     };
 
     void require_task_usable() const {
+        if (task_integrity_failed_)
+            throw std::runtime_error("task restoration integrity failed; admission is disabled");
         if (task_delivery_failed_)
             throw std::runtime_error("task result delivery failed; cancel_all or close is required");
     }
@@ -14029,24 +14178,114 @@ private:
         if (!task_frame_) return;
         if (task_frame_->operation) task_frame_->operation->consumed = true;
         if (task_frame_->request) task_frame_->request->consumed = true;
-        task_frame_.reset();
+        task_frames_[--task_depth_].reset();
+        task_frame_ = task_depth_ ? task_frames_[task_depth_ - 1].get() : nullptr;
     }
-    void validate_task_evidence() const {
+    void discard_all_task_frames() noexcept {
+        while (task_depth_) discard_task_frame();
+    }
+    std::shared_ptr<TaskPublication> task_child(
+            const TaskPublication& parent, const std::shared_ptr<mp64_task::ChildEdge>& edge) const {
+        if (!edge || edge->owner.lock() != task_identity_ ||
+                edge->parent_spec != parent.spec.get() || edge->parent_generation != parent.generation ||
+                edge->parent_publication.lock() != parent.identity ||
+                edge->site_index >= parent.spec->sealed.callbacks.size())
+            throw py::value_error("task child edge parent authority is stale");
+        const auto found = task_publications_.find(edge->child_spec);
+        if (found == task_publications_.end() || !found->second->sealed ||
+                found->second->generation != edge->child_generation ||
+                found->second->identity != edge->child_publication.lock())
+            throw py::value_error("task child edge generation is stale");
+        return found->second;
+    }
+    std::shared_ptr<TaskPublication> validate_task_edge(
+            const std::shared_ptr<mp64_task::ChildEdge>& edge) const {
         const auto& frame = *task_frame_;
+        const auto& parent = *frame.publication;
+        if (!edge || edge->site_index != frame.site ||
+                std::find(parent.edges.begin(), parent.edges.end(), edge) == parent.edges.end())
+            throw py::value_error("task edge was not issued for the exact pending callback site");
+        return task_child(parent, edge);
+    }
+    void validate_task_closure(const TaskPublication& root) const {
+        // Cyclic potential targets are legal. Each node and row is visited
+        // once; neither helper paths nor active ancestry are expanded here.
+        std::array<const TaskPublication*, mp64_callbacks::MAX_PUBLICATIONS> pending{};
+        pending[0] = &root;
+        std::size_t count = 1;
+        uint64_t edges = 0;
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& parent = *pending[index];
+            const auto issued = task_publications_.find(parent.spec.get());
+            if (issued == task_publications_.end() || issued->second.get() != &parent || !parent.sealed)
+                throw py::value_error("task reachable publication is stale");
+            if (parent.edges.size() > mp64_task::MAX_OWNER_CHILD_EDGES - edges)
+                throw py::value_error("task reachable edge bound exceeded");
+            edges += parent.edges.size();
+            for (const auto& edge : parent.edges) {
+                const auto child = task_child(parent, edge);
+                if (std::find(pending.begin(), pending.begin() + count, child.get()) != pending.begin() + count)
+                    continue;
+                if (count == pending.size()) throw py::value_error("task reachable publication bound exceeded");
+                pending[count++] = child.get();
+            }
+        }
+    }
+    void validate_task_frame_evidence(const TaskFrame& frame, bool ancestor) const {
         const auto& publication = *frame.publication;
         const auto found = task_publications_.find(publication.spec.get());
         if (found == task_publications_.end() || found->second != frame.publication || !publication.sealed)
             throw py::value_error("task publication authority is stale");
         validate_spec(publication.spec->sealed.routine);
         validate_seal(publication.spec->sealed, true);
-        if (!frame.initialized) return;
-        validate_nested_profile();
-        if (!std::equal(frame.registers.begin(), frame.registers.end(), state_->regs) ||
-                frame.flags != flags_pack(*state_) || frame.cycle_frontier != state_->cycle_count ||
-                std::memcmp(control_bytes_ + (frame.live_stack_base - control_.base),
-                    frame.live_control.data(), frame.live_control_size) != 0)
-            throw py::value_error("parked task CPU or private control evidence changed");
+        if (ancestor) {
+            const auto& request = frame.request;
+            if (!frame.initialized || frame.phase != mp64_task::State::CALLBACK || !request ||
+                    request->consumed || request->owner.lock() != task_identity_ ||
+                    request->root_generation != task_root_generation_ ||
+                    request->invocation_id != frame.invocation_id || request->sequence != frame.callbacks ||
+                    !frame.operation || frame.operation->consumed)
+                throw py::value_error("task ancestor callback authority is stale");
+        }
+        if (frame.initialized && std::memcmp(control_bytes_ + (frame.live_stack_base - control_.base),
+                frame.live_control.data(), frame.live_control_size) != 0)
+            throw py::value_error("parked task private control evidence changed");
     }
+    void validate_task_ancestors(uint64_t count) const {
+        for (uint64_t index = 0; index < count; ++index)
+            validate_task_frame_evidence(*task_frames_[index], true);
+    }
+    void validate_task_evidence() const {
+        validate_task_ancestors(task_depth_ - 1);
+        validate_task_frame_evidence(*task_frame_, false);
+        // An admitted but uninitialized child still has its parent's CPU view.
+        const TaskFrame* live = task_frame_->initialized ? task_frame_
+            : (task_depth_ > 1 ? task_frames_[task_depth_ - 2].get() : nullptr);
+        if (!live) return;
+        validate_nested_profile();
+        if (!std::equal(live->registers.begin(), live->registers.end(), state_->regs) ||
+                live->flags != flags_pack(*state_) || live->cycle_frontier != state_->cycle_count)
+            throw py::value_error("parked task CPU execution view changed");
+    }
+    void restore_task_parent(uint64_t parent_index) noexcept {
+        auto& parent = *task_frames_[parent_index];
+        // These are initialization-owned integer controls. A failed child may
+        // leave a partial modifier/selector effect, so do not infer invariance.
+        state_->psel = 3; state_->xsel = 2; state_->spsel = 15; state_->sw = 1;
+        state_->d_reg = state_->q_out = state_->t_reg = state_->ef_flags = 0;
+        state_->halted = state_->idle = false;
+        state_->ext_modifier = -1;
+        state_->ivt_base = state_->ivec_id = state_->trap_addr = state_->wake_ms = 0;
+        state_->priv_level = 0; state_->core_id = 0; state_->num_cores = 1;
+        state_->private_irq_ipi.store(false, std::memory_order_release);
+        state_->instruction_bus_access = nullptr;
+        state_->icache_enabled = 1;
+        std::copy(parent.registers.begin(), parent.registers.end(), std::begin(state_->regs));
+        flags_unpack(*state_, parent.flags);
+        parent.cycle_frontier = state_->cycle_count;
+        state_->ifetch_window_valid = false;
+    }
+
     void capture_task_evidence() {
         auto& frame = *task_frame_;
         if (!frame.initialized) return;
@@ -14068,7 +14307,7 @@ private:
         const auto& frame = *task_frame_;
         last_task_receipt_ = mp64_task::Receipt{
             task_root_generation_, task_root_->token->root_id, frame.invocation_id,
-            0, 1, ++task_root_->sequence, started, task_root_->entries, phase,
+            frame.parent_invocation_id, task_depth_, ++task_root_->sequence, started, task_root_->entries, phase,
             frame.instructions - instructions_before, frame.cycles - cycles_before,
             frame.callbacks - callbacks_before, frame.instructions, frame.cycles, frame.callbacks,
             task_root_->instructions, task_root_->cycles, task_root_->callbacks};
@@ -14095,6 +14334,7 @@ private:
         lower_task_budget(budget);
         rotate_task_operation(token);
         result.operation_token = token;
+        bool restoring_parent = false;
         if (outputs) {
             frame.request->consumed = true;
             frame.request.reset();
@@ -14166,12 +14406,19 @@ private:
             if (frame.phase == mp64_task::State::YIELDED || frame.phase == mp64_task::State::CALLBACK)
                 capture_task_evidence();
             result.pc = pc(*state_);
+            if (frame.phase == mp64_task::State::RETURNED && task_depth_ > 1) {
+                restoring_parent = true;
+                validate_task_ancestors(task_depth_ - 1);
+                restore_task_parent(task_depth_ - 2);
+                restoring_parent = false;
+            }
             record_task_receipt(frame.phase, false, instructions_before, cycles_before, callbacks_before);
             result.receipt = *last_task_receipt_;
             if (frame.phase == mp64_task::State::RETURNED) discard_task_frame();
             return result;
         } catch (...) {
             // A host exception retains actual prefix and a cancellable frame.
+            if (restoring_parent) task_integrity_failed_ = true;
             frame.phase = mp64_task::State::FAILED;
             record_task_receipt(frame.phase, false, instructions_before, cycles_before, callbacks_before);
             task_delivery_failed_ = true;
@@ -14774,11 +15021,14 @@ private:
     std::unordered_map<const mp64_task::Spec*, std::shared_ptr<TaskPublication>> task_publications_;
     std::unique_ptr<TaskRoot> task_root_;
     std::unique_ptr<RoutineCPUReservation> task_reservation_;
-    std::unique_ptr<TaskFrame> task_frame_;
+    std::array<std::unique_ptr<TaskFrame>, mp64_task::MAX_DEPTH> task_frames_;
+    uint64_t task_depth_ = 0;
+    TaskFrame* task_frame_ = nullptr;
     std::optional<mp64_task::Receipt> last_task_receipt_;
     uint64_t task_root_generation_ = 0, task_invocation_sequence_ = 0;
     uint64_t task_marshal_fail_after_ = 0;
-    bool task_delivery_failed_ = false;
+    bool task_delivery_failed_ = false, task_integrity_failed_ = false;
+    bool task_cancel_marshal_fail_ = false;
 };
 
 // Public facades intentionally own no CPU state, pins, publication registry,
@@ -14862,7 +15112,9 @@ public:
     uint64_t control_size() const noexcept { return owner_->control_size(); }
     void close() { owner_->close_task_owner(); }
     void prepare_code(const std::shared_ptr<mp64_task::Spec>& spec) { owner_->prepare_task_code(spec); }
-    std::size_t seal_publications(py::handle batch) { return owner_->seal_task_publications(batch); }
+    std::vector<std::vector<std::shared_ptr<mp64_task::ChildEdge>>> seal_publications(py::handle batch) {
+        return owner_->seal_task_publications(batch);
+    }
     bool is_code_registered(const std::shared_ptr<mp64_task::Spec>& spec) {
         return owner_->is_task_code_registered(spec, false);
     }
@@ -14896,8 +15148,12 @@ public:
     }
     std::optional<mp64_task::Receipt> last_receipt() const noexcept { return owner_->last_task_receipt(); }
     void test_fail_marshalling(py::handle count) { owner_->test_fail_task_marshalling(count); }
+    void test_fail_cancel_delivery() { owner_->test_fail_task_cancel_delivery(); }
     void begin_delivery() { owner_->begin_task_delivery(); }
-    void maybe_fail_delivery() { owner_->maybe_fail_task_delivery(); }
+    void maybe_fail_delivery(bool accepted_segment) {
+        if (accepted_segment) owner_->maybe_fail_task_delivery();
+        else owner_->maybe_fail_task_cancel_delivery();
+    }
     void finish_delivery(bool failed) noexcept { owner_->finish_task_delivery(failed); }
 private:
     friend class RoutineRunnerV3;
@@ -14913,7 +15169,7 @@ static py::object marshal_task_result(TaskRoutineRunnerV1& runner, Execute execu
     auto result = execute();
     try {
         runner.begin_delivery();
-        if (accepted_segment) runner.maybe_fail_delivery();
+        runner.maybe_fail_delivery(accepted_segment);
         auto delivered = py::cast(std::move(result));
         runner.finish_delivery(false);
         return delivered;
@@ -38192,9 +38448,14 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("close", &TaskRoutineRunnerV1::close)
         .def("prepare_code", &TaskRoutineRunnerV1::prepare_code, py::arg("spec").none(false))
         .def("seal_publications", [](TaskRoutineRunnerV1& runner, py::handle batch) {
-            const auto count = runner.seal_publications(batch);
-            py::tuple result(count);
-            for (std::size_t index = 0; index < count; ++index) result[index] = py::tuple();
+            const auto rows = runner.seal_publications(batch);
+            py::tuple result(rows.size());
+            for (std::size_t index = 0; index < rows.size(); ++index) {
+                py::tuple handles(rows[index].size());
+                for (std::size_t edge = 0; edge < rows[index].size(); ++edge)
+                    handles[edge] = py::cast(rows[index][edge]);
+                result[index] = std::move(handles);
+            }
             return result;
         }, py::arg("batch"))
         .def("is_code_registered", &TaskRoutineRunnerV1::is_code_registered, py::arg("spec").none(false))
@@ -38231,7 +38492,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         }, py::arg("operation_token").none(false))
         .def("last_receipt", &TaskRoutineRunnerV1::last_receipt)
         .def("_test_fail_marshalling_after_results", &TaskRoutineRunnerV1::test_fail_marshalling,
-            py::arg("count"));
+            py::arg("count"))
+        .def("_test_fail_next_cancel_delivery", &TaskRoutineRunnerV1::test_fail_cancel_delivery);
 
     // Expose RunResult
     py::class_<RunResult>(m, "RunResult")

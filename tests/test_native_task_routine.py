@@ -426,8 +426,8 @@ def test_preparation_is_nonexecuting_and_atomic_empty_edge_seal_keeps_failed_bat
     harness.runner.close()
 
 
-@pytest.mark.parametrize("shape", ["list_batch", "list_pair", "list_edges", "duplicate", "unprepared", "children"])
-def test_slice_one_publication_rejects_nonexact_batches_or_child_rows_without_partial_seals(shape):
+@pytest.mark.parametrize("shape", ["list_batch", "list_pair", "list_edges", "duplicate", "unprepared"])
+def test_publication_rejects_nonexact_batches_without_partial_seals(shape):
     harness = Harness(publish=False)
     harness.runner.prepare_code(harness.spec)
     clone = native.TaskRoutineSpecV1(**harness.fields)
@@ -437,7 +437,6 @@ def test_slice_one_publication_rejects_nonexact_batches_or_child_rows_without_pa
         "list_edges": ((harness.spec, []),),
         "duplicate": ((harness.spec, ()), (harness.spec, ())),
         "unprepared": ((harness.spec, ()), (clone, ())),
-        "children": ((harness.spec, ((0, harness.spec),)),),
     }[shape]
     before = harness.snapshot()
     with pytest.raises((TypeError, ValueError)):
