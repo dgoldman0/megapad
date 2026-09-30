@@ -42,3 +42,37 @@ abort; and simulator/viewer input boundaries for all five rich control families.
 The final combined Desk run may use this rebuilt checkpoint. The in-flight
 standalone waveform run remains on `fb94ade`; this synchronization does not
 rewrite its provenance or timing evidence.
+
+## Committed callback idle and deadline alignment
+
+Source merge `737867a6710cddf9104bd7bbfb3ad5390c3fbc9a` advances the peer
+checkpoint to `e723e50accbfb811a4bb26deb6ddff735f398660`, without conflicts.
+It includes `d5ab2d9` task-only receipt accounting: cumulative native and
+semantic work remains attached to the original installed owner, independently
+of mixed-profile diagnostics. Repeated receipt observation, interrupted
+counter publication and later private roots cannot duplicate or refund that
+task work.
+
+Canonical semantic `Idle` and `IdleUntil` callbacks now retain the original
+task root, execution limits, stack ownership, native-chain state and exact
+engine-issued suspension witness through detach and resume. Deadline waits
+also preserve the original RTC route and clock identity. Wake-up does not
+replenish execution limits; invalid suspension authority is rejected, and
+cancellation releases native frames before return-stack cleanup.
+
+Both native build targets, `accel` and `simulator-accel`, completed successfully
+with GCC/G++ (`/tmp/rich-task-idle-build.log`). The Make-supervised regression
+gate passed **410 tests in 45.50 seconds**, with no skips
+(`/tmp/task-idle-rich-gates.log`). This adds callback idle/deadline suspension,
+clock and witness authority, deadline host abort, task-only receipts and KDOS
+exception checks to the ordinary suspension, registration/runtime/stack,
+native adapter and prepared-session coverage. It also rechecks FIELD,
+STATUS_FIELD, GRID, PANE and TASKBAR simulator/viewer-input boundaries.
+
+The public task/composite capability gates remain unchanged. Prepared-session
+tests still require `callback_suspension`, `shared_task_exceptions` and
+`composite_suspension` to be false. The peer's separate machine-cursor
+scheduling implementation and capability activation are outside this merge.
+This checkpoint supplies richer runtime regression coverage for the combined
+Desk qualification; it does not replace a complete Desk journey or change the
+frozen standalone runs' source and timing records.
