@@ -784,7 +784,7 @@ private:
         // Root and fault returns retain their dispatcher-owned control effects.
         if (py::cast<Cell>(py::handle(PyTuple_GET_ITEM(entry, 1))) != raw ||
             continuation.attr("root").cast<bool>() ||
-            continuation.attr("fault_abort").cast<bool>())
+            !continuation.attr("fault_abort").is_none())
             return PYTHON_BOUNDARY;
         value = ContinuationUpdate{continuation.attr("xt").cast<Cell>(),
                                    continuation.attr("ip").cast<Cell>(), raw};
