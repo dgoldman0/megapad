@@ -11,7 +11,7 @@ full-program or modeled-hardware performance.
 | --- | --- | ---: | ---: |
 | AES-256-GCM | 64 transactions, 32 plaintext bytes each | 53.277 ms | 60.373 ms |
 | NTT compute | 64 forward transforms, 256 coefficients | 17.735 ms | 19.031 ms |
-| NTT transfer | 64 polynomial loads and stores, 2,048 bytes each | 135.774 ms | 154.146 ms |
+| NTT transfer | 64 load/transform/store iterations, 2,048 transferred bytes each | 135.774 ms | 154.146 ms |
 | Hot page reads | 4,096 reads | 107.299 ms | 0.965 ms |
 | Scattered page reads | 4,096 reads | 105.251 ms | 1.002 ms |
 | Page-crossing reads | 4,096 reads | 112.207 ms | 1.039 ms |
