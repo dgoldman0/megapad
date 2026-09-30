@@ -79,6 +79,8 @@ Both detailed and lightweight status contain the same `runtime` descriptor:
 | `step_unit` | `mp64_instruction` | `semantic_step` |
 | `step_request_unit` | `mp64_instruction` | `semantic_boundary` |
 | `batch_unit` | `instruction_batch` | `semantic_boundary` |
+| `timing.model` | `instruction_batched` | `semantic` |
+| `timing.models_shared_clock_latency` | `false` | `false` |
 | `timing.timer_unit` | `mp64_system_cycle` | `semantic_step` |
 | `timing.rtc_mode` | `virtual` or `realtime` | `manual` or `host_monotonic` |
 | `capabilities.machine_code` | `true` | `false` |
@@ -91,7 +93,25 @@ The executor identifies the selected engine; native execution can include
 Python fallbacks. Capabilities identify supported session operations,
 independently of whether optional facilities are enabled. Existing emulator
 instruction batches do not enable the system's separate strict cycle-bounded
-runner. Semantic work does not claim hardware cycles. The standalone simulator
+runner. `instruction_batched` advances functional time once per equal-credit
+scheduler round, using the maximum accumulated per-core cycle cost. Wake and
+interrupt delivery occur at the model's round boundaries. CPU memory accesses
+are ordered without strict main-bus timing. Its clock can drive devices and
+report progress, but it cannot measure shared-clock worker wake latency or bus
+contention. Host worker count and a native executor do not change that model.
+
+Use `MegapadSystem.run_cycle_batch(...)` with a virtual RTC and a supported
+full-core-only topology for modeled wake, interrupt, and bus timing. Its
+`SystemRunStats.timing_model` is `strict_shared_clock`, and
+`models_shared_clock_latency` is true. `run_batch_stats(...)` reports
+`instruction_batched` and false. Zero-budget and host-backpressure results
+retain the requested model. The same cycle field names exist in both results;
+compare them only with their timing model recorded. The strict model does not
+establish physical RTL latency or guarantee multicore speedup. The shared
+application session currently selects instruction batches, including its
+paused one-instruction requests.
+
+Semantic work does not claim hardware cycles. The standalone simulator
 server binds its RTC to host monotonic time; a directly constructed runtime
 starts with a manually advanced RTC. Reading its RTC policy does not sample
 or advance the clock.

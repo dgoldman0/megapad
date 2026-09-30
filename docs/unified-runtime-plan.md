@@ -330,6 +330,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
 | 2 — workload profiles | Bounded kernels and KDOS load controls recorded; Desktop/attribution pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
+| 2B — math-team timing qualification | Timing identity explicit; strict multicore FP and wake/contention gates underway | 8 timing-model cases plus shared-session and benchmark regressions |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
 | 4 — initial hybrid ABI and execution | Integer-routine v1 ABI locked; shared backing qualified, execution integration underway | `docs/hybrid-runtime-abi.md`; 56 dense backing checks and 664 existing runtime regressions |
@@ -609,3 +610,20 @@ all images are read before publication. Names must be printable nonwhitespace
 ASCII; paths must be filesystem encodable. All 94 manifest/value cases passed.
 Independent review found and closed name, path-encoding and forged-lease gaps.
 These foundations do not yet publish an executable hybrid session.
+
+### Phase 2B timing identity — 2026-09-30
+
+System batch results now identify `instruction_batched` versus
+`strict_shared_clock`, including zero-budget and host-backpressure returns.
+Shared session status reports its actual execution policy; semantic sessions
+report `semantic`. Only strict results advertise modeled shared-clock latency.
+The Phase 0 benchmark carries this identity into serialized accounting, and
+the session documentation explains round time, strict bus time and host time.
+No scheduler behavior or existing cycle accounting changed in this slice.
+
+All eight focused model tests passed, along with shared-session and Phase 3
+benchmark regressions in a 221-pass combined foundation gate. Two socket tests
+were skipped because this environment cannot create their sockets. These tags
+prevent a functional round clock from being presented as strict wake latency;
+they do not reproduce the unavailable math solver or establish physical RTL
+timing. Strict FP and bounded wake/contention evidence are separate gates.

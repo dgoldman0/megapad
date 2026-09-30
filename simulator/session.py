@@ -487,6 +487,7 @@ class SimulatorSharedMachine(SharedSessionOwner):
                     step_request_unit="semantic_boundary",
                     batch_unit="semantic_boundary",
                     timer_unit="semantic_step",
+                    timing_model="semantic",
                     rtc_mode=session.runtime.rtc.clock_mode,
                     machine_code=False,
                     cpu_diagnostics=False,
