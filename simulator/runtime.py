@@ -604,6 +604,8 @@ class _UndefinedWord(SourceError):
 class MegaForthRuntime:
     """Hosted dictionary, evaluator, and explicit semantic dispatcher."""
 
+    NESTED_CALLBACK_ABI_VERSION = 4
+
     def __init__(
         self,
         *,
@@ -2511,7 +2513,7 @@ class MegaForthRuntime:
     @property
     def callback_export_abi_version(self) -> int:
         """Metadata profile supported by the canonical callback export engine."""
-        return 3
+        return self.NESTED_CALLBACK_ABI_VERSION
 
     def inspect_callback_export(self, handle):
         """Return immutable derived proof diagnostics, or None for a leaf."""

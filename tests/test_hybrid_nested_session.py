@@ -1,9 +1,4 @@
-"""V4 application staging keeps startup private until the complete profile exists.
-
-Successful V4 journeys require the complete native transport marker. The
-explicit loader is injected into the staged server path until generic V4
-dispatch is separately activated after the lower-layer qualification gates.
-"""
+"""V4 application journeys use the generic loader and complete native profile."""
 
 import json
 import os
@@ -96,10 +91,6 @@ def _write_manifest(path, *, empty=False):
     return document
 
 
-def _stage_explicit_loader(monkeypatch):
-    monkeypatch.setattr("hybrid.server.load_manifest", load_nested_manifest_v4)
-
-
 def _return_evidence(owner):
     stack = owner.semantic.main_context.returns
     return (stack.pointer, stack.snapshot(), dict(stack._continuations),
@@ -176,7 +167,6 @@ def test_staged_v4_capability_failure_precedes_publication_boot_or_session(
     native = _native()
     args = _server_args(tmp_path)
     _write_manifest(args.hybrid_routines, empty=empty)
-    _stage_explicit_loader(monkeypatch)
     monkeypatch.delattr(native, {
         "marker": "HYBRID_NESTED_ROUTINE_ABI_VERSION", "spec": "RoutineSpecV3",
         "runner": "RoutineRunnerV3",
@@ -203,12 +193,14 @@ def test_staged_v4_capability_failure_precedes_publication_boot_or_session(
     assert not Path(args.socket).exists()
 
 
-def test_generic_dispatch_remains_unchanged_during_application_staging(tmp_path, monkeypatch):
+def test_generic_loader_validates_before_runtime_creation(tmp_path, monkeypatch):
     args = _server_args(tmp_path)
-    _write_manifest(args.hybrid_routines)
+    document = _write_manifest(args.hybrid_routines)
+    document["policies"][0]["operations"][0]["routine_id"] = 63
+    args.hybrid_routines.write_text(json.dumps(document))
 
     def forbidden(**kwargs):
-        raise AssertionError("generic V4 startup is not activated by staged application code")
+        raise AssertionError("invalid V4 graph must fail before runtime creation")
 
     monkeypatch.setattr(HybridRuntime, "create", forbidden)
     with pytest.raises(HybridManifestError):
@@ -251,14 +243,13 @@ def test_nested_shared_dispatch_counts_root_work_once_and_preserves_outer_return
 
 
 @pytest.mark.parametrize("executor", ["python", "native"])
-def test_staged_manifest_uses_mixed_dependency_order_before_boot_once(tmp_path, monkeypatch, executor):
+def test_generic_manifest_uses_mixed_dependency_order_before_boot_once(tmp_path, monkeypatch, executor):
     _native(executor, nested=True)
     args = _server_args(tmp_path, executor=executor, autoexec_body=(
         b"-7 H-PARENT AUTO-RUNS !\n"
         b'S" \' SESSION-MARK IS _SIMULATOR-SESSION-ENTRY" EVALUATE\n'
     ))
     _write_manifest(args.hybrid_routines)
-    _stage_explicit_loader(monkeypatch)
     opened = []
     original_open = os.open
 
@@ -285,14 +276,13 @@ def test_staged_manifest_uses_mixed_dependency_order_before_boot_once(tmp_path, 
 
 
 @pytest.mark.parametrize("executor", ["python", "native"])
-def test_staged_manifest_nested_chain_runs_through_live_production_root(tmp_path, monkeypatch, executor):
+def test_generic_manifest_nested_chain_runs_through_live_production_root(tmp_path, monkeypatch, executor):
     _native(executor, nested=True)
     args = _server_args(tmp_path, executor=executor, autoexec_body=(
         b'S" : NESTED-LIVE -7 H-PARENT ; '
         b'\' NESTED-LIVE IS _SIMULATOR-SESSION-ENTRY" EVALUATE\n'
     ))
     _write_manifest(args.hybrid_routines)
-    _stage_explicit_loader(monkeypatch)
     prepared = prepare_server(args)
     try:
         assert prepared.hybrid.machine_instructions == 0
@@ -312,7 +302,6 @@ def test_empty_v4_selection_is_truthful_only_with_full_capability(tmp_path, monk
     _native(nested=True)
     args = _server_args(tmp_path)
     _write_manifest(args.hybrid_routines, empty=True)
-    _stage_explicit_loader(monkeypatch)
     prepared = prepare_server(args)
     try:
         execution = prepared.machine.status()["machine_execution"]
@@ -332,7 +321,6 @@ def test_staged_namespace_collision_rejects_before_first_publication(tmp_path, m
     document = _write_manifest(args.hybrid_routines)
     document["policies" if kind == "policy" else "routines"][0]["name"] = "DUP"
     args.hybrid_routines.write_text(json.dumps(document))
-    _stage_explicit_loader(monkeypatch)
     owners = []
     original = HybridRuntime.create
 
@@ -357,7 +345,6 @@ def test_failed_later_native_publication_closes_unexposed_owner_without_boot(tmp
     # to a MOV. Only native publication may reject its instruction encoding.
     document["routines"][0]["callbacks"][0]["call_offset"] = 0
     args.hybrid_routines.write_text(json.dumps(document))
-    _stage_explicit_loader(monkeypatch)
     owners = []
     original = HybridRuntime.create
 

@@ -240,7 +240,12 @@ def test_real_child_return_restores_parent_only_and_matches_ordinary_cold_and_wa
         reference.assert_equal()
         _assert_receipt(owner, final)
         previous_segment = final.segment_id
-    assert not hasattr(native, "HYBRID_NESTED_ROUTINE_ABI_VERSION")
+    assert type(native.HYBRID_NESTED_ROUTINE_ABI_VERSION) is int
+    assert native.HYBRID_NESTED_ROUTINE_ABI_VERSION == 3
+    assert type(native.HYBRID_NESTED_ROUTINE_CAPABILITY) is str
+    assert native.HYBRID_NESTED_ROUTINE_CAPABILITY == "distinct_registration_children"
+    assert type(native.HYBRID_NESTED_ROUTINE_MAX_DEPTH) is int
+    assert native.HYBRID_NESTED_ROUTINE_MAX_DEPTH == 8
     owner.runner.close()
 
 

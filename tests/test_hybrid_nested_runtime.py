@@ -1,4 +1,4 @@
-"""V4 capture/publication gates before nested execution is enabled."""
+"""V4 publication, private boundaries, and qualified public source entry."""
 
 from dataclasses import replace
 
@@ -64,19 +64,15 @@ def state(owner):
             tuple(owner.semantic._callback_exports._nested_calls))
 
 
-def test_public_profile_and_source_execution_remain_unavailable(owner):
-    before = state(owner)
-    assert not owner.nested_callback_abi_available
-    with pytest.raises(RuntimeError, match="fully qualified"):
-        owner.register_routine_v4(image())
-    assert state(owner) == before
-    word = owner._publish_nested_routine(image())
+def test_public_profile_registers_and_executes_through_semantic_word(owner):
+    assert owner.nested_callback_abi_available
+    assert owner.closed_callback_abi_available
+    word = owner.register_routine_v4(image())
     owner.semantic.main_context.data.push(41)
-    with pytest.raises(HybridExecutionError) as caught:
-        owner.execute(word.xt)
-    assert caught.value.reason == "nested_unavailable"
-    assert owner.semantic.main_context.data.snapshot() == (41,)
-    assert owner.machine_instructions == owner.transitions == 0
+    report = owner.execute(word.xt)
+    assert owner.semantic.main_context.data.snapshot() == (42,)
+    assert (report.machine_instructions, report.transitions) == (2, 1)
+    assert owner.max_machine_depth == 1
 
 
 def test_real_publication_retains_exact_child_edge_and_live_graph_proof(owner):
@@ -333,9 +329,8 @@ def test_failed_legacy_facade_factory_closes_constructed_v3_owner(monkeypatch):
     buffers[0].extend(b"released")
 
 
-# The public profile stays unavailable through staged qualification. These
-# tests call the permanent private implementation from an ordinary primitive,
-# so they retain a real original meter without changing capability metadata.
+# Internal boundary tests call the permanent implementation from an ordinary
+# primitive, preserving the original meter without changing capability metadata.
 def private_entry(owner, word, name="PRIVATE-TEST-ENTRY"):
     return owner.semantic.define_primitive(name, lambda context: owner._invoke_published_nested(word, context))
 
@@ -370,7 +365,7 @@ def test_private_root_uses_real_native_segments_and_original_meter(owner, kind):
                 (5, 8, 1, 2, 1) if export is not None else (2, 3, 1, 1, 0))
     assert owner.max_machine_depth == 1
     assert owner.semantic._callback_exports._nested_chain is None
-    assert not owner.nested_callback_abi_available
+    assert owner.nested_callback_abi_available
 
 
 def test_child_callback_counts_once_at_root_and_inclusively_in_parent(owner):
@@ -817,3 +812,72 @@ def test_terminal_native_authority_corruption_settles_work_but_commits_no_output
     assert owner.callback_semantic_steps == 1
     assert owner.semantic.main_context.data.snapshot() == (MASK64,)
     assert owner.semantic._callback_exports._nested_chain is None
+
+
+def test_public_nested_source_uses_qualified_marker_and_same_owner(owner):
+    child = owner.register_routine_v4(image(export=leaf_export()))
+    owner.semantic.define_colon("POLICY", (Call(child.xt), Return()))
+    owner.register_routine_v4(image("PARENT", 1, descriptor(steps=4)))
+    report = owner.evaluate("-1 PARENT")
+    assert owner.semantic.main_context.data.snapshot() == (1,)
+    assert (report.machine_instructions, report.machine_cycles, report.transitions,
+            report.machine_segments, report.callback_requests, report.callback_semantic_steps) == (10, 16, 2, 4, 2, 4)
+    assert owner.max_machine_depth == 2
+    assert owner.semantic.callback_export_abi_version == 4
+
+
+def test_required_public_nested_profile_creates_real_qualified_owner():
+    runtime = HybridRuntime.create(require_nested_callbacks=True, executor="python",
+                                  geometry={"bank0_size": 65536, "external_size": 65536})
+    try:
+        assert runtime.nested_callback_abi_available
+        word = runtime.register_routine_v4(image())
+        runtime.semantic.main_context.data.push(41)
+        assert runtime.execute(word.xt).machine_instructions == 2
+        assert runtime.semantic.main_context.data.snapshot() == (42,)
+    finally:
+        runtime.close()
+
+
+@pytest.mark.parametrize("marker", ("HYBRID_NESTED_ROUTINE_ABI_VERSION", "HYBRID_NESTED_ROUTINE_CAPABILITY",
+                                     "HYBRID_NESTED_ROUTINE_MAX_DEPTH"))
+def test_missing_native_profile_rejects_required_creation_before_ownership(monkeypatch, marker):
+    import hybrid.runtime as bridge
+    def forbidden(*args, **kwargs):
+        raise AssertionError("missing native profile must not acquire memory ownership")
+    monkeypatch.delattr(native, marker)
+    monkeypatch.setattr(bridge, "create_one_core_address_space", forbidden)
+    with pytest.raises(RuntimeError, match="fully qualified"):
+        HybridRuntime.create(require_nested_callbacks=True)
+
+
+def test_missing_native_marker_blocks_public_entry_even_for_issued_word(owner, monkeypatch):
+    word = owner.register_routine_v4(image())
+    owner.semantic.main_context.data.push(41)
+    with monkeypatch.context() as patch:
+        patch.delattr(native, "HYBRID_NESTED_ROUTINE_ABI_VERSION")
+        assert not owner.nested_callback_abi_available
+        with pytest.raises(HybridExecutionError) as caught:
+            owner.execute(word.xt)
+    assert caught.value.reason == "nested_unavailable"
+    assert owner.machine_instructions == 0
+    assert owner.semantic.main_context.data.snapshot() == (41,)
+    assert owner.execute(word.xt).machine_instructions == 2
+
+
+@pytest.mark.parametrize("stack", ("data", "returns"))
+def test_nested_private_stack_rejects_task_effect_authority_during_tick(owner, monkeypatch, stack):
+    word = owner.register_routine_v4(image(export=leaf_export()))
+    owner.semantic.main_context.data.push(7)
+    account = owner.semantic._account_semantic_step
+    def attach():
+        account()
+        context = owner.semantic._callback_exports._active_context
+        if context is not None:
+            getattr(context, stack)._task_effect_guard = object()
+    monkeypatch.setattr(owner.semantic, "_account_semantic_step", attach)
+    with pytest.raises(CallbackExportError):
+        owner.execute(word.xt)
+    assert owner.machine_instructions == 3
+    assert owner.callback_semantic_steps == 1
+    assert owner.semantic.main_context.data.snapshot() == (7,)

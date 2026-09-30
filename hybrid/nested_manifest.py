@@ -1,4 +1,4 @@
-"""Explicit V4 combined-graph loading, without publication or startup access."""
+"""V4 combined-graph loading, without publication or execution authority."""
 
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def _exports_metadata(value: object, policies: tuple[ClosedPolicyV4, ...],
     return tuple(exports)
 
 
-def _load_nested_manifest_v4(manifest_path: Path, decoded: object) -> RoutineManifestV4:
+def _parse_nested_manifest_v4(manifest_path: Path, decoded: object) -> RoutineManifestV4:
     root = _object(decoded, _MANIFEST_FIELDS, "nested manifest")
     if type(root["abi"]) is not str or root["abi"] != HYBRID_ABI:
         raise HybridManifestError("unsupported hybrid ABI identity")
@@ -178,20 +178,22 @@ def _load_nested_manifest_v4(manifest_path: Path, decoded: object) -> RoutineMan
     )
 
 
-def load_nested_manifest_v4(path: str | os.PathLike[str]) -> RoutineManifestV4:
-    """Load one bounded V4 document and its images, never publish or execute.
-
-    The generic loader and existing application capability remain unchanged.
-    Actual instruction boundaries/encodings are proved by later publication.
-    """
-
-    manifest_path, decoded = _read_manifest(path)
+def _load_nested_manifest_v4(manifest_path: Path, decoded: object) -> RoutineManifestV4:
+    """Normalize declaration failures for both public loader entry points."""
     try:
-        return _load_nested_manifest_v4(manifest_path, decoded)
+        return _parse_nested_manifest_v4(manifest_path, decoded)
     except (TypeError, ValueError) as exc:
         if type(exc) is HybridManifestError:
             raise
         raise HybridManifestError(str(exc)) from exc
+
+
+def load_nested_manifest_v4(path: str | os.PathLike[str]) -> RoutineManifestV4:
+    """Load one bounded V4 document and its images, never publish or execute.
+
+    Actual instruction boundaries/encodings are proved by later publication.
+    """
+    return _load_nested_manifest_v4(*_read_manifest(path))
 
 
 __all__ = ["HybridManifestError", "load_nested_manifest_v4"]

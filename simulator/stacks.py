@@ -247,6 +247,7 @@ class DataStack:
         initial_cells = tuple(u64(cell) for cell in cells)
         self._memory = memory
         self._memory_view = None
+        self._task_effect_guard = None
         self._cells: list[int] | None
         self._floor: int | None
         self._empty_pointer: int | None
@@ -513,6 +514,7 @@ class ReturnStack:
         self._entries: list[ReturnEntry] | None
         self._continuations: dict[int, tuple[Continuation | ForeignContinuation, int]]
         self._foreign_control: ForeignReturnControl | None = None
+        self._task_effect_guard = None
         self._pointer_capture_generation = 0
         self._continuation_cookie = 0
         self._floor: int | None

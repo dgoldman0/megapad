@@ -37384,8 +37384,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly("chain_callbacks", &mp64_nested::Receipt::chain_callbacks)
         .def_readonly("callback_request", &mp64_nested::Receipt::callback_request);
 
-    // No HYBRID_NESTED_ROUTINE_ABI_VERSION advertisement until the full
-    // distinct-registration child path passes its qualification gate.
+    m.attr("HYBRID_NESTED_ROUTINE_ABI_VERSION") = py::int_(3);
+    m.attr("HYBRID_NESTED_ROUTINE_CAPABILITY") = py::str("distinct_registration_children");
+    m.attr("HYBRID_NESTED_ROUTINE_MAX_DEPTH") = py::int_(8);
     py::class_<RoutineRunnerV3>(m, "RoutineRunnerV3")
         .def(py::init<py::object, py::handle, py::buffer>(),
             py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))

@@ -110,12 +110,15 @@ def test_v4_owns_images_and_resolves_exact_shared_descriptors_once(tmp_path, mon
     assert value.routines[0].code == b"\x01" * 64
 
 
-def test_one_manifest_read_and_no_implicit_old_loader_capability(tmp_path, monkeypatch):
+def test_one_manifest_read_through_generic_loader_and_exact_old_schemas(tmp_path, monkeypatch):
     path = _write(tmp_path)
     opened = _record_opens(monkeypatch)
     load_nested_manifest_v4(path)
     assert opened == [path, tmp_path / "routine.bin", tmp_path / "routine.bin"]
-    for loader in (load_manifest, load_manifest_v1, load_manifest_v2, load_manifest_v3,
+    opened.clear()
+    assert type(load_manifest(path)) is RoutineManifestV4
+    assert opened == [path, tmp_path / "routine.bin", tmp_path / "routine.bin"]
+    for loader in (load_manifest_v1, load_manifest_v2, load_manifest_v3,
                    load_service_manifest_v5):
         opened.clear()
         with pytest.raises(HybridManifestError):
@@ -307,7 +310,9 @@ def guarded(name, *args, **kwargs):
     return original(name, *args, **kwargs)
 builtins.__import__ = guarded
 from hybrid.nested_manifest import load_nested_manifest_v4
+from hybrid.manifest import load_manifest
 value = load_nested_manifest_v4(sys.argv[1])
 assert value.version == 4
+assert load_manifest(sys.argv[1]) == value
 """
     subprocess.run([sys.executable, "-c", code, str(path)], cwd=root, check=True)

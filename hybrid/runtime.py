@@ -30,7 +30,7 @@ from shared.hybrid_nested import (RoutineImageV4, RoutineDeclarationV4, MAX_CHIL
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES, Word
 from simulator.errors import ExecutionBlocked, ExecutionError
 from simulator.interop_exports import (
-    CallbackExportBudgetExceeded, CallbackExportResult, ClosedCallbackReceipt,
+    CallbackExportBudgetExceeded, CallbackExportResult, ClosedCallbackReceipt, CallbackExportEngine,
 )
 from simulator.memory import AddressClass, MMIO_BASE, MMIO_LIMIT, SparseAddressSpace
 from simulator.platform import create_one_core_address_space
@@ -338,11 +338,8 @@ class HybridRuntime:
     ) -> HybridRuntime:
         if type(require_nested_callbacks) is not bool:
             raise TypeError("require_nested_callbacks must be an exact boolean")
-        if require_nested_callbacks:
-            raise RuntimeError(
-                "hybrid nested callbacks require the fully qualified semantic V4 "
-                "profile and native V3 transport; this build does not enable them"
-            )
+        if require_nested_callbacks and (cls is not HybridRuntime or not cls._supports_nested_semantics()):
+            raise RuntimeError("hybrid nested callbacks require fully qualified semantic V4 and native V3")
         limit = _positive_limit(dispatch_instruction_limit,
                                 MAX_DISPATCH_INSTRUCTIONS, "dispatch instruction limit")
         callback_limit = _positive_limit(
@@ -378,6 +375,8 @@ class HybridRuntime:
         if (getattr(native, "HYBRID_ROUTINE_ABI_ID", None) != HYBRID_ABI
                 or getattr(native, "HYBRID_ROUTINE_ABI_VERSION", None) != HYBRID_ABI_VERSION):
             raise RuntimeError("hybrid execution requires a matching _mp64_accel; run make build")
+        if require_nested_callbacks and not cls._supports_nested_execution(native):
+            raise RuntimeError("hybrid nested callbacks require fully qualified semantic V4 and native V3")
         if memory is None:
             memory = create_one_core_address_space(dense_backing=True, **(geometry or {}))
         # Validate and pin architectural geometry before the semantic runtime
@@ -390,7 +389,11 @@ class HybridRuntime:
             machine = None
             raise
         try:
-            return cls(semantic, native, limit, machine, callback_limit, callback_semantic_limit)
+            owner = cls(semantic, native, limit, machine, callback_limit, callback_semantic_limit)
+            if require_nested_callbacks and not owner.nested_callback_abi_available:
+                owner.close()
+                raise RuntimeError("hybrid nested callbacks require fully qualified semantic V4 and native V3")
+            return owner
         except BaseException:
             machine[1].close()
             raise
@@ -818,6 +821,37 @@ class HybridRuntime:
         )
 
     @staticmethod
+    def _supports_nested_semantics() -> bool:
+        version = getattr(MegaForthRuntime, "NESTED_CALLBACK_ABI_VERSION", None)
+        return (
+            type(version) is int and version == 4
+            and all(callable(getattr(CallbackExportEngine, name, None)) for name in (
+                "_install_nested_owner", "_begin_nested_chain", "_finish_nested_chain",
+                "_begin_nested_callback", "_invoke_nested_callback", "_consume_nested_callback",
+                "_nested_private_context", "consume_budget_failure",
+            ))
+        )
+
+    @staticmethod
+    def _supports_nested_execution(native: Any) -> bool:
+        version = getattr(native, "HYBRID_NESTED_ROUTINE_ABI_VERSION", None)
+        profile = getattr(native, "HYBRID_NESTED_ROUTINE_CAPABILITY", None)
+        depth = getattr(native, "HYBRID_NESTED_ROUTINE_MAX_DEPTH", None)
+        runner = getattr(native, "RoutineRunnerV3", None)
+        return (
+            type(version) is int and version == 3
+            and type(profile) is str and profile == "distinct_registration_children"
+            and type(depth) is int and depth == 8
+            and HybridRuntime._supports_nested_publication(native)
+            and all(callable(getattr(runner, name, None)) for name in (
+                "begin_root_v3", "begin_child_v3", "resume_callback_v3", "cancel_chain_v3", "last_segment_v3",
+            ))
+            and all(callable(getattr(native, name, None)) for name in (
+                "RoutineSegmentResultV3", "RoutineSegmentReceiptV3", "RoutineCallbackRequestV3",
+            ))
+        )
+
+    @staticmethod
     def _prepare_machine(memory: SparseAddressSpace, native: Any) -> tuple:
         # This logical span is deliberately absent from semantic memory and
         # SysInfo. It owns native CALL/RET control cells, never shared data.
@@ -897,10 +931,10 @@ class HybridRuntime:
     @property
     def closed_callback_abi_available(self) -> bool:
         """Whether this owner admits V3 closed policies over the V2 transport."""
+        version = getattr(self.semantic, "callback_export_abi_version", None)
         return (
             self._callbacks_available
-            and getattr(self.semantic, "callback_export_abi_version", None)
-            == HYBRID_CLOSED_ABI_VERSION
+            and type(version) is int and version in (HYBRID_CLOSED_ABI_VERSION, 4)
             and callable(getattr(self.semantic, "inspect_callback_export", None))
             and callable(getattr(self.semantic, "callback_policy_core_xt", None))
             and callable(getattr(self.semantic, "consume_callback_budget_failure", None))
@@ -910,8 +944,16 @@ class HybridRuntime:
 
     @property
     def nested_callback_abi_available(self) -> bool:
-        """Foundation ownership alone never advertises executable V4 support."""
-        return False
+        """Exact qualified semantic profile and distinct-child native transport."""
+        version = getattr(self.semantic, "callback_export_abi_version", None)
+        return (
+            type(self) is HybridRuntime and type(self.semantic) is MegaForthRuntime
+            and type(version) is int and version == 4
+            and self._supports_nested_semantics() and self._supports_nested_execution(self._native)
+            and type(self._nested_runner) is self._native.RoutineRunnerV3
+            and type(self.semantic._callback_exports) is CallbackExportEngine
+            and self.semantic._callback_exports._nested_owner is not None
+        )
 
     @property
     def max_machine_depth(self) -> int:
@@ -1584,8 +1626,10 @@ class HybridRuntime:
             registration = self._by_nonce.get(nonce)
             if registration is None:
                 raise HybridExecutionError("stale_registration", "registration identity is no longer live")
-            if type(registration.declaration) is RoutineDeclarationV4 and not self.nested_callback_abi_available:
-                raise HybridExecutionError("nested_unavailable", "nested machine execution is not enabled")
+            if type(registration.declaration) is RoutineDeclarationV4:
+                if not self.nested_callback_abi_available:
+                    raise HybridExecutionError("nested_unavailable", "nested machine execution is not enabled")
+                return self._invoke_published_nested(registration.word, context)
             self._validate_registration(registration)
             declaration = registration.declaration
             protected = self._protected_spans(context)

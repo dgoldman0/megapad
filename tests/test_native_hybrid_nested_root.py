@@ -239,7 +239,12 @@ def test_root_segments_match_ordinary_calls_returns_registers_control_bytes_and_
         _assert_root_receipt(harness, final, started=False, callbacks=1)
         assert first_receipt.instructions == 7 and first_receipt.invocation_started is True
         assert int.from_bytes(harness.external[:8], "little") == MASK64 - 2
-    assert not hasattr(native, "HYBRID_NESTED_ROUTINE_ABI_VERSION")
+    assert type(native.HYBRID_NESTED_ROUTINE_ABI_VERSION) is int
+    assert native.HYBRID_NESTED_ROUTINE_ABI_VERSION == 3
+    assert type(native.HYBRID_NESTED_ROUTINE_CAPABILITY) is str
+    assert native.HYBRID_NESTED_ROUTINE_CAPABILITY == "distinct_registration_children"
+    assert type(native.HYBRID_NESTED_ROUTINE_MAX_DEPTH) is int
+    assert native.HYBRID_NESTED_ROUTINE_MAX_DEPTH == 8
     harness.runner.close()
 
 
