@@ -15,6 +15,7 @@ from shared.cells import MASK64
 
 HYBRID_ABI = "megapad.hybrid.integer-routine"
 HYBRID_ABI_VERSION = 1
+HYBRID_CALLBACK_ABI_VERSION = 2
 MAX_CODE_BYTES = 1 << 20
 MAX_TOTAL_CODE_BYTES = 16 << 20
 MAX_MANIFEST_BYTES = 1 << 20
@@ -27,6 +28,11 @@ MAX_CALL_INSTRUCTIONS = 1_000_000
 MAX_DISPATCH_INSTRUCTIONS = 10_000_000
 CODE_ALIGNMENT = 16
 CELL_BYTES = 8
+MAX_CALLBACK_EXPORTS = 64
+MAX_CALLBACK_SITES = 16
+MAX_DISPATCH_CALLBACKS = 1024
+MAX_CALLBACK_SEMANTIC_STEPS = 4096
+MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS = 65536
 
 
 def _integer(value: int, label: str, minimum: int, maximum: int) -> int:
@@ -44,12 +50,12 @@ def _span(base: int, size: int, label: str, *, empty: bool = False) -> None:
         raise ValueError(f"{label} span wraps the uint64 address space")
 
 
-def _version(abi: str, version: int) -> None:
+def _version(abi: str, version: int, *, expected: int = HYBRID_ABI_VERSION) -> None:
     if type(abi) is not str:
         raise TypeError("ABI identity must be a string")
     if abi != HYBRID_ABI:
         raise ValueError("unsupported hybrid ABI identity")
-    _integer(version, "ABI version", 1, HYBRID_ABI_VERSION)
+    _integer(version, "ABI version", expected, expected)
 
 
 def _name(name: str) -> None:
@@ -135,7 +141,7 @@ class BufferRuleV1:
         return BufferSpanV1(base=base, size=size, access=self.access)
 
 
-def _routine_values(value: object) -> None:
+def _routine_values(value: object, *, version: int = HYBRID_ABI_VERSION) -> None:
     _name(value.name)
     if type(value.code) is not bytes:
         raise TypeError("routine code must be immutable bytes")
@@ -154,7 +160,7 @@ def _routine_values(value: object) -> None:
             raise ValueError("buffer rule argument is outside the input signature")
     _integer(value.max_instructions, "per-call instructions", 1, MAX_CALL_INSTRUCTIONS)
     _integer(value.return_stack_cells, "return stack cells", 1, MAX_RETURN_STACK_CELLS)
-    _version(value.abi, value.version)
+    _version(value.abi, value.version, expected=version)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -238,7 +244,10 @@ class RoutineDeclarationV1:
     version: int = HYBRID_ABI_VERSION
 
     def __post_init__(self) -> None:
-        _routine_values(self)
+        self._validate_declaration()
+
+    def _validate_declaration(self, *, version: int = HYBRID_ABI_VERSION) -> None:
+        _routine_values(self, version=version)
         for label in ("session_nonce", "registration_nonce", "allocation_lease", "control_lease"):
             if getattr(self, label) is None:
                 raise ValueError(f"{label} must identify its owner")
@@ -304,11 +313,15 @@ class MachineRoutineResultV1:
     version: int = HYBRID_ABI_VERSION
 
     def __post_init__(self) -> None:
-        _version(self.abi, self.version)
-        if not isinstance(self.exit_kind, MachineExitKindV1):
+        self._validate_result()
+
+    def _validate_result(self, *, version: int = HYBRID_ABI_VERSION,
+                         exit_type: type[Enum] = MachineExitKindV1) -> None:
+        _version(self.abi, self.version, expected=version)
+        if not isinstance(self.exit_kind, exit_type):
             if type(self.exit_kind) is not str:
                 raise TypeError("machine exit kind must be a string")
-            object.__setattr__(self, "exit_kind", MachineExitKindV1(self.exit_kind))
+            object.__setattr__(self, "exit_kind", exit_type(self.exit_kind))
         _integer(self.instructions, "completed instructions", 0, MAX_CALL_INSTRUCTIONS)
         _integer(self.cycles, "completed cycles", 0, MASK64)
         _integer(self.entry_pc, "entry PC", 0, MASK64)
@@ -336,6 +349,200 @@ class MachineRoutineResultV1:
             raise TypeError("detail must be a string")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CallbackExportV2:
+    """A leaf signature, never authority to call a word or host function.
+
+    The semantic owner independently binds the exact original canonical Word.
+    Names and IDs in this value cannot establish that identity or its lifetime.
+    """
+
+    export_id: int
+    name: str
+    input_cells: int
+    output_cells: int
+    max_semantic_steps: int = 1
+    effect: str = "integer_leaf"
+    abi: str = HYBRID_ABI
+    version: int = HYBRID_CALLBACK_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _version(self.abi, self.version, expected=HYBRID_CALLBACK_ABI_VERSION)
+        _integer(self.export_id, "callback export ID", 0, MAX_CALLBACK_EXPORTS - 1)
+        _name(self.name)
+        if self.name not in ("MIN", "MAX", "ABS", "AND", "OR", "XOR"):
+            raise ValueError("callback export must name a canonical integer leaf")
+        _integer(self.input_cells, "callback input cells", 0, MAX_SIGNATURE_CELLS)
+        _integer(self.output_cells, "callback output cells", 0, MAX_SIGNATURE_CELLS)
+        if (self.input_cells, self.output_cells) != ((1, 1) if self.name == "ABS" else (2, 1)):
+            raise ValueError("callback arity does not match its canonical integer leaf")
+        # _execute_top charges one tick then invokes these total primitives;
+        # none returns Invoke, enters a service, or performs nested dispatch.
+        _integer(self.max_semantic_steps, "integer leaf semantic steps", 1, 1)
+        if type(self.effect) is not str:
+            raise TypeError("callback effect must be a string")
+        if self.effect != "integer_leaf":
+            raise ValueError("callback effect must be integer_leaf")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CallbackSiteV2:
+    """Numerical metadata for an unprefixed two-byte CALL and one-byte RET.
+
+    The native publisher still proves encodings, instruction boundaries and
+    dynamic call provenance against the complete sealed image.
+    """
+
+    call_offset: int
+    stub_offset: int
+    export: CallbackExportV2
+    abi: str = HYBRID_ABI
+    version: int = HYBRID_CALLBACK_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _version(self.abi, self.version, expected=HYBRID_CALLBACK_ABI_VERSION)
+        _integer(self.call_offset, "callback call offset", 0, MAX_CODE_BYTES - 2)
+        _integer(self.stub_offset, "callback stub offset", 0, MAX_CODE_BYTES - 1)
+        if self.call_offset <= self.stub_offset < self.call_offset + 2:
+            raise ValueError("callback call and stub byte spans must be disjoint")
+        if type(self.export) is not CallbackExportV2:
+            raise TypeError("callback export must be a CallbackExportV2 value")
+
+
+def _callback_sites(value: object) -> None:
+    if type(value.callbacks) is not tuple:
+        raise TypeError("callback sites must be an immutable tuple")
+    if len(value.callbacks) > MAX_CALLBACK_SITES:
+        raise ValueError("a routine may declare at most 16 callback sites")
+    exports: dict[int, CallbackExportV2] = {}
+    occupied: set[int] = set()
+    for site in value.callbacks:
+        if type(site) is not CallbackSiteV2:
+            raise TypeError("callback sites must be CallbackSiteV2 values")
+        if site.call_offset + 2 > len(value.code) or site.stub_offset >= len(value.code):
+            raise ValueError("complete callback call and stub must lie inside the code image")
+        offsets = (site.call_offset, site.call_offset + 1, site.stub_offset)
+        if any(offset in occupied for offset in offsets):
+            raise ValueError("callback site byte spans must not overlap or repeat")
+        occupied.update(offsets)
+        previous = exports.setdefault(site.export.export_id, site.export)
+        if previous != site.export:
+            raise ValueError("callback export ID has conflicting descriptors")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutineImageV2(RoutineImageV1):
+    """Unpublished callback image; the v1 loader does not admit this type."""
+
+    callbacks: tuple[CallbackSiteV2, ...]
+    version: int = HYBRID_CALLBACK_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _routine_values(self, version=HYBRID_CALLBACK_ABI_VERSION)
+        _callback_sites(self)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RoutineDeclarationV2(RoutineDeclarationV1):
+    """Sealed v2 metadata; allocation/export/token authority stays external."""
+
+    callbacks: tuple[CallbackSiteV2, ...]
+    dispatch_callback_limit: int = MAX_DISPATCH_CALLBACKS
+    dispatch_callback_semantic_limit: int = MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS
+    version: int = HYBRID_CALLBACK_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        self._validate_declaration(version=HYBRID_CALLBACK_ABI_VERSION)
+        _callback_sites(self)
+        _integer(self.dispatch_callback_limit, "dispatch callback requests", 1,
+                 MAX_DISPATCH_CALLBACKS)
+        _integer(self.dispatch_callback_semantic_limit, "dispatch callback semantic steps", 1,
+                 MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CallbackRequestV2:
+    """Copyable callback observation, not a native continuation capability."""
+
+    invocation_id: int
+    sequence: int
+    site: CallbackSiteV2
+    arguments: tuple[int, ...]
+    abi: str = HYBRID_ABI
+    version: int = HYBRID_CALLBACK_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        _version(self.abi, self.version, expected=HYBRID_CALLBACK_ABI_VERSION)
+        _integer(self.invocation_id, "invocation ID", 1, MASK64)
+        _integer(self.sequence, "callback request sequence", 1, MAX_DISPATCH_CALLBACKS)
+        if type(self.site) is not CallbackSiteV2:
+            raise TypeError("callback request site must be a CallbackSiteV2 value")
+        if type(self.arguments) is not tuple:
+            raise TypeError("callback arguments must be an immutable tuple")
+        if len(self.arguments) != self.site.export.input_cells:
+            raise ValueError("callback argument count does not match its export")
+        for argument in self.arguments:
+            _integer(argument, "callback argument cell", 0, MASK64)
+
+
+class MachineExitKindV2(str, Enum):
+    RETURNED = "returned"
+    INSTRUCTION_LIMIT = "instruction_limit"
+    UNSUPPORTED_INSTRUCTION = "unsupported_instruction"
+    REJECTED_ACCESS = "rejected_access"
+    DECODE_FAULT = "decode_fault"
+    INVALID_RETURN = "invalid_return"
+    CANCELLED = "cancelled"
+    CALLBACK_REQUEST = "callback_request"
+    CALLBACK_LIMIT = "callback_limit"
+    INVALID_CALLBACK = "invalid_callback"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MachineSegmentResultV2(MachineRoutineResultV1):
+    """One settled segment, with distinct deltas and invocation totals.
+
+    A callback request is nonterminal and has no final machine outputs. The
+    associated native continuation token is intentionally not a shared value.
+    """
+
+    invocation_id: int
+    invocation_instructions: int
+    invocation_cycles: int
+    callback: CallbackRequestV2 | None = None
+    exit_kind: MachineExitKindV2 | str
+    version: int = HYBRID_CALLBACK_ABI_VERSION
+
+    def __post_init__(self) -> None:
+        self._validate_result(version=HYBRID_CALLBACK_ABI_VERSION, exit_type=MachineExitKindV2)
+        _integer(self.invocation_id, "invocation ID", 1, MASK64)
+        _integer(self.invocation_instructions, "invocation instructions", 0,
+                 MAX_CALL_INSTRUCTIONS)
+        _integer(self.invocation_cycles, "invocation cycles", 0, MASK64)
+        if self.instructions > self.invocation_instructions or self.cycles > self.invocation_cycles:
+            raise ValueError("segment counters cannot exceed invocation totals")
+        for instructions, cycles in (
+            (self.instructions, self.cycles),
+            (self.invocation_instructions - self.instructions,
+             self.invocation_cycles - self.cycles),
+        ):
+            if cycles < instructions or (instructions == 0 and cycles != 0):
+                raise ValueError("completed instruction and cycle counters are inconsistent")
+        if self.exit_kind is MachineExitKindV2.RETURNED and self.instructions == 0:
+            raise ValueError("returned exit requires a completed RET instruction")
+        if self.exit_kind is MachineExitKindV2.CALLBACK_REQUEST:
+            if type(self.callback) is not CallbackRequestV2:
+                raise TypeError("callback request exit requires a CallbackRequestV2 value")
+            if self.callback.invocation_id != self.invocation_id:
+                raise ValueError("callback request belongs to a different invocation")
+            if self.instructions == 0:
+                raise ValueError("callback request requires a completed CALL instruction")
+            if self.callback.sequence > self.invocation_instructions:
+                raise ValueError("callback request sequence exceeds completed calls")
+        elif self.callback is not None:
+            raise ValueError("only callback request exits may carry a callback request")
+
+
 __all__ = [
     "HYBRID_ABI", "HYBRID_ABI_VERSION", "MAX_CODE_BYTES", "MAX_TOTAL_CODE_BYTES",
     "MAX_MANIFEST_BYTES", "MAX_ROUTINES", "MAX_BUFFER_RULES", "MAX_SIGNATURE_CELLS",
@@ -343,4 +550,9 @@ __all__ = [
     "MAX_DISPATCH_INSTRUCTIONS", "CODE_ALIGNMENT", "CELL_BYTES", "BufferAccessV1",
     "BufferSpanV1", "BufferRuleV1", "RoutineImageV1", "RoutineManifestV1",
     "RoutineDeclarationV1", "MachineExitKindV1", "MachineRoutineResultV1",
+    "HYBRID_CALLBACK_ABI_VERSION", "MAX_CALLBACK_EXPORTS", "MAX_CALLBACK_SITES",
+    "MAX_DISPATCH_CALLBACKS", "MAX_CALLBACK_SEMANTIC_STEPS",
+    "MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS", "CallbackExportV2", "CallbackSiteV2",
+    "RoutineImageV2", "RoutineDeclarationV2", "CallbackRequestV2",
+    "MachineExitKindV2", "MachineSegmentResultV2",
 ]
