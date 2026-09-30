@@ -629,13 +629,30 @@ also gives the misaligned address. Illegal instructions include reserved
 the unassigned prefixes F7 and FD–FF, and tile operations a format does not
 admit (`docs/floating-point.md`).
 
-On core 0 the BIOS then recovers as it does for an undefined word, with
-clean stacks: interpret state, the `EVALUATE` depth reset, interrupts
-enabled as they were, and the prompt. Definitions and variables survive.
-On a worker core the BIOS ends the job, so `CORE-STATUS` reports the core
-idle, resets the core's stacks, and returns it to its idle loop, ready for
-the next `WAKE-CORE`. A fault does not reach a KDOS `CATCH`; it aborts to
-the prompt as the BIOS does for other errors.
+Before reporting, the BIOS calls the callback installed with `FAULT-XT!`
+`( xt -- )`, if any, with the fault's standard throw code on the data
+stack:
+
+| Fault | Code |
+|-------|------|
+| Illegal instruction | -21 (unsupported operation) |
+| Alignment fault | -23 (address alignment exception) |
+| Divide by zero, or signed division overflow | -10 (division by zero) |
+
+The callback runs on the faulting core with the BIOS registers restored,
+interrupts enabled as they were, and the trap frame still on the return
+stack. KDOS installs one that `THROW`s the code to the innermost `CATCH` of
+the faulting context (a task on core 0, or a worker core), so a fault inside
+`CATCH` or a checked load unwinds like any other exception and prints
+nothing. `0 FAULT-XT!` removes the callback; boot clears it.
+
+With no callback, or when the callback returns (KDOS returns when there is
+no `CATCH`), the BIOS prints the line above and recovers. On core 0 it
+recovers as it does for an undefined word, with clean stacks: interpret
+state, the `EVALUATE` depth reset, interrupts enabled as they were, and the
+prompt. Definitions and variables survive. On a worker core the BIOS ends
+the job, so `CORE-STATUS` reports the core idle, resets the core's stacks,
+and returns it to its idle loop, ready for the next `WAKE-CORE`.
 
 ---
 

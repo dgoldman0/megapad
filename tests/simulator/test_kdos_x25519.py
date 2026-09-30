@@ -30,11 +30,11 @@ from tests.simulator.test_kdos_hmac import _load_hmac
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = Path(__file__).with_name("fixtures") / (
-    "kdos-x25519-1433-1481.f"
+    "kdos-x25519-1442-1490.f"
 )
 
-FIRST_LINE = 1433
-LAST_LINE = 1481
+FIRST_LINE = 1442
+LAST_LINE = 1490
 SLICE_SHA256 = "2177b310911ce4ea4eba937a26797d265e83466c67a2089a82fd6690840e3f8f"
 SLICE_GIT_BLOB = "2e46939cc9ada82480e83b0e3e1cda7db2a9d88e"
 DEFINITIONS = (
@@ -428,14 +428,14 @@ def test_next_contiguous_field_slice_is_now_admitted(
     loaded_x25519: MegaForthRuntime,
 ) -> None:
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    assert lines[1481] == b"\n"  # source line 1482
-    next_source = b"".join(lines[1482:1515])
+    assert lines[1490] == b"\n"  # source line 1491
+    next_source = b"".join(lines[1491:1524])
     assert next_source.startswith(b"\\ =================================")
     assert next_source.endswith(b"CREATE _FRH 32 ALLOT\n")
 
     result = loaded_x25519.evaluate(
         next_source,
-        source_name="kdos.f:1483-1515",
+        source_name="kdos.f:1492-1524",
     )
     assert tuple(word.name for word in result.definitions) == (
         b"PRIME-25519",

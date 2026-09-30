@@ -7,7 +7,7 @@ from shared.cells import MASK64
 from simulator.errors import ExecutionError
 from simulator.memory import SparseAddressSpace
 from simulator.runtime import MegaForthRuntime, YieldedExecution
-from simulator.stacks import Continuation, DataStack, ReturnStack
+from simulator.stacks import Continuation, DataStack, FaultAbort, ReturnStack
 
 
 @pytest.fixture(params=["reference", "native"])
@@ -69,7 +69,8 @@ def test_return_snapshot_preserves_types_and_removes_only_active_stale_metadata(
         if index % 100 == 0:
             expected.append(stack.push_continuation(
                 xt=index + 1, ip=index, root=index == 0,
-                dispatch_id=1000 if index == 0 else 0, fault_abort=index == 100,
+                dispatch_id=1000 if index == 0 else 0,
+                fault_abort=FaultAbort(b"report", "abort") if index == 100 else None,
             ))
         else:
             stack.push(index)

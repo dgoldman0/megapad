@@ -34,6 +34,7 @@ from simulator.errors import (
     ExecutionBlocked,
     ExecutionError,
     ForthAbort,
+    InstructionFault,
     SourceError,
     StepBudgetExceeded,
 )
@@ -90,7 +91,7 @@ from simulator.source import (
     SourceCursor,
     SourceLocation,
 )
-from simulator.stacks import DataStack, ReturnEntry, ReturnStack
+from simulator.stacks import DataStack, FaultAbort, ReturnEntry, ReturnStack
 from simulator.timer import HostedTimerService
 from simulator.terminal_geometry import HostedTerminalGeometryState
 
@@ -550,18 +551,33 @@ class _SuspendedExecution:
     wake_receipt: IdleWakeReceipt | None = None
 
 
-class _DictionaryFaultRequest(BaseException):
-    """Nonlocal request to enter the installed guest fault callback."""
+_DICTIONARY_FAULT_ABORT = FaultAbort(
+    b"dictionary overflow\r\n",
+    "dictionary fault callback returned",
+)
+
+
+class _GuestFaultRequest(BaseException):
+    """Nonlocal request to enter an installed guest fault callback.
+
+    ``xt`` is the ``DICT-FAULT-XT!`` or ``FAULT-XT!`` callback, zero when none
+    is installed.  An instruction fault passes its throw ``code`` on the data
+    stack.  ``abort`` applies when there is no callback or it returns.
+    """
 
     def __init__(
         self,
         xt: int,
         context: ExecutionContext,
         reason: str,
+        abort: FaultAbort,
+        code: int | None = None,
     ) -> None:
         self.xt = u64(xt)
         self.context = context
         self.reason = reason
+        self.abort = abort
+        self.code = code
         super().__init__(reason)
 
 
@@ -745,6 +761,7 @@ class MegaForthRuntime:
         self._dictionary_base = 0
         self._dictionary_limit = 0
         self._dictionary_fault_xt = 0
+        self._fault_xt = 0
         # Hardware user mode was removed from MegaPad, but its public BIOS
         # compatibility surface still exposes inert MPU registers.  Preserve
         # their guest-visible state without using it to restrict semantic
@@ -887,6 +904,12 @@ class MegaForthRuntime:
         """Return the raw callback installed through ``DICT-FAULT-XT!``."""
 
         return self._dictionary_fault_xt
+
+    @property
+    def fault_xt(self) -> int:
+        """Return the raw callback installed through ``FAULT-XT!``."""
+
+        return self._fault_xt
 
     @property
     def privilege_level(self) -> int:
@@ -1272,7 +1295,7 @@ class MegaForthRuntime:
             evaluator = self._require_bios_evaluator()
             try:
                 self._bios_evaluate(evaluator, context)
-            except (_GuestControlTransfer, _DictionaryFaultRequest):
+            except (_GuestControlTransfer, _GuestFaultRequest):
                 # Both paths have abandoned the Python input cursor while guest
                 # control is still entitled to reconstruct logical EVALUATE depth.
                 raise
@@ -1419,7 +1442,7 @@ class MegaForthRuntime:
         except _UndefinedWord as error:
             self._capture_bios_undefined(evaluator, error)
             self._pop_bios_evaluator_frame(evaluator, frame)
-        except (_GuestControlTransfer, _DictionaryFaultRequest):
+        except (_GuestControlTransfer, _GuestFaultRequest):
             # The Python cursor is gone, but the native input frame would
             # remain abandoned until KDOS calls EVALUATOR-UNWIND.
             raise
@@ -1561,6 +1584,13 @@ class MegaForthRuntime:
         self._require_session_owner_access("change the dictionary fault callback")
         self._require_no_suspension("change the dictionary fault callback")
         self._dictionary_fault_xt = u64(xt)
+
+    def set_fault_xt(self, xt: int) -> None:
+        """Install the instruction-fault callback, including zero to remove it."""
+
+        self._require_session_owner_access("change the fault callback")
+        self._require_no_suspension("change the fault callback")
+        self._fault_xt = u64(xt)
 
     def configure_dictionary_bounds(
         self,
@@ -1720,11 +1750,30 @@ class MegaForthRuntime:
         context: ExecutionContext,
         reason: str,
     ) -> NoReturn:
-        raise _DictionaryFaultRequest(
+        raise _GuestFaultRequest(
             self._dictionary_fault_xt,
             context,
             reason,
+            _DICTIONARY_FAULT_ABORT,
         )
+
+    def _invoke_primitive(
+        self,
+        implementation: PrimitiveDefinition,
+        context: ExecutionContext,
+    ) -> object:
+        """Run a primitive; a machine trap becomes a guest fault request."""
+
+        try:
+            return implementation.callback(context)
+        except InstructionFault as fault:
+            raise _GuestFaultRequest(
+                self._fault_xt,
+                context,
+                str(fault),
+                FaultAbort(fault.report, str(fault)),
+                fault.throw_code,
+            ) from None
 
     def _preflight_dictionary_growth(
         self,
@@ -1820,7 +1869,7 @@ class MegaForthRuntime:
 
     def _route_unhandled_dictionary_fault(
         self,
-        request: _DictionaryFaultRequest,
+        request: _GuestFaultRequest,
     ) -> NoReturn:
         """Give direct host definition calls the same fail-closed boundary."""
 
@@ -1829,7 +1878,7 @@ class MegaForthRuntime:
             for state in self._active_input_states
         ):
             raise request
-        self._execute_dictionary_fault_guarded(
+        self._execute_guest_fault_guarded(
             request,
             request.context,
             _StepMeter(None, self._account_semantic_step),
@@ -1851,7 +1900,7 @@ class MegaForthRuntime:
                 immediate=immediate,
                 initial_body=initial_body,
             )
-        except _DictionaryFaultRequest as request:
+        except _GuestFaultRequest as request:
             self._route_unhandled_dictionary_fault(request)
 
     def allot_dictionary(
@@ -2185,7 +2234,7 @@ class MegaForthRuntime:
                 if not self._has_active_guest_transfer_target(transfer):
                     self._fail_closed_active_bios_evaluator()
                 raise
-            except _DictionaryFaultRequest as request:
+            except _GuestFaultRequest as request:
                 if not self._has_active_dispatch(request.context):
                     self._fail_closed_active_bios_evaluator()
                 raise
@@ -2254,7 +2303,7 @@ class MegaForthRuntime:
                 semantic_steps=meter.steps - starting_steps,
                 definitions=tuple(state.definitions),
             )
-        except _DictionaryFaultRequest as request:
+        except _GuestFaultRequest as request:
             # Nested evaluation must hand the request back to the suspended
             # semantic dispatcher so guest THROW can discard its fault
             # sentinel and resume the existing CATCH continuation.
@@ -2267,7 +2316,7 @@ class MegaForthRuntime:
             if self._has_active_dispatch(active_context):
                 raise
             try:
-                self._execute_dictionary_fault_guarded(
+                self._execute_guest_fault_guarded(
                     request,
                     active_context,
                     meter,
@@ -3300,7 +3349,7 @@ class MegaForthRuntime:
             # root after RP! discarded its own Python dispatch boundary.  The
             # nested loop has already completed this semantic dispatch.
             completed_successfully = True
-        except _DictionaryFaultRequest as request:
+        except _GuestFaultRequest as request:
             # A nested public execute/evaluate boundary must not install a
             # fresh fault continuation above an older guest CATCH.  Remove
             # only this nested dispatch's internal return state and let the
@@ -3405,7 +3454,7 @@ class MegaForthRuntime:
                 raise
             completed_successfully = True
             cursor = None
-        except _DictionaryFaultRequest as request:
+        except _GuestFaultRequest as request:
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -3465,9 +3514,9 @@ class MegaForthRuntime:
                 raise AssertionError("active semantic dispatch stack is corrupted")
         return cursor
 
-    def _execute_dictionary_fault_guarded(
+    def _execute_guest_fault_guarded(
         self,
-        request: _DictionaryFaultRequest,
+        request: _GuestFaultRequest,
         context: ExecutionContext,
         meter: _StepMeter,
     ) -> None:
@@ -3521,21 +3570,19 @@ class MegaForthRuntime:
             if active is not frame:
                 raise AssertionError("active semantic dispatch stack is corrupted")
 
-    def _abort_returned_dictionary_fault(
+    def _abort_guest_fault(
         self,
+        abort: FaultAbort,
         context: ExecutionContext,
-    ) -> None:
-        self.write_uart_bytes(b"dictionary overflow\r\n")
+    ) -> NoReturn:
+        self.write_uart_bytes(abort.report)
         context.data.clear()
         context.returns.clear()
-        raise ForthAbort(
-            "dictionary fault callback returned",
-            origin_context=context,
-        )
+        raise ForthAbort(abort.message, origin_context=context)
 
-    def _begin_dictionary_fault(
+    def _begin_guest_fault(
         self,
-        request: _DictionaryFaultRequest,
+        request: _GuestFaultRequest,
         context: ExecutionContext,
         meter: _StepMeter,
     ) -> tuple[Word, int]:
@@ -3543,24 +3590,27 @@ class MegaForthRuntime:
 
         if request.context is not context:
             raise ExecutionError(
-                "dictionary fault crossed into a different execution context"
+                "guest fault crossed into a different execution context"
             )
+        abort = request.abort
         if context.returns.has_fault_abort_continuation():
-            self._abort_returned_dictionary_fault(context)
+            self._abort_guest_fault(abort, context)
         if request.xt == 0:
-            self._abort_returned_dictionary_fault(context)
+            self._abort_guest_fault(abort, context)
         try:
             target = self._resolve_dispatch_word(request.xt)
         except KeyError:
             raise ExecutionError(
-                "dictionary fault callback is not a live execution token: "
+                "guest fault callback is not a live execution token: "
                 f"0x{request.xt:016x}"
             ) from None
 
+        if request.code is not None:
+            context.data.push(u64(request.code))
         context.returns.push_continuation(
             target.xt,
             0,
-            fault_abort=True,
+            fault_abort=abort,
         )
         entry_ip = 0
         while True:
@@ -3568,27 +3618,27 @@ class MegaForthRuntime:
             if isinstance(implementation, ConstantDefinition):
                 meter.tick()
                 context.data.push(implementation.value)
-                self._abort_returned_dictionary_fault(context)
+                self._abort_guest_fault(abort, context)
             if isinstance(implementation, ValueDefinition):
                 meter.tick()
                 context.data.push(self.memory.read64(target.body_address))
-                self._abort_returned_dictionary_fault(context)
+                self._abort_guest_fault(abort, context)
             if isinstance(implementation, CreatedDefinition):
                 meter.tick()
                 context.data.push(target.body_address)
                 if implementation.action is None:
-                    self._abort_returned_dictionary_fault(context)
+                    self._abort_guest_fault(abort, context)
                 target, entry_ip = self._resolve_does_entry(implementation.action)
                 break
             if not isinstance(implementation, PrimitiveDefinition):
                 break
             meter.tick()
             try:
-                invocation = implementation.callback(context)
-            except _DictionaryFaultRequest:
-                self._abort_returned_dictionary_fault(context)
+                invocation = self._invoke_primitive(implementation, context)
+            except _GuestFaultRequest as nested:
+                self._abort_guest_fault(nested.abort, context)
             if invocation is None:
-                self._abort_returned_dictionary_fault(context)
+                self._abort_guest_fault(abort, context)
             if not isinstance(invocation, Invoke):
                 raise ExecutionError("primitive returned an invalid control result")
             target = self._resolve_dispatch_word(invocation.xt)
@@ -3606,7 +3656,7 @@ class MegaForthRuntime:
         meter: _StepMeter,
         *,
         root_id: int,
-        fault_request: _DictionaryFaultRequest | None = None,
+        fault_request: _GuestFaultRequest | None = None,
         resume_cursor: _DispatchCursor | None = None,
         allow_idle: bool = False,
         quantum_limit: int | None = None,
@@ -3623,7 +3673,7 @@ class MegaForthRuntime:
             current = None
             ip = 0
         if resume_cursor is None and fault_request is not None:
-            target, entry_ip = self._begin_dictionary_fault(
+            target, entry_ip = self._begin_guest_fault(
                 fault_request,
                 context,
                 meter,
@@ -3656,13 +3706,13 @@ class MegaForthRuntime:
                     break
                 meter.tick()
                 try:
-                    invocation = implementation.callback(context)
-                except _DictionaryFaultRequest as request:
+                    invocation = self._invoke_primitive(implementation, context)
+                except _GuestFaultRequest as request:
                     if request.context is not context:
                         raise
                     if self._has_older_dispatch(context):
                         raise
-                    target, entry_ip = self._begin_dictionary_fault(
+                    target, entry_ip = self._begin_guest_fault(
                         request,
                         context,
                         meter,
@@ -3721,8 +3771,8 @@ class MegaForthRuntime:
                 # its final Return.  Resume through the same continuation that
                 # the unchanged definition would have consumed.
                 continuation = context.returns.pop_continuation()
-                if continuation.fault_abort:
-                    self._abort_returned_dictionary_fault(context)
+                if continuation.fault_abort is not None:
+                    self._abort_guest_fault(continuation.fault_abort, context)
                 if continuation.root:
                     if continuation.dispatch_id != root_id:
                         raise _GuestControlTransfer(
@@ -3908,8 +3958,8 @@ class MegaForthRuntime:
                 ip += 1
             elif isinstance(operation, Return):
                 continuation = context.returns.pop_continuation()
-                if continuation.fault_abort:
-                    self._abort_returned_dictionary_fault(context)
+                if continuation.fault_abort is not None:
+                    self._abort_guest_fault(continuation.fault_abort, context)
                 if continuation.root:
                     if continuation.dispatch_id != root_id:
                         raise _GuestControlTransfer(
@@ -3978,13 +4028,13 @@ class MegaForthRuntime:
                 break
             meter.tick()
             try:
-                invocation = implementation.callback(context)
-            except _DictionaryFaultRequest as request:
+                invocation = self._invoke_primitive(implementation, context)
+            except _GuestFaultRequest as request:
                 if request.context is not context:
                     raise
                 if self._has_older_dispatch(context):
                     raise
-                return self._begin_dictionary_fault(
+                return self._begin_guest_fault(
                     request,
                     context,
                     meter,

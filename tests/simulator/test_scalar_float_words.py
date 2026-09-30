@@ -16,6 +16,7 @@ from emulator.megapad64 import CSR_FPCSR
 from emulator.megapad64 import Megapad64 as PythonMegapad64
 from shared import ieee_fp, scalar_fp
 from shared.cells import MASK64
+from simulator.errors import ForthAbort
 from simulator.runtime import MegaForthRuntime
 from simulator.scalar_float import IllegalScalarFloatError
 
@@ -93,10 +94,18 @@ def test_dynamic_words_fail_closed_on_a_reserved_mode() -> None:
     runtime = MegaForthRuntime()
     runtime.scalar_float.write_fpcsr(5)
     one = struct.unpack("<Q", struct.pack("<d", 1.0))[0]
-    runtime.main_context.data.push(one)
-    runtime.main_context.data.push(one)
     with pytest.raises(IllegalScalarFloatError):
+        add = next(op for name, _shape, op in scalar_fp.BIOS_WORDS
+                   if name == "F64+")
+        runtime.scalar_float.operate(add, one, one)
+    # Through the dictionary the trap reports and aborts as BIOS does.
+    runtime.main_context.data.push(one)
+    runtime.main_context.data.push(one)
+    with pytest.raises(ForthAbort, match="reserved FPCSR.RM 5"):
         runtime.execute("F64+", step_budget=10_000)
+    assert runtime.drain_uart_output() == (
+        b"\r\n*** ILLEGAL INSTRUCTION CORE=00\r\n")
+    assert runtime.main_context.data.snapshot() == ()
     assert runtime.scalar_float.fpcsr == 5
     # Fixed-mode words ignore FPCSR.RM.
     runtime = MegaForthRuntime()

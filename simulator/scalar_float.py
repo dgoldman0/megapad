@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from shared import scalar_fp
 from shared.cells import u64
-from simulator.errors import ExecutionError
+from simulator.errors import IllegalInstructionFault
 
 
-class IllegalScalarFloatError(ExecutionError):
+class IllegalScalarFloatError(IllegalInstructionFault):
     """The operation would raise ``IVEC_ILLEGAL_OP`` on the machine."""
 
 

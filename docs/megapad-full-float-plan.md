@@ -799,11 +799,15 @@ Progress:
   those faults jumped to address 0 and silently restarted the machine. The
   BIOS now reports each one (fault, address, PC, core) and recovers: core 0
   returns to the prompt with clean stacks, and a worker core ends its job
-  and idles. A fault does not reach a KDOS `CATCH` yet, and after a fault
-  inside `CATCH` the KDOS handler chain still names the dead frame. Routing
-  faults to `THROW` needs a KDOS hook and matching hosted words, which is
-  KDOS's own work. An uncaught `THROW` on KDOS already runs away without any
-  fault (§7).
+  and idles. Before reporting, the BIOS calls a `FAULT-XT!` callback with a
+  standard throw code (-21 illegal instruction, -23 alignment, -10 divide by
+  zero). KDOS installs `_KDOS-FAULT`, which throws the code to the innermost
+  `CATCH` of the faulting task or worker core, so a fault inside `CATCH` or a
+  checked load unwinds like any exception and leaves the handler chain
+  intact; with no `CATCH` it returns and the BIOS reports. The hosted
+  simulator routes its divide-by-zero and illegal-instruction traps the
+  same way. An uncaught `THROW` on KDOS still runs away without any fault,
+  and `ABORT` inside `CATCH` leaves a stale handler (§7).
 
 ## 6. Testing and resource rules
 
@@ -882,6 +886,11 @@ without fixing them.
     fail with the same output before and after Phase 7.
 - **Uncaught KDOS `THROW`.** With no `CATCH`, `THROW` does `0 RP!` and
   runs into wild code (`: T5 5 THROW ; T5` on a fresh KDOS never returns).
+- **`ABORT` inside KDOS `CATCH`.** The BIOS `ABORT` (and `ABORT"`) resets
+  the stacks without unwinding the KDOS handler chain, so the foreground
+  `HANDLER` keeps naming the dead frame. A later `THROW`, or an instruction
+  fault through `_KDOS-FAULT`, then unwinds to it. Standard Forth makes
+  `ABORT` a `-1 THROW`; KDOS would need a BIOS abort hook to do the same.
 - **`test_system.py` memory in one process.** Run as one pytest process,
   the file's memory grows past the 3.5 GiB guard around the network-stack
   tests, although each test alone stays under 500 MiB. Run it in chunks of

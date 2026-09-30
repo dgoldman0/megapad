@@ -36,11 +36,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-kernels-pipelines-3217-3754.f"
+    / "kdos-kernels-pipelines-3226-3763.f"
 )
 
-FIRST_LINE = 3217
-LAST_LINE = 3754
+FIRST_LINE = 3226
+LAST_LINE = 3763
 SLICE_SHA256 = (
     "ec724b8ca6f6887a2c4ce724edf9612726cf04a48416c29c2eb3ed9448949e40"
 )
@@ -322,7 +322,7 @@ def test_former_disk_status_seam_is_absorbed_into_the_storage_frontier(
 ) -> None:
     runtime = loaded_kernels_pipelines
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
-    next_source = b"".join(lines[LAST_LINE:3771])
+    next_source = b"".join(lines[LAST_LINE:3780])
     assert len(next_source) == 698
     assert next_source.count(b"\n") == 17
     assert (

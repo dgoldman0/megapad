@@ -221,6 +221,19 @@ zero. That safe backend convention does not choose a permanent
 result-or-trap contract. The qualified positive-divisor domain of KDOS
 `RAND-RANGE` excludes the edge.
 
+A word whose operation traps on the machine routes the fault as the BIOS
+instruction-fault handlers do (`docs/bios-forth.md`, Instruction faults).
+Hosted words raise two of the three kinds: an illegal instruction (a
+floating-point operation under a reserved `FPCSR.RM`, or a tile operation the
+format does not admit) and a divide by zero (`/`, `MOD`, or `/MOD` by zero,
+and signed division overflow). The callback installed with `FAULT-XT!`
+receives the throw code, -21 or -10, so KDOS's `_KDOS-FAULT` throws it to
+the innermost `CATCH`. With no callback, or when it returns, the runtime
+prints the BIOS report line without its `PC=` field, since the simulator has
+no machine PC (for example `*** DIVIDE BY ZERO CORE=00`), and aborts with
+clean stacks. The simulator has no alignment fault: it does not implement
+the `TACC` words that raise one.
+
 The simulator exposes a sparse 64-bit logical address space with the same
 source-visible address classes as the machine: Bank 0, external memory, HBW,
 VRAM, and MMIO.  Host pointers never enter a guest cell.  Dynamic addresses
@@ -453,7 +466,7 @@ otherwise uninterpreted comment or string text, and makes
 surface still does not publish or qualify public `SOURCE`, `>IN`, or `STATE`,
 or direct LF-containing guest `EVALUATE` input. Filesystem `LOAD` deliberately has
 a narrower raw source domain and different failure behavior, specified below.
-The contiguous KDOS source frontier now reaches EOF at line 9894.
+The contiguous KDOS source frontier now reaches EOF at line 9903.
 
 The current profile advertises one full core and `CRYPTO_CAPS = 0x7`: bit 0 is
 the admitted semantic reflected/raw CRC service, bit 1 is checked SHA3/SHAKE
@@ -772,10 +785,10 @@ executes to `shared/scalar_fp.execute`, the definition the Python emulator
 runs, with the same register roles. The runtime keeps one `FPCSR`: `FPCSR!`
 keeps bits `[8:4]` and `[2:0]`, operations OR their flags into it, and a word
 whose operation would trap on the machine, such as a dynamic-mode word under
-a reserved `FPCSR.RM`, fails with `IllegalScalarFloatError` after taking its
-operands, as the BIOS word does, without changing `FPCSR` or pushing a
+a reserved `FPCSR.RM`, raises an illegal-instruction fault (§3) after taking
+its operands, as the BIOS word does, without changing `FPCSR` or pushing a
 result. `TDIV` and `TSQRT` follow them; `TSQRT` reads only `TSRC0`, and both
-fail closed in integer formats.
+fail closed in integer formats. `FAULT-XT!` follows at the frontier.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
@@ -842,7 +855,7 @@ Updates preflight their complete source before reading it. Finalization
 preflights all 32 or 64 destination bytes, stages the standard big-endian
 digest, publishes once, and then becomes inactive. A failed final does not
 alter an ordinary destination. The exact unchanged KDOS slice through
-`kdos.f` line 1269 retains `HASH` as the SHA3-256 alias and adds the adjacent
+`kdos.f` line 1278 retains `HASH` as the SHA3-256 alias and adds the adjacent
 `SHA256` and `SHA512` one-shot wrappers, which return the first checked status
 unchanged.
 
@@ -913,7 +926,7 @@ This discrepancy record chooses the executable behavior for hosted
 differential compatibility; it does not decide which native/RTL contract must
 ultimately change.
 
-Byte-exact `kdos.f` lines 1270 through 1431 execute the complete unchanged
+Byte-exact `kdos.f` lines 1279 through 1440 execute the complete unchanged
 HMAC-SHA3 portion of unified crypto plus its `ENCRYPT`, `DECRYPT`, and
 `VERIFY` words. Capability absence precedes the one nonblocking lock-9
 attempt, contention precedes caller-span validation, and later checked SHA3
@@ -962,7 +975,7 @@ The value operation clamps the scalar, clears the encoded point's top bit,
 uses the field `2^255-19`, and emits 32 little-endian bytes. Low-order/all-zero
 points are not rejected and may produce an all-zero result. The high-level
 unchanged `X25519` consumes both inputs before publishing, so its destination
-may alias either one. Exact `kdos.f` lines 1433 through 1481 also add the
+may alias either one. Exact `kdos.f` lines 1442 through 1490 also add the
 global 32-byte `X25519-PRIV`, `X25519-PUB`, `X25519-SHARED`, and base-point
 buffers plus ordinary `X25519-KEYGEN` and `X25519-DH`. Those buffers are not
 task/core-isolated or automatically wiped. Key generation uses the admitted
@@ -983,7 +996,7 @@ execution, or host-memory erasure.
 The general Field slice admits the same per-core state through all 15 raw BIOS
 words: `GF-A!`, `GF-R@`, `GF-PRIME`, `LOAD-PRIME`, `FADD`, `FSUB`, `FMUL`,
 `FSQR`, `FINV`, `FPOW`, `FMUL-RAW`, `FCMOV`, `FCEQ`, `FMAC`, and
-`FMUL-ADD-RAW`. Exact unchanged `kdos.f` lines 1483 through 1515 then define
+`FMUL-ADD-RAW`. Exact unchanged `kdos.f` lines 1492 through 1524 then define
 the four named prime selectors and four 32-byte scratch buffers. Every
 ordinary operand/result argument is an address to a 32-byte little-endian
 integer; raw operations take separate low and high addresses. `FCMOV` takes
@@ -1092,7 +1105,7 @@ ordinary radix-2 forward/inverse transforms. Pointwise addition and
 multiplication are fully reduced. This means
 `INTT(NTT(a)*NTT(b))` computes cyclic convolution modulo `x^256-1`, not the
 negacyclic ring operation required by ML-KEM or ML-DSA. Exact current `kdos.f`
-lines 1517 through 1584 contain 68 LF records and 2,784 bytes, with SHA-256
+lines 1526 through 1593 contain 68 LF records and 2,784 bytes, with SHA-256
 `95769988473110183b3b2adcc90a2eb3bdd812100ab1702f8686d573af1f4194`
 and Git blob `d4f2ce38b6818520b0227f5a2f8c69aef3c408b6`. They define both named
 moduli, selectors, two global 1024-byte scratch buffers, `NTT-POLYMUL`, and
@@ -1116,7 +1129,7 @@ service.
 The admitted ML-KEM slice is one runtime-global semantic service behind the
 seven authoritative raw BIOS words: `KEM-SEL!`, `KEM-LOAD`, `KEM-STORE`,
 `KEM-KEYGEN`, `KEM-ENCAPS`, `KEM-DECAPS`, and `KEM-STATUS@`. Exact current
-`kdos.f` lines 1586 through 1633 contain 48 LF records and 1,510 bytes, with
+`kdos.f` lines 1595 through 1642 contain 48 LF records and 1,510 bytes, with
 SHA-256 `58fab7b6c7a7e722ca1d3bddf77046e700ed196084c0fa1a69608222b800f824`
 and Git blob `5e74d7b947598492bc8ddc82a646687eb0eeaddb`. They define five buffer IDs, five size constants,
 the three `KYBER-*` wrappers, and `.KEM-STATUS`. The pre-decision source
@@ -1185,8 +1198,8 @@ values. BIOS DOUT therefore reads RTL size, and immediate KDOS stores race the
 RTL lifecycle. Hosted success makes no direct-MMIO, RTL, timing, arbitration,
 FIPS-validation, constant-time, or physical-erasure claim.
 
-The admitted HMAC/HKDF/hybrid slice is exact unchanged `kdos.f` lines 1635
-through 2043: 59 ordinary definitions spanning the §1.13 PQ scratch preamble,
+The admitted HMAC/HKDF/hybrid slice is exact unchanged `kdos.f` lines 1644
+through 2052: 59 ordinary definitions spanning the §1.13 PQ scratch preamble,
 the complete SHA3-HMAC HKDF family, HMAC-SHA256 and HKDF-SHA256, and the three
 final PQ exchange words. No high-level HMAC, HKDF, or exchange word is a host
 substitute. Hosted services beneath them remain the already admitted SHA3,
@@ -1256,7 +1269,7 @@ validation, concurrency safety, or protected host-secret boundary.
 The admitted HBW slice installs `HBW-BASE` and `HBW-SIZE` as semantic BIOS
 reads of SysInfo `+0x20` and `+0x28`, respectively. They always read the
 currently bound sparse-memory geometry rather than copying host constants into
-the dictionary. Exact current `kdos.f` lines 2044 through 2108 contain 65 LF
+the dictionary. Exact current `kdos.f` lines 2053 through 2117 contain 65 LF
 records and 2,448 bytes, with SHA-256
 `5fc825c8588b85a499ee34e7fc142b8bba7e74d7efb481bde4183c93476444c9`
 and Git blob `2d9704f542181bbf91eaead01d5b6ea7a1f9cff0`. They define
@@ -1303,7 +1316,7 @@ The admitted external-memory slice installs `EXT-MEM-BASE` and
 `EXT-MEM-SIZE` as dynamic semantic BIOS reads of SysInfo `+0x38` and `+0x40`.
 They report the actual external region bound to the sparse address space; the
 runtime does not copy a second geometry or substitute a host allocator.
-Unchanged `kdos.f` lines 2110 through 2388 add all 31 definitions through
+Unchanged `kdos.f` lines 2119 through 2397 add all 31 definitions through
 `XBUF`, including the raw XMEM allocator, first-fit free list, public
 `ALLOCATE`/`FREE`/`RESIZE` dispatch, explicit Bank-0 DMA allocation, reset
 floor, and status output. `NIP` and `TUCK` are ordinary stack primitives needed
@@ -1388,7 +1401,7 @@ remains the correctness representation, so an unbound or saturated index has
 the same lookup results without claiming hardware `EXT.DICT`, probe timing,
 seqlock concurrency, or cycle counts.
 
-Exact unchanged `kdos.f` lines 2390 through 2423 add
+Exact unchanged `kdos.f` lines 2399 through 2432 add
 `_DICT-POW2-FLOOR`, `_DICT-INDEX-DONE`, and `_DICT-INDEX-INIT`, then run the
 initializer. `2*` wraps one-cell left shifts. `2/` is an arithmetic right
 shift; this sizing source supplies positive values and is therefore unchanged
@@ -1423,7 +1436,7 @@ The hardware's limit-first publication ordering is not independently
 observable in the one-core hosted profile; hosted callers see only the stable
 old, disabled, or complete new state.
 
-Exact unchanged `kdos.f` lines 2425 through 2574 define and execute the
+Exact unchanged `kdos.f` lines 2434 through 2583 define and execute the
 complete userland lifecycle. Loading the slice only publishes its 18 words and
 rebinds the XMEM free-span hook. Lazy initialization aligns above the live
 XMEM high-water mark, assigns either an explicit rounded reserve or half the
@@ -1470,8 +1483,8 @@ retains its initial-start lower bound and faults that otherwise-admitted raw
 rewind. This existing safer host divergence does not affect the Bank-0/XMEM
 transition and is documented without treating it as the desired native API.
 
-The Arena portion of the contiguous source frontier ends at line 2780. Exact
-unchanged lines 2576 through 2780 add all 31 Arena definitions without a host
+The Arena portion of the contiguous source frontier ends at line 2789. Exact
+unchanged lines 2585 through 2789 add all 31 Arena definitions without a host
 allocator shortcut. `A-HEAP` follows public `ALLOCATE`/`FREE` and therefore uses
 prefixed XMEM when present and Bank 0 otherwise; `A-XMEM` uses raw recyclable
 XMEM blocks; `A-HBW` advances and later abandons HBW backing until
@@ -1498,7 +1511,7 @@ per-task/per-core state; direct `ARENA-ALLOT` on exclusively owned descriptors
 does not have that selection race. These are pinned source-contract gaps, not
 host-side repairs.
 
-Exact unchanged lines 2782 through 2796 add Buffer's general `IDLE` helper.
+Exact unchanged lines 2791 through 2805 add Buffer's general `IDLE` helper.
 The hosted compiler keeps
 an open definition distinct from its compile/interpret mode, preserves the
 native immediate `[` and non-immediate `]` flags, and translates the exact low
@@ -1512,7 +1525,7 @@ state remain pending; that unsupported `]` form fails during source
 compilation. Persistent one-core compiler state across evaluator calls is now
 part of the semantic BIOS prerequisite above.
 
-Exact current lines 2797 through 2985 contain 189 LF records and 7,084 bytes,
+Exact current lines 2806 through 2994 contain 189 LF records and 7,084 bytes,
 with SHA-256
 `68826ac284decca406051412e4478710dd9ebd81319109f5dd326a04ca205a93`
 and Git blob `cbf10f550499d59aa5c6721024ee4ba46b8b0acb`. They execute the Buffer registry,
@@ -1550,7 +1563,7 @@ rollback after a publication does not repair `BUF-HEAD` or `BUF-COUNT`; both
 paths can therefore leave stale registry state.
 
 Exact unchanged lines
-2986 through 3109 publish `B.SUM`, `B.MIN`, `B.MAX`, `BTMP-NTILES`, `B.ADD`,
+2995 through 3118 publish `B.SUM`, `B.MIN`, `B.MAX`, `BTMP-NTILES`, `B.ADD`,
 `B.SUB`, and `B.SCALE`. The five tile-backed words force unsigned-byte TMODE;
 descriptor width changes byte and tile counts but never selects wider lanes.
 `B.SCALE` never reaches the tile service: it scales exactly `B.BYTES` through
@@ -1569,7 +1582,7 @@ and SCALE use `0 DO`, enter the body, and cannot complete normally before
 defects are pinned rather than repaired by host objects.
 
 Exact unchanged lines
-3110 through 3216 publish `F.SUM`, `F.DOT`, `F.SUMSQ`, `F.ADD`, `F.MUL`,
+3119 through 3225 publish `F.SUM`, `F.DOT`, `F.SUMSQ`, `F.ADD`, `F.MUL`,
 `BF.SUM`, and `BF.DOT`. These words treat every complete physical tile as 32
 little-endian half lanes without validating descriptor type, width, whether
 `B.BYTES` is even, or cross-descriptor sizes. Reductions return raw binary32
@@ -1588,7 +1601,7 @@ describes 64 one-byte elements; `0 2 32 BUFFER` matches its stated 32-element
 descriptor.
 
 The kernel/pipeline portion of the contiguous source frontier ends at line
-3754. Exact unchanged lines 3217 through 3754 contain 538 lines and 16,586
+3763. Exact unchanged lines 3226 through 3763 contain 538 lines and 16,586
 bytes (SHA-256
 `ec724b8ca6f6887a2c4ce724edf9612726cf04a48416c29c2eb3ed9448949e40`).
 They publish 109 definitions: the 32-slot kernel registry and 23 populated
@@ -1622,7 +1635,7 @@ pins the resulting nontermination instead of treating zero as an empty loop.
 Earlier Buffer tail, count-owner, and multi-tile defects flow through their
 kernel wrappers unchanged.
 
-Exact unchanged lines 3755 through 4099 contain 345 lines and 11,424 bytes
+Exact unchanged lines 3764 through 4108 contain 345 lines and 11,424 bytes
 (SHA-256
 `e4d09d0801838fc9721ba68e39f2c5a5dbc139101c9c4a3489fb66cab9b248b1`).
 They publish 97 definitions through `VOL-FLUSH`: the storage constants and
@@ -1632,7 +1645,7 @@ block I/O, raw and bounded volume constructors, reference accounting, and
 relative volume I/O. Source load performs no media operation and explicitly
 initializes only `STORAGE-COOKIE`.
 
-Exact unchanged lines 4100 through 4669 contain 570 lines and 18,979 bytes
+Exact unchanged lines 4109 through 4678 contain 570 lines and 18,979 bytes
 (SHA-256
 `bf46ad3acc9deaf380ac4229fe9196219fc0111df8d8f5a6650ffa95fb766112`).
 They publish 110 definitions through the locked public `MBR-SCAN`, `GPT-SCAN`,
@@ -1650,7 +1663,7 @@ generation swap during later array reads. The caller must provide pairwise-
 disjoint writable block descriptor, output, and workspace extents; the source
 does not prove those spans or make a scan a same-medium content snapshot.
 
-Exact unchanged lines 4670 through 4803 contain 134 lines and 4,127 bytes
+Exact unchanged lines 4679 through 4812 contain 134 lines and 4,127 bytes
 (SHA-256
 `7ba6cb19989623363d2e78ac45ae81b1b7e4bb2ad51864005bfbb35b1f768199`).
 They publish 24 definitions through `DISK-INFO`: singleton raw storage
@@ -1701,8 +1714,8 @@ on the successful path), narrow occupied-entry predicate, and final
 attachment-generation check. The admitted `FS-LOAD` path now consumes that
 ordinary pseudo-BIOS word rather than a host filesystem shortcut.
 
-The contiguous source frontier now reaches EOF at line 9894. Exact current
-lines 4804 through 5003 contain 200 lines and 6,799 bytes (SHA-256
+The contiguous source frontier now reaches EOF at line 9903. Exact current
+lines 4813 through 5012 contain 200 lines and 6,799 bytes (SHA-256
 `d76d714ed903db5bcd5a6ba5271288ea31c08e2f5fdec2eabd86dbb0bd0cbc32`).
 They publish all 38 legacy file definitions through `FILES`: the eight-pointer
 display registry, one-sector scratch window, permanent four-cell dictionary
@@ -1738,7 +1751,7 @@ I/O non-reentrant, and per-sector locking does not make read-modify-write or
 multi-sector work atomic. Failures can leave earlier destination or media
 effects, no logical hole is automatically zero-filled, all raw field access
 trusts its pointers, and descriptor metadata is never persisted. After blank
-line 5004, exact unchanged lines 5005 through 5134 admit the initial MP64FS
+line 5013, exact unchanged lines 5014 through 5143 admit the initial MP64FS
 foundation. Including that leading seam, its fixture contains 131 lines and
 4,579 bytes (SHA-256
 `caf26787745bdf711a89130db7f8b30d45b0f9a63534b4ccb58a601bb2cea062`)
@@ -1769,7 +1782,7 @@ gate on `FS-OK` or validate pointers, indices, geometry, or counts.
 `0..7`; invalid ordinary-`DO` bounds can traverse the modulo-64-bit range.
 `FIND-FREE` uses shared `FF-*` scratch and is non-reentrant.
 
-Exact unchanged lines 5135 through 5217 add four definitions through `FORMAT`
+Exact unchanged lines 5144 through 5226 add four definitions through `FORMAT`
 in 83 lines and 2,999 bytes (SHA-256
 `829268e2d06f11c19bda4a5fa0606e883fdf3ab4a3690a741f0cd2616ada4137`).
 Loading the slice only installs definitions. Focused pathless in-memory
@@ -1797,7 +1810,7 @@ active bitmap, and directory before flushing. Only flush success sets
 binding, and earlier media writes; data sectors and the inactive bitmap-cache
 tail are not erased.
 
-Exact unchanged lines 5218 through 5285 add `.FTYPE`, `DIR`, and `CATALOG` in
+Exact unchanged lines 5227 through 5294 add `.FTYPE`, `DIR`, and `CATALOG` in
 68 lines and 2,167 bytes (SHA-256
 `c3c831bc183ee999c8b5a0d1fb4edd169890be1e5fa44ad726d3025923fdb3b7`).
 Loading them installs only three definitions and inline strings; it performs
@@ -1824,10 +1837,10 @@ slash for type 8. `CATALOG` prints `DE.USED`, the primary `DE.COUNT` only,
 numeric type, and flags. Their numeric fields use signed `.` in the current
 `BASE`. The cache and output are not a coherent concurrent snapshot, and
 `FS-ENSURE` does not revalidate an already-true `FS-OK`; detached or replaced
-media can therefore leave a stale listing eligible. Blank line 5286 is the
+media can therefore leave a stale listing eligible. Blank line 5295 is the
 leading seam of the adjacent lookup/mutation fixture.
 
-Exact unchanged lines 5286 through 5408 add `FIND-BY-NAME`, `TICKS@`,
+Exact unchanged lines 5295 through 5417 add `FIND-BY-NAME`, `TICKS@`,
 `MKFILE`, `RMFILE`, and `RENAME`, plus six scratch variables, in 123 lines and
 4,020 bytes (SHA-256
 `a890bfaabc682f1c6d9b71ccbbcc5767d4184da1184ea363b87754496ae9c028`).
@@ -1882,10 +1895,10 @@ Parser consumption is also nontransactional. When the filesystem is
 unavailable, `MKFILE`, `RMFILE`, and `RENAME` return before `PARSE-NAME`, so
 their filename tokens remain for the outer evaluator. When `RENAME` cannot
 find its old name, it returns before parsing the proposed new name. These are
-preserved source defects, not admitted safe command forms. Blank line 5409 is
+preserved source defects, not admitted safe command forms. Blank line 5418 is
 the leading seam of the adjacent `CAT` fixture.
 
-Exact unchanged lines 5409 through 5436 contain 28 LF lines and 838 bytes,
+Exact unchanged lines 5418 through 5445 contain 28 LF lines and 838 bytes,
 with SHA-256
 `e645378a2f4a6a6f5e5e46716a9d12513397bdfa6ec441aba9af51d36ff86f23`
 and Git blob `2d20b05dc5ca8deaf1c8ca28f80d2d36a66634e5`. They define zero-initialized
@@ -1916,10 +1929,10 @@ non-directory file, one small positive primary extent, no secondary extent,
 two-extent file whose used content crosses the primary boundary causes `CAT`
 to emit stale unread bytes already following the primary DMA span. `CAT-SLOT`,
 `NAMEBUF`, `PATHBUF`, `PN-LEN`, storage diagnostics, and the unreserved `HERE`
-scratch are global and unlocked. Blank line 5437 leads into the adjacent
+scratch are global and unlocked. Blank line 5446 leads into the adjacent
 free-space reporting fixture.
 
-Exact unchanged lines 5437 through 5471 contain 35 LF lines and 984 bytes,
+Exact unchanged lines 5446 through 5480 contain 35 LF lines and 984 bytes,
 with SHA-256
 `6ad3b135d3b2b69f651814349899f507d56dde4c876c8be9e0cd7aefd4a1d75c`
 and Git blob `1884c81ba2b8aa48082d472250f13a2265fd1def`. They define zero-initialized
@@ -1952,7 +1965,7 @@ scratch are global and unlocked, not one coherent allocation snapshot. This
 qualification admits reporting only, not allocation improvement, extent
 ownership validation, repair, compaction, or persistence.
 
-Exact unchanged lines 5472 through 5514 contain 43 LF lines and 1,317 bytes,
+Exact unchanged lines 5481 through 5523 contain 43 LF lines and 1,317 bytes,
 with SHA-256
 `7b4511333822c8f4aca8e3fd0768fa520d72e398a14529240bf6e66792627104`
 and Git blob `8b4645f16c7ac2f21036282a896b7ede6bad16b0`. The exact source-order ledger is
@@ -2006,7 +2019,7 @@ per-entry read-only or system flags. `SB-*`, `LB-*`, name/parser
 state, cache, and storage diagnostics are global and unlocked; this slice adds
 no file lock or transactional recovery.
 
-Exact unchanged lines 5515 through 5610 contain 96 LF lines and 3,397 bytes,
+Exact unchanged lines 5524 through 5619 contain 96 LF lines and 3,397 bytes,
 with SHA-256
 `16637705bd8d26e0e92b14605ba0e4e772ec2d5d5c9eb02bbd107714c8650c78`
 and Git blob `e01ffa80d946b2cddd50e37bcefd9421a1b8dbb9`. Their exact 14-definition
@@ -2083,7 +2096,7 @@ the new occupant (an ABA hazard), while a double close can race logical reuse.
 Pool headers, fdesc payloads, `OP-SLOT`, parser state, directory cache, and the
 deferred vectors are global and unlocked.
 
-Exact current lines 5611 through 5944 contain 334 LF records and 11,980 bytes,
+Exact current lines 5620 through 5953 contain 334 LF records and 11,980 bytes,
 with SHA-256
 `6a30453c933ac8666c1b798a98a4fb3e6a331afeb4c2d3048299a83a0ea79a7c`
 and Git blob `f2bea50138ca04e235358debd734a4fc234e002a`. Their exact 55-definition
@@ -2172,7 +2185,7 @@ This is a KDOS lifecycle repair shared by emulator and simulator, not a direct
 host-filesystem substitute. File-type/flag policy and the runtime-global,
 unlocked loader scratch remain separate open matters.
 
-Exact current lines 5945 through 6059 contain 115 LF records and 4,231 bytes,
+Exact current lines 5954 through 6068 contain 115 LF records and 4,231 bytes,
 with SHA-256
 `b42f5c10635f43ff41e4dd719987f21ab5bcbb229d3985ad0cc854d2bba7ffc1`
 and Git blob `bf344d51bdea5287d4af87c920d563a33adc1a85`. The 13-definition ledger
@@ -2229,7 +2242,7 @@ decimal digits for ordinary magnitudes below 1,000; magnitudes at least 1,000
 delegate to the existing base-sensitive `.` and inherit its trailing space.
 No separate terminal renderer or rich-terminal path is involved.
 
-Exact unchanged lines 6060 through 6200 contain 141 LF records and 5,298
+Exact unchanged lines 6069 through 6209 contain 141 LF records and 5,298
 bytes, with SHA-256
 `35a8f33b51da4e3a319f193e0c709a876207f940923637d0f56b0f8160c7f574`
 and Git blob `ed442875e780976b10553721137e515e3742ddcb`. The exact ledger is two
@@ -2302,7 +2315,7 @@ buffer addresses are never wiped. `FENCRYPT` does not inspect AES status after
 cache, allocator, diagnostic, and storage state is runtime-global and
 unlocked.
 
-Exact unchanged lines 6201 through 6296 contain 96 LF records and 3,082
+Exact unchanged lines 6210 through 6305 contain 96 LF records and 3,082
 bytes, with SHA-256
 `dc7f065cfac1fc3eb6efd1de7f4b0f472ff40e66fa14666e1087c18047e1d6c8`
 and Git blob `b964ca87a1af44e54b22abd25116edd2a7e2a853`. The exact five-word ledger
@@ -2360,7 +2373,7 @@ snapshots in the loader/REQUIRE machinery, and its nonempty rejection drops
 only one of two target slot copies, returning with the slot leaked on the data
 stack.
 
-Exact unchanged lines 6297 through 6427 contain 131 LF records and 3,945
+Exact unchanged lines 6306 through 6436 contain 131 LF records and 3,945
 bytes, with SHA-256
 `442e5e39598d71a589bf19d6345c5bb042d678ba9f51607a878ae5030fbdcee6`
 and Git blob `242fc879957ba14f3a00b3284e8af921a4fa365c`. Their exact
@@ -2433,7 +2446,7 @@ is verified. Content and names are trusted terminal data. Zero or malformed
 ordinary-`DO` chunk bounds, non-NUL names, invalid slots, concurrency,
 durability, and multi-extent browsing remain outside the qualified domain.
 
-Exact unchanged lines 6428 through 6510 contain 83 LF records and 2,682
+Exact unchanged lines 6437 through 6519 contain 83 LF records and 2,682
 bytes, with SHA-256
 `c1c7be64fd2d1c86465edec8f0fd6922c2742c6b77be9267dc7638f7eeb3ce5a`
 and Git blob `8335b7ef5566340e7fa1115de27fec9c75f6ae97`. The exact ledger is
@@ -2487,7 +2500,7 @@ fault after partial output; and failure retains global `IC-*`/`WL-*` state,
 transient pattern bytes, and any UART prefix. `.RECENT` remains count-bounded
 even if a link cycles.
 
-Exact unchanged lines 6511 through 6724 contain 214 LF records and 6,935
+Exact unchanged lines 6520 through 6733 contain 214 LF records and 6,935
 bytes, with SHA-256
 `cc28cfab7033390f4efc885cc043feafecc136e913aa34cc6338f7ad1b6a1f4c`
 and Git blob `ccdee7bbf513495f25eb77ad4c0f13f63b07532c`. Their source-order ledger
@@ -2524,7 +2537,7 @@ RUNNING descriptor, `SCHED-RUNNING = 1`, and stale `CURRENT-TASK`; success also
 does not clear `CURRENT-TASK`. Public counts, table cells, and descriptor
 addresses are not validated.
 
-Exact unchanged lines 6725 through 6758 contain 34 LF records and 1,143 bytes,
+Exact unchanged lines 6734 through 6767 contain 34 LF records and 1,143 bytes,
 with SHA-256
 `e55c6bf6e2df1fd6f543105822ac24217083dbeebe94bae0f631ac34d6dcd653`
 and Git blob `a1955ae8ee10c8bee1de5455a55c725d752462ff`. They publish
@@ -2547,7 +2560,7 @@ Consequently this slice qualifies Timer configuration and manual checkpoint
 gating, not timer-driven preemption, scheduling fairness, or a time-slice
 contract.
 
-Exact unchanged lines 6759 through 6922 contain 164 LF records and 5,713
+Exact unchanged lines 6768 through 6931 contain 164 LF records and 5,713
 bytes, with SHA-256
 `03dc68d356a186f11b63fedd818863e75da51886d6290b38ba2c769325ffa90f`
 and Git blob `c919439c3c81cf5e35a270f47b7b122867df6a89`. Their 15 source-order
@@ -2590,7 +2603,7 @@ work rather than physical speedup, performs non-normalized wrapping
 subtraction, and leaks its original pipeline argument despite the declared
 stack effect.
 
-Exact unchanged lines 6923 through 7461 contain 539 LF records and 17,203
+Exact unchanged lines 6932 through 7470 contain 539 LF records and 17,203
 bytes, with SHA-256
 `4e36452b9d65c41843f8b015065303375efae8667824c5bf606c30da6af32625`
 and Git blob `022981afa233362debb10678b250ac044d8454d9`. They publish 91
@@ -2676,7 +2689,7 @@ releases only on normal return; a throw or abort strands ownership. Static
 `LOCK-INFO` labels are not live lock state and omit the later networking lock
 12.
 
-Exact unchanged lines 7462 through 7568 contain 107 LF records and 3,693
+Exact unchanged lines 7471 through 7577 contain 107 LF records and 3,693
 bytes, with SHA-256
 `7f349876f58c132cf72f116c0fa764a97ff0963679abb78d961e4f9a08770932`
 and Git blob `3c13145b43c2eadc14841326f2fef22d34d01b6a`. They publish
@@ -2711,7 +2724,7 @@ therefore the first sign-bit-set cell, `0x8000_0000_0000_0000`, is BIOS-micro
 but KDOS-full. This is a documented source/BIOS discrepancy, not silently
 normalized by the simulator.
 
-Exact unchanged lines 7569 through 7838 contain 270 LF records and 8,868
+Exact unchanged lines 7578 through 7847 contain 270 LF records and 8,868
 bytes, with SHA-256
 `c982515e55f9e94af0122ae1cd9e02af902774105bf59f65eae5a491973dfb82`
 and Git blob `467892ab2c4d04851a9c8db7dc95eafe860f3ec8`. They publish 58
@@ -2754,7 +2767,7 @@ The following unchanged-source discrepancies are part of this acceptance:
   `label-xt ['] EXECUTE CATCH` path leaves the saved data-stack-pointer cell
   exposed after the throw instead of satisfying the declared empty result.
 
-Exact unchanged lines 7839 through 8339 contain 501 LF records and 18,051
+Exact unchanged lines 7848 through 8348 contain 501 LF records and 18,051
 bytes, with SHA-256
 `a47d29e51c6754e24852bea08261b3119389e8a1849b9e39322bf1e9013cce7d`
 and Git blob `01a3e0eff93567b66441e071003b3e7a25809d3d`. They publish 86
@@ -2809,7 +2822,7 @@ visible:
   `NET-RX?` into the user label `idle`; that label is not evidence that a NIC
   exists.
 
-Exact unchanged lines 8340 through 8568 complete §9 in 229 LF records and
+Exact unchanged lines 8349 through 8577 complete §9 in 229 LF records and
 7,772 bytes, with SHA-256
 `6294e7f8f2170e73bf7188481a8ae0575564e11b75e8fb61ae808ed305f155c1`
 and Git blob `9de3741357f813221f0f44216340cc55c2f51cd0`. They publish 23
@@ -2855,7 +2868,7 @@ The tail adds these source-literal discrepancies:
   is also not idempotent: it appends registrations until the 16-row table is
   full and appends duplicate Home and Buffer subscreens.
 
-Exact unchanged lines 8569 through 8943 add §10's transport-independent
+Exact unchanged lines 8578 through 8952 add §10's transport-independent
 Data Port structures and bindings, the empty §11 benchmark placeholder,
 §12's text Dashboard/status words, and §13's Help system. The 375 LF
 records occupy 15,702 bytes, have SHA-256
@@ -2933,18 +2946,18 @@ The following source-literal discrepancies remain visible:
   were reached, `TYPE` would leave only `( count entry )` and the following
   `ROT` would underflow.
 - `.HELP-ALL` advertises `POLL`, `INGEST`, and Bundle words before those
-  definitions exist at the line-8943 boundary. The Bundle words arrive in the
+  definitions exist at the line-8952 boundary. The Bundle words arrive in the
   following qualified §15 slice, but the surrounding §10 source also promises
   `RECV-FRAME`, `ROUTE-FRAME`, `PORT-SEND`, and the deferred networking layer.
   None of those transport names, including `PORT-SEND-SLICE`, is executable
-  through the current EOF line-9894 frontier; qualified Help text does not
+  through the current EOF line-9903 frontier; qualified Help text does not
   qualify a transport operation.
 
-Exact unchanged lines 8944 through 9121 add §15 Pipeline Bundles in 178 LF
+Exact unchanged lines 8953 through 9130 add §15 Pipeline Bundles in 178 LF
 records and 5,801 bytes, with SHA-256
 `370c6c6d17470ae7ea0c8a94ca5ede4ddcae04a8c9e0badcb007cc5358ef919f`
 and Git blob `a7f49a7d29bbfa61d043dae73854924e74f4b2f8`. The checked fixture includes
-the following §18 separator at line 9122: 179 LF records and 5,873 bytes, with
+the following §18 separator at line 9131: 179 LF records and 5,873 bytes, with
 SHA-256
 `8791e5eecef059d052ecd8b69976317857c41c29ae475e18cc53d79761d8b922`
 and Git blob `3690e82c7a15e69fa69c84186fdda0caa5937d42`.
@@ -3058,15 +3071,15 @@ The following source-literal limits remain part of the contract:
   constructor scratch are global and unlocked, with no nesting, core, or
   concurrent-owner isolation.
 
-Exact current lines 9122 through 9214 add §18 Ring Buffer Primitives in 93
+Exact current lines 9131 through 9223 add §18 Ring Buffer Primitives in 93
 LF records and 3,031 bytes, with SHA-256
 `3fa7f307956111f555ac07365f6b8fd1b9ad4b42a0f7240c88581118d01f3ec4`
 and Git blob `783d29204b369b0fd05c352b82fac8bdbc46e755`. The checked fixture includes
-the following separator at line 9215: 94 LF records and 3,103 bytes, with
+the following separator at line 9224: 94 LF records and 3,103 bytes, with
 SHA-256
 `87599dcacd3fbc9a979028d47b9456e63a4be00931ae0994d1348772b0513e89`
 and Git blob `4db5792de3de17318a66eb46696c0382c919ede2`. §19 Hash Table Primitives
-begins at line 9216 and is not part of this slice.
+begins at line 9225 and is not part of this slice.
 
 The slice publishes fifteen definitions in source order: the `RING` defining
 word; seven `RING.*` accessors; `RING-FULL?`, `RING-EMPTY?`, and
@@ -3140,15 +3153,15 @@ The unchanged source retains these discrepancies and unsafe domains:
   need not be coherent, and a successful returned address can be popped or
   overwritten immediately after return.
 
-Exact unchanged lines 9215 through 9383 add §19 Hash Table Primitives in 169
+Exact unchanged lines 9224 through 9392 add §19 Hash Table Primitives in 169
 LF records and 5,352 bytes, with SHA-256
 `ce5fc5c20a4905a0092ec28cd647c0d1679317334968db81084aba7bf6410e24`
 and Git blob `3c465404ec02b189269d5c982ee360c9d070e638`. The checked fixture includes
-the following separator at line 9384: 170 LF records and 5,424 bytes, with
+the following separator at line 9393: 170 LF records and 5,424 bytes, with
 SHA-256
 `9379a85c46423efe2d14242f61bb974f6d1fa746cd9449b046cfbc3dbebdb467`
 and Git blob `b75a16f60f80d7885323443843919b8946af38ea`. §20 Module System begins at
-line 9385 and is not part of this slice.
+line 9394 and is not part of this slice.
 
 The slice publishes 28 definitions in source order: seventeen colon words
 from `HASHTABLE` through `HT-EACH` and eleven scratch variables across the
@@ -3266,7 +3279,7 @@ The unchanged source retains these discrepancies and unsafe domains:
   which can alias the next slot or following header. These cases are pinned as
   literal degeneracies, not safe general-purpose maps.
 
-The §19 source ends at line 9383; the §20 qualification below continues the
+The §19 source ends at line 9392; the §20 qualification below continues the
 contiguous frontier. Real bundle-file integration, scheduler or cadence
 behavior, concurrent ring/hash qualification, rendering, physical viewing,
 and every rich-terminal module/projection/compositor/input seam remain
@@ -3274,11 +3287,11 @@ deferred.
 
 ### KDOS §20 module-system contract
 
-Exact current lines 9384 through 9853 contain 470 LF records and 14,414
+Exact current lines 9393 through 9862 contain 470 LF records and 14,414
 bytes, with SHA-256
 `73adf1e903e12f891908750aeeced70d4888dfb6087af6372a99eca1495ecd74`
 and Git blob `231b452a63ad3d70fc635f3e4b40a7033627fc68`. The checked fixture adds the
-line-9854 §14 Startup separator: 471 LF records, 14,486 bytes, SHA-256
+line-9863 §14 Startup separator: 471 LF records, 14,486 bytes, SHA-256
 `6213a62e8bbc1ada04565d775a436cebc2ace9b5c9b32f27302b13568d9d92b6`,
 and Git blob `be9ab02eced24379053654034ff4199bef57dbf3`. Line 9855 begins Startup and is
 not admitted by that sentinel.
@@ -3370,16 +3383,16 @@ The safe domain is one core with canonical uncorrupted registry/loader state,
 immutable mapped 1–246-byte IDs, a genuine exact-uppercase first-token
 declaration on bounded LF records, direct root filenames, available
 Bank-0 node storage, production-compatible nonthrowing allocator bindings,
-and no reentry or pre-held shared lock. §20 ends at line 9853; the following
-§14 qualification completes the contiguous frontier through EOF line 9894.
+and no reentry or pre-held shared lock. §20 ends at line 9862; the following
+§14 qualification completes the contiguous frontier through EOF line 9903.
 
 ### Current KDOS §14 startup and EOF contract
 
-Exact current lines 9854 through 9894, including the section separator,
+Exact current lines 9863 through 9903, including the section separator,
 contain 41 LF records and 1,432 bytes, with SHA-256
 `d14948c62ff524ed67fe0743f1f3976d3430c1754809bf339c45ac8bd3569f82`
 and Git blob `64644994439ac09da0bd19db31866c404d380582`. The executable section from
-line 9855 through EOF contains 40 LF records and 1,360 bytes, with SHA-256
+line 9864 through EOF contains 40 LF records and 1,360 bytes, with SHA-256
 `480ab7b30f349044fdfd2c10257aee4525348819e15938396865ce332efa71fb`
 and Git blob `5f5d1922439468bbd5884505b3c5801e8d295269`. At the historical qualification
 revision, the complete `kdos.f` had 9,894 LF records and 341,355 bytes, with
@@ -3442,7 +3455,7 @@ initial dictionary zone. It does not qualify failure rollback after
 `tools.f` journey. The independently confirmed cross-zone rollback defect does
 not alter this same-zone fixture's successful result.
 
-Source comments at lines 9877–9878 claim that line-by-line evaluation means a
+Source comments at lines 9886–9887 claim that line-by-line evaluation means a
 multiline `IF` cannot gate execution. That contradicts both the immediately
 preceding multiline startup branch and BIOS's persisted temporary-`IF`
 implementation; the unchanged source is recorded rather than silently fixed.
@@ -3457,11 +3470,11 @@ autoexec's cross-zone failure path, the outer loader's Bank-0 checkpoint cannot
 be restored under active external bounds; the secondary capacity abort masks
 the original failure. Normal successful autoexec completion never requests
 that restore.
-Hosted `JIT-ON` at line 39 and `JIT-OFF` at line 9893 are semantic no-ops, not
+Hosted `JIT-ON` at line 39 and `JIT-OFF` at line 9902 are semantic no-ops, not
 evidence of native-code state or performance.
 
 This qualification completes the monotonically contiguous unchanged-source
-frontier from executable line 39 through EOF line 9894. It is focused semantic
+frontier from executable line 39 through EOF line 9903. It is focused semantic
 evidence. A separate moderate selector now also submits the complete pinned
 file through the persistent checked pseudo-BIOS evaluator on one fresh
 canonical runtime; it is not native/exact-full-core cold-load or timing
@@ -3488,7 +3501,7 @@ false. Status zero is success, one is unavailable, two is an invalid range,
 and three is a protected Bank-0 span. Deterministic bytes remain development
 data rather than cryptographic entropy.
 
-The exact unchanged KDOS SHA3/random slice ending at `kdos.f` line 1216 is
+The exact unchanged KDOS SHA3/random slice ending at `kdos.f` line 1225 is
 qualified only in its current safe source domain. `.SHA3` uses `0 DO`, so its
 length must be positive and nonwrapping; zero or negative lengths can wrap or
 fail to terminate. `RAND-RANGE` requires a positive signed maximum, faults on
@@ -3688,7 +3701,7 @@ implementation branch had an explicit pre-rich-terminal stop line:
 6. stop before loading or implementing `rich-terminal.f`.
 
 Steps 1 through 5 are now satisfied by contiguous unchanged-source
-qualification from executable `kdos.f` line 39 through EOF line 9894. The
+qualification from executable `kdos.f` line 39 through EOF line 9903. The
 completed simulator branch stopped at step 6: no rich-terminal source,
 projection, compositor, viewer, or input lifecycle was part of that qualified
 KDOS slice. The ordinary semantic file also loaded through the CLI-like checked

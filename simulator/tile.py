@@ -13,7 +13,7 @@ from typing import Protocol
 
 from shared import ieee_fp, tile_float, tile_formats
 from shared.cells import MASK64, u64
-from simulator.errors import ExecutionError
+from simulator.errors import IllegalInstructionFault
 from simulator.memory import SparseAddressSpace
 
 
@@ -58,7 +58,7 @@ class _LegacyRegisterFile(Protocol):
     def set_result_address(self, core_id: int, address: int) -> None: ...
 
 
-class UnsupportedTileModeError(ExecutionError):
+class UnsupportedTileModeError(IllegalInstructionFault):
     """A tile operation reached a format that does not admit it."""
 
     def __init__(self, mode: int) -> None:

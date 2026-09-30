@@ -5677,7 +5677,8 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_latest_store", "d_dict_rollback"),
             ("d_dict_rollback", "d_dict_index_fetch"),
             ("d_dict_index_fetch", "d_dict_index_store"),
-            ("d_dict_index_store", "d_dict_fault_xt_store"),
+            ("d_dict_index_store", "d_fault_xt_store"),
+            ("d_fault_xt_store", "d_dict_fault_xt_store"),
             ("d_dict_fault_xt_store", "d_dict_limit_fetch"),
             ("d_dict_limit_fetch", "d_dict_base_fetch"),
             ("d_dict_base_fetch", "d_dict_bounds_off"),
@@ -5710,7 +5711,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 540)
+        self.assertEqual(len(seen), 541)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -5941,6 +5942,25 @@ class TestBIOSInstructionFaults(unittest.TestCase):
         ])
         self.assertIn("*** ALIGNMENT FAULT @ 0000000000000001 PC=", text)
         self.assertIn("A=7 0 ", text)
+
+    def test_fault_callback_gets_the_throw_code_then_the_report_runs(self):
+        text = self._run([
+            "VARIABLE SEEN : SAW SEEN ! ; ' SAW FAULT-XT!",
+            "5 FPCSR! 1 S>F64",
+            '." A=" SEEN @ . DEPTH .',
+            "0 FPCSR! 1 0 /",
+            '." B=" SEEN @ . DEPTH .',
+            "TACC-TRY DROP 1 TSRC0! TACC-LOAD",
+            '." C=" SEEN @ . DEPTH .',
+            "TACC-RELEASE 0 FAULT-XT!",
+        ])
+        # A callback that returns leaves the report and recovery to BIOS.
+        self.assertIn("*** ILLEGAL INSTRUCTION PC=", text)
+        self.assertIn("*** DIVIDE BY ZERO PC=", text)
+        self.assertIn("*** ALIGNMENT FAULT @ 0000000000000001 PC=", text)
+        self.assertIn("A=-21 0 ", text)
+        self.assertIn("B=-10 0 ", text)
+        self.assertIn("C=-23 0 ", text)
 
 
 class TestBIOSTileModes(unittest.TestCase):
@@ -13363,6 +13383,39 @@ class TestKDOSMarkerForget(_KDOSTestBase):
 class TestKDOSExceptions(_KDOSTestBase):
     """Tests for CATCH / THROW exception handling."""
 
+    def test_instruction_faults_throw_through_catch(self):
+        """Each fault kind returns its code to CATCH, with no report."""
+        text = self._run_kdos([
+            ": FX-DIV  1 2 1 0 / ;",
+            ": FX-ILL  5 FPCSR! 1 S>F64 ;",
+            ": FX-ALIGN  TACC-TRY DROP 1 TSRC0! TACC-LOAD ;",
+            "CR .\" [FX-DIV \" 11 ' FX-DIV CATCH . . DEPTH . .\" ]\"",
+            "CR .\" [FX-ILL \" ' FX-ILL CATCH . FPCSR@ 7 AND . .\" ]\"",
+            "0 FPCSR!",
+            "CR .\" [FX-ALIGN \" ' FX-ALIGN CATCH . .\" ]\"",
+            "TACC-RELEASE",
+            'CR ." [FX-EVAL " S" 1 0 /" EVALUATE-CHECKED . '
+            'EVAL-THROW @ . DEPTH . ." ]"',
+            'CR ." [FX-AFTER " HANDLER @ . DEPTH . ." ]"',
+        ])
+        self.assertRegex(text, r"\[FX-DIV\s+-10\s+11\s+0\s+\]")
+        self.assertRegex(text, r"\[FX-ILL\s+-21\s+5\s+\]")
+        self.assertRegex(text, r"\[FX-ALIGN\s+-23\s+\]")
+        # A checked load reports a faulting line as a caught exception.
+        self.assertRegex(text, r"\[FX-EVAL\s+5\s+-10\s+0\s+\]")
+        self.assertRegex(text, r"\[FX-AFTER\s+0\s+0\s+\]")
+        self.assertNotIn("*** ", text)
+
+    def test_uncaught_instruction_fault_still_reports(self):
+        """Outside CATCH the KDOS hook returns and BIOS reports."""
+        text = self._run_kdos([
+            ": FX-DIV  1 2 1 0 / ;",
+            "FX-DIV",
+            'CR ." [FX-ALIVE " HANDLER @ . DEPTH . 6 7 * . ." ]"',
+        ])
+        self.assertEqual(text.count("*** DIVIDE BY ZERO PC="), 1)
+        self.assertRegex(text, r"\[FX-ALIVE\s+0\s+0\s+42\s+\]")
+
     def test_catch_no_throw(self):
         """CATCH returns 0 when XT completes normally."""
         text = self._run_kdos([
@@ -15695,7 +15748,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 540)
+        self.assertEqual(len(seen), 541)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -17244,7 +17297,8 @@ class TestBIOSEntropyFill(unittest.TestCase):
             ("d_latest_store", "d_dict_rollback"),
             ("d_dict_rollback", "d_dict_index_fetch"),
             ("d_dict_index_fetch", "d_dict_index_store"),
-            ("d_dict_index_store", "d_dict_fault_xt_store"),
+            ("d_dict_index_store", "d_fault_xt_store"),
+            ("d_fault_xt_store", "d_dict_fault_xt_store"),
             ("d_dict_fault_xt_store", "d_dict_limit_fetch"),
             ("d_dict_limit_fetch", "d_dict_base_fetch"),
             ("d_dict_base_fetch", "d_dict_bounds_off"),
@@ -22024,6 +22078,30 @@ class TestKDOSMulticore(unittest.TestCase):
             "0 CURRENT-TASK ! PREEMPT-OFF-ALL",
         ])
         self.assertIn("2 0 ", text)
+
+    def test_worker_faults_throw_through_the_worker_catch(self):
+        """A worker's fault reaches its own CATCH; uncaught, it idles."""
+        text = self._run_mc([
+            "VARIABLE _FX-R1 VARIABLE _FX-R2 VARIABLE _FX-D1",
+            ": _FX-DIV  1 0 / ;",
+            ": _FX-ILL  5 FPCSR! 1 S>F64 ;",
+            ": _FX-W1  DEPTH ['] _FX-DIV CATCH _FX-R1 ! DEPTH 1- - _FX-D1 ! ;",
+            ": _FX-W2  ['] _FX-ILL CATCH _FX-R2 ! ;",
+            "' _FX-W1 1 CORE-RUN ' _FX-W2 2 CORE-RUN",
+            "1 CORE-WAIT 2 CORE-WAIT",
+            # Core 0 waits on the same line, so core 3's report does not
+            # interleave with core 0's echo.
+            "' _FX-DIV 3 CORE-RUN 3 CORE-WAIT",
+            ": _FX-GOOD  66 458767 C! ;",
+            "' _FX-GOOD 3 CORE-RUN 3 CORE-WAIT",
+            'CR ." [FX-MC " _FX-R1 @ . _FX-R2 @ . _FX-D1 @ . '
+            '458767 C@ . ." ]"',
+        ])
+        self.assertRegex(text, r"\[FX-MC\s+-10\s+-21\s+0\s+66\s+\]")
+        # Only core 3's uncaught fault is reported.
+        self.assertEqual(text.count("*** DIVIDE BY ZERO PC="), 1)
+        self.assertIn(" CORE=03", text)
+        self.assertNotIn("ILLEGAL INSTRUCTION", text)
 
     def test_catch_throw_chains_are_per_core(self):
         """Concurrent full cores use independent exception frames."""

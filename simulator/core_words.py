@@ -20,7 +20,7 @@ from simulator.aes import (
     AES_TAG,
 )
 from simulator.dictionary import MAX_NAME_BYTES
-from simulator.errors import ExecutionError, ForthAbort
+from simulator.errors import DivideByZeroFault, ExecutionError, ForthAbort
 from simulator.entropy import (
     TRNG_RAND8,
     TRNG_RAND64,
@@ -204,7 +204,7 @@ def _signed_divide(context: ExecutionContext) -> None:
     divisor = s64(context.data.pop())
     dividend = s64(context.data.pop())
     if divisor == 0 or (dividend == -(1 << 63) and divisor == -1):
-        raise ExecutionError("signed division trapped on zero or overflow")
+        raise DivideByZeroFault("signed division trapped on zero or overflow")
     quotient = abs(dividend) // abs(divisor)
     if (dividend < 0) != (divisor < 0):
         quotient = -quotient
@@ -215,7 +215,7 @@ def _signed_modulo(context: ExecutionContext) -> None:
     divisor = s64(context.data.pop())
     dividend = s64(context.data.pop())
     if divisor == 0:
-        raise ExecutionError("signed modulo trapped on zero")
+        raise DivideByZeroFault("signed modulo trapped on zero")
     quotient = abs(dividend) // abs(divisor)
     if (dividend < 0) != (divisor < 0):
         quotient = -quotient
@@ -226,7 +226,7 @@ def _signed_divmod(context: ExecutionContext) -> None:
     divisor = s64(context.data.pop())
     dividend = s64(context.data.pop())
     if divisor == 0 or (dividend == -(1 << 63) and divisor == -1):
-        raise ExecutionError("signed /MOD trapped on zero or overflow")
+        raise DivideByZeroFault("signed /MOD trapped on zero or overflow")
     quotient = abs(dividend) // abs(divisor)
     if (dividend < 0) != (divisor < 0):
         quotient = -quotient
@@ -600,6 +600,13 @@ def _dictionary_fault_xt_store(
     context: ExecutionContext,
 ) -> None:
     runtime.set_dictionary_fault_xt(context.data.pop())
+
+
+def _fault_xt_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    runtime.set_fault_xt(context.data.pop())
 
 
 def _dictionary_index_store(
@@ -2856,6 +2863,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.define_primitive(
         b"TSQRT",
         lambda _context: runtime.tile.square_root(),
+    )
+
+    # The instruction-fault callback follows at the frontier.
+    runtime.define_primitive(
+        b"FAULT-XT!",
+        lambda context: _fault_xt_store(runtime, context),
     )
 
 

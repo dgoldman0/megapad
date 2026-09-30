@@ -194,6 +194,8 @@ boot:
     str r11, r1
     ldi64 r11, var_dict_fault_xt
     str r11, r1
+    ldi64 r11, var_fault_xt
+    str r11, r1
 
     ; The caller-owned dictionary index may point into external RAM which
     ; survives a warm reset.  A fresh BIOS must never inherit either that
@@ -2938,6 +2940,15 @@ w_dict_fault_xt_store:
     ldn r1, r14
     addi r14, 8
     ldi64 r11, var_dict_fault_xt
+    str r11, r1
+    ret.l
+
+; FAULT-XT! ( xt -- )
+; Install the instruction-fault callback; 0 removes it.  See fault_report.
+w_fault_xt_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, var_fault_xt
     str r11, r1
     ret.l
 
@@ -13031,24 +13042,32 @@ priv_fault_handler:
 ;  faulting instruction ([R15]) and the saved flags ([R15+8]); an
 ;  alignment fault also records its address in TRAP_ADDR (CSR 0x25).
 ;
-;  The report is one line: the fault, the address for an alignment fault,
-;  the PC after the faulting instruction, and the core ID.  Core 0 then
-;  recovers as an undefined word does, with clean stacks: interpret STATE,
-;  a closed temporary IF block, the EVALUATE depth reset, and the prompt.
-;  A worker core clears its worker slot so CORE-STATUS reports it idle,
-;  resets its stacks, and returns to its idle loop.
+;  A callback installed with FAULT-XT! runs first, with the fault's
+;  standard throw code on the data stack: -21 (unsupported operation) for
+;  an illegal instruction, -23 (address alignment exception), and -10
+;  (division by zero).  KDOS installs one that THROWs the code to the
+;  innermost CATCH of the faulting context and never returns.  The callback
+;  runs with the BIOS fixed-role registers restored, the interrupt enable
+;  the faulting code had, and the trap frame still on the return stack.
+;
+;  With no callback, or when it returns, the fault is reported in one line:
+;  the fault, the address for an alignment fault, the PC after the faulting
+;  instruction, and the core ID.  Core 0 then recovers as an undefined word
+;  does, with clean stacks: interpret STATE, a closed temporary IF block,
+;  the EVALUATE depth reset, and the prompt.  A worker core clears its
+;  worker slot so CORE-STATUS reports it idle, resets its stacks, and
+;  returns to its idle loop.
+;
+;  R9 carries the fault kind, an index into fault_names and fault_codes.
 ;
 illegal_op_handler:
-    ldi64 r10, str_fault_illegal
-    ldi r9, 0                         ; no fault address to report
+    ldi r9, 0
     lbr fault_report
 align_fault_handler:
-    ldi64 r10, str_fault_align
-    ldi r9, 1                         ; report TRAP_ADDR
+    ldi r9, 1
     lbr fault_report
 div_zero_handler:
-    ldi64 r10, str_fault_divzero
-    ldi r9, 0
+    ldi r9, 2
 
 fault_report:
     ; The fault may have hit inside a SEP routine, so move to R3 as the
@@ -13069,14 +13088,51 @@ fault_report:
     mov r16, r11
     ldi64 r11, forth_exit
     mov r17, r11
+    ; The trap masked interrupts; restore the enable the faulting code had.
+    mov r11, r15
+    addi r11, 8
+    ldn r1, r11                       ; saved flags
+    lsri r1, 6
+    andi r1, 1
+    csrw 0x09, r1                     ; IE
     ; R9, R12, and R13 survive print_str, print_hex32, and SEP R6.
-    ldn r12, r15                      ; PC after the faulting instruction
     csrr r0, 0x25                     ; TRAP_ADDR
     mov r13, r0
+
+    ldi64 r11, var_fault_xt
+    ldn r11, r11
+    cmpi r11, 0
+    breq .fault_print
+    subi r15, 8
+    str r15, r9                       ; the kind and TRAP_ADDR outlive
+    subi r15, 8
+    str r15, r13                      ;   a callback that returns
+    mov r0, r9
+    ldi r1, 3
+    shl r0, r1
+    ldi64 r7, fault_codes
+    add r7, r0
+    ldn r1, r7
+    subi r14, 8
+    str r14, r1                       ; ( throw-code )
+    call.l r11
+    ldn r13, r15
+    addi r15, 8
+    ldn r9, r15
+    addi r15, 8
+
+.fault_print:
+    ldn r12, r15                      ; PC after the faulting instruction
+    mov r0, r9
+    ldi r1, 3
+    shl r0, r1
+    ldi64 r7, fault_names
+    add r7, r0
+    ldn r10, r7
     ldi64 r11, print_str
-    call.l r11                        ; the fault name from R10
-    cmpi r9, 0
-    breq .fault_pc
+    call.l r11                        ; the fault name
+    cmpi r9, 1                        ; an alignment fault names TRAP_ADDR
+    brne .fault_pc
     mov r1, r13
     ldi64 r11, print_fault_hex64
     call.l r11
@@ -13100,13 +13156,6 @@ fault_report:
     lbrne .fault_worker
 
     ; ---- Core 0: back to the prompt ----
-    ; The trap masked interrupts; restore the enable the faulting code had.
-    mov r11, r15
-    addi r11, 8
-    ldn r1, r11                       ; saved flags
-    lsri r1, 6
-    andi r1, 1
-    csrw 0x09, r1                     ; IE
     ldi r1, 0
     ldi64 r11, var_state
     str r11, r1                       ; interpret
@@ -13130,6 +13179,15 @@ fault_report:
     sub r14, r11                      ; DSP = zone top - 0x8000
     ei
     lbr secondary_idle_loop
+
+fault_names:
+    .dq str_fault_illegal
+    .dq str_fault_align
+    .dq str_fault_divzero
+fault_codes:
+    .dq 0xFFFFFFFFFFFFFFEB            ; -21 unsupported operation
+    .dq 0xFFFFFFFFFFFFFFE9            ; -23 address alignment exception
+    .dq 0xFFFFFFFFFFFFFFF6            ; -10 division by zero
 
 ; print_fault_hex64: R1 -> 16 hex chars.  Clobbers R0, R1, R7, and R11;
 ;   the value waits on the return stack while the high half prints.
@@ -23805,9 +23863,18 @@ d_dict_fault_xt_store:
     call.l r11
     ret.l
 
+; === FAULT-XT! ===
+d_fault_xt_store:
+    .dq d_dict_fault_xt_store
+    .db 9
+    .ascii "FAULT-XT!"
+    ldi64 r11, w_fault_xt_store
+    call.l r11
+    ret.l
+
 ; === DICT-INDEX! ===
 d_dict_index_store:
-    .dq d_dict_fault_xt_store
+    .dq d_fault_xt_store
     .db 11
     .ascii "DICT-INDEX!"
     ldi64 r11, w_dict_index_store
@@ -23874,6 +23941,8 @@ var_dict_base:
 var_dict_limit:
     .dq 0
 var_dict_fault_xt:
+    .dq 0
+var_fault_xt:
     .dq 0
 ; Caller-backed open-addressed dictionary index state.  Flags use the public
 ; DICT-INDEX@ bit assignments documented by w_dict_index_store above.

@@ -693,6 +693,15 @@ _TASK-HANDLERS 4 CELLS 0 FILL
 
 ' _KDOS-DICT-FAULT DICT-FAULT-XT!
 
+\ BIOS instruction-fault handlers call this hook with a standard throw code:
+\ -21 illegal instruction, -23 alignment fault, -10 divide by zero.  Inside a
+\ CATCH the fault unwinds like any THROW.  Outside one, return so BIOS reports
+\ the fault and recovers the prompt or worker core.
+: _KDOS-FAULT  ( code -- )
+    HANDLER @ IF THROW THEN DROP ;
+
+' _KDOS-FAULT FAULT-XT!
+
 \ Preserve the BIOS task ABI while adding KDOS-owned exception cleanup.  BIOS
 \ cannot clear _TASK-HANDLERS because that table is allocated when KDOS loads.
 \ Scheduling a slot is also replacement, so reset on both start and stop.  Slot

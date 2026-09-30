@@ -44,12 +44,12 @@ from tests.simulator.test_kdos_dictionary_task_hooks import _load_hooks
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-crc-720-855.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-crc-729-864.f"
 
 MEGAPAD_REVISION = "9576065668114ffdf9b08c015cf4d16c8b2e6e89"
-KDOS_GIT_BLOB = "4580b4075b3114ef6e5b2c8121b6e4fa1cfb2c70"
-FIRST_LINE = 720
-LAST_LINE = 855
+KDOS_GIT_BLOB = "626d6ade5a25d94c4d312cebf60b20cd3c8fa781"
+FIRST_LINE = 729
+LAST_LINE = 864
 SLICE_SHA256 = "5c6853fab0b95696d8e9a682c74e2d740dcaa84ebcd01283c66c9417ac3d0aa8"
 SLICE_GIT_BLOB = "1fa770d5ab3a7da722ed4daa0181c923f07d2286"
 DEFINITIONS = (

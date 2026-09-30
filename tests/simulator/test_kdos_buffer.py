@@ -25,10 +25,10 @@ from tests.simulator.test_kdos_xmem import CANONICAL_EXTERNAL_SIZE, _pointer
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-buffer-2797-2985.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-buffer-2806-2994.f"
 
-FIRST_LINE = 2797
-LAST_LINE = 2985
+FIRST_LINE = 2806
+LAST_LINE = 2994
 SLICE_SHA256 = (
     "68826ac284decca406051412e4478710dd9ebd81319109f5dd326a04ca205a93"
 )
@@ -129,7 +129,7 @@ def test_next_contiguous_tile_buffer_slice_is_now_admitted(
 ) -> None:
     lines = KDOS_SOURCE.read_bytes().splitlines(keepends=True)
     assert lines[LAST_LINE] == b"\n"
-    next_source = b"".join(lines[LAST_LINE:3109])
+    next_source = b"".join(lines[LAST_LINE:3118])
     assert next_source.count(b"\n") == 124
     assert next_source.startswith(b"\n\\ ====")
     assert next_source.endswith(b"    2DROP ;\n")

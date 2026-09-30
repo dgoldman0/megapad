@@ -37,6 +37,32 @@ class ExecutionBlocked(SimulatorError):
         )
 
 
+class InstructionFault(ExecutionError):
+    """A primitive reached an operation that traps on the machine.
+
+    The runtime routes it like the BIOS instruction-fault handlers: the
+    ``FAULT-XT!`` callback receives ``throw_code``, and when there is none or
+    it returns, the runtime prints ``report`` and aborts.
+    """
+
+    report = b""
+    throw_code = 0
+
+
+class IllegalInstructionFault(InstructionFault):
+    """The machine raises ``IVEC_ILLEGAL_OP``."""
+
+    report = b"\r\n*** ILLEGAL INSTRUCTION CORE=00\r\n"
+    throw_code = -21  # unsupported operation
+
+
+class DivideByZeroFault(InstructionFault):
+    """The machine raises ``IVEC_DIV_ZERO`` (zero divisor or overflow)."""
+
+    report = b"\r\n*** DIVIDE BY ZERO CORE=00\r\n"
+    throw_code = -10  # division by zero
+
+
 class ForthAbort(ExecutionError):
     """The nonreturning BIOS ``ABORT`` word cleared one active task."""
 
@@ -66,9 +92,12 @@ class StepBudgetExceeded(ExecutionError):
 
 
 __all__ = [
+    "DivideByZeroFault",
     "ExecutionError",
     "ExecutionBlocked",
     "ForthAbort",
+    "IllegalInstructionFault",
+    "InstructionFault",
     "SimulatorError",
     "SourceError",
     "StepBudgetExceeded",

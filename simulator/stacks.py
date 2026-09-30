@@ -91,14 +91,30 @@ class ReturnStackShapeError(StackError):
 
 
 @dataclass(frozen=True, slots=True)
+class FaultAbort:
+    """What the runtime does when a guest fault callback returns.
+
+    It writes ``report`` to the UART, as BIOS does, and aborts with
+    ``message``.
+    """
+
+    report: bytes
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class Continuation:
-    """Internal colon-definition continuation stored on the return stack."""
+    """Internal colon-definition continuation stored on the return stack.
+
+    A ``fault_abort`` continuation sits beneath a guest fault callback; a
+    callback that returns into it aborts instead of resuming.
+    """
 
     xt: int
     ip: int
     root: bool = False
     dispatch_id: int = 0
-    fault_abort: bool = False
+    fault_abort: FaultAbort | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "xt", u64(self.xt))
@@ -106,7 +122,7 @@ class Continuation:
         object.__setattr__(self, "dispatch_id", u64(self.dispatch_id))
         if self.dispatch_id and not self.root:
             raise ValueError("only a root continuation may name a dispatch")
-        if self.root and self.fault_abort:
+        if self.root and self.fault_abort is not None:
             raise ValueError("a continuation cannot be both root and fault-abort")
 
 
@@ -567,7 +583,7 @@ class ReturnStack:
         *,
         root: bool = False,
         dispatch_id: int = 0,
-        fault_abort: bool = False,
+        fault_abort: FaultAbort | None = None,
     ) -> Continuation:
         continuation = Continuation(
             xt=xt,
@@ -600,10 +616,10 @@ class ReturnStack:
         return entry
 
     def has_fault_abort_continuation(self) -> bool:
-        """Whether a live dictionary-fault fail-closed frame remains."""
+        """Whether a live guest-fault fail-closed frame remains."""
 
         return any(
-            isinstance(entry, Continuation) and entry.fault_abort
+            isinstance(entry, Continuation) and entry.fault_abort is not None
             for entry in self.snapshot()
         )
 

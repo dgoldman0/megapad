@@ -18,18 +18,19 @@ from tests.simulator.test_kdos_exceptions import _load_exceptions
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = Path(__file__).with_name("fixtures") / (
-    "kdos-dictionary-task-hooks-676-719.f"
+    "kdos-dictionary-task-hooks-676-728.f"
 )
 
 MEGAPAD_REVISION = "9576065668114ffdf9b08c015cf4d16c8b2e6e89"
-KDOS_GIT_BLOB = "4580b4075b3114ef6e5b2c8121b6e4fa1cfb2c70"
+KDOS_GIT_BLOB = "626d6ade5a25d94c4d312cebf60b20cd3c8fa781"
 FIRST_LINE = 676
-LAST_LINE = 719
-SLICE_SHA256 = "45d4378e494a235d9d91f7c4c11e4d15830b49161c14c88f3699178d69781b8e"
-SLICE_GIT_BLOB = "0d956cf70f2697737c604d92c8cbb00543343021"
+LAST_LINE = 728
+SLICE_SHA256 = "36d101dc608d15fbb7453558d2dfd337183a5ac946fde6677526db02c0548142"
+SLICE_GIT_BLOB = "ec55064d082be862d3c9be2da3a7cabe03150245"
 DEFINITIONS = (
     b"U-DICT-E-FULL",
     b"_KDOS-DICT-FAULT",
+    b"_KDOS-FAULT",
     b"_BIOS-BACKGROUND-XT",
     b"_BIOS-BACKGROUND2-XT",
     b"_BIOS-BACKGROUND3-XT",
@@ -132,6 +133,43 @@ def test_hook_load_captures_the_live_pre_shadow_bios_task_words(
     fault = runtime.find("_KDOS-DICT-FAULT")
     assert fault is not None
     assert runtime.dictionary_fault_xt == fault.xt
+    fault = runtime.find("_KDOS-FAULT")
+    assert fault is not None
+    assert runtime.fault_xt == fault.xt
+
+
+def test_instruction_faults_throw_their_codes_through_catch(
+    loaded_hooks: tuple[MegaForthRuntime, dict[str, object]],
+) -> None:
+    runtime, _bios_words = loaded_hooks
+    runtime.drain_uart_output()
+    runtime.evaluate(
+        b": _FX-DIV  1 2 1 0 / ;\n"
+        b": _FX-ILL  5 FPCSR! 1 1 F64+ ;\n"
+        b"11 ' _FX-DIV CATCH\n"
+        b"' _FX-ILL CATCH 0 FPCSR!\n"
+    )
+    # CATCH restores the depth it saw; the fault reports nothing.
+    assert runtime.main_context.data.snapshot() == (11, u64(-10), u64(-21))
+    assert runtime.main_context.returns.snapshot() == ()
+    assert runtime.drain_uart_output() == b""
+    assert _handler_cells(runtime) == (0, 0, 0, 0)
+
+
+def test_an_uncaught_instruction_fault_reports_and_aborts(
+    loaded_hooks: tuple[MegaForthRuntime, dict[str, object]],
+) -> None:
+    runtime, _bios_words = loaded_hooks
+    runtime.drain_uart_output()
+    runtime.evaluate(b": _FX-DIV  1 2 1 0 / ;")
+    with pytest.raises(ForthAbort, match="signed division trapped on zero"):
+        runtime.evaluate(b"_FX-DIV")
+    assert runtime.drain_uart_output() == b"\r\n*** DIVIDE BY ZERO CORE=00\r\n"
+    assert runtime.main_context.data.snapshot() == ()
+    assert runtime.main_context.returns.snapshot() == ()
+    assert _handler_cells(runtime) == (0, 0, 0, 0)
+    runtime.evaluate(b"6 7 *")
+    assert runtime.main_context.data.snapshot() == (42,)
 
 
 @pytest.mark.parametrize("slot", (1, 2, 3))
@@ -734,7 +772,7 @@ def test_foreign_dictionary_request_marks_prior_intervening_rp_capture() -> None
     assert intervening.data.depth() == 1
     assert intervening.returns.snapshot() == ()
     assert not intervening.reusable
-    assert intervening.host_control_fault == "_DictionaryFaultRequest"
+    assert intervening.host_control_fault == "_GuestFaultRequest"
     assert _handler_cells(runtime)[0] == 0
 
 

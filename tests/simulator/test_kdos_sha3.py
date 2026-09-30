@@ -58,10 +58,10 @@ from tests.simulator.test_kdos_aes import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-sha3-1072-1216.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-sha3-1081-1225.f"
 
-FIRST_LINE = 1072
-LAST_LINE = 1216
+FIRST_LINE = 1081
+LAST_LINE = 1225
 SLICE_SHA256 = "a37aa3609e32f4b7fc966c575dbc2f5f0a59362a89c18ea076b0143e52c622f2"
 SLICE_GIT_BLOB = "d547de0490759ee0ebb6bfed1e070488b409dcfa"
 DEFINITIONS = (
@@ -211,6 +211,8 @@ def test_new_scalar_bios_closure_matches_executable_cell_semantics() -> None:
         )
     with pytest.raises(ExecutionError, match="modulo trapped"):
         _execute(runtime, "MOD", 1, 0)
+    assert runtime.drain_uart_output() == (
+        b"\r\n*** DIVIDE BY ZERO CORE=00\r\n")
 
     assert _execute(runtime, "EMIT", 0x141) == ()
     assert runtime.drain_uart_output() == b"A"

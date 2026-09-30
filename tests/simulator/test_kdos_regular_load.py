@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from shared.cells import MASK64, TRUE
+from shared.cells import MASK64, TRUE, u64
 from simulator.dictionary_index import (
     DICT_INDEX_AUTHORITATIVE,
     DICT_INDEX_BOUND,
@@ -22,14 +22,14 @@ from tests.simulator.test_kdos_aes import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-KDOS_LINES = 9_894
-KDOS_BYTES = 343_551
+KDOS_LINES = 9_903
+KDOS_BYTES = 343_925
 KDOS_SHA256 = (
-    "b9e6ab1f3fa6331d14db4c94b7ed6978b78b2acd45c311fdecf566dcce4e00ae"
+    "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db"
 )
-SUBMITTED_LINES = 6_681
-SUBMITTED_PAYLOAD_BYTES = 215_630
-CLI_UART_BYTES = 222_311
+SUBMITTED_LINES = 6_684
+SUBMITTED_PAYLOAD_BYTES = 215_713
+CLI_UART_BYTES = 222_397
 MAX_SUBMITTED_LINE = 99
 CANONICAL_EXTERNAL_BYTES = 128 << 20
 CANONICAL_HBW_BYTES = 3 << 20
@@ -181,8 +181,8 @@ def test_complete_kdos_loads_once_and_runs_representative_subsystems() -> None:
     assert runtime.main_context.data.pop() == 0
 
     loaded_words = runtime.dictionary.words[len(core_words) :]
-    assert len(core_words) == 434
-    assert len(loaded_words) == 1_460
+    assert len(core_words) == 435
+    assert len(loaded_words) == 1_461
     assert loaded_words[0].name == b".R"
     assert tuple(word.name for word in loaded_words[-2:]) == (
         b"_AUTOEXEC-NAME",
@@ -272,3 +272,13 @@ def test_complete_kdos_loads_once_and_runs_representative_subsystems() -> None:
     assert all(owner is None for owner in runtime.spinlocks.owners)
     assert runtime.main_context.data.snapshot() == ()
     assert runtime.main_context.returns.snapshot() == ()
+
+    # A trapping line in a checked load is a caught exception, as on the
+    # machine: status 5 with the divide-by-zero code, and no report.
+    runtime.evaluate(
+        b'S" 1 0 /" EVALUATE-CHECKED EVAL-THROW @ HANDLER @',
+        source_name="regular-load-fault.f",
+    )
+    assert runtime.main_context.data.snapshot() == (5, u64(-10), 0)
+    assert runtime.drain_uart_output() == b""
+    runtime.main_context.data.clear()
