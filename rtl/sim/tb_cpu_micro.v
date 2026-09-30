@@ -1356,6 +1356,27 @@ module tb_cpu_micro;
                            "instruction response error saves flags");
 
         // ============================================================
+        // IDL ends on a request whatever I is; with I clear it continues
+        // at the next instruction without vectoring.
+        // Program: IDL; INC R0; HALT
+        // ============================================================
+        clear_mem;
+        mem[0] = 8'h00; mem[1] = 8'h10; mem[2] = 8'h02;
+        reset_cpu;
+        @(negedge clk);
+        u_cpu.flags = 8'h00;
+        wait_halt(2000);
+        repeat (20) @(posedge clk);
+        check64_value({63'd0, u_cpu.idle_wait}, 64'd1,
+                      "IDL waits with no request");
+        irq_ipi = 1'b1;
+        repeat (40) @(posedge clk);
+        irq_ipi = 1'b0;
+        check_reg(0, 64'd1, "masked IPI resumes IDL");
+        check64_value({56'd0, u_cpu.ivec_id}, 64'd0,
+                      "masked IPI does not vector");
+
+        // ============================================================
         // Summary
         // ============================================================
         $display("--------------------------------------------");

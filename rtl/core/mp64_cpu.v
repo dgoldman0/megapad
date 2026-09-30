@@ -116,6 +116,8 @@ module mp64_cpu #(
     input  wire        irq_uart,
     input  wire        irq_nic,
     input  wire        irq_ipi,
+    // RTC uptime in ms, compared with WAKE_MS while IDL waits
+    input  wire [63:0] rtc_uptime_ms,
 
     // === I-cache statistics (from icache module) ===
     input  wire [63:0] icache_stat_hits,
@@ -150,6 +152,8 @@ module mp64_cpu #(
     reg [63:0] ivt_base;
     reg [7:0]  ivec_id;
     reg [63:0] trap_addr;
+    reg [63:0] wake_ms;        // CSR WAKE_MS: IDL ends at this uptime; 0 = none
+    reg        idle_wait;      // CPU_HALT was entered by IDL, not HALT
     reg [63:0] trap_return_pc;
 
     // Privilege / MPU. General execution retains the historical inert field;
@@ -268,6 +272,11 @@ module mp64_cpu #(
             else if (irq_nic)   begin irq_pending = 1'b1; irq_vector = IRQX_NIC;             end
         end
     end
+
+    // IDL wake sources: any enabled request, ignoring the I flag, and the
+    // WAKE_MS deadline (docs/isa-reference.md).
+    wire irq_request = irq_ipi | irq_timer | irq_uart | irq_nic;
+    wire wake_due = (wake_ms != 64'd0) && (rtc_uptime_ms >= wake_ms);
 
     // ====================================================================
     // ALU instance
@@ -598,6 +607,8 @@ module mp64_cpu #(
             ivt_base   <= 64'd0;
             ivec_id    <= 8'd0;
             trap_addr  <= 64'd0;
+            wake_ms    <= 64'd0;
+            idle_wait  <= 1'b0;
             trap_return_pc <= 64'd0;
             priv_level <= 1'b0;
             mpu_base   <= 64'd0;
@@ -1032,7 +1043,10 @@ module mp64_cpu #(
                 else if (fam == FAM_SYS) begin
                     ext_active <= 1'b0;
                     case (nib)
-                        4'h0: cpu_state <= CPU_HALT;           // IDL
+                        4'h0: begin                            // IDL
+                            idle_wait <= 1'b1;
+                            cpu_state <= CPU_HALT;
+                        end
                         4'h1: cpu_state <= CPU_FETCH;          // NOP
                         4'h2: cpu_state <= CPU_HALT;           // HALT
 
@@ -1041,6 +1055,7 @@ module mp64_cpu #(
                             flags <= 8'h40; priv_level <= 1'b0;
                             D <= 8'd0; Q <= 1'b0; T <= 16'd0;
                             ivt_base <= 64'd0; ivec_id <= 8'd0;
+                            wake_ms <= 64'd0;
                             fetch_pc <= 64'd0;
                             ibuf_len <= 5'd0;
                             ibuf_need <= 4'd1;
@@ -1566,6 +1581,7 @@ module mp64_cpu #(
                             CSR_FPCSR:    fpcsr      <= {R[nib[2:0]][8:4], 1'b0,
                                                          R[nib[2:0]][2:0]};
                             CSR_IVEC_ID:  ivec_id  <= R[nib[2:0]][7:0];
+                            CSR_WAKE_MS:  wake_ms  <= R[nib[2:0]];
                             CSR_PERF_CTRL: begin
                                 perf_enable <= R[nib[2:0]][0];
                                 if (R[nib[2:0]][1]) begin
@@ -1639,6 +1655,7 @@ module mp64_cpu #(
                             CSR_NCORES:      R[nib[2:0]] <= 64'd16;  // updated at SoC level
                             CSR_IVEC_ID:     R[nib[2:0]] <= {56'd0, ivec_id};
                             CSR_TRAP_ADDR:   R[nib[2:0]] <= trap_addr;
+                            CSR_WAKE_MS:     R[nib[2:0]] <= wake_ms;
                             CSR_MEGAPAD_SZ:  R[nib[2:0]] <= mem_size_bytes;
                             CSR_CPUID:       R[nib[2:0]] <= 64'h4D50_3634_0001_4350; // "MP64" v1 "CP"
                             CSR_PERF_CYCLES: R[nib[2:0]] <= perf_cycles;
@@ -2335,8 +2352,14 @@ module mp64_cpu #(
             // ============================================================
             CPU_HALT: begin
                 if (irq_pending) begin
+                    idle_wait <= 1'b0;
                     ivec_id  <= {4'd0, irq_vector};
                     cpu_state <= CPU_IRQ;
+                end else if (idle_wait && (irq_request || wake_due)) begin
+                    // IDL ends on an enabled request whatever I is, and at
+                    // WAKE_MS; with I clear it continues without vectoring.
+                    idle_wait <= 1'b0;
+                    cpu_state <= CPU_FETCH;
                 end
             end
 

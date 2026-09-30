@@ -398,6 +398,7 @@ parameter [7:0] CSR_MBOX     = 8'h22;   // Read: pending IPI mask, Write: send I
 parameter [7:0] CSR_IPIACK   = 8'h23;   // Write: acknowledge IPI from core N
 parameter [7:0] CSR_IVEC_ID  = 8'h24;   // Current interrupt vector ID
 parameter [7:0] CSR_TRAP_ADDR= 8'h25;   // Faulting address
+parameter [7:0] CSR_WAKE_MS  = 8'h26;   // RTC uptime (ms) at which IDL ends
 
 // Strided / 2D tile addressing CSRs (§2.5)
 parameter [7:0] CSR_TSTRIDE_R = 8'h40;  // Row stride in bytes

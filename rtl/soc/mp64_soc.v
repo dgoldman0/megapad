@@ -215,6 +215,8 @@ module mp64_soc #(
     wire        irq_nic_w;
     wire        irq_timer_w;
     wire [NUM_CORES-1:0] ipi_out;
+    // RTC uptime, which every full core compares with its WAKE_MS
+    wire [63:0] rtc_uptime_w;
 
     // NIC byte-DMA master.  It participates in the same memory arbiter as
     // CPUs and clusters so BIOS NET-RECV/NET-SEND reach real system RAM.
@@ -338,11 +340,12 @@ module mp64_soc #(
                 .tacc_ctl_done   (core_tacc_ctl_done[ci]),
                 .tacc_ctl_fault  (core_tacc_ctl_fault[ci]),
 
-                // Interrupts
+                // Interrupts.  UART and NIC requests reach core 0 only.
                 .irq_timer       (irq_timer_w),
-                .irq_uart        (irq_uart_w),
-                .irq_nic         (irq_nic_w),
+                .irq_uart        (ci == 0 ? irq_uart_w : 1'b0),
+                .irq_nic         (ci == 0 ? irq_nic_w : 1'b0),
                 .irq_ipi         (ipi_out[ci]),
+                .rtc_uptime_ms   (rtc_uptime_w),
 
                 // Info
                 .mem_size_bytes  (MEM_SIZE_BYTES),
@@ -1883,7 +1886,8 @@ module mp64_soc #(
         .wen   (bus_mmio_wen),
         .rdata (rtc_rdata_raw),
         .ack   (rtc_ack),
-        .irq   (irq_rtc_w)
+        .irq   (irq_rtc_w),
+        .uptime(rtc_uptime_w)
     );
 
     // ========================================================================

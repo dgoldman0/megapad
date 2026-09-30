@@ -343,6 +343,7 @@ localparam [7:0] CSR_MBOX      = 8'h22;  // IPI mask / send
 localparam [7:0] CSR_IPIACK    = 8'h23;  // Acknowledge IPI
 localparam [7:0] CSR_IVEC_ID   = 8'h24;  // Current IRQ vector ID
 localparam [7:0] CSR_TRAP_ADDR = 8'h25;  // Faulting address
+localparam [7:0] CSR_WAKE_MS   = 8'h26;  // RTC uptime (ms) at which IDL ends
 
 // Memory size / CPU ID
 localparam [7:0] CSR_MEGAPAD_SZ = 8'h30;

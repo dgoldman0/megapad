@@ -47,13 +47,17 @@ module mp64_rtc #(
     output reg         ack,
 
     // === Interrupt output ===
-    output wire        irq
+    output wire        irq,
+
+    // === Uptime for the cores' WAKE_MS comparison ===
+    output wire [63:0] uptime
 );
 
     // ========================================================================
     // Counters
     // ========================================================================
     reg [63:0] uptime_ms;      // monotonic ms since boot
+    assign uptime = uptime_ms;
     reg [63:0] epoch_ms;       // ms since Unix epoch (settable)
 
     // Latch registers (snapshot on read of byte 0)

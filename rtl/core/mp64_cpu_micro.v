@@ -182,6 +182,7 @@ module mp64_cpu_micro (
     // Trap / interrupt context
     reg [7:0]  ivec_id;
     reg [63:0] trap_addr;
+    reg        idle_wait;      // CPU_HALT was entered by IDL, not HALT
     reg [63:0] trap_return_pc;
 
     assign tile_caller_id          = core_id;
@@ -349,6 +350,7 @@ module mp64_cpu_micro (
 
             ivec_id   <= 8'd0;
             trap_addr <= 64'd0;
+            idle_wait <= 1'b0;
             trap_return_pc <= 64'd0;
 
             post_action <= POST_NONE;
@@ -671,7 +673,10 @@ module mp64_cpu_micro (
                 else if (fam == FAM_SYS) begin
                     ext_active <= 1'b0;
                     case (nib)
-                        4'h0: cpu_state <= CPU_HALT;           // IDL
+                        4'h0: begin                            // IDL
+                            idle_wait <= 1'b1;
+                            cpu_state <= CPU_HALT;
+                        end
                         4'h1: cpu_state <= CPU_FETCH;          // NOP
                         4'h2: cpu_state <= CPU_HALT;           // HALT
 
@@ -1582,8 +1587,13 @@ module mp64_cpu_micro (
             // ============================================================
             CPU_HALT: begin
                 if (irq_pending) begin
+                    idle_wait <= 1'b0;
                     ivec_id  <= {4'd0, irq_vector};
                     cpu_state <= CPU_IRQ;
+                end else if (idle_wait && (irq_ipi || irq_timer)) begin
+                    // IDL ends on a request whatever I is (docs/isa-reference.md).
+                    idle_wait <= 1'b0;
+                    cpu_state <= CPU_FETCH;
                 end
             end
 

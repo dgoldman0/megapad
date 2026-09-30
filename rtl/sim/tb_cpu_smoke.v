@@ -40,6 +40,7 @@ module tb_cpu_smoke;
     reg  [63:0] bus_fault_addr;
     reg         bus_fault_wen;
     reg         irq_ipi;
+    reg  [63:0] rtc_uptime;
 
     // 1-cycle response (combinational)
     always @(negedge clk) begin
@@ -283,6 +284,7 @@ module tb_cpu_smoke;
         .irq_uart  (1'b0),
         .irq_nic   (1'b0),
         .irq_ipi   (irq_ipi),
+        .rtc_uptime_ms(rtc_uptime),
 
         // I-cache stats
         .icache_stat_hits  (64'd0),
@@ -658,6 +660,7 @@ module tb_cpu_smoke;
         bus_fault_addr = 64'd0;
         bus_fault_wen = 1'b0;
         irq_ipi = 1'b0;
+        rtc_uptime = 64'd0;
         icache_error = 1'b0;
         icache_error_addr = 64'd0;
 
@@ -1377,6 +1380,52 @@ module tb_cpu_smoke;
                            12'h070, 64'd0);
         check_mem_qword_be("instruction refill error saves flags",
                            12'h078, 64'h25);
+
+        // =================================================================
+        // Test: IDL ends on an enabled request whatever I is, and with I
+        // clear it continues at the next instruction without vectoring.
+        // Program: IDL; INC R0; HALT
+        // =================================================================
+        clear_mem;
+        mem[0] = 8'h00; mem[1] = 8'h10; mem[2] = 8'h02;
+        reset_cpu;
+        @(negedge clk);
+        uut.flags = 8'h00;                 // I clear
+        wait_state(CPU_HALT, 5000);
+        repeat (20) @(posedge clk);
+        check64("IDL waits with no request",
+                {63'd0, uut.cpu_state == CPU_HALT && uut.idle_wait}, 64'd1);
+        irq_ipi = 1'b1;
+        repeat (40) @(posedge clk);
+        irq_ipi = 1'b0;
+        check_reg("masked IPI resumes IDL", 0, 64'd1);
+        check64("masked IPI does not vector", {56'd0, uut.ivec_id}, 64'd0);
+        check64("HALT after wake stays halted",
+                {63'd0, uut.cpu_state == CPU_HALT && !uut.idle_wait}, 64'd1);
+
+        // =================================================================
+        // Test: WAKE_MS ends IDL once the RTC uptime reaches it.
+        // Program: LDI R1,7; CSRW WAKE_MS,R1; IDL; INC R0; HALT
+        // =================================================================
+        clear_mem;
+        mem[0] = 8'h60; mem[1] = 8'h10; mem[2] = 8'h07;
+        mem[3] = 8'hD9; mem[4] = 8'h26;
+        mem[5] = 8'h00; mem[6] = 8'h10; mem[7] = 8'h02;
+        rtc_uptime = 64'd5;
+        reset_cpu;
+        wait_state(CPU_HALT, 5000);
+        repeat (20) @(posedge clk);
+        check64("IDL waits before WAKE_MS",
+                {63'd0, uut.cpu_state == CPU_HALT && uut.idle_wait}, 64'd1);
+        check64("WAKE_MS holds the deadline", uut.wake_ms, 64'd7);
+        rtc_uptime = 64'd6;
+        repeat (20) @(posedge clk);
+        check64("IDL still waits 1 ms early", {63'd0, uut.idle_wait}, 64'd1);
+        rtc_uptime = 64'd7;
+        repeat (40) @(posedge clk);
+        check_reg("WAKE_MS resumes IDL", 0, 64'd1);
+        check64("deadline does not vector", {56'd0, uut.ivec_id}, 64'd0);
+        rtc_uptime = 64'd0;
 
         // =================================================================
         $display("===========================================");
