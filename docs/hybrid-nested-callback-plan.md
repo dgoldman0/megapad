@@ -81,11 +81,18 @@ receipt sequences and result shapes, so a V2 call followed by a V4 call and
 another V2 call does not introduce a gap into the existing V2 settlement
 sequence. Aggregate work still charges the same outer dispatch allowance.
 
-Construction selects the V3 owner and legacy facade when the full transport-3
-capability is available. If it is unavailable, the existing V2/V1 construction
-fallback remains available only when no V4 capability is required. A required
-V4 manifest fails capability preflight before exposing its session owner;
-it must not silently fall back or begin publication through an older runner.
+Construction may select the V3 owner and legacy facade once their shared-owner,
+publication and legacy-isolation surfaces have been qualified, even while
+nested execution is incomplete. This keeps lower-layer publication and older
+profiles on the same pinned owner; it does not replace a live V2 owner, promote
+legacy status, or advertise transport-3 execution. Older modules retain the
+existing V2/V1 construction fallback when no V4 capability is required.
+
+Full capability still requires qualified child execution and semantic
+composition. Public V4 registration, required runtime creation and V4 manifests
+fail capability preflight until then, before exposing a session owner. Internal
+publication tests may exercise the qualified surface without enabling an
+installed machine Word. No V4 entry silently falls back to an older transport.
 
 ## Source constraints
 

@@ -240,6 +240,18 @@ Retire the discarded callback-local guards too. Subsequent catch-body work
 continues under the surviving parent's original guard and the same root meter;
 it cannot spend the canceled child's allowance or renew the parent's allowance.
 
+RP! can retire a child while the current THROW/HANDLER implementation still has
+semantic operations to finish. Retain that implementation's captured semantic
+code, effect evidence and original bounded task-state/data grants until control
+actually reaches the surviving pre-unwind continuation or transfers out of the
+root. An intermediate Return inside HANDLER does not end this tail. Its grants
+are not promoted into the parent's grant table. The tail retains no discarded
+native frame, adapter token or child-local fuel and cannot enter another foreign
+operation or mint export/request authority. Charge only the original root and
+any surviving ancestor callback guards. A second RP! or raw slot mismatch must
+revalidate the continuation frontier, code, effects and grants before another
+operation. Tail completion removes this temporary semantic authority.
+
 Do not execute a child's RET, fabricate child outputs, reset the parent, or
 roll back shared bytes, cycles, caches or counters. Clear the host fetch window
 when restoring the parent view; do not flush architectural I-cache. A throw
@@ -339,6 +351,12 @@ inclusive fuel, root callback fuel, native invocation limits and root machine
 limits across every callback, child, yield and wake. Nested work charges each
 root counter once; parent-local callback guards may include descendant work
 without charging it again globally.
+
+The dispatch cursor retains a strong task-root record containing the original
+meter, spent ledger, adapter chain and foreign issuer even after the last
+foreign frame has returned or retired. Ordinary outer quanta cannot drop this
+record and obtain fresh foreign allowances on a later entry. Release it only
+when that exact outer dispatch finishes or is canceled.
 
 Retain current ceilings: 64 machine registrations and 64 semantic exports,
 16 callback sites per routine, eight active distinct machine frames,
@@ -511,6 +529,16 @@ resumes only an issued runnable token; `reply` consumes only its exact live
 callback token. Structural protocol conformance, copied values, numerical IDs
 and matching descriptors are never admission. The engine-owned registration,
 foreign return entry and token state remain outside this shared module.
+
+The first begin is an admission-only, zero-quantum transition. Validate and
+reserve the invocation, then publish a zero-work receipt and issued runnable
+token without initializing CPU registers, writing a return sentinel or executing
+an instruction. Only after delivery of that accepted event may the semantic
+dispatcher consume the declared data-stack inputs. The following advance
+initializes the CPU once and starts execution. If accepted-event allocation or
+delivery fails, settle the retained zero-work entry receipt and cancel the
+admission while leaving semantic inputs untouched. Preflight rejection still
+creates no receipt. This ordering applies to child entry as well as root entry.
 
 Adapters enforce the lesser of their retained original allowances and supplied
 remaining ceilings. A zero scheduling quantum may produce a zero-work yield;
