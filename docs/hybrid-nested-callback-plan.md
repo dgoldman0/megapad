@@ -204,6 +204,20 @@ native runner independently checks the issued handle against the exact
 pending parent token and current top frame. It does not trust a supplied
 child spec or a caller-claimed active depth.
 
+The concrete publication input is an immutable tuple of
+`(site_index, call_edge_id, child_spec)` rows. `site_index` selects the parent's
+sealed callback site; `call_edge_id` identifies one exact captured Word/Call
+operation. Publication returns issued handles in row order. Repeated helper
+paths reuse the same static edge within a site rather than expanding paths;
+the same Call under different sites requires distinct site-bound rows.
+Bound the table to 4096 rows per routine and 65536 rows across the one owner.
+These are explicit additional admission limits: validate declarative counts
+before image reads, enforce them again natively, and return aggregate capacity
+on successful revocation or publication rollback. Switching facade cannot
+replenish the allowance. No separate lookup/recovery API is needed after a
+publication exception; exact publication query and transactional revocation
+remain the cleanup authority.
+
 Each invocation receives its own opaque owner-bound callback tokens, including
 children. A parent's token stays pending while a child runs; starting a child
 does not consume it or fabricate a second machine CALL. Only its eventual
