@@ -38,7 +38,8 @@ class NativeExecutor:
                 ) from None
             return None
         if (getattr(extension, "SEMANTIC_API_VERSION", None) != SEMANTIC_API_VERSION
-                or not hasattr(extension, "scalar_fp_execute")):
+                or not hasattr(extension, "scalar_fp_execute")
+                or not hasattr(extension, "keccak_f1600")):
             if required:
                 raise RuntimeError(
                     "native semantic execution requires a matching "

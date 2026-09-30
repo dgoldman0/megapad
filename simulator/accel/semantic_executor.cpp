@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include "../../shared/accel/scalar_fp_bindings.h"
+#include "../../shared/accel/keccak_bindings.h"
 
 #include <algorithm>
 #include <array>
@@ -1283,6 +1284,7 @@ private:
 
 PYBIND11_MODULE(_megaforth_native, module) {
     megapad::scalar_fp::register_bindings(module);
+    megapad::keccak::register_bindings(module);
     module.attr("SEMANTIC_API_VERSION") = 1;
     module.doc() = "Native execution of generic hosted Forth semantic plans";
     py::class_<NativeProgram>(module, "NativeProgram")

@@ -33,9 +33,10 @@ setup(
     version="0.1.0",
     ext_modules=[Extension(
         "_megaforth_native", [
-            "simulator/accel/semantic_executor.cpp", "shared/accel/scalar_fp.cpp",
+            "simulator/accel/semantic_executor.cpp", "shared/accel/scalar_fp.cpp", "shared/accel/keccak.cpp",
         ],
-        depends=["shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h"],
+        depends=["shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h",
+                 "shared/accel/keccak.h", "shared/accel/keccak_bindings.h"],
         include_dirs=[pybind11.get_include()], language="c++",
         extra_compile_args=flags, extra_link_args=links,
     )],

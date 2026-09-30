@@ -130,3 +130,30 @@ The reference timing continues to vary; small absolute timings should not be
 read as a precision ranking or a full-program result.
 
 Raw evidence: [runtime-hotspots-semantic-fp-2026-09-30.json](runtime-hotspots-semantic-fp-2026-09-30.json).
+
+## Shared Keccak permutation
+
+The emulator's existing Keccak-f[1600] permutation now lives in a shared native
+value kernel. Native-selected hosted SHA3 uses it for absorb, finalize, squeeze
+and raw operations; ownership, padding, byte transfers and publication remain
+with the same service. The Python oracle remains independent.
+
+| Executor | Before wall ms | Native permutation wall ms | Before / after |
+|---|---:|---:|---:|
+| simulator-python | 102.974 | 101.956 | 1.01× |
+| simulator-native | 114.437 | 51.404 | 2.23× |
+
+Each case still hashes 64 × 256-byte messages and checks exact hashlib digests
+and guest status. Native routing is also proven with observed native calls in
+raw/SHA3/SHAKE tests. Byte MMIO dispatch remains and is a candidate for later
+qualification; this slice does not bypass its ownership or effect ordering.
+The native emulator already used this arithmetic, so no emulator throughput
+gain is claimed from moving it.
+
+Validation: 86 direct-kernel/native-device/differential checks, 47 hosted KDOS
+SHA3 checks in each executor, and 26 native WOTS dependency checks pass.
+The native-selected source gate also exposed an older FaultAbort continuation
+classification bug, reproduced at the untouched baseline and fixed separately
+in `957d272` with three focused regressions.
+
+Raw evidence: [runtime-hotspots-keccak-2026-09-30.json](runtime-hotspots-keccak-2026-09-30.json).

@@ -69,13 +69,15 @@ ext = Extension(
     "_mp64_accel",
     sources=[
         "emulator/accel/mp64_accel.cpp",
-        "shared/accel/scalar_fp.cpp",
+        "shared/accel/scalar_fp.cpp", "shared/accel/keccak.cpp",
         "emulator/accel/dbt/executable_arena.cpp",
         "emulator/accel/dbt/x86_64/emitter.cpp",
         "emulator/accel/dbt/x86_64/lowering.cpp",
         "emulator/accel/machine/settlement.cpp",
     ],
     depends=[
+        "shared/accel/keccak.h",
+        "shared/accel/keccak_bindings.h",
         "shared/accel/scalar_fp.h",
         "shared/accel/scalar_fp_bindings.h",
         "emulator/accel/cpu/mp64/block_ir.h",

@@ -42,6 +42,7 @@
 #include <pybind11/numpy.h>
 
 #include "../../shared/accel/scalar_fp_bindings.h"
+#include "../../shared/accel/keccak_bindings.h"
 #include "dbt/executable_arena.h"
 #include "dbt/x86_64/lowering.h"
 #include "cpu/mp64/block_ir.h"
@@ -30049,6 +30050,7 @@ build_system_dma_callbacks(
 
 PYBIND11_MODULE(_mp64_accel, m) {
     megapad::scalar_fp::register_bindings(m);
+    megapad::keccak::register_bindings(m);
     m.doc() = "C++ accelerated core for Megapad-64 emulator";
 
     py::class_<PythonMemoryUseScope>(m, "_MemoryUseScope")

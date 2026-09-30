@@ -299,7 +299,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
 | 2 — workload profiles | Bounded kernels recorded; representative work pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
-| 3B/3C — remaining native extraction | Qualified bulk audio complete; further work profile-driven | 57 audio checks; paired headless transfer measurements |
+| 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
 | 4 — initial hybrid ABI and execution | Integer-routine v1 ABI locked; implementation pending | `docs/hybrid-runtime-abi.md`; source-reviewed memory, lifetime and return-stack constraints |
 | 5 — expanded interoperability | Pending | |
 
@@ -508,3 +508,27 @@ semantic accounting, and staged acceptance gates. The launcher remains disabled
 for hybrid until those gates pass. No machine execution or performance claim
 is added by the document. Dense memory and allocation lifetime are the next
 implementation foundations; callback/service/JIT interoperability stays later.
+
+### Phase 3B shared Keccak values — 2026-09-30
+
+Extracted the existing architectural Keccak-f[1600] permutation into
+`shared/accel/keccak.{h,cpp}` and linked it into both extensions. The native
+round scratch still receives volatile erasure. The immutable Python value
+boundary validates exactly 25 uint64 lanes, preserves sequence iteration order
+and clears its local copied state on success or exceptions. The independent
+Python oracle is unchanged.
+
+Native-selected hosted SHA3 binds this kernel without changing device owner,
+MMIO, padding, buffers, staged publication or fault cleanup. Explicitly injected
+permutations, service subclasses and prior oracle overrides retain their
+implementation. A new explicit Python runtime using the same platform clears
+a previous runtime-selected value executor; guest CLEAR retains the binding.
+
+Both extensions built and 86 kernel/device/differential checks passed, plus
+47 hosted SHA3 checks in each backend and 26 WOTS borrowing/timing checks.
+Read-only review caught a custom-Sequence iteration edge before final build.
+Native source qualification exposed a pre-existing fault-continuation bug;
+`957d272` fixes it independently after baseline reproduction and three focused
+regressions. Paired SHA3 timing and exact-output evidence is in the performance
+report. Python byte-level transfer costs remain; this is not a complete crypto
+service or Desktop performance claim.
