@@ -6,6 +6,8 @@ an isolated writable image copy; no source project is imported or rebuilt.
 SDL's dummy software sink exercises composition and presentation acknowledgments,
 not physical display, audio, Unix transport, or the standalone viewer loop.
 CELL marker assertions describe the backing snapshot, not retained-text OCR.
+Explicit reference-executor diagnostics may allow up to 240 seconds per step
+and 1200 seconds overall; normal defaults remain 30 and 240 seconds respectively.
 """
 
 from __future__ import annotations
@@ -169,7 +171,7 @@ def load_journey(path):
             raise ValueError("input value must contain 1..4096 UTF-8 bytes")
         steps.append(JourneyStep(row["name"], row["method"], row["value"],
                                  _expectation(row["expect"]),
-                                 _bounded(row.get("timeout_seconds", 30), "step timeout", 1, 120)))
+                                 _bounded(row.get("timeout_seconds", 30), "step timeout", 1, 240)))
     provenance = value.get("provenance", {})
     if type(provenance) is not dict:
         raise ValueError("provenance must be a JSON object")
@@ -267,7 +269,9 @@ def build_parser():
     parser.add_argument("--semantic-quantum-steps", type=_number(1, 1_000_000),
                         help="override the production session's selected-executor quantum")
     parser.add_argument("--semantic-step-budget", type=_number(1, 1_000_000_000))
-    parser.add_argument("--timeout", type=_number(1, 900), default=240)
+    parser.add_argument("--timeout", type=_number(1, 1200), default=240,
+                        help="overall seconds (1..1200, default 240); expanded bounds support "
+                             "explicit reference-executor diagnostics")
     parser.add_argument("--font", type=Path)
     parser.add_argument("--font-size", type=_number(6, 32), default=12)
     parser.add_argument("--restore-emulator-tail", action="store_true")

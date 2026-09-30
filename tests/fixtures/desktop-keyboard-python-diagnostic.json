@@ -1,0 +1,80 @@
+{
+  "schema": "megapad.desktop-journey.v1",
+  "name": "Prepared six-app Desktop keyboard subset: Python completion diagnostic",
+  "require_retained": true,
+  "provenance": {
+    "scope": "CELL marker checks and retained presentation; a bounded keyboard subset, not the original 52-stage semantic and pointer journey",
+    "reference_source": "rich_terminal_desktop_acceptance.py DesktopAcceptanceJourney stages 3 through 10",
+    "reference_source_sha256": "4f971973c645278c35f663672740a26544aae25acdd4c63670fc50cdf57ee1fc",
+    "reference_runtime_checkpoint": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+    "reference_appearance_checkpoint": "4e8bf26a18346043ea6b903fc8251a14e46e15b0",
+    "reference_image_before_journey_sha256": "db0b8a2d7c5b77eb8d08fb10774b5819f698792adda1dc4468d032034dbc7e2a",
+    "fixture_requirement": "280x84 Desktop, Pad initially focused, blank Pad acceptance marker, no active Daybook prompt",
+    "derived_from": "tests/fixtures/desktop-keyboard-journey.json",
+    "derived_from_sha256": "6446634c46a53013b16b27ceaf8b1b90fbe0715bfd881d698dc65ab9bcac3049",
+    "diagnostic": "Python reference-executor completion diagnostic with expanded time allowances; not production latency qualification",
+    "timeout_policy": "60 seconds for five short steps, 240 seconds for prompt/commit/date; run with --timeout 1200 and the production default quantum"
+  },
+  "ready": {
+    "contains": ["[1:Akashic Pa*]", "[2:File Explo", "[3:Daybook"],
+    "absent": ["~", "New task:"]
+  },
+  "steps": [
+    {
+      "name": "Pad receives text",
+      "method": "send_text",
+      "value": "~",
+      "expect": {"contains": ["[1:Akashic Pa*]", "~"]},
+      "timeout_seconds": 60
+    },
+    {
+      "name": "Daybook receives focus",
+      "method": "send_key",
+      "value": "alt+3",
+      "expect": {"contains": ["[3:Daybook*]", "~"]},
+      "timeout_seconds": 60
+    },
+    {
+      "name": "Daybook opens its guest prompt",
+      "method": "send_key",
+      "value": "ctrl+n",
+      "expect": {"contains": ["[3:Daybook*]", "New task:"]},
+      "timeout_seconds": 240
+    },
+    {
+      "name": "Daybook prompt receives text",
+      "method": "send_text",
+      "value": "^",
+      "expect": {"contains": ["[3:Daybook*]", "New task:", "^"]},
+      "timeout_seconds": 60
+    },
+    {
+      "name": "Daybook commits the task",
+      "method": "send_key",
+      "value": "enter",
+      "expect": {"contains": ["[3:Daybook*]", "^"], "absent": ["New task:"]},
+      "timeout_seconds": 240
+    },
+    {
+      "name": "Daybook moves to the next date",
+      "method": "send_key",
+      "value": "right",
+      "expect": {"contains": ["[3:Daybook*]", "~"], "absent": ["New task:", "^"]},
+      "timeout_seconds": 240
+    },
+    {
+      "name": "File Explorer receives focus",
+      "method": "send_key",
+      "value": "alt+2",
+      "expect": {"contains": ["[2:File Explo*]", "~"]},
+      "timeout_seconds": 60
+    },
+    {
+      "name": "Pad retains its edit after focus changes",
+      "method": "send_key",
+      "value": "alt+1",
+      "expect": {"contains": ["[1:Akashic Pa*]", "~"], "absent": ["New task:"]},
+      "timeout_seconds": 60
+    }
+  ]
+}

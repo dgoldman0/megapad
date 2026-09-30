@@ -31,8 +31,25 @@ and no journey step completed. All cleanup checks passed and the original
 image was preserved. The report is
 [`performance/unified-desktop-simulator-python-2026-09-30.json`](performance/unified-desktop-simulator-python-2026-09-30.json).
 It did not retain the latest protocol status, so it cannot distinguish ANSI
-fallback from work still preparing the first retained presentation. Python
-and emulator prepared-journey completion remain unqualified.
+fallback from work still preparing the first retained presentation. That
+historical attempt does not qualify Python prepared-journey completion.
+
+The production-quantum Python diagnostic reached retained readiness at 426.339
+seconds, then passed the Pad edit and Daybook focus steps. It failed the
+unchanged 30-second prompt deadline after 498.668 seconds overall. The final
+polled status shows 249,277,972 semantic steps, quantum 8,192, and a running
+session with an ACTIVE retained terminal and no protocol error. All cleanup
+checks passed and the original image was preserved. This establishes progress,
+not full completion or the exact cause of the slow prompt. Its report is
+[`performance/unified-desktop-simulator-python-production-2026-09-30.json`](performance/unified-desktop-simulator-python-production-2026-09-30.json).
+
+The emulator/native prepared journey completed on 2026-09-30: 123.902 seconds
+to ready, 169.325 seconds overall and 12 presented offers. All eight steps and
+cleanup checks passed, with the original image preserved. The private image
+copy used the explicit emulator-tail restoration described below. Execution
+used the existing instruction-batched timing model; this is no shared-clock
+latency comparison. The report is
+[`performance/unified-desktop-emulator-native-2026-09-30.json`](performance/unified-desktop-emulator-native-2026-09-30.json).
 
 These three historical reports used an explicit 65,536-step semantic quantum
 and remain unchanged. The harness now leaves an omitted quantum to production
@@ -42,6 +59,16 @@ session policy and records the actual selected value. Production defaults are
 negotiation uses host-clock deadlines and can fall back to ANSI; this policy
 difference warrants a diagnostic rerun, but does not establish the cause of
 the earlier timeout.
+
+The separate `tests/fixtures/desktop-keyboard-python-diagnostic.json` retains
+every input and assertion from the standard journey. It records that source
+fixture's hash and changes only diagnostic metadata and deadlines: 60 seconds
+for five short steps, 240 for prompt/commit/date, and an explicit 1,200-second
+overall run allowance. The first two Python inputs took about 21 seconds each,
+versus 0.18–0.23 seconds in the native run; the longest native step took 1.64
+seconds. Expanded deadlines allow a bounded completion investigation without
+changing the standard fixture, guest image, default quantum or failed report.
+A diagnostic completion would not satisfy the standard 30-second step bound.
 
 ## Scope
 
@@ -202,7 +229,8 @@ trailing blank lines, line ending, file type and flags; filesystem allocation
 and modification metadata may change. It requires a matching source
 definition and rejects unrecognized tails. No other guest source is patched.
 This only establishes an emulator-ready entry invocation, not successful
-architectural boot or sufficient execution time. No separate already-proven
+architectural boot or sufficient execution time. The emulator run above
+subsequently completed this prepared subset. No separate already-proven
 emulator Desktop image was found in the inspected MegaPad run artifacts.
 
 Do not remove failed expectations or rewrite guest state to manufacture a
@@ -220,8 +248,8 @@ failed bounded attempt; it is not a performance measurement of completion.
 | Journey steps | 1 through 64; only `send_text` and `send_key` |
 | Input per step | 1 through 4,096 UTF-8 bytes |
 | Expectation | At most 32 positive and 32 absent markers, each 1 through 256 UTF-8 bytes; positive marker required |
-| Per-step time | 1 through 120 seconds; default 30 |
-| Total cooperative deadline | 1 through 900 seconds; default 240, including preparation |
+| Per-step time | 1 through 240 seconds; default 30; expanded bounds are explicit diagnostics |
+| Total cooperative deadline | 1 through 1,200 seconds; default 240, including preparation |
 | Parent process watchdog | Total deadline plus 10 seconds, including native intervals and cleanup |
 | Polls | At most 100,000 |
 | Geometry | 1–400 columns, 1–200 rows; default 280 by 84 |

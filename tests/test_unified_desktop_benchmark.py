@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -114,7 +115,7 @@ def test_tail_restoration_preserves_prefix_comments_blank_lines_and_crlf():
     lambda value: value.update(steps=value["steps"] * 33),
     lambda value: value["steps"][0].update(method="execute_source"),
     lambda value: value["steps"][0].update(value="x" * 4097),
-    lambda value: value["steps"][0].update(timeout_seconds=121),
+    lambda value: value["steps"][0].update(timeout_seconds=241),
     lambda value: value["ready"].update(contains=[]),
     lambda value: value["ready"].update(absent=["ready>"]),
     lambda value: value.update(extra=True),
@@ -132,6 +133,72 @@ def test_bundled_keyboard_subset_has_pinned_provenance_and_eight_steps():
     assert journey.require_retained
     assert "subset" in journey.provenance["scope"]
     assert len(journey.provenance["reference_source_sha256"]) == 64
+
+
+@pytest.mark.parametrize("seconds", (1, 30, 120, 121, 240))
+def test_explicit_step_timeouts_accept_bounded_diagnostic_allowances(tmp_path, seconds):
+    document = _document()
+    document["steps"][0]["timeout_seconds"] = seconds
+    journey = bench.load_journey(_journey(tmp_path, document))
+    assert journey.steps[0].timeout_seconds == seconds
+    assert journey.steps[1].timeout_seconds == 30
+
+
+@pytest.mark.parametrize("seconds", (-1, 0, 241, True, False, 30.0, None, "240"))
+def test_step_timeouts_reject_out_of_bounds_and_non_integer_values(tmp_path, seconds):
+    document = _document()
+    document["steps"][0]["timeout_seconds"] = seconds
+    with pytest.raises(ValueError, match="step timeout must be an integer in 1..240"):
+        bench.load_journey(_journey(tmp_path, document))
+
+
+@pytest.mark.parametrize("seconds", (None, "1", "900", "1200"))
+def test_overall_timeout_keeps_default_and_accepts_bounded_diagnostics(seconds):
+    argv = ["--image", "prepared.img", "--journey", "journey.json", "--mode", "simulator"]
+    if seconds is not None:
+        argv += ["--timeout", seconds]
+    args = bench.build_parser().parse_args(argv)
+    assert args.timeout == (240 if seconds is None else int(seconds))
+    assert args.semantic_quantum_steps is None
+
+
+@pytest.mark.parametrize("seconds", ("-1", "0", "1201", "1.5", "nan"))
+def test_overall_timeout_rejects_unbounded_or_non_integer_values(seconds):
+    with pytest.raises(SystemExit) as error:
+        bench.build_parser().parse_args([
+            "--image", "prepared.img", "--journey", "journey.json", "--mode", "simulator",
+            "--timeout", seconds,
+        ])
+    assert error.value.code == 2
+
+
+def test_python_diagnostic_preserves_exact_standard_journey_except_declared_timeouts():
+    standard_path = bench.ROOT / "tests/fixtures/desktop-keyboard-journey.json"
+    diagnostic_path = bench.ROOT / "tests/fixtures/desktop-keyboard-python-diagnostic.json"
+    standard_bytes = standard_path.read_bytes()
+    standard = json.loads(standard_bytes)
+    diagnostic = json.loads(diagnostic_path.read_bytes())
+    standard_sha = hashlib.sha256(standard_bytes).hexdigest()
+    assert standard_sha == "6446634c46a53013b16b27ceaf8b1b90fbe0715bfd881d698dc65ab9bcac3049"
+    assert "diagnostic" in diagnostic["name"]
+    provenance = diagnostic["provenance"]
+    assert provenance["derived_from"] == "tests/fixtures/desktop-keyboard-journey.json"
+    assert provenance["derived_from_sha256"] == standard_sha
+    assert "not production latency qualification" in provenance["diagnostic"]
+    assert [step.pop("timeout_seconds") for step in diagnostic["steps"]] == [
+        60, 60, 240, 60, 240, 240, 60, 60,
+    ]
+    diagnostic["name"] = standard["name"]
+    diagnostic["provenance"] = {key: provenance[key] for key in standard["provenance"]}
+    assert diagnostic == standard
+
+    original = bench.load_journey(standard_path)
+    expanded = bench.load_journey(diagnostic_path)
+    assert [step.timeout_seconds for step in original.steps] == [30] * 8
+    assert [step.timeout_seconds for step in expanded.steps] == [60, 60, 240, 60, 240, 240, 60, 60]
+    assert expanded.ready == original.ready
+    assert expanded.require_retained is original.require_retained is True
+    assert expanded.sha256 != original.sha256
 
 
 def test_outputs_cannot_replace_inputs_or_reuse_an_artifact_directory(tmp_path):
@@ -285,20 +352,23 @@ bench_unified_desktop.main(['--help'])
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     assert "--mode {emulator,simulator,hybrid}" in result.stdout
+    assert "reference-executor diagnostics" in " ".join(result.stdout.split())
 
 
-def test_outer_watchdog_reports_failure_without_a_success_claim(tmp_path, monkeypatch):
+@pytest.mark.parametrize("seconds", (1, 1200))
+def test_outer_watchdog_reports_failure_without_a_success_claim(tmp_path, monkeypatch, seconds):
     args = _args(tmp_path)
     output = tmp_path / "report.json"
 
     def timeout(command, **options):
-        assert options["timeout"] == 11
+        assert options["timeout"] == seconds + 10
         assert options["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
         raise subprocess.TimeoutExpired(command, options["timeout"])
 
     monkeypatch.setattr(bench.subprocess, "run", timeout)
     assert bench.main(["--image", str(args.image), "--journey", str(args.journey),
-                       "--mode", "simulator", "--timeout", "1", "--output", str(output)]) == 1
+                       "--mode", "simulator", "--timeout", str(seconds), "--output", str(output)]) == 1
     report = json.loads(output.read_text())
     assert not report["complete"]
     assert "watchdog" in report["error"]
+    assert report["timeout_seconds"] == seconds + 10
