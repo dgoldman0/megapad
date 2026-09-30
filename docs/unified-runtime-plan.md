@@ -297,7 +297,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
-| 2 — workload profiles | Bounded kernels recorded; representative work pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
+| 2 — workload profiles | Bounded kernels and KDOS load controls recorded; Desktop/attribution pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
 | 4 — initial hybrid ABI and execution | Integer-routine v1 ABI locked; implementation pending | `docs/hybrid-runtime-abi.md`; source-reviewed memory, lifetime and return-stack constraints |
@@ -532,3 +532,15 @@ Native source qualification exposed a pre-existing fault-continuation bug;
 regressions. Paired SHA3 timing and exact-output evidence is in the performance
 report. Python byte-level transfer costs remain; this is not a complete crypto
 service or Desktop performance claim.
+
+### Phase 2 representative source-loading controls — 2026-09-30
+
+The existing full KDOS source-loading benchmark passed three fresh-process
+trials per executor at the preserved baseline and at the runtime committed as
+`bb50f9b`, with 90-second per-process watchdogs. All 12 runs passed exact source,
+startup transcript, dictionary, stack and representative-word validation. Each
+performed 36,116 semantic steps while loading 1,461 KDOS definitions. The raw
+reports retain preparation versus loading time, source/binary identities and
+peak memory. No compiler optimization or loading speedup is claimed; this is
+a representative compatibility/control workload. Desktop and source-loading
+attribution remain open, as does executor default promotion.

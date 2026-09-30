@@ -157,3 +157,27 @@ classification bug, reproduced at the untouched baseline and fixed separately
 in `957d272` with three focused regressions.
 
 Raw evidence: [runtime-hotspots-keccak-2026-09-30.json](runtime-hotspots-keccak-2026-09-30.json).
+
+## Representative KDOS source-loading controls
+
+The existing `bench_simulator_kdos_load.py` completed three fresh-process,
+unprofiled trials per executor on the preserved baseline and the runtime now
+committed as `bb50f9b`. Each subprocess had a 90-second wall watchdog. Runtime
+and fixture preparation are reported separately from the source-load interval.
+
+All twelve runs passed the existing source hash, dictionary/publication, startup
+transcript, stack and representative-word checks. Each loaded 6,684 submitted
+lines, 222,397 packed bytes and 1,461 KDOS words, charging 36,116 semantic steps.
+
+| Executor | Baseline median source-load ms | Current median source-load ms |
+|---|---:|---:|
+| python | 394.331 | 401.111 |
+| native | 377.572 | 364.361 |
+
+This workload checks loading compatibility outside the extracted hot kernels.
+No compiler change was made, and timing movement is not attributed to the FP,
+audio or Keccak changes. These trials do not include Desktop modules or input
+interaction. Source-loading attribution and Desktop qualification remain open;
+executor default promotion is still deferred.
+
+Raw evidence: [kdos-controls-2026-09-30.json](kdos-controls-2026-09-30.json).
