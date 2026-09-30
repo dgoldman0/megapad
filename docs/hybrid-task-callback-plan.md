@@ -724,3 +724,266 @@ available after cancellation and close.
 Use a new `cpu/mp64/routine_tasks.h` with narrow setup dependency changes and
 the existing `mp64_accel.cpp` common-owner helpers. Build and test serially
 through the repository Make gates, preserving private transport regressions.
+
+### Nested native task refinement — 2026-09-30
+
+The first one-frame implementation passed 541 native/private-composition and
+application checks after an isolated GCC build. The next slice keeps the
+locked public signatures and replaces the single frame with eight bounded
+slots under the same reservation and retained root ledger.
+
+At root and child admission, validate reachable publication generations with
+one bounded walk: at most 64 visited publications and 65536 rows. Accept cycles
+without expanding paths. Separately require the exact used edge, active parent
+request and root token. Publication still does not impose active-frame overlap
+or recursion rules on the potential target graph.
+
+An admission-only child has not overwritten the parent's CPU state. Separate
+saved ancestor code/token/control checks from validation of the currently live
+CPU view. On successful child return, validate all survivors before restoration,
+restore the initialization-owned integer controls and saved parent registers
+and flags, advance only the parent's cycle frontier, then issue the child's
+returned receipt and pop. A restoration failure records the completed child
+prefix as failed, retains the child and preserves the original host exception.
+
+Suffix cancellation preallocates diagnostics, validates survivors and restores
+the parent before retiring frames. A cancellation-result delivery failure
+retains the actual retired suffix and restored parent request under the owner
+reservation, blocks execution, and allows only all-cancel or close. It never
+resurrects frames or invents a receipt. An idle-only one-shot cancellation
+delivery failpoint may qualify this exact window independently of the existing
+accepted-segment failpoint.
+
+### First synchronous semantic dispatcher gate
+
+The reference dispatcher is a separate qualification slice from native task
+transport and production session exposure. It uses the unchanged KDOS exception
+fixture on the original main-context stacks. No task or composite-suspension
+capability is advertised by this source foundation.
+
+One semantic root admits exactly one adapter owner. Several registrations on
+that owner share its receipt sequence and root totals, including later entries
+after the active machine chain becomes empty. Entry through a different owner
+fails before adapter admission or input consumption; counters are never rebased.
+
+The initial retained-tail implementation pins the nearest exact surviving
+pre-unwind continuation above the discarded foreign suffix, including a
+surviving parent foreign continuation. The search examines active stack slots,
+bounded by the original remaining semantic allowance. Intermediate helper
+returns cannot assume this role. The tail keeps only its original captured
+semantic grants and dependencies. A second pointer or cookie change which
+destroys that boundary first retires the affected native suffix, then fails
+closed. This slice does not claim general multi-frontier rethrow support;
+expanding that support requires independently captured preexisting boundary
+evidence, not promotion of newly created helper continuations.
+
+Ordinary outer execution quanta retain the same strong task root and spent
+ledger. Callback IDL and detachable machine execution remain a later gate.
+The focused reference selectors are `tests/simulator/test_foreign_dispatch.py`
+and `tests/simulator/test_foreign_dispatch_guards.py`, alongside the existing
+foreign protocol, stack, registration, receipt and scripted-adapter gates.
+
+### Production native adapter refinement — 2026-09-30
+
+The native child transport passed 567 checks after an isolated GCC build. The
+next slice connects that transport to the existing neutral task dispatcher;
+it does not enable callback IDL, composite suspension or a generic task
+manifest. Keep these changes separate from the synchronous reference engine
+foundation so its existing behavior remains independently reviewable.
+
+#### Adapter ownership and admission
+
+Add an ordinary Python `NativeTaskAdapter` in `hybrid/task_adapter.py`. It
+defines all six `ForeignAdapterV1` transition methods directly on its class:
+`begin`, `advance`, `reply`, `cancel_suffix`, `cancel_all`, and `last_receipt`.
+The engine's canonical adapter seal admits those exact Python functions; a
+pybind facade or inherited transition methods do not satisfy that contract.
+The adapter converts protocol values and validates issued authority. It never
+executes semantic callback closures itself.
+
+Use the existing common owner's cached `RoutineRunnerV3.task_v1()` facade.
+There is one architectural CPU, one ordinary-memory/control pin owner and the
+existing integer interpreter. No second native runner construction or memory
+copy is permitted. Keep exact registered operation, export, code/body lease,
+native spec and child-edge identities in bounded owner tables. Numeric export
+IDs, equal descriptor copies and caller-supplied native specs grant no entry.
+
+Expose a private exact-integer `_TASK_ROUTINE_TRANSPORT_REVISION = 2` only for
+the qualified native child transport. The adapter factory checks that value
+and the complete task spec/budget/token/publication/transition/receipt surface
+before publication. This distinguishes the earlier one-frame extension,
+which exposes many of the same method names. A stale extension fails with a
+clear rebuild error; do not probe behavior or silently choose another adapter.
+This private revision is not the public task capability marker.
+
+#### Atomic semantic and native publication
+
+Add a bounded engine-owned batch registration transaction under the original
+session owner lock. Its boundary includes dictionary headers and bodies,
+ForeignDefinition bindings, callback captures, native prepared/sealed
+publications, and composition code/control allocation. Reject dispatch,
+reentry and nested publication until the entire batch commits. Preserve the
+existing single-operation registration API and its behavior.
+
+Prevalidate names, signatures, grants and capacities. Checkpoint dictionary
+and side-index state, exact binding/capture tables and capture IR allowance,
+and composition allocation counters. Publish the batch's actual Foreign
+Words using a narrow engine-owned initial-body/code-lease seam. Their aligned
+machine images occupy those leased bodies, with exact sealed bytes and live
+dictionary ownership checked on every admission. Include body bytes and
+alignment in growth admission and rollback; do not allocate untracked code
+beside a marker-only Word.
+
+The transaction may define the required exact host-selected semantic IR and
+Foreign Words before capturing callback dependencies. It does not evaluate
+arbitrary source or execute guest/service side effects inside the rollback
+boundary. After all candidate Words exist, prepare native specs, capture
+callbacks, derive child rows, then atomically seal the complete batch. Only
+after every step succeeds may the adapter expose executable registrations.
+Prepared native specs and provisional semantic Words are undispatchable.
+
+Rollback revokes only newly issued exact authority and restores the original
+dictionary/index, binding/capture tables and allocation counters. Query native
+`is_code_registered`/`is_code_published` before `revoke_code`, including when a
+forwarding publication wrapper succeeds natively and then raises. Reclaim
+prepared as well as sealed count, byte and edge capacity. Preserve preexisting
+registrations and the original exception. If any cleanup cannot be proved,
+disable further interop, retain safe close, and add diagnostics without
+replacing the original error.
+
+#### Captured child dependencies
+
+Add an engine query `task_export_dependencies(export)` that verifies the exact
+issued capture and returns its exact issued `ForeignOperationV1` dependencies.
+It exposes no Word, callable or mutable capture table. Include transitive
+ForeignDefinition targets reached through the captured static IR and explicitly
+admitted dynamic EXECUTE/DEFER targets. A numeric registration ID or an
+uncaptured current dictionary lookup cannot add a child.
+
+For each native callback site, bind the exact engine export and derive
+`(site_index, child_spec)` rows from those dependencies and the adapter's exact
+operation registrations. Potential cycles remain legal. Do not reuse private
+V4 static Call-edge IDs or impose its combined DAG proof. The native owner
+independently enforces current generations, the exact used parent/site/child
+edge, active-frame distinctness, depth and narrowed grants.
+
+On delivery, check native site, export ID, signature and arguments against
+the sealed site and captured export before issuing a neutral callback request.
+Retain the exact parent request identity through child return and suffix
+cancellation. A successful lookup by numeric site or export alone is not
+callback authority.
+
+#### Original root policy and profile exclusion
+
+Add the engine-owned query
+`adapter_root_policy(adapter, root_token, root_id)`. It proves the live original
+task root, exact admitted adapter, engine ownership and exact semantic root
+token/ID, then returns immutable original instruction, callback and entry
+ceilings. Do not return the mutable ledger or infer its original entry ceiling
+from `ForeignBudgetV1`, which contains only instruction/callback remainders
+and the scheduling quantum.
+
+Bind one native root token from that policy and retain the exact semantic root
+token strongly in the adapter's bounded root slot. Frame-empty reentry,
+ordinary outer quanta and same-meter nested host frames reuse that token,
+receipt sequence and spent ledger. They cannot rebind or replenish ceilings.
+Replace it only when the old chain is empty and the engine proves a later
+original outer dispatch. Zero entry/instruction allowance rejects before
+native binding or argument consumption.
+
+For this first production profile, one original semantic root may enter
+either private machine routines or task machine routines, never both. Pin
+that choice through frame-empty intervals and scheduling quanta; reject the
+opposite kind before native admission or input consumption. Separate original
+roots may use either profile on the same owner. This explicit exclusion
+prevents the existing private and task ledgers from each spending a fresh copy
+of the same configured machine allowance. Shared mixed-profile accounting is
+a separate future change, not an implicit exception to the root policy.
+
+#### Exact receipts, delivery failure and accounting
+
+Cache one exact neutral `ForeignReceiptV1` by native root generation and
+per-root sequence. Repeated native receipt queries may return fresh native
+value objects; they must yield the same cached neutral object and unchanged
+scalar evidence. Every delivered event and cancellation refers to that exact
+cached receipt. Keep this sequence and accounting separate from private
+V2/V3 segment sequences. Map native parent ID zero to neutral `None` and use
+the four existing callback/returned/yielded/failed states.
+
+Keep at most eight adapter frame records and one pending transition record.
+Reconcile an accepted native receipt, including entry or completed return,
+before allocating the neutral event. Admission delivery failure may create a
+zero-work frame without delivering its token; retain that fact for all-cancel
+instead of retrying begin. A returned child is already retired when its event
+is converted; retain the surviving parent and never resurrect the child.
+Adapter-side conversion failure likewise blocks further execution until safe
+cleanup and preserves the original exception.
+
+Settle each native receipt once in composition totals: instruction/cycle
+deltas, one segment per accepted receipt including zero-work admission,
+machine transitions from `invocation_started`, and callback-request deltas
+from the receipt. The semantic engine alone charges callback semantic work
+through its original meter and root ledger. Do not subtract mutable meter
+fields or charge semantic work again in the adapter.
+
+Cancellation creates no work receipt. A cancellation delivery error may have
+already retired a suffix and restored its surviving parent; preserve that
+actual state, the latest settled receipt and the owner reservation, then allow
+only all-cancel/close. Do not fabricate a successful neutral cancellation or
+restore discarded authority to make the ledgers appear consistent. Failure
+to recover exact retirement/accounting proof fails closed while preserving
+the original host exception. Bounded native machine failures map to the
+existing neutral failure kinds; host exceptions keep their exact identity
+and never become guest THROW or FAULT events.
+
+#### Prepared session and qualification boundary
+
+Start with an explicit host-prepared `HybridSession` using the preconstructed
+runtime seam. Install the unchanged KDOS exception definitions, exact callback
+IR, code/Foreign Words and captures, then compile the final entry before
+arming the session. Generic task manifest/startup support remains deferred.
+
+The first session gate is synchronous. The dispatcher may consume successive
+native runnable quanta internally, but that does not constitute a detachable
+host suspension. Callback IDL/IdleUntil and composite cursor, wake and cancel
+ownership require a later qualification slice. Report task callback execution
+as the Python reference dispatcher even when the general semantic backend is
+native; task execution still bypasses native semantic planning/accelerators.
+Report task registration/profile and counters separately from private ABI
+profiles. Do not advertise `shared_task_exceptions`, callback suspension or
+`composite_suspension` solely because the private native revision is present.
+
+Close must retire the semantic task root and native task frames before closing
+the legacy facade/shared owner. A semantic cleanup error must still reach
+safe native all-cancel/close so no task reservation or memory pin is stranded;
+preserve the first exception and retain honest fail-closed state. Idle close
+remains idempotent, and active host-dispatch exclusion remains in force.
+
+Qualify the adapter first against the existing neutral/reference scenarios,
+then the host-prepared session. Include atomic late-failure rollback and retry,
+body-lease revocation, captured dynamic child dependencies, cyclic batches,
+exact callback/receipt/token identity, zero-work admission before stack pops,
+entry and instruction ceilings across empty-chain reentry, mixed-profile
+rejection in both orders, suffix THROW-style cancellation, native and Python
+delivery failures, exact host-error propagation, and close after failed
+cleanup. Preserve all private transport/application gates. This first adapter
+and synchronous session slice leaves public task and composite-suspension
+capabilities disabled. Activation requires a separately reviewed application
+capability gate; callback suspension remains separately deferred.
+
+#### Lost suffix-cancellation delivery recovery
+
+Before native suffix cancellation, retain one exact checkpoint of the owned
+frame chain and the requested suffix boundary. If delivery raises, preserve
+that exception and disable further task execution. A later successful native
+all-cancel may return either the entire original chain (the suffix call failed
+before retirement) or the exact surviving ancestor prefix (the suffix was
+already retired). Validate those identities and the empty native survivor
+before reconciling host control.
+
+That all-cancel proves every original owned frame is now retired. Its neutral
+result may therefore report their combined deepest-first IDs, including the
+suffix already retired by the failed delivery. It does not claim the earlier
+suffix call succeeded, create a work receipt, or permit guest reuse. Any other
+retirement list fails closed. Qualification covers both native outcomes,
+malformed IDs, exact original exception propagation and released ownership.

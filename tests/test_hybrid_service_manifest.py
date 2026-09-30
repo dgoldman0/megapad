@@ -114,12 +114,15 @@ def test_every_admitted_service_has_exact_manifest_arity(tmp_path):
     assert all(site.export is value.exports[i] for i, site in enumerate(value.routines[0].callbacks))
 
 
-def test_explicit_loader_reads_manifest_once_and_does_not_change_generic_dispatch(tmp_path, monkeypatch):
+def test_generic_and_explicit_loaders_read_once_and_preserve_old_schemas(tmp_path, monkeypatch):
     path = _write(tmp_path)
     opened = _record_opens(monkeypatch)
     assert type(load_service_manifest_v5(path)) is RoutineManifestV5
     assert opened == [path, tmp_path / "routine.bin"]
-    for loader in (load_manifest, load_manifest_v1, load_manifest_v2, load_manifest_v3):
+    opened.clear()
+    assert type(load_manifest(path)) is RoutineManifestV5
+    assert opened == [path, tmp_path / "routine.bin"]
+    for loader in (load_manifest_v1, load_manifest_v2, load_manifest_v3):
         opened.clear()
         with pytest.raises(HybridManifestError):
             loader(path)

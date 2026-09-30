@@ -16,21 +16,27 @@ from shared.foreign_abi import (
     ForeignSignatureV1, ForeignSpanV1, ForeignStateV1, MAX_CALLBACK_REQUESTS, MAX_DEPTH,
     MAX_ROOT_CALLBACK_SEMANTIC_STEPS, MAX_ROOT_ENTRIES, MAX_ROOT_INSTRUCTIONS,
 )
-from simulator import core_words
+from simulator import core_words, stacks as _stack_module, runtime as _runtime_module
+from simulator import foreign_effects as _effect_module
+from simulator import memory as _memory_module
+from simulator.foreign_effects import TaskEffectGuard, TaskEffectScope, _EFFECT_ROUTES
+from simulator.foreign_control import ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn
 from simulator.dictionary import Dictionary, Word
 from simulator.errors import ExecutionError
+from simulator.foreign_types import ForeignDefinition, ForeignResumeTarget, ForeignDispatchReport
 from simulator.ir import (
     Branch, BranchZero, Call, CallSelf, Do, Literal, Loop, PlusLoop, QuestionDo,
     RestoreDataStackPointer, RestoreReturnStackPointer, Return, RPeek, RPeekPair,
     RPop, RPopPair, RPush, RPushPair, StoreValue, Unloop,
 )
-from simulator.memory import SparseAddressSpace
+from simulator.memory import SparseAddressSpace, _QualifiedOrdinarySpan, _SparseRegion, _DenseRegion, RegionSpec, _ResolvedSpan
 from simulator.runtime import (
     ColonDefinition, ConstantDefinition, CreatedDefinition, DoesBodyRef,
     ExecutionContext, MegaForthRuntime, PrimitiveDefinition, ValueDefinition,
     _StepMeter,
+    _TASK_DISPATCH_ALIASES,
 )
-from simulator.stacks import DataStack, ReturnStack
+from simulator.stacks import DataStack, ReturnStack, Continuation, FaultAbort
 
 
 _MAX_WORDS = 64
@@ -54,16 +60,32 @@ _BRANCH_TYPES = (Branch, BranchZero, QuestionDo, Loop, PlusLoop)
 _MEMORY_ROUTES = tuple((name, value) for name, value in vars(SparseAddressSpace).items()
                        if type(value) is FunctionType or type(value) is property)
 _DICTIONARY_ROUTES = tuple((name, vars(Dictionary)[name]) for name in ("find", "resolve", "words"))
+_STACK_ROUTES = tuple((kind, tuple((name, value) for name, value in vars(kind).items()
+                                  if type(value) is FunctionType or type(value) is property))
+                      for kind in (DataStack, ReturnStack))
+_VIEW_ROUTES = tuple(vars(_QualifiedOrdinarySpan).items())
+_MEMORY_GLOBALS = tuple((name, vars(_memory_module)[name]) for name in (
+    "_checked_span", "_require_integer", "_ResolvedSpan", "_QualifiedOrdinarySpan",
+    "_SparseRegion", "_DenseRegion", "RegionSpec", "AddressClass", "struct",
+    "_INTEGER_WIDTHS", "MMIO_BASE", "MMIO_LIMIT", "ADDRESS_SPACE_SIZE",
+))
+_MEMORY_FORMATS = dict(_memory_module._INTEGER_FORMATS)
+_MEMORY_STRUCT = (_memory_module.struct.unpack_from, _memory_module.struct.pack_into)
 _CORE_HELPERS = tuple((name, value) for name, value in vars(core_words).items()
                      if type(value) is FunctionType)
 _METADATA_ROUTES = tuple((kind, tuple(vars(kind).items())) for kind in (
     Word, PrimitiveDefinition, ColonDefinition, ConstantDefinition, ValueDefinition,
     CreatedDefinition, DoesBodyRef, *_OPERATION_FIELDS,
     ForeignSignatureV1, ForeignSpanV1, ForeignExportV1, ForeignOperationV1, ForeignReceiptV1,
-))
+    ExecutionContext, ForeignDefinition, ForeignResumeTarget,
+    _QualifiedOrdinarySpan, _SparseRegion, _DenseRegion, RegionSpec, _ResolvedSpan,
+    Continuation, FaultAbort, ForeignContinuation, ForeignReturnControl, ForeignRetirement, _LiveReturn,
+)) + _EFFECT_ROUTES
 _NAMESPACE_DESCRIPTORS = (
     (SparseAddressSpace, vars(SparseAddressSpace)["__dict__"]),
     (Dictionary, vars(Dictionary)["__dict__"]),
+    (DataStack, vars(DataStack)["__dict__"]),
+    (ReturnStack, vars(ReturnStack)["__dict__"]),
 )
 
 
@@ -96,7 +118,8 @@ def _namespace(instance, kind, routes, *, descriptor=None):
     fields = vars(kind)
     if any(type(key) is not str for key in fields):
         raise ForeignTaskError("task dependency class namespace is not canonical")
-    if kind.__getattribute__ is not object.__getattribute__ or "__getattr__" in fields:
+    if (kind.__getattribute__ is not object.__getattribute__ or "__getattr__" in fields
+            or kind.__setattr__ is not object.__setattr__ or kind.__delattr__ is not object.__delattr__):
         raise ForeignTaskError("task dependency attribute routing changed")
     if descriptor is None:
         descriptor = next((value for owner, value in _NAMESPACE_DESCRIPTORS if owner is kind), None)
@@ -120,7 +143,7 @@ def _require_metadata():
         if kind.__getattribute__ is not object.__getattribute__ or "__getattr__" in fields:
             raise ForeignTaskError("task metadata attribute routing changed")
         for name, value in original:
-            if (type(value) in (FunctionType, MemberDescriptorType, property)
+            if (type(value) in (FunctionType, MemberDescriptorType, property, classmethod, staticmethod)
                     or name in ("__setattr__", "__delattr__", "__dict__")):
                 if fields.get(name) is not value:
                     raise ForeignTaskError("task metadata descriptor routing changed")
@@ -128,32 +151,6 @@ def _require_metadata():
 
 def _overlaps(base, size, other_base, other_limit):
     return bool(size and base < other_limit and other_base < base + size)
-
-
-@dataclass(frozen=True, slots=True, eq=False)
-class ForeignDefinition:
-    """An implementation marker; only the issuing engine binds it to a Word."""
-
-    _registration: object = field(repr=False)
-
-
-@dataclass(frozen=True, slots=True, eq=False)
-class ForeignResumeTarget:
-    """An owned semantic location, or completion of the original public root.
-
-    This value is not a machine PC and grants no return authority by itself.
-    """
-
-    word: Word | None = field(repr=False)
-    ip: int
-
-    def __post_init__(self):
-        _uint(self.ip, "semantic resume IP")
-        if self.word is None:
-            if self.ip:
-                raise ValueError("root completion must have zero semantic IP")
-        elif type(self.word) is not Word:
-            raise TypeError("semantic resume target must retain an exact Word")
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,13 +340,29 @@ class ForeignTaskEngine:
         self._dictionary = runtime.dictionary
         self._memory = runtime.memory
         self._context = runtime.main_context
+        self._stacks = tuple((stack, stack._memory_view, stack._floor, stack._empty_pointer)
+                             for stack in (self._context.data, self._context.returns))
         self._owner = object()
         self._bindings: dict[int, _ForeignBinding] = {}
         self._capture_state: tuple[dict[int, CapturedTaskExport], int] = ({}, 0)
         self._canonical: dict[int, _CapturedWord] = {}
         self._task_root = None
+        self._root_ownership = None
+        self._cleanup_ownership = None
+        self._limits = (MAX_ROOT_INSTRUCTIONS, MAX_CALLBACK_REQUESTS,
+                        MAX_ROOT_ENTRIES, MAX_ROOT_CALLBACK_SEMANTIC_STEPS)
+        self._last_dispatch = None
         self._publication_failure = None
+        self._execution_failure = None
+        self._memory_evidence = None
         self._registration_active = False
+        self._effect_functions = tuple(_FunctionSeal.capture(
+            value.__func__ if type(value) in (classmethod, staticmethod) else value)
+            for _kind, routes in _METADATA_ROUTES for _name, value in routes
+            if type(value) in (FunctionType, classmethod, staticmethod))
+        self._backing_functions = tuple(_FunctionSeal.capture(value)
+            for _name, value in (*_MEMORY_ROUTES, *(_item for _kind, routes in _STACK_ROUTES for _item in routes),
+                                 *_MEMORY_GLOBALS) if type(value) is FunctionType)
         if core_installed:
             for name in _CORE_NAMES:
                 word = self._dictionary.find(name)
@@ -358,10 +371,138 @@ class ForeignTaskEngine:
                         word, word.xt, word.header_address, word.implementation,
                         function=_FunctionSeal.capture(word.implementation.callback),
                     )
+        from simulator.foreign_dispatch import TaskDispatchRoot
+
+        self._dispatch_kind = TaskDispatchRoot
+        self._dispatch_routes = tuple(vars(TaskDispatchRoot).items())
+        self._dispatch_namespace = vars(TaskDispatchRoot)["__dict__"]
+        self._dispatch_functions = tuple(_FunctionSeal.capture(value)
+            for _name, value in self._dispatch_routes if type(value) is FunctionType)
+        runtime._private_host_abort.install_task_issuers(self, TaskDispatchRoot)
 
     @property
     def _exports(self):
         return self._capture_state[0]
+
+    @property
+    def last_dispatch(self):
+        return self._last_dispatch
+
+    def configure_limits(self, *, instruction_limit=None, callback_limit=None,
+                         entry_limit=None, semantic_limit=None):
+        with self._runtime._session_owner_lock:
+            self._require_idle("configure task limits")
+            requested = (instruction_limit, callback_limit, entry_limit, semantic_limit)
+            values = tuple(old if value is None else value for old, value in zip(self._limits, requested))
+            for value, maximum in zip(values, (MAX_ROOT_INSTRUCTIONS, MAX_CALLBACK_REQUESTS,
+                                               MAX_ROOT_ENTRIES, MAX_ROOT_CALLBACK_SEMANTIC_STEPS)):
+                _uint(value, "task root limit", maximum=maximum)
+            self._limits = values
+
+    def root_for(self, context, meter):
+        self._require_task(context)
+        frames = [frame for frame in self._runtime._active_dispatches
+                  if frame.context is context and frame.meter is meter and frame.closed_guard is None]
+        if not frames:
+            raise ForeignTaskError("task entry has no owning semantic dispatch")
+        root = next((frame.task_root for frame in frames if frame.task_root is not None), None)
+        if root is None:
+            root = self._dispatch_kind(self, meter, frames[0].root_id, self._limits)
+            try:
+                namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
+                self._root_ownership = (root, namespace, tuple((name, getattr(root, name)) for name in (
+                    "engine", "context", "ledger", "issuer", "effects", "control", "frames",
+                    "_meter_namespace", "_meter_policy", "_effects_close", "_control_close", "_cleanup_functions")))
+            except BaseException as failure:
+                # No host callback or machine instruction has run; release
+                # the exact constructor-owned control before publication.
+                for close, owned in ((TaskEffectGuard.close, root.effects),
+                                     (ForeignReturnControl.close, root.control)):
+                    try:
+                        close(owned, root.issuer)
+                    except BaseException as cleanup:
+                        self._execution_failure = cleanup
+                        try:
+                            BaseException.add_note(failure, "task root admission cleanup also failed")
+                        except BaseException:
+                            pass
+                raise
+        elif root.engine is not self:
+            raise ForeignTaskError("task root belongs to a different engine")
+        self._task_root = root
+        for frame in frames:
+            object.__setattr__(frame, "task_root", root)
+        return root
+
+    def finish_root(self, root, *, completed):
+        ownership = self._restore_cleanup_owners(root)
+        dict.__setitem__(ownership[1], "closed", False)
+        try:
+            self._root_cleanup_call(root, "close", completed=completed)
+        except BaseException as failure:
+            self._execution_failure = failure
+            completed = False
+            raise
+        finally:
+            ledger = dict(ownership[2])["ledger"]
+            namespace = ownership[1]
+            dict.__setitem__(namespace, "closed", True)
+            cancelled = dict.get(namespace, "cancelled")
+            if type(cancelled) is not bool or not completed:
+                cancelled = True
+                dict.__setitem__(namespace, "cancelled", True)
+            self._last_dispatch = ForeignDispatchReport(
+                ledger.root_id, ledger.instructions, ledger.cycles, ledger.callbacks,
+                ledger.entries, ledger.semantic_steps, completed, cancelled)
+            if self._task_root is root:
+                self._task_root = None
+                self._cleanup_ownership = self._root_ownership
+                self._root_ownership = None
+
+    def _restore_cleanup_owners(self, root):
+        ownership = self._root_ownership
+        if ownership is None or ownership[0] is not root:
+            ownership = self._cleanup_ownership
+        if ownership is None or ownership[0] is not root:
+            raise ForeignTaskError("task cleanup lacks its original owner evidence")
+        namespace = ownership[1]
+        self._dispatch_namespace.__set__(root, namespace)
+        for name, value in ownership[2]:
+            dict.__setitem__(namespace, name, value)
+        # Remove only shadowed host method routes. Guest stack/memory state is
+        # never restored by this repair of host reference projections.
+        for name, _value in self._dispatch_routes:
+            dict.pop(namespace, name, None)
+        return ownership
+
+    def _root_cleanup_call(self, root, name, **kwargs):
+        self._restore_cleanup_owners(root)
+        fields = vars(self._dispatch_kind)
+        if (any(type(key) is not str for key in fields)
+                or self._dispatch_kind.__getattribute__ is not object.__getattribute__
+                or self._dispatch_kind.__setattr__ is not object.__setattr__
+                or self._dispatch_kind.__delattr__ is not object.__delattr__
+                or any(name in fields for name, _value in self._restore_cleanup_owners(root)[2])
+                or any(method not in ("close", "cleanup_safe", "mark_unsafe_cleanup")
+                       and fields.get(method) is not value for method, value in self._dispatch_routes)):
+            raise ForeignTaskError("task canonical cleanup implementation changed")
+        callback = next(value for method, value in self._dispatch_routes if method == name)
+        seal = next(seal for seal in self._dispatch_functions if seal.callback is callback)
+        seal.verify()
+        return callback(root, **kwargs)
+
+    def task_cleanup_safe(self, root):
+        try:
+            return self._root_cleanup_call(root, "cleanup_safe")
+        except BaseException:
+            return False
+
+    def mark_task_cleanup_unsafe(self, root):
+        ownership = self._restore_cleanup_owners(root)
+        context = dict(ownership[2])["context"]
+        descriptor = next(value for kind, fields in _METADATA_ROUTES if kind is ExecutionContext
+                          for name, value in fields if name == "_host_control_fault")
+        descriptor.__set__(context, "task host failure changed trusted cleanup authority")
 
     def _require_idle(self, operation):
         if self._registration_active:
@@ -379,7 +520,46 @@ class ForeignTaskEngine:
             raise ForeignTaskError("task registration is already in progress")
         if self._publication_failure is not None:
             raise ForeignTaskError("task registration rollback failed; further admission is disabled")
+        if self._execution_failure is not None:
+            raise ForeignTaskError("task transport cleanup failed; further foreign admission is disabled")
         _require_metadata()
+        ownership = self._root_ownership
+        if ownership is not None:
+            root, original_namespace, original_fields = ownership
+            _namespace(root, self._dispatch_kind, self._dispatch_routes,
+                       descriptor=self._dispatch_namespace)
+            for seal in self._dispatch_functions:
+                seal.verify()
+            namespace = self._dispatch_namespace.__get__(root, self._dispatch_kind)
+            fields = vars(self._dispatch_kind)
+            if (root is not self._task_root or namespace is not original_namespace
+                    or dict.get(namespace, "closed") is not False
+                    or type(dict.get(namespace, "busy")) is not bool
+                    or any(name in fields or dict.get(namespace, name) is not value
+                                                 for name, value in original_fields)):
+                raise ForeignTaskError("task original dispatcher ownership changed")
+        if any(type(key) is not str for module in (core_words, _stack_module, _effect_module,
+                                                  _runtime_module, _memory_module) for key in vars(module)):
+            raise ForeignTaskError("task consumed module namespace changed")
+        if (vars(core_words).get("TaskEffectGuard") is not TaskEffectGuard
+                or vars(_stack_module).get("TaskEffectGuard") is not TaskEffectGuard
+                or vars(_effect_module).get("TaskEffectGuard") is not TaskEffectGuard
+                or vars(_effect_module).get("TaskEffectScope") is not TaskEffectScope
+                or any(vars(_runtime_module).get(name) is not original
+                       for name, original in _TASK_DISPATCH_ALIASES)):
+            raise ForeignTaskError("task dispatcher or effect helper alias changed")
+        for seal in self._effect_functions:
+            seal.verify()
+        if (any(vars(_memory_module).get(name) is not original for name, original in _MEMORY_GLOBALS)
+                or type(_memory_module._INTEGER_FORMATS) is not dict
+                or any(type(key) is not int or type(value) is not str
+                       for key, value in _memory_module._INTEGER_FORMATS.items())
+                or _memory_module._INTEGER_FORMATS != _MEMORY_FORMATS
+                or _memory_module.struct.unpack_from is not _MEMORY_STRUCT[0]
+                or _memory_module.struct.pack_into is not _MEMORY_STRUCT[1]):
+            raise ForeignTaskError("task ordinary memory helper route changed")
+        for seal in self._backing_functions:
+            seal.verify()
         runtime = self._runtime
         if (type(runtime) is not MegaForthRuntime or type(context) is not ExecutionContext
                 or runtime._foreign_tasks is not self
@@ -388,12 +568,93 @@ class ForeignTaskEngine:
                 or type(context.data) is not DataStack or type(context.returns) is not ReturnStack
                 or context.data._memory is not self._memory or context.returns._memory is not self._memory):
             raise ForeignTaskError("task profile requires the original canonical main context")
+        for actual, evidence, (kind, routes) in zip((context.data, context.returns), self._stacks, _STACK_ROUTES):
+            stack, view, floor, empty = evidence
+            _namespace(actual, kind, routes)
+            if (actual is not stack or actual._memory_view is not view
+                    or type(actual._floor) is not int or actual._floor != floor
+                    or type(actual._empty_pointer) is not int or actual._empty_pointer != empty
+                    or type(actual._pointer) is not int or not floor <= actual._pointer <= empty
+                    or actual._pointer % CELL_BYTES):
+                raise ForeignTaskError("task profile original stack geometry changed")
+        fields = vars(_QualifiedOrdinarySpan)
+        if any(type(key) is not str for key in fields) or any(fields.get(name) is not value for name, value in _VIEW_ROUTES):
+            raise ForeignTaskError("task stack backing routes changed")
         _namespace(self._memory, SparseAddressSpace, _MEMORY_ROUTES)
+        self._require_memory_backing()
         _namespace(self._dictionary, Dictionary, _DICTIONARY_ROUTES)
         for name, seal in _CORE_FUNCTION_SEALS:
             if vars(core_words).get(name) is not seal.callback:
                 raise ForeignTaskError("canonical task core helper changed")
             seal.verify()
+
+    def _require_memory_backing(self):
+        regions = self._memory._regions
+        if type(regions) is not tuple or len(regions) > 4:
+            raise ForeignTaskError("task memory regions are not canonical")
+        evidence = []
+        previous = 0
+        for region in regions:
+            if type(region) not in (_SparseRegion, _DenseRegion) or type(region.spec) is not RegionSpec:
+                raise ForeignTaskError("task memory backing has a custom owner")
+            spec = region.spec
+            if (type(spec.base) is not int or type(spec.size) is not int
+                    or spec.base < previous or spec.size <= 0 or spec.size > MASK64 + 1 - spec.base):
+                raise ForeignTaskError("task ordinary memory geometry changed")
+            previous = spec.base + spec.size
+            if type(region) is _SparseRegion:
+                pages = region.pages
+                if (type(region.page_size) is not int or region.page_size <= 0
+                        or type(pages) is not dict
+                        or any(type(key) is not int or key < 0 for key in pages)
+                        or any(type(page) is not bytearray or len(page) != region.page_size for page in pages.values())):
+                    raise ForeignTaskError("task sparse backing may execute custom access code")
+                backing = pages
+                width = region.page_size
+            else:
+                backing = region._buffer
+                if (type(backing) is not memoryview or backing.readonly or not backing.c_contiguous
+                        or backing.ndim != 1 or backing.itemsize != 1 or len(backing) != spec.size):
+                    raise ForeignTaskError("task dense backing is not its fixed writable view")
+                width = spec.size
+            evidence.append((region, spec, spec.base, spec.size, backing, width))
+        if type(self._memory._specs) is not tuple or len(self._memory._specs) != len(evidence):
+            raise ForeignTaskError("task memory specification table changed")
+        if any(spec is not item[1] for spec, item in zip(self._memory._specs, evidence)):
+            raise ForeignTaskError("task memory specifications differ from its regions")
+        prior = self._memory_evidence
+        if prior is None:
+            self._memory_evidence = regions, tuple(evidence)
+        elif (regions is not prior[0] or len(evidence) != len(prior[1])
+              or any(a[0] is not b[0] or a[1] is not b[1] or a[2:4] != b[2:4]
+                     or a[4] is not b[4] or a[5] != b[5] for a, b in zip(evidence, prior[1]))):
+            raise ForeignTaskError("task original memory ownership changed")
+        for stack, view, floor, empty in self._stacks:
+            if (type(view) is not _QualifiedOrdinarySpan or type(view._base) is not int
+                    or type(view._offset) is not int or view._base != floor
+                    or not any(view._region is row[0] and row[2] <= floor < empty <= row[2] + row[3]
+                               and view._offset == floor - row[2] for row in evidence)):
+                raise ForeignTaskError("task original stack backing view changed")
+
+    def require_cleanup_routes(self):
+        """Prove only routes used by ordinary stack restoration after failure."""
+        _require_metadata()
+        for seal in self._effect_functions:
+            seal.verify()
+        if any(type(key) is not str for key in vars(_memory_module)):
+            raise ForeignTaskError("task cleanup memory namespace changed")
+        if (any(vars(_memory_module).get(name) is not original for name, original in _MEMORY_GLOBALS)
+                or _memory_module.struct.unpack_from is not _MEMORY_STRUCT[0]
+                or _memory_module.struct.pack_into is not _MEMORY_STRUCT[1]
+                or type(_memory_module._INTEGER_FORMATS) is not dict
+                or any(type(key) is not int or type(value) is not str
+                       for key, value in _memory_module._INTEGER_FORMATS.items())
+                or _memory_module._INTEGER_FORMATS != _MEMORY_FORMATS):
+            raise ForeignTaskError("task cleanup memory routes changed")
+        for seal in self._backing_functions:
+            seal.verify()
+        _namespace(self._memory, SparseAddressSpace, _MEMORY_ROUTES)
+        self._require_memory_backing()
 
     def _word(self, target):
         if type(target) is Word:
@@ -663,6 +924,13 @@ class _InvocationAccount:
 
 
 @dataclass(frozen=True, slots=True)
+class _SemanticAccount:
+    invocation_id: int
+    limit: int
+    steps: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class _LedgerState:
     instructions: int = 0
     cycles: int = 0
@@ -674,6 +942,7 @@ class _LedgerState:
     receipt_values: ForeignReceiptV1 | None = field(default=None, repr=False)
     active: tuple[_InvocationAccount, ...] = ()
     semantic_steps: int = 0
+    semantic_scopes: tuple[_SemanticAccount, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -837,6 +1106,8 @@ class ForeignRootLedger:
             receipt.root_entries, receipt.sequence,
             receipt.invocation_id if receipt.invocation_started else state.last_invocation_id,
             receipt, replace(receipt), active,
+            state.semantic_steps,
+            state.semantic_scopes,
         )
         return True
 
@@ -850,7 +1121,39 @@ class ForeignRootLedger:
         if invocation_ids != expected:
             raise ForeignTaskError("task cancellation does not retire an exact active suffix")
         if invocation_ids:
-            self._state = replace(state, active=state.active[:-len(invocation_ids)])
+            self._state = replace(state, active=state.active[:-len(invocation_ids)],
+                semantic_scopes=tuple(scope for scope in state.semantic_scopes
+                                      if scope.invocation_id not in invocation_ids))
+
+    def begin_callback(self, invocation_id, limit):
+        _uint(invocation_id, "callback invocation", minimum=1)
+        _uint(limit, "callback semantic allowance", minimum=1, maximum=4096)
+        state = self._state
+        if (not state.active or state.active[-1].invocation_id != invocation_id
+                or len(state.semantic_scopes) >= MAX_DEPTH
+                or any(scope.invocation_id == invocation_id for scope in state.semantic_scopes)):
+            raise ForeignTaskError("callback semantic account lacks active invocation authority")
+        self._state = replace(state, semantic_scopes=state.semantic_scopes + (_SemanticAccount(invocation_id, limit),))
+
+    def end_callback(self, invocation_id):
+        state = self._state
+        if not state.semantic_scopes or state.semantic_scopes[-1].invocation_id != invocation_id:
+            raise ForeignTaskError("callback completion lacks active semantic accounting")
+        self._state = replace(state, semantic_scopes=state.semantic_scopes[:-1])
+
+    def require_semantic_step(self):
+        if self.semantic_steps >= self.semantic_limit:
+            raise ForeignTaskBudgetExceeded("task root semantic allowance exhausted")
+        if any(scope.steps >= scope.limit for scope in self._state.semantic_scopes):
+            raise ForeignTaskBudgetExceeded("task callback semantic allowance exhausted")
+
+    def charge_semantic_step(self):
+        self.require_semantic_step()
+        state = self._state
+        updated = replace(state, semantic_steps=state.semantic_steps + 1,
+                          semantic_scopes=tuple(replace(scope, steps=scope.steps + 1)
+                                                for scope in state.semantic_scopes))
+        self._state = updated
 
 
 _CORE_FUNCTION_SEALS = tuple((name, _FunctionSeal.capture(function))

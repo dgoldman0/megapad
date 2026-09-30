@@ -15,7 +15,7 @@ from simulator import foreign_runtime
 from simulator.dictionary import Word
 from simulator.foreign_runtime import (
     ForeignDefinition, ForeignRootLedger, ForeignTaskBudgetExceeded,
-    ForeignTaskEngine, ForeignTaskError,
+    ForeignTaskError,
 )
 from simulator.ir import Call, Idle, Literal, Return
 from simulator.memory import EXTERNAL_BASE, MMIO_BASE, MemoryAccessError
@@ -58,9 +58,6 @@ def operation(*, instructions=20, callbacks=4, grants=()):
 def runtime():
     result = MegaForthRuntime(memory=create_one_core_address_space(external_size=0x10000),
                              execution_backend="python")
-    # The production init hook is deliberately staged separately from the
-    # dispatcher work. This immediate fixture boundary precedes any user source.
-    result._foreign_tasks = ForeignTaskEngine(result, core_installed=True)
     return result
 
 

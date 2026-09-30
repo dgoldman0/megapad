@@ -110,7 +110,7 @@ def _assert_nested_work(execution):
     assert execution["nested_callback_abi_available"] is True
 
 
-@pytest.mark.parametrize("selected", [True, False, 0, 5, "4", 4.0])
+@pytest.mark.parametrize("selected", [True, False, 0, 6, "4", 4.0])
 def test_manifest_version_is_an_exact_bounded_diagnostic_before_session_claim(legacy, selected):
     word = legacy.semantic.define_primitive("EMPTY", lambda context: None)
     with pytest.raises((TypeError, ValueError), match="manifest ABI version"):

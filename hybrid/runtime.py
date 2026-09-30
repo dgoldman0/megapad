@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 import os
 from typing import Any, Callable
 import weakref
+from types import BuiltinFunctionType, BuiltinMethodType, MethodType
 
 from shared.cells import MASK64
 from shared.hybrid_abi import (
@@ -27,10 +28,17 @@ from shared.hybrid_abi import (
 )
 from shared.hybrid_nested import (RoutineImageV4, RoutineDeclarationV4, MAX_CHILD_EDGES,
                                   CallbackRequestV4, MachineSegmentResultV4)
+from shared.hybrid_services import (
+    RoutineImageV5, RoutineDeclarationV5, CallbackRequestV5, MachineSegmentResultV5,
+    SERVICE_CAPABILITY_V5, SERVICE_EFFECT_V5,
+)
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES, Word
 from simulator.errors import ExecutionBlocked, ExecutionError
 from simulator.interop_exports import (
     CallbackExportBudgetExceeded, CallbackExportResult, ClosedCallbackReceipt, CallbackExportEngine,
+    ServiceCallbackReceiptV5, ServiceCallbackFailureV5, ServiceCallbackProfileV5,
+    begin_service_callback_accounting, consume_service_callback_accounting,
+    service_callback_profile,
 )
 from simulator.memory import AddressClass, MMIO_BASE, MMIO_LIMIT, SparseAddressSpace
 from simulator.platform import create_one_core_address_space
@@ -38,13 +46,49 @@ from simulator.runtime import ExecutionContext, MegaForthRuntime
 from simulator.stacks import DataStack, ReturnStack
 
 
+# Capture the issuing routes once. A same-shaped/copyable receipt alone never
+# establishes service-fault authority, and a hook cannot replace cleanup.
+_SERVICE_ACCOUNTING_BEGIN = begin_service_callback_accounting
+_SERVICE_ACCOUNTING_CONSUME = consume_service_callback_accounting
+_SERVICE_RECEIPT_FIELDS = tuple(vars(ServiceCallbackReceiptV5)[name] for name in (
+    "semantic_steps", "entered", "completed", "consumed_input_cells", "failure",
+))
+_SERVICE_FAILURE_FIELDS = tuple(vars(ServiceCallbackFailureV5)[name] for name in (
+    "export_id", "name", "invocation_id", "sequence", "call_offset", "stub_offset",
+    "operation", "consumed_input_cells", "fpcsr", "semantic_steps", "cause", "fault_kind", "throw_code",
+))
+_SERVICE_RESULT_FIELDS = tuple(vars(CallbackExportResult)[name] for name in ("outputs", "semantic_steps"))
+_SERVICE_VALUE_ROUTES = tuple((cls, tuple((name, value) for name, value in vars(cls).items()
+                                        if name != "__slotnames__")) for cls in (
+    ServiceCallbackReceiptV5, ServiceCallbackFailureV5, CallbackExportResult,
+))
+
+
+def _service_value_routes_unchanged():
+    for cls, items in _SERVICE_VALUE_ROUTES:
+        values = vars(cls)
+        cache = values.get("__slotnames__")
+        slots = next(value for name, value in items if name == "__slots__")
+        if ("__slotnames__" in values and (type(cache) is not list
+                or len(cache) != len(slots)
+                or any(type(name) is not str or name != expected
+                       for name, expected in zip(cache, slots)))):
+            return False
+        if (len(values) != len(items) + int("__slotnames__" in values)
+                or any(values.get(name) is not value for name, value in items)):
+            return False
+    return True
+
+
 class HybridExecutionError(ExecutionError):
     """An entry preflight or bounded machine interval failed coherently."""
 
     def __init__(self, reason: str, detail: str = "", *,
-                 result: MachineRoutineResultV1 | None = None) -> None:
+                 result: MachineRoutineResultV1 | None = None,
+                 service_failure: ServiceCallbackFailureV5 | None = None) -> None:
         self.reason = reason
         self.result = result
+        self.service_failure = service_failure
         super().__init__(f"hybrid {reason}: {detail}" if detail else f"hybrid {reason}")
 
 
@@ -114,6 +158,150 @@ class _NestedExecution:
     machine_instructions: int = 0
     machine_cycles: int = 0
     callback_requests: int = 0
+
+
+def _native_bound_route(method, owner):
+    if type(method) is BuiltinMethodType:
+        return method.__self__ is owner
+    return (type(method) is MethodType and method.__self__ is owner
+            and type(method.__func__) is BuiltinFunctionType)
+
+
+def _service_accounting_authority(owner, allowance, runner, meter):
+    """One immutable V5 ledger; mutable public counters are only projections."""
+    namespace = object.__getattribute__(owner, "__dict__")
+    allowances = dict.__getitem__(namespace, "_allowances")
+    weak_namespace = vars(weakref.WeakKeyDictionary)["__dict__"]
+    allowance_namespace = weak_namespace.__get__(allowances, weakref.WeakKeyDictionary)
+    weak_routes = tuple((cls, tuple(vars(cls).items())) for cls in weakref.WeakKeyDictionary.__mro__
+                        if cls is not object)
+    weak_methods = tuple((name, dict.get(allowance_namespace, name)) for name in (
+        "get", "__getitem__", "__setitem__", "__getattribute__",
+    ))
+    allowance_table = dict.__getitem__(allowance_namespace, "data")
+    # The stored weakref already owns its hash. Never rehash the meter after a
+    # hook may have changed a route the private engine has rejected.
+    allowance_key = next(key for key in allowance_table if key() is meter)
+    fields = tuple(vars(_MachineAllowance)[name] for name in (
+        "limit", "callback_limit", "callback_semantic_limit", "instructions",
+        "callback_requests", "callback_semantic_steps",
+    ))
+    initial = tuple(field.__get__(allowance, _MachineAllowance) for field in fields)
+    names = ("_machine_instructions", "_machine_cycles", "_callback_requests",
+             "_callback_semantic_steps", "_transitions", "_machine_segments", "_max_machine_depth")
+    baseline = tuple(dict.__getitem__(namespace, name) for name in names)
+    # Last segment, invocation, instructions, cycles, requests, semantic ticks,
+    # segments, last consumed request, exact consumed semantic receipt.
+    snapshot = (owner._v2_segment_id, owner._v2_invocation_id, 0, 0, 0, 0, 0, 0, None)
+    original_invocation = snapshot[1]
+    receipt_type = owner._native.RoutineSegmentReceiptV2
+    class_route, class_fields = _MachineAllowance.__getattribute__, tuple(vars(_MachineAllowance).items())
+
+    def projected():
+        started = int(snapshot[1] != original_invocation)
+        return (baseline[0] + snapshot[2], baseline[1] + snapshot[3],
+                baseline[2] + snapshot[4], baseline[3] + snapshot[5],
+                baseline[4] + started, baseline[5] + snapshot[6], max(baseline[6], started))
+
+    def project():
+        for name, value in zip(names, projected()):
+            dict.__setitem__(namespace, name, value)
+        dict.__setitem__(namespace, "_v2_segment_id", snapshot[0])
+        dict.__setitem__(namespace, "_v2_invocation_id", snapshot[1])
+        dict.__setitem__(namespace, "_runner", runner)
+        dict.__setitem__(namespace, "_active_machine", True)
+        dict.__setitem__(namespace, "_allowances", allowances)
+        weak_namespace.__set__(allowances, allowance_namespace)
+        dict.__setitem__(allowance_namespace, "data", allowance_table)
+        dict.__setitem__(allowance_table, allowance_key, allowance)
+        for field, value in zip(fields, initial[:3] + (
+                initial[3] + snapshot[2], initial[4] + snapshot[4], initial[5] + snapshot[5])):
+            field.__set__(allowance, value)
+
+    def equal(value, expected):
+        return type(value) is int and value == expected
+
+    def require():
+        if (_MachineAllowance.__getattribute__ is not class_route
+                or len(vars(_MachineAllowance)) != len(class_fields)
+                or any(vars(_MachineAllowance).get(name) is not value for name, value in class_fields)
+                or dict.get(namespace, "_runner") is not runner
+                or dict.get(namespace, "_active_machine") is not True
+                or dict.get(namespace, "_allowances") is not allowances
+                or weak_namespace.__get__(allowances, weakref.WeakKeyDictionary) is not allowance_namespace
+                or any(dict.get(allowance_namespace, name) is not value for name, value in weak_methods)
+                or any(len(vars(cls)) != len(items)
+                       or any(vars(cls).get(name) is not value for name, value in items)
+                       for cls, items in weak_routes)
+                or dict.get(allowance_namespace, "data") is not allowance_table
+                or dict.get(allowance_table, allowance_key) is not allowance
+                or not equal(dict.get(namespace, "_v2_segment_id"), snapshot[0])
+                or not equal(dict.get(namespace, "_v2_invocation_id"), snapshot[1])
+                or any(not equal(dict.get(namespace, name), value) for name, value in zip(names, projected()))
+                or any(not equal(field.__get__(allowance, _MachineAllowance), value)
+                       for field, value in zip(fields, initial[:3] + (
+                           initial[3] + snapshot[2], initial[4] + snapshot[4], initial[5] + snapshot[5])))):
+            project()
+            dict.__setitem__(namespace, "_registration_failure", "service accounting authority changed")
+            raise HybridExecutionError("callback_accounting", "service accounting authority changed")
+
+    def publish(value):
+        nonlocal snapshot
+        snapshot = value
+        try:
+            project()
+        except BaseException as error:
+            dict.__setitem__(namespace, "_registration_failure", "service accounting publication interrupted")
+            try:
+                project()
+            except BaseException:
+                try:
+                    BaseException.add_note(error, "service accounting projection could not be restored")
+                except BaseException:
+                    pass
+            raise
+
+    def dispatch(operation, value=None):
+        mismatch = None
+        try:
+            require()
+        except HybridExecutionError as error:
+            mismatch = error
+        if operation == "native":
+            receipt = value
+            if receipt is not None:
+                if type(receipt) is not receipt_type:
+                    raise RuntimeError("service native accounting returned a foreign receipt")
+                if receipt.segment_id != snapshot[0]:
+                    if (receipt.segment_id != snapshot[0] + 1
+                            or receipt.invocation_id <= original_invocation
+                            or (snapshot[6] and receipt.invocation_id != snapshot[1])
+                            or receipt.instructions < 0 or receipt.cycles < receipt.instructions
+                            or receipt.invocation_instructions != snapshot[2] + receipt.instructions
+                            or receipt.invocation_cycles != snapshot[3] + receipt.cycles):
+                        raise RuntimeError("service native accounting sequence changed")
+                    publish((receipt.segment_id, receipt.invocation_id,
+                             receipt.invocation_instructions, receipt.invocation_cycles,
+                             snapshot[4] + int(receipt.callback_request), snapshot[5],
+                             snapshot[6] + 1, snapshot[7], snapshot[8]))
+        elif operation == "semantic":
+            sequence, receipt, steps = value
+            if sequence == snapshot[7] and receipt is snapshot[8]:
+                project()
+            elif sequence <= snapshot[7] or sequence != snapshot[4]:
+                raise RuntimeError("service semantic receipt was already consumed or has no native request")
+            else:
+                publish(snapshot[:5] + (snapshot[5] + steps, snapshot[6], sequence, receipt))
+        if mismatch is not None:
+            raise mismatch
+        if operation == "remaining":
+            return (initial[0] - initial[3] - snapshot[2],
+                    initial[1] - initial[4] - snapshot[4],
+                    initial[2] - initial[5] - snapshot[5])
+        if operation == "segment":
+            return snapshot[0]
+
+    return dispatch
 
 
 def _nested_accounting_authority(owner, state):
@@ -334,8 +522,13 @@ class HybridRuntime:
         dispatch_callback_limit: int = MAX_DISPATCH_CALLBACKS,
         dispatch_callback_semantic_limit: int = MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
         require_nested_callbacks: bool = False,
+        require_service_callbacks: bool = False,
         **runtime_kwargs: Any,
     ) -> HybridRuntime:
+        if type(require_service_callbacks) is not bool:
+            raise TypeError("require_service_callbacks must be an exact boolean")
+        if require_service_callbacks and cls is not HybridRuntime:
+            raise RuntimeError("hybrid scalar callbacks require a canonical qualified owner")
         if type(require_nested_callbacks) is not bool:
             raise TypeError("require_nested_callbacks must be an exact boolean")
         if require_nested_callbacks and (cls is not HybridRuntime or not cls._supports_nested_semantics()):
@@ -377,6 +570,8 @@ class HybridRuntime:
             raise RuntimeError("hybrid execution requires a matching _mp64_accel; run make build")
         if require_nested_callbacks and not cls._supports_nested_execution(native):
             raise RuntimeError("hybrid nested callbacks require fully qualified semantic V4 and native V3")
+        if require_service_callbacks and not cls._supports_callbacks(native):
+            raise RuntimeError("hybrid scalar callbacks require qualified native transport V2")
         if memory is None:
             memory = create_one_core_address_space(dense_backing=True, **(geometry or {}))
         # Validate and pin architectural geometry before the semantic runtime
@@ -393,6 +588,9 @@ class HybridRuntime:
             if require_nested_callbacks and not owner.nested_callback_abi_available:
                 owner.close()
                 raise RuntimeError("hybrid nested callbacks require fully qualified semantic V4 and native V3")
+            if require_service_callbacks and not owner.service_callback_abi_available:
+                owner.close()
+                raise RuntimeError("hybrid scalar callbacks require a canonical qualified service owner")
             return owner
         except BaseException:
             machine[1].close()
@@ -432,6 +630,19 @@ class HybridRuntime:
         self._wrapper_limits: list[tuple[int, int, int]] = []
         self._cpu, self._runner, self._control_base, self._control_buffer, self._nested_runner = machine
         self._callbacks_available = self._supports_callbacks(native)
+        self._service_native_authority = None
+        if self._callbacks_available and type(self._runner) is native.RoutineRunnerV2:
+            methods = tuple(getattr(self._runner, name) for name in (
+                "begin_v2", "resume_callback", "last_segment_v2", "cancel_invocation",
+            ))
+            if all(_native_bound_route(method, self._runner) for method in methods):
+                native_classes = tuple(dict.fromkeys(
+                    base for cls in (native.RoutineRunnerV2, native.RoutineSegmentResultV2,
+                                     native.RoutineSegmentReceiptV2, native.RoutineCallbackRequestV2)
+                    for base in cls.__mro__ if base is not object
+                ))
+                classes = tuple((cls, tuple(vars(cls).items())) for cls in native_classes)
+                self._service_native_authority = (self._runner, methods, classes)
         self._dictionary = semantic.dictionary
         self._memory = semantic.memory
         previous_guard = self._dictionary._mutation_guard
@@ -956,6 +1167,50 @@ class HybridRuntime:
         )
 
     @property
+    def service_callback_abi_available(self) -> bool:
+        """Qualified private scalar services on this exact native owner."""
+        if type(self) is not HybridRuntime or not self._callbacks_available:
+            return False
+        try:
+            self._require_service_profile()
+        except (RuntimeError, CallbackExportError):
+            return False
+        return True
+
+    @property
+    def service_callback_value_executor(self) -> str | None:
+        if not self.service_callback_abi_available:
+            return None
+        return self._require_service_profile().value_executor
+
+    def _service_native_routes(self):
+        authority = self._service_native_authority
+        if (type(authority) is not tuple or len(authority) != 3
+                or authority[0] is not self._runner
+                or type(self._runner) is not self._native.RoutineRunnerV2):
+            raise RuntimeError("scalar service execution requires its original exact native facade")
+        runner, methods, classes = authority
+        if (any(not _native_bound_route(method, runner) for method in methods)
+                or any(len(vars(cls)) != len(fields)
+                       or any(vars(cls).get(name) is not value for name, value in fields)
+                       for cls, fields in classes)):
+            raise RuntimeError("scalar service native facade or result routes changed")
+        return authority
+
+    def _require_service_profile(self) -> ServiceCallbackProfileV5:
+        self._service_native_routes()
+        profile = service_callback_profile(self.semantic)
+        if (type(self) is not HybridRuntime or not self._callbacks_available
+                or type(profile) is not ServiceCallbackProfileV5
+                or type(profile.version) is not int or profile.version != 5
+                or type(profile.capability) is not str or profile.capability != SERVICE_CAPABILITY_V5
+                or type(profile.effect) is not str or profile.effect != SERVICE_EFFECT_V5
+                or type(profile.value_executor) is not str
+                or profile.value_executor not in ("python_reference", "shared_native_kernel")):
+            raise RuntimeError("hybrid scalar service callbacks require a canonical finalized owner and native V2")
+        return profile
+
+    @property
     def max_machine_depth(self) -> int:
         return self._max_machine_depth
 
@@ -1018,6 +1273,25 @@ class HybridRuntime:
         """Transactional publication core; it grants no execution by itself."""
         return self._register_routine(image, RoutineImageV4, values)
 
+    def register_routine_v5(self, image: RoutineImageV5 | None = None, **values: Any) -> Word:
+        """Publish service metadata only with its full executable capability."""
+        if not self.service_callback_abi_available:
+            raise RuntimeError("hybrid scalar callbacks require a canonical qualified service owner")
+        return self._publish_service_routine(image, **values)
+
+    def _publish_service_routine(self, image: RoutineImageV5 | None = None, **values: Any) -> Word:
+        """Permanent V5 publication core; the public Word remains gated."""
+        self._require_service_profile()
+        return self._register_routine(image, RoutineImageV5, values)
+
+    def _invoke_published_service(self, word: Word, context: ExecutionContext) -> None:
+        """Exercise the qualified lower boundary without advertising V5."""
+        registration = self._registrations.get(id(word))
+        if (registration is None or registration.word is not word
+                or type(registration.declaration) is not RoutineDeclarationV5):
+            raise HybridExecutionError("stale_registration", "word has no issued V5 registration")
+        return self._invoke(registration.declaration.registration_nonce, context, _private_service=True)
+
     def _require_authority(self) -> None:
         if (self.semantic.dictionary is not self._dictionary
                 or self._dictionary._mutation_guard is not self._dictionary_guard
@@ -1050,7 +1324,10 @@ class HybridRuntime:
             if type(image) is not image_type:
                 raise TypeError(f"registration requires a {image_type.__name__}")
             nested = image_type is RoutineImageV4
-            callbacks = image_type in (RoutineImageV2, RoutineImageV3, RoutineImageV4)
+            callbacks = image_type in (RoutineImageV2, RoutineImageV3, RoutineImageV4, RoutineImageV5)
+            if image_type is RoutineImageV5:
+                RoutineImageV5.__post_init__(image)
+                self._require_service_profile()
             if nested:
                 RoutineImageV4.__post_init__(image)
                 if (type(self) is not HybridRuntime or self._nested_runner is None
@@ -1166,6 +1443,7 @@ class HybridRuntime:
                         RoutineImageV2: RoutineDeclarationV2,
                         RoutineImageV3: RoutineDeclarationV3,
                         RoutineImageV4: RoutineDeclarationV4,
+                        RoutineImageV5: RoutineDeclarationV5,
                     }[image_type]
                     extra = dict(
                         callbacks=image.callbacks,
@@ -1174,6 +1452,8 @@ class HybridRuntime:
                     ) if callbacks else {}
                     if nested:
                         extra.update(routine_id=image.routine_id, max_callback_requests=image.max_callback_requests)
+                    elif image_type is RoutineImageV5:
+                        extra.update(max_callback_requests=image.max_callback_requests)
                     declaration = declaration_type(
                         name=image.name, session_nonce=self._session_nonce,
                         registration_nonce=registration_nonce, allocation_lease=lease,
@@ -1260,12 +1540,13 @@ class HybridRuntime:
             values = []
             for registration in self._registrations.values():
                 declaration = registration.declaration
-                callbacks = type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3, RoutineDeclarationV4)
+                callbacks = type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3, RoutineDeclarationV4, RoutineDeclarationV5)
                 image_type = {
                     RoutineDeclarationV1: RoutineImageV1,
                     RoutineDeclarationV2: RoutineImageV2,
                     RoutineDeclarationV3: RoutineImageV3,
                     RoutineDeclarationV4: RoutineImageV4,
+                    RoutineDeclarationV5: RoutineImageV5,
                 }[type(declaration)]
                 extra = dict(callbacks=tuple(
                     replace(site, export=replace(site.export)) for site in declaration.callbacks
@@ -1273,6 +1554,8 @@ class HybridRuntime:
                 if type(declaration) is RoutineDeclarationV4:
                     extra.update(routine_id=declaration.routine_id,
                                  max_callback_requests=declaration.max_callback_requests)
+                elif type(declaration) is RoutineDeclarationV5:
+                    extra.update(max_callback_requests=declaration.max_callback_requests)
                 values.append(image_type(
                     name=declaration.name, code=declaration.code,
                     entry_offset=declaration.entry_offset,
@@ -1617,7 +1900,209 @@ class HybridRuntime:
                 self._registration_cleanup_error(error, cleanup)
             raise
 
-    def _invoke(self, nonce: object, context: ExecutionContext) -> None:
+    def _service_callback_boundary(self, handle, request, accounting, machine_result):
+        remaining = accounting("remaining")[2]
+        consume = _SERVICE_ACCOUNTING_CONSUME
+        cleanup_error = self._registration_cleanup_error
+        invoke = self.semantic.invoke_callback_export
+        semantic = self.semantic
+        checkpoint = None
+
+        def settle(error):
+            receipt = consume(semantic, checkpoint, handle, error)
+            if type(receipt) is not ServiceCallbackReceiptV5:
+                raise RuntimeError("service accounting returned a foreign receipt")
+            steps, entered, completed, consumed, failure = tuple(
+                field.__get__(receipt, ServiceCallbackReceiptV5) for field in _SERVICE_RECEIPT_FIELDS
+            )
+            if (type(steps) is not int or not 0 <= steps <= min(1, remaining)
+                    or type(entered) is not bool or type(completed) is not bool
+                    or (not entered and (steps != 0 or completed))
+                    or (completed and steps != 1)
+                    or (consumed is not None and (type(consumed) is not int
+                        or not 0 <= consumed <= request.site.export.input_cells))
+                    or (completed and consumed != request.site.export.input_cells)):
+                raise RuntimeError("service accounting receipt is inconsistent")
+            # Settle the independently issued actual count before interpreting
+            # failure metadata or validating a result; neither can refund work.
+            accounting("semantic", (request.sequence, receipt, steps))
+            if not _service_value_routes_unchanged():
+                raise RuntimeError("service receipt or result metadata routes changed")
+            if failure is not None:
+                if type(failure) is not ServiceCallbackFailureV5:
+                    raise RuntimeError("service validation returned a foreign failure")
+                (export_id, name, invocation_id, sequence, call_offset, stub_offset,
+                 operation, input_cells, fpcsr, ticks, cause, kind, code) = tuple(
+                    field.__get__(failure, ServiceCallbackFailureV5) for field in _SERVICE_FAILURE_FIELDS
+                )
+                if (error is None or cause is not error or completed or not entered or steps != 1
+                        or type(export_id) is not int or export_id != request.site.export.export_id
+                        or type(name) is not str or name != request.site.export.name
+                        or type(invocation_id) is not int or invocation_id != request.invocation_id
+                        or type(sequence) is not int or sequence != request.sequence
+                        or type(call_offset) is not int or call_offset != request.site.call_offset
+                        or type(stub_offset) is not int or stub_offset != request.site.stub_offset
+                        or type(operation) is not int or not 0 <= operation <= 0xFF
+                        or type(fpcsr) is not int or fpcsr < 0 or fpcsr & ~0x1F7
+                        or type(input_cells) is not int or input_cells != request.site.export.input_cells
+                        or type(ticks) is not int or ticks != steps
+                        or type(kind) is not str or kind != "illegal_scalar_float"
+                        or type(code) is not int or code != -21):
+                    raise RuntimeError("service validation failure does not match its issued request")
+            return receipt, steps, entered, completed, failure
+
+        checkpoint = _SERVICE_ACCOUNTING_BEGIN(semantic, handle, request)
+        try:
+            result = invoke(handle, request.arguments, semantic_step_limit=remaining)
+        except BaseException as error:
+            try:
+                receipt, steps, entered, completed, failure = settle(error)
+            except BaseException as cleanup:
+                cleanup_error(error, cleanup)
+                raise error
+            if failure is not None:
+                raise HybridExecutionError(
+                    "service_fault", "admitted scalar service validation failed",
+                    result=machine_result, service_failure=failure,
+                ) from error
+            raise
+        try:
+            receipt, steps, entered, completed, failure = settle(None)
+            outputs, ticks = ((None, None) if type(result) is not CallbackExportResult else tuple(
+                field.__get__(result, CallbackExportResult) for field in _SERVICE_RESULT_FIELDS
+            ))
+            if (not entered or not completed or failure is not None
+                    or type(result) is not CallbackExportResult
+                    or type(ticks) is not int or ticks != steps
+                    or type(outputs) is not tuple or len(outputs) != request.site.export.output_cells
+                    or any(type(cell) is not int or not 0 <= cell <= MASK64 for cell in outputs)):
+                raise HybridExecutionError("invalid_callback", "service has no completed output receipt",
+                                           result=machine_result)
+            # consume() may repair corrupt host meter metadata and still return
+            # truthful work. The subsequent owner proof must reject that case.
+            self._require_service_profile()
+        except BaseException:
+            self._registration_failure = "service callback accounting or output validation failed"
+            raise
+        return outputs
+
+    def _drive_services(self, registration, arguments, spans, protected, meter, allowance, remaining):
+        native_routes = self._service_native_routes
+        native_authority = native_routes()
+        runner, methods, _classes = native_authority
+        begin, resume, query, cancel = methods
+        validate = self._validate_registration
+        profile = self._require_service_profile
+        cleanup_error = self._registration_cleanup_error
+        callback_boundary = self._service_callback_boundary
+        accounting = _service_accounting_authority(self, allowance, runner, meter)
+        declaration = registration.declaration
+        instruction_limit = min(remaining, declaration.max_instructions)
+        native_result_type = self._native.RoutineSegmentResultV2
+
+        def require_native():
+            try:
+                if native_routes() is not native_authority:
+                    raise HybridExecutionError("invalid_callback", "service native owner authority changed")
+            except BaseException:
+                self._registration_failure = "service native owner authority changed"
+                raise
+
+        def boundary(operation, *args, **kwargs):
+            before = accounting("segment")
+            require_native()
+            try:
+                raw = operation(*args, **kwargs)
+            except BaseException as error:
+                try:
+                    accounting("native", query())
+                except BaseException as cleanup:
+                    cleanup_error(error, cleanup)
+                raise
+            accounting("native", query())
+            require_native()
+            if (type(raw) is not native_result_type or raw.segment_id <= before
+                    or raw.segment_id != accounting("segment")):
+                self._registration_failure = "service native result has no fresh receipt"
+                raise HybridExecutionError("invalid_callback", self._registration_failure)
+            self._require_open()
+            return raw
+
+        try:
+            before = accounting("segment")
+            try:
+                raw = boundary(begin, registration.spec, arguments, spans, remaining,
+                               callback_limit=min(declaration.max_callback_requests,
+                                                  accounting("remaining")[1]),
+                               protected_spans=protected)
+            except (TypeError, ValueError) as error:
+                if accounting("segment") != before or self._registration_failure is not None:
+                    raise
+                raise HybridExecutionError("rejected_access", str(error)) from error
+            while True:
+                request = None
+                if raw.exit_kind == "callback_request":
+                    callback = raw.callback
+                    matching = tuple((site, handle) for site, handle in registration.exports
+                                     if site.call_offset == callback.call_offset
+                                     and site.stub_offset == callback.stub_offset
+                                     and site.export.export_id == callback.export_id)
+                    if len(matching) != 1 or raw.token is None:
+                        raise HybridExecutionError("invalid_callback", "service callback site was not declared")
+                    site, handle = matching[0]
+                    request = CallbackRequestV5(invocation_id=callback.invocation_id,
+                                                sequence=callback.sequence, site=site,
+                                                arguments=tuple(callback.arguments))
+                result = MachineSegmentResultV5(
+                    **self._result_fields(raw), invocation_id=raw.invocation_id,
+                    invocation_instructions=raw.invocation_instructions,
+                    invocation_cycles=raw.invocation_cycles, callback=request,
+                )
+                if result.exit_kind is not MachineExitKindV2.CALLBACK_REQUEST:
+                    accounting("require")
+                    profile()
+                    validate(registration)
+                    return result
+                available = accounting("remaining")
+                if raw.invocation_instructions >= instruction_limit or available[0] <= 0:
+                    raise HybridExecutionError("instruction_limit", "machine allowance exhausted before service",
+                                               result=result)
+                if available[2] <= 0:
+                    raise HybridExecutionError("callback_semantic_limit", "callback work allowance exhausted",
+                                               result=result)
+                validate(registration)
+                profile()
+                try:
+                    callback_outputs = callback_boundary(handle, request, accounting, result)
+                except CallbackExportBudgetExceeded as error:
+                    if self._registration_failure is not None:
+                        raise
+                    try:
+                        issued = self.semantic.consume_callback_budget_failure(error)
+                    except BaseException as cleanup:
+                        cleanup_error(error, cleanup)
+                        raise error
+                    if not issued:
+                        raise
+                    raise HybridExecutionError(error.reason, str(error), result=result) from error
+                accounting("require")
+                validate(registration)
+                profile()
+                raw = boundary(resume, raw.token, callback_outputs)
+        except BaseException as error:
+            # Retained original routes recover completed native work even if a
+            # post-work result/receipt allocation escaped before publication.
+            try:
+                accounting("native", query())
+            except BaseException as cleanup:
+                cleanup_error(error, cleanup)
+            try:
+                cancel()
+            except BaseException as cleanup:
+                cleanup_error(error, cleanup)
+            raise
+
+    def _invoke(self, nonce: object, context: ExecutionContext, *, _private_service: bool = False) -> None:
         with self.semantic._session_owner_lock:
             self._require_open()
             self.semantic._require_session_owner_access("enter a hybrid routine")
@@ -1626,6 +2111,10 @@ class HybridRuntime:
             registration = self._by_nonce.get(nonce)
             if registration is None:
                 raise HybridExecutionError("stale_registration", "registration identity is no longer live")
+            if type(registration.declaration) is RoutineDeclarationV5:
+                if not _private_service and not self.service_callback_abi_available:
+                    raise HybridExecutionError("service_unavailable", "scalar service callbacks are not enabled")
+                self._require_service_profile()
             if type(registration.declaration) is RoutineDeclarationV4:
                 if not self.nested_callback_abi_available:
                     raise HybridExecutionError("nested_unavailable", "nested machine execution is not enabled")
@@ -1659,7 +2148,11 @@ class HybridRuntime:
                 raise HybridExecutionError("instruction_limit", "outer dispatch machine allowance exhausted")
             self._active_machine = True
             try:
-                if type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3):
+                if type(declaration) is RoutineDeclarationV5:
+                    result = self._drive_services(
+                        registration, arguments, tuple(spans), protected, meter, allowance, remaining
+                    )
+                elif type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3):
                     result = self._drive_callbacks(
                         registration, arguments, tuple(spans), protected, meter, allowance, remaining
                     )

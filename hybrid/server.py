@@ -17,6 +17,7 @@ from shared.hybrid_closed import (
     PolicyLiteralV3, PolicyReturnV3, prove_policies,
 )
 from shared.hybrid_nested import PolicyMachineCallV4, RoutineManifestV4
+from shared.hybrid_services import RoutineManifestV5
 from shared.session_options import configured_production_executor
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapPreparation, prepare_image_bootstrap
@@ -46,13 +47,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="MANIFEST",
-        help="version 1 through 4 JSON manifest of bounded integer machine routines",
+        help="version 1 through 5 JSON manifest of bounded integer machine routines",
     )
     parser.epilog = (
         "Hybrid mode requires the native MP64 interpreter. Machine routines "
         "use declared buffers and fixed call bounds. Version 2 admits declared "
         "MIN/MAX/ABS/AND/OR/XOR callbacks; version 3 adds declared closed integer "
         "policies; version 4 adds bounded distinct-registration nested callbacks. "
+        "Version 5 adds private scalar FP/FPCSR service callbacks. "
         "Machine MMIO, arbitrary callbacks, "
         "native BIOS boot, and multicore execution are unavailable."
     )
@@ -195,7 +197,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     manifest = load_manifest(args.hybrid_routines)
     closed_manifest = type(manifest) is RoutineManifestV3
     nested_manifest = type(manifest) is RoutineManifestV4
-    callback_manifest = type(manifest) in (RoutineManifestV2, RoutineManifestV3, RoutineManifestV4)
+    service_manifest = type(manifest) is RoutineManifestV5
+    callback_manifest = type(manifest) in (RoutineManifestV2, RoutineManifestV3, RoutineManifestV4, RoutineManifestV5)
     rich_terminal = None
     if args.rich_terminal_policy is not None:
         rich_terminal = args.rich_terminal_policy.configuration(
@@ -217,6 +220,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         storage=storage,
         dispatch_instruction_limit=manifest.dispatch_instruction_limit,
         **({"require_nested_callbacks": True} if nested_manifest else {}),
+        **({"require_service_callbacks": True} if service_manifest else {}),
         **({
             "dispatch_callback_limit": manifest.dispatch_callback_limit,
             "dispatch_callback_semantic_limit": manifest.dispatch_callback_semantic_limit,
@@ -224,6 +228,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     )
     session = None
     try:
+        if service_manifest and getattr(hybrid, "service_callback_abi_available", False) is not True:
+            raise RuntimeError("hybrid scalar callbacks require qualified private scalar services and native transport v2")
         if nested_manifest and getattr(hybrid, "nested_callback_abi_available", False) is not True:
             raise RuntimeError(
                 "hybrid nested callbacks require full semantic profile v4 and native transport v3"
@@ -242,7 +248,9 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         elif closed_manifest:
             _install_manifest_policies(hybrid, manifest)
         for image in (() if nested_manifest else manifest.routines):
-            if closed_manifest:
+            if service_manifest:
+                hybrid.register_routine_v5(image)
+            elif closed_manifest:
                 hybrid.register_routine_v3(image)
             elif callback_manifest:
                 hybrid.register_routine_v2(image)

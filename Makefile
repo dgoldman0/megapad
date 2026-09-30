@@ -133,6 +133,10 @@ accel-clean:
 bench: accel
 	$(VENV_PY) bench_accel.py
 
+.PHONY: bench-hybrid-services
+bench-hybrid-services: build
+	$(VENV_PY) bench_hybrid_services.py --executor python native --iterations 64 256 --trials 3 --warmup 1 $(BENCH_ARGS)
+
 # --- Primary test target: background + live dashboard (DEFAULT) ---
 .PHONY: test
 test: test-bg

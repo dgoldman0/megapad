@@ -159,8 +159,10 @@ def test_service_capture_finalize_once_and_missing_core():
         empty.bind(_descriptor("FPCSR@"))
     with pytest.raises(TypeError, match="exact bool"):
         ScalarServiceCatalog.capture(runtime, core_installed=1)
-    with pytest.raises(TypeError, match="admitted callback"):
-        runtime.bind_callback_export(_descriptor("F64+"))
+    handle = runtime.bind_callback_export(_descriptor("F64+"))
+    assert runtime.verify_callback_export(handle) == _descriptor("F64+")
+    with pytest.raises(CallbackExportError, match="prepared request"):
+        runtime.invoke_callback_export(handle, (0, 0))
 
 
 @pytest.mark.parametrize("value_name", ("descriptor", "word", "primitive", "outcome", "format"))
