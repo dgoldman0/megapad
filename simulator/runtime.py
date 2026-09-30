@@ -784,6 +784,9 @@ class MegaForthRuntime:
         self._transient_words: dict[int, Word] = {}
         self._colon_accelerators: dict[int, _ColonAccelerator] = {}
         self._primitive_host_escapes: dict[int, tuple[PrimitiveDefinition, object]] = {}
+        from simulator.private_host_escape import PrivateHostAbortProvenance
+
+        self._private_host_abort = PrivateHostAbortProvenance(self, MegaForthRuntime)
         self._next_dispatch_root_id = 1
         self._uart_input: deque[int] = deque()
         self._uart_output = bytearray()
@@ -1851,8 +1854,14 @@ class MegaForthRuntime:
             admission = self._primitive_host_escapes.get(id(implementation))
             host_escape = (admission is not None and admission[0] is implementation
                            and admission[1] is callback)
+        # Pin before calling host code; exception attributes carry no authority.
+        host_abort_issue = self._private_host_abort.issue if host_escape else None
         try:
             return callback(context)
+        except ForthAbort as error:
+            if host_abort_issue is not None:
+                host_abort_issue(admission, implementation, callback, error)
+            raise
         except InstructionFault as fault:
             if host_escape:
                 raise
@@ -2353,6 +2362,10 @@ class MegaForthRuntime:
             active_context.returns.pointer_capture_checkpoint()
         )
         has_enclosing_dispatch = self._has_active_dispatch(active_context)
+        host_abort = self._private_host_abort
+        host_abort_matches = host_abort.matches
+        host_abort_leave = host_abort.leave
+        host_abort.enter()
         closed_cleanup_guard = self._closed_cleanup_guard
         unsafe_closed_cleanup = False
         state: _EvaluationState | None = None
@@ -2436,7 +2449,7 @@ class MegaForthRuntime:
                     capture_checkpoint
                 ):
                     active_context._mark_host_control_fault(exc)
-                if exc.bind_origin(active_context):
+                if not host_abort_matches(exc) and exc.bind_origin(active_context):
                     active_context.data.clear()
                     active_context.returns.clear()
                 raise
@@ -2471,7 +2484,7 @@ class MegaForthRuntime:
                 capture_checkpoint
             ):
                 active_context._mark_host_control_fault(exc)
-            if exc.bind_origin(active_context):
+            if not host_abort_matches(exc) and exc.bind_origin(active_context):
                 active_context.data.clear()
                 active_context.returns.clear()
             raise
@@ -2486,6 +2499,7 @@ class MegaForthRuntime:
                 active_context._mark_host_control_fault(exc)
             raise
         finally:
+            host_abort_leave()
             if state is not None:
                 compiler = state.compiler
                 if compiler is not None and compiler.temporary:
@@ -3490,6 +3504,12 @@ class MegaForthRuntime:
                         cleanup_failed(None)
                     cleanup_failed(original)
 
+        host_abort = self._private_host_abort
+        host_abort_matches = host_abort.matches
+        host_abort_leave = host_abort.leave
+        host_abort.enter()
+        host_abort_capture_leaf = host_abort.capture_leaf
+        host_abort_issue_leaf = host_abort.issue_leaf
         closed_cleanup_guard = self._closed_cleanup_guard
         unsafe_closed_cleanup = False
         context._require_reusable()
@@ -3502,6 +3522,7 @@ class MegaForthRuntime:
         suspended: _SuspendedExecution | None = None
         self._active_dispatches.append(frame)
         try:
+            host_abort_capture_leaf(word, context)
             cursor = self._execute_top(
                 word,
                 context,
@@ -3576,13 +3597,14 @@ class MegaForthRuntime:
             preserve_capture_evidence = True
             raise
         except ForthAbort as exc:
+            host_abort_issue_leaf(exc)
             if closed_cleanup_guard(exc, context):
                 unsafe_closed_cleanup = True
                 raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
-            if exc.bind_origin(context):
+            if not host_abort_matches(exc) and exc.bind_origin(context):
                 # Normalize a direct host primitive ForthAbort to the same
                 # complete-task reset as the BIOS word.
                 context.data.clear()
@@ -3600,6 +3622,7 @@ class MegaForthRuntime:
             context.returns.restore(return_snapshot)
             raise
         finally:
+            host_abort_leave()
             if completed_successfully:
                 if self._has_older_dispatch(
                     context
@@ -3619,6 +3642,10 @@ class MegaForthRuntime:
         """Continue a detached dispatch under its original host guard."""
 
         context = suspended.context
+        host_abort = self._private_host_abort
+        host_abort_matches = host_abort.matches
+        host_abort_leave = host_abort.leave
+        host_abort.enter()
         closed_cleanup_guard = self._closed_cleanup_guard
         unsafe_closed_cleanup = False
         resume_capture_checkpoint = (
@@ -3707,7 +3734,7 @@ class MegaForthRuntime:
             )
             if suspended.had_pointer_capture:
                 context._mark_host_control_fault(exc)
-            if exc.bind_origin(context):
+            if not host_abort_matches(exc) and exc.bind_origin(context):
                 context.data.clear()
                 context.returns.clear()
             else:
@@ -3729,6 +3756,7 @@ class MegaForthRuntime:
             context.returns.restore(suspended.return_snapshot)
             raise
         finally:
+            host_abort_leave()
             if completed_successfully and (
                 self._has_older_dispatch(context)
                 or self._has_active_evaluation(context)
@@ -3751,6 +3779,10 @@ class MegaForthRuntime:
     ) -> None:
         """Enter a top-level fault callback with ordinary host escape guards."""
 
+        host_abort = self._private_host_abort
+        host_abort_matches = host_abort.matches
+        host_abort_leave = host_abort.leave
+        host_abort.enter()
         closed_cleanup_guard = self._closed_cleanup_guard
         unsafe_closed_cleanup = False
         context._require_reusable()
@@ -3788,7 +3820,7 @@ class MegaForthRuntime:
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
-            if exc.bind_origin(context):
+            if not host_abort_matches(exc) and exc.bind_origin(context):
                 context.data.clear()
                 context.returns.clear()
             else:
@@ -3804,6 +3836,7 @@ class MegaForthRuntime:
             context.returns.restore(return_snapshot)
             raise
         finally:
+            host_abort_leave()
             if not unsafe_closed_cleanup and not preserve_capture_evidence:
                 context.returns.restore_pointer_captures(capture_checkpoint)
             active = self._active_dispatches.pop()
