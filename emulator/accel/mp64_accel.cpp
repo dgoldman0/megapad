@@ -41,6 +41,7 @@
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
 
+#include "../../shared/accel/scalar_fp_bindings.h"
 #include "dbt/executable_arena.h"
 #include "dbt/x86_64/lowering.h"
 #include "cpu/mp64/block_ir.h"
@@ -59,6 +60,7 @@
 
 namespace py = pybind11;
 namespace mp64_x86_64 = mp64::dbt::x86_64;
+namespace mp64_scalar_fp = megapad::scalar_fp;
 
 using mp64::machine::SystemClock;
 using mp64::machine::UnboundedSettlementRequest;
@@ -7822,8 +7824,47 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
 
 // EXT.FP is FC op DR, plus the T byte for FMA and FMS.
 static int fp_instruction_size(uint8_t op) {
-    const uint8_t code = op & 0x3F;
-    return code == 0x07 || code == 0x08 ? 4 : 3;
+    return static_cast<int>(mp64_scalar_fp::instruction_length(op));
+}
+
+static int exec_fp(CPUState& s) {
+    const uint8_t op = fetch8(s);
+    const uint8_t operands = fetch8(s);
+    const uint8_t t_byte =
+        fp_instruction_size(op) == 4 ? fetch8(s) : 0;
+
+    // Reserved encodings consume their complete instruction before trapping.
+    // Fetch through the normal cache/bus path, then validate before touching
+    // registers, integer flags, or sticky FP flags.
+    if (const char* error =
+            mp64_scalar_fp::validate(op, t_byte, s.fpcsr)) {
+        throw std::runtime_error(
+            std::string("TRAP:ILLEGAL_OP:EXT.FP: ") + error);
+    }
+    const int rd =
+        (rex_d(s.ext_modifier) << 4) | (operands >> 4);
+    const int rs =
+        (rex_s(s.ext_modifier) << 4) | (operands & 0xF);
+    const int rt = t_byte & 0x1F;
+    // All inputs are sampled after fetch, including any PC-selected register.
+    const uint64_t d = s.regs[rd];
+    const uint64_t source = s.regs[rs];
+    const uint64_t third = s.regs[rt];
+    const auto outcome =
+        mp64_scalar_fp::execute(op, d, source, third, s.fpcsr);
+    s.fpcsr |= outcome.flags;
+    if (outcome.has_relation) {
+        // Shared IEEE relations: less=-1, equal=0, greater=1, unordered=2.
+        s.flag_z = outcome.relation == 0;
+        s.flag_g = outcome.relation == 1;
+        s.flag_n = outcome.relation == -1;
+        s.flag_v = outcome.relation == 2;
+        s.flag_c = 0;
+        s.flag_p = 0;
+    } else {
+        s.regs[rd] = outcome.value;
+    }
+    return static_cast<int>(mp64_scalar_fp::extra_cycles(op));
 }
 
 static int crypto_instruction_size(uint8_t sub_op) {
@@ -13114,19 +13155,15 @@ static int step_one(
             cycles += exec_dict(s, cb);
         else if (n == 0xB)
             cycles += exec_crypto(s, cb);
-        else if (n == 0xC) {
-            // EXT.FP executes in the Python oracle, which owns its exact
-            // rounding and flags. Rewind the complete instruction.
-            pc(s) = pc_start;
-            s.ext_modifier = -1;
-            icache_rollback_instruction(s);
-            throw std::runtime_error("EXT_ISA_FALLBACK");
-        }
+        else if (n == 0xC)
+            cycles += exec_fp(s);
         else
             throw std::logic_error(
                 "shared MP64 decoder deferred an invalid extension");
         s.ext_modifier = -1;
         s.cycle_count += cycles;
+        if (n == 0xC && s.perf_enable)
+            s.perf_cycles += cycles;
         return cycles;
     }
 
@@ -30011,6 +30048,7 @@ build_system_dma_callbacks(
 // ---------------------------------------------------------------------------
 
 PYBIND11_MODULE(_mp64_accel, m) {
+    megapad::scalar_fp::register_bindings(m);
     m.doc() = "C++ accelerated core for Megapad-64 emulator";
 
     py::class_<PythonMemoryUseScope>(m, "_MemoryUseScope")

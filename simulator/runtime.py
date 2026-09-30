@@ -806,6 +806,10 @@ class MegaForthRuntime:
                 self, required=selected_backend == "native",
                 admit_core=install_core_words,
             )
+            if self._native_execution is not None:
+                self.scalar_float._native_execute = (
+                    self._native_execution.extension.scalar_fp_execute
+                )
         self.storage.claim()
 
     @property

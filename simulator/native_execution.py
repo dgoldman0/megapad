@@ -35,6 +35,13 @@ class NativeExecutor:
                     "run python setup_simulator_accel.py build_ext --inplace"
                 ) from None
             return None
+        if not hasattr(extension, "scalar_fp_execute"):
+            if required:
+                raise RuntimeError(
+                    "native semantic execution requires a matching "
+                    "_megaforth_native build; run make build"
+                )
+            return None
         return cls(runtime, extension, admit_core=admit_core)
 
     def __init__(self, runtime, extension, *, admit_core: bool):

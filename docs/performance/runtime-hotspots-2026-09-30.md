@@ -64,3 +64,28 @@ Peak RSS is the subprocess lifetime high-water mark, including preparation; it
 is not isolated workload allocation.
 
 Raw evidence: [runtime-hotspots-baseline-2026-09-30.json](runtime-hotspots-baseline-2026-09-30.json).
+
+## Shared exact scalar kernel
+
+The same 64-iteration FP case was repeated with the exact C++ kernel and
+adapters, with three unprofiled trials and separate attribution. These are
+small, fresh-instance kernels; the simulator still crosses the Python word
+boundary for each FP operation in this slice.
+
+| Executor | Before wall ms | Kernel wall ms | Before / after |
+|---|---:|---:|---:|
+| emulator-native | 20.257 | 0.144 | 140.44× |
+| simulator-python | 4.243 | 3.895 | 1.09× |
+| simulator-native | 3.577 | 2.155 | 1.66× |
+
+Emulator attribution drops all 256 scalar FP Python fallbacks and the associated
+per-operation synchronization calls to zero. The Python simulator control is
+unchanged; its timing movement illustrates host variability. Architectural
+cycles, known result bits and flags remain equal. Native semantic FP still
+returns to Python for each BIOS word, making that boundary the next target.
+
+The source manifest includes unrelated pending audio adapter edits, which this
+FP case does not execute. This comparison supports the scalar path only, with
+no Desktop, full program, or hardware timing claim.
+
+Raw evidence: [runtime-hotspots-fp-kernel-2026-09-30.json](runtime-hotspots-fp-kernel-2026-09-30.json).

@@ -298,7 +298,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
 | 2 — workload profiles | Bounded kernels recorded; representative work pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
-| 3A — native scalar FP | Pending | |
+| 3A — native scalar FP | Shared exact kernel/adapters complete; direct semantic words next | 200 kernel/machine/adapter checks; 53 hosted checks in each executor; paired FP measurements |
 | 3B/3C — remaining native extraction | Pending, profile-driven | |
 | 4 — initial hybrid ABI and execution | Pending | |
 | 5 — expanded interoperability | Pending | |
@@ -426,3 +426,28 @@ its focused checks do not constitute representative workload qualification.
 Phase 2 must record current baselines before changing defaults or selecting
 additional hot-path extraction. No new performance or full Desktop acceptance
 claim is made by this slice.
+
+### Phase 3A shared value kernel — 2026-09-30
+
+Both extensions compile `shared/accel/scalar_fp.cpp`. The kernel uses bounded
+integer arithmetic for exact FP32/64 arithmetic, FMA/FMS, square root,
+conversions, comparisons and classification. No host floating-point rounding
+mode or third-party big-integer package is required. The Python value models
+remain independent. Build object directories are isolated between extensions
+so their optimization/sanitizer flags cannot reuse the same shared object.
+
+Full-core emulator FC instructions now call the kernel directly, preserving
+full-tail validation, fault PC, REX/PC register aliasing, sticky flags, cycle
+charges, strict-cycle retirement, and intentional I-cache noncoherence.
+Microcore oracle/fault policy remains unchanged. Native-selected hosted FP
+binds the same value kernel; Python selection retains the reference model.
+An obsolete native extension fails clearly in required-native mode and falls
+back in auto mode. Direct semantic FP dispatch is the next slice.
+
+Validation through sequential Make targets: 198 existing/new kernel and machine
+checks passed, covering all legal operations/modes, directed and seeded values,
+all FP16/BF16 widening bit patterns, FMA exponent extremes and machine state.
+Two additional service-bypass/stale-build checks passed. All 53 hosted scalar
+word tests passed in Python selection and again with native selected. Both
+extensions built with GCC; no RTL change or new RTL parity claim is involved.
+The paired bounded FP evidence is recorded in the performance report.

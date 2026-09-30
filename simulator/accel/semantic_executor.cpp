@@ -1,6 +1,7 @@
 // Generic hosted Forth execution. This file contains no terminal/app policy.
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include "../../shared/accel/scalar_fp_bindings.h"
 
 #include <algorithm>
 #include <array>
@@ -1240,6 +1241,7 @@ private:
 }  // namespace
 
 PYBIND11_MODULE(_megaforth_native, module) {
+    megapad::scalar_fp::register_bindings(module);
     module.doc() = "Native execution of generic hosted Forth semantic plans";
     py::class_<NativeProgram>(module, "NativeProgram")
         .def(py::init<const py::iterable&, Cell, py::object>(), py::arg("regions"),

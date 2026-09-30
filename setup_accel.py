@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext
 import pybind11
 
 
@@ -68,12 +69,15 @@ ext = Extension(
     "_mp64_accel",
     sources=[
         "emulator/accel/mp64_accel.cpp",
+        "shared/accel/scalar_fp.cpp",
         "emulator/accel/dbt/executable_arena.cpp",
         "emulator/accel/dbt/x86_64/emitter.cpp",
         "emulator/accel/dbt/x86_64/lowering.cpp",
         "emulator/accel/machine/settlement.cpp",
     ],
     depends=[
+        "shared/accel/scalar_fp.h",
+        "shared/accel/scalar_fp_bindings.h",
         "emulator/accel/cpu/mp64/block_ir.h",
         "emulator/accel/cpu/mp64/decode.h",
         "emulator/accel/cpu/mp64/decode_impl.h",
@@ -102,7 +106,16 @@ ext = Extension(
     extra_link_args=_link_args,
 )
 
+class IsolatedBuildExt(build_ext):
+    """Keep shared source objects specific to this extension's compile flags."""
+
+    def finalize_options(self):
+        super().finalize_options()
+        self.build_temp = os.path.join(self.build_temp, "mp64")
+
+
 setup(
+    cmdclass={"build_ext": IsolatedBuildExt},
     name="mp64_accel",
     version="0.1.0",
     description="C++ accelerated core for Megapad-64 emulator",
