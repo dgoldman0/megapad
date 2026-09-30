@@ -41,6 +41,7 @@ from .retained_model import (
 )
 from .retained_resources import ResourceStoreState, RetainedResourceStore
 from .semantic_content import (
+    GRID_DATA_ROLES,
     SemanticTextContent,
     SemanticTextItem,
     SemanticTextRole,
@@ -1449,7 +1450,7 @@ class RetainedSceneModel:
             return item
         if (
             scalar_offset != 0
-            or item.role is not SemanticTextRole.CONTENT
+            or item.role not in GRID_DATA_ROLES
             or item.state & SemanticTextState.UNAVAILABLE
         ):
             raise SceneModelError(
@@ -2667,6 +2668,11 @@ class RetainedSceneModel:
             and not features & RetainedFeature.CONTROL_ITEMS
         ):
             self._fail(SceneErrorCode.FEATURE, "CONTROL_ITEMS was not advertised")
+        if (definition.kind is ControlKind.TEXT_GRID
+                and isinstance(definition.content, SemanticTextContent)
+                and definition.content.requires_grid_cells
+                and not features & RetainedFeature.GRID_CELLS):
+            self._fail(SceneErrorCode.FEATURE, "GRID_CELLS was not advertised")
         if definition.kind is ControlKind.FIELD:
             if not features & RetainedFeature.FIELDS:
                 self._fail(SceneErrorCode.FEATURE, "FIELDS was not advertised")

@@ -155,7 +155,12 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
     assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
-    assert "0x7F3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0xFF3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x8000   CONSTANT _PT-RET-GRID-CELLS" in source
+    assert (
+        "_PT-RV-FEATURES @ _PT-RET-GRID-CELLS AND\n"
+        "    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND"
+    ) in caps
     assert "0x4000   CONSTANT _PT-RET-FIELDS" in source
     assert (
         "_PT-RV-FEATURES @ _PT-RET-FIELDS AND\n"

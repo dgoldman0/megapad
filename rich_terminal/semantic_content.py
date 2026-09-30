@@ -69,6 +69,14 @@ class SemanticTextRole(IntEnum):
     CONTENT = 1
     ROW_HEADER = 2
     COLUMN_HEADER = 3
+    NUMBER = 4
+    FORMULA = 5
+    ERROR = 6
+
+
+GRID_DATA_ROLES = frozenset((SemanticTextRole.CONTENT, SemanticTextRole.NUMBER,
+                             SemanticTextRole.FORMULA, SemanticTextRole.ERROR))
+_TYPED_GRID_ROLES = GRID_DATA_ROLES - {SemanticTextRole.CONTENT}
 
 
 class SemanticTextState(IntFlag):
@@ -400,6 +408,7 @@ class SemanticTextContent:
     anchor_offset: int
     items: tuple[SemanticTextItem, ...]
     text_area_compatible: bool = field(init=False, repr=False, compare=False)
+    requires_grid_cells: bool = field(init=False, repr=False, compare=False)
     current_item_count: int = field(init=False, repr=False, compare=False)
     style_run_count: int = field(init=False, repr=False, compare=False)
     _utf8_bytes: int = field(init=False, repr=False, compare=False)
@@ -454,10 +463,12 @@ class SemanticTextContent:
         utf8_bytes = 0
         prior_order: tuple[int, int, int] | None = None
         text_area_compatible = True
+        requires_grid_cells = False
         current_item_count = 0
         style_run_count = 0
         for item in items:
             item_bytes = item.wire_bytes
+            requires_grid_cells |= item.role in _TYPED_GRID_ROLES
             style_run_count += len(item.runs)
             if item_bytes > UINT32_MAX - wire_bytes:
                 raise ValueError("semantic text content exceeds u32 wire bytes")
@@ -498,6 +509,7 @@ class SemanticTextContent:
             raise ValueError("semantic text anchor requires a primary position")
         object.__setattr__(self, "items", items)
         object.__setattr__(self, "text_area_compatible", text_area_compatible)
+        object.__setattr__(self, "requires_grid_cells", requires_grid_cells)
         object.__setattr__(self, "current_item_count", current_item_count)
         object.__setattr__(self, "style_run_count", style_run_count)
         object.__setattr__(self, "_utf8_bytes", utf8_bytes)
@@ -782,6 +794,7 @@ __all__ = [
     "SemanticTextContent",
     "SemanticTextItem",
     "SemanticTextRole",
+    "GRID_DATA_ROLES",
     "SemanticTextState",
     "StyleRun",
     "TextStyle",

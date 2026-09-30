@@ -159,7 +159,11 @@ Each style run is the 12-byte record `<IIHH>`: u32 start, a Unicode-scalar
 offset into the item's text; u32 length in scalars, positive; u16 meaning;
 and u16 reserved = 0. The section on style runs below gives their rules.
 
-Roles are 1 `CONTENT`, 2 `ROW_HEADER`, and 3 `COLUMN_HEADER`. State bit 0 is
+Roles are 1 `CONTENT`, 2 `ROW_HEADER`, 3 `COLUMN_HEADER`, 4 `NUMBER`,
+5 `FORMULA`, and 6 `ERROR`. The last three roles require the explicitly
+advertised `RET_GRID_CELLS` capability (bit 15), which itself requires
+`RET_CONTROL_COLLECTIONS`. They are valid only in TEXT_GRID. STX1 retains
+version 1 and its exact existing header and item layout. State bit 0 is
 `CURRENT`; bit 1 is `UNAVAILABLE`; other bits are zero and an unavailable item
 cannot be current. Text is well-formed Unicode scalar UTF-8 in logical order
 and contains no C0 control scalar other than U+0009 HORIZONTAL TAB, and no
@@ -207,11 +211,27 @@ of row away from their own start edge. Carets and selections are shown as
 
 Each TEXT_GRID item's text is one paragraph with the content's direction,
 ordered, mirrored, and joined in the same way. Where it sits inside the
-item's rectangle is the renderer's choice. `TEXT_GRID`
-permits all three roles and rectangle spans; its positions name whole items and
+item's rectangle is the renderer's choice for existing roles. NUMBER and
+FORMULA text is right-aligned within its declared item rectangle, with
+renderer-chosen role styling; ERROR text is left-aligned with error styling.
+These roles describe guest-supplied display text: NUMBER adds no host parser,
+FORMULA adds no host evaluator, and ERROR text remains application-authored.
+Their geometry, spans, text quotas, and input identity remain unchanged.
+TEXT_GRID permits all six roles when GRID_CELLS is advertised, and only the
+three original roles otherwise. Its positions name whole data items and
 therefore use zero offsets and no anchor. At most one `CURRENT` grid item
 exists. The primary item is the authoritative selection and may differ from
 `CURRENT` (for example, a selected calendar date distinct from today).
+A data item has role CONTENT, NUMBER, FORMULA, or ERROR. Header roles remain
+nonselectable, and UNAVAILABLE prevents interaction for every data role.
+READ_ONLY remains orthogonal to whole-cell selection. Changed role metadata
+requires complete newer STX1 content under existing replacement rules.
+
+The capability adds no numeric maxima, new wire fields, or event tails. Every
+carried item, including offscreen items, participates in the feature check. A
+TEXT_GRID containing a typed role is rejected atomically when GRID_CELLS is
+absent. The client retains complete CELL fallback or publishes an ordinary
+CONTENT grid; the host must never silently reinterpret a typed role as CONTENT.
 
 ### Style runs
 
@@ -444,7 +464,8 @@ never change the text.
   or, when none is above, the nearest carried row below it at offset zero.
   With no carried row in the viewport the terminal emits nothing.
 - On a TEXT_GRID, the point names the item whose rectangle contains it, with
-  offset zero. Only a `CONTENT` item without `UNAVAILABLE` may be named; any
+  offset zero. Only a data-role item (`CONTENT`, `NUMBER`, `FORMULA`, or `ERROR`)
+  without `UNAVAILABLE` may be named; any
   other point emits nothing.
 
 `EXTEND` names a TEXT_AREA position exactly as `PLACE` does and moves the caret
@@ -525,8 +546,9 @@ common one-row-span case uses a linear overlap pass; genuine row spans use an
 scan terminal cells, or rebuild a second scene. Immutable values cache their
 validated UTF-8 and wire byte totals, so quota admission and scene freezing do
 not re-encode every string. That same canonical item loop derives exactly
-three non-semantic summaries: whether the content has TEXT_AREA shape, how
-many items carry `CURRENT`, and how many style runs it has. Later scene,
+four derived summaries: whether the content has TEXT_AREA shape, whether any
+item needs GRID_CELLS, how many items carry `CURRENT`, and how many style runs
+it has. Later scene,
 view, and shared-wire family checks consult
 those immutable facts in `O(1)` instead of rescanning items. They add no hash,
 certificate, cache, traversal, or wire field; canonical STX1 construction and
@@ -608,8 +630,9 @@ TEXT_GRID maps item rectangles directly from their logical viewport-relative
 row, column, and span values. It paints role, primary, `CURRENT`, and
 `UNAVAILABLE` states with renderer-owned styling and never materializes a
 rows-by-columns matrix. Each item's text is laid out as one paragraph in the
-content's direction, and a right-to-left item is set against its rectangle's
-right edge. Tab, menu, and shortcut labels are laid out as AUTO paragraphs
+content's direction. NUMBER and FORMULA roles align at the rectangle's right
+edge, ERROR at its left edge; existing roles retain their current paragraph
+alignment, including the right edge for a right-to-left item. Tab, menu, and shortcut labels are laid out as AUTO paragraphs
 (`APT-1-TEXT.md` Section 10). TABSET uses renderer-owned sans-serif metrics: natural
 tab widths when they fit and deterministic equal partitioning when they do not.
 Only physically visible, effectively enabled TAB children enter the immutable

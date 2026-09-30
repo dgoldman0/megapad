@@ -89,9 +89,9 @@ application status bar. A retained region also does not by itself identify
 an application pane or its focus state.
 
 The full pane-and-channel design needs the following semantic publication.
-MegaPad now implements pane, structured-status, taskbar, and editable-field families; their Akashic
-producers remain integration work. Border curves and material treatment
-remain host choices.
+MegaPad now implements panes, structured status, taskbars, editable fields,
+and typed spreadsheet cells; their Akashic producers remain integration work.
+Border curves and material treatment remain host choices.
 
 | Family | Required meaning | Producer work after the MegaPad side |
 | --- | --- | --- |
@@ -99,7 +99,7 @@ remain host choices.
 | Structured status (MegaPad implemented) | Stable fields with separate label/value slots, severity, emphasis, order and bounds | Shared UIDL status/label observation and lowering, covering existing app status strips |
 | Taskbar (MegaPad implemented) | Running-app and launcher entries, selected/minimized/enabled state, bounds, and activation intent | Desk shell publication from the same entries used for painting and hit testing |
 | Editable field (MegaPad implemented) | Label/value, type, limits or choices, selected/enabled/read-only state, and revision-bound edit intents | Reusable widget with normal CELL drawing and ordinary event routing; migrate Sound Lab's parameter rows to it |
-| Spreadsheet | Logical cells, row/column headers, selection, viewport, and existing edit actions | Targeted migration of Grid's custom drawing into a canonical reusable grid model |
+| Spreadsheet (MegaPad implemented) | Logical cells, number/formula-result/error roles, row/column headers, selection, viewport, and existing edit actions | Targeted migration of Grid's custom drawing into the reusable TEXT_GRID family |
 | Waveform | Plot bounds, actual sample/series source, scale, and clip | Shared waveform widget/projector backed by Sound Lab's rendered PCM; the terminal already has a retained `WAVEFORM` object |
 
 Grid's application currently draws its spreadsheet directly into cells;
@@ -436,3 +436,46 @@ Host tests covered choice/object and UTF-8 quotas, atomic failure and retry,
 immutable full/delta offers, driver credit, display proof, and pointer routing
 through the rendered value area. Read-only behavior, unchanged raw keyboard
 handling, and full/partial repaint equivalence are covered.
+
+## Typed grid cells and producer handoff
+
+`RET_GRID_CELLS` (feature bit 15) extends the existing TEXT_GRID control with
+NUMBER (4), FORMULA (5), and ERROR (6) item roles. It requires
+CONTROL_COLLECTIONS and retains the STX1 version, binary layout, quotas,
+viewport, selection, and whole-cell PLACE event. There is no new object
+family, evaluator, or terminal-owned spreadsheet state. Plain CONTENT grids,
+including Daybook's calendar, continue to work without this capability.
+
+The guest supplies each cell's final display string. NUMBER and FORMULA
+align to the right within the existing padded rectangle, while ERROR aligns
+to the left. The host applies distinct role colors, with disabled and
+unavailable treatment and selected-text contrast taking precedence. Cells,
+headers, viewport origins, clipping, and hit rectangles keep their published
+geometry. All data roles can receive whole-cell selection; headers and
+unavailable cells cannot. Read-only content remains selectable.
+
+Grid's producer should map its existing cell types directly: NUMBER carries
+the current source text, FORMULA carries the guest-computed result, ERROR
+carries the current error text, and ordinary text remains CONTENT. Use
+logical column spans to preserve its existing row-header and data-cell
+widths. Publish the current viewport and stable cell identities from the
+same model used for CELL drawing. Continue routing PLACE and raw keyboard
+input to the existing selection and editor actions. The host never parses a
+string to discover its role or applies edits locally.
+
+The Forth writer inspects bounded STX1 structure and role admission before
+emitting or charging a transaction; malformed framing is invalid, and a
+well-formed typed grid without GRID_CELLS is unsupported with no emission.
+Full canonical content validation remains on the host. Adopt the updated
+paired guest module before advertising this capability. Existing product
+profiles remain unchanged until the Akashic producer is ready.
+
+The supervised grid gate passed 508 checks in 61.10 seconds. Two additional
+renderer assertions incorrectly expected paragraph direction on whole-cell
+input targets; their replacement verifies fixed column identities, and the
+complete 21-case renderer rerun passed in 0.24 seconds. Canonical publication
+passed on the emulator and both simulator executors. Tests cover feature
+fallback, quotas and atomic retries, all data roles, headers/unavailable
+cells, immutable projection and full/delta JSON, acknowledged input, clipping,
+bounded glyph rendering, and complete/partial repaint equivalence. The host
+accepted no new style-run or TEXT_AREA behavior.

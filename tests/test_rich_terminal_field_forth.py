@@ -182,7 +182,7 @@ class TestFieldForth(_KDOSTestBase):
             "  55 FH-S _PT.S.CLIENT-MAX-PAY ! FH-S _PT-RET-CAPS-VALID? .",
             "  64 FH-S _PT.S.CLIENT-MAX-PAY !",
             "  0x4001 FH-CAPS 8 + _PT-U64! FH-S _PT-RET-CAPS-VALID? .",
-            "  0x8101 FH-CAPS 8 + _PT-U64! FH-S _PT-RET-CAPS-VALID? .",
+            "  0x10101 FH-CAPS 8 + _PT-U64! FH-S _PT-RET-CAPS-VALID? .",
             "  0x4101 FH-CAPS 8 + _PT-U64! FH-S _PT-RET-CAPS-VALID? .",
             "  FH-CAPS FH-S _PT.S.RET-CAPS 64 MOVE",
             "  FH-FORMATS _PT-RX-P ! FH-S _PT-RET-FORMATS-VALID? .",

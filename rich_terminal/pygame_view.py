@@ -42,6 +42,7 @@ from .retained_view import (
     retained_draw_key,
 )
 from .semantic_content import (
+    GRID_DATA_ROLES,
     SemanticContentFlag,
     SemanticTextRole,
     SemanticTextState,
@@ -146,6 +147,11 @@ _GRID_CELL = (26, 32, 42)
 _GRID_HEADER = (34, 43, 57)
 _GRID_UNAVAILABLE = (23, 28, 36)
 _GRID_PRIMARY = (39, 69, 112)
+_GRID_ROLE_TEXT = {
+    SemanticTextRole.NUMBER: (105, 201, 220),
+    SemanticTextRole.FORMULA: (116, 214, 159),
+    SemanticTextRole.ERROR: (244, 139, 139),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1956,7 +1962,7 @@ def _text_root_entries(region, draw, anchor, visible_anchor) -> list[HitMapEntry
                     item.row_span,
                     item.column_span,
                     item.item_key,
-                    item.role is SemanticTextRole.CONTENT
+                    item.role in GRID_DATA_ROLES
                     and not item.state & SemanticTextState.UNAVAILABLE,
                 )
                 for item in content.items
@@ -2373,18 +2379,24 @@ def _paint_text_grid(
             text_color = (
                 _DISABLED_TEXT
                 if not enabled or item.state & SemanticTextState.UNAVAILABLE
-                else _TEXT
+                else _GRID_ROLE_TEXT.get(item.role, _TEXT)
             )
             if appearance.flowing and enabled and item.item_key == content.primary_key and not unavailable:
                 text_color = appearance.surface
             text_left = logical_left + padding
             text_right = logical_right - padding
-            # Each item is one paragraph in the content's direction; a
-            # right-to-left one is set against the item's right edge.
-            if (
-                not item.text.isascii()
-                or content.direction == text_rules.DIRECTION_RTL
-            ) and text_rules.cached_row(item.text, content.direction, True).rtl:
+            # Numeric and computed displays use their published role, never
+            # parsed text. Other existing cells retain paragraph alignment;
+            # an ERROR is explicitly left-aligned in its unchanged slot.
+            right_aligned = item.role in (
+                SemanticTextRole.NUMBER, SemanticTextRole.FORMULA,
+            )
+            if item.role is not SemanticTextRole.ERROR and not right_aligned:
+                right_aligned = (
+                    not item.text.isascii()
+                    or content.direction == text_rules.DIRECTION_RTL
+                ) and text_rules.cached_row(item.text, content.direction, True).rtl
+            if right_aligned:
                 text_left = max(
                     text_left,
                     text_right

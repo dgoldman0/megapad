@@ -138,6 +138,7 @@ PT-LEGACY-PENDING?  ( session -- flag )
 
 PT-RETAINED-DISCOVER   ( session -- status )
 PT-RETAINED-STATE@     ( session -- state )
+PT-RET-GRID-CELLS?     ( session -- flag )
 PT-RETAINED-AVAILABLE? ( session -- flag )
 PT-RETAINED-CAPS@      ( session -- a u )
 PT-RETAINED-FORMATS@   ( session -- a u )
@@ -548,6 +549,25 @@ nonoverlap, and at most one selected task in the final graph. PT keeps no
 parallel control table. Task and launcher activation uses the existing
 revision-bound `PT-CONTROL-ACTIVATE` event; the guest decides which application
 to activate or launch, then publishes the resulting state.
+
+`RET_GRID_CELLS` (bit 15) extends STX1 TEXT_GRID item roles with
+`PT-TEXT-ROLE-NUMBER`, `PT-TEXT-ROLE-FORMULA`, and `PT-TEXT-ROLE-ERROR` (4–6).
+Existing `PT-TEXT-ROLE-CONTENT`, `PT-TEXT-ROLE-ROW-HEADER`, and
+`PT-TEXT-ROLE-COLUMN-HEADER` are 1–3. `PT-RET-GRID-CELLS?` reports the
+negotiated feature. It depends on CONTROL_COLLECTIONS and inherits that
+family's capacities and wire format. The guest publishes the displayed text,
+logical slots, and semantic role; evaluation and value authority remain with
+the application.
+
+Before admitting a TEXT_GRID DEFINE or REPLACE, PT walks the bounded STX1
+header and item records, checking the tag, version, reserved header word,
+roles 1–6, item count, text/style-run spans, and exact final length. A malformed
+walk returns `PT-S-INVALID`. A valid record containing roles 4–6 returns
+`PT-S-UNSUPPORTED` when GRID_CELLS is unavailable, without emission or
+transaction accounting changes. Ordinary roles 1–3 continue to publish under
+CONTROL_COLLECTIONS alone. All temporary traversal pointers are scrubbed.
+Full STX1 text, geometry, flags, style semantics, item identity, and quota
+validation remain terminal-owned.
 
 `PT-CONTROL-FIELD` (13) uses the existing CONTROL writers with an exact
 canonical FDC1 content span. It requires `RET_FIELDS` (bit 14), which depends

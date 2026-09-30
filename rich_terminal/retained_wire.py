@@ -65,7 +65,7 @@ from .semantic_items import (
 from .semantic_fields import FieldContent, encode_field_content, decode_field_content
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0x7F3F
+_RETAINED_FEATURE_MASK = 0xFF3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -388,6 +388,8 @@ class RetainedCaps:
             and not features & RetainedFeature.CONTROLS
         ):
             raise ValueError("TASKBARS requires CONTROLS")
+        if features & RetainedFeature.GRID_CELLS and not features & RetainedFeature.CONTROL_COLLECTIONS:
+            raise ValueError("GRID_CELLS requires CONTROL_COLLECTIONS")
         if features & RetainedFeature.FIELDS and not features & RetainedFeature.CONTROLS:
             raise ValueError("FIELDS requires CONTROLS")
         object.__setattr__(self, "features", features)
