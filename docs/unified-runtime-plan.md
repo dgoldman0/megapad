@@ -317,6 +317,13 @@ The following nesting gate is separately locked in
 distinct active registrations, narrowed child buffers, per-frame callback
 ceilings and one shared dispatch budget. It requires 5B1 qualification first.
 
+The shared-task exception and suspension boundary is locked separately in
+[`hybrid-task-callback-plan.md`](hybrid-task-callback-plan.md). Its new task ABI
+uses the original main-context stacks, dispatcher-owned foreign continuations,
+permanent cookie revocation, child-suffix cancellation and one composite
+suspension. Private callback stack/failure semantics stay unchanged. Reference,
+native and production session gates precede capability exposure.
+
 Add machine-to-semantic callbacks, nested transitions, exceptions,
 suspension/wake, and selected service access in separate qualified slices.
 Then specify native compiler/dictionary integration for guest JIT, machine
