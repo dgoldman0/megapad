@@ -311,6 +311,10 @@ closed, acyclic integer colon policies on the existing private stacks. Its
 explicit v3 metadata reuses the v2 native transport. Declarative policy IR is
 validated and installed before routine publication and unchanged source
 bootstrap; no arbitrary source prelude or dynamic callback is admitted.
+The following nesting gate is separately locked in
+[`hybrid-nested-callback-plan.md`](hybrid-nested-callback-plan.md): at most eight
+distinct active registrations, narrowed child buffers, per-frame callback
+ceilings and one shared dispatch budget. It requires 5B1 qualification first.
 
 Add machine-to-semantic callbacks, nested transitions, exceptions,
 suspension/wake, and selected service access in separate qualified slices.
