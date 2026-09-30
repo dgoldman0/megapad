@@ -41,10 +41,21 @@ struct Callback {
 };
 
 struct Result : routine_v1::Result {
+    uint64_t segment_id = 0;
     uint64_t invocation_id = 0;
     uint64_t invocation_instructions = 0, invocation_cycles = 0;
     std::shared_ptr<Callback> callback;
     std::shared_ptr<Token> token;
+};
+
+// Plain accounting survives result allocation/marshalling failures and token
+// revocation. No guest cells, continuation authority, or Python ownership.
+struct Receipt {
+    uint64_t segment_id = 0, invocation_id = 0;
+    uint64_t instructions = 0, cycles = 0;
+    uint64_t invocation_instructions = 0, invocation_cycles = 0;
+    uint64_t invocation_callbacks = 0;
+    bool callback_request = false;
 };
 
 } // namespace mp64::cpu::routine_v2

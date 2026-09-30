@@ -2,9 +2,9 @@
 
 Date: 2026-09-30
 
-Status: Phase 5A value contract, semantic export engine, v2 manifest loader and
-native request/resume runner are qualified. Composition and launcher admission
-remain separate implementation gates.
+Status: Phase 5A values, semantic export engine, v2 manifest loader, native
+request/resume runner and synchronous composition are qualified. Application
+admission is the next separately recorded integration slice.
 The locked implementation direction is
 [`hybrid-interop-plan.md`](hybrid-interop-plan.md).
 
@@ -222,6 +222,42 @@ The existing hybrid bridge and registration-failure gates also passed 99
 checks. This engine does not yet connect an actual machine callback or enable
 v2 manifests in the application. The separate loader gate passed 98 new checks
 alongside 94 existing v1 manifest and 90 callback-value checks.
+
+## Qualified synchronous composition
+
+`HybridRuntime.register_routine_v2` binds exports and publishes code within one
+rollback boundary. The caller's argument cells remain in place until normal
+machine return; each semantic callback runs on its own bounded stacks. Exact
+code, allocation, dictionary, export and native-owner evidence is rechecked
+before callbacks and resumed machine segments. Dictionary mutation and nested
+machine entry are rejected while the invocation is active.
+
+The existing root semantic meter owns callback work. Machine instructions,
+callback requests and callback semantic steps have separate cumulative
+allowances that survive raw execution, wrapper calls and host quanta, including
+a yield before the first machine entry. Lowering a retained allowance never
+renews it. A last-instruction CALL is counted and cancelled without dispatching
+a semantic leaf.
+
+The native owner retains a plain-data `last_segment_v2()` receipt before result
+allocation or marshalling. Its monotonically increasing segment identity lets
+composition settle completed work exactly once even if result delivery raises.
+Receipts survive cancellation and carry no continuation authority. Owner
+cancellation with no token is idempotent; explicit-token cancellation retains
+strict identity and replay checks. If settlement or cleanup cannot be proved,
+later interop entry is disabled while the original exception is preserved.
+
+An exact runtime-issued primitive admission preserves callback host exceptions
+through the outer semantic primitive boundary, including `InstructionFault`.
+Ordinary primitives and v1 retain their existing guest-fault translation.
+Completed machine stores and charged work remain visible after failure;
+unpublished callback outputs do not replace the caller's cells.
+
+The final native/composition gate passed 476 checks: 64 native callback cases,
+114 composition cases across both semantic executors, the 79 native v1 cases,
+99 existing hybrid bridge/publication cases, 110 export/transaction cases and
+10 KDOS exception cases. This is synchronous integer-leaf interoperability;
+it does not enable nested machine callbacks, callback suspension or services.
 
 ## `CallbackRequestV2`
 

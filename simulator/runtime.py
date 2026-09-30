@@ -780,6 +780,7 @@ class MegaForthRuntime:
         self._active_dispatches: list[_DispatchFrame] = []
         self._transient_words: dict[int, Word] = {}
         self._colon_accelerators: dict[int, _ColonAccelerator] = {}
+        self._primitive_host_escapes: dict[int, tuple[PrimitiveDefinition, object]] = {}
         self._next_dispatch_root_id = 1
         self._uart_input: deque[int] = deque()
         self._uart_output = bytearray()
@@ -1799,6 +1800,30 @@ class MegaForthRuntime:
             _DICTIONARY_FAULT_ABORT,
         )
 
+    def _register_primitive_host_escape(self, implementation, callback):
+        """Issue exact implementation authority for a trusted host boundary.
+
+        Hybrid v2 uses this only to preserve an inner callback exception after
+        its native frame has been cancelled. It is not a source-word option.
+        """
+        if (type(implementation) is not PrimitiveDefinition
+                or implementation.callback is not callback or not callable(callback)):
+            raise TypeError("host escape admission requires an exact primitive and callback")
+        key = id(implementation)
+        if key in self._primitive_host_escapes:
+            raise ExecutionError("primitive host escape authority already issued")
+        if len(self._primitive_host_escapes) >= 64:
+            raise ExecutionError("primitive host escape table is full")
+        admission = (implementation, callback)
+        self._primitive_host_escapes[key] = admission
+        return admission
+
+    def _revoke_primitive_host_escape(self, admission) -> None:
+        key = id(admission[0])
+        if self._primitive_host_escapes.get(key) is not admission:
+            raise ExecutionError("primitive host escape authority is no longer issued")
+        del self._primitive_host_escapes[key]
+
     def _invoke_primitive(
         self,
         implementation: PrimitiveDefinition,
@@ -1806,9 +1831,17 @@ class MegaForthRuntime:
     ) -> object:
         """Run a primitive; a machine trap becomes a guest fault request."""
 
+        callback = implementation.callback
+        host_escape = False
+        if self._primitive_host_escapes:
+            admission = self._primitive_host_escapes.get(id(implementation))
+            host_escape = (admission is not None and admission[0] is implementation
+                           and admission[1] is callback)
         try:
-            return implementation.callback(context)
+            return callback(context)
         except InstructionFault as fault:
+            if host_escape:
+                raise
             raise _GuestFaultRequest(
                 self._fault_xt,
                 context,

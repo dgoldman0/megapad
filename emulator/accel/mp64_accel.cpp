@@ -13208,6 +13208,7 @@ public:
             throw py::value_error("v2 specification was not published by this runner");
         if (invocation_sequence_ == std::numeric_limits<uint64_t>::max())
             throw std::runtime_error("native invocation identity space is exhausted");
+        require_segment_identity();
         auto next = std::make_unique<Frame>();
         next->spec = spec;
         next->publication = publication->second.generation;
@@ -13235,11 +13236,14 @@ public:
         validate_token(token);
         validate_seal(*frame_->spec, true);
         validate_parked_frame();
+        require_segment_identity();
         if (frame_->instructions == frame_->allowance) {
             auto result = make_result();
             result.detail = "machine instruction allowance exhausted before callback return";
             token->consumed = true;
             frame_->pending.reset();
+            record_segment(frame_->instructions, frame_->cycles, frame_->sequence);
+            result.segment_id = last_segment_->segment_id;
             frame_.reset();
             return result;
         }
@@ -13262,6 +13266,16 @@ public:
         if (frame_->pending) frame_->pending->consumed = true;
         frame_.reset();
         return result;
+    }
+
+    bool owner_cancel_is_inactive() const {
+        if (active_)
+            throw std::runtime_error("routine runner boundary is already active");
+        return !frame_;
+    }
+
+    std::optional<mp64_callbacks::Receipt> last_segment_v2() const noexcept {
+        return last_segment_;
     }
 
     void abandon_marshaled_result(uint64_t invocation_id) noexcept {
@@ -13364,7 +13378,25 @@ private:
         return result;
     }
 
+    void require_segment_identity() const {
+        if (segment_sequence_ == std::numeric_limits<uint64_t>::max())
+            throw std::runtime_error("native segment identity space is exhausted");
+    }
+
+    void record_segment(uint64_t instructions_before, uint64_t cycles_before,
+                        uint64_t callbacks_before) noexcept {
+        const Frame& frame = *frame_;
+        last_segment_ = mp64_callbacks::Receipt{
+            ++segment_sequence_, frame.invocation_id,
+            frame.instructions - instructions_before,
+            frame.cycles - cycles_before, frame.instructions, frame.cycles,
+            frame.sequence, frame.sequence > callbacks_before};
+    }
+
     mp64_callbacks::Result drive(bool resume_stub) {
+        const uint64_t instructions_before = frame_->instructions;
+        const uint64_t cycles_before = frame_->cycles;
+        const uint64_t callbacks_before = frame_->sequence;
         try {
             auto result = make_result();
             Frame& frame = *frame_;
@@ -13474,9 +13506,12 @@ private:
             result.invocation_cycles = frame.cycles;
             if (result.exit_kind == "instruction_limit")
                 result.detail = "machine instruction allowance exhausted before root return";
+            record_segment(instructions_before, cycles_before, callbacks_before);
+            result.segment_id = last_segment_->segment_id;
             if (result.exit_kind != "callback_request") frame_.reset();
             return result;
         } catch (...) {
+            record_segment(instructions_before, cycles_before, callbacks_before);
             frame_.reset();
             throw;
         }
@@ -13486,6 +13521,8 @@ private:
         std::make_shared<mp64_callbacks::OwnerIdentity>();
     std::unordered_map<const mp64_callbacks::Spec*, Publication> publications_;
     uint64_t published_bytes_ = 0, publication_sequence_ = 0, invocation_sequence_ = 0;
+    uint64_t segment_sequence_ = 0;
+    std::optional<mp64_callbacks::Receipt> last_segment_;
     std::unique_ptr<Frame> frame_;
 };
 
@@ -36333,16 +36370,28 @@ PYBIND11_MODULE(_mp64_accel, m) {
         });
 
     py::class_<mp64_callbacks::Result, mp64_routine::Result>(m, "RoutineSegmentResultV2")
+        .def_readonly("segment_id", &mp64_callbacks::Result::segment_id)
         .def_readonly("invocation_id", &mp64_callbacks::Result::invocation_id)
         .def_readonly("invocation_instructions", &mp64_callbacks::Result::invocation_instructions)
         .def_readonly("invocation_cycles", &mp64_callbacks::Result::invocation_cycles)
         .def_readonly("callback", &mp64_callbacks::Result::callback)
         .def_readonly("token", &mp64_callbacks::Result::token);
 
+    py::class_<mp64_callbacks::Receipt>(m, "RoutineSegmentReceiptV2")
+        .def_readonly("segment_id", &mp64_callbacks::Receipt::segment_id)
+        .def_readonly("invocation_id", &mp64_callbacks::Receipt::invocation_id)
+        .def_readonly("instructions", &mp64_callbacks::Receipt::instructions)
+        .def_readonly("cycles", &mp64_callbacks::Receipt::cycles)
+        .def_readonly("invocation_instructions", &mp64_callbacks::Receipt::invocation_instructions)
+        .def_readonly("invocation_cycles", &mp64_callbacks::Receipt::invocation_cycles)
+        .def_readonly("invocation_callbacks", &mp64_callbacks::Receipt::invocation_callbacks)
+        .def_readonly("callback_request", &mp64_callbacks::Receipt::callback_request);
+
     py::class_<RoutineRunnerV2, RoutineRunnerV1>(m, "RoutineRunnerV2")
         .def(py::init<py::object, py::handle, py::buffer>(),
             py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
         .def("close", &RoutineRunnerV2::close)
+        .def("last_segment_v2", &RoutineRunnerV2::last_segment_v2)
         .def("publish_code_v2", &RoutineRunnerV2::publish_code_v2,
             py::arg("spec").none(false))
         .def("revoke_code_v2", &RoutineRunnerV2::revoke_code_v2,
@@ -36370,7 +36419,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 return runner.resume_callback(token, outputs);
             });
         }, py::arg("token").none(false), py::arg("outputs"))
-        .def("cancel_invocation", [](RoutineRunnerV2& runner, py::object token) {
+        .def("cancel_invocation", [](RoutineRunnerV2& runner, py::object token) -> py::object {
+            if (token.is_none() && runner.owner_cancel_is_inactive())
+                return py::none();
             return marshal_routine_segment_v2(runner, [&] {
                 return runner.cancel_invocation(token);
             });

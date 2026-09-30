@@ -174,6 +174,119 @@ def _request(result):
     return result.callback, result.token
 
 
+def _receipt(receipt):
+    return (receipt.segment_id, receipt.invocation_id, receipt.instructions, receipt.cycles,
+            receipt.invocation_instructions, receipt.invocation_cycles,
+            receipt.callback_request, receipt.invocation_callbacks)
+
+
+def _assert_receipt_matches(result, receipt, callbacks):
+    assert _receipt(receipt) == (
+        result.segment_id, result.invocation_id, result.instructions, result.cycles,
+        result.invocation_instructions, result.invocation_cycles,
+        result.exit_kind == "callback_request", callbacks,
+    )
+
+
+def test_native_receipts_count_each_segment_once_and_remain_readable_after_close():
+    harness = Harness(DOUBLE, inputs=3, callbacks=(
+        ("call1", "stub1", 7, 2, 1), ("call2", "stub2", 9, 2, 1),
+    ))
+    assert harness.runner.last_segment_v2() is None
+    first = harness.begin((EXT_BASE, 7, 3), [(EXT_BASE, 8, "read_write")])
+    _request(first)
+    before = harness.snapshot()
+    first_receipt = harness.runner.last_segment_v2()
+    _assert_receipt_matches(first, first_receipt, 1)
+    assert first.segment_id > 0 and harness.snapshot() == before
+    with pytest.raises(AttributeError):
+        first_receipt.instructions = 0
+
+    second = harness.runner.resume_callback(first.token, (3,))
+    _request(second)
+    second_receipt = harness.runner.last_segment_v2()
+    _assert_receipt_matches(second, second_receipt, 2)
+    assert second.segment_id == first.segment_id + 1
+    assert second.invocation_id == first.invocation_id
+    assert second.invocation_instructions == first.instructions + second.instructions
+    assert second.invocation_cycles == first.cycles + second.cycles
+    # Receipts are value snapshots, not a view rewritten at the next boundary.
+    _assert_receipt_matches(first, first_receipt, 1)
+
+    final = harness.runner.resume_callback(second.token, (9,))
+    assert final.exit_kind == "returned" and final.outputs == (9,)
+    final_receipt = harness.runner.last_segment_v2()
+    _assert_receipt_matches(final, final_receipt, 2)
+    assert final.segment_id == second.segment_id + 1
+    assert final.invocation_instructions == first.instructions + second.instructions + final.instructions
+    assert final.invocation_cycles == first.cycles + second.cycles + final.cycles
+    before = harness.snapshot()
+    assert harness.runner.cancel_invocation() is None
+    assert _receipt(harness.runner.last_segment_v2()) == _receipt(final_receipt)
+    assert harness.snapshot() == before
+    harness.runner.close()
+    assert _receipt(harness.runner.last_segment_v2()) == _receipt(final_receipt)
+
+
+def test_preflight_failures_and_owner_cancellation_do_not_replace_work_receipt():
+    harness = Harness()
+    assert harness.runner.cancel_invocation() is None
+    before = harness.snapshot()
+    with pytest.raises(TypeError):
+        harness.begin(callbacks=True)
+    assert harness.snapshot() == before
+    assert harness.runner.last_segment_v2() is None
+    first = harness.begin()
+    _request(first)
+    receipt = _receipt(harness.runner.last_segment_v2())
+    before = harness.snapshot()
+    with pytest.raises(TypeError):
+        harness.runner.resume_callback(first.token, (True,))
+    assert _receipt(harness.runner.last_segment_v2()) == receipt
+    assert harness.snapshot() == before
+    cancelled = harness.runner.cancel_invocation()
+    assert cancelled.exit_kind == "cancelled"
+    assert cancelled.instructions == cancelled.cycles == 0
+    assert _receipt(harness.runner.last_segment_v2()) == receipt
+    assert harness.snapshot() == before
+    assert harness.runner.cancel_invocation() is None
+    with pytest.raises((ValueError, RuntimeError)):
+        harness.runner.cancel_invocation(first.token)
+    assert _receipt(harness.runner.last_segment_v2()) == receipt
+
+    harness.ram[CODE_BASE] ^= 1
+    before = harness.snapshot()
+    with pytest.raises(ValueError):
+        harness.begin()
+    assert harness.snapshot() == before
+    assert _receipt(harness.runner.last_segment_v2()) == receipt
+    harness.ram[CODE_BASE] ^= 1
+    second = harness.begin()
+    assert second.segment_id == first.segment_id + 1
+    assert second.invocation_id > first.invocation_id
+    _assert_receipt_matches(second, harness.runner.last_segment_v2(), 1)
+    harness.runner.cancel_invocation()
+
+
+def test_zero_work_exhaustion_still_issues_a_unique_terminal_segment_receipt():
+    harness = Harness()
+    first = harness.begin(limit=3)
+    _request(first)
+    before = harness.snapshot()
+    final = harness.runner.resume_callback(first.token, (99,))
+    assert final.exit_kind == "instruction_limit"
+    assert final.segment_id == first.segment_id + 1
+    assert final.invocation_id == first.invocation_id
+    assert final.instructions == final.cycles == 0
+    assert final.invocation_instructions == first.invocation_instructions
+    assert final.invocation_cycles == first.invocation_cycles
+    _assert_receipt_matches(final, harness.runner.last_segment_v2(), 1)
+    assert harness.snapshot() == before
+    receipt = _receipt(harness.runner.last_segment_v2())
+    assert harness.runner.cancel_invocation() is None
+    assert _receipt(harness.runner.last_segment_v2()) == receipt
+
+
 def test_real_calls_returns_registers_private_cells_and_warm_cache_match_ordinary_interpreter():
     harness = Harness(DOUBLE, inputs=3, callbacks=(
         ("call1", "stub1", 7, 2, 1), ("call2", "stub2", 9, 2, 1),
