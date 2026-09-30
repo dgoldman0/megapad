@@ -560,6 +560,26 @@ class ScriptedForeignAdapter:
                 frame.state = "failed"
                 return self._emit(frame, ForeignStateV1.FAILED, before, started, failure=step)
 
+    def validate_parked(self, root_token, operation_token, request_token=None):
+        if root_token is not self._root_token or operation_token is None:
+            raise ValueError("parked validation requires the exact current root and operation")
+        frame = self._top(operation_token=operation_token)
+        if frame.state == "callback":
+            if request_token is None or request_token is not frame.request_token:
+                raise ValueError("parked validation requires the exact pending request")
+            self._top(request_token=request_token)
+        elif frame.state != "runnable" or request_token is not None:
+            raise ValueError("parked foreign state is not resumable")
+        parent = None
+        for current in self._frames:
+            self._binding(current.binding.operation)
+            if current.parent_id != (parent.invocation_id if parent is not None else None):
+                raise ValueError("parked foreign ancestry changed")
+            if parent is not None and (parent.state != "callback" or parent.request is None):
+                raise ValueError("parked ancestor no longer owns its request")
+            parent = current
+        return True
+
     def last_receipt(self):
         return self._last
 

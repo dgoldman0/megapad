@@ -49,7 +49,7 @@ class PrivateHostAbortProvenance:
 
     __slots__ = ("_runtime", "_issuer_code", "_scope_codes", "_error",
                  "_cursor", "_cursor_frame", "_matched_scope", "_leaf_scope",
-                 "_task_installation")
+                 "_task_installation", "_task_deadline_installation")
 
     def __init__(self, runtime, runtime_class):
         self._runtime = runtime
@@ -60,18 +60,22 @@ class PrivateHostAbortProvenance:
         ))
         self._leaf_scope = None
         self._task_installation = None
+        self._task_deadline_installation = None
         _clear(self)
 
     def install_task_issuers(self, engine, dispatch_class):
-        """Capture only the original task engine's two host-call boundaries.
+        """Capture only the original task engine's admitted host-call boundaries.
 
         Construction happens before user customization, before any task root
         exists. This installs no guest exception or arbitrary-callable route.
         """
-        from simulator.foreign_runtime import ForeignTaskEngine
+        from simulator.foreign_runtime import (
+            CapturedTaskExport, ForeignTaskEngine, _RTC_FIELDS, _TaskRTCSeal,
+        )
         from simulator.foreign_dispatch import TaskDispatchRoot
         from simulator.foreign_control import ForeignReturnControl
         from simulator.runtime import ExecutionContext
+        from simulator.rtc import HostedRTCService
         from simulator.stacks import ReturnStack
 
         frame = _GETFRAME(1)
@@ -100,6 +104,11 @@ class PrivateHostAbortProvenance:
             vars(ForeignReturnControl)["_issuer"], vars(ForeignReturnControl)["_stack"],
             runtime_descriptor, vars(ReturnStack)["__dict__"],
         )
+        self._task_deadline_installation = (
+            ForeignTaskEngine.read_task_uptime.__code__,
+            next(value.fget for name, value in _RTC_FIELDS if name == "uptime_ms"),
+            HostedRTCService, CapturedTaskExport, _TaskRTCSeal,
+        )
 
     def issue_task(self, root, error):
         """Issue only an admitted task accounting/adapter host-call failure."""
@@ -117,6 +126,58 @@ class PrivateHostAbortProvenance:
         unwinding = dict.get(values, "_unwinding_error")
         # Cleanup can encounter another host error while preserving a primary
         # escape. It must neither replace its record nor mark an ordinary ABORT.
+        if unwinding is not None and unwinding is not error:
+            return
+        runtime_values = runtime_descriptor.__get__(self._runtime, type(self._runtime))
+        control = dict.get(values, "control")
+        returns = returns_descriptor.__get__(context, type(context))
+        if (dict.get(runtime_values, "_foreign_tasks") is not engine
+                or engine_descriptor.__get__(engine, type(engine)) is not engine_values
+                or dict.get(engine_values, "_task_root") is not root
+                or dict.get(engine_values, "_runtime") is not self._runtime
+                or dict.get(engine_values, "_context") is not context
+                or dict.get(values, "engine") is not engine
+                or dict.get(values, "context") is not context
+                or type(control) is not control_class
+                or issuer_descriptor.__get__(control, control_class) is not dict.get(values, "issuer")
+                or stack_descriptor.__get__(control, control_class) is not returns
+                or dict.get(returns_namespace.__get__(returns, type(returns)), "_foreign_control") is not control
+                or _outer_scope(self, frame) is None):
+            return
+        traceback = _TRACEBACK.__get__(error, BaseException)
+        if traceback is None or traceback.tb_frame is not frame:
+            return
+        _clear(self)
+        self._error = error
+        self._cursor = traceback
+        self._cursor_frame = frame
+
+    def issue_task_deadline(self, root, error):
+        """Preserve only a captured IdleUntil clock failure in its original guard.
+
+        The canonical engine frame has already validated its RTC seal and
+        retained the exact getter/owner before the host clock runs. Reading
+        those locals avoids consulting host-mutated RTC routes during unwind.
+        """
+        installation = self._task_installation
+        deadline = self._task_deadline_installation
+        if installation is None or deadline is None:
+            return
+        (engine, engine_descriptor, engine_values, dispatch_class, root_descriptor,
+         _codes, context, returns_descriptor, control_class,
+         issuer_descriptor, stack_descriptor, runtime_descriptor, returns_namespace) = installation
+        code, getter, rtc_class, capture_class, seal_class = deadline
+        frame = _GETFRAME(1)
+        local = frame.f_locals
+        if (frame.f_code is not code or local.get("self") is not engine
+                or local.get("root") is not root or type(root) is not dispatch_class
+                or local.get("getter") is not getter
+                or type(local.get("rtc_owner")) is not rtc_class
+                or type(local.get("capture")) is not capture_class
+                or type(local.get("rtc")) is not seal_class):
+            return
+        values = root_descriptor.__get__(root, dispatch_class)
+        unwinding = dict.get(values, "_unwinding_error")
         if unwinding is not None and unwinding is not error:
             return
         runtime_values = runtime_descriptor.__get__(self._runtime, type(self._runtime))

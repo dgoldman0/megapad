@@ -616,7 +616,8 @@ _TASK_DISPATCH_ALIASES = tuple((kind.__name__, kind) for kind in (
     ForeignContinuation, ForeignCallbackTarget, ForeignResumeTarget, Invoke,
     Literal, Call, CallSelf, StoreValue, Branch, BranchZero, QuestionDo, Loop,
     PlusLoop, Return, Do, Unloop, RPush, RPop, RPeek, RPushPair, RPopPair,
-    RPeekPair, RestoreDataStackPointer, RestoreReturnStackPointer,
+    RPeekPair, RestoreDataStackPointer, RestoreReturnStackPointer, Idle, IdleUntil,
+    _DispatchCursor, _SuspendedExecution, ExecutionSuspension,
 ))
 
 
@@ -1017,7 +1018,32 @@ class MegaForthRuntime:
         if self._uart_input:
             return True
         deadline = self._idle_deadline_ms
+        blocked = self._suspended_execution
+        if (deadline is not None and blocked is not None
+                and self._foreign_tasks.task_suspension_owner(blocked=blocked) is not None):
+            try:
+                return self._foreign_tasks.parked_idle_wake_due(blocked, deadline)
+            except BaseException as failure:
+                self._cancel_failed_task_suspension(blocked, failure)
+                raise
         return deadline is not None and self.rtc.uptime_ms >= deadline
+
+    @property
+    def idle_wake_delay_s(self) -> float | None:
+        """Read the selected deadline clock without granting a wake."""
+        deadline = self._idle_deadline_ms
+        if deadline is None:
+            return None
+        blocked = self._suspended_execution
+        if blocked is not None and self._foreign_tasks.task_suspension_owner(blocked=blocked) is not None:
+            try:
+                uptime = self._foreign_tasks.parked_idle_uptime(blocked)
+            except BaseException as failure:
+                self._cancel_failed_task_suspension(blocked, failure)
+                raise
+        else:
+            uptime = self.rtc.uptime_ms
+        return max(deadline - uptime, 0) / 1000
 
     @property
     def uart_input_pending(self) -> int:
@@ -1800,6 +1826,10 @@ class MegaForthRuntime:
         return ExecutionSuspension(sequence, self._runtime_token)
 
     def _require_no_closed_callback_entry(self, operation: str) -> None:
+        task_engine = getattr(self, "_foreign_tasks", None)
+        if task_engine is not None and task_engine.suspension_transition_busy():
+            from simulator.foreign_runtime import ForeignTaskError
+            raise ForeignTaskError(f"cannot {operation} during an owned task transition")
         accounting_guard = getattr(self, "_closed_accounting_guard", None)
         if accounting_guard is not None:
             accounting_guard(operation)
@@ -1825,7 +1855,25 @@ class MegaForthRuntime:
     def _require_suspension(
         self,
         handle: ExecutionSuspension,
+        *, validate_task: bool = True,
     ) -> _SuspendedExecution:
+        if self._foreign_tasks.suspension_transition_busy():
+            from simulator.foreign_runtime import ForeignTaskError
+            raise ForeignTaskError("cannot change suspension during an owned task transition")
+        witness = self._foreign_tasks._parked_task
+        ownership = self._foreign_tasks._parked_ownership
+        suspended = self._suspended_execution
+        if ownership is not None and ownership[1] is suspended:
+            original_handle = next(evidence[2] for name, evidence in ownership[3] if name == "handle")
+            if handle is not original_handle:
+                raise ExecutionError("suspension is stale, foreign, or already consumed")
+            if validate_task:
+                try:
+                    self._foreign_tasks._verify_parked(witness, suspended)
+                except BaseException as failure:
+                    self._cancel_failed_task_suspension(suspended, failure)
+                    raise
+            return suspended
         if not isinstance(handle, ExecutionSuspension):
             raise TypeError("suspension must be an ExecutionSuspension")
         if handle._runtime_token is not self._runtime_token:
@@ -2771,7 +2819,8 @@ class MegaForthRuntime:
             or blocked.wake_receipt is not wake_receipt
         ):
             raise ExecutionError("wake receipt is stale, foreign, or already consumed")
-        self._idle_deadline_ms = None
+        if not self.task_suspension_pending(suspension):
+            self._idle_deadline_ms = None
         return self._continue_suspension_locked(blocked)
 
     def resume_yielded(self, suspension: ExecutionSuspension) -> RunResult:
@@ -2790,18 +2839,78 @@ class MegaForthRuntime:
 
         task = self._foreign_tasks._task_root
         if task is not None:
+            self._foreign_tasks._require_task(task.context)
             task.reconcile()
+            return stack.snapshot()
         if self._native_execution is not None:
             snapshot = self._native_execution.snapshot_stack(stack)
             if snapshot is not None:
                 return snapshot
         return stack.snapshot()
 
+    def task_suspension_pending(self, handle) -> bool:
+        """Identify a current task proof before a backend polls its deadline."""
+        blocked = self._suspended_execution
+        return (type(handle) is ExecutionSuspension and blocked is not None
+                and self._foreign_tasks.task_suspension_owner(blocked=blocked, handle=handle) is not None)
+
+    def _finish_task_escape(self, root, failure, blocked=None):
+        if root is None:
+            return True
+        engine = self._foreign_tasks
+        safe = True if blocked is None else engine.restore_suspension_cleanup(blocked)
+        if engine._root_ownership is not None and engine._root_ownership[0] is root:
+            try:
+                engine.finish_root(root, completed=False, primary_error=failure)
+            except BaseException:
+                try:
+                    BaseException.add_note(failure, "task suspension transport cleanup also failed")
+                except BaseException:
+                    pass
+        if blocked is not None:
+            engine.release_suspension_lease()
+        if not safe or not engine.task_cleanup_safe(root):
+            engine.mark_task_cleanup_unsafe(root)
+            return False
+        return True
+
+    def _cancel_failed_task_suspension(self, blocked, failure):
+        """Consume failed composite proof before restoring ordinary returns."""
+        engine = self._foreign_tasks
+        root = engine.task_suspension_owner(blocked=blocked)
+        if root is None:
+            root = engine._root_ownership[0] if engine._root_ownership is not None else blocked.task_root
+        try:
+            if self._finish_task_escape(root, failure, blocked):
+                context = blocked.context
+                if (blocked.had_pointer_capture or context.returns.has_pointer_captures_after(
+                        blocked.capture_checkpoint)):
+                    context._mark_host_control_fault(failure)
+                context.returns.restore(blocked.return_snapshot)
+                context.returns.restore_pointer_captures(blocked.capture_checkpoint)
+        except BaseException:
+            try:
+                BaseException.add_note(failure, "task suspension ordinary cleanup also failed")
+            except BaseException:
+                pass
+        finally:
+            self._suspended_execution = None
+            self._idle_deadline_ms = None
+            self._foreign_tasks.release_suspension_lease()
+
     def _continue_suspension_locked(
         self,
         blocked: _SuspendedExecution,
     ) -> RunResult:
         suspension = blocked.handle
+        if self.task_suspension_pending(suspension) or blocked.task_root is not None:
+            try:
+                self._foreign_tasks.resume_suspension(blocked)
+            except BaseException as failure:
+                self._cancel_failed_task_suspension(blocked, failure)
+                raise
+            if not blocked.cursor.host_yield:
+                self._idle_deadline_ms = None
         if self._stack_snapshot(blocked.context.data) != blocked.blocked_data_snapshot:
             raise ExecutionError("data stack changed while dispatch was suspended")
         if self._stack_snapshot(blocked.context.returns) != blocked.blocked_return_snapshot:
@@ -2832,24 +2941,18 @@ class MegaForthRuntime:
             blocked.cursor = cursor
             blocked.blocked_data_snapshot = self._stack_snapshot(blocked.context.data)
             blocked.blocked_return_snapshot = self._stack_snapshot(blocked.context.returns)
+            if blocked.task_root is not None:
+                self._foreign_tasks.park_suspension(blocked)
             blocked.context._lease_for_suspension(handle.sequence)
             lease_installed = True
             self._suspended_execution = blocked
         except BaseException as exc:
-            if lease_installed:
-                assert handle is not None
-                blocked.context._release_suspension(handle.sequence)
-            if blocked.task_root is not None and self._foreign_tasks._task_root is blocked.task_root:
-                try:
-                    self._foreign_tasks.finish_root(blocked.task_root, completed=False, primary_error=exc)
-                except BaseException:
-                    try:
-                        BaseException.add_note(exc, "task suspension cleanup also failed")
-                    except BaseException:
-                        pass
-            if blocked.task_root is not None and not self._foreign_tasks.task_cleanup_safe(blocked.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(blocked.task_root)
+            if blocked.task_root is not None:
+                self._cancel_failed_task_suspension(blocked, exc)
             else:
+                if lease_installed:
+                    assert handle is not None
+                    blocked.context._release_suspension(handle.sequence)
                 if blocked.had_pointer_capture:
                     blocked.context._mark_host_control_fault(exc)
                 blocked.context.returns.restore(blocked.return_snapshot)
@@ -2869,17 +2972,24 @@ class MegaForthRuntime:
         self,
         suspension: ExecutionSuspension,
     ) -> None:
-        blocked = self._require_suspension(suspension)
+        blocked = self._require_suspension(suspension, validate_task=False)
+        engine = self._foreign_tasks
+        root = engine.task_suspension_owner(blocked=blocked)
+        if root is None:
+            root = blocked.task_root
+        snapshot_safe = True if root is None else engine.restore_suspension_cleanup(blocked)
         failure = None
         try:
-            if blocked.task_root is not None and self._foreign_tasks._task_root is blocked.task_root:
+            if root is not None and engine._root_ownership is not None and engine._root_ownership[0] is root:
                 try:
-                    self._foreign_tasks.finish_root(blocked.task_root, completed=False)
+                    engine.finish_root(root, completed=False)
                 except BaseException as error:
                     failure = error
-            safe = blocked.task_root is None or self._foreign_tasks.task_cleanup_safe(blocked.task_root)
+            safe = snapshot_safe and (root is None or engine.task_cleanup_safe(root))
             if not safe:
-                self._foreign_tasks.mark_task_cleanup_unsafe(blocked.task_root)
+                engine.mark_task_cleanup_unsafe(root)
+                if failure is None:
+                    failure = ExecutionError("task cancellation lost trusted return snapshot authority")
             else:
                 blocked.had_pointer_capture = (
                     blocked.had_pointer_capture
@@ -2895,7 +3005,11 @@ class MegaForthRuntime:
                 raise
         finally:
             self._suspended_execution = None
-            blocked.context._release_suspension(suspension.sequence)
+            self._idle_deadline_ms = None
+            if root is None:
+                blocked.context._release_suspension(suspension.sequence)
+            else:
+                engine.release_suspension_lease()
         if failure is not None:
             raise failure
 
@@ -3575,6 +3689,7 @@ class MegaForthRuntime:
         completed_successfully = False
         primary_error = None
         suspended: _SuspendedExecution | None = None
+        candidate: _SuspendedExecution | None = None
         self._active_dispatches.append(frame)
         try:
             host_abort_capture_leaf(word, context)
@@ -3592,7 +3707,7 @@ class MegaForthRuntime:
                 completed_successfully = True
             else:
                 handle = self._allocate_suspension_handle()
-                suspended = _SuspendedExecution(
+                candidate = _SuspendedExecution(
                     handle=handle,
                     context=context,
                     meter=meter,
@@ -3611,7 +3726,10 @@ class MegaForthRuntime:
                     quantum_steps=quantum_steps,
                     task_root=frame.task_root,
                 )
+                if frame.task_root is not None:
+                    self._foreign_tasks.park_suspension(candidate)
                 context._lease_for_suspension(handle.sequence)
+                suspended = candidate
                 self._suspended_execution = suspended
                 preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
@@ -3666,6 +3784,9 @@ class MegaForthRuntime:
         except ForthAbort as exc:
             primary_error = exc
             host_abort_issue_leaf(exc)
+            if not self._finish_task_escape(frame.task_root, exc, candidate):
+                unsafe_closed_cleanup = True
+                raise
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3686,6 +3807,9 @@ class MegaForthRuntime:
             raise
         except BaseException as exc:
             primary_error = exc
+            if not self._finish_task_escape(frame.task_root, exc, candidate):
+                unsafe_closed_cleanup = True
+                raise
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3701,8 +3825,8 @@ class MegaForthRuntime:
         finally:
             host_abort_leave()
             try:
-                if (frame.task_root is not None and frame.task_root.ledger.root_id == frame.root_id
-                        and suspended is None and self._foreign_tasks._task_root is frame.task_root):
+                if (frame.task_root is not None and self._foreign_tasks._task_root is frame.task_root
+                        and suspended is None and frame.task_root.ledger.root_id == frame.root_id):
                     self._foreign_tasks.finish_root(frame.task_root, completed=completed_successfully,
                                                     primary_error=primary_error)
             finally:
@@ -3821,6 +3945,9 @@ class MegaForthRuntime:
             raise
         except ForthAbort as exc:
             primary_error = exc
+            if not self._finish_task_escape(frame.task_root, exc):
+                unsafe_closed_cleanup = True
+                raise
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -3845,6 +3972,9 @@ class MegaForthRuntime:
             raise
         except BaseException as exc:
             primary_error = exc
+            if not self._finish_task_escape(frame.task_root, exc):
+                unsafe_closed_cleanup = True
+                raise
             if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
                 self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
                 unsafe_closed_cleanup = True
@@ -4380,7 +4510,10 @@ class MegaForthRuntime:
                 elif isinstance(operation, IdleUntil):
                     deadline = context.data.pop()
                     ip += 1
-                    if allow_idle and deadline > self.rtc.uptime_ms:
+                    if allow_idle:
+                        uptime = (self._foreign_tasks.read_task_uptime(task)
+                                  if task is not None and task.active else self.rtc.uptime_ms)
+                    if allow_idle and deadline > uptime:
                         self._idle_deadline_ms = deadline
                         return _DispatchCursor(current.xt, ip)
                 elif isinstance(operation, UartReadAttempt):

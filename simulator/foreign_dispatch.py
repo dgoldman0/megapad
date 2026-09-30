@@ -238,6 +238,7 @@ class TaskDispatchRoot:
             else:
                 self.ledger.settle(receipt, issued_receipt=receipt,
                                    starting_operation=starting)
+            self.engine.record_native_receipt(self, receipt)
         return receipt
 
     def _owned_call(self, name, *args, **kwargs):
@@ -286,6 +287,7 @@ class TaskDispatchRoot:
         type(event).__post_init__(event)
         receipt = self._owned_call("last_receipt")
         self.ledger.settle(event.receipt, issued_receipt=receipt, starting_operation=starting)
+        self.engine.record_native_receipt(self, event.receipt)
         return event
 
     def begin(self, word, resume):
@@ -426,6 +428,7 @@ class TaskDispatchRoot:
               or result.surviving_parent_token is not parent.request.request_token):
             raise ForeignTaskError("task cancellation changed its parent's pending authority")
         self.ledger.retire_suffix(expected)
+        self.engine.record_native_cancellation(self, result)
 
     def reconcile(self):
         if self.closed:
