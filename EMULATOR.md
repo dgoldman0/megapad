@@ -5,7 +5,7 @@ memory-mapped I/O peripherals, a two-pass assembler, a Forth REPL BIOS,
 and an interactive CLI monitor/debugger.
 
 > **Branch:** `main`
-> **Status:** Fully functional.  BIOS v1.0 source with a 486-word Forth
+> **Status:** Fully functional.  BIOS v1.0 source with a 538-word Forth
 > dictionary targeting a 16-core heterogeneous SoC (4 full cores + 3×4
 > micro-clusters) with
 > seven physical tile engines, seven 2,048-bit full-width TACCs,
@@ -127,7 +127,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 │          asm.py  — two-pass assembler                      │
 └──────────────────────────────────────────────────────────┘
 
-    bios.asm  — Forth BIOS v1.0, 486 words
+    bios.asm  — Forth BIOS v1.0, 538 words
     bios.rom                 — generated precompiled binary; size is build-specific
 ```
 
@@ -143,7 +143,7 @@ printf '6 7 * .\nBYE\n' | python cli.py --bios bios.rom
 | `nic_backends.py` | — | Pluggable NIC backends — Loopback, UDP tunnel, Linux TAP |
 | `emulator/system.py` | — | 16-core heterogeneous SoC — four private full-core tile engines plus three cluster-shared engines, HBW math RAM, mailbox IPI, spinlocks, `run_batch()` C++ fast path |
 | `cli.py` | — | CLI monitor with disassembler, breakpoints, console mode, pipe mode, `--assemble` |
-| `bios.asm` | — | Forth BIOS v1.0 — subroutine-threaded interpreter, 486 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile/TACC, I-cache, cooperative multitasking) |
+| `bios.asm` | — | Forth BIOS v1.0 — subroutine-threaded interpreter, 538 built-in words (incl. multicore, micro-cluster, HBW, crypto, PQC, extended tile/TACC, I-cache, cooperative multitasking) |
 | `tests/test_megapad64.py` | — | CPU + tile engine test suite |
 | `tests/test_system.py` | — | System integration tests: devices, MMIO, BIOS, KDOS, multicore, micro-cluster, HBW, FS, crypto, PQC, network, extended tile, port I/O bridge, and bus timeout |
 | `tests/test_networking.py` | — | Real-networking tests |
@@ -419,7 +419,7 @@ buffer), then tokenises and interprets:
 | R17 | EXIT handler (`sep r17` = pop return address from RSP, branch) |
 | R20 | Task yield handler (cooperative multitasking; `SEP R20` yields) |
 
-### Built-in words (486)
+### Built-in words (538)
 
 **Stack manipulation**
 `DUP` `DROP` `SWAP` `OVER` `ROT` `NIP` `TUCK` `2DUP` `2DROP` `DEPTH` `PICK`
@@ -564,6 +564,9 @@ modulo-128 position that disagrees with the saved offset.
 
 **Floating-point tile words**
 `FP16-MODE` `BF16-MODE` `FP32-MODE` `FP64-MODE` `TCVT` `TCMP` `TVSEL`
+
+**Scalar floating-point words** (`docs/floating-point.md` §11)
+`FPCSR@` `FPCSR!` `F32+` `F32-` `F32*` `F32/` `F32SQRT` `F32FMA` `F32MIN` `F32MAX` `F32=` `F32<` `F32<=` `F32CLASS` `F32ROUND` `F32TRUNC` `F32FLOOR` `F32CEIL` `S>F32` `U>F32` `F32>S` `F32>U` `F64+` `F64-` `F64*` `F64/` `F64SQRT` `F64FMA` `F64MIN` `F64MAX` `F64=` `F64<` `F64<=` `F64CLASS` `F64ROUND` `F64TRUNC` `F64FLOOR` `F64CEIL` `S>F64` `U>F64` `F64>S` `F64>U` `F32>F64` `F64>F32` `F16>F32` `F32>F16` `BF16>F32` `F32>BF16` `F16>F64` `F64>F16` `BF16>F64` `F64>BF16`
 
 **Instruction cache**
 `ICACHE-ON` `ICACHE-OFF` `ICACHE-INV` `ICACHE-HITS` `ICACHE-MISSES`
@@ -914,7 +917,7 @@ PyPy's JIT gives **~5× speedup** on the pure-Python CPU loop; pytest-xdist
 adds parallel execution across 8 workers.
 
 The system tests exercise the full stack: devices, MMIO routing, the
-Forth BIOS (all 486 words), KDOS (buffers, kernels, pipelines, scheduler,
+Forth BIOS (all 538 words), KDOS (buffers, kernels, pipelines, scheduler,
 filesystem, screens, data ports, multicore dispatch, network stack,
 TLS 1.3, socket API, post-quantum crypto), extended tile engine
 (saturating, rounding, FP16/BF16, strided/2D, SHUFFLE/PACK/RROT), CRC

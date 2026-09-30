@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **486** entries.  The numbered
+The `bios.asm` dictionary link chain contains **538** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -704,6 +704,63 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 484 | `TCVT` | `( ew -- )` | | Convert the region from `TMODE.EW` to `ew` (t.cvt); illegal pairs trap |
 | 485 | `TCMP` | `( pred -- )` | | Lane mask from predicate 0–7 (t.cmp); other values trap |
 | 486 | `TVSEL` | `( -- )` | | Select lanes by the mask in `[TDST]` (t.vsel) |
+
+### Scalar Floating-Point (52 words)
+
+| # | Word | Stack Effect | Imm | Description |
+|---|------|-------------|-----|-------------|
+| 487 | `FPCSR@` | `( -- u )` | | Read FPCSR: RM in bits 2:0, sticky flags NX UF OF DZ NV in bits 8:4 |
+| 488 | `FPCSR!` | `( u -- )` | | Write FPCSR; bit 3 and bits above 8 are ignored |
+| 489 | `F32+` | `( r1 r2 -- r3 )` | | Add (binary32, FPCSR.RM) |
+| 490 | `F32-` | `( r1 r2 -- r3 )` | | Subtract r2 from r1 (binary32, FPCSR.RM) |
+| 491 | `F32*` | `( r1 r2 -- r3 )` | | Multiply (binary32, FPCSR.RM) |
+| 492 | `F32/` | `( r1 r2 -- r3 )` | | Divide r1 by r2 (binary32, FPCSR.RM) |
+| 493 | `F32SQRT` | `( r -- r )` | | Square root (binary32, FPCSR.RM) |
+| 494 | `F32FMA` | `( a b c -- r )` | | a*b+c with one rounding (binary32, FPCSR.RM) |
+| 495 | `F32MIN` | `( r1 r2 -- r3 )` | | Minimum; NaN propagates, -0 < +0 (binary32) |
+| 496 | `F32MAX` | `( r1 r2 -- r3 )` | | Maximum; NaN propagates, -0 < +0 (binary32) |
+| 497 | `F32=` | `( r1 r2 -- r3 )` | | Equal: -1 or 0; -0 = +0 (binary32) |
+| 498 | `F32<` | `( r1 r2 -- r3 )` | | Less than: -1 or 0 (binary32) |
+| 499 | `F32<=` | `( r1 r2 -- r3 )` | | Less or equal: -1 or 0 (binary32) |
+| 500 | `F32CLASS` | `( r -- r )` | | One-hot class mask (docs/floating-point.md §8.6) (binary32) |
+| 501 | `F32ROUND` | `( r -- r )` | | Round to integral, ties to even (binary32) |
+| 502 | `F32TRUNC` | `( r -- r )` | | Round to integral toward zero (binary32) |
+| 503 | `F32FLOOR` | `( r -- r )` | | Round to integral toward -inf (binary32) |
+| 504 | `F32CEIL` | `( r -- r )` | | Round to integral toward +inf (binary32) |
+| 505 | `S>F32` | `( r -- r )` | | Signed integer to float (binary32, FPCSR.RM) |
+| 506 | `U>F32` | `( r -- r )` | | Unsigned integer to float (binary32, FPCSR.RM) |
+| 507 | `F32>S` | `( r -- r )` | | To signed integer toward zero, saturating (binary32) |
+| 508 | `F32>U` | `( r -- r )` | | To unsigned integer toward zero, saturating (binary32) |
+| 509 | `F64+` | `( r1 r2 -- r3 )` | | Add (binary64, FPCSR.RM) |
+| 510 | `F64-` | `( r1 r2 -- r3 )` | | Subtract r2 from r1 (binary64, FPCSR.RM) |
+| 511 | `F64*` | `( r1 r2 -- r3 )` | | Multiply (binary64, FPCSR.RM) |
+| 512 | `F64/` | `( r1 r2 -- r3 )` | | Divide r1 by r2 (binary64, FPCSR.RM) |
+| 513 | `F64SQRT` | `( r -- r )` | | Square root (binary64, FPCSR.RM) |
+| 514 | `F64FMA` | `( a b c -- r )` | | a*b+c with one rounding (binary64, FPCSR.RM) |
+| 515 | `F64MIN` | `( r1 r2 -- r3 )` | | Minimum; NaN propagates, -0 < +0 (binary64) |
+| 516 | `F64MAX` | `( r1 r2 -- r3 )` | | Maximum; NaN propagates, -0 < +0 (binary64) |
+| 517 | `F64=` | `( r1 r2 -- r3 )` | | Equal: -1 or 0; -0 = +0 (binary64) |
+| 518 | `F64<` | `( r1 r2 -- r3 )` | | Less than: -1 or 0 (binary64) |
+| 519 | `F64<=` | `( r1 r2 -- r3 )` | | Less or equal: -1 or 0 (binary64) |
+| 520 | `F64CLASS` | `( r -- r )` | | One-hot class mask (docs/floating-point.md §8.6) (binary64) |
+| 521 | `F64ROUND` | `( r -- r )` | | Round to integral, ties to even (binary64) |
+| 522 | `F64TRUNC` | `( r -- r )` | | Round to integral toward zero (binary64) |
+| 523 | `F64FLOOR` | `( r -- r )` | | Round to integral toward -inf (binary64) |
+| 524 | `F64CEIL` | `( r -- r )` | | Round to integral toward +inf (binary64) |
+| 525 | `S>F64` | `( r -- r )` | | Signed integer to float (binary64, FPCSR.RM) |
+| 526 | `U>F64` | `( r -- r )` | | Unsigned integer to float (binary64, FPCSR.RM) |
+| 527 | `F64>S` | `( r -- r )` | | To signed integer toward zero, saturating (binary64) |
+| 528 | `F64>U` | `( r -- r )` | | To unsigned integer toward zero, saturating (binary64) |
+| 529 | `F32>F64` | `( r -- r )` | | binary32 to binary64, exact |
+| 530 | `F64>F32` | `( r -- r )` | | binary64 to binary32 |
+| 531 | `F16>F32` | `( r -- r )` | | binary16 bits to binary32 (exact) |
+| 532 | `F32>F16` | `( r -- r )` | | binary32 bits to binary16 |
+| 533 | `BF16>F32` | `( r -- r )` | | bfloat16 bits to binary32 (exact) |
+| 534 | `F32>BF16` | `( r -- r )` | | binary32 bits to bfloat16 |
+| 535 | `F16>F64` | `( r -- r )` | | binary16 bits to binary64 (exact) |
+| 536 | `F64>F16` | `( r -- r )` | | binary64 bits to binary16 |
+| 537 | `BF16>F64` | `( r -- r )` | | bfloat16 bits to binary64 (exact) |
+| 538 | `F64>BF16` | `( r -- r )` | | binary64 bits to bfloat16 |
 
 ### Instruction Cache (5 words)
 

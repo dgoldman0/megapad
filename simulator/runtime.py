@@ -79,6 +79,7 @@ from simulator.platform import (
     SYSINFO_NUM_CORES,
     SYSINFO_NUM_FULL,
 )
+from simulator.scalar_float import HostedScalarFloatService
 from simulator.sha2 import HostedSHA2Service
 from simulator.tile import HostedTileService
 from simulator.spinlocks import HostedSpinlockBank
@@ -675,6 +676,7 @@ class MegaForthRuntime:
             self.field,
             account_operation=self.diagnostics.account_tile_operation,
         )
+        self.scalar_float = HostedScalarFloatService()
         self._runtime_token = object()
         self._session_owner_lock = threading.RLock()
         self._session_owner_token: object | None = None

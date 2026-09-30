@@ -590,3 +590,29 @@ def test_native_fpcsr_csr_and_reset() -> None:
     assert cpu.fpcsr == RDN | NV
     cpu._reset_state()
     assert cpu.csr_read(CSR_FPCSR) == 0
+
+
+def test_native_system_microcores_keep_private_fpcsr() -> None:
+    from system import MegapadSystem
+
+    system = MegapadSystem(ram_size=4096, num_cores=1, num_clusters=1,
+                           hbw_size=0, ext_mem_size=0, vram_size=0)
+    system.sysinfo.write8(0x18, 0x01)  # enable the cluster
+    first, second = system.clusters[0].cores[:2]
+    system.load_binary(0x100, assemble(
+        "fdiv.d r1, r6\ncsrr r4, 0x0D\nhalt"))
+    for cpu in system.cores:
+        cpu.halted = True
+        cpu.idle = False
+    for cpu, mode in ((first, RUP), (second, RNE)):
+        cpu.pc = 0x100
+        cpu.regs[1], cpu.regs[6] = d64(1.0), d64(3.0)
+        cpu.csr_write(CSR_FPCSR, mode)
+        cpu.halted = False
+    for _ in range(50):
+        if first.halted and second.halted:
+            break
+        system.run_batch_stats(4)
+    assert first.halted and second.halted
+    assert (first.regs[1], first.regs[4]) == (up64(1 / 3), RUP | NX)
+    assert (second.regs[1], second.regs[4]) == (d64(1 / 3), NX)

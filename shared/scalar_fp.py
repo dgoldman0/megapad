@@ -54,7 +54,6 @@ _DYNAMIC_OPERATIONS = frozenset((
     FADD, FSUB, FMUL, FDIV, FSQRT, FMA, FMS,
     FCVT_F_L, FCVT_F_LU, FCVT_F_F, FCVT_H_F, FCVT_B_F,
 ))
-_ROUNDING_FORM_BASES = (FRND, FCVT_L, FCVT_LU)
 _DEFINED = frozenset(
     tuple(range(9)) + tuple(range(0x10, 0x15)) + tuple(range(0x20, 0x3F))
 )
@@ -212,3 +211,54 @@ def execute(op: int, rd: int, rs: int, rt: int = 0, fpcsr: int = 0
     if code == FCVT_F_B:
         return rounded(ieee_fp.convert(fmt, BF16, rs & BF16.mask))
     raise IllegalOperation(f"reserved FC operation {code:#04x}")
+
+
+# BIOS words (§11) in dictionary order: (name, shape, operation byte).
+# Shapes: "binary" ( r1 r2 -- r3 ) is Rd=r1, Rs=r2; "unary" ( r -- r ) is
+# Rd=Rs=r; "fma" ( a b c -- a*b+c ) is Rd=c, Rs=a, Rt=b; "fetch" and
+# "store" read and write FPCSR.
+def _bios_words() -> tuple[tuple[str, str, int | None], ...]:
+    words: list[tuple[str, str, int | None]] = [
+        ("FPCSR@", "fetch", None),
+        ("FPCSR!", "store", None),
+    ]
+    for prefix, fmt in (("F32", FORMAT_S << 6), ("F64", FORMAT_D << 6)):
+        words += [
+            (f"{prefix}+", "binary", fmt | FADD),
+            (f"{prefix}-", "binary", fmt | FSUB),
+            (f"{prefix}*", "binary", fmt | FMUL),
+            (f"{prefix}/", "binary", fmt | FDIV),
+            (f"{prefix}SQRT", "unary", fmt | FSQRT),
+            (f"{prefix}FMA", "fma", fmt | FMA),
+            (f"{prefix}MIN", "binary", fmt | FMIN),
+            (f"{prefix}MAX", "binary", fmt | FMAX),
+            (f"{prefix}=", "binary", fmt | FEQ),
+            (f"{prefix}<", "binary", fmt | FLT),
+            (f"{prefix}<=", "binary", fmt | FLE),
+            (f"{prefix}CLASS", "unary", fmt | FCLASS),
+            (f"{prefix}ROUND", "unary", fmt | FRND | ieee_fp.RNE),
+            (f"{prefix}TRUNC", "unary", fmt | FRND | ieee_fp.RTZ),
+            (f"{prefix}FLOOR", "unary", fmt | FRND | ieee_fp.RDN),
+            (f"{prefix}CEIL", "unary", fmt | FRND | ieee_fp.RUP),
+            (f"S>{prefix}", "unary", fmt | FCVT_F_L),
+            (f"U>{prefix}", "unary", fmt | FCVT_F_LU),
+            (f"{prefix}>S", "unary", fmt | FCVT_L | ieee_fp.RTZ),
+            (f"{prefix}>U", "unary", fmt | FCVT_LU | ieee_fp.RTZ),
+        ]
+    s, d = FORMAT_S << 6, FORMAT_D << 6
+    words += [
+        ("F32>F64", "unary", d | FCVT_F_F),
+        ("F64>F32", "unary", s | FCVT_F_F),
+        ("F16>F32", "unary", s | FCVT_F_H),
+        ("F32>F16", "unary", s | FCVT_H_F),
+        ("BF16>F32", "unary", s | FCVT_F_B),
+        ("F32>BF16", "unary", s | FCVT_B_F),
+        ("F16>F64", "unary", d | FCVT_F_H),
+        ("F64>F16", "unary", d | FCVT_H_F),
+        ("BF16>F64", "unary", d | FCVT_F_B),
+        ("F64>BF16", "unary", d | FCVT_B_F),
+    ]
+    return tuple(words)
+
+
+BIOS_WORDS = _bios_words()

@@ -1067,6 +1067,71 @@ reserved and always trap. `TCVT`, `TCMP`, and `TVSEL` follow
 
 ---
 
+## Scalar Floating-Point Words (52 words)
+
+These words run the `EXT.FP` engine on cells (`docs/floating-point.md`
+§8–§11). An FP32 value lives in the low 32 bits of a cell and FP32 results
+clear the high bits. Flags are -1 or 0. Arithmetic words and the
+integer-to-float words round with `FPCSR.RM`; a reserved RM makes them trap.
+Exceptions only set the sticky flags in `FPCSR`.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `FPCSR@` | `( -- u )` | Read FPCSR: RM in bits 2:0, sticky flags NX UF OF DZ NV in bits 8:4. |
+| `FPCSR!` | `( u -- )` | Write FPCSR; bit 3 and bits above 8 are ignored. |
+| `F32+` | `( r1 r2 -- r3 )` | Add (binary32, FPCSR.RM). |
+| `F32-` | `( r1 r2 -- r3 )` | Subtract r2 from r1 (binary32, FPCSR.RM). |
+| `F32*` | `( r1 r2 -- r3 )` | Multiply (binary32, FPCSR.RM). |
+| `F32/` | `( r1 r2 -- r3 )` | Divide r1 by r2 (binary32, FPCSR.RM). |
+| `F32SQRT` | `( r -- r )` | Square root (binary32, FPCSR.RM). |
+| `F32FMA` | `( a b c -- r )` | a*b+c with one rounding (binary32, FPCSR.RM). |
+| `F32MIN` | `( r1 r2 -- r3 )` | Minimum; NaN propagates, -0 < +0 (binary32). |
+| `F32MAX` | `( r1 r2 -- r3 )` | Maximum; NaN propagates, -0 < +0 (binary32). |
+| `F32=` | `( r1 r2 -- r3 )` | Equal: -1 or 0; -0 = +0 (binary32). |
+| `F32<` | `( r1 r2 -- r3 )` | Less than: -1 or 0 (binary32). |
+| `F32<=` | `( r1 r2 -- r3 )` | Less or equal: -1 or 0 (binary32). |
+| `F32CLASS` | `( r -- r )` | One-hot class mask (docs/floating-point.md §8.6) (binary32). |
+| `F32ROUND` | `( r -- r )` | Round to integral, ties to even (binary32). |
+| `F32TRUNC` | `( r -- r )` | Round to integral toward zero (binary32). |
+| `F32FLOOR` | `( r -- r )` | Round to integral toward -inf (binary32). |
+| `F32CEIL` | `( r -- r )` | Round to integral toward +inf (binary32). |
+| `S>F32` | `( r -- r )` | Signed integer to float (binary32, FPCSR.RM). |
+| `U>F32` | `( r -- r )` | Unsigned integer to float (binary32, FPCSR.RM). |
+| `F32>S` | `( r -- r )` | To signed integer toward zero, saturating (binary32). |
+| `F32>U` | `( r -- r )` | To unsigned integer toward zero, saturating (binary32). |
+| `F64+` | `( r1 r2 -- r3 )` | Add (binary64, FPCSR.RM). |
+| `F64-` | `( r1 r2 -- r3 )` | Subtract r2 from r1 (binary64, FPCSR.RM). |
+| `F64*` | `( r1 r2 -- r3 )` | Multiply (binary64, FPCSR.RM). |
+| `F64/` | `( r1 r2 -- r3 )` | Divide r1 by r2 (binary64, FPCSR.RM). |
+| `F64SQRT` | `( r -- r )` | Square root (binary64, FPCSR.RM). |
+| `F64FMA` | `( a b c -- r )` | a*b+c with one rounding (binary64, FPCSR.RM). |
+| `F64MIN` | `( r1 r2 -- r3 )` | Minimum; NaN propagates, -0 < +0 (binary64). |
+| `F64MAX` | `( r1 r2 -- r3 )` | Maximum; NaN propagates, -0 < +0 (binary64). |
+| `F64=` | `( r1 r2 -- r3 )` | Equal: -1 or 0; -0 = +0 (binary64). |
+| `F64<` | `( r1 r2 -- r3 )` | Less than: -1 or 0 (binary64). |
+| `F64<=` | `( r1 r2 -- r3 )` | Less or equal: -1 or 0 (binary64). |
+| `F64CLASS` | `( r -- r )` | One-hot class mask (docs/floating-point.md §8.6) (binary64). |
+| `F64ROUND` | `( r -- r )` | Round to integral, ties to even (binary64). |
+| `F64TRUNC` | `( r -- r )` | Round to integral toward zero (binary64). |
+| `F64FLOOR` | `( r -- r )` | Round to integral toward -inf (binary64). |
+| `F64CEIL` | `( r -- r )` | Round to integral toward +inf (binary64). |
+| `S>F64` | `( r -- r )` | Signed integer to float (binary64, FPCSR.RM). |
+| `U>F64` | `( r -- r )` | Unsigned integer to float (binary64, FPCSR.RM). |
+| `F64>S` | `( r -- r )` | To signed integer toward zero, saturating (binary64). |
+| `F64>U` | `( r -- r )` | To unsigned integer toward zero, saturating (binary64). |
+| `F32>F64` | `( r -- r )` | binary32 to binary64, exact. |
+| `F64>F32` | `( r -- r )` | binary64 to binary32. |
+| `F16>F32` | `( r -- r )` | binary16 bits to binary32 (exact). |
+| `F32>F16` | `( r -- r )` | binary32 bits to binary16. |
+| `BF16>F32` | `( r -- r )` | bfloat16 bits to binary32 (exact). |
+| `F32>BF16` | `( r -- r )` | binary32 bits to bfloat16. |
+| `F16>F64` | `( r -- r )` | binary16 bits to binary64 (exact). |
+| `F64>F16` | `( r -- r )` | binary64 bits to binary16. |
+| `BF16>F64` | `( r -- r )` | bfloat16 bits to binary64 (exact). |
+| `F64>BF16` | `( r -- r )` | binary64 bits to bfloat16. |
+
+---
+
 ## AES-256/128-GCM Engine (11 words)
 
 Authenticated encryption via the executable/native MMIO AES ABI at

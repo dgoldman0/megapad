@@ -766,6 +766,16 @@ exact-address rule above. Every source is read before the first write, and
 the destination tiles are written in order, as in the executable machine, so
 a fault in a later destination keeps the earlier ones, like `TWMUL`.
 
+The 52 scalar floating-point words of `docs/floating-point.md` §11 follow at
+the dictionary frontier. Each applies the `FC` operation byte its BIOS body
+executes to `shared/scalar_fp.execute`, the definition the Python emulator
+runs, with the same register roles. The runtime keeps one `FPCSR`: `FPCSR!`
+keeps bits `[8:4]` and `[2:0]`, operations OR their flags into it, and a word
+whose operation would trap on the machine, such as a dynamic-mode word under
+a reserved `FPCSR.RM`, fails with `IllegalScalarFloatError` after taking its
+operands, as the BIOS word does, without changing `FPCSR` or pushing a
+result.
+
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
 byte/word accesses against that same object. It implements AES-128/256 block

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from shared import scalar_fp
 from shared.cells import CELL_BYTES, MASK64, forth_flag, s64, u64
 from shared.storage import STORAGE_RESULT_TIMEOUT
 from simulator.aes import (
@@ -2838,5 +2839,40 @@ def install_core(runtime: MegaForthRuntime) -> None:
         b"TVSEL",
         lambda _context: runtime.tile.select(),
     )
+
+    # The scalar floating-point words (docs/floating-point.md §11) follow at
+    # the frontier.  Each applies the FC operation byte its BIOS body runs.
+    for name, shape, op in scalar_fp.BIOS_WORDS:
+        runtime.define_primitive(
+            name.encode("ascii"),
+            _scalar_float_word(runtime.scalar_float, shape, op),
+        )
+
+
+def _scalar_float_word(service, shape: str, op: int | None):
+    """Bind one BIOS-shaped scalar FP word to the hosted service."""
+
+    if shape == "fetch":
+        return lambda context: context.data.push(service.fpcsr)
+    if shape == "store":
+        return lambda context: service.write_fpcsr(context.data.pop())
+    if shape == "unary":
+        def unary(context) -> None:
+            value = context.data.pop()
+            context.data.push(service.operate(op, value, value))
+        return unary
+    if shape == "fma":
+        def fused(context) -> None:
+            addend = context.data.pop()
+            right = context.data.pop()
+            left = context.data.pop()
+            context.data.push(service.operate(op, addend, left, right))
+        return fused
+
+    def binary(context) -> None:
+        right = context.data.pop()
+        left = context.data.pop()
+        context.data.push(service.operate(op, left, right))
+    return binary
 
 __all__ = ["install_core"]

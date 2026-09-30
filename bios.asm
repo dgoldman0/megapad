@@ -22109,9 +22109,577 @@ d_tvsel:
     call.l r11
     ret.l
 
+; === Scalar floating-point words (docs/floating-point.md §11) ===
+; FP32 values live in the low 32 bits of a cell.  Arithmetic words and the
+; integer-to-float conversions round with FPCSR.RM; flags are -1 or 0.
+
+; === FPCSR@ ( -- u ) ===
+d_fpcsrfetch:
+    .dq d_tvsel
+    .db 6
+    .ascii "FPCSR@"
+    csrr r0, 0x0D
+    subi r14, 8
+    str r14, r0
+    ret.l
+
+; === FPCSR! ( u -- ) ===
+d_fpcsrstore:
+    .dq d_fpcsrfetch
+    .db 6
+    .ascii "FPCSR!"
+    ldn r0, r14
+    addi r14, 8
+    csrw 0x0D, r0
+    ret.l
+
+; === F32+ ( r1 r2 -- r3 ) ===
+d_f32plus:
+    .dq d_fpcsrstore
+    .db 4
+    .ascii "F32+"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fadd.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32- ( r1 r2 -- r3 ) ===
+d_f32minus:
+    .dq d_f32plus
+    .db 4
+    .ascii "F32-"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fsub.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32* ( r1 r2 -- r3 ) ===
+d_f32star:
+    .dq d_f32minus
+    .db 4
+    .ascii "F32*"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fmul.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32/ ( r1 r2 -- r3 ) ===
+d_f32slash:
+    .dq d_f32star
+    .db 4
+    .ascii "F32/"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fdiv.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32SQRT ( r -- r ) ===
+d_f32sqrt:
+    .dq d_f32slash
+    .db 7
+    .ascii "F32SQRT"
+    ldn r0, r14
+    fsqrt.s r0, r0
+    str r14, r0
+    ret.l
+
+; === F32FMA ( a b c -- a*b+c ) ===
+d_f32fma:
+    .dq d_f32sqrt
+    .db 6
+    .ascii "F32FMA"
+    ldn r0, r14
+    addi r14, 8
+    ldn r7, r14
+    addi r14, 8
+    ldn r1, r14
+    fma.s r0, r1, r7
+    str r14, r0
+    ret.l
+
+; === F32MIN ( r1 r2 -- r3 ) ===
+d_f32min:
+    .dq d_f32fma
+    .db 6
+    .ascii "F32MIN"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fmin.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32MAX ( r1 r2 -- r3 ) ===
+d_f32max:
+    .dq d_f32min
+    .db 6
+    .ascii "F32MAX"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fmax.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32= ( r1 r2 -- flag ) ===
+d_f32eq:
+    .dq d_f32max
+    .db 4
+    .ascii "F32="
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    feq.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32< ( r1 r2 -- flag ) ===
+d_f32lt:
+    .dq d_f32eq
+    .db 4
+    .ascii "F32<"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    flt.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32<= ( r1 r2 -- flag ) ===
+d_f32_le:
+    .dq d_f32lt
+    .db 5
+    .ascii "F32<="
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fle.s r0, r1
+    str r14, r0
+    ret.l
+
+; === F32CLASS ( r -- r ) ===
+d_f32class:
+    .dq d_f32_le
+    .db 8
+    .ascii "F32CLASS"
+    ldn r0, r14
+    fclass.s r0, r0
+    str r14, r0
+    ret.l
+
+; === F32ROUND ( r -- r ) ===
+d_f32round:
+    .dq d_f32class
+    .db 8
+    .ascii "F32ROUND"
+    ldn r0, r14
+    frnd.s.rne r0, r0
+    str r14, r0
+    ret.l
+
+; === F32TRUNC ( r -- r ) ===
+d_f32trunc:
+    .dq d_f32round
+    .db 8
+    .ascii "F32TRUNC"
+    ldn r0, r14
+    frnd.s.rtz r0, r0
+    str r14, r0
+    ret.l
+
+; === F32FLOOR ( r -- r ) ===
+d_f32floor:
+    .dq d_f32trunc
+    .db 8
+    .ascii "F32FLOOR"
+    ldn r0, r14
+    frnd.s.rdn r0, r0
+    str r14, r0
+    ret.l
+
+; === F32CEIL ( r -- r ) ===
+d_f32ceil:
+    .dq d_f32floor
+    .db 7
+    .ascii "F32CEIL"
+    ldn r0, r14
+    frnd.s.rup r0, r0
+    str r14, r0
+    ret.l
+
+; === S>F32 ( r -- r ) ===
+d_s_to_f32:
+    .dq d_f32ceil
+    .db 5
+    .ascii "S>F32"
+    ldn r0, r14
+    fcvt.s.l r0, r0
+    str r14, r0
+    ret.l
+
+; === U>F32 ( r -- r ) ===
+d_u_to_f32:
+    .dq d_s_to_f32
+    .db 5
+    .ascii "U>F32"
+    ldn r0, r14
+    fcvt.s.lu r0, r0
+    str r14, r0
+    ret.l
+
+; === F32>S ( r -- r ) ===
+d_f32_to_s:
+    .dq d_u_to_f32
+    .db 5
+    .ascii "F32>S"
+    ldn r0, r14
+    fcvt.l.s.rtz r0, r0
+    str r14, r0
+    ret.l
+
+; === F32>U ( r -- r ) ===
+d_f32_to_u:
+    .dq d_f32_to_s
+    .db 5
+    .ascii "F32>U"
+    ldn r0, r14
+    fcvt.lu.s.rtz r0, r0
+    str r14, r0
+    ret.l
+
+; === F64+ ( r1 r2 -- r3 ) ===
+d_f64plus:
+    .dq d_f32_to_u
+    .db 4
+    .ascii "F64+"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fadd.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64- ( r1 r2 -- r3 ) ===
+d_f64minus:
+    .dq d_f64plus
+    .db 4
+    .ascii "F64-"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fsub.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64* ( r1 r2 -- r3 ) ===
+d_f64star:
+    .dq d_f64minus
+    .db 4
+    .ascii "F64*"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fmul.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64/ ( r1 r2 -- r3 ) ===
+d_f64slash:
+    .dq d_f64star
+    .db 4
+    .ascii "F64/"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fdiv.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64SQRT ( r -- r ) ===
+d_f64sqrt:
+    .dq d_f64slash
+    .db 7
+    .ascii "F64SQRT"
+    ldn r0, r14
+    fsqrt.d r0, r0
+    str r14, r0
+    ret.l
+
+; === F64FMA ( a b c -- a*b+c ) ===
+d_f64fma:
+    .dq d_f64sqrt
+    .db 6
+    .ascii "F64FMA"
+    ldn r0, r14
+    addi r14, 8
+    ldn r7, r14
+    addi r14, 8
+    ldn r1, r14
+    fma.d r0, r1, r7
+    str r14, r0
+    ret.l
+
+; === F64MIN ( r1 r2 -- r3 ) ===
+d_f64min:
+    .dq d_f64fma
+    .db 6
+    .ascii "F64MIN"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fmin.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64MAX ( r1 r2 -- r3 ) ===
+d_f64max:
+    .dq d_f64min
+    .db 6
+    .ascii "F64MAX"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fmax.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64= ( r1 r2 -- flag ) ===
+d_f64eq:
+    .dq d_f64max
+    .db 4
+    .ascii "F64="
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    feq.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64< ( r1 r2 -- flag ) ===
+d_f64lt:
+    .dq d_f64eq
+    .db 4
+    .ascii "F64<"
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    flt.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64<= ( r1 r2 -- flag ) ===
+d_f64_le:
+    .dq d_f64lt
+    .db 5
+    .ascii "F64<="
+    ldn r1, r14
+    addi r14, 8
+    ldn r0, r14
+    fle.d r0, r1
+    str r14, r0
+    ret.l
+
+; === F64CLASS ( r -- r ) ===
+d_f64class:
+    .dq d_f64_le
+    .db 8
+    .ascii "F64CLASS"
+    ldn r0, r14
+    fclass.d r0, r0
+    str r14, r0
+    ret.l
+
+; === F64ROUND ( r -- r ) ===
+d_f64round:
+    .dq d_f64class
+    .db 8
+    .ascii "F64ROUND"
+    ldn r0, r14
+    frnd.d.rne r0, r0
+    str r14, r0
+    ret.l
+
+; === F64TRUNC ( r -- r ) ===
+d_f64trunc:
+    .dq d_f64round
+    .db 8
+    .ascii "F64TRUNC"
+    ldn r0, r14
+    frnd.d.rtz r0, r0
+    str r14, r0
+    ret.l
+
+; === F64FLOOR ( r -- r ) ===
+d_f64floor:
+    .dq d_f64trunc
+    .db 8
+    .ascii "F64FLOOR"
+    ldn r0, r14
+    frnd.d.rdn r0, r0
+    str r14, r0
+    ret.l
+
+; === F64CEIL ( r -- r ) ===
+d_f64ceil:
+    .dq d_f64floor
+    .db 7
+    .ascii "F64CEIL"
+    ldn r0, r14
+    frnd.d.rup r0, r0
+    str r14, r0
+    ret.l
+
+; === S>F64 ( r -- r ) ===
+d_s_to_f64:
+    .dq d_f64ceil
+    .db 5
+    .ascii "S>F64"
+    ldn r0, r14
+    fcvt.d.l r0, r0
+    str r14, r0
+    ret.l
+
+; === U>F64 ( r -- r ) ===
+d_u_to_f64:
+    .dq d_s_to_f64
+    .db 5
+    .ascii "U>F64"
+    ldn r0, r14
+    fcvt.d.lu r0, r0
+    str r14, r0
+    ret.l
+
+; === F64>S ( r -- r ) ===
+d_f64_to_s:
+    .dq d_u_to_f64
+    .db 5
+    .ascii "F64>S"
+    ldn r0, r14
+    fcvt.l.d.rtz r0, r0
+    str r14, r0
+    ret.l
+
+; === F64>U ( r -- r ) ===
+d_f64_to_u:
+    .dq d_f64_to_s
+    .db 5
+    .ascii "F64>U"
+    ldn r0, r14
+    fcvt.lu.d.rtz r0, r0
+    str r14, r0
+    ret.l
+
+; === F32>F64 ( r -- r ) ===
+d_f32_to_f64:
+    .dq d_f64_to_u
+    .db 7
+    .ascii "F32>F64"
+    ldn r0, r14
+    fcvt.d.s r0, r0
+    str r14, r0
+    ret.l
+
+; === F64>F32 ( r -- r ) ===
+d_f64_to_f32:
+    .dq d_f32_to_f64
+    .db 7
+    .ascii "F64>F32"
+    ldn r0, r14
+    fcvt.s.d r0, r0
+    str r14, r0
+    ret.l
+
+; === F16>F32 ( r -- r ) ===
+d_f16_to_f32:
+    .dq d_f64_to_f32
+    .db 7
+    .ascii "F16>F32"
+    ldn r0, r14
+    fcvt.s.h r0, r0
+    str r14, r0
+    ret.l
+
+; === F32>F16 ( r -- r ) ===
+d_f32_to_f16:
+    .dq d_f16_to_f32
+    .db 7
+    .ascii "F32>F16"
+    ldn r0, r14
+    fcvt.h.s r0, r0
+    str r14, r0
+    ret.l
+
+; === BF16>F32 ( r -- r ) ===
+d_bf16_to_f32:
+    .dq d_f32_to_f16
+    .db 8
+    .ascii "BF16>F32"
+    ldn r0, r14
+    fcvt.s.b r0, r0
+    str r14, r0
+    ret.l
+
+; === F32>BF16 ( r -- r ) ===
+d_f32_to_bf16:
+    .dq d_bf16_to_f32
+    .db 8
+    .ascii "F32>BF16"
+    ldn r0, r14
+    fcvt.b.s r0, r0
+    str r14, r0
+    ret.l
+
+; === F16>F64 ( r -- r ) ===
+d_f16_to_f64:
+    .dq d_f32_to_bf16
+    .db 7
+    .ascii "F16>F64"
+    ldn r0, r14
+    fcvt.d.h r0, r0
+    str r14, r0
+    ret.l
+
+; === F64>F16 ( r -- r ) ===
+d_f64_to_f16:
+    .dq d_f16_to_f64
+    .db 7
+    .ascii "F64>F16"
+    ldn r0, r14
+    fcvt.h.d r0, r0
+    str r14, r0
+    ret.l
+
+; === BF16>F64 ( r -- r ) ===
+d_bf16_to_f64:
+    .dq d_f64_to_f16
+    .db 8
+    .ascii "BF16>F64"
+    ldn r0, r14
+    fcvt.d.b r0, r0
+    str r14, r0
+    ret.l
+
+; === F64>BF16 ( r -- r ) ===
+d_f64_to_bf16:
+    .dq d_bf16_to_f64
+    .db 8
+    .ascii "F64>BF16"
+    ldn r0, r14
+    fcvt.b.d r0, r0
+    str r14, r0
+    ret.l
+
 ; === ICACHE-ON ( -- ) ===
 d_icache_on:
-    .dq d_tvsel
+    .dq d_f64_to_bf16
     .db 9
     .ascii "ICACHE-ON"
     ldi64 r11, w_icache_on

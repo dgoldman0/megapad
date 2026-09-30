@@ -78,6 +78,7 @@ from megapad64 import (
     HaltError,
 )
 from asm import assemble, AsmError
+from shared import ieee_fp, scalar_fp
 from system import MegapadSystem, MMIO_START, MicroCluster
 from devices import (
     MMIO_BASE, UART_BASE, TIMER_BASE, STORAGE_BASE, SYSINFO_BASE,
@@ -5709,7 +5710,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 486)
+        self.assertEqual(len(seen), 538)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -5897,8 +5898,19 @@ class TestBIOSTileModes(unittest.TestCase):
     def test_float_format_words_follow_bf16_in_the_chain(self):
         labels = self._bios_harness._bios_labels
         code = self._bios_harness.bios_code
+        # The scalar floating-point words sit between TVSEL and ICACHE-ON in
+        # the order of shared.scalar_fp.BIOS_WORDS.
+        address = int.from_bytes(
+            code[labels["d_icache_on"]:labels["d_icache_on"] + 8], "little")
+        names = []
+        for _ in scalar_fp.BIOS_WORDS:
+            length = code[address + 8]
+            names.append(code[address + 9:address + 9 + length].decode())
+            address = int.from_bytes(code[address:address + 8], "little")
+        self.assertEqual(
+            names[::-1], [name for name, _, _ in scalar_fp.BIOS_WORDS])
+        self.assertEqual(address, labels["d_tvsel"])
         for current, previous in (
-            ("d_icache_on", "d_tvsel"),
             ("d_tvsel", "d_tcmp"),
             ("d_tcmp", "d_tcvt"),
             ("d_tcvt", "d_fp64_mode"),
@@ -5958,6 +5970,58 @@ class TestBIOSTileModes(unittest.TestCase):
         self.assertIn("M0=4294967295 ", text)
         self.assertIn("M15=4294967295 ", text)
         self.assertIn("S0=0 ", text)
+
+
+    def test_scalar_float_words_run_their_fc_operations(self):
+        """Every §11 word applies its FC operation to the data stack."""
+        rng = random.Random(0xF11)
+        lines, expected = [], {}
+
+        def operand(fmt):
+            pick = rng.random()
+            if pick < 0.25:
+                return rng.choice((0, fmt.sign_bit, fmt.infinity,
+                                   fmt.canonical_nan, 1, fmt.max_finite))
+            if pick < 0.4:
+                return rng.getrandbits(64)
+            return ieee_fp.from_double(fmt, rng.choice((-1, 1)) * rng.choice(
+                (0.5, 2.5, 3.0, 1e-3, 1e10, 2.0 ** 40, 65520.0, 1e300)))
+
+        def literal(value):
+            return str(value - (1 << 64) if value >> 63 else value)
+
+        for name, shape, op in scalar_fp.BIOS_WORDS:
+            if op is None:
+                continue
+            fmt = ieee_fp.FP64 if op >> 6 else ieee_fp.FP32
+            for turn in range(2):
+                a, b, c = operand(fmt), operand(fmt), operand(fmt)
+                if shape == "unary":
+                    arguments, registers = (a,), (a, a, 0)
+                elif shape == "fma":
+                    arguments, registers = (a, b, c), (c, a, b)
+                else:
+                    arguments, registers = (a, b), (a, b, 0)
+                key = f"{len(expected)}"
+                expected[key] = scalar_fp.execute(op, *registers).value
+                lines.append(
+                    f'." R{key}=" '
+                    + " ".join(literal(v) for v in arguments)
+                    + f" {name} ."
+                )
+        lines += [
+            '." CSR=" -1 FPCSR! FPCSR@ .',
+            '." FLAGS=" 0 FPCSR! 1 S>F64 3 S>F64 F64/ DROP FPCSR@ .',
+            "0 FPCSR!",
+        ]
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(sys_obj, buf, lines)
+        for key, value in expected.items():
+            match = re.search(rf"R{key}=(-?\d+) ", text)
+            self.assertIsNotNone(match, key)
+            self.assertEqual(int(match.group(1)) & ((1 << 64) - 1), value, key)
+        self.assertIn("CSR=503 ", text)
+        self.assertIn("FLAGS=16 ", text)
 
 
 class TestMulticore(unittest.TestCase):
@@ -15522,7 +15586,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 486)
+        self.assertEqual(len(seen), 538)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)

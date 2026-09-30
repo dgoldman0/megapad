@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from shared import scalar_fp
 from shared.cells import MASK64, TRUE
 from simulator.errors import ExecutionError
 from simulator.platform import create_one_core_address_space
@@ -14,8 +15,14 @@ from simulator.stacks import StackUnderflow
 def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
     runtime = MegaForthRuntime()
 
-    assert len(runtime.dictionary.words) == 380
-    assert tuple(word.name for word in runtime.dictionary.words[-61:]) == (
+    scalar_float_words = tuple(
+        name.encode("ascii") for name, _, _ in scalar_fp.BIOS_WORDS)
+    assert len(runtime.dictionary.words) == 380 + len(scalar_float_words)
+    words = runtime.dictionary.words[:-len(scalar_float_words)]
+    assert tuple(
+        word.name for word in runtime.dictionary.words[-len(scalar_float_words):]
+    ) == scalar_float_words
+    assert tuple(word.name for word in words[-61:]) == (
         b"UM*",
         b"WITHIN",
         b"MOVE",
