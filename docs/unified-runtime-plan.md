@@ -305,6 +305,13 @@ gate is opt-in v2 with sealed local CALL/RET sites and canonical integer
 callbacks; v1 remains unchanged. General task exceptions require their own
 shared-task ABI before admission.
 
+After qualifying 5A, the next bounded implementation contract is
+[`hybrid-closed-callback-plan.md`](hybrid-closed-callback-plan.md): statically
+closed, acyclic integer colon policies on the existing private stacks. Its
+explicit v3 metadata reuses the v2 native transport. Declarative policy IR is
+validated and installed before routine publication and unchanged source
+bootstrap; no arbitrary source prelude or dynamic callback is admitted.
+
 Add machine-to-semantic callbacks, nested transitions, exceptions,
 suspension/wake, and selected service access in separate qualified slices.
 Then specify native compiler/dictionary integration for guest JIT, machine
