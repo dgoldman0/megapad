@@ -1535,6 +1535,7 @@ class TerminalSession(ABC):
         scalar_offset: int = 0,
         wheel_x: int = 0,
         wheel_y: int = 0,
+        adjustment: int = 0,
     ) -> DriverStatus:
         """Send one semantic control intent in the exact acknowledged scope."""
 
@@ -1546,6 +1547,10 @@ class TerminalSession(ABC):
         scope = self._acknowledged_output_scope()
         if scope is None:
             return DriverStatus.BACKPRESSURED
+        field_tail = (
+            {"adjustment": adjustment}
+            if event_kind == ControlEventKind.ADJUST or adjustment != 0 else {}
+        )
         return driver.send_control_event(
             owner_id,
             owner_generation,
@@ -1558,6 +1563,7 @@ class TerminalSession(ABC):
             scalar_offset=scalar_offset,
             wheel_x=wheel_x,
             wheel_y=wheel_y,
+            **field_tail,
         )
 
 
@@ -1706,4 +1712,3 @@ def _resolve_font(path: str | os.PathLike | None) -> Path | None:
         if candidate.is_file():
             return candidate.resolve()
     return None
-
