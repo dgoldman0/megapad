@@ -691,12 +691,9 @@ those package interfaces. The emulator still resolves its default BIOS from
 the repository root; parser behavior, executor selection and owner lifecycle
 are unchanged. Current user commands use `megapad.py --mode MODE`.
 
-The root `session_server.py` and `simulator_server.py` files now contain only
-deprecated `main` forwarding. External launchers, including separately
-maintained Akashic tooling, are outside this change and have not been
-migrated. Those two script paths remain until that dependency cluster can
-move. Internal helper imports and monkeypatches use the canonical package
-modules; no second server implementation remains.
+The root `session_server.py` and `simulator_server.py` forwarders were
+removed once Akashic's tools started MegaPad through `megapad.py`. Internal
+helper imports and monkeypatches use the canonical package modules.
 
 `shared_session.py` remains the canonical common protocol/owner module.
 The architectural monitor `cli.py` and flat architectural module aliases
@@ -717,8 +714,8 @@ arguments to their existing server lifecycle. Emulator is the default.
 Top-level help and unavailable-mode errors load no backend; selected-mode
 help needs no native extension. Hybrid remains an invalid selection.
 
-`session_server.py` now exposes a parser factory and `main(argv=None)`.
-`simulator_server.py --executor python|native|auto` passes an explicit choice
+`emulator.server` exposes a parser factory and `main(argv=None)`.
+`megapad.py --mode simulator --executor python|native|auto` passes an explicit choice
 through image preparation into the runtime used by the live session. Omission
 retains the existing environment/default behavior; this does not mutate the
 process environment. Missing required native execution fails before boot

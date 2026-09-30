@@ -80,7 +80,7 @@ go one at a time; commit each coherent slice once it is green.
    routines and compare it with simulator mode.
 8. **Launcher migration.** Once Akashic's tools start MegaPad through
    `megapad.py` or the packaged servers, delete the root `session_server.py`
-   and `simulator_server.py` forwarders.
+   and `simulator_server.py` forwarders. Done.
 9. **Capacity negotiation.** Designed with the owner before implementation:
    a request-and-answer step through which a producer asks the terminal for
    more retained space and receives an approval or a denial, replacing silent

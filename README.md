@@ -338,12 +338,8 @@ See [the v1 ABI and manifest format](docs/hybrid-runtime-abi.md) and
 
 The architectural monitor in `cli.py` remains a separate debugging tool.
 Server implementations and programmatic interfaces live in `emulator.server`,
-`simulator.server`, and `hybrid.server`; the unified launcher selects one.
-The deprecated `session_server.py` and `simulator_server.py` scripts forward
-only to the corresponding package's `main`. They remain temporarily for
-external launchers, including the separately maintained Akashic tooling;
-new callers should use `megapad.py --mode MODE`. Their external callers have
-not been migrated as part of this repository change.
+`simulator.server`, and `hybrid.server`; start a session with
+`megapad.py --mode MODE`, which selects one.
 
 ### Boot the System
 

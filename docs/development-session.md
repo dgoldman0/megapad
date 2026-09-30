@@ -78,10 +78,7 @@ Backend server interfaces live in `emulator.server`, `simulator.server`, and
 `megapad.py --mode MODE` loads the selected package lazily; top-level help
 requires no backend imports.
 Simulator and hybrid image preparation also expose `prepare_server(args)`
-without opening a listener. The deprecated root `session_server.py` and
-`simulator_server.py` scripts retain only `main` forwarding for external
-launchers that have not migrated. Their removal waits for that external
-dependency cluster; they contain no second server implementation.
+without opening a listener.
 
 Both detailed and lightweight status contain the same `runtime` descriptor:
 

@@ -2514,9 +2514,8 @@ remain deterministic unless their caller explicitly binds a clock; this does
 not add timer interrupts or change semantic-step accounting. Physical retained
 offer and complete Desktop acceptance remain separate qualification evidence.
 
-Its parser, preparation and lifecycle interfaces live in `simulator.server`.
-The deprecated root `simulator_server.py` script temporarily forwards `main`
-for external launchers; it contains no separate implementation.
+Its parser, preparation and lifecycle interfaces live in `simulator.server`;
+sessions start with `megapad.py --mode simulator`.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.
