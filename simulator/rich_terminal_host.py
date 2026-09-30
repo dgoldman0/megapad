@@ -18,6 +18,7 @@ from enum import Enum
 from typing import Callable, Iterator
 
 from rich_terminal.transport import HostPortLimits, TerminalHostLease
+from shared.foreign_abi import MAX_ROOT_INSTRUCTIONS
 from shared.rich_terminal_host import RichTerminalHostHooks, SharedRichTerminalHost
 from simulator.errors import ExecutionError
 from simulator.runtime import (
@@ -116,6 +117,7 @@ class SimulatorSessionBackend:
         terminal_cols: int = 80,
         terminal_rows: int = 24,
         semantic_quantum_steps: int | None = None,
+        machine_quantum_instructions: int | None = None,
     ) -> None:
         if not isinstance(runtime, MegaForthRuntime):
             raise TypeError("runtime must be a MegaForthRuntime")
@@ -129,6 +131,13 @@ class SimulatorSessionBackend:
             if semantic_quantum_steps <= 0:
                 raise ValueError("semantic_quantum_steps must be positive")
         self._semantic_quantum_steps = semantic_quantum_steps
+        if machine_quantum_instructions is not None:
+            if type(machine_quantum_instructions) is not int:
+                raise TypeError("machine_quantum_instructions must be an exact integer or None")
+            if not 1 <= machine_quantum_instructions <= MAX_ROOT_INSTRUCTIONS:
+                raise ValueError(
+                    f"machine_quantum_instructions must be in 1..{MAX_ROOT_INSTRUCTIONS}")
+        self._machine_quantum_instructions = machine_quantum_instructions
         self._runtime = runtime
         self._legacy_output_sink = legacy_output_sink
         self._geometry = HostedTerminalGeometryState(
@@ -156,6 +165,10 @@ class SimulatorSessionBackend:
         return self._runtime
 
     @property
+    def machine_quantum_instructions(self) -> int | None:
+        return self._machine_quantum_instructions
+
+    @property
     def geometry(self) -> HostedTerminalGeometry:
         with self._boundary_lock:
             return self._geometry.snapshot()
@@ -173,6 +186,32 @@ class SimulatorSessionBackend:
     def waiting_for_interrupt(self) -> bool:
         with self._boundary_lock:
             return isinstance(self._suspension, BlockedExecution)
+
+    def _poll_idle_runtime(self, attribute):
+        with self._boundary_lock:
+            suspended = self._suspension
+            task_pending = (
+                suspended is not None
+                and self._runtime.task_suspension_pending(suspended.suspension)
+            )
+            if not task_pending:
+                return getattr(self._runtime, attribute)
+            try:
+                with self._runtime._session_owner_scope(self._owner_token):
+                    return getattr(self._runtime, attribute)
+            except BaseException as error:
+                # Runtime proof failure revokes its task continuation. Retire
+                # the backend's copy too, without replacing the first error.
+                self._cancel_failed_resume(suspended, error)
+                raise
+
+    @property
+    def idle_wake_due(self) -> bool:
+        return self._poll_idle_runtime("idle_wake_due")
+
+    @property
+    def idle_wake_delay_s(self) -> float | None:
+        return self._poll_idle_runtime("idle_wake_delay_s")
 
     @property
     def closed(self) -> bool:
@@ -342,7 +381,7 @@ class SimulatorSessionBackend:
                     )
                 elif (
                     isinstance(suspended, BlockedExecution)
-                    and not self._runtime.idle_wake_due
+                    and not self.idle_wake_due
                 ):
                     result = SemanticBatchResult(
                         0,
@@ -352,6 +391,8 @@ class SimulatorSessionBackend:
                 else:
                     guest_started = True
                     if suspended is None:
+                        scheduling = ({} if self._machine_quantum_instructions is None else
+                                      {"machine_quantum_instructions": self._machine_quantum_instructions})
                         with self._runtime._session_owner_scope(
                             self._owner_token
                         ):
@@ -360,6 +401,7 @@ class SimulatorSessionBackend:
                                 context=context,
                                 step_budget=step_budget,
                                 quantum_steps=self._semantic_quantum_steps,
+                                **scheduling,
                             )
                         prior_steps = 0
                     else:
@@ -436,11 +478,12 @@ class SimulatorSessionBackend:
             # Resume clears the old handle before re-entering guest code. A
             # guest fault after that point therefore makes cancellation stale.
             pass
-        except BaseException as cancel_error:
-            original_error.add_note(
-                "failed to cancel simulator suspension after resume error: "
-                f"{type(cancel_error).__name__}: {cancel_error}"
-            )
+        except BaseException:
+            try:
+                BaseException.add_note(original_error,
+                    "failed to cancel simulator suspension after resume error")
+            except BaseException:
+                pass
         finally:
             self._suspension = None
             self._reported_suspension_steps = 0

@@ -5,6 +5,7 @@ Every callback reenters the existing dispatcher on the task's original stacks.
 """
 
 from dataclasses import dataclass
+from types import FunctionType
 
 from shared.cells import CELL_BYTES
 from shared.foreign_abi import (
@@ -12,7 +13,8 @@ from shared.foreign_abi import (
     ForeignCompletedV1, ForeignFailedV1, ForeignRunnableYieldV1, ForeignSpanV1,
 )
 from simulator.foreign_control import ForeignContinuation, ForeignReturnControl
-from simulator.foreign_effects import TaskEffectGuard
+from simulator.foreign_cursor import MachineTurn, ForeignMachineCursor, _machine_state_cell
+from simulator.foreign_effects import TaskEffectGuard, TaskEffectScope
 from simulator.foreign_runtime import (
     ForeignRootLedger, ForeignTaskError, ForeignTaskBudgetExceeded, _StepMeter,
     _STACK_ROUTES, _namespace, ExecutionContext,
@@ -21,7 +23,7 @@ from simulator.foreign_runtime import (
 from simulator.foreign_types import ForeignCallbackTarget, ForeignResumeTarget
 from simulator.errors import ForthAbort, StepBudgetExceeded
 from simulator.stacks import Continuation
-from simulator.runtime import _TASK_METER_ROUTES, _TASK_METER_NAMESPACE
+from simulator.runtime import _TASK_METER_ROUTES, _TASK_METER_NAMESPACE, _DispatchFrame
 
 
 _METER_ROUTES = _TASK_METER_ROUTES
@@ -75,7 +77,12 @@ class _Tail:
 class TaskDispatchRoot:
     """One original semantic root, meter, adapter owner, and spent ledger."""
 
-    def __init__(self, engine, meter, root_id, limits):
+    def __init__(self, engine, meter, root_id, limits,
+                 _machine_factory=(_machine_state_cell, _machine_state_cell.__code__,
+                                   _machine_state_cell.__defaults__),
+                 _machine_metadata=tuple((kind, tuple(vars(kind).items()))
+                                         for kind in (MachineTurn, ForeignMachineCursor)),
+                 *, machine_turn=None):
         meter_namespace = _meter_namespace(meter)
         self.engine = engine
         self.context = engine._context
@@ -97,6 +104,17 @@ class TaskDispatchRoot:
         self._control_close = ForeignReturnControl.close
         self._cleanup_functions = (_FunctionSeal.capture(self._effects_close),
                                    _FunctionSeal.capture(self._control_close))
+        self._machine_scheduled = machine_turn is not None
+        self._machine_routes = _machine_metadata
+        publishers = tuple(callback.__code__ for name, callback in engine._dispatch_routes
+                           if name in ("begin_machine_turn", "_issue_machine_cursor",
+                                       "resume_machine", "close"))
+        factory, code, defaults = _machine_factory
+        if (type(factory) is not FunctionType or factory.__code__ is not code
+                or factory.__defaults__ is not defaults or factory.__kwdefaults__ is not None
+                or factory.__closure__ is not None):
+            raise ForeignTaskError("task original machine scheduling factory changed")
+        self._machine_schedule = factory(self, publishers)
         self.control = None
         # Allocate host state first; binding the control is the final publish.
         try:
@@ -120,6 +138,185 @@ class TaskDispatchRoot:
     @property
     def active(self):
         return self.tail is not None or any(frame.capture is not None for frame in self.frames)
+
+    def _machine_state(self):
+        """Read the original state cell only through its retained routes."""
+        self.engine._require_task(self.context)
+        for kind, routes in self._machine_routes:
+            fields = vars(kind)
+            if (any(type(name) is not str for name in fields)
+                    or kind.__getattribute__ is not object.__getattribute__
+                    or "__getattr__" in fields
+                    or any(fields.get(name) is not value for name, value in routes)
+                    or any(name in fields and not any(key == name for key, _ in routes)
+                           for name in ("__new__", "__getattribute__", "__getattr__"))):
+                raise ForeignTaskError("task machine scheduling metadata routes changed")
+        read, replace, routes = self._machine_schedule
+        for function, code, globals_, defaults, kwdefaults, closure, fixed in routes:
+            if (type(function) is not FunctionType or function.__code__ is not code
+                    or function.__globals__ is not globals_ or function.__defaults__ is not defaults
+                    or function.__kwdefaults__ is not kwdefaults or function.__closure__ is not closure
+                    or any(cell.cell_contents is not value for cell, value in fixed)):
+                raise ForeignTaskError("task machine scheduling holder routes changed")
+        state = read()
+        if type(state) is not tuple or len(state) != 2:
+            raise ForeignTaskError("task machine scheduling holder changed")
+        if self._machine_scheduled and state[0] is not None:
+            machine_call, call_seal = self.engine._machine_methods[0][1:]
+            call_seal.verify()
+            machine_call(self.engine, "require_machine_selection", self.ledger.meter, state[0][2])
+        return state
+
+    def _machine_frame(self):
+        runtime = self.engine._runtime
+        frames = runtime._active_dispatches
+        if type(frames) is not list or not frames:
+            raise ForeignTaskError("task machine scheduling has no outer host frame")
+        if len(frames) != 1 or runtime._active_input_states:
+            raise ForeignTaskError("task machine scheduling cannot detach source or nested host dispatch")
+        frame = frames[0]
+        if (type(frame) is not _DispatchFrame or frame.context is not self.context
+                or frame.meter is not self.ledger.meter or frame.root_id != self.ledger.root_id
+                or frame.closed_guard is not None or frame.task_root is not self):
+            raise ForeignTaskError("task machine scheduling changed its original host frame")
+        return frame
+
+    def _machine_instructions(self):
+        self.engine.require_native_chain(self)
+        ledger = self.ledger
+        receipt = ledger.last_receipt
+        instructions = ledger.instructions
+        if type(instructions) is not int or instructions < 0:
+            raise ForeignTaskError("task machine scheduling instruction projection changed")
+        if receipt is None:
+            if instructions:
+                raise ForeignTaskError("task machine scheduling lacks its original receipt")
+        else:
+            ledger.settle(receipt, issued_receipt=receipt)
+            if instructions != receipt.root_instructions:
+                raise ForeignTaskError("task machine scheduling receipt projection changed")
+        return instructions
+
+    def begin_machine_turn(self, turn):
+        """Admit one outer scheduling turn without renewing execution fuel."""
+        state = self._machine_state()
+        previous, cursor = state
+        if not self._machine_scheduled:
+            if turn is not None or previous is not None or cursor is not None:
+                raise ForeignTaskError("synchronous task root cannot acquire machine scheduling")
+            return
+        frame = self._machine_frame()
+        turn_kind = self._machine_routes[0][0]
+        if type(turn) is not turn_kind or frame.machine_turn is not turn:
+            raise ForeignTaskError("task machine turn is not its exact outer frame selection")
+        limit = turn.limit
+        if type(limit) is not int or not 1 <= limit <= 10_000_000:
+            raise ForeignTaskError("task machine quantum instructions must be an exact integer in 1..10000000")
+        instructions = self._machine_instructions()
+        if previous is not None:
+            old_frame, old_turn, original_limit, start = previous
+            if limit != original_limit:
+                raise ForeignTaskError("task machine scheduling cannot replace its original limit")
+            if frame is old_frame:
+                if turn is not old_turn or instructions < start:
+                    raise ForeignTaskError("task machine turn changed during its original host dispatch")
+                return
+            if turn is old_turn or any(item is old_frame for item in self.engine._runtime._active_dispatches):
+                raise ForeignTaskError("task machine scheduling cannot renew an active or repeated turn")
+        current = (frame, turn, limit, instructions)
+        self._machine_schedule[1](state, (current, cursor))
+
+    def machine_turn_evidence(self):
+        """The immutable original turn record for the existing parked witness."""
+        state = self._machine_state()
+        current = state[0]
+        if not self._machine_scheduled:
+            if current is not None or state[1] is not None:
+                raise ForeignTaskError("synchronous task root acquired scheduling state")
+            return None
+        if type(current) is not tuple or len(current) != 4:
+            raise ForeignTaskError("task machine turn has not been admitted")
+        frame, turn, limit, start = current
+        if (type(frame) is not _DispatchFrame or frame.machine_turn is not turn
+                or frame.context is not self.context or frame.meter is not self.ledger.meter
+                or type(frame.root_id) is not int or frame.root_id != self.ledger.root_id
+                or frame.closed_guard is not None or frame.task_root is not self
+                or type(turn) is not self._machine_routes[0][0]
+                or type(turn.limit) is not int or turn.limit != limit
+                or type(limit) is not int or type(start) is not int
+                or self._machine_instructions() < start):
+            raise ForeignTaskError("task original machine turn evidence changed")
+        return current
+
+    def _machine_quantum(self):
+        if not self._machine_scheduled:
+            return 65536
+        frame, _turn, limit, start = self.machine_turn_evidence()
+        if self._machine_frame() is not frame:
+            raise ForeignTaskError("task machine scheduling has not admitted this host turn")
+        spent = self._machine_instructions() - start
+        if spent > limit:
+            raise ForeignTaskError("task adapter exceeded the original machine turn allowance")
+        return min(65536, limit - spent)
+
+    def _issue_machine_cursor(self, event, frame):
+        state = self._machine_state()
+        current, previous = state
+        if previous is not None:
+            raise ForeignTaskError("task machine cursor already has a live issuance")
+        if (type(event) is not ForeignRunnableYieldV1 or event.receipt is not self.ledger.last_receipt
+                or not self.frames or frame is not self.frames[-1] or frame.request is not None
+                or event.operation_token is not frame.token):
+            raise ForeignTaskError("task machine cursor lacks its exact runnable invocation")
+        self.machine_turn_evidence()
+        kind, routes = self._machine_routes[1]
+        values = (self.ledger.root_token, self.ledger.root_id, frame.invocation_id,
+                  frame.token, event.receipt, True)
+        cursor = object.__new__(kind)
+        for name, value in zip(("root_token", "root_id", "invocation_id", "operation_token",
+                                "receipt", "host_yield"), values):
+            slot = next(descriptor for field_name, descriptor in routes if field_name == name)
+            slot.__set__(cursor, value)
+        record = (cursor, event, frame, frame.binding, frame.resume, current,
+                  *values[:-1], self.context.data.pointer, self.context.returns.pointer)
+        self._machine_schedule[1](state, (current, record))
+        return cursor
+
+    def machine_cursor_evidence(self, cursor):
+        """Validate exact one-shot issuance without using cursor fields as authority."""
+        state = self._machine_state()
+        record = state[1]
+        if type(record) is not tuple or len(record) != 13 or record[0] is not cursor:
+            raise ForeignTaskError("task machine cursor is not the exact live issuance")
+        (issued, event, frame, binding, resume, _turn, root_token, root_id,
+         invocation_id, token, receipt, data_pointer, return_pointer) = record
+        kind = self._machine_routes[1][0]
+        if (type(issued) is not kind or issued.root_token is not root_token
+                or type(issued.root_id) is not int or issued.root_id != root_id
+                or type(issued.invocation_id) is not int or issued.invocation_id != invocation_id
+                or issued.operation_token is not token or issued.receipt is not receipt
+                or issued.host_yield is not True or self.ledger.root_token is not root_token
+                or self.ledger.root_id != root_id or self.ledger.last_receipt is not receipt
+                or type(event) is not ForeignRunnableYieldV1 or event.receipt is not receipt
+                or event.operation_token is not token or not self.frames or self.frames[-1] is not frame
+                or frame.binding is not binding or frame.resume is not resume or frame.token is not token
+                or type(frame.invocation_id) is not int or frame.invocation_id != invocation_id
+                or frame.request is not None or frame.capture is not None or frame.cookie is not None
+                or self.context.data.pointer != data_pointer or self.context.returns.pointer != return_pointer):
+            raise ForeignTaskError("task machine cursor changed its accepted invocation evidence")
+        if self.engine.require_definition(binding.word) is not binding:
+            raise ForeignTaskError("task machine cursor binding changed")
+        self.machine_turn_evidence()
+        self.ledger.settle(receipt, issued_receipt=receipt)
+        return record
+
+    def resume_machine(self, cursor):
+        record = self.machine_cursor_evidence(cursor)
+        state = self._machine_state()
+        if self._machine_frame() is not state[0][0] or state[0] is record[5]:
+            raise ForeignTaskError("task machine cursor requires one fresh outer host turn")
+        self._machine_schedule[1](state, (state[0], None))
+        return self._drive(record[1])
 
     def _scope(self):
         if self.tail is not None:
@@ -184,6 +381,8 @@ class TaskDispatchRoot:
             raise
         try:
             require_task(context)
+            if self._machine_scheduled:
+                self.machine_turn_evidence()
             require_meter()
             projected = dict.get(meter_namespace, "steps")
             if type(projected) is not int or projected != before + 1:
@@ -334,11 +533,24 @@ class TaskDispatchRoot:
 
     def _drive(self, event):
         while True:
+            self.engine._require_task(self.context)
+            if self._machine_scheduled:
+                self.machine_turn_evidence()
             frame = self.frames[-1]
             frame.token = event.operation_token
             if type(event) is ForeignRunnableYieldV1:
+                quantum = self._machine_quantum()
+                budget = self._budget(frame.binding, quantum=quantum)
+                # A runnable adapter value cannot turn exhausted execution
+                # fuel into a host scheduling boundary.
+                if not budget.invocation_instructions_remaining or not budget.root_instructions_remaining:
+                    raise ForeignTaskBudgetExceeded("task machine instruction allowance exhausted")
+                if not quantum:
+                    return self._issue_machine_cursor(event, frame)
                 event = self._transition("advance", frame.token,
-                                         budget=self._budget(frame.binding, quantum=65536))
+                                         budget=budget)
+                if event.receipt.instructions > quantum:
+                    raise ForeignTaskError("task adapter exceeded the original machine advance quantum")
                 if type(event) is ForeignRunnableYieldV1 and not event.receipt.instructions:
                     raise ForeignTaskError("task adapter made no progress with positive quantum")
                 continue
@@ -429,13 +641,40 @@ class TaskDispatchRoot:
             raise ForeignTaskError("task cancellation changed its parent's pending authority")
         self.ledger.retire_suffix(expected)
         self.engine.record_native_cancellation(self, result)
+        # Cancellation invalidates a parked runnable issuance without calling
+        # any replaceable function on the failure/cleanup path. This is the
+        # original state cell retained in the engine-owned holder evidence.
+        state_cell = self._machine_schedule[2][0][5][0]
+        state = state_cell.cell_contents
+        if type(state) is tuple and len(state) == 2:
+            state_cell.cell_contents = (state[0], None)
+        else:
+            state_cell.cell_contents = (None, None)
 
     def reconcile(self):
         if self.closed:
             return
         capture, scope = self._scope()
         if capture is not None:
-            self.effects.require_binding(self.issuer, scope)
+            parked = self._machine_state()[1] if self._machine_scheduled else None
+            runnable = (type(parked) is tuple and len(parked) == 13 and self.frames
+                        and parked[2] is self.frames[-1] and self.frames[-1].request is None)
+            if runnable:
+                # A child machine parks with semantic effects detached. Its
+                # parent's captured scope remains issued, but confers no stack
+                # access until normal completion reattaches it. Reconcile raw
+                # foreign-cookie losses before the full cursor pointer proof.
+                self.engine._verify_export(capture)
+                TaskEffectGuard._require(self.effects, self.issuer)
+                record = next((item for item in self.effects._scopes if item[0] is scope), None)
+                if (type(scope) is not TaskEffectScope or record is None
+                        or scope._issuer is not self.issuer or scope.grants is not record[1]
+                        or scope._retired is not False or self.effects._scope is not None
+                        or self.context.data._task_effect_guard is not None
+                        or self.context.returns._task_effect_guard is not None):
+                    raise ForeignTaskError("runnable task lost its detached ancestor scope")
+            else:
+                self.effects.require_binding(self.issuer, scope)
         self.control.reconcile(self.issuer)
         retired = self.control.drain_retired(self.issuer)
         if retired:
@@ -592,6 +831,7 @@ class TaskDispatchRoot:
     def close(self, *, completed):
         if self.closed:
             return
+        self._machine_schedule[2][0][5][0].cell_contents = (None, None)
         original = None
 
         def failed(error):

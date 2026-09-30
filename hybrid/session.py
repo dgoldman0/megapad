@@ -28,6 +28,7 @@ class HybridSession(SimulatorMachineSession):
         rows: int = 30,
         semantic_step_budget: int | None = None,
         semantic_quantum_steps: int | None = None,
+        machine_quantum_instructions: int | None = None,
         rich_terminal: RichTerminalSessionConfig | None = None,
         manifest_abi_version: int | None = None,
     ) -> None:
@@ -55,6 +56,7 @@ class HybridSession(SimulatorMachineSession):
             rows=rows,
             semantic_step_budget=semantic_step_budget,
             semantic_quantum_steps=semantic_quantum_steps,
+            machine_quantum_instructions=machine_quantum_instructions,
             rich_terminal=rich_terminal,
         )
 
@@ -134,6 +136,8 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 nested_machine_callbacks=nested_profile and nested_available,
                 private_scalar_fp_v1=service_profile and service_available,
                 callback_suspension=False,
+                shared_task_exceptions=False,
+                composite_suspension=False,
                 native_bios_boot=False,
                 multicore=False,
                 native_snapshot=False,
@@ -174,6 +178,13 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 "dispatch_callback_limit": hybrid.dispatch_callback_limit,
                 "dispatch_callback_semantic_limit": hybrid.dispatch_callback_semantic_limit,
             }
+            task_execution = hybrid.task_execution_status
+            if task_execution is not None:
+                result["task_execution"] = {
+                    **task_execution,
+                    "registered_words": list(task_execution["registered_words"]),
+                    "quantum_instructions": self.semantic_session.machine_quantum_instructions,
+                }
             if detailed:
                 result["hybrid"] = result.pop("simulator")
             return result

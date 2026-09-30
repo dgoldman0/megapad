@@ -81,6 +81,7 @@ class SimulatorMachineSession(TerminalSession):
         rows: int = 30,
         semantic_step_budget: int | None = None,
         semantic_quantum_steps: int | None = None,
+        machine_quantum_instructions: int | None = None,
         rich_terminal: RichTerminalSessionConfig | None = None,
     ) -> None:
         if not isinstance(runtime, MegaForthRuntime):
@@ -123,7 +124,9 @@ class SimulatorMachineSession(TerminalSession):
             terminal_cols=cols,
             terminal_rows=rows,
             semantic_quantum_steps=semantic_quantum_steps,
+            machine_quantum_instructions=machine_quantum_instructions,
         )
+        self._machine_quantum_instructions = backend.machine_quantum_instructions
         self._backend = backend
         try:
             if rich_terminal is None:
@@ -151,6 +154,10 @@ class SimulatorMachineSession(TerminalSession):
         return self._semantic_quantum_steps
 
     @property
+    def machine_quantum_instructions(self) -> int | None:
+        return self._machine_quantum_instructions
+
+    @property
     def booted(self) -> bool:
         return self._booted
 
@@ -164,17 +171,14 @@ class SimulatorMachineSession(TerminalSession):
         return bool(
             not self._halted
             and backend.waiting_for_interrupt
-            and not self.runtime.idle_wake_due
+            and not backend.idle_wake_due
             and not self.rich_terminal_work_pending
         )
 
     @property
     def idle_wake_delay_s(self) -> float | None:
         """Seconds until a blocked IDLE-UNTIL deadline, or None."""
-        deadline = self.runtime.idle_deadline_ms
-        if deadline is None:
-            return None
-        return max(deadline - self.runtime.rtc.uptime_ms, 0) / 1000
+        return self.backend.idle_wake_delay_s
 
     @property
     def semantic_steps_total(self) -> int:
@@ -260,6 +264,9 @@ class SimulatorMachineSession(TerminalSession):
         )
         self._last_batch_rich_terminal_progress = bool(
             semantic.semantic_steps or terminal_progress
+            # A machine-only scheduling turn can yield without semantic work.
+            # Its runnable result should not trigger the idle/backpressure wait.
+            or semantic.stop_reason is SemanticBatchStop.YIELDED
         )
         self._refresh_output_display_boundary()
         return SimulatorSessionRun(
@@ -414,13 +421,13 @@ class SimulatorSharedMachine(SharedSessionOwner):
                     continue
 
                 session = self.semantic_session
-                if (session.halted or session.idle) and not (
-                    session.rich_terminal_work_pending
-                ):
-                    should_wait = True
-                    guest_idle = True
-                else:
-                    try:
+                try:
+                    if (session.halted or session.idle) and not (
+                        session.rich_terminal_work_pending
+                    ):
+                        should_wait = True
+                        guest_idle = True
+                    else:
                         result = session.run_boundary()
                         self._record_boundary_locked(result)
                         failure = self._terminal_failure_locked()
@@ -429,9 +436,9 @@ class SimulatorSharedMachine(SharedSessionOwner):
                             self.paused = True
                         elif not session.last_batch_made_progress:
                             should_wait = True
-                    except Exception as exc:
-                        self.last_error = f"{type(exc).__name__}: {exc}"
-                        self.paused = True
+                except Exception as exc:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self.paused = True
 
             if should_wait:
                 with self.condition:
@@ -440,7 +447,12 @@ class SimulatorSharedMachine(SharedSessionOwner):
                         # Input notifies the condition; a guest blocked in
                         # IDLE-UNTIL resumes at its deadline.
                         timeout = self.idle_wait_cap_s
-                        timed_wake = self.semantic_session.idle_wake_delay_s
+                        try:
+                            timed_wake = self.semantic_session.idle_wake_delay_s
+                        except Exception as exc:
+                            self.last_error = f"{type(exc).__name__}: {exc}"
+                            self.paused = True
+                            continue
                         if timed_wake is not None:
                             timeout = min(timeout, timed_wake)
                     if timeout > 0:
