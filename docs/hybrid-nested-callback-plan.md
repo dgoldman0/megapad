@@ -200,7 +200,8 @@ adapter presents the corresponding metadata values to application code.
 | `resume_callback_v3(token, outputs)` | Resume only the current top frame's pending callback through its real sealed RET.L |
 | `cancel_chain_v3(token=None)` | Cancel the complete owned chain; no-token owner cleanup is idempotent, an explicit token remains strict |
 | `last_segment_v3()` | Immutable copy of the latest native accounting receipt, without continuation authority |
-| `revoke_code_v3(spec)` / `is_code_published_v3(spec)` | Exact idle identity operations needed by transactional publication rollback |
+| `revoke_code_v3(spec)` | Exact idle revocation needed by transactional publication rollback |
+| `is_code_published_v3(spec)` | Read-only exact publication identity query, including an owned parked chain; it grants no entry authority |
 
 Publication issues opaque `ChildEdgeV3` handles retained by the composition
 registration. Each is bound to the runner, parent publication, callback/export,
@@ -224,6 +225,12 @@ on successful revocation or publication rollback. Switching facade cannot
 replenish the allowance. No separate lookup/recovery API is needed after a
 publication exception; exact publication query and transactional revocation
 remain the cleanup authority.
+
+Semantic dependency validation also queries publication while a native chain
+is parked. Admit this read-only query through that owner's reservation, while
+still excluding reentry during an active native boundary or result delivery.
+It neither validates a resume token nor changes code, cache, publication or
+frame state. Publication and revocation remain idle-only mutations.
 
 Each invocation receives its own opaque owner-bound callback tokens, including
 children. A parent's token stays pending while a child runs; starting a child
