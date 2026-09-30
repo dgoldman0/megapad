@@ -12,6 +12,7 @@ from hybrid.manifest import load_manifest
 from hybrid.runtime import HybridRuntime
 from hybrid.session import HybridSession, HybridSharedMachine
 from shared.hybrid_abi import RoutineManifestV2
+from shared.session_options import configured_production_executor
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapPreparation, prepare_image_bootstrap
 from simulator.platform import create_one_core_address_space
@@ -62,6 +63,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     if not storage_path.is_file():
         raise ValueError(f"storage image does not exist: {storage_path}")
     quantum_steps = configured_semantic_quantum_steps(args.semantic_quantum_steps)
+    executor = configured_production_executor(args.executor)
     # The loader resolves and validates all images before any runtime, routine
     # binding, boot source, or socket is made visible.
     manifest = load_manifest(args.hybrid_routines)
@@ -82,7 +84,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     memory.mmio.rtc.bind_monotonic_clock(time.monotonic_ns)
     storage = HostedStorageService(image_path=storage_path)
     hybrid = HybridRuntime.create(
-        executor=args.executor,
+        executor=executor,
         memory=memory,
         storage=storage,
         dispatch_instruction_limit=manifest.dispatch_instruction_limit,

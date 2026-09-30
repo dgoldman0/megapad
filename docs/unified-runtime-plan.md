@@ -9,7 +9,9 @@ qualified; residual profiles identify NTT and AES transfer routing as the next
 targets. Native page access and longer continuation intervals need no further
 rewrite on current evidence. Kernel/source/captured-frame evidence and
 strict multicore FP/timing checks are recorded. Live Desktop acceptance,
-executor default promotion and expanded hybrid interoperability remain open.
+expanded hybrid interoperability and remaining Desktop acceptance remain open.
+Production semantic sessions now default to required native execution; explicit
+CLI/environment choices and Python embedding defaults remain available.
 
 Branch: `feature/unified-runtime`
 
@@ -366,7 +368,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 |---|---|---|
 | Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
-| 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
+| 1B — common session boundary | Extraction complete; production native default qualified | Original boundary gates plus 30 default-selection cases and the 317-check application gate; prepared simulator/native and hybrid/native Desktop subsets passed; socket scope remains unqualified |
 | 2 — workload profiles | Kernels, KDOS controls/attribution and captured Desktop composition recorded; live Desktop pending | 19 harness checks; source controls in both executors; 3 exact captured-frame gates; separate evidence in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
