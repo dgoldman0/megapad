@@ -1023,6 +1023,14 @@ the semantic tick, perform the operation's operand/deadline effects, then retain
 the next semantic IP. This does not admit `UartReadAttempt`, `KEY`, `MS@` or
 `IDLE-MS` as new callback effects.
 
+For `IdleUntil`, capture the original canonical RTC owner and implementation
+routes plus the selected monotonic-clock identity. Keep the deadline pop
+before the uptime read and any clock failure. Admit only this deadline
+observation, including the configured realtime policy; it grants no general
+`MS@` or RTC callback authority. A narrowly installed deadline-read issuer
+preserves exact host exceptions from the clock, and owner/code/grant evidence
+is checked again after that host call before suspension publication.
+
 Use the existing `_SuspendedExecution`, context lease and one-shot
 `IdleWakeReceipt`. Strongly retain the original task root, meter, ledger,
 foreign chain and retained tail through every block and resume, including an
@@ -1066,6 +1074,33 @@ lower budgets, issue receipts or change cycles. Cached `last_receipt()` is not
 this proof; validation at eventual reply is too late for resumed callback
 effects. Composite admission requires this complete native surface, while the
 earlier synchronous capability remains separately qualified.
+
+#### Optional adapter validation and semantic settlement
+
+The six mandatory neutral adapter methods remain the synchronous contract.
+Two optional, directly class-defined Python methods are captured with their
+original function, code and closure evidence. `validate_parked(root_token,
+operation_token, request_token=None)` must return exact `True` without changing
+issued frame/token/receipt evidence or doing work. Missing validation support
+rejects a live callback detach after the canonical IDL tick and operand
+effects, before suspension publication. It does not remove synchronous use.
+
+`settle_semantic_receipt(receipt)` receives an engine-issued immutable
+`TaskSemanticReceiptV1(root_token, root_id, sequence, semantic_steps)`. The count
+is cumulative task callback work from the original ledger, independently of
+native receipts and public meter projections. The engine retains one bounded
+latest record and independent scalar evidence. Its
+`task_semantic_receipt(adapter, root_token, root_id)` query only returns that
+existing exact receipt; numeric equality or a copied value cannot issue it.
+The first receipt has sequence one. More callback work advances the sequence;
+retrying an unchanged total returns the same object and sequence. The initial
+synchronous gate settles before root teardown; composite detach later uses
+the same mechanism before publishing status. A final receipt already settled
+at detach contributes zero additional work. Accounting values infer no
+success or cancellation outcome. Settlement failure preserves its receipt
+and first error while native/control cleanup is still attempted. Optional
+method changes cannot replace or prevent use of otherwise intact mandatory
+cancellation routes.
 
 #### Completion qualification
 
