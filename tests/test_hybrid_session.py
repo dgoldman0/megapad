@@ -253,7 +253,7 @@ def test_invalid_quantum_prevents_manifest_and_boot_loading(tmp_path, monkeypatc
     def load(_path):
         pytest.fail("a bad quantum must fail before loading the manifest")
 
-    monkeypatch.setattr("hybrid.server.load_manifest_v1", load)
+    monkeypatch.setattr("hybrid.server.load_manifest", load)
     with pytest.raises(ValueError, match=SEMANTIC_QUANTUM_ENVIRONMENT):
         prepare_server(args)
 

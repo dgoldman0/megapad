@@ -8,9 +8,10 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from hybrid.manifest import load_manifest_v1
+from hybrid.manifest import load_manifest
 from hybrid.runtime import HybridRuntime
 from hybrid.session import HybridSession, HybridSharedMachine
+from shared.hybrid_abi import RoutineManifestV2
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapPreparation, prepare_image_bootstrap
 from simulator.platform import create_one_core_address_space
@@ -38,11 +39,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
         metavar="MANIFEST",
-        help="version 1 JSON manifest of bounded integer machine routines",
+        help="version 1 or 2 JSON manifest of bounded integer machine routines",
     )
     parser.epilog = (
         "Hybrid mode requires the native MP64 interpreter. Machine routines "
-        "use declared buffers and fixed call bounds; machine MMIO, callbacks, "
+        "use declared buffers and fixed call bounds. Version 2 admits declared "
+        "MIN/MAX/ABS/AND/OR/XOR callbacks; machine MMIO, arbitrary callbacks, "
         "native BIOS boot, and multicore execution are unavailable."
     )
     return parser
@@ -62,7 +64,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
     quantum_steps = configured_semantic_quantum_steps(args.semantic_quantum_steps)
     # The loader resolves and validates all images before any runtime, routine
     # binding, boot source, or socket is made visible.
-    manifest = load_manifest_v1(args.hybrid_routines)
+    manifest = load_manifest(args.hybrid_routines)
+    callback_manifest = isinstance(manifest, RoutineManifestV2)
     rich_terminal = None
     if args.rich_terminal_policy is not None:
         rich_terminal = args.rich_terminal_policy.configuration(
@@ -83,13 +86,22 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         memory=memory,
         storage=storage,
         dispatch_instruction_limit=manifest.dispatch_instruction_limit,
+        **({
+            "dispatch_callback_limit": manifest.dispatch_callback_limit,
+            "dispatch_callback_semantic_limit": manifest.dispatch_callback_semantic_limit,
+        } if callback_manifest else {}),
     )
     session = None
     try:
+        if callback_manifest and not hybrid.callback_abi_available:
+            raise RuntimeError("hybrid callbacks require a matching _mp64_accel v2; run make build")
         # Core BIOS vocabulary already exists. Source compilation and autoexec
         # can now resolve the exact declared words through ordinary lookup.
         for image in manifest.routines:
-            hybrid.register_routine_v1(image)
+            if callback_manifest:
+                hybrid.register_routine_v2(image)
+            else:
+                hybrid.register_routine_v1(image)
         preparation = prepare_image_bootstrap(
             memory=memory,
             storage=storage,

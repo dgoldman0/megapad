@@ -2,9 +2,9 @@
 
 Date: 2026-09-30
 
-Status: Phase 5A values, semantic export engine, v2 manifest loader, native
-request/resume runner and synchronous composition are qualified. Application
-admission is the next separately recorded integration slice.
+Status: Phase 5A values, semantic exports, native request/resume, synchronous
+composition and application admission are qualified. The unified hybrid
+launcher accepts strict version 1 or 2 manifests.
 The locked implementation direction is
 [`hybrid-interop-plan.md`](hybrid-interop-plan.md).
 
@@ -337,15 +337,31 @@ the ordinary completed call effects: its push, register/PC effects and work
 remain observable. A failed private-stack store has the existing failed-call
 partial effects and creates no successful callback request.
 
-## Required qualification before execution is advertised
+## Application qualification
+
+The server validates the complete manifest before creating its runtime,
+publishes admitted routines before boot-source compilation and rejects a stale
+callback extension even for an empty v2 manifest. Shared-session status derives
+callback names and ABI versions from issued routine metadata, while reporting
+actual machine instructions/cycles, invocations, segments, requests and semantic
+callback steps separately. An unused export declaration advertises no callback
+access. Metadata reporting does not renew a revoked allocation or export.
+
+Nine new application cases passed alongside the existing session, launcher,
+bootstrap and strict manifest gates. A real `SessionServer.dispatch` callback
+in both selected semantic executors produced exactly two semantic steps, five
+machine instructions, eight machine cycles, two segments, one invocation and
+one callback request/step. The gate uses the production owner and direct
+dispatch; it does not claim Unix socket transport or physical output.
+
+## Qualification boundaries
 
 The pure value gate checks exact types and bounds, immutable nesting, v1/v2
 separation, site collisions, export-ID conflicts, arities, variant/counter
 coherence, and a fresh-process import with every backend blocked.
 
-That gate proves no native opcode, callable identity, continuation authority,
-effect ordering, performance, or application integration. The next native
-and semantic slices must separately prove canonical word identity, sealed
-call provenance, one-shot token ownership, memory and stack protection,
-real CALL/RET accounting, cumulative work limits, failure/close behavior and
-unchanged v1 execution before exposing a callback capability.
+The pure value gate alone proves no native opcode, callable identity,
+continuation authority, effect ordering, performance or application integration.
+Those properties are covered by the separately recorded native, semantic and
+application gates above. This profile remains synchronous, one-frame and
+integer-only; later profiles require their own contracts and evidence.

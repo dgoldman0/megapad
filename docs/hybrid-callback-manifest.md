@@ -26,9 +26,13 @@ examining `version`. Unknown versions, booleans, floating-point versions, or a
 missing version fail. The explicit v1 loader continues to reject version 2 and
 callback fields. These APIs import no emulator, simulator, or native extension.
 
-This slice provides the format and loader. Server selection and runtime
-registration are separate composition work; loading a v2 file does not opt a
-v1 session into callbacks.
+The unified launcher accepts either format through
+`megapad.py --mode hybrid --storage IMAGE --hybrid-routines MANIFEST`.
+Version 2 requires the matching callback-capable MP64 extension, including
+when the manifest has no routines. Admission publishes declared routines and
+their canonical export bindings before compiling boot source. A failed
+publication closes the unexposed startup owner; loading alone still grants no
+execution authority. Version 1 sessions retain their callback-free contract.
 
 ## Exact JSON schema
 

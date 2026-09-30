@@ -372,7 +372,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
 | 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
-| 5 — expanded interoperability | Pending | |
+| 5 — expanded interoperability | Synchronous canonical integer callbacks (5A) qualified; closed policies, nesting, task exceptions, suspension and services remain | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
 
 ### Phase 1A implementation and validation — 2026-09-30
 
