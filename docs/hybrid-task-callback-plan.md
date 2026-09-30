@@ -987,3 +987,114 @@ suffix already retired by the failed delivery. It does not claim the earlier
 suffix call succeeded, create a work receipt, or permit guest reuse. Any other
 retirement list fails closed. Qualification covers both native outcomes,
 malformed IDs, exact original exception propagation and released ownership.
+
+### Task completion refinement — 2026-09-30
+
+The following gates complete retained-tail control and composite suspension.
+The single-frontier and synchronous-session limitations above remain the
+qualification boundaries of those earlier checkpoints. This refinement does
+not activate a public capability or change the private callback profiles.
+
+#### Original retained-tail frontiers
+
+Before guest callback effects, retain a bounded immutable vector of original
+active continuation evidence: exact entry identity, slot address and raw
+cookie. Bound both scanning and retained records by the canonical return-stack
+allocation and the original finite root ceiling. Inactive retained history
+cannot add authority. On a foreign discard, select the relevant surviving
+suffix of this vector and retain a monotonic frontier index with the original
+semantic capture and effect scope.
+
+A subsequent RP!, raw mismatch or metadata removal must first retire the
+affected machine suffix, then revalidate the original vector, code and grants.
+It may advance to a still-valid original frontier; a newly pushed helper, a
+copied entry or a repaired tombstone can never become that frontier. Retain no
+discarded machine frame, token, child-local fuel or machine-entry authority.
+Charge the original root and surviving ancestor callback guards only. Release
+the tail at the selected exact continuation or when the original root leaves;
+fail closed if no trustworthy continuation remains. Preserve the existing
+older-root `_GuestControlTransfer` behavior and guest SP/RP/HANDLER results.
+
+#### Callback IDL under the existing suspension owner
+
+Admit only the exact `Idle` and `IdleUntil` IR forms in this gate, including
+their metadata and dispatcher route seals. Preserve canonical ordering: charge
+the semantic tick, perform the operation's operand/deadline effects, then retain
+the next semantic IP. This does not admit `UartReadAttempt`, `KEY`, `MS@` or
+`IDLE-MS` as new callback effects.
+
+Use the existing `_SuspendedExecution`, context lease and one-shot
+`IdleWakeReceipt`. Strongly retain the original task root, meter, ledger,
+foreign chain and retained tail through every block and resume, including an
+empty machine chain. Add engine-issued suspension evidence for exact cursor,
+frame/request identities, foreign slots, code/grants and owner routes; stack
+snapshot equality alone is insufficient. Revalidate before another guest
+effect. Copied, stale or repeated suspension/wake values confer no authority,
+and waking renews no execution allowance. Source evaluation and nested public
+host dispatch remain unresumable.
+
+Cancellation settles and retires native/foreign authority before the existing
+semantic root/capture cleanup and lease release. Never restore a return-stack
+snapshot to suspend or recreate foreign authority. Preserve the first error
+if cancellation or publication of a later suspension also fails.
+
+#### Typed machine cursor and scheduling quantum
+
+Extend the single dispatch cursor with engine-issued states for pending or
+accepted zero-work entry and a runnable machine invocation. Retain the exact
+binding, semantic resume target, operation token, root and completed entry
+effects. Resume must not replay Call ticks, admission, CPU initialization,
+input pops or callback reply. Preserve synchronous behavior when detachable
+scheduling has not been selected.
+
+Use a separate native instruction quantum per host turn. Spend it across all
+machine segments and entries in that turn; do not reset it at each adapter
+transition or confuse it with semantic steps. A later host turn receives a
+fresh scheduling quantum while retaining every spent invocation/root limit.
+Instruction-fuel exhaustion remains terminal. A host yield adds no semantic
+tick, machine instruction/cycle, IDL or wake. Return runnable cursors through
+the existing `YieldedExecution`/`resume_yielded` path, without a second scheduler,
+input owner or suspension handle.
+
+Before detaching and before resuming an active parked chain, use a no-work
+native `validate_parked(root_token, operation_token, request_token=None)` query.
+Validate the exact root and leaf operation, the exact pending request when in
+callback state, every ancestor, publication/code seal, private control bytes
+and live CPU evidence. Reuse the common owner's existing validators and
+exclusion guard. The query must not initialize the CPU, execute, rotate tokens,
+lower budgets, issue receipts or change cycles. Cached `last_receipt()` is not
+this proof; validation at eventual reply is too late for resumed callback
+effects. Composite admission requires this complete native surface, while the
+earlier synchronous capability remains separately qualified.
+
+#### Completion qualification
+
+Use the unchanged KDOS exception and IDLE fixtures with these focused journeys:
+
+- Normal/local CATCH, THROW 0, nested rethrow and DEFER/DOES>/loop unwinds;
+  child THROW caught by the parent and rethrow to the outer guest CATCH.
+- A wrapper using `HANDLER @ RP! R> HANDLER ! -42 THROW` across two preexisting
+  catch frontiers, while keeping the fixture's THROW/HANDLER unchanged. Check
+  exact suffix retirement, intermediate helper returns, no discarded reply or
+  RET, exact final code/HANDLER state and preserved completed stores/cycles.
+- Raw overwrite, identical-cookie writes, metadata removal and later repair;
+  budget and cancellation failures at both frontiers without restored authority.
+- Callback and retained-tail IDL, repeated IDL, deadline/input wake, wrong or
+  stale wake values, RP@ capture, failed second suspension publication and
+  cancellation while parent and child are parked.
+- Quantum boundaries around zero-work admission, CALL, reply, child return,
+  RET and empty-chain reentry. Compare exact cumulative work, cookies, pointers
+  and memory with uninterrupted execution, including terminal fuel exhaustion.
+
+Then use one host-prepared `HybridSession`: load the fixtures and compile all
+entries before arming; machine A's callback catches child B, whose callback
+executes IDLE then `-17 THROW`. Existing backend input admission wakes the root,
+B is canceled, and A receives/replies with the code. Ordinary outer `KEY EMIT`
+consumes and emits the queued byte after the callback finishes. Repeat with a
+parent rethrow to outer CATCH and with timeout/cancel at each parked boundary.
+
+Record the actual Python-reference task callback dispatcher, semantic ticks,
+machine segments/instructions/cycles, observed depth, yields, wakes and cleanup.
+Preserve private-profile and ordinary suspension gates. Advertise task and
+composite capabilities only after their reviewed application gates pass;
+generic task manifests/startup remain a separate qualification.
