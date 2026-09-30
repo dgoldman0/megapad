@@ -419,9 +419,29 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
 | 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
 | 5B2 — nested callbacks | Qualified through the generic unified application path | 302 native child/root/publication/legacy checks; 767 private composition checks; rebuilt isolated activation candidate passed all 1,977 checks, including all 11 formerly deferred application journeys |
-| 5C/5D — shared task callbacks | Capture/publication and immutable ledger foundations qualified; dispatcher and native task execution in progress | 206 protocol/ABI checks and 409 stack/private-profile checks; 45 task-foundation checks and combined 714-check clean foundation gate; native transport contract locked before implementation; no task capability exposed |
-| 5E — private scalar services | Metadata and canonical service capture qualified; private dispatcher and registry integration in progress | 532 metadata/manifest checks and 367 capture/service checks; combined 714-check clean foundation gate; no service capability advertised |
+| 5C/5D — shared task callbacks | Capture, immutable ledger and bounded native task transport qualified; semantic dispatcher and production adapter in progress | Existing foundation gates; 541 one-frame transport checks and 567 child transport/regression checks after matching GCC rebuilds; no task capability exposed |
+| 5E — private scalar services | Metadata, canonical capture, private dispatcher and callback-owner integration qualified; bridge and application gate in progress | Existing metadata/capture gates; 426 private dispatcher checks and 754 registry/accounting checks; no service capability advertised |
 | Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
+
+### Native task transport and private host exceptions — 2026-09-30
+
+Commits `ac04c8e` and `afe1db0` qualify admission-only task entry, retained root
+fuel, real instruction quanta and bounded native children. Child publication
+accepts bounded cyclic graphs while rejecting stale generations and active
+recursion. Parent control state is restored before child return or suffix
+cancellation is delivered. Committed stores, cache observations and cycle
+prefixes remain intact. The two isolated GCC builds passed 541 and 567 selected
+checks respectively, including ordinary-machine differential execution,
+cancellation and delivery failures. These are transport gates; the semantic
+task adapter, shared exception journeys and composite suspension still need
+their own qualification before a public task capability can be enabled.
+
+Commit `8206806` preserves original host-raised `ForthAbort` objects through
+private callback unwinding using runtime-owned provenance bound to the original
+primitive and guard frames. The isolated gate passed 459 checks, including the
+canonical leaf's inner guard, nested callbacks, guest exception behavior and
+execution quanta. It does not authorize guest exception objects to bypass
+normal ABORT behavior, stack restoration or pointer-capture retirement.
 
 ### Nested publication and root execution — 2026-09-30
 
