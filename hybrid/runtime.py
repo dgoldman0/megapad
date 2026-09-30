@@ -170,6 +170,7 @@ def _task_accounting_authority(owner, adapter):
     """Retain one root's counter proof independently of public projections."""
     from hybrid.task_adapter import NativeTaskAdapter
     from shared.foreign_abi import ForeignReceiptV1
+    from simulator.foreign_types import TaskSemanticReceiptV1
 
     namespace = object.__getattribute__(owner, "__dict__")
     names = ("_machine_instructions", "_machine_cycles", "_transitions",
@@ -178,19 +179,55 @@ def _task_accounting_authority(owner, adapter):
                           if name not in ("abi", "version"))
     receipt_fields = tuple(vars(ForeignReceiptV1)[name] for name in receipt_names)
     last_receipt = NativeTaskAdapter.last_receipt
+    semantic_query = adapter._engine.task_semantic_receipt
+    semantic_fields = tuple(vars(TaskSemanticReceiptV1)[name] for name in (
+        "root_token", "root_id", "sequence", "semantic_steps"))
     # Root token, root ID, pre-root owner totals, latest exact receipt and its
     # copied scalars, absolute owner projection. Publish each change once.
     state = (None, 0, (), None, (), ())
+    # Separate from native segment sequences and from total semantic meter
+    # steps. This snapshot can be replayed after an interrupted projection.
+    semantic_state = (None, 0, 0, None, (), 0, False)
 
     def project(values):
         for name, value in zip(names, values):
             dict.__setitem__(namespace, name, value)
 
     def dispatch(action, *values):
-        nonlocal state
+        nonlocal state, semantic_state
         if object.__getattribute__(owner, "__dict__") is not namespace:
             raise HybridExecutionError("callback_accounting", "task owner namespace changed")
         token, root_id, baseline, issued, evidence, projected = state
+        if action == "semantic":
+            if len(values) != 1 or type(values[0]) is not TaskSemanticReceiptV1:
+                raise HybridExecutionError("callback_accounting", "task semantic receipt type changed")
+            receipt, = values
+            copied = tuple(field.__get__(receipt, TaskSemanticReceiptV1) for field in semantic_fields)
+            sem_token, sem_root, sequence, steps = copied
+            if semantic_query(adapter, sem_token, sem_root) is not receipt:
+                raise HybridExecutionError("callback_accounting", "task semantic work has no engine proof")
+            old_token, old_root, sem_base, old_receipt, old_values, sem_projection, pending = semantic_state
+            if sem_token is not old_token or sem_root != old_root:
+                # An entry rejected before native root admission cannot have
+                # run a callback; its engine receipt may still report zero.
+                if steps == 0:
+                    return
+                raise HybridExecutionError("callback_accounting", "task callback work has no original root baseline")
+            if old_receipt is receipt:
+                if (copied[0] is not old_values[0] or copied[1:] != old_values[1:]):
+                    raise HybridExecutionError("callback_accounting", "settled callback work changed")
+                if pending:
+                    dict.__setitem__(namespace, "_callback_semantic_steps", sem_projection)
+                    semantic_state = (sem_token, sem_root, sem_base, receipt, copied, sem_projection, False)
+                return
+            if (sequence != (1 if old_receipt is None else old_values[2] + 1)
+                    or steps < (0 if old_receipt is None else old_values[3])):
+                raise HybridExecutionError("callback_accounting", "task semantic receipt is discontinuous")
+            sem_projection = sem_base + steps
+            semantic_state = (sem_token, sem_root, sem_base, receipt, copied, sem_projection, True)
+            dict.__setitem__(namespace, "_callback_semantic_steps", sem_projection)
+            semantic_state = (sem_token, sem_root, sem_base, receipt, copied, sem_projection, False)
+            return
         if action == "begin":
             requested_token, requested_id = values
             if requested_token is token:
@@ -202,6 +239,10 @@ def _task_accounting_authority(owner, adapter):
             baseline = tuple(dict.__getitem__(namespace, name) for name in names)
             if any(type(value) is not int or value < 0 for value in baseline):
                 raise HybridExecutionError("callback_accounting", "task owner counters are not exact")
+            sem_base = dict.__getitem__(namespace, "_callback_semantic_steps")
+            if type(sem_base) is not int or sem_base < 0:
+                raise HybridExecutionError("callback_accounting", "task semantic counter is not exact")
+            semantic_state = (requested_token, requested_id, sem_base, None, (), sem_base, False)
             state = (requested_token, requested_id, baseline, None, (), baseline)
             return
         if action != "settle" or len(values) != 1 or token is None:
@@ -1432,6 +1473,16 @@ class HybridRuntime:
                 raise HybridExecutionError("callback_accounting", "task installation authority changed")
         except BaseException as error:
             self._registration_failure = "task native receipt accounting failed"
+            raise
+
+    def _settle_task_semantic_receipt(self, adapter, receipt) -> None:
+        try:
+            authority, changed = _task_owner_authority(self, adapter)
+            authority.accounting("semantic", receipt)
+            if changed:
+                raise HybridExecutionError("callback_accounting", "task installation authority changed")
+        except BaseException:
+            self._registration_failure = "task semantic receipt accounting failed"
             raise
 
     def register_routine_v1(self, image: RoutineImageV1 | None = None,

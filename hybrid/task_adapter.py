@@ -23,6 +23,7 @@ from shared.hybrid_abi import (
 )
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES, Word
 from simulator.foreign_runtime import ForeignTaskEngine, ForeignTaskError
+from simulator.foreign_types import TaskSemanticReceiptV1
 
 
 _BUDGET_FIELDS = (
@@ -46,7 +47,9 @@ _NATIVE_TYPES = (
     "TaskSegmentReceiptV1", "TaskSegmentResultV1", "TaskCancellationV1",
 )
 _OWNER_HOOKS = ("_install_task_adapter", "_require_task_adapter", "_admit_task_root",
-                "_settle_task_receipt")
+                "_settle_task_receipt", "_settle_task_semantic_receipt")
+_SEMANTIC_RECEIPT_FIELDS = tuple(vars(TaskSemanticReceiptV1)[name] for name in (
+    "root_token", "root_id", "sequence", "semantic_steps"))
 
 
 def _uint(value, label, minimum=0, maximum=MASK64):
@@ -147,7 +150,8 @@ class NativeTaskAdapter:
             engine = hybrid.semantic._foreign_tasks
             if (type(engine) is not ForeignTaskEngine
                     or any(not callable(getattr(engine, name, None)) for name in (
-                        "registration_batch", "adapter_root_policy", "task_export_dependencies"))):
+                        "registration_batch", "adapter_root_policy", "task_export_dependencies",
+                        "task_semantic_receipt"))):
                 raise RuntimeError("native task adapter requires the engine publication and root-policy API")
             if any(not callable(getattr(hybrid, name, None)) for name in _OWNER_HOOKS):
                 raise RuntimeError("native task adapter requires the hybrid task ownership hooks")
@@ -158,11 +162,13 @@ class NativeTaskAdapter:
             if type(self._runner) is not native.TaskRoutineRunnerV1:
                 raise TypeError("task facade is not the exact shared native owner")
             self._native_types = tuple((name, getattr(native, name)) for name in _NATIVE_TYPES)
+            optional_native = ("validate_parked",) if callable(getattr(type(self._runner), "validate_parked", None)) else ()
             self._runner_routes = tuple((name, getattr(type(self._runner), name),
-                                         getattr(self._runner, name)) for name in _NATIVE_METHODS)
+                                         getattr(self._runner, name)) for name in (*_NATIVE_METHODS, *optional_native))
             self._engine_routes = tuple((name, getattr(ForeignTaskEngine, name), getattr(engine, name))
                                        for name in ("registration_batch", "adapter_root_policy",
-                                                    "task_export_dependencies", "require_definition"))
+                                                    "task_export_dependencies", "require_definition",
+                                                    "task_semantic_receipt"))
             self._owner_routes = tuple((name, getattr(HybridRuntime, name), getattr(hybrid, name))
                                       for name in (*_OWNER_HOOKS, "close"))
             self._registrations = {}
@@ -258,6 +264,8 @@ class NativeTaskAdapter:
             raise ForeignTaskError("task adapter class changed")
         attributes = vars(self)
         for name, route in _ADAPTER_ROUTES:
+            if cleanup and name in ("validate_parked", "settle_semantic_receipt"):
+                continue
             if vars(NativeTaskAdapter).get(name) is not route or name in attributes:
                 raise ForeignTaskError("task adapter transition route changed")
         if (self._owner.semantic is not self._semantic
@@ -407,6 +415,56 @@ class NativeTaskAdapter:
             _cells(outputs, frame.request.export.signature.output_cells)
             return self._transition("reply", frame.registration, request_token, outputs,
                                     budget=self._budget(budget))
+
+    def validate_parked(self, root_token, operation_token, request_token=None):
+        """Prove retained authority without work, token rotation or CPU writes."""
+        with self._semantic._session_owner_lock:
+            self._require_owner()
+            if root_token is not self._root_token or self._native_root is None:
+                raise ForeignTaskError("parked validation requires the original task root")
+            if self._pending is not None:
+                raise ForeignTaskError("cannot validate during an active native transition")
+            frame = self._top(operation_token)
+            issued = None if frame.request is None else frame.request.request_token
+            if request_token is not issued:
+                raise ForeignTaskError("parked validation requires the exact current request")
+            if not any(name == "validate_parked" for name, _route, _bound in self._runner_routes):
+                raise RuntimeError("native parked validation is unavailable; run make build")
+            if self._native_call("validate_parked", self._native_root,
+                                 operation_token, request_token) is not True:
+                raise ForeignTaskError("native task parked validation failed")
+            return True
+
+    def settle_semantic_receipt(self, receipt):
+        """Project only the engine's issued cumulative callback work."""
+        with self._semantic._session_owner_lock:
+            engine_call, owner_call = self._engine_call, self._owner_call
+
+            def project():
+                if type(receipt) is not TaskSemanticReceiptV1:
+                    raise ForeignTaskError("task callback work requires an exact engine receipt")
+                token, root_id, sequence, steps = (
+                    field.__get__(receipt, TaskSemanticReceiptV1) for field in _SEMANTIC_RECEIPT_FIELDS)
+                _uint(root_id, "semantic receipt root", 1)
+                _uint(sequence, "semantic receipt sequence", 1)
+                _uint(steps, "semantic callback work", maximum=65536)
+                if engine_call("task_semantic_receipt", self, token, root_id) is not receipt:
+                    raise ForeignTaskError("task callback receipt was not issued to this adapter")
+                # Cleanup may already be fail-closed. The original query and
+                # owner authority remain usable to retain the actual prefix.
+                owner_call("_settle_task_semantic_receipt", self, receipt)
+
+            try:
+                project()
+            except BaseException as error:
+                # The owner publishes its immutable accounting snapshot before
+                # projecting counters. A single retry repairs a trace/host
+                # escape in that window without charging the receipt twice.
+                try:
+                    project()
+                except BaseException:
+                    _note(error, "task semantic receipt recovery also failed")
+                raise
 
     def _transition(self, name, binding, *args, **kwargs):
         if self._pending is not None:
