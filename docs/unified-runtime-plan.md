@@ -187,6 +187,38 @@ independently checkable compatibility result. The observed scalar-FP
 fallback mechanism justifies preparing its extraction before all workload
 families have been profiled.
 
+### 2B. Multicore timing qualification — math-team finding
+
+The user supplied a math-team report on 2026-09-30: instruction-batched
+multicore execution makes worker wake appear near 130,000 cycles, versus about
+1,000 under the shared-clock model; four-core explicit work scales only
+1.3–1.4× under modeled bus contention; scalar FP64 previously blocked the
+strict-mode solver. Those workload figures are reported observations, not
+independently reproduced solver measurements in this branch. Work stays within
+MegaPad; the team's separately edited Akashic sources are outside scope.
+
+The exact native FC kernel removes the known full-core FP Python fallback. A
+real one-core SystemState strict-cycle division check already proves 30+1-cycle
+retirement. Extend this to 1/2/4 full cores, distinct FPCSR state, cold and warm
+instruction fetches, sliced versus whole execution, shared bus traffic and
+representative BIOS F64 word calls. Full-core strict execution and clustered
+microcore support remain separate capabilities. Qualify the actual solver only
+when its reproducer is available; kernel tests do not establish solver support.
+
+Separately, make timing-model identity explicit in run results/status and
+benchmark evidence. Instruction-batched functional cycle accounting must not
+be presented as shared-clock wake latency or multicore scaling evidence. Add a
+bounded wake/IPI and contention fixture that reports instructions, per-core
+work, elapsed model cycles, selected timing model and host wall time separately.
+Use the strict shared-clock path for modeled latency/scaling comparisons; retain
+the fast path's established functional behavior and documented accounting.
+
+The gate is reproducible wake/accounting classification, strict FP retirement
+and cross-core state parity, and honest measured contention. Moving work into
+C++ improves host execution cost; it must not erase modeled bus waits or force
+a nominal fourfold result. Any remaining contention optimization needs its own
+architectural equivalence and paired evidence before being credited.
+
 ## Phase 3 — Shared native computation and hot runtime state
 
 ### 3A. Scalar floating point
