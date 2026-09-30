@@ -1,4 +1,4 @@
-"""Owner-bound semantic admission for the v2 canonical integer callbacks.
+"""Owner-bound semantic admission for versioned private callbacks.
 
 Shared descriptors contain only values. This engine retains the original
 installed Words and dispatches them through the runtime's ordinary meter;
@@ -17,6 +17,7 @@ from shared.hybrid_abi import (
     MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
 )
 from shared.hybrid_nested import CallbackExportV4
+from shared.hybrid_services import CallbackRequestV5, CallbackSiteV5, ServiceExportV5
 from simulator import core_words
 from simulator.dictionary import Word
 from simulator.errors import ExecutionError
@@ -73,6 +74,50 @@ class ClosedCallbackReceipt:
     completed: bool
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class ServiceCallbackFailureV5:
+    """Exact engine-issued failure; copies are diagnostics, not authority."""
+
+    export_id: int
+    name: str
+    invocation_id: int
+    sequence: int
+    call_offset: int
+    stub_offset: int
+    operation: int
+    consumed_input_cells: int
+    fpcsr: int
+    semantic_steps: int
+    cause: BaseException = field(repr=False)
+    fault_kind: str = "illegal_scalar_float"
+    throw_code: int = -21
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceCallbackReceiptV5:
+    semantic_steps: int
+    entered: bool
+    completed: bool
+    consumed_input_cells: int | None
+    failure: ServiceCallbackFailureV5 | None
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceCallbackProfileV5:
+    """Qualified semantic service metadata, without native bridge authority."""
+
+    value_executor: str
+    version: int = 5
+    capability: str = "private_scalar_fp_v1"
+    effect: str = "scalar_fp_state"
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _ServiceCheckpoint:
+    _owner: object
+    _record: object
+
+
 @dataclass(slots=True)
 class _ClosedAccounting:
     token: object
@@ -96,9 +141,10 @@ class _CanonicalLeaf:
 @dataclass(frozen=True, slots=True)
 class _ExportBinding:
     handle: CallbackExportHandle
-    descriptor: CallbackExportV2 | CallbackExportV3
+    descriptor: CallbackExportV2 | CallbackExportV3 | CallbackExportV4 | ServiceExportV5
     leaf: _CanonicalLeaf | None
     closed: object = None
+    service: object = None
 
 
 @dataclass(slots=True)
@@ -156,8 +202,11 @@ class _PrivateStackSeal:
 
 
 def _descriptor(value):
-    if type(value) not in (CallbackExportV2, CallbackExportV3, CallbackExportV4):
+    if type(value) not in (CallbackExportV2, CallbackExportV3, CallbackExportV4, ServiceExportV5):
         raise TypeError("callback descriptor must be an exact admitted callback value")
+    if type(value) is ServiceExportV5:
+        from simulator.interop_services import _EXPORT_CLASS
+        _EXPORT_CLASS.instance(value)
     # Revalidate even a forged frozen value and keep our own metadata copy.
     return replace(value)
 
@@ -216,6 +265,38 @@ class CallbackExportEngine:
 
         self._closed_capture_type = ClosedCapture
         self._closed_dispatch_type = ClosedDispatch
+        from simulator.interop_services import ScalarServiceCatalog, ServiceDispatch, _ServiceAccounting
+
+        self._service_catalog = None
+        self._service_dispatch_type = ServiceDispatch
+        self._service_accounting_type = _ServiceAccounting
+        self._service_finalized = False
+        self._service_unavailable = "private scalar services were not captured"
+        # Private-profile qualification must not reject a valid old embedding.
+        # Only our own canonical-admission rejection disables this profile;
+        # allocation failures and unexpected host exceptions remain visible.
+        if type(core_installed) is bool and core_installed:
+            try:
+                self._service_catalog = ScalarServiceCatalog.capture(runtime, core_installed=True)
+            except CallbackExportError:
+                self._service_unavailable = "private scalar services require canonical installed owners"
+        self._accounting_routes.update({
+            "begin_service": ("begin_service_accounting", type(self).begin_service_accounting),
+            "consume_service": ("consume_service_accounting", type(self).consume_service_accounting),
+        })
+
+    def finalize_service_executor(self, executor):
+        """One constructor seam after the runtime selects its value backend."""
+        if self._service_finalized:
+            raise CallbackExportError("private scalar service executor was already finalized")
+        self._service_finalized = True
+        if self._service_catalog is None:
+            return
+        try:
+            self._service_catalog.finalize_executor(executor)
+        except CallbackExportError:
+            self._service_catalog = None
+            self._service_unavailable = "private scalar value executor is not canonical"
 
     def _guard_accounting_entry(self, operation):
         if self._nested_chain is not None:
@@ -390,7 +471,7 @@ class CallbackExportEngine:
         with self._runtime._session_owner_lock:
             record = self._closed_accounting
             # Cleanup proof deliberately remains available after fail-closing.
-            if (record is None or record.token is not token or record.handle is not handle
+            if (type(record) is not _ClosedAccounting or record.token is not token or record.handle is not handle
                     or self._runtime._callback_exports is not self or self._active is not None):
                 raise CallbackExportError("closed callback accounting checkpoint is not issued here")
             if (type(record.semantic_steps) is not int or not 0 <= record.semantic_steps <= 4096
@@ -401,6 +482,138 @@ class CallbackExportEngine:
                 if repair_meter(record.meter, record.namespace, record.starting_steps + record.semantic_steps):
                     self._registration_failure = "closed callback accounting meter changed"
             result = ClosedCallbackReceipt(record.semantic_steps, record.entered, record.completed)
+            self._closed_accounting = None
+            return result
+
+    def begin_service_accounting(self, handle, request):
+        from simulator.interop_services import ServiceDispatch, _ServiceAccounting
+
+        with self._runtime._session_owner_lock:
+            self._require_owner("begin private scalar service accounting")
+            self._runtime._require_no_suspension("begin private scalar service accounting")
+            if (self._service_accounting_type is not _ServiceAccounting
+                    or self._service_dispatch_type is not ServiceDispatch):
+                self._registration_failure = "private service type projections changed"
+                raise CallbackExportError(self._registration_failure)
+            if (self._active is not None or self._registration is not None
+                    or self._closed_accounting is not None or self._nested_chain is not None):
+                raise CallbackExportError("private service accounting requires an idle callback owner")
+            binding = self._binding(handle)
+            if binding.service is None or type(request) is not CallbackRequestV5:
+                raise CallbackExportError("private service accounting requires its V5 binding and request")
+            from simulator.interop_services import _SERVICE_REQUEST_CLASS, _SERVICE_SITE_CLASS, _EXPORT_CLASS
+            _SERVICE_REQUEST_CLASS.instance(request)
+            _SERVICE_SITE_CLASS.instance(request.site)
+            _EXPORT_CLASS.instance(request.site.export)
+            CallbackRequestV5.__post_init__(request)
+            if request.site.export != binding.descriptor:
+                raise CallbackExportError("private service request does not match its issued export")
+            copied = CallbackRequestV5(
+                invocation_id=request.invocation_id, sequence=request.sequence,
+                site=CallbackSiteV5(call_offset=request.site.call_offset,
+                                    stub_offset=request.site.stub_offset,
+                                    export=replace(binding.descriptor)),
+                arguments=request.arguments,
+            )
+            frames, states = self._runtime._active_dispatches, self._runtime._active_input_states
+            meter = frames[-1].meter if frames else (states[-1].meter if states else None)
+            record = _ServiceAccounting(token=None, handle=handle, binding=binding,
+                                        request=copied, meter=meter)
+            if meter is not None:
+                from simulator.interop_closed import capture_meter
+                record.namespace, record.starting_steps = capture_meter(meter)
+            checkpoint = _ServiceCheckpoint(self._owner, record)
+            record.token = checkpoint
+            self._closed_accounting = record
+            return checkpoint
+
+    def consume_service_accounting(self, checkpoint, handle, error=None):
+        from simulator.interop_services import ServiceDispatch, _ServiceAccounting
+
+        with self._runtime._session_owner_lock:
+            record = self._closed_accounting
+            # Exact checkpoint cleanup remains available after fail-closing.
+            if (type(checkpoint) is not _ServiceCheckpoint or checkpoint._owner is not self._owner
+                    or type(record) is not _ServiceAccounting
+                    or checkpoint._record is not record or record.token is not checkpoint
+                    or record.handle is not handle or self._active is not None
+                    or self._runtime._callback_exports is not self):
+                raise CallbackExportError("private service checkpoint was not issued here or was consumed")
+            steps, entered, completed = record.semantic_steps, record.entered, record.completed
+            consumed = record.consumed_input_cells
+            if (type(steps) is not int or not 0 <= steps <= 1
+                    or type(entered) is not bool or type(completed) is not bool
+                    or (not entered and (steps or completed)) or (completed and steps != 1)
+                    or (consumed is not None and (type(consumed) is not int
+                        or not 0 <= consumed <= record.binding.descriptor.input_cells))):
+                self._registration_failure = "private service accounting receipt changed"
+                raise CallbackExportError(self._registration_failure)
+            if record.meter is not None:
+                from simulator.interop_closed import repair_meter
+                if repair_meter(record.meter, record.namespace, record.starting_steps + steps):
+                    self._registration_failure = "private service accounting meter changed"
+            failure = None
+            observation, scope, active = record.validation_failure, record.scope, record.dispatch
+            if observation is not None and self._registration_failure is None:
+                from simulator.interop_services import (
+                    ScalarValidationFailure, _SERVICE_VALIDATION_CLASS, _SERVICE_SCOPE_CLASS,
+                    _SERVICE_DISPATCH_CLASS, _CLOSED_DISPATCH_CLASS, _SERVICE_PRIVATE_CLASSES,
+                    _SERVICE_REQUEST_CLASS, _SERVICE_SITE_CLASS, _EXPORT_CLASS,
+                    _service_request_values,
+                )
+                _SERVICE_VALIDATION_CLASS.instance(observation)
+                _SERVICE_SCOPE_CLASS.instance(scope)
+                _CLOSED_DISPATCH_CLASS.verify()
+                _SERVICE_DISPATCH_CLASS.instance(active)
+                for seal in _SERVICE_PRIVATE_CLASSES:
+                    seal.verify()
+                binding = record.binding
+                binding.service.verify()
+                _SERVICE_REQUEST_CLASS.instance(record.request)
+                _SERVICE_SITE_CLASS.instance(record.request.site)
+                _EXPORT_CLASS.instance(record.request.site.export)
+                CallbackRequestV5.__post_init__(record.request)
+                request_values = _service_request_values(record.request)
+                next(item for item in _SERVICE_PRIVATE_CLASSES if item.cls is ExecutionContext).instance(active.context)
+                # The observation already proved the exact popped prefix.
+                # Recheck final empty private pointers without invoking stack
+                # methods that a caller could replace after the escape.
+                private = {}
+                for kind, value in ((DataStack, active.data), (ReturnStack, active.returns)):
+                    seal = next(item for item in _SERVICE_PRIVATE_CLASSES if item.cls is kind)
+                    private[kind] = seal.instance(value)
+                if (type(observation) is not ScalarValidationFailure
+                        or type(active) is not ServiceDispatch
+                        or active.accounting_record is not record or active._scope is not scope
+                        or scope is None or scope.failure is not observation
+                        or scope._capture is not binding.service or scope._boundary is not None
+                        or record.error is not error or observation.cause is not error or error is None
+                        or steps != 1 or not entered or completed
+                        or consumed != binding.descriptor.input_cells
+                        or type(observation.operation) is not int or type(observation.fpcsr) is not int
+                        or observation.operation != binding.service.original.operation
+                        or record.request is not active._request
+                        or len(request_values) != len(active._request_values)
+                        or any(type(value) is not type(original) or value != original
+                               for value, original in zip(request_values, active._request_values))
+                        or active.context.data is not active.data or active.context.returns is not active.returns
+                        or type(private[DataStack].get("_pointer")) is not int
+                        or private[DataStack].get("_pointer") != 64
+                        or type(private[ReturnStack].get("_pointer")) is not int
+                        or private[ReturnStack].get("_pointer") != 128):
+                    self._registration_failure = "private service validation issuance changed"
+                    raise CallbackExportError(self._registration_failure)
+                if binding.service.catalog._service.fpcsr != observation.fpcsr:
+                    self._registration_failure = "private service validation FPCSR changed"
+                    raise CallbackExportError(self._registration_failure)
+                request = record.request
+                failure = ServiceCallbackFailureV5(
+                    binding.descriptor.export_id, binding.descriptor.name,
+                    request.invocation_id, request.sequence, request.site.call_offset,
+                    request.site.stub_offset, observation.operation, consumed,
+                    observation.fpcsr, steps, error,
+                )
+            result = ServiceCallbackReceiptV5(steps, entered, completed, consumed, failure)
             self._closed_accounting = None
             return result
 
@@ -445,7 +658,9 @@ class CallbackExportEngine:
         return binding
 
     def _require_binding(self, binding):
-        if binding.closed is None:
+        if binding.service is not None:
+            binding.service.verify()
+        elif binding.closed is None:
             self._require_leaf(binding.leaf)
         else:
             binding.closed.verify(self)
@@ -471,12 +686,17 @@ class CallbackExportEngine:
             return existing.handle
         closed = None
         leaf = None
+        service = None
         if len(self._exports) >= MAX_CALLBACK_EXPORTS:
             raise CallbackExportError("callback export table is full")
         handle = CallbackExportHandle(descriptor.export_id, self._owner)
         binding = None
         try:
-            if type(descriptor) is CallbackExportV4 and descriptor.effect != "integer_leaf":
+            if type(descriptor) is ServiceExportV5:
+                if self._service_catalog is None or not self._service_finalized:
+                    raise CallbackExportError(self._service_unavailable)
+                service = self._service_catalog.bind(descriptor)
+            elif type(descriptor) is CallbackExportV4 and descriptor.effect != "integer_leaf":
                 from simulator.interop_nested import NestedCapture
                 closed = NestedCapture.create(self, descriptor, handle)
             elif descriptor.effect == "closed_integer_colon":
@@ -486,7 +706,7 @@ class CallbackExportEngine:
                 if leaf is None:
                     raise CallbackExportError("canonical installed callback Word is unavailable")
                 self._require_leaf(leaf)
-            binding = _ExportBinding(handle, descriptor, leaf, closed)
+            binding = _ExportBinding(handle, descriptor, leaf, closed, service)
             if self._registration is not None:
                 # Record the exact identity before insertion, so a failure after
                 # publication but before return still has complete rollback data.
@@ -629,6 +849,8 @@ class CallbackExportEngine:
         self, handle: CallbackExportHandle, arguments: tuple[int, ...], *,
         semantic_step_limit: int | None = None,
     ) -> CallbackExportResult:
+        from simulator.interop_services import _ServiceAccounting
+
         with self._runtime._session_owner_lock:
             self._require_owner("invoke a semantic callback export")
             record = self._closed_accounting
@@ -655,6 +877,12 @@ class CallbackExportEngine:
             if type(binding.descriptor) is CallbackExportV4:
                 raise CallbackExportError("V4 callbacks require their admitted nested chain")
             _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
+            if binding.service is not None:
+                if (type(record) is not _ServiceAccounting or record.binding is not binding
+                        or record.request.arguments != arguments):
+                    raise CallbackExportError("private service invocation requires its exact prepared request")
+            elif type(record) is _ServiceAccounting:
+                raise CallbackExportError("private service checkpoint cannot invoke another profile")
             if semantic_step_limit is not None:
                 if type(semantic_step_limit) is not int:
                     raise TypeError("callback semantic step limit must be an exact integer")
@@ -672,6 +900,8 @@ class CallbackExportEngine:
             data = DataStack(arguments, memory=memory, floor=0, empty_pointer=half)
             returns = ReturnStack(memory=memory, floor=half, empty_pointer=2 * half)
             context = ExecutionContext(data=data, returns=returns)
+            if binding.service is not None:
+                return self._invoke_service(binding, context, semantic_step_limit)
             if binding.closed is not None:
                 return self._invoke_closed(binding, context, semantic_step_limit)
             active = _ActiveExport(
@@ -700,6 +930,63 @@ class CallbackExportEngine:
                 return CallbackExportResult(outputs, result.semantic_steps)
             finally:
                 self._active = None
+
+    def _invoke_service(self, binding, context, semantic_step_limit):
+        from simulator.interop_closed import capture_meter
+        from simulator.interop_services import ServiceDispatch, _ServiceAccounting
+
+        record = self._closed_accounting
+        meter, _starting = self._runtime._meter_for_public_call(
+            None if self._runtime._active_dispatches else 1
+        )
+        if record.meter is not None and record.meter is not meter:
+            raise CallbackExportError("private service meter owner changed")
+        if record.meter is None:
+            record.namespace, record.starting_steps = capture_meter(meter)
+            record.meter = meter
+        active = None
+        original = None
+        namespace = object.__getattribute__(self, "__dict__")
+        try:
+            if (self._service_accounting_type is not _ServiceAccounting
+                    or self._service_dispatch_type is not ServiceDispatch):
+                self._registration_failure = "private service type projections changed"
+                raise CallbackExportError(self._registration_failure)
+            active = ServiceDispatch(self, binding, context, meter, semantic_step_limit)
+            prepare_unwind, cleanup_failed = active.prepare_unwind, active.cleanup_failed
+            self._active = active
+            active.require_state()
+            self._runtime._execute_guarded(binding.service.word, context, meter, closed_guard=active)
+            active.require_state()
+            binding.service.verify()
+            if not active.completed or context.returns.depth() != 0:
+                raise CallbackExportError("private scalar service did not return balanced state")
+            outputs = context.data.snapshot()
+            _cells(outputs, count=binding.descriptor.output_cells, label="outputs")
+            result = CallbackExportResult(outputs, record.semantic_steps)
+            record.completed = True
+            return result
+        except BaseException as error:
+            original = error
+            record.error = error
+            if active is not None:
+                try:
+                    prepare_unwind(error)
+                except BaseException:
+                    cleanup_failed(error)
+            raise
+        finally:
+            changed = dict.get(namespace, "_closed_accounting") is not record
+            dict.__setitem__(namespace, "_closed_accounting", record)
+            dict.__setitem__(namespace, "_active", None)
+            if changed:
+                dict.__setitem__(namespace, "_registration_failure", "private service accounting owner changed")
+                if original is None:
+                    raise CallbackExportError("private service accounting owner changed")
+                try:
+                    BaseException.add_note(original, "private service accounting owner changed")
+                except BaseException:
+                    pass
 
     def _invoke_closed(self, binding, context, semantic_step_limit):
         meter, starting_steps = self._runtime._meter_for_public_call(
@@ -770,7 +1057,85 @@ def verify_callback_export(runtime, handle: CallbackExportHandle) -> CallbackExp
     return engine.verify(handle)
 
 
+_BEGIN_SERVICE_ACCOUNTING = CallbackExportEngine.begin_service_accounting
+_CONSUME_SERVICE_ACCOUNTING = CallbackExportEngine.consume_service_accounting
+
+
+def _service_engine(runtime):
+    from simulator.runtime import MegaForthRuntime
+
+    if type(runtime) is not MegaForthRuntime or MegaForthRuntime.__getattribute__ is not object.__getattribute__:
+        raise CallbackExportError("private service runtime lookup route changed")
+    namespace = object.__getattribute__(runtime, "__dict__")
+    if type(namespace) is not dict or len(namespace) > 4096 or any(type(key) is not str for key in namespace):
+        raise CallbackExportError("private service runtime namespace changed")
+    engine = dict.get(namespace, "_callback_exports")
+    if type(engine) is not CallbackExportEngine:
+        raise CallbackExportError("runtime has no canonical private service export owner")
+    values = object.__getattribute__(engine, "__dict__")
+    if (type(values) is not dict or len(values) > 4096 or any(type(key) is not str for key in values)
+            or dict.get(values, "_runtime") is not runtime):
+        raise CallbackExportError("private service export owner changed")
+    return engine
+
+
+def begin_service_callback_accounting(runtime, handle, request):
+    """Prepare one exact V5 request in the existing callback accounting slot.
+
+    This private integration seam does not advertise native V5 capability.
+    The bridge retains the returned identity and the original consume helper.
+    """
+    return _BEGIN_SERVICE_ACCOUNTING(_service_engine(runtime), handle, request)
+
+
+def consume_service_callback_accounting(runtime, checkpoint, handle, error=None):
+    """Consume engine-issued work and optional exact validation provenance.
+
+    The returned failure is trusted only as part of this exact consume call;
+    constructing or copying the diagnostic dataclass grants no fault authority.
+    Cleanup intentionally uses the captured route after an exceptional dispatch.
+    """
+    return _CONSUME_SERVICE_ACCOUNTING(_service_engine(runtime), checkpoint, handle, error)
+
+
+def service_callback_profile(runtime):
+    """Report the finalized scalar owner, independent of outer executor mode.
+
+    This is a semantic qualification query. A caller still needs its separately
+    admitted V5 bridge and native callback transport before advertising service
+    execution. Unsupported old embeddings simply have no private profile.
+    """
+    from simulator.interop_services import (
+        ScalarServiceCatalog, ServiceDispatch, _ServiceAccounting, _SERVICE_ENGINE_CLASS, _keys,
+    )
+
+    try:
+        engine = _service_engine(runtime)
+        namespace = _SERVICE_ENGINE_CLASS.instance(engine)
+        with runtime._session_owner_lock:
+            if (namespace.get("_registration_failure") is not None
+                    or namespace.get("_service_finalized") is not True
+                    or namespace.get("_service_accounting_type") is not _ServiceAccounting
+                    or namespace.get("_service_dispatch_type") is not ServiceDispatch):
+                return None
+            catalog = namespace.get("_service_catalog")
+            if type(catalog) is not ScalarServiceCatalog:
+                return None
+            values = _keys(object.__getattribute__(catalog, "__dict__"))
+            if (values.get("_runtime") is not runtime
+                    or values.get("_dictionary") is not namespace.get("_dictionary")
+                    or any(name in values for name in ("verify", "_verify_owner"))):
+                return None
+            ScalarServiceCatalog.verify(catalog)
+            executor = "python_reference" if catalog._executor is None else "shared_native_kernel"
+            return ServiceCallbackProfileV5(executor)
+    except CallbackExportError:
+        return None
+
+
 __all__ = [
     "CallbackExportError", "CallbackExportBudgetExceeded", "CallbackExportHandle", "CallbackExportResult",
-    "verify_callback_export",
+    "verify_callback_export", "ServiceCallbackFailureV5", "ServiceCallbackReceiptV5",
+    "begin_service_callback_accounting", "consume_service_callback_accounting",
+    "ServiceCallbackProfileV5", "service_callback_profile",
 ]

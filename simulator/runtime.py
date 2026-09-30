@@ -833,6 +833,7 @@ class MegaForthRuntime:
                         self._native_execution.extension.tile_execute_values,
                         guard_factory=self._native_execution.extension.TileIdentityGuard,
                     )
+        self._callback_exports.finalize_service_executor(self._native_execution)
         self.storage.claim()
 
     @property

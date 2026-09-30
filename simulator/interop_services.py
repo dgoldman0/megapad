@@ -608,6 +608,9 @@ class ServiceDispatch(ClosedDispatch):
             raise self.failure("scalar service engine namespace changed")
         if any(name in engine_namespace for name in ("_require_owner", "_budget_error")):
             raise self.failure("scalar service engine method route changed")
+        if (engine_namespace.get("_service_accounting_type") is not _ServiceAccounting
+                or engine_namespace.get("_service_dispatch_type") is not ServiceDispatch):
+            raise self.failure("scalar service engine type projections changed")
         ClosedDispatch.require_state(self)
         _SERVICE_CAPTURE_CLASS.instance(self.capture)
         record = self.accounting_record
@@ -833,6 +836,8 @@ class ServiceDispatch(ClosedDispatch):
 
 
 _SERVICE_ACCOUNTING_CLASS = _ClassSeal(_ServiceAccounting, functions=True)
+_SERVICE_VALIDATION_CLASS = _ClassSeal(ScalarValidationFailure, functions=True)
+_SERVICE_SCOPE_CLASS = _ClassSeal(_ServiceValidationScope, functions=True)
 _SERVICE_CAPTURE_CLASS = _ClassSeal(_ServiceDispatchCapture, functions=True)
 _SERVICE_REQUEST_CLASS = _ClassSeal(CallbackRequestV5, functions=True)
 _SERVICE_SITE_CLASS = _ClassSeal(CallbackSiteV5, functions=True)

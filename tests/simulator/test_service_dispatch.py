@@ -126,8 +126,10 @@ def test_service_dispatch_uses_one_actual_tick_and_private_frame(runtime, name, 
     assert runtime._callback_exports._active is None
     assert runtime.scalar_float._validation_scope is None
     assert runtime.scalar_float._validation_armed is None
-    with pytest.raises(TypeError, match="admitted callback"):
-        runtime.bind_callback_export(fixture.binding.descriptor)
+    handle = runtime.bind_callback_export(fixture.binding.descriptor)
+    assert runtime.verify_callback_export(handle) == fixture.binding.descriptor
+    with pytest.raises(CallbackExportError, match="prepared request"):
+        runtime.invoke_callback_export(handle, arguments)
 
 
 @pytest.mark.parametrize("name,arguments,operation", (
