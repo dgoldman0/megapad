@@ -46,7 +46,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = Path(__file__).with_name("fixtures") / "kdos-crc-729-864.f"
 
-MEGAPAD_REVISION = "9576065668114ffdf9b08c015cf4d16c8b2e6e89"
+MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
 KDOS_GIT_BLOB = "626d6ade5a25d94c4d312cebf60b20cd3c8fa781"
 FIRST_LINE = 729
 LAST_LINE = 864

@@ -20,7 +20,7 @@ PREFIX_FIXTURE = Path(__file__).with_name("fixtures") / "kdos-prefix-39-69.f"
 # MegaPad revision and kdos.f Git blob.  Pinning both the fixture digest and its
 # blob identity makes an accidental edit distinguishable from an intentional
 # refresh after the ordinary KDOS source changes.
-MEGAPAD_REVISION = "9576065668114ffdf9b08c015cf4d16c8b2e6e89"
+MEGAPAD_REVISION = "b8e1a7e174fb50d7ea3cb5f5f8d10917ed329ec4"
 KDOS_GIT_BLOB = "626d6ade5a25d94c4d312cebf60b20cd3c8fa781"
 PREFIX_FIRST_LINE = 39
 PREFIX_LAST_LINE = 69
