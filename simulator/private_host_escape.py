@@ -48,7 +48,8 @@ class PrivateHostAbortProvenance:
     """One issued primitive escape, bounded by its live Python unwind path."""
 
     __slots__ = ("_runtime", "_issuer_code", "_scope_codes", "_error",
-                 "_cursor", "_cursor_frame", "_matched_scope", "_leaf_scope")
+                 "_cursor", "_cursor_frame", "_matched_scope", "_leaf_scope",
+                 "_task_installation")
 
     def __init__(self, runtime, runtime_class):
         self._runtime = runtime
@@ -58,7 +59,89 @@ class PrivateHostAbortProvenance:
             "_evaluate_source",
         ))
         self._leaf_scope = None
+        self._task_installation = None
         _clear(self)
+
+    def install_task_issuers(self, engine, dispatch_class):
+        """Capture only the original task engine's two host-call boundaries.
+
+        Construction happens before user customization, before any task root
+        exists. This installs no guest exception or arbitrary-callable route.
+        """
+        from simulator.foreign_runtime import ForeignTaskEngine
+        from simulator.foreign_dispatch import TaskDispatchRoot
+        from simulator.foreign_control import ForeignReturnControl
+        from simulator.runtime import ExecutionContext
+        from simulator.stacks import ReturnStack
+
+        frame = _GETFRAME(1)
+        if (self._task_installation is not None or type(engine) is not ForeignTaskEngine
+                or dispatch_class is not TaskDispatchRoot
+                or frame.f_code is not ForeignTaskEngine.__init__.__code__
+                or frame.f_locals.get("self") is not engine):
+            raise RuntimeError("task host-escape issuers require original engine construction")
+        engine_namespace = vars(ForeignTaskEngine)["__dict__"]
+        values = engine_namespace.__get__(engine, ForeignTaskEngine)
+        runtime_descriptor = next(vars(base)["__dict__"]
+                                  for base in type(self._runtime).__mro__
+                                  if "__dict__" in vars(base))
+        runtime_values = runtime_descriptor.__get__(self._runtime, type(self._runtime))
+        context = dict.get(values, "_context")
+        if (dict.get(values, "_runtime") is not self._runtime
+                or type(context) is not ExecutionContext
+                or context is not dict.get(runtime_values, "main_context")
+                or dict.get(values, "_task_root") is not None):
+            raise RuntimeError("task host-escape engine has no original context")
+        self._task_installation = (
+            engine, engine_namespace, values, dispatch_class,
+            vars(dispatch_class)["__dict__"],
+            (dispatch_class.tick.__code__, dispatch_class._owned_call.__code__),
+            context, vars(ExecutionContext)["returns"], ForeignReturnControl,
+            vars(ForeignReturnControl)["_issuer"], vars(ForeignReturnControl)["_stack"],
+            runtime_descriptor, vars(ReturnStack)["__dict__"],
+        )
+
+    def issue_task(self, root, error):
+        """Issue only an admitted task accounting/adapter host-call failure."""
+        installation = self._task_installation
+        if installation is None:
+            return
+        (engine, engine_descriptor, engine_values, dispatch_class, root_descriptor,
+         codes, context, returns_descriptor, control_class,
+         issuer_descriptor, stack_descriptor, runtime_descriptor, returns_namespace) = installation
+        frame = _GETFRAME(1)
+        if (type(root) is not dispatch_class or not any(frame.f_code is code for code in codes)
+                or frame.f_locals.get("self") is not root):
+            return
+        values = root_descriptor.__get__(root, dispatch_class)
+        unwinding = dict.get(values, "_unwinding_error")
+        # Cleanup can encounter another host error while preserving a primary
+        # escape. It must neither replace its record nor mark an ordinary ABORT.
+        if unwinding is not None and unwinding is not error:
+            return
+        runtime_values = runtime_descriptor.__get__(self._runtime, type(self._runtime))
+        control = dict.get(values, "control")
+        returns = returns_descriptor.__get__(context, type(context))
+        if (dict.get(runtime_values, "_foreign_tasks") is not engine
+                or engine_descriptor.__get__(engine, type(engine)) is not engine_values
+                or dict.get(engine_values, "_task_root") is not root
+                or dict.get(engine_values, "_runtime") is not self._runtime
+                or dict.get(engine_values, "_context") is not context
+                or dict.get(values, "engine") is not engine
+                or dict.get(values, "context") is not context
+                or type(control) is not control_class
+                or issuer_descriptor.__get__(control, control_class) is not dict.get(values, "issuer")
+                or stack_descriptor.__get__(control, control_class) is not returns
+                or dict.get(returns_namespace.__get__(returns, type(returns)), "_foreign_control") is not control
+                or _outer_scope(self, frame) is None):
+            return
+        traceback = _TRACEBACK.__get__(error, BaseException)
+        if traceback is None or traceback.tb_frame is not frame:
+            return
+        _clear(self)
+        self._error = error
+        self._cursor = traceback
+        self._cursor_frame = frame
 
     def enter(self):
         # An entry after issuance means someone caught the exception and started

@@ -19,7 +19,7 @@ from simulator.foreign_runtime import (
     _METADATA_ROUTES, _FunctionSeal,
 )
 from simulator.foreign_types import ForeignCallbackTarget, ForeignResumeTarget
-from simulator.errors import StepBudgetExceeded
+from simulator.errors import ForthAbort, StepBudgetExceeded
 from simulator.stacks import Continuation
 from simulator.runtime import _TASK_METER_ROUTES, _TASK_METER_NAMESPACE
 
@@ -88,6 +88,7 @@ class TaskDispatchRoot:
         self.cancelled = False
         self.closed = False
         self.busy = False
+        self._unwinding_error = None
         self._meter_policy = (dict.get(meter_namespace, "budget"), dict.get(meter_namespace, "_on_tick"))
         self._meter_namespace = meter_namespace
         self._effects_close = TaskEffectGuard.close
@@ -147,6 +148,8 @@ class TaskDispatchRoot:
         ledger, context = self.ledger, self.context
         meter, meter_namespace = ledger.meter, self._meter_namespace
         meter_descriptor = _METER_NAMESPACE
+        root_namespace = self.engine._dispatch_namespace.__get__(self, type(self))
+        issue_host_abort = self.engine._runtime._private_host_abort.issue_task
         self._require_meter()
         evidence = self.require_target(target, ip)
         active = self.active
@@ -163,7 +166,13 @@ class TaskDispatchRoot:
             if active:
                 ledger.charge_semantic_step()
             dict.__setitem__(meter_namespace, "steps", before + 1)
-            hook()
+            try:
+                hook()
+            except ForthAbort as failure:
+                issue_host_abort(self, failure)
+                if dict.get(root_namespace, "_unwinding_error") is None:
+                    dict.__setitem__(root_namespace, "_unwinding_error", failure)
+                raise
         except BaseException:
             # Restore only the charged public projection, preserving the
             # original hook failure and the already-published receipt.
@@ -230,16 +239,26 @@ class TaskDispatchRoot:
         return receipt
 
     def _owned_call(self, name, *args, **kwargs):
+        engine = self.engine
+        namespace = engine._dispatch_namespace.__get__(self, type(self))
+        issue_host_abort = engine._runtime._private_host_abort.issue_task
         prior = self.busy
-        self.busy = True
+        dict.__setitem__(namespace, "busy", True)
         try:
             return self.adapter.call(name, *args, **kwargs)
+        except ForthAbort as failure:
+            issue_host_abort(self, failure)
+            if dict.get(namespace, "_unwinding_error") is None:
+                dict.__setitem__(namespace, "_unwinding_error", failure)
+            if name in ("cancel_suffix", "cancel_all"):
+                engine._execution_failure = failure
+            raise
         except BaseException as failure:
             if name in ("cancel_suffix", "cancel_all"):
-                self.engine._execution_failure = failure
+                engine._execution_failure = failure
             raise
         finally:
-            self.busy = prior
+            dict.__setitem__(namespace, "busy", prior)
 
     def _transition(self, name, *args, starting=None, **kwargs):
         self.effects.detach(self.issuer)

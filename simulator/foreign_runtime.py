@@ -378,6 +378,7 @@ class ForeignTaskEngine:
         self._dispatch_namespace = vars(TaskDispatchRoot)["__dict__"]
         self._dispatch_functions = tuple(_FunctionSeal.capture(value)
             for _name, value in self._dispatch_routes if type(value) is FunctionType)
+        runtime._private_host_abort.install_task_issuers(self, TaskDispatchRoot)
 
     @property
     def _exports(self):
