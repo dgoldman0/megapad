@@ -772,7 +772,10 @@ Progress:
 - **Regression.** `test_system.py` passes in fresh-process chunks except
   the three THROW-during-load tests recorded in §7, which fail the same way
   before this work. The hosted suite (2,472), the full RTL list, and SoC
-  elaboration pass.
+  elaboration pass. The hosted simulator changed in Phases 7 and 8, so the
+  physical Desktop journey ran once, with Akashic `f2f06799` and this
+  branch at `c5cb5b8`. It passed in 164 s, with a peak aggregate RSS of
+  512 MB, clean trees, and the native simulator executor.
 - **Docs.** The README carries a manual resource estimate that includes the
   float datapath and says the chip no longer fits the Kintex-7 325T whole;
   the ROADMAP lists the work; the non-determinism audit's cluster
