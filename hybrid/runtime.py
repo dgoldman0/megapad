@@ -135,6 +135,115 @@ class _MachineAllowance:
     callback_semantic_steps: int = 0
 
 
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class _TaskOwnerAuthority:
+    owner: object
+    adapter: object
+    accounting: object
+    cleanup: object
+    closed: object
+    engine: object
+
+
+_TASK_OWNER_AUTHORITIES = {}
+
+
+def _task_owner_authority(owner, adapter=None):
+    registered = _TASK_OWNER_AUTHORITIES.get(id(owner))
+    if registered is None or registered[0]() is not owner:
+        raise HybridExecutionError("callback_accounting", "task owner has no issued installation")
+    held = registered[1]()
+    if type(held) is not _TaskOwnerAuthority or held.owner is not owner:
+        raise HybridExecutionError("callback_accounting", "task owner lost its issued installation")
+    published = object.__getattribute__(owner, "_task_authority")
+    if adapter is None:
+        adapter = held.adapter
+    if held.adapter is not adapter:
+        raise HybridExecutionError("callback_accounting", "task adapter lost its exact installation authority")
+    changed = (published is not held or object.__getattribute__(adapter, "_composition_authority") is not held
+               or owner._task_adapter is not adapter
+               or owner._task_accounting is not held.accounting or owner._task_cleanup is not held.cleanup)
+    return held, changed
+
+
+def _task_accounting_authority(owner, adapter):
+    """Retain one root's counter proof independently of public projections."""
+    from hybrid.task_adapter import NativeTaskAdapter
+    from shared.foreign_abi import ForeignReceiptV1
+
+    namespace = object.__getattribute__(owner, "__dict__")
+    names = ("_machine_instructions", "_machine_cycles", "_transitions",
+             "_callback_requests", "_machine_segments", "_max_machine_depth")
+    receipt_names = tuple(name for name in ForeignReceiptV1.__slots__
+                          if name not in ("abi", "version"))
+    receipt_fields = tuple(vars(ForeignReceiptV1)[name] for name in receipt_names)
+    last_receipt = NativeTaskAdapter.last_receipt
+    # Root token, root ID, pre-root owner totals, latest exact receipt and its
+    # copied scalars, absolute owner projection. Publish each change once.
+    state = (None, 0, (), None, (), ())
+
+    def project(values):
+        for name, value in zip(names, values):
+            dict.__setitem__(namespace, name, value)
+
+    def dispatch(action, *values):
+        nonlocal state
+        if object.__getattribute__(owner, "__dict__") is not namespace:
+            raise HybridExecutionError("callback_accounting", "task owner namespace changed")
+        token, root_id, baseline, issued, evidence, projected = state
+        if action == "begin":
+            requested_token, requested_id = values
+            if requested_token is token:
+                if requested_id != root_id:
+                    raise HybridExecutionError("callback_accounting", "task root identity changed")
+                return
+            if requested_id <= root_id:
+                raise HybridExecutionError("callback_accounting", "task root identity did not advance")
+            baseline = tuple(dict.__getitem__(namespace, name) for name in names)
+            if any(type(value) is not int or value < 0 for value in baseline):
+                raise HybridExecutionError("callback_accounting", "task owner counters are not exact")
+            state = (requested_token, requested_id, baseline, None, (), baseline)
+            return
+        if action != "settle" or len(values) != 1 or token is None:
+            raise HybridExecutionError("callback_accounting", "task accounting has no issued root")
+        receipt, = values
+        # Only the adapter's pending original projection may call this hook.
+        # Its pinned native receipt query proves identity and counters afresh.
+        if (adapter._projecting is not True or not adapter._settlement.owner_pending
+                or type(receipt) is not ForeignReceiptV1
+                or last_receipt(adapter) is not receipt):
+            raise HybridExecutionError("callback_accounting", "task receipt has no pending native proof")
+        copied = tuple(field.__get__(receipt, ForeignReceiptV1) for field in receipt_fields)
+        fields = dict(zip(receipt_names, copied))
+        if fields["root_id"] != root_id:
+            raise HybridExecutionError("callback_accounting", "task receipt belongs to another root")
+        if issued is receipt:
+            if copied != evidence:
+                raise HybridExecutionError("callback_accounting", "settled task receipt changed")
+            # A trace/host escape may interrupt projection after any one field.
+            project(projected)
+            return
+        previous = dict(zip(receipt_names, evidence)) if issued is not None else None
+        if (fields["sequence"] != (1 if previous is None else previous["sequence"] + 1)
+                or fields["root_instructions"] != (0 if previous is None else previous["root_instructions"]) + fields["instructions"]
+                or fields["root_cycles"] != (0 if previous is None else previous["root_cycles"]) + fields["cycles"]
+                or fields["root_callbacks"] != (0 if previous is None else previous["root_callbacks"]) + fields["callback_requests"]
+                or fields["root_entries"] != (0 if previous is None else previous["root_entries"]) + int(fields["invocation_started"])):
+            raise HybridExecutionError("callback_accounting", "task receipt work is discontinuous")
+        next_projection = (
+            baseline[0] + fields["root_instructions"],
+            baseline[1] + fields["root_cycles"],
+            baseline[2] + fields["root_entries"],
+            baseline[3] + fields["root_callbacks"],
+            baseline[4] + fields["sequence"],
+            max(projected[5], fields["depth"]),
+        )
+        state = (token, root_id, baseline, receipt, copied, next_projection)
+        project(next_projection)
+
+    return dispatch
+
+
 
 @dataclass(slots=True)
 class _NestedMachineFrame:
@@ -625,6 +734,10 @@ class HybridRuntime:
         self._v3_segment_id = 0
         self._max_machine_depth = 0
         self._nested_execution = None
+        self._task_adapter = None
+        self._task_accounting = None
+        self._task_cleanup = None
+        self._task_authority = None
         self._allowances: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._stack_allocations: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._wrapper_limits: list[tuple[int, int, int]] = []
@@ -929,6 +1042,8 @@ class HybridRuntime:
             meter = self._current_meter()
             if meter is None:
                 raise HybridExecutionError("invalid_entry", "root requires the original semantic dispatch")
+            if self._task_adapter is not None:
+                self.semantic._foreign_tasks.claim_machine_profile(meter, "private")
             allowance = self._allowance(meter)
             remaining = allowance.limit - allowance.instructions
             if remaining <= 0:
@@ -1247,6 +1362,77 @@ class HybridRuntime:
             raise HybridExecutionError("closed", "the hybrid owner has been closed")
         if self._registration_failure is not None:
             raise HybridExecutionError("registration_cleanup", self._registration_failure)
+
+    def _install_task_adapter(self, adapter) -> None:
+        from hybrid.task_adapter import NativeTaskAdapter
+
+        self._require_open()
+        self._require_authority()
+        self.semantic._foreign_tasks._require_idle("install a native task adapter")
+        if (type(self) is not HybridRuntime or type(adapter) is not NativeTaskAdapter
+                or adapter._owner is not self or adapter._semantic is not self.semantic
+                or self._nested_runner is None
+                or adapter._runner is not self._nested_runner.task_v1()):
+            raise HybridExecutionError("invalid_entry", "task adapter does not own this native facade")
+        if self._task_adapter is not None:
+            raise HybridExecutionError("invalid_entry", "this owner already has its task adapter")
+        accounting = _task_accounting_authority(self, adapter)
+        authority = _TaskOwnerAuthority(self, adapter, accounting, adapter._native_cleanup,
+                                        adapter._native_closed, adapter._engine)
+        owner_id = id(self)
+        table = _TASK_OWNER_AUTHORITIES
+
+        def retire(owned):
+            current = table.get(owner_id)
+            if current is not None and current[0] is owned:
+                table.pop(owner_id, None)
+
+        _TASK_OWNER_AUTHORITIES[owner_id] = (weakref.ref(self, retire), weakref.ref(authority))
+        adapter._composition_authority = authority
+        self._task_cleanup = adapter._native_cleanup
+        self._task_accounting = accounting
+        self._task_authority = authority
+        self._task_adapter = adapter
+
+    def _require_task_adapter(self, adapter) -> None:
+        self._require_open()
+        self._require_authority()
+        _authority, changed = _task_owner_authority(self, adapter)
+        if changed:
+            self._registration_failure = "task installation authority changed"
+            raise HybridExecutionError("callback_accounting", self._registration_failure)
+        if (self._task_adapter is not adapter or adapter._owner is not self
+                or adapter._semantic is not self.semantic
+                or adapter._engine is not self.semantic._foreign_tasks
+                or self._nested_runner is None
+                or adapter._runner is not self._nested_runner.task_v1()):
+            raise HybridExecutionError("stale_registration", "native task adapter ownership changed")
+        if self._active_machine:
+            raise HybridExecutionError("active_dispatch", "private machine invocation owns the CPU")
+        self.semantic._require_session_owner_access("use the native task adapter")
+
+    def _admit_task_root(self, adapter, root_token, root_id) -> None:
+        self._require_task_adapter(adapter)
+        engine = self.semantic._foreign_tasks
+        engine.adapter_root_policy(adapter, root_token, root_id)
+        meter = self._current_meter()
+        if meter is None:
+            raise HybridExecutionError("invalid_entry", "task entry has no original semantic meter")
+        engine.claim_machine_profile(meter, "task")
+        authority, _changed = _task_owner_authority(self, adapter)
+        authority.accounting("begin", root_token, root_id)
+
+    def _settle_task_receipt(self, adapter, receipt) -> None:
+        # This path remains available for exact receipt recovery after a host
+        # failure. Replaying the same receipt is projection, never another charge.
+        try:
+            authority, changed = _task_owner_authority(self, adapter)
+            authority.accounting("settle", receipt)
+            if changed:
+                raise HybridExecutionError("callback_accounting", "task installation authority changed")
+        except BaseException as error:
+            self._registration_failure = "task native receipt accounting failed"
+            raise
 
     def register_routine_v1(self, image: RoutineImageV1 | None = None,
                             **values: Any) -> Word:
@@ -2111,6 +2297,13 @@ class HybridRuntime:
             registration = self._by_nonce.get(nonce)
             if registration is None:
                 raise HybridExecutionError("stale_registration", "registration identity is no longer live")
+            # The task profile has its own retained budget. Until mixed-profile
+            # accounting is qualified, one original meter can choose only one.
+            if self._task_adapter is not None:
+                meter = self._current_meter()
+                if meter is None:
+                    raise HybridExecutionError("invalid_entry", "routine requires an active semantic dispatch")
+                self.semantic._foreign_tasks.claim_machine_profile(meter, "private")
             if type(registration.declaration) is RoutineDeclarationV5:
                 if not _private_service and not self.service_callback_abi_available:
                     raise HybridExecutionError("service_unavailable", "scalar service callbacks are not enabled")
@@ -2281,13 +2474,43 @@ class HybridRuntime:
             self.semantic._require_session_owner_access("close the hybrid owner")
             if self._active_machine or self.semantic._active_dispatches or self.semantic._active_input_states:
                 raise HybridExecutionError("active_dispatch", "close only at an idle host boundary")
+            failure = None
+            if id(self) in _TASK_OWNER_AUTHORITIES:
+                authority, changed = _task_owner_authority(self)
+                adapter = authority.adapter
+                if changed:
+                    failure = HybridExecutionError("callback_accounting", "task installation authority changed")
+                try:
+                    root = authority.engine._task_root
+                    if root is not None:
+                        authority.engine.finish_root(root, completed=False)
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+                try:
+                    # Issued before callbacks; closes the exact native owner
+                    # without traversing possibly changed Python cleanup routes.
+                    authority.cleanup()
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+                    else:
+                        try:
+                            BaseException.add_note(failure, "native task close also failed")
+                        except BaseException:
+                            pass
+                    if not authority.closed():
+                        raise failure
+            else:
+                self._runner.close()
             self._closed = True
-            self._runner.close()
             self._runner = None
             self._nested_runner = None
             self._cpu = None
             self._control_buffer = None
             self._allowances.clear()
+            if failure is not None:
+                raise failure
 
 
 _NESTED_OWNER_ROUTES = tuple((name, vars(HybridRuntime)[name]) for name in (
