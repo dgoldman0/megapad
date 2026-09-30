@@ -21,6 +21,7 @@ from simulator.aes import (
 )
 from simulator.dictionary import MAX_NAME_BYTES
 from simulator.errors import DivideByZeroFault, ExecutionError, ForthAbort
+from simulator.foreign_effects import TaskEffectGuard
 from simulator.entropy import (
     TRNG_RAND8,
     TRNG_RAND64,
@@ -385,14 +386,22 @@ def _within(context: ExecutionContext) -> None:
     )
 
 
+def _task_access(context: ExecutionContext, address: int, width: int, access: str) -> None:
+    guard = context.data._task_effect_guard
+    if guard is not None:
+        TaskEffectGuard.require_access(guard, address, width, access)
+
+
 def _fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.peek()
+    _task_access(context, address, CELL_BYTES, "read")
     value = runtime.memory.read64(address)
     context.data.replace_top(value)
 
 
 def _c_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.peek()
+    _task_access(context, address, 1, "read")
     value = runtime.memory.read8(address)
     context.data.replace_top(value)
 
@@ -401,6 +410,7 @@ def _w_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.peek()
     value = 0
     for offset in range(2):
+        _task_access(context, u64(address + offset), 1, "read")
         value |= runtime.memory.read8(u64(address + offset)) << (offset * 8)
     context.data.replace_top(value)
 
@@ -409,6 +419,7 @@ def _l_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.peek()
     value = 0
     for offset in range(4):
+        _task_access(context, u64(address + offset), 1, "read")
         value |= runtime.memory.read8(u64(address + offset)) << (offset * 8)
     context.data.replace_top(value)
 
@@ -460,11 +471,13 @@ def _find(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 def _store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
+    _task_access(context, address, CELL_BYTES, "write")
     runtime.memory.write64(address, value)
 
 
 def _off(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
+    _task_access(context, address, CELL_BYTES, "write")
     runtime.memory.write64(address, 0)
 
 
@@ -492,6 +505,7 @@ def _two_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 def _c_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
+    _task_access(context, address, 1, "write")
     runtime.memory.write8(address, value)
 
 
@@ -499,6 +513,7 @@ def _w_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
     for offset in range(2):
+        _task_access(context, u64(address + offset), 1, "write")
         runtime.memory.write8(
             u64(address + offset),
             value >> (offset * 8),
@@ -509,6 +524,7 @@ def _l_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     value = context.data.pop()
     for offset in range(4):
+        _task_access(context, u64(address + offset), 1, "write")
         runtime.memory.write8(
             u64(address + offset),
             value >> (offset * 8),
@@ -518,10 +534,10 @@ def _l_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 def _plus_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     address = context.data.pop()
     increment = context.data.pop()
-    runtime.memory.write64(
-        address,
-        u64(runtime.memory.read64(address) + increment),
-    )
+    _task_access(context, address, CELL_BYTES, "read")
+    value = u64(runtime.memory.read64(address) + increment)
+    _task_access(context, address, CELL_BYTES, "write")
+    runtime.memory.write64(address, value)
 
 
 def _fill(runtime: MegaForthRuntime, context: ExecutionContext) -> None:

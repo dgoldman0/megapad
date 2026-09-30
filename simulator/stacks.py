@@ -18,6 +18,7 @@ from simulator.foreign_control import (
     ForeignRetirementReason,
     ForeignReturnControl,
 )
+from simulator.foreign_effects import TaskEffectGuard
 from simulator.memory import SparseAddressSpace
 
 
@@ -319,6 +320,8 @@ class DataStack:
             return
         target = self._push_address()
         assert self._memory_view is not None
+        if self._task_effect_guard is not None:
+            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, target, CELL_BYTES, "write")
         self._memory_view.write64(target, value)
         self._pointer = target
 
@@ -338,6 +341,8 @@ class DataStack:
             return self._cells.pop()
         assert self._pointer is not None
         assert self._memory_view is not None
+        if self._task_effect_guard is not None:
+            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer, CELL_BYTES, "read")
         value = self._memory_view.read64(self._pointer)
         self._pointer += CELL_BYTES
         return value
@@ -362,6 +367,8 @@ class DataStack:
             return self._cells[-1 - offset]
         assert self._pointer is not None
         assert self._memory_view is not None
+        if self._task_effect_guard is not None:
+            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer + offset * CELL_BYTES, CELL_BYTES, "read")
         return self._memory_view.read64(self._pointer + offset * CELL_BYTES)
 
     def replace_top(self, cell: int) -> None:
@@ -375,6 +382,8 @@ class DataStack:
             return
         assert self._pointer is not None
         assert self._memory_view is not None
+        if self._task_effect_guard is not None:
+            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer, CELL_BYTES, "write")
         self._memory_view.write64(self._pointer, value)
 
     def depth(self) -> int:
@@ -427,6 +436,8 @@ class DataStack:
         self._require(1, "SP!")
         assert self._pointer is not None
         assert self._memory_view is not None
+        if self._task_effect_guard is not None:
+            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer, CELL_BYTES, "read")
         target = self._memory_view.read64(self._pointer)
         self._validate_pointer(target)
         self._pointer = target
@@ -614,6 +625,8 @@ class ReturnStack:
             return
         target = self._push_address()
         assert self._memory_view is not None
+        if self._task_effect_guard is not None:
+            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, target, CELL_BYTES, "write")
         self._memory_view.write64(target, value)
         self._continuations.pop(target, None)
         self._pointer = target
@@ -690,6 +703,8 @@ class ReturnStack:
         # XT into this machine-private slot must not preserve its host type.
         raw = self._next_continuation_cookie(continuation.xt)
         assert self._memory_view is not None
+        if self._task_effect_guard is not None:
+            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, target, CELL_BYTES, "write")
         self._memory_view.write64(target, raw)
         self._continuations[target] = (continuation, raw)
         self._pointer = target
@@ -748,6 +763,8 @@ class ReturnStack:
         else:
             assert self._pointer is not None
             assert self._memory_view is not None
+            if self._task_effect_guard is not None:
+                TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer, CELL_BYTES, "write")
             self._memory_view.write64(self._pointer, next_index)
         return True
 
@@ -950,6 +967,8 @@ class ReturnStack:
         assert self._pointer is not None
         assert self._memory_view is not None
         address = self._pointer + offset * CELL_BYTES
+        if self._task_effect_guard is not None:
+            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, address, CELL_BYTES, "read")
         raw = self._memory_view.read64(address)
         return self._decode_entry(address, raw)
 
