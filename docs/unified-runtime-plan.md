@@ -4,12 +4,13 @@ Started: 2026-09-30
 
 Status: The unified emulator/simulator/hybrid application and bounded hybrid
 integer-routine v1 are implemented and qualified locally. Shared native scalar
-FP, tile values, Keccak, checked SHA3 input transfers and bulk audio are
-qualified; residual profiles identify NTT and AES transfer routing as the next
-targets. Native page access and longer continuation intervals need no further
-rewrite on current evidence. Kernel/source/captured-frame evidence and
-strict multicore FP/timing checks are recorded. Live Desktop acceptance,
-expanded hybrid interoperability and remaining Desktop acceptance remain open.
+FP, tile values, Keccak, checked SHA3 input transfers, NTT bulk transfers and
+bulk audio are qualified. The hardened AES transfer candidate showed no gain
+against a fresh scalar baseline, so existing AES routing is retained. Native
+page access and longer continuation intervals need no further rewrite on
+current evidence. Kernel/source/captured-frame evidence and strict multicore
+FP/timing checks are recorded. Expanded hybrid interoperability and remaining
+Desktop acceptance remain open.
 Production semantic sessions now default to required native execution; explicit
 CLI/environment choices and Python embedding defaults remain available.
 
@@ -390,7 +391,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 2 — workload profiles | Kernels, KDOS controls/attribution and captured Desktop composition recorded; live Desktop pending | 19 harness checks; source controls in both executors; 3 exact captured-frame gates; separate evidence in `docs/performance/runtime-hotspots-2026-09-30.md` |
 | 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
-| 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
+| 3B/3C — remaining native extraction | Bulk audio, shared Keccak, SHA3 and NTT transfer work qualified; AES candidate declined on current measurements | Existing oracle gates plus 109 NTT checks; 200 AES candidate checks with no measured speed benefit; retained raw comparisons |
 | 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
 | 5 — expanded interoperability | Synchronous canonical integer callbacks (5A) qualified; closed policies, nesting, task exceptions, suspension and services remain | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
 
