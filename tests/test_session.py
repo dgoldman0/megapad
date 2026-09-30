@@ -32,8 +32,10 @@ from rich_terminal.retained_scene import RetainedScene, SceneModelState
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
 from rich_terminal.update_authority import TerminalGeometry, TerminalUpdateError
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
-from session import (
+from emulator.session import (
     MachineSession,
+)
+from shared.session import (
     RichTerminalSessionConfig,
     RichTerminalSessionPolicy,
     TerminalDisplayOffer,

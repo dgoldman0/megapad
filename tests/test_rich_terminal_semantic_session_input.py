@@ -14,7 +14,9 @@ from rich_terminal.retained_scene import RetainedScene, SceneModelState
 from rich_terminal.retained_view import DisplayScope
 from rich_terminal.retained_wire import ControlEventKind
 from rich_terminal.update_authority import TerminalGeometry
-from session import MachineSession
+from emulator.session import (
+    MachineSession,
+)
 
 
 ATTACHMENT_EPOCH = 7

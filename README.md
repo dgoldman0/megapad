@@ -274,16 +274,57 @@ boundaries are recorded in `docs/tls-hardening.md`.
 
 ### Prerequisites
 
-Python 3.8+ (3.12 recommended).  The emulator and all tools run with
-**no external dependencies** — pure Python standard library.
+Use CPython 3.12 for the current build and test workflow. The hosted Python
+executor can run without compiling either native extension.
 
-For the optional **C++ accelerator** (63× speedup), you need CPython 3.12
-and pybind11 (`pip install pybind11`).  Build with `make accel`.
+Architectural emulation requires the C++ extension; hosted simulation also
+has a native executor. Build both with `make build` using CPython 3.12,
+pybind11, and a C++17 compiler. The focused `make accel` and
+`make simulator-accel` targets remain available.
 
 ```bash
 git clone <repository-url>
 cd megapad-64
 ```
+
+### Unified application
+
+`megapad.py` starts one shared session using the selected execution mode.
+The emulator is the default. The existing session viewer and control client
+attach to either mode through the same socket protocol.
+
+```bash
+make build
+python megapad.py --help
+python megapad.py --mode emulator --bios bios.asm --storage sample.img
+python megapad.py --mode simulator --storage desktop.img --executor native
+
+# Each mode documents its own supported options.
+python megapad.py --mode simulator --help
+# Equivalent Make entry point:
+make serve ARGS='--mode simulator --storage desktop.img --executor native'
+```
+
+Use a prepared MP64FS source image with the ordinary KDOS autoexec entry for
+simulator sessions; the existing Akashic image preparation remains applicable.
+Each running session needs its own writable image and socket/runtime namespace.
+`--executor python|native|auto` applies to simulator preparation and live
+execution. Omission preserves `MEGAFORTH_EXECUTOR`, otherwise Python; explicit
+`native` requires the extension, and `auto` uses it when available. Emulator
+lane and clock controls remain emulator options. Python-only simulation and
+launcher help do not require the emulator extension. The simulator and viewer
+also import no architectural backend.
+
+Both modes report a common `runtime` object in session status: selected mode
+and executor, work/step units, timer and RTC policy, and supported diagnostic
+and reset actions. A native executor may still use Python service fallbacks.
+See [the session API](docs/development-session.md) for the boundary and status
+fields. Executor defaults remain unchanged.
+
+Hybrid execution is planned in [the unified runtime plan](docs/unified-runtime-plan.md).
+Available modes are currently emulator and simulator. The architectural
+monitor in `cli.py` and the existing `session_server.py` and
+`simulator_server.py` entry points remain available during consolidation.
 
 ### Boot the System
 

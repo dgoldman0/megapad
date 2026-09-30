@@ -91,6 +91,12 @@ class HostedRTCService:
         self._monotonic_ns = clock_ns
         self._last_monotonic_ns = now
 
+    @property
+    def clock_mode(self) -> str:
+        """Report the selected source without sampling or advancing it."""
+
+        return "manual" if self._monotonic_ns is None else "host_monotonic"
+
     @staticmethod
     def _require_monotonic_ns(value: int) -> int:
         if isinstance(value, bool) or not isinstance(value, int):

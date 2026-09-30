@@ -1,0 +1,1708 @@
+"""Backend-neutral terminal configuration, capture, and display authority."""
+
+from __future__ import annotations
+
+import json
+import operator
+import os
+from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass, replace
+from pathlib import Path
+
+from display import ATTR_CONTINUATION, ATTR_WIDE, VirtualTerminal
+from rich_terminal import (
+    DriverLimits,
+    DriverServiceResult,
+    DriverStatus,
+    EgressWatermarks,
+    HostPortLimits,
+    RichTerminalDriver,
+    TerminalConfig,
+    TerminalSessionError,
+    TerminalState,
+    TerminalView,
+)
+from rich_terminal.apt1 import CONTROL_RESERVE_BYTES, snapshot_wire_bytes
+from rich_terminal.display_cadence import DisplayCadenceScheduler
+from rich_terminal.output_coordinator import CompositeTerminalView
+from rich_terminal.retained_view import (
+    DisplayScope,
+    RetainedDrawPlane,
+    project_composite_draw_plane,
+)
+from rich_terminal.update_authority import TerminalUpdateError
+from rich_terminal.retained_model import RetainedPolicy
+from rich_terminal.retained_wire import ControlEventKind
+
+
+@dataclass(frozen=True)
+class TerminalCell:
+    """One grid cell.  ``char`` is the whole character a lead cell shows,
+    which may hold several scalars, and is empty in the continuation cell
+    of a wide character.  ``attrs`` uses the SGR bits of ``VirtualTerminal``
+    plus ``ATTR_WIDE`` and ``ATTR_CONTINUATION``."""
+
+    char: str
+    fg: tuple[int, int, int]
+    bg: tuple[int, int, int]
+    attrs: int
+
+
+@dataclass(frozen=True)
+class TerminalSnapshot:
+    cols: int
+    rows: int
+    cells: tuple[tuple[TerminalCell, ...], ...]
+    cursor_col: int
+    cursor_row: int
+    cursor_visible: bool
+    alternate_screen: bool
+
+    def lines(self, trim_right: bool = False) -> list[str]:
+        result = ["".join(cell.char for cell in row) for row in self.cells]
+        if trim_right:
+            result = [line.rstrip() for line in result]
+        return result
+
+    def text(self, trim_right: bool = False) -> str:
+        return "\n".join(self.lines(trim_right=trim_right))
+
+    def row_text(self, row: int, start: int = 0, end: int | None = None) -> str:
+        """The text of the characters whose lead cells lie in columns
+        ``start`` to ``end`` of ``row``."""
+
+        return "".join(cell.char for cell in self.cells[row][start:end])
+
+    def find(self, needle: str) -> list[tuple[int, int]]:
+        """Each (row, column) whose cells begin ``needle``."""
+
+        hits: list[tuple[int, int]] = []
+        for row, cells in enumerate(self.cells):
+            line = []
+            columns = []
+            for column, cell in enumerate(cells):
+                for _ in cell.char:
+                    columns.append(column)
+                line.append(cell.char)
+            text = "".join(line)
+            start = 0
+            while True:
+                offset = text.find(needle, start)
+                if offset < 0:
+                    break
+                hits.append((row, columns[offset]))
+                start = offset + 1
+        return hits
+
+    def to_dict(self) -> dict:
+        return {
+            "cols": self.cols,
+            "rows": self.rows,
+            "cursor": {
+                "col": self.cursor_col,
+                "row": self.cursor_row,
+                "visible": self.cursor_visible,
+            },
+            "alternate_screen": self.alternate_screen,
+            "lines": self.lines(),
+            "cells": [
+                [
+                    {
+                        "char": cell.char,
+                        "fg": list(cell.fg),
+                        "bg": list(cell.bg),
+                        "attrs": cell.attrs,
+                    }
+                    for cell in row
+                ]
+                for row in self.cells
+            ],
+        }
+
+    def write_text(self, path: str | os.PathLike, trim_right: bool = True):
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(self.text(trim_right=trim_right) + "\n", encoding="utf-8")
+
+    def write_json(self, path: str | os.PathLike):
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    def write_png(
+        self,
+        path: str | os.PathLike,
+        *,
+        font_path: str | os.PathLike | None = None,
+        font_size: int = 16,
+        padding: int = 6,
+    ):
+        """Render this immutable terminal state to a PNG using Pillow."""
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError as exc:
+            raise RuntimeError("PNG capture requires Pillow") from exc
+
+        selected_font = _resolve_font(font_path)
+        if selected_font is not None:
+            font = ImageFont.truetype(str(selected_font), font_size)
+        else:
+            font = ImageFont.load_default()
+
+        bbox = font.getbbox("M")
+        cell_w = max(1, int(round(font.getlength("M"))))
+        cell_h = max(1, bbox[3] - bbox[1] + 4)
+        image = Image.new(
+            "RGB",
+            (self.cols * cell_w + padding * 2,
+             self.rows * cell_h + padding * 2),
+            (0, 0, 0),
+        )
+        draw = ImageDraw.Draw(image)
+
+        for row_index, row in enumerate(self.cells):
+            y = padding + row_index * cell_h
+            items = []
+            for col_index, cell in enumerate(row):
+                if cell.attrs & ATTR_CONTINUATION:
+                    continue
+                span = 2 if cell.attrs & ATTR_WIDE else 1
+                fg = cell.fg
+                bg = cell.bg
+                if cell.attrs & 32:
+                    fg, bg = bg, fg
+                if cell.attrs & 1:
+                    fg = tuple(min(255, int(channel * 1.4)) for channel in fg)
+                if cell.attrs & 2:
+                    fg = tuple(channel // 2 for channel in fg)
+                items.append((padding + col_index * cell_w, span * cell_w, cell, fg, bg))
+            # Backgrounds first, so a wide glyph keeps its right half.
+            for x, width, cell, fg, bg in items:
+                if bg != (0, 0, 0):
+                    draw.rectangle((x, y, x + width - 1, y + cell_h - 1), fill=bg)
+            for x, width, cell, fg, bg in items:
+                if cell.char and cell.char != " " and not (cell.attrs & 64):
+                    draw.text((x, y - bbox[1] + 1), cell.char, font=font, fill=fg)
+                if cell.attrs & 8:
+                    draw.line((x, y + cell_h - 2, x + width - 1, y + cell_h - 2), fill=fg)
+                if cell.attrs & 128:
+                    mid = y + cell_h // 2
+                    draw.line((x, mid, x + width - 1, mid), fill=fg)
+
+        if self.cursor_visible:
+            x = padding + self.cursor_col * cell_w
+            y = padding + self.cursor_row * cell_h
+            draw.rectangle((x, y + cell_h - 2, x + cell_w - 1, y + cell_h - 1), fill=(255, 255, 255))
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        image.save(target, format="PNG")
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalDisplayOffer:
+    """One immutable renderer-facing candidate awaiting physical ACK."""
+
+    offer_id: int
+    scope: DisplayScope
+    cell: TerminalSnapshot
+    retained: RetainedDrawPlane
+
+    def __post_init__(self) -> None:
+        if isinstance(self.offer_id, bool):
+            raise TypeError("offer_id must be an integer, not bool")
+        try:
+            normalized = operator.index(self.offer_id)
+        except TypeError as exc:
+            raise TypeError("offer_id must be an integer") from exc
+        if normalized < 1:
+            raise ValueError("offer_id must be positive")
+        object.__setattr__(self, "offer_id", int(normalized))
+        if not isinstance(self.scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        if not isinstance(self.cell, TerminalSnapshot):
+            raise TypeError("cell must be TerminalSnapshot")
+        if not isinstance(self.retained, RetainedDrawPlane):
+            raise TypeError("retained must be RetainedDrawPlane")
+
+
+def _output_snapshot_row(row) -> tuple[TerminalCell, ...]:
+    palette = VirtualTerminal.COLORS
+    # CELL-1 style bits 0 to 5 match; its strike bit 6 is the grid's
+    # 0x80, and its WIDE and CONTINUATION bits 7 and 8 are one higher.
+    return tuple(
+        TerminalCell(
+            char="".join(map(chr, (cell.codepoint, *cell.extras)))
+            if cell.codepoint else "",
+            fg=palette[cell.foreground],
+            bg=palette[cell.background],
+            attrs=(cell.attributes & 0x3F)
+            | ((cell.attributes & 0x1C0) << 1),
+        )
+        for cell in row
+    )
+
+
+class OutputSnapshotRows:
+    """Renderer snapshots of CELL views that convert only replaced rows.
+
+    A CELL publication keeps every row it did not change as the same
+    immutable tuple of immutable cells.  A row object from the previous
+    snapshot therefore converts to exactly the renderer row made for it
+    then, and only rows the model replaced are converted.  Entries are keyed
+    by row identity and hold their rows, so no other object can share a key
+    while its entry exists, and a matching key is always the same row.
+    """
+
+    __slots__ = ("_rows",)
+
+    def __init__(self) -> None:
+        self._rows: dict[int, tuple[tuple, tuple[TerminalCell, ...]]] = {}
+
+    def snapshot(self, view: TerminalView) -> TerminalSnapshot:
+        previous = self._rows
+        current: dict[int, tuple[tuple, tuple[TerminalCell, ...]]] = {}
+        cells = []
+        for row in view.cells:
+            key = id(row)
+            entry = current.get(key) or previous.get(key)
+            if entry is None:
+                entry = (row, _output_snapshot_row(row))
+            current[key] = entry
+            cells.append(entry[1])
+        self._rows = current
+        return TerminalSnapshot(
+            cols=view.cols,
+            rows=view.rows,
+            cells=tuple(cells),
+            cursor_col=view.cursor.column,
+            cursor_row=view.cursor.row,
+            cursor_visible=view.cursor.visible,
+            alternate_screen=False,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RichTerminalSessionConfig:
+    """Caller-owned bounds for one optional rich-terminal attachment."""
+
+    host_limits: HostPortLimits
+    terminal_config: TerminalConfig
+    driver_limits: DriverLimits
+    ansi_history_bytes: int
+    service_batches: int = 1
+    retained_policy: RetainedPolicy | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.host_limits, HostPortLimits):
+            raise TypeError("host_limits must be HostPortLimits")
+        if not isinstance(self.terminal_config, TerminalConfig):
+            raise TypeError("terminal_config must be TerminalConfig")
+        if not isinstance(self.driver_limits, DriverLimits):
+            raise TypeError("driver_limits must be DriverLimits")
+        if self.retained_policy is not None and not isinstance(
+            self.retained_policy, RetainedPolicy
+        ):
+            raise TypeError("retained_policy must be RetainedPolicy or None")
+        for name, value, minimum in (
+            ("ansi_history_bytes", self.ansi_history_bytes, 0),
+            ("service_batches", self.service_batches, 1),
+        ):
+            if isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer, not bool")
+            try:
+                normalized = operator.index(value)
+            except TypeError as exc:
+                raise TypeError(f"{name} must be an integer") from exc
+            if normalized < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
+            if normalized > (1 << 64) - 1:
+                raise ValueError(f"{name} must fit uint64")
+            object.__setattr__(self, name, int(normalized))
+
+
+@dataclass(frozen=True, slots=True)
+class RichTerminalSessionPolicy:
+    """Reusable product bounds for explicitly enabled rich-terminal sessions."""
+
+    max_cols: int
+    max_rows: int
+    egress_high_publications: int
+    egress_high_batches: int
+    egress_low_batches: int
+    ingress_bytes: int
+    ingress_events: int
+    ingress_control_bytes: int
+    ingress_control_events: int
+    geometry_events: int
+    pending_outbound_bytes: int
+    pending_outbound_events: int
+    ansi_history_bytes: int
+    service_batches: int = 1
+
+    def __post_init__(self) -> None:
+        minima = {
+            "max_cols": 1,
+            "max_rows": 1,
+            "egress_high_publications": 2,
+            "egress_high_batches": 1,
+            "egress_low_batches": 0,
+            "ingress_bytes": 1,
+            "ingress_events": 1,
+            "ingress_control_bytes": 1,
+            "ingress_control_events": 1,
+            "geometry_events": 1,
+            "pending_outbound_bytes": 1,
+            "pending_outbound_events": 1,
+            "ansi_history_bytes": 0,
+            "service_batches": 1,
+        }
+        for name, minimum in minima.items():
+            value = getattr(self, name)
+            if isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer, not bool")
+            try:
+                normalized = operator.index(value)
+            except TypeError as exc:
+                raise TypeError(f"{name} must be an integer") from exc
+            if normalized < minimum:
+                raise ValueError(f"{name} must be at least {minimum}")
+            if normalized > (1 << 64) - 1:
+                raise ValueError(f"{name} must fit uint64")
+            object.__setattr__(self, name, int(normalized))
+        if self.max_cols > 0xFFFF or self.max_rows > 0xFFFF:
+            raise ValueError("maximum geometry must fit APT-1 uint16 fields")
+        if self.egress_low_batches >= self.egress_high_batches:
+            raise ValueError("egress batch low watermark must be below high")
+        if self.ingress_control_bytes >= self.ingress_bytes:
+            raise ValueError("ordinary ingress needs a nonempty byte allowance")
+        if self.ingress_control_events >= self.ingress_events:
+            raise ValueError("ordinary ingress needs a nonempty event allowance")
+        if self.ingress_control_bytes < CONTROL_RESERVE_BYTES:
+            raise ValueError(
+                "ingress control reserve must admit the APT-1 reserve"
+            )
+        if self.ingress_bytes - self.ingress_control_bytes < 68:
+            raise ValueError("ordinary ingress cannot admit every fixed input")
+        if self.pending_outbound_bytes < CONTROL_RESERVE_BYTES:
+            raise ValueError("pending outbound bytes must admit control reserve")
+        if self.pending_outbound_events < 3:
+            raise ValueError("pending outbound needs three result records")
+        # Constructing the maximum geometry proves the complete cross-object
+        # capacity contract once, rather than discovering a mismatch at attach.
+        self.configuration(self.max_cols, self.max_rows)
+
+    @property
+    def maximum_transaction_bytes(self) -> int:
+        return snapshot_wire_bytes(self.max_cols, self.max_rows)
+
+    @property
+    def retained_publication_bytes(self) -> int:
+        return self.maximum_transaction_bytes + CONTROL_RESERVE_BYTES
+
+    def configuration(
+        self,
+        cols: int,
+        rows: int,
+        *,
+        retained_policy: RetainedPolicy | None = None,
+    ) -> RichTerminalSessionConfig:
+        """Bind selected geometry without weakening the declared maxima."""
+        if retained_policy is not None and not isinstance(
+            retained_policy, RetainedPolicy
+        ):
+            raise TypeError("retained_policy must be RetainedPolicy or None")
+        selected: dict[str, int] = {}
+        for name, value, maximum in (
+            ("cols", cols, self.max_cols),
+            ("rows", rows, self.max_rows),
+        ):
+            if isinstance(value, bool):
+                raise TypeError(f"{name} must be an integer, not bool")
+            try:
+                normalized = operator.index(value)
+            except TypeError as exc:
+                raise TypeError(f"{name} must be an integer") from exc
+            if not 1 <= normalized <= maximum:
+                raise ValueError(f"{name} exceeds rich-terminal policy")
+            selected[name] = int(normalized)
+        max_payload = max(32, 12 + 8 * self.max_cols)
+        transaction_bytes = self.maximum_transaction_bytes
+        if retained_policy is not None:
+            max_payload = max(
+                max_payload,
+                retained_policy.client_to_terminal_max_payload,
+            )
+            transaction_bytes = max(
+                transaction_bytes,
+                retained_policy.max_retained_transaction_bytes,
+            )
+        publication_bytes = transaction_bytes + CONTROL_RESERVE_BYTES
+        return RichTerminalSessionConfig(
+            host_limits=HostPortLimits(
+                egress=EgressWatermarks(
+                    high_bytes=(
+                        publication_bytes * self.egress_high_publications
+                    ),
+                    low_bytes=publication_bytes,
+                    high_batches=self.egress_high_batches,
+                    low_batches=self.egress_low_batches,
+                ),
+                retained_publication_bytes=publication_bytes,
+                ingress_bytes=self.ingress_bytes,
+                ingress_events=self.ingress_events,
+                ingress_control_bytes=self.ingress_control_bytes,
+                ingress_control_events=self.ingress_control_events,
+                geometry_events=self.geometry_events,
+            ),
+            terminal_config=TerminalConfig(
+                max_payload=max_payload,
+                max_transaction_bytes=transaction_bytes,
+                terminal_receive_credit=transaction_bytes,
+                max_cells=self.max_cols * self.max_rows,
+                max_feed_bytes=publication_bytes,
+                max_cols=self.max_cols,
+                max_rows=self.max_rows,
+                cols=selected["cols"],
+                rows=selected["rows"],
+            ),
+            driver_limits=DriverLimits(
+                self.pending_outbound_bytes,
+                self.pending_outbound_events,
+            ),
+            ansi_history_bytes=self.ansi_history_bytes,
+            service_batches=self.service_batches,
+            retained_policy=retained_policy,
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        return asdict(self)
+
+
+class TerminalSession(ABC):
+    """Own one terminal frontend; execution and resource lifetime belong to adapters."""
+
+    KEY_SEQUENCES = {
+        "enter": b"\r",
+        "return": b"\r",
+        "escape": b"\x1b",
+        "esc": b"\x1b",
+        "tab": b"\t",
+        "backspace": b"\x08",
+        "delete": b"\x1b[3~",
+        "up": b"\x1b[A",
+        "down": b"\x1b[B",
+        "right": b"\x1b[C",
+        "left": b"\x1b[D",
+        "home": b"\x1b[H",
+        "end": b"\x1b[F",
+        "pageup": b"\x1b[5~",
+        "pagedown": b"\x1b[6~",
+        "insert": b"\x1b[2~",
+        "f1": b"\x1bOP",
+        "f2": b"\x1bOQ",
+        "f3": b"\x1bOR",
+        "f4": b"\x1bOS",
+        "f5": b"\x1b[15~",
+        "f6": b"\x1b[17~",
+        "f7": b"\x1b[18~",
+        "f8": b"\x1b[19~",
+        "f9": b"\x1b[20~",
+        "f10": b"\x1b[21~",
+        "f11": b"\x1b[23~",
+        "f12": b"\x1b[24~",
+    }
+
+
+    NAMED_CHARACTERS = {
+        "space": " ",
+    }
+
+
+    RICH_TERMINAL_KEY_SYMBOLS = {
+        "backspace": 0x00110001,
+        "tab": 0x00110002,
+        "enter": 0x00110003,
+        "return": 0x00110003,
+        "escape": 0x00110004,
+        "esc": 0x00110004,
+        "insert": 0x00110005,
+        "delete": 0x00110006,
+        "home": 0x00110007,
+        "end": 0x00110008,
+        "pageup": 0x00110009,
+        "pagedown": 0x0011000A,
+        "left": 0x0011000B,
+        "right": 0x0011000C,
+        "up": 0x0011000D,
+        "down": 0x0011000E,
+        **{f"f{index}": 0x0011001F + index for index in range(1, 13)},
+    }
+
+
+    RICH_TERMINAL_MODIFIERS = {
+        "shift": 1 << 0,
+        "ctrl": 1 << 1,
+        "alt": 1 << 2,
+        "super": 1 << 3,
+    }
+
+
+    MODIFIED_CSI_KEYS = {
+        "up": ("1", "A"),
+        "down": ("1", "B"),
+        "right": ("1", "C"),
+        "left": ("1", "D"),
+        "home": ("1", "H"),
+        "end": ("1", "F"),
+        "insert": ("2", "~"),
+        "delete": ("3", "~"),
+        "pageup": ("5", "~"),
+        "pagedown": ("6", "~"),
+        "f5": ("15", "~"),
+        "f6": ("17", "~"),
+        "f7": ("18", "~"),
+        "f8": ("19", "~"),
+        "f9": ("20", "~"),
+        "f10": ("21", "~"),
+        "f11": ("23", "~"),
+        "f12": ("24", "~"),
+    }
+
+
+    def __init__(
+        self,
+        cols: int,
+        rows: int,
+        rich_terminal: RichTerminalSessionConfig | None,
+    ) -> None:
+        """Initialize backend-neutral terminal and presentation authority."""
+
+        if rich_terminal is not None and not isinstance(
+            rich_terminal, RichTerminalSessionConfig
+        ):
+            raise TypeError("rich_terminal must be RichTerminalSessionConfig or None")
+        if rich_terminal is not None and (
+            cols != rich_terminal.terminal_config.cols
+            or rows != rich_terminal.terminal_config.rows
+        ):
+            raise ValueError(
+                "session geometry must match the rich terminal config"
+            )
+        self._rich_terminal_config = rich_terminal
+        self._rich_terminal_driver: RichTerminalDriver | None = None
+        self._output_view: TerminalView | None = None
+        self._output_view_selected = False
+        self._output_snapshot_rows = OutputSnapshotRows()
+        self._logical_composite_output: CompositeTerminalView | None = None
+        self._displayed_composite_output: CompositeTerminalView | None = None
+        self._display_offer: TerminalDisplayOffer | None = None
+        self._display_offer_composite: CompositeTerminalView | None = None
+        self._acknowledged_display_offer: TerminalDisplayOffer | None = None
+        self._next_display_offer_id = 1
+        self._display_cadence = (
+            None
+            if rich_terminal is None or rich_terminal.retained_policy is None
+            else DisplayCadenceScheduler(policy=rich_terminal.retained_policy)
+        )
+        self._display_cadence_scope: tuple[int, int, int] | None = None
+        self._last_cadence_service_progress = False
+        self._rich_terminal_failure_reason: str | None = None
+        self._rich_terminal_lost = False
+        self._last_batch_rich_terminal_progress = False
+        self.terminal = VirtualTerminal(
+            cols=cols,
+            rows=rows,
+            uart_inject=self._inject_terminal_response,
+        )
+        self.raw_output = bytearray()
+        self._raw_output_total = 0
+        self._raw_output_start = 0
+        self.output_batches = 0
+        self.output_byte_callbacks = 0
+        self.revision = 0
+        self._closed = False
+
+
+    def __enter__(self) -> "TerminalSession":
+        return self
+
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
+
+
+    @property
+    def rich_terminal_enabled(self) -> bool:
+        return self._rich_terminal_config is not None
+
+
+    @property
+    def rich_terminal_driver(self) -> RichTerminalDriver | None:
+        return self._rich_terminal_driver
+
+
+    @property
+    def logical_output_view(self) -> CompositeTerminalView | None:
+        """Newest committed retained composite, whether or not yet displayed."""
+
+        return self._logical_composite_output
+
+
+    @property
+    def displayed_output_view(self) -> CompositeTerminalView | None:
+        """Retained composite whose physical presentation was ACKed."""
+
+        return self._displayed_composite_output
+
+
+    @property
+    def displayed_model_revision(self) -> int | None:
+        """Global revision physically available to a retained-view observer."""
+
+        view = self._displayed_composite_output
+        return None if view is None else view.revision
+
+
+    @property
+    def display_offer(self) -> TerminalDisplayOffer | None:
+        """Immutable physical-display candidate awaiting an exact ACK."""
+
+        return self._display_offer
+
+
+    @property
+    def retained_display_required(self) -> bool:
+        """Whether shared input must be bound to a retained physical display."""
+
+        config = self._rich_terminal_config
+        driver = self._rich_terminal_driver
+        return bool(
+            config is not None
+            and config.retained_policy is not None
+            and driver is not None
+            and driver.core.retained_configured
+        )
+
+
+    @property
+    def last_acknowledged_display_offer(self) -> tuple[int, DisplayScope] | None:
+        """Exact immutable proof token for the currently owned physical sink."""
+
+        offer = self._acknowledged_display_offer
+        return None if offer is None else (offer.offer_id, offer.scope)
+
+
+    @property
+    def acknowledged_display_offer(self) -> TerminalDisplayOffer | None:
+        """The offer the physical sink presented last, while it still owns it."""
+
+        return self._acknowledged_display_offer
+
+
+    @property
+    def rich_terminal_state(self) -> TerminalState | None:
+        if self._rich_terminal_failure_reason is not None:
+            return TerminalState.FAILED
+        driver = self._rich_terminal_driver
+        return None if driver is None else driver.core.state
+
+
+    @property
+    def rich_terminal_failure(self) -> str | None:
+        if self._rich_terminal_failure_reason is not None:
+            return self._rich_terminal_failure_reason
+        driver = self._rich_terminal_driver
+        if driver is not None:
+            if driver.failure_reason is not None:
+                self._record_rich_terminal_failure(driver.failure_reason)
+                return self._rich_terminal_failure_reason
+            host = self._terminal_host_state()
+            if (
+                driver.closed
+                or host.active_attachment_epoch != driver.attachment_epoch
+            ):
+                self._record_rich_terminal_failure(
+                    "rich-terminal attachment became stale",
+                    lost=True,
+                )
+                return self._rich_terminal_failure_reason
+        if self._rich_terminal_config is not None:
+            host_failure = self._terminal_host_state().failure_reason
+            if host_failure is not None:
+                self._record_rich_terminal_failure(host_failure)
+                return self._rich_terminal_failure_reason
+            if driver is None and not self._closed:
+                self._record_rich_terminal_failure(
+                    "rich-terminal driver is unavailable",
+                    lost=True,
+                )
+                return self._rich_terminal_failure_reason
+        return None
+
+
+    @property
+    def rich_terminal_lost(self) -> bool:
+        """Whether the exact attachment disappeared outside controlled reset."""
+
+        return self._rich_terminal_lost
+
+
+    @property
+    def raw_output_start(self) -> int:
+        """Absolute offset of the first retained diagnostic ANSI byte."""
+
+        return self._raw_output_start
+
+
+    @property
+    def raw_output_end(self) -> int:
+        """Absolute offset immediately after all observed ANSI bytes."""
+
+        return self._raw_output_total
+
+
+    @property
+    def visible_geometry(self) -> tuple[int, int]:
+        """Geometry of the immutable view currently exposed to observers."""
+
+        view = self._output_view if self._output_view_selected else None
+        if view is not None:
+            return view.cols, view.rows
+        with self.terminal._lock:
+            return self.terminal.cols, self.terminal.rows
+
+
+    @property
+    def rich_terminal_work_pending(self) -> bool:
+        """Whether a runner boundary can advance owned terminal work."""
+
+        return self._rich_terminal_has_pending_work()
+
+
+    @property
+    def last_batch_made_progress(self) -> bool:
+        return self._last_batch_rich_terminal_progress
+
+
+    def _clear_display_offer_tokens(self) -> None:
+        self._display_offer = None
+        self._display_offer_composite = None
+        self._acknowledged_display_offer = None
+
+
+    def _discard_retained_display_cadence(self) -> None:
+        """Discard every rich-display scope after a bare-CELL fallback."""
+
+        self._clear_display_offer_tokens()
+        self._display_cadence_scope = None
+        self._display_cadence = None
+
+
+    def _attach_rich_terminal(self) -> None:
+        config = self._rich_terminal_config
+        if config is None:
+            return
+        if self._rich_terminal_driver is not None:
+            raise RuntimeError("rich terminal is already attached")
+        terminal_config = replace(
+            config.terminal_config,
+            cols=self.terminal.cols,
+            rows=self.terminal.rows,
+        )
+        self._rich_terminal_driver = RichTerminalDriver.attach(
+            self._terminal_attachment_target(),
+            config.host_limits,
+            terminal_config,
+            config.driver_limits,
+            ansi_sink=self._receive_rich_terminal_ansi,
+            view_sink=self._receive_terminal_output,
+            retained_policy=config.retained_policy,
+        )
+        self._rich_terminal_failure_reason = None
+        self._rich_terminal_lost = False
+
+
+    def _close_rich_terminal(self) -> None:
+        self._discard_retained_display_cadence()
+        driver = self._rich_terminal_driver
+        if driver is None:
+            return
+        driver.close()
+        self._rich_terminal_driver = None
+
+
+    def _inject_terminal_response(self, data: bytes) -> None:
+        if self._rich_terminal_mutation_blocked():
+            raise RuntimeError(self._rich_terminal_failure_reason)
+        driver = self._rich_terminal_driver
+        if driver is None:
+            self._inject_legacy_terminal_input(data)
+            return
+        status = driver.send_legacy_input(data)
+        if status is not DriverStatus.PROGRESS:
+            raise RuntimeError(
+                f"cannot enqueue ANSI terminal response: {status.value}"
+            )
+
+
+    def _append_raw_output(self, data: bytes) -> None:
+        payload = bytes(data)
+        if not payload:
+            return
+        self._raw_output_total += len(payload)
+        config = self._rich_terminal_config
+        if config is None:
+            self.raw_output.extend(payload)
+            return
+        limit = config.ansi_history_bytes
+        if limit == 0:
+            self.raw_output.clear()
+            self._raw_output_start = self._raw_output_total
+            return
+        if len(payload) >= limit:
+            self.raw_output[:] = payload[-limit:]
+        else:
+            overflow = len(self.raw_output) + len(payload) - limit
+            if overflow > 0:
+                del self.raw_output[:overflow]
+            self.raw_output.extend(payload)
+        self._raw_output_start = self._raw_output_total - len(self.raw_output)
+
+
+    def _rich_terminal_mutation_blocked(self) -> bool:
+        reason = self.rich_terminal_failure
+        if reason is None:
+            return False
+        if self._rich_terminal_failure_reason is None:
+            self._rich_terminal_failure_reason = reason
+        return True
+
+
+    def _receive_byte(self, value: int):
+        self._append_raw_output(bytes((value,)))
+        self.output_byte_callbacks += 1
+        self.terminal.write(value)
+        self.revision += 1
+
+
+    def _receive_batch(self, data: bytes):
+        self._append_raw_output(data)
+        self.output_batches += 1
+        self.terminal.write(data)
+        self.revision += 1
+
+
+    def _receive_rich_terminal_ansi(self, data: bytes) -> None:
+        self._receive_batch(data)
+
+
+    def _receive_terminal_output(
+        self,
+        view: TerminalView | CompositeTerminalView,
+    ) -> None:
+        if isinstance(view, CompositeTerminalView):
+            self._submit_composite_output(view)
+            return
+        if not isinstance(view, TerminalView):
+            raise TypeError("terminal output view has an unsupported type")
+        retained_boundary_active = bool(
+            self._display_offer is not None
+            or self._logical_composite_output is not None
+            or self._displayed_composite_output is not None
+        )
+        target_scope = (
+            view.attachment_epoch,
+            view.session_id,
+            view.presentation_epoch,
+        )
+        if retained_boundary_active and target_scope == self._display_cadence_scope:
+            self._discard_retained_display_cadence()
+        else:
+            self._align_cadence_to_cell_view(view)
+        if (self.terminal.cols, self.terminal.rows) != (view.cols, view.rows):
+            self.terminal.resize(view.cols, view.rows)
+        self._output_view = view
+        self._output_view_selected = True
+        self._logical_composite_output = None
+        self._displayed_composite_output = None
+        self.revision += 1
+
+
+    def _align_cadence_to_cell_view(self, view: TerminalView) -> None:
+        """Track session/epoch replacement before retained discovery repeats."""
+
+        cadence = self._display_cadence
+        if cadence is None:
+            return
+        target = (
+            view.attachment_epoch,
+            view.session_id,
+            view.presentation_epoch,
+        )
+        current = self._display_cadence_scope
+        if current is None or target[:2] != current[:2]:
+            if view.presentation_epoch != 0:
+                raise TerminalUpdateError(
+                    "a replacement rich-terminal session must begin at epoch zero"
+                )
+            cadence.replace_session(view.attachment_epoch, view.session_id)
+            self._clear_display_offer_tokens()
+        elif view.presentation_epoch == current[2]:
+            return
+        elif view.presentation_epoch == current[2] + 1:
+            cadence.reset_presentation_epoch(view.presentation_epoch)
+            self._clear_display_offer_tokens()
+        else:
+            raise TerminalUpdateError(
+                "CELL view skipped or regressed the presentation_epoch"
+            )
+        self._display_cadence_scope = target
+
+
+    def _submit_composite_output(
+        self,
+        view: CompositeTerminalView,
+    ) -> None:
+        """Submit one logical composite without making it physically visible."""
+
+        cadence = self._display_cadence
+        if cadence is None:
+            config = self._rich_terminal_config
+            policy = None if config is None else config.retained_policy
+            if policy is None or view.presentation_epoch != 0:
+                raise TerminalUpdateError(
+                    "a composite view requires a configured retained cadence scope"
+                )
+            cadence = DisplayCadenceScheduler(policy=policy)
+            self._display_cadence = cadence
+        cell = view.cell
+        if cell is None:
+            raise TerminalUpdateError(
+                "a MachineSession composite requires the mandatory CELL plane"
+            )
+        target = (
+            cell.attachment_epoch,
+            cell.session_id,
+            view.presentation_epoch,
+        )
+        current = self._display_cadence_scope
+        if current is None or target[:2] != current[:2]:
+            cadence.replace_session(
+                cell.attachment_epoch,
+                cell.session_id,
+                initial_view=view,
+            )
+            self._displayed_composite_output = None
+            self._clear_display_offer_tokens()
+        elif view.presentation_epoch == current[2]:
+            cadence.submit(view)
+        elif view.presentation_epoch == current[2] + 1:
+            cadence.reset_presentation_epoch(
+                view.presentation_epoch,
+                initial_view=view,
+            )
+            self._displayed_composite_output = None
+            self._clear_display_offer_tokens()
+        else:
+            raise TerminalUpdateError(
+                "composite view skipped or regressed the presentation_epoch"
+            )
+        self._display_cadence_scope = target
+        self._logical_composite_output = view
+
+
+    def _service_display_cadence(self) -> bool:
+        """Create at most one immutable renderer offer at an owner boundary."""
+
+        cadence = self._display_cadence
+        driver = self._rich_terminal_driver
+        if cadence is None or driver is None or not driver.core.retained_enabled:
+            return False
+        current = driver.core.output_view
+        if isinstance(current, CompositeTerminalView) and (
+            current != self._logical_composite_output
+        ):
+            self._submit_composite_output(current)
+        logical = self._logical_composite_output
+        if not self._retained_composite_is_offerable(logical):
+            return False
+        offered = cadence.service()
+        if offered is None:
+            return False
+        if not self._retained_composite_is_offerable(offered):
+            cadence.revoke_offer(offered)
+            return False
+        cell = offered.cell
+        if cell is None:
+            raise TerminalUpdateError(
+                "cadence offered a composite without a CELL plane"
+            )
+        try:
+            scope, retained = project_composite_draw_plane(offered)
+            cell_snapshot = self._output_snapshot_rows.snapshot(cell)
+            display_offer = TerminalDisplayOffer(
+                offer_id=self._next_display_offer_id,
+                scope=scope,
+                cell=cell_snapshot,
+                retained=retained,
+            )
+        except Exception:
+            cadence.revoke_offer(offered)
+            raise
+        self._next_display_offer_id += 1
+        self._display_offer = display_offer
+        self._display_offer_composite = offered
+        return True
+
+
+    @staticmethod
+    def _retained_composite_is_offerable(
+        view: CompositeTerminalView | None,
+    ) -> bool:
+        """Whether a composite can become a physical retained presentation."""
+
+        if view is None or view.retained is None:
+            return False
+        return bool(
+            view.retained.retained_initialized
+            and view.retained.retained_visible
+        )
+
+
+    @staticmethod
+    def _normalize_display_offer_id(offer_id: int) -> int:
+        if isinstance(offer_id, bool):
+            raise TypeError("offer_id must be an integer, not bool")
+        try:
+            normalized = operator.index(offer_id)
+        except TypeError as exc:
+            raise TypeError("offer_id must be an integer") from exc
+        if normalized < 1:
+            raise ValueError("offer_id must be positive")
+        return int(normalized)
+
+
+    def acknowledge_display_offer(
+        self,
+        offer_id: int,
+        scope: DisplayScope,
+    ) -> bool:
+        """Promote only the exact physical offer; duplicate last ACK is harmless."""
+
+        normalized = self._normalize_display_offer_id(offer_id)
+        if not isinstance(scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        offer = self._display_offer
+        if offer is None or offer.offer_id != normalized or offer.scope != scope:
+            if self.last_acknowledged_display_offer == (normalized, scope):
+                return False
+            raise TerminalUpdateError("display ACK is stale or outside the active scope")
+        cadence = self._display_cadence
+        if cadence is None:
+            raise TerminalUpdateError("display ACK has no active retained cadence")
+
+        composite = self._display_offer_composite
+        if composite is None:
+            raise TerminalUpdateError("display ACK lost its exact composite binding")
+        active_scope = self._display_cadence_scope
+        if active_scope != (
+            scope.attachment_epoch,
+            scope.session_id,
+            scope.presentation_epoch,
+        ):
+            raise TerminalUpdateError("display ACK is outside the active scope")
+        cell = composite.cell
+        if cell is None:
+            raise TerminalUpdateError("display offer lost its mandatory CELL plane")
+        cadence.acknowledge(composite)
+        if (self.terminal.cols, self.terminal.rows) != (cell.cols, cell.rows):
+            self.terminal.resize(cell.cols, cell.rows)
+        self._displayed_composite_output = composite
+        self._output_view = cell
+        self._output_view_selected = True
+        self._display_offer = None
+        self._display_offer_composite = None
+        self._acknowledged_display_offer = offer
+        self.revision += 1
+        return True
+
+
+    def revoke_display_offer(
+        self,
+        offer_id: int,
+        scope: DisplayScope,
+    ) -> bool:
+        """Requeue the exact unacknowledged offer after its physical sink is lost."""
+
+        normalized = self._normalize_display_offer_id(offer_id)
+        if not isinstance(scope, DisplayScope):
+            raise TypeError("scope must be DisplayScope")
+        offer = self._display_offer
+        if offer is None or offer.offer_id != normalized or offer.scope != scope:
+            raise TerminalUpdateError(
+                "display offer revocation is stale or outside the active scope"
+            )
+        cadence = self._display_cadence
+        if cadence is None:
+            raise TerminalUpdateError("display revocation has no active retained cadence")
+        composite = self._display_offer_composite
+        if composite is None:
+            raise TerminalUpdateError("display revocation lost its exact composite binding")
+        active_scope = self._display_cadence_scope
+        if active_scope != (
+            scope.attachment_epoch,
+            scope.session_id,
+            scope.presentation_epoch,
+        ):
+            raise TerminalUpdateError("display revocation is outside the active scope")
+        cadence.revoke_offer(composite)
+        self._display_offer = None
+        self._display_offer_composite = None
+        return True
+
+
+    def revoke_physical_display(self) -> bool:
+        """Revoke all sink state while preserving the CELL observer baseline."""
+
+        cadence = self._display_cadence
+        offered = self._display_offer_composite
+        presented = self._displayed_composite_output
+        if (offered is not None or presented is not None) and cadence is None:
+            raise TerminalUpdateError(
+                "physical display state has no active retained cadence"
+            )
+
+        changed = False
+        if offered is not None:
+            assert cadence is not None
+            cadence.revoke_offer(offered)
+            changed = True
+        self._display_offer = None
+        self._display_offer_composite = None
+
+        if presented is not None:
+            assert cadence is not None
+            cadence.revoke_presented(presented)
+            self._displayed_composite_output = None
+            changed = True
+        self._acknowledged_display_offer = None
+        return changed
+
+
+    def _acknowledged_output_scope(self) -> DisplayScope | None:
+        """Return the exact current physically acknowledged retained scope."""
+
+        config = self._rich_terminal_config
+        if config is None or config.retained_policy is None:
+            return None
+        cadence = self._display_cadence
+        driver = self._rich_terminal_driver
+        if (
+            driver is None
+            or not driver.core.retained_configured
+            or not driver.core.retained_enabled
+            or cadence is None
+        ):
+            return None
+        if (
+            cadence.pending_revision is not None
+            or cadence.offered_revision is not None
+            or self._display_offer is not None
+            or self._display_offer_composite is not None
+        ):
+            return None
+
+        displayed = self._displayed_composite_output
+        logical = self._logical_composite_output
+        current = driver.core.output_view
+        acknowledged = self._acknowledged_display_offer
+        if (
+            displayed is None
+            or logical is None
+            or not isinstance(current, CompositeTerminalView)
+            or acknowledged is None
+            or displayed is not logical
+            or displayed is not current
+            or cadence.displayed_revision != displayed.revision
+            or displayed.revision != driver.core.model_revision
+        ):
+            return None
+        cell = displayed.cell
+        retained = displayed.retained
+        if cell is None or retained is None:
+            return None
+        try:
+            scope = DisplayScope(
+                attachment_epoch=cell.attachment_epoch,
+                session_id=cell.session_id,
+                presentation_epoch=displayed.presentation_epoch,
+                model_revision=displayed.revision,
+                geometry_generation=displayed.geometry.generation,
+                cell_revision=cell.revision,
+                retained_revision=retained.revision,
+            )
+        except (TypeError, ValueError):
+            return None
+        if not (
+            retained.retained_initialized
+            and retained.retained_visible
+            and acknowledged.scope == scope
+            and self._display_cadence_scope
+            == (
+                scope.attachment_epoch,
+                scope.session_id,
+                scope.presentation_epoch,
+            )
+        ):
+            return None
+        return scope
+
+
+    def _output_revision_ready(self) -> bool:
+        """Require normalized input to name a revision already shown."""
+
+        config = self._rich_terminal_config
+        if config is None or config.retained_policy is None:
+            return True
+        return self._acknowledged_output_scope() is not None
+
+
+    def clear_output(self):
+        self.raw_output.clear()
+        self._raw_output_start = self._raw_output_total
+
+
+    def raw_text(self) -> str:
+        return bytes(self.raw_output).decode("utf-8", errors="replace")
+
+
+    def screen_text(self, trim_right: bool = False) -> str:
+        return self.snapshot().text(trim_right=trim_right)
+
+
+    def service_rich_terminal(self) -> DriverServiceResult | None:
+        """Service the optional driver without executing guest instructions."""
+
+        driver = self._rich_terminal_driver
+        config = self._rich_terminal_config
+        if config is None:
+            return None
+        if driver is None:
+            reason = self.rich_terminal_failure or "rich-terminal driver is unavailable"
+            self._latch_rich_terminal_failure(reason, lost=True)
+        if self._rich_terminal_failure_reason is not None:
+            raise TerminalSessionError(self._rich_terminal_failure_reason)
+        self._last_cadence_service_progress = False
+        result = driver.service(max_batches=config.service_batches)
+        self._raise_rich_terminal_failure(result)
+        self._sync_rich_terminal_geometry()
+        self._last_cadence_service_progress = self._service_display_cadence()
+        self._refresh_output_display_boundary()
+        return result
+
+
+    def _raise_rich_terminal_failure(
+        self,
+        result: DriverServiceResult,
+    ) -> None:
+        if result.status is DriverStatus.FAILED:
+            driver = self._rich_terminal_driver
+            reason = None if driver is None else driver.failure_reason
+            self._latch_rich_terminal_failure(reason or "rich-terminal driver failed")
+        if result.status is DriverStatus.STALE:
+            self._latch_rich_terminal_failure(
+                "rich-terminal attachment became stale",
+                lost=True,
+            )
+        host_failure = self._terminal_host_state().failure_reason
+        if host_failure is not None:
+            self._latch_rich_terminal_failure(host_failure)
+
+
+    def _latch_rich_terminal_failure(
+        self,
+        reason: str,
+        *,
+        lost: bool = False,
+    ) -> None:
+        self._record_rich_terminal_failure(reason, lost=lost)
+        raise TerminalSessionError(self._rich_terminal_failure_reason)
+
+
+    def _record_rich_terminal_failure(
+        self,
+        reason: str,
+        *,
+        lost: bool = False,
+    ) -> None:
+        if self._rich_terminal_failure_reason is None:
+            self._rich_terminal_failure_reason = str(reason)
+        self._rich_terminal_lost = self._rich_terminal_lost or lost
+
+
+    def _rich_terminal_transport_has_pending_work(self) -> bool:
+        """Whether a driver/machine boundary can advance protocol transport."""
+
+        driver = self._rich_terminal_driver
+        if driver is None:
+            return False
+        host = self._terminal_host_state()
+        return bool(
+            driver.pending_outbound_events
+            or (
+                driver.pending_resize is not None
+                and driver.core.resize_ready
+            )
+            or host.accepted_egress_batches
+            or host.retained_publication is not None
+            or host.pending_ingress_events
+            or host.pending_geometry_events
+        )
+
+
+    def _display_cadence_has_pending_work(self) -> bool:
+        """Whether cadence can run, excluding an offer blocked on physical ACK."""
+
+        driver = self._rich_terminal_driver
+        cadence = self._display_cadence
+        return bool(
+            driver is not None
+            and cadence is not None
+            and driver.core.retained_enabled
+            and cadence.pending_revision is not None
+            and cadence.offered_revision is None
+            and self._display_offer is None
+            and self._retained_composite_is_offerable(
+                self._logical_composite_output
+            )
+        )
+
+
+    def _rich_terminal_has_pending_work(self) -> bool:
+        return bool(
+            self._rich_terminal_transport_has_pending_work()
+            or self._display_cadence_has_pending_work()
+        )
+
+
+    def _refresh_output_display_boundary(self) -> None:
+        driver = self._rich_terminal_driver
+        if driver is None or not self._output_view_selected:
+            return
+        host = self._terminal_host_state()
+        if (
+            driver.core.state is TerminalState.ANSI
+            and driver.pending_outbound_events == 0
+            and host.pending_ingress_events == 0
+            and host.pending_geometry_events == 0
+        ):
+            self._discard_retained_display_cadence()
+            self._output_view_selected = False
+            self._logical_composite_output = None
+            self._displayed_composite_output = None
+            self.revision += 1
+
+
+    def _sync_rich_terminal_geometry(self) -> None:
+        """Mirror only geometry already committed by the protocol core."""
+
+        driver = self._rich_terminal_driver
+        if driver is None:
+            return
+        cols, rows = driver.core.selected_geometry
+        if (self.terminal.cols, self.terminal.rows) == (cols, rows):
+            return
+        self.terminal.resize(cols, rows)
+        if not self._output_view_selected:
+            self.revision += 1
+
+
+    def send_text(self, text: str | bytes) -> DriverStatus | None:
+        if isinstance(text, str):
+            payload = text.encode("utf-8")
+        else:
+            try:
+                payload = bytes(text)
+            except (TypeError, ValueError) as exc:
+                raise TypeError("text must be str or bytes-like") from exc
+        if self._rich_terminal_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._rich_terminal_driver
+        if driver is None:
+            self._inject_legacy_terminal_input(payload)
+            return None
+        if driver.core.state in {TerminalState.ANSI, TerminalState.PROBING}:
+            return driver.send_legacy_input(payload)
+        if not self._output_revision_ready():
+            return DriverStatus.BACKPRESSURED
+        return driver.send_text(payload)
+
+
+    @staticmethod
+    def _key_parts(key: str) -> tuple[str, set[str]]:
+        if not isinstance(key, str):
+            raise TypeError("key must be str")
+        normalized = key.strip().lower().replace("_", "")
+        parts = normalized.split("+")
+        if not parts or not parts[-1]:
+            raise ValueError(f"unknown key: {key}")
+        modifiers = set(parts[:-1])
+        return parts[-1], modifiers
+
+
+    def _legacy_key_bytes(self, key: str) -> bytes:
+        normalized = key.strip().lower().replace("_", "")
+        if normalized in self.KEY_SEQUENCES:
+            return self.KEY_SEQUENCES[normalized]
+        base, modifiers = self._key_parts(key)
+        if (
+            modifiers
+            and modifiers <= {"ctrl", "alt", "shift"}
+            and base in self.MODIFIED_CSI_KEYS
+        ):
+            modifier = 1
+            modifier += 1 if "shift" in modifiers else 0
+            modifier += 2 if "alt" in modifiers else 0
+            modifier += 4 if "ctrl" in modifiers else 0
+            parameter, final = self.MODIFIED_CSI_KEYS[base]
+            return f"\x1b[{parameter};{modifier}{final}".encode("ascii")
+        char = self.NAMED_CHARACTERS.get(base, base)
+        if len(char) == 1 and modifiers == {"ctrl"}:
+            if "a" <= char <= "z":
+                return bytes([ord(char) & 0x1F])
+        if len(char) == 1 and modifiers == {"alt"}:
+            return b"\x1b" + char.encode("utf-8")
+        if len(char) == 1 and modifiers and modifiers <= {"ctrl", "alt", "shift"}:
+            modifier = 1
+            modifier += 1 if "shift" in modifiers else 0
+            modifier += 2 if "alt" in modifiers else 0
+            modifier += 4 if "ctrl" in modifiers else 0
+            return f"\x1b[{ord(char)};{modifier}u".encode("ascii")
+        if len(char) == 1 and not modifiers:
+            return char.encode("utf-8")
+        raise ValueError(f"unknown key: {key}")
+
+
+    def _rich_terminal_key(self, key: str) -> tuple[int, int]:
+        base, modifiers = self._key_parts(key)
+        if not modifiers <= self.RICH_TERMINAL_MODIFIERS.keys():
+            raise ValueError(f"unknown key modifier in: {key}")
+        symbol = self.RICH_TERMINAL_KEY_SYMBOLS.get(base)
+        if symbol is None:
+            char = self.NAMED_CHARACTERS.get(base, base)
+            if len(char) != 1:
+                raise ValueError(f"unknown key: {key}")
+            symbol = ord(char)
+        modifier_bits = 0
+        for modifier in modifiers:
+            modifier_bits |= self.RICH_TERMINAL_MODIFIERS[modifier]
+        return symbol, modifier_bits
+
+
+    def send_key(self, key: str) -> DriverStatus | None:
+        if self._rich_terminal_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._rich_terminal_driver
+        if driver is None or driver.core.state in {
+            TerminalState.ANSI,
+            TerminalState.PROBING,
+        }:
+            payload = self._legacy_key_bytes(key)
+            if driver is None:
+                self._inject_legacy_terminal_input(payload)
+                return None
+            return driver.send_legacy_input(payload)
+        symbol, modifiers = self._rich_terminal_key(key)
+        if not self._output_revision_ready():
+            return DriverStatus.BACKPRESSURED
+        return driver.send_key(symbol, modifiers=modifiers)
+
+
+    def send_control_event(
+        self,
+        owner_id: int,
+        owner_generation: int,
+        control_id: int,
+        *,
+        event_kind: ControlEventKind = ControlEventKind.ACTIVATE,
+        modifiers: int = 0,
+        content_revision: int = 0,
+        item_key: int = 0,
+        scalar_offset: int = 0,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> DriverStatus:
+        """Send one semantic control intent in the exact acknowledged scope."""
+
+        if self._rich_terminal_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._rich_terminal_driver
+        if driver is None:
+            return DriverStatus.INVALID
+        scope = self._acknowledged_output_scope()
+        if scope is None:
+            return DriverStatus.BACKPRESSURED
+        return driver.send_control_event(
+            owner_id,
+            owner_generation,
+            control_id,
+            event_kind=event_kind,
+            modifiers=modifiers,
+            model_revision=scope.model_revision,
+            content_revision=content_revision,
+            item_key=item_key,
+            scalar_offset=scalar_offset,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
+        )
+
+
+    def send_pointer(
+        self,
+        x: int,
+        y: int,
+        *,
+        buttons: int = 0,
+        modifiers: int = 0,
+        kind: int = 1,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> DriverStatus:
+        if self._rich_terminal_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._rich_terminal_driver
+        if driver is None:
+            return DriverStatus.INVALID
+        if not self._output_revision_ready():
+            return DriverStatus.BACKPRESSURED
+        return driver.send_pointer(
+            x,
+            y,
+            buttons=buttons,
+            modifiers=modifiers,
+            kind=kind,
+            wheel_x=wheel_x,
+            wheel_y=wheel_y,
+        )
+
+
+    def send_focus(self, focused: bool) -> DriverStatus:
+        if self._rich_terminal_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._rich_terminal_driver
+        if driver is None:
+            return DriverStatus.INVALID
+        if not self._output_revision_ready():
+            return DriverStatus.BACKPRESSURED
+        return driver.send_focus(focused)
+
+
+    def resize(self, cols: int, rows: int) -> DriverStatus | None:
+        if self._rich_terminal_mutation_blocked():
+            return DriverStatus.FAILED
+        driver = self._rich_terminal_driver
+        if driver is not None:
+            state = driver.core.state
+            status = driver.request_resize(cols, rows)
+            if (
+                status is DriverStatus.PROGRESS
+                and state is TerminalState.ANSI
+            ):
+                changed = (
+                    cols != self.terminal.cols or rows != self.terminal.rows
+                )
+                self.terminal.resize(cols, rows)
+                if changed and not self._output_view_selected:
+                    self.revision += 1
+            return status
+        changed = cols != self.terminal.cols or rows != self.terminal.rows
+        self.terminal.resize(cols, rows)
+        self._set_legacy_terminal_geometry(cols, rows)
+        if changed:
+            self.revision += 1
+        return None
+
+
+    def snapshot(self) -> TerminalSnapshot:
+        view = (
+            self._output_view
+            if self._output_view_selected
+            else None
+        )
+        if view is not None:
+            return self._output_snapshot_rows.snapshot(view)
+        terminal = self.terminal
+        with terminal._lock:
+            cells = tuple(
+                tuple(
+                    TerminalCell(
+                        char=cell[0],
+                        fg=tuple(cell[1]),
+                        bg=tuple(cell[2]),
+                        attrs=cell[3] if len(cell) > 3 else 0,
+                    )
+                    for cell in row
+                )
+                for row in terminal.grid
+            )
+            return TerminalSnapshot(
+                cols=terminal.cols,
+                rows=terminal.rows,
+                cells=cells,
+                cursor_col=terminal.cx,
+                cursor_row=terminal.cy,
+                cursor_visible=terminal.cursor_visible,
+                alternate_screen=terminal._in_alt_screen,
+            )
+
+
+    @abstractmethod
+    def _terminal_attachment_target(self):
+        """Return the adapter exposing the rich-terminal host port."""
+
+    @abstractmethod
+    def _terminal_host_state(self):
+        """Return host-port state for attachment liveness."""
+
+    @abstractmethod
+    def _inject_legacy_terminal_input(self, data: bytes) -> None:
+        """Admit legacy input through the owning backend."""
+
+    @abstractmethod
+    def _set_legacy_terminal_geometry(self, cols: int, rows: int) -> None:
+        """Commit geometry through the owning backend."""
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release terminal authority and resources owned by the adapter."""
+
+    def _close_terminal_frontend(self) -> None:
+        driver = self._rich_terminal_driver
+        if driver is not None:
+            driver.close()
+            self._rich_terminal_driver = None
+        self._logical_composite_output = None
+        self._displayed_composite_output = None
+        self._clear_display_offer_tokens()
+        self._display_cadence_scope = None
+        self._display_cadence = None
+
+
+def _resolve_font(path: str | os.PathLike | None) -> Path | None:
+    candidates = []
+    if path:
+        candidates.append(Path(path).expanduser())
+    if os.environ.get("MP64_TERMINAL_FONT"):
+        candidates.append(Path(os.environ["MP64_TERMINAL_FONT"]).expanduser())
+    candidates.extend([
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"),
+        Path("/usr/share/fonts/dejavu/DejaVuSansMono.ttf"),
+    ])
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None

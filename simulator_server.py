@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from session_server import _retained_policy, _rich_terminal_policy
+from shared.session_options import retained_policy, rich_terminal_policy
 from shared_session import DEFAULT_SOCKET, SessionServer
 from simulator.image_bootstrap import (
     ImageBootstrapPreparation,
@@ -70,6 +70,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cols", type=_positive_int, default=80)
     parser.add_argument("--rows", type=_positive_int, default=30)
     parser.add_argument(
+        "--executor",
+        choices=("python", "native", "auto"),
+        help=(
+            "semantic executor for source preparation and live execution; "
+            "defaults to MEGAFORTH_EXECUTOR, otherwise python"
+        ),
+    )
+    parser.add_argument(
         "--semantic-step-budget",
         type=_positive_int,
         help="optional cumulative budget for autoexec preparation and live dispatch",
@@ -87,7 +95,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--rich-terminal-policy",
-        type=_rich_terminal_policy,
+        type=rich_terminal_policy,
         metavar="JSON",
         help=(
             "attach the optional rich terminal with the complete "
@@ -96,7 +104,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--retained-terminal-policy",
-        type=_retained_policy,
+        type=retained_policy,
         metavar="JSON",
         help=(
             "enable RETAINED-1 with the complete caller-owned JSON policy; "
@@ -149,6 +157,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         terminal_cols=args.cols,
         terminal_rows=args.rows,
         semantic_step_budget=args.semantic_step_budget,
+        execution_backend=args.executor,
     )
     session = SimulatorMachineSession(
         preparation.runtime,

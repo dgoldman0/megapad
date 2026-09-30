@@ -174,3 +174,49 @@ The capture used DejaVu Sans Mono at 18/16 pixels for cells/controls, with an
 coverage; missing glyphs in the mixed-text acceptance data appear under both
 appearances. They are preserved in the fixture rather than replaced in the
 preview.
+
+## Unified-runtime integration checkpoint
+
+The flowing branch integrates the committed runtime extraction at `ca66ad7`
+with the appearance work at `4e8bf26`. The checkpoints were combined in a
+separate worktree before advancing the appearance branch. Their common edits
+were the README and viewer; the viewer now imports terminal types from
+`shared.session`. Both native extensions built from the combined checkout.
+
+The renderer, replay, viewer, semantic wire/input, vertical-contract, and
+package-layout checks passed 343 tests. With native semantic execution
+selected, the launcher, cold-import boundary, and simulator session/server/
+clock checks passed 37 tests; one Unix-socket boundary test was skipped because
+this execution environment denies AF_UNIX creation. These are integration
+checks of the existing object families, before pane/status implementation.
+
+A fresh native-simulator Desk journey through
+`megapad.main --mode simulator --executor native` completed all 52 stages and
+51 inputs with the flowing renderer. It reached ready in 32.76 seconds,
+finished in 118.87 seconds, and used 279.22 MiB peak RSS. The actual runtime
+descriptor reported the native simulator and host-monotonic RTC. Production
+shutdown released the owner thread, backend, runtime ownership token, terminal
+driver, and display lease. Akashic remained at `f2f0679` for this run.
+
+The acceptance harness replaced only the Unix listener bind and serving loop
+with a scripted in-process client. The real unified entry point selected and
+prepared the simulator, started the owner, and stopped it on return; requests
+used production dispatch and the existing display/acknowledgment path. The
+viewer components rendered through SDL's dummy software display. This covers
+headless simulator acceptance, not socket transport, the complete standalone
+viewer event loop, physical display/audio, or emulator/hybrid execution. The
+timings include image preparation and deliberate input pacing and are a single
+acceptance observation rather than a controlled performance comparison.
+
+New terminal families should extend the common `shared.session` authority and
+the backend-neutral codecs in `shared_session.py`. Keep the runtime adapters
+responsible for engine construction, execution, timing, and resource release.
+Keep rich-object schemas, guest publication, retained composition, and appearance
+work together on the UI side. Coordinate shared offer/input/acknowledgment
+changes and any runtime optimization of terminal projection or serialization
+before either branch changes those contracts.
+
+The runtime branch can continue from its existing history. Future integration
+should merge a committed runtime checkpoint into the UI branch and repeat the
+affected boundary checks. This checkpoint leaves hybrid execution as later
+runtime work and establishes the common module locations for pane support.

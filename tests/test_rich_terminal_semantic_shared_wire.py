@@ -40,7 +40,11 @@ from rich_terminal.semantic_content import (
     SemanticTextState,
     encode_semantic_text_content,
 )
-from session import TerminalCell, TerminalDisplayOffer, TerminalSnapshot
+from shared.session import (
+    TerminalCell,
+    TerminalDisplayOffer,
+    TerminalSnapshot,
+)
 from shared_session import (
     display_offer_from_wire,
     display_offer_to_wire,

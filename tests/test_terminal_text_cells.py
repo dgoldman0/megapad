@@ -21,7 +21,12 @@ from rich_terminal.cell_model import (
 )
 from rich_terminal.pygame_view import _glyph_slots
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
-from session import OutputSnapshotRows, TerminalCell, TerminalDisplayOffer, TerminalSnapshot
+from shared.session import (
+    OutputSnapshotRows,
+    TerminalCell,
+    TerminalDisplayOffer,
+    TerminalSnapshot,
+)
 from shared_session import (
     WireRowRuns,
     display_offer_from_wire,

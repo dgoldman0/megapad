@@ -58,7 +58,7 @@ from rich_terminal.retained_view import (
     WaveformDraw,
     retained_draw_control_ids,
 )
-from session import TerminalDisplayOffer, TerminalSnapshot
+from shared.session import TerminalDisplayOffer, TerminalSnapshot
 from shared_session import (
     DEFAULT_SOCKET,
     SessionClient,
