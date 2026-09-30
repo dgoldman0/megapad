@@ -264,7 +264,8 @@ def build_parser():
     parser.add_argument("--ram-kib", type=_number(64, 1024), default=1024)
     parser.add_argument("--ext-mem-mib", type=_number(0, 512), default=320)
     parser.add_argument("--vram-mib", type=_number(0, 16), default=4)
-    parser.add_argument("--semantic-quantum-steps", type=_number(1, 1_000_000), default=65536)
+    parser.add_argument("--semantic-quantum-steps", type=_number(1, 1_000_000),
+                        help="override the production session's selected-executor quantum")
     parser.add_argument("--semantic-step-budget", type=_number(1, 1_000_000_000))
     parser.add_argument("--timeout", type=_number(1, 900), default=240)
     parser.add_argument("--font", type=Path)
@@ -296,7 +297,9 @@ def _server_arguments(args, image, directory):
         if value is not None:
             result += ["--" + option.replace("_", "-"), value]
     if args.mode != "emulator":
-        result += ["--executor", args.executor, "--semantic-quantum-steps", str(args.semantic_quantum_steps)]
+        result += ["--executor", args.executor]
+        if args.semantic_quantum_steps is not None:
+            result += ["--semantic-quantum-steps", str(args.semantic_quantum_steps)]
         if args.semantic_step_budget is not None:
             result += ["--semantic-step-budget", str(args.semantic_step_budget)]
     elif args.executor != "native" or args.semantic_step_budget is not None:
@@ -375,6 +378,8 @@ def run_journey(server, args, journey, report, started):
     _require(client.request("claim_display").get("claimed"), "direct client could not claim display")
     status = client.request("status", detailed=False)
     report["runtime"] = status["runtime"]
+    report["last_status"] = status
+    report["actual_semantic_quantum_steps"] = status.get("semantic_execution", {}).get("quantum_steps")
     _require(status["runtime"]["mode"] == args.mode, "selected session mode differs")
     pygame.display.init()
     pygame.font.init()
@@ -410,6 +415,7 @@ def run_journey(server, args, journey, report, started):
                      f"Desktop step timed out: {journey.steps[stage].name}")
         pygame.event.pump()
         status = client.request("status", detailed=False)
+        report["last_status"] = status
         _require(not status.get("error"), f"guest session failed: {status.get('error')}")
         _require(not status["rich_terminal"].get("failure"), "rich terminal failed")
         _require(status["generation"] == generation, "session generation changed during the journey")
@@ -486,6 +492,7 @@ def run_journey(server, args, journey, report, started):
             stage += 1
             if stage == len(journey.steps):
                 report["final_status"] = client.request("status", detailed=False)
+                report["last_status"] = report["final_status"]
                 capture("final")
                 return
             sent, stage_started = False, time.monotonic()

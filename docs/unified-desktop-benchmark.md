@@ -15,9 +15,33 @@ simulator/native on 2026-09-30: 31.111 seconds to ready, 36.340 seconds overall,
 shutdown check passed, and the original image hash was preserved. This is one
 bounded acceptance run, not a throughput comparison. Its report is
 [`performance/unified-desktop-simulator-native-2026-09-30.json`](performance/unified-desktop-simulator-native-2026-09-30.json).
-Prepared Desktop runs for the other modes/executors remain pending.
-Hybrid uses an empty routine registry and must report zero
-machine instructions and zero machine transitions.
+
+The hybrid/native prepared journey also completed on 2026-09-30: 28.516 seconds
+to ready, 33.357 seconds overall, 12 presented offers, and 603,410,432 bytes peak
+RSS. All eight steps and cleanup checks passed, and the original image was
+preserved. It used an empty routine registry with zero machine instructions
+and transitions, so this qualifies session composition compatibility only.
+The report is
+[`performance/unified-desktop-hybrid-native-2026-09-30.json`](performance/unified-desktop-hybrid-native-2026-09-30.json).
+
+The simulator/Python prepared run timed out at initial readiness after 240.286
+seconds, including 33.138 seconds of preparation. Its final CELL snapshot
+contained the initial Desktop markers, but no retained offer was acknowledged
+and no journey step completed. All cleanup checks passed and the original
+image was preserved. The report is
+[`performance/unified-desktop-simulator-python-2026-09-30.json`](performance/unified-desktop-simulator-python-2026-09-30.json).
+It did not retain the latest protocol status, so it cannot distinguish ANSI
+fallback from work still preparing the first retained presentation. Python
+and emulator prepared-journey completion remain unqualified.
+
+These three historical reports used an explicit 65,536-step semantic quantum
+and remain unchanged. The harness now leaves an omitted quantum to production
+session policy and records the actual selected value. Production defaults are
+8,192 steps for Python and 65,536 for native, unless
+`MEGAFORTH_QUANTUM_STEPS` supplies an override. The prepared guest's terminal
+negotiation uses host-clock deadlines and can fall back to ANSI; this policy
+difference warrants a diagnostic rerun, but does not establish the cause of
+the earlier timeout.
 
 ## Scope
 
@@ -135,7 +159,7 @@ desktop_image=/workspace/scratch/64bce13821f6/desk-flowing-unified-integration/d
   --journey tests/fixtures/desktop-keyboard-journey.json \
   --mode simulator --executor native \
   --cols 280 --rows 84 --ram-kib 1024 --ext-mem-mib 320 --vram-mib 4 \
-  --semantic-quantum-steps 65536 --timeout 240 \
+  --timeout 240 \
   --rich-terminal-policy "$desktop_rich_policy" \
   --retained-terminal-policy "$desktop_retained_policy" \
   --font /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf --font-size 12 \
@@ -155,6 +179,14 @@ with separate outputs. The harness supplies a private, validated empty
 routine manifest; both native extensions are required. `--executor python`
 and `--executor auto` are available for semantic modes, and the report records
 the executor actually selected. Test explicit executors when comparing costs.
+Omit `--semantic-quantum-steps` to use production policy; an explicit value is
+forwarded unchanged. The requested value appears in
+`configuration.semantic_quantum_steps` (`null` when omitted), while
+`actual_semantic_quantum_steps` comes from session status (`null` for emulator).
+For the next bounded Python diagnostic, use `--mode simulator --executor python`
+with `--timeout 600`, omit the quantum option, and choose new output paths.
+Keep the same image, policies, and journey expectations; its per-step deadlines
+still apply.
 
 For an emulator attempt, use `--mode emulator --executor native` and add
 `--restore-emulator-tail`. Omit semantic budget options. This image's exact
@@ -174,7 +206,7 @@ architectural boot or sufficient execution time. No separate already-proven
 emulator Desktop image was found in the inspected MegaPad run artifacts.
 
 Do not remove failed expectations or rewrite guest state to manufacture a
-pass. Inspect the report's error and last CELL snapshot first. Preparation
+pass. Inspect the report's error, `last_status`, and last CELL snapshot first. Preparation
 time, existing guest state, the real-time date, terminal negotiation, and the
 emulator's different execution cost remain possible blockers. A timeout is a
 failed bounded attempt; it is not a performance measurement of completion.
@@ -194,7 +226,7 @@ failed bounded attempt; it is not a performance measurement of completion.
 | Polls | At most 100,000 |
 | Geometry | 1–400 columns, 1–200 rows; default 280 by 84 |
 | Bank 0 / external / VRAM | 64–1,024 KiB / 0–512 MiB / 0–16 MiB; defaults 1,024 KiB / 320 MiB / 4 MiB |
-| Semantic quantum | 1–1,000,000 steps; default 65,536 |
+| Semantic quantum | Explicit override: 1–1,000,000 steps; omitted: production policy for the selected executor |
 | Optional semantic budget | 1–1,000,000,000 steps; unset by default |
 | Font size | 6 through 32; default 12 |
 
@@ -206,7 +238,11 @@ Reports contain the checkout commit and dirty status, harness/journey hashes,
 native extension paths and hashes, selected runtime descriptor, supplied
 policies, image and autoexec hashes before/after selection, copied-image hash
 after execution, timing, peak worker RSS, input retries, offers, completed
-steps, final status, and cleanup checks. Loaded native extensions must come
+steps, actual semantic quantum, latest polled status, successful final status,
+and cleanup checks. `last_status` is retained on ordinary failure so protocol
+state, semantic steps, and frame counters can distinguish fallback from
+publication progress; it is the latest completed status request, not a
+post-shutdown sample. Loaded native extensions must come
 from this checkout. Optional artifacts contain initial/final software captures
 and CELL text. A successful run returns exit status zero and `complete: true`.
 

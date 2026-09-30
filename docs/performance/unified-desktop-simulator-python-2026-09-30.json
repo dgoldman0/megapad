@@ -1,0 +1,121 @@
+{
+  "schema": "megapad.unified-desktop.v1",
+  "mode": "simulator",
+  "requested_executor": "python",
+  "complete": false,
+  "reference_provenance": {
+    "harness": "run_desk_flowing_unified.py",
+    "harness_sha256": "a9fa986c62fe9768af2f5f67d041551dfc68c7729ff3eb9e0ad55470196fd56a",
+    "runtime_checkpoint": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+    "appearance_checkpoint": "4e8bf26a18346043ea6b903fc8251a14e46e15b0",
+    "recorded_image_before_journey_sha256": "db0b8a2d7c5b77eb8d08fb10774b5819f698792adda1dc4468d032034dbc7e2a",
+    "recorded_result_sha256": "6ab957e2d9f1d0bfb9bbbce7d42b482b7f562f5a634b8df67722c5ffd5dfb48a"
+  },
+  "repository": {
+    "commit": "c0958bd61ce3aac5378a595685c043f9f4d92fe9",
+    "status": "",
+    "harness_sha256": "5b781c9c32f4ab24e0f5bfca678fb4b2ad2c6993dadd65105c2dceb808b6c59d"
+  },
+  "journey": {
+    "name": "Prepared six-app Desktop keyboard subset",
+    "sha256": "6446634c46a53013b16b27ceaf8b1b90fbe0715bfd881d698dc65ab9bcac3049",
+    "steps": 8,
+    "provenance": {
+      "scope": "CELL marker checks and retained presentation; a bounded keyboard subset, not the original 52-stage semantic and pointer journey",
+      "reference_source": "rich_terminal_desktop_acceptance.py DesktopAcceptanceJourney stages 3 through 10",
+      "reference_source_sha256": "4f971973c645278c35f663672740a26544aae25acdd4c63670fc50cdf57ee1fc",
+      "reference_runtime_checkpoint": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+      "reference_appearance_checkpoint": "4e8bf26a18346043ea6b903fc8251a14e46e15b0",
+      "reference_image_before_journey_sha256": "db0b8a2d7c5b77eb8d08fb10774b5819f698792adda1dc4468d032034dbc7e2a",
+      "fixture_requirement": "280x84 Desktop, Pad initially focused, blank Pad acceptance marker, no active Daybook prompt"
+    }
+  },
+  "scope": {
+    "transport": "direct SessionServer.dispatch; no listener",
+    "display": "SDL dummy software sink",
+    "assertions": "CELL backing snapshot markers plus production composition and acknowledgments",
+    "socket_qualified": false,
+    "physical_display_qualified": false,
+    "audio_qualified": false,
+    "standalone_viewer_qualified": false,
+    "hybrid_machine_calls_exercised": false
+  },
+  "configuration": {
+    "cols": 280,
+    "rows": 84,
+    "ram_kib": 1024,
+    "ext_mem_mib": 320,
+    "vram_mib": 4,
+    "timeout": 240,
+    "semantic_quantum_steps": 65536,
+    "semantic_step_budget": null,
+    "rich_terminal_policy": "{\"ansi_history_bytes\": 262144, \"egress_high_batches\": 32, \"egress_high_publications\": 2, \"egress_low_batches\": 4, \"geometry_events\": 8, \"ingress_bytes\": 131072, \"ingress_control_bytes\": 4096, \"ingress_control_events\": 32, \"ingress_events\": 256, \"max_cols\": 400, \"max_rows\": 200, \"pending_outbound_bytes\": 131072, \"pending_outbound_events\": 256, \"service_batches\": 4}",
+    "retained_terminal_policy": "{\"base_max_transaction_bytes\": 16075624, \"client_to_terminal_max_payload\": 917608, \"features\": 1801, \"image_format\": 0, \"max_glyph_run_bytes\": 1600, \"max_history_per_series\": 0, \"max_image_height\": 0, \"max_image_width\": 0, \"max_live_owners\": 1, \"max_objects\": 109695, \"max_operations_per_transaction\": 110720, \"max_owner_records\": 1, \"max_path_points\": 0, \"max_regions\": 7169, \"max_resource_chunk_bytes\": 0, \"max_resources\": 0, \"max_retained_transaction_bytes\": 16075624, \"max_samples_per_append\": 0, \"max_series\": 0, \"minimum_presentation_interval_us\": 0, \"terminal_to_client_max_payload\": 64, \"total_resource_bytes\": 0, \"total_sample_slots\": 0, \"total_utf8_bytes\": 12575232}"
+  },
+  "image": {
+    "source": "/workspace/scratch/64bce13821f6/desk-flowing-unified-integration/desktop-fresh-simulator.img",
+    "source_sha256": "13bbe7264c8735180fb0841ed96a863e962bba28c56b4a3f5312e180487aad88",
+    "copy_before_execution_sha256": "13bbe7264c8735180fb0841ed96a863e962bba28c56b4a3f5312e180487aad88",
+    "autoexec_before": {
+      "kind": "semantic_deferred",
+      "entry": "_boot-desktop-session-entry",
+      "line_index": 161,
+      "tail": "' _boot-desktop-session-entry IS _SIMULATOR-SESSION-ENTRY",
+      "sha256": "afced7d41e9a8578efa9b6e353804999ff44b1f36c296ace58f2e885a40d5b07"
+    },
+    "autoexec_selected": {
+      "kind": "semantic_deferred",
+      "entry": "_boot-desktop-session-entry",
+      "line_index": 161,
+      "tail": "' _boot-desktop-session-entry IS _SIMULATOR-SESSION-ENTRY",
+      "sha256": "afced7d41e9a8578efa9b6e353804999ff44b1f36c296ace58f2e885a40d5b07"
+    },
+    "restored_emulator_tail": false,
+    "original_preserved": true,
+    "copy_after_execution_sha256": "ed34d45949dd5a3b0e7c5bb31a7e2a6790ee6a2379e495e0a03930c4eea41eab"
+  },
+  "preparation_seconds": 33.13753795999946,
+  "native_artifacts": [],
+  "runtime": {
+    "mode": "simulator",
+    "executor": "python",
+    "step_unit": "semantic_step",
+    "step_request_unit": "semantic_boundary",
+    "batch_unit": "semantic_boundary",
+    "timing": {
+      "model": "semantic",
+      "models_shared_clock_latency": false,
+      "timer_unit": "semantic_step",
+      "rtc_mode": "host_monotonic"
+    },
+    "capabilities": {
+      "machine_code": false,
+      "cpu_diagnostics": false,
+      "network_diagnostics": false,
+      "reset": false,
+      "host_profiling": false
+    }
+  },
+  "font": {
+    "path": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "sha256": "c805f9436dbc268644c1d9584f01a601a653e028e08fd74b9b949f6cf8304d88",
+    "size": 12,
+    "cell_width": 7,
+    "cell_height": 14
+  },
+  "steps": [],
+  "presented_offers": 0,
+  "input_retries": 0,
+  "last_cell_text": " File  Build  Edit  Selection  View  Go  Help                                                 File  Edit  View  Tools                                                                      File  Entry  Go  Help\n\u25b6 /              \u2591\u2502 Untitled                                                 \u2502             \u2591 \u25b6 /                        \u2502 Details  Preview                                                September 2026           \u2502  2026-09-30                                              5\n                 \u2591\u2502\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2502             \u2591                            \u2502\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Mo Tu  We Th  Fr Sa  Su  \u2502 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n                 \u2591\u2502  1                                                       \u2502             \u2591                            \u2502Name                                                  Size Type\u2591    1   2  3   4  5   6   \u2502\n                 \u2591\u2502  2                                                       \u2502             \u2591                            \u2502agent-thread-a.bin                                      80 file\u2591 7  8   9  10  11 12  13  \u2502SCHEDULE\n                 \u2591\u2502  3                                                       \u2502             \u2591                            \u2502agent-thread-b.bin                                      80 file\u2591                          \u2502  Project review                                               09:30\n                 \u2591\u2502  4                                                       \u2502             \u2591                            \u2502app-catalog.bin                                         3K file\u2591 14 15  16 17  18 19  20  \u2502TASKS\n                 \u2591\u2502  5                                                       \u2502             \u2591                            \u2502autoexec.f                                              6K file\u2591 21 22  23 24  25 26  27  \u2502  [ ] Plan the next release\n                 \u2591\u2502  6                                                       \u2502             \u2591                            \u2502coldsrc.f                                              10K file\u2591 28 29  30                \u2502  [x] Morning walk\n                 \u2591\u2502  7                                                       \u2502             \u2591                            \u2502daybook.md                                             261 file\u2591                          \u2502  [ ] ^\n                 \u2591\u2502  8                                                       \u2502             \u2591                            \u2502example.f                                               28 file\u2591                          \u2502NOTES\n                 \u2591\u2502  9                                                       \u2502             \u2591                            \u2502grid.csv                                                84 file\u2591                          \u2502  Keep the system small and legible\n                 \u2591\u2502 10                                                       \u2502             \u2591                            \u2502kdos.f                                                187K file\u2591                          \u2502\n                 \u2591\u2502 11                                                       \u2502             \u2591                            \u2502large.txt                                               2K file\u2591                          \u2502\n                 \u2591\u2502 12                                                       \u2502             \u2591                            \u2502networking.f                                          536K file\u2591                          \u2502\n                 \u2591\u2502 13                                                       \u2502             \u2591                            \u2502notes.md                                                54 file\u2591                          \u2502\n                 \u2591\u2502 14                                                       \u2502             \u2591                            \u2502practice-head-a.bin                                    416 file\u2591                          \u2502\n                 \u2591\u2502 15                                                       \u2502             \u2591                            \u2502practice-head-b.bin                                    416 file\u2591                          \u2502\n                 \u2591\u2502 16                                                       \u2502             \u2591                            \u2502rich-terminal.f                                       190K file\u2591                          \u2502\n                 \u2591\u2502 17                                                       \u2502             \u2591                            \u2502source-00.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 18                                                       \u2502             \u2591                            \u2502source-01.src                                         115K file\u2591                          \u2502\n                 \u2591\u2502 19                                                       \u2502             \u2591                            \u2502source-02.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 20                                                       \u2502             \u2591                            \u2502source-03.src                                         115K file\u2591                          \u2502\n                 \u2591\u2502 21                                                       \u2502             \u2591                            \u2502source-04.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 22                                                       \u2502             \u2591                            \u2502source-05.src                                         117K file\u2591                          \u2502\n                 \u2591\u2502 23                                                       \u2502             \u2591                            \u2502source-06.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 24                                                       \u2502             \u2591                            \u2502source-07.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 25                                                       \u2502             \u2591                            \u2502source-08.src                                         120K file\u2591                          \u2502\n                 \u2591\u2502 26                                                       \u2502             \u2591                            \u2502source-09.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 27                                                       \u2502             \u2591                            \u2502source-10.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 28                                                       \u2502             \u2591                            \u2502source-11.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 29                                                       \u2502             \u2591                            \u2502source-12.src                                         120K file\u2591                          \u2502\n                 \u2591\u2502 30                                                       \u2502             \u2591                            \u2502source-13.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 31                                                       \u2502             \u2591                            \u2502source-14.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 32                                                       \u2502             \u2591                            \u2502source-15.src                                         120K file\u2591                          \u2502\n                 \u2591\u2502 33                                                       \u2502             \u2591                            \u2502source-16.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 34                                                       \u2502             \u2591                            \u2502source-17.src                                         118K file\u2591                          \u2502\n                 \u2591\u2502 35                                                       \u2502             \u2591                            \u2502source-18.src                                         119K file\u2591                          \u2502\n                 \u2591\u2502 36                                                       \u2502             \u2591                            \u2502source-19.src                                         119K file\u2591                          \u2502\nUntitled               Ln 1, Col 1            UTF-8                  1 tabs                  53 items                                      /                                              2026-09-30                                     5 entries  |  Saved\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n File  Edit  Data  Help                                                                       Agent  Run  Connection  Access  Review  Help\n A1   = Item\n          A           B           C           D           E           F           G            Start a conversation\n  1 Item        Qty         Price       Total\n  2 Paper, A4             3          12          36\n  3 Ink                   2          25          50\n  4 Subtotal                                     86\n  5\n  6\n  7\n  8\n  9\n 10\n 11\n 12\n 13\n 14\n 15\n 16\n 17\n 18\n 19\n 20\n 21\n 22\n 23\n 24\n 25\n 26\n 27\n 28\n 29\n 30\n 31\n 32\n 33\n 34\n 35\n 36                                                                                          DEMO                          scripted                      default\nA1                                            Grid  |  Text  |  Saved                        default                       Chat                          Offline\n\n[1:Akashic Pa*] [2:File Explo] [3:Daybook] [4:Grid] [5:Agent] | [Akashic Pa] [File Explo] [Daybook] [Grid] [Agent] <Sound Lab> <Streams>                                                                                                                               [Agent: offline]",
+  "cleanup": {
+    "owner_thread_stopped": true,
+    "display_lease_released": true,
+    "terminal_driver_closed": true,
+    "no_socket_created": true,
+    "backend_closed": true,
+    "runtime_owner_released": true
+  },
+  "error": "BenchmarkError: Desktop deadline reached at stage -1",
+  "elapsed_seconds": 240.2861655939996,
+  "peak_rss_bytes": 235347968
+}

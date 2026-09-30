@@ -47,14 +47,17 @@ def _journey(tmp_path, document=None):
     return path
 
 
-def _args(tmp_path, *, mode="simulator", executor="python"):
+def _args(tmp_path, *, mode="simulator", executor="python", quantum_steps=None):
     image = _image(tmp_path, runnable=True)
     journey = _journey(tmp_path)
-    return bench.build_parser().parse_args([
+    arguments = [
         "--image", str(image), "--journey", str(journey), "--mode", mode,
         "--executor", executor, "--cols", "20", "--rows", "3",
         "--ext-mem-mib", "0", "--vram-mib", "0", "--timeout", "20",
-    ])
+    ]
+    if quantum_steps is not None:
+        arguments += ["--semantic-quantum-steps", str(quantum_steps)]
+    return bench.build_parser().parse_args(arguments)
 
 
 def test_image_copy_is_private_and_original_survives_guest_failure(tmp_path):
@@ -161,6 +164,18 @@ def test_emulator_and_hybrid_configuration_keep_separate_execution_contracts(tmp
     assert argv[argv.index("--executor") + 1] == "native"
 
 
+@pytest.mark.parametrize("mode", ("simulator", "hybrid"))
+@pytest.mark.parametrize("quantum_steps", (None, 4096))
+def test_semantic_quantum_uses_production_policy_unless_explicit(tmp_path, mode, quantum_steps):
+    args = _args(tmp_path, mode=mode, quantum_steps=quantum_steps)
+    assert args.semantic_quantum_steps == quantum_steps
+    argv = bench._server_arguments(args, args.image, tmp_path)
+    if quantum_steps is None:
+        assert "--semantic-quantum-steps" not in argv
+    else:
+        assert argv[argv.index("--semantic-quantum-steps") + 1] == "4096"
+
+
 def test_input_retry_preserves_exact_generation_and_display_proof():
     from rich_terminal.retained_view import DisplayScope
     scope = DisplayScope(1, 2, 0, 3, 0, 3, 3)
@@ -196,18 +211,23 @@ def test_partial_or_unauthorized_input_is_not_retried(response):
 
 
 @pytest.mark.parametrize("mode,executor", (("simulator", "python"), ("simulator", "native"), ("hybrid", "native")))
-def test_real_direct_session_runs_copied_image_and_releases_ownership(tmp_path, mode, executor):
+def test_real_direct_session_runs_copied_image_and_releases_ownership(tmp_path, monkeypatch, mode, executor):
     pytest.importorskip("pygame")
     if executor == "native":
         pytest.importorskip("_megaforth_native")
     if mode == "hybrid":
         pytest.importorskip("_mp64_accel")
+    monkeypatch.delenv("MEGAFORTH_QUANTUM_STEPS", raising=False)
     args = _args(tmp_path, mode=mode, executor=executor)
     original = args.image.read_bytes()
     report = bench.run_case(args)
     assert report["complete"], report
     assert [item["name"] for item in report["steps"]] == ["first", "second"]
     assert report["runtime"]["mode"] == mode
+    assert report["configuration"]["semantic_quantum_steps"] is None
+    assert report["actual_semantic_quantum_steps"] == (8192 if executor == "python" else 65536)
+    assert report["actual_semantic_quantum_steps"] == report["final_status"]["semantic_execution"]["quantum_steps"]
+    assert report["last_status"] == report["final_status"]
     assert all(report["cleanup"].values())
     assert report["image"]["original_preserved"]
     assert args.image.read_bytes() == original
@@ -218,8 +238,19 @@ def test_real_direct_session_runs_copied_image_and_releases_ownership(tmp_path, 
         assert "zero machine calls" in report["hybrid_registry"]
 
 
-def test_failed_expectation_is_reported_and_owner_still_closes(tmp_path):
+def test_failed_expectation_is_reported_and_owner_still_closes(tmp_path, monkeypatch):
     pytest.importorskip("pygame")
+    monkeypatch.setenv("MEGAFORTH_QUANTUM_STEPS", "4096")
+    observed_status = []
+    request = bench.DirectClient.request
+
+    def record_status(self, method, **params):
+        response = request(self, method, **params)
+        if method == "status":
+            observed_status.append(response)
+        return response
+
+    monkeypatch.setattr(bench.DirectClient, "request", record_status)
     args = _args(tmp_path)
     document = _document()
     document["steps"][0].update(expect={"contains": ["never emitted"]}, timeout_seconds=1)
@@ -227,6 +258,13 @@ def test_failed_expectation_is_reported_and_owner_still_closes(tmp_path):
     report = bench.run_case(args)
     assert not report["complete"]
     assert "step timed out" in report["error"]
+    assert "final_status" not in report
+    assert len(observed_status) > 1
+    assert report["last_status"] is observed_status[-1]
+    assert report["last_status"] is not observed_status[0]
+    assert report["configuration"]["semantic_quantum_steps"] is None
+    assert report["actual_semantic_quantum_steps"] == 4096
+    assert report["last_status"]["semantic_execution"]["quantum_steps"] == 4096
     assert all(report["cleanup"].values())
     assert report["image"]["original_preserved"]
 
