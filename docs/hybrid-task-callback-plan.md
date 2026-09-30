@@ -724,3 +724,32 @@ available after cancellation and close.
 Use a new `cpu/mp64/routine_tasks.h` with narrow setup dependency changes and
 the existing `mp64_accel.cpp` common-owner helpers. Build and test serially
 through the repository Make gates, preserving private transport regressions.
+
+### Nested native task refinement — 2026-09-30
+
+The first one-frame implementation passed 541 native/private-composition and
+application checks after an isolated GCC build. The next slice keeps the
+locked public signatures and replaces the single frame with eight bounded
+slots under the same reservation and retained root ledger.
+
+At root and child admission, validate reachable publication generations with
+one bounded walk: at most 64 visited publications and 65536 rows. Accept cycles
+without expanding paths. Separately require the exact used edge, active parent
+request and root token. Publication still does not impose active-frame overlap
+or recursion rules on the potential target graph.
+
+An admission-only child has not overwritten the parent's CPU state. Separate
+saved ancestor code/token/control checks from validation of the currently live
+CPU view. On successful child return, validate all survivors before restoration,
+restore the initialization-owned integer controls and saved parent registers
+and flags, advance only the parent's cycle frontier, then issue the child's
+returned receipt and pop. A restoration failure records the completed child
+prefix as failed, retains the child and preserves the original host exception.
+
+Suffix cancellation preallocates diagnostics, validates survivors and restores
+the parent before retiring frames. A cancellation-result delivery failure
+retains the actual retired suffix and restored parent request under the owner
+reservation, blocks execution, and allows only all-cancel or close. It never
+resurrects frames or invents a receipt. An idle-only one-shot cancellation
+delivery failpoint may qualify this exact window independently of the existing
+accepted-segment failpoint.
