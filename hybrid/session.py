@@ -26,12 +26,22 @@ class HybridSession(SimulatorMachineSession):
         semantic_step_budget: int | None = None,
         semantic_quantum_steps: int | None = None,
         rich_terminal: RichTerminalSessionConfig | None = None,
+        manifest_abi_version: int | None = None,
     ) -> None:
         if not isinstance(hybrid, HybridRuntime):
             raise TypeError("hybrid must be a HybridRuntime")
         if hybrid.closed:
             raise RuntimeError("the hybrid runtime is closed")
+        if manifest_abi_version is not None:
+            if type(manifest_abi_version) is not int:
+                raise TypeError("manifest ABI version must be an exact integer or None")
+            if not 1 <= manifest_abi_version <= 4:
+                raise ValueError("manifest ABI version must be in 1..4")
+        if (manifest_abi_version == 4
+                and getattr(hybrid, "nested_callback_abi_available", False) is not True):
+            raise RuntimeError("hybrid nested callbacks require full semantic profile v4 and native transport v3")
         self.hybrid = hybrid
+        self._manifest_abi_version = manifest_abi_version
         super().__init__(
             hybrid.semantic,
             entry,
@@ -41,6 +51,10 @@ class HybridSession(SimulatorMachineSession):
             semantic_quantum_steps=semantic_quantum_steps,
             rich_terminal=rich_terminal,
         )
+
+    @property
+    def manifest_abi_version(self) -> int | None:
+        return self._manifest_abi_version
 
     def close(self) -> None:
         # Release the terminal lease, cancel any owned continuation, and give
@@ -63,6 +77,10 @@ class HybridSharedMachine(SimulatorSharedMachine):
             hybrid = self.semantic_session.hybrid
             registrations = hybrid.registered_routines
             registered_versions = sorted({image.version for image in registrations})
+            manifest_version = self.semantic_session.manifest_abi_version
+            abi_version = max(registered_versions, default=(manifest_version or HYBRID_ABI_VERSION))
+            nested_available = getattr(hybrid, "nested_callback_abi_available", False) is True
+            nested_profile = abi_version == 4
             exports = sorted({
                 site.export.name
                 for image in registrations
@@ -71,10 +89,12 @@ class HybridSharedMachine(SimulatorSharedMachine):
             effects = {site.export.effect
                        for image in registrations
                        for site in getattr(image, "callbacks", ())}
-            closed_policies = "closed_integer_colon" in effects
+            closed_policies = bool(effects & {"closed_integer_colon", "closed_integer_nested"})
             profiles = (["canonical_integer_leaf"] if "integer_leaf" in effects else [])
-            if closed_policies:
+            if "closed_integer_colon" in effects:
                 profiles.append("closed_integer_colon")
+            if "closed_integer_nested" in effects:
+                profiles.append("closed_integer_nested")
             result["backend"] = "hybrid"
             result["runtime"]["mode"] = "hybrid"
             result["runtime"]["capabilities"].update(
@@ -85,7 +105,7 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 semantic_callbacks=bool(exports),
                 closed_integer_callbacks=closed_policies,
                 arbitrary_semantic_callbacks=False,
-                nested_machine_callbacks=False,
+                nested_machine_callbacks=nested_profile and nested_available,
                 callback_suspension=False,
                 native_bios_boot=False,
                 multicore=False,
@@ -94,9 +114,10 @@ class HybridSharedMachine(SimulatorSharedMachine):
             result["machine_execution"] = {
                 "backend": "mp64_native_interpreter",
                 "abi": HYBRID_ABI,
-                "abi_version": max(registered_versions, default=HYBRID_ABI_VERSION),
+                "abi_version": abi_version,
+                "manifest_abi_version": manifest_version,
                 "registered_abi_versions": registered_versions,
-                "native_transport_version": 2 if any(v >= 2 for v in registered_versions) else 1,
+                "native_transport_version": 3 if abi_version == 4 else 2 if abi_version >= 2 else 1,
                 "instructions": hybrid.machine_instructions,
                 "cycles": hybrid.machine_cycles,
                 "transitions": hybrid.transitions,
@@ -104,7 +125,10 @@ class HybridSharedMachine(SimulatorSharedMachine):
                 "dispatch_instruction_limit": hybrid.dispatch_instruction_limit,
                 "callback_abi_available": hybrid.callback_abi_available,
                 "closed_callback_abi_available": hybrid.closed_callback_abi_available,
-                "callback_profile": ("closed_integer_colon" if closed_policies else
+                "nested_callback_abi_available": nested_available,
+                "max_machine_depth": hybrid.max_machine_depth if nested_available else 0,
+                "callback_profile": ("closed_integer_nested" if "closed_integer_nested" in effects else
+                                     "closed_integer_colon" if closed_policies else
                                      "canonical_integer_leaf" if exports else None),
                 "callback_profiles": profiles,
                 "closed_callback_executor": "python_reference" if closed_policies else None,
