@@ -136,6 +136,9 @@ set required_rtl [list \
     rtl/core/mp64_dict.v \
     rtl/core/mp64_fp_half.v \
     rtl/core/mp64_fma.v \
+    rtl/core/mp64_fp_round.v \
+    rtl/core/mp64_fp_divsqrt.v \
+    rtl/core/mp64_fpu.v \
     rtl/core/mp64_string.v \
     rtl/core/mp64_cpu.v \
     rtl/core/mp64_cpu_micro.v \

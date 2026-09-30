@@ -219,6 +219,7 @@ module mp64_cpu #(
     reg [4:0] cpu_state;
     reg       skip_has_rex;
     reg       skip_is_mex;       // lookahead is a MEX function byte
+    reg       skip_is_fp;        // lookahead is an EXT.FP operation byte
     reg [3:0] skip_mex_len;      // skipped MEX length without a control byte
 
     function [7:0] mex_fault_vector;
@@ -414,6 +415,36 @@ module mp64_cpu #(
     wire         mul_u_done;
     wire         mul_u_busy;
 
+    // Scalar FP unit (EXT.FP, docs/floating-point.md §8-§10).  FPCSR keeps
+    // RM in [2:0] and the sticky flags in [8:4]; bit 3 reads zero.
+    reg  [8:0]  fpcsr;
+    reg         fpu_start_r;
+    reg  [7:0]  fpu_op_r;
+    reg  [63:0] fpu_a_r, fpu_b_r, fpu_c_r;
+    wire        fpu_busy;
+    wire        fpu_done;
+    wire        fpu_write;
+    wire [63:0] fpu_result;
+    wire [4:0]  fpu_flags;
+    wire [3:0]  fpu_cmp;
+
+    mp64_fpu u_fpu (
+        .clk     (clk),
+        .rst     (rst),
+        .start   (fpu_start_r),
+        .op      (fpu_op_r),
+        .rd_val  (fpu_a_r),
+        .rs_val  (fpu_b_r),
+        .rt_val  (fpu_c_r),
+        .rm_dyn  (fpcsr[2:0]),
+        .busy    (fpu_busy),
+        .done    (fpu_done),
+        .result  (fpu_result),
+        .write_rd(fpu_write),
+        .flags   (fpu_flags),
+        .cmp     (fpu_cmp)
+    );
+
     mp64_mul #(.LATENCY(4)) u_mul (
         .clk       (clk),
         .rst       (rst),
@@ -547,7 +578,10 @@ module mp64_cpu #(
             ibuf_need      <= 4'd1;
             skip_has_rex   <= 1'b0;
             skip_is_mex    <= 1'b0;
+            skip_is_fp     <= 1'b0;
             skip_mex_len   <= 4'd0;
+            fpcsr          <= 9'd0;
+            fpu_start_r    <= 1'b0;
 
             icache_enabled <= 1'b1;
             icache_inv_all <= 1'b0;
@@ -770,6 +804,10 @@ module mp64_cpu #(
                     // EXT.CRYPTO length is selected by its second byte.
                     // Correct the initial three-byte maximum before decode.
                     ibuf_need <= 4'd2;
+                end else if (ibuf_len >= 5'd2 && ibuf[0] == 8'hFC &&
+                             fp_has_t(ibuf[1]) && ibuf_need != 4'd4) begin
+                    // EXT.FP FMA and FMS carry the T byte.
+                    ibuf_need <= 4'd4;
                 end else if (ibuf_len >= 5'd2 &&
                              mex_has_control_byte(
                                  ibuf[0], ibuf[1],
@@ -942,6 +980,45 @@ module mp64_cpu #(
                             ext_active     <= 1'b0;
                             cpu_state      <= CPU_EXECUTE;
                         end
+                    end else if (nib == EXT_FP) begin
+                        // EXT.FP — FC op DR [T]; reserved encodings and
+                        // modes trap after the whole instruction.
+                        if (!fp_op_legal(ibuf[1], ibuf[3], fpcsr[2:0])) begin
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            trap_return_pc <= R[psel] + {60'd0, ibuf_need};
+                            mem_data <= {55'd0, priv_level, flags};
+                            flags[6] <= 1'b0;
+                            priv_level <= 1'b0;
+                            ivec_id <= IRQX_ILLEGAL_OP;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            ext_active <= 1'b0;
+                            cpu_state <= CPU_MEM_WRITE;
+                        end else begin
+                            fpu_op_r    <= ibuf[1];
+                            fpu_a_r     <= R[{rex_d, ibuf[2][7:4]}];
+                            fpu_b_r     <= R[{rex_s, ibuf[2][3:0]}];
+                            fpu_c_r     <= R[ibuf[3][4:0]];
+                            dst_reg     <= {rex_d, ibuf[2][7:4]};
+                            fpu_start_r <= 1'b1;
+                            ext_active  <= 1'b0;
+                            cpu_state   <= CPU_FPU;
+                        end
+                    end else if (nib == 4'h7 || nib >= 4'hD) begin
+                        // F7 and FD-FF are unassigned: they trap at their
+                        // one byte instead of latching as a modifier.
+                            R[spsel] <= R[spsel] - 64'd8;
+                            effective_addr <= R[spsel] - 64'd8;
+                            trap_return_pc <= R[psel] + {60'd0, ibuf_need};
+                            mem_data <= {55'd0, priv_level, flags};
+                            flags[6] <= 1'b0;
+                            priv_level <= 1'b0;
+                            ivec_id <= IRQX_ILLEGAL_OP;
+                            post_action <= POST_IRQ_VEC;
+                            bus_size <= BUS_DWORD;
+                            ext_active <= 1'b0;
+                            cpu_state <= CPU_MEM_WRITE;
                     end else begin
                         ext_active <= 1'b1;
                         ext_mod    <= nib;
@@ -1486,6 +1563,8 @@ module mp64_cpu #(
                             CSR_PRIV:     priv_level <= R[nib[2:0]][0];  // inert — no enforcement
                             CSR_MPU_BASE: mpu_base   <= R[nib[2:0]];
                             CSR_MPU_LIMIT:mpu_limit  <= R[nib[2:0]];
+                            CSR_FPCSR:    fpcsr      <= {R[nib[2:0]][8:4], 1'b0,
+                                                         R[nib[2:0]][2:0]};
                             CSR_IVEC_ID:  ivec_id  <= R[nib[2:0]][7:0];
                             CSR_PERF_CTRL: begin
                                 perf_enable <= R[nib[2:0]][0];
@@ -1555,6 +1634,7 @@ module mp64_cpu #(
                             CSR_PRIV:        R[nib[2:0]] <= {63'd0, priv_level};
                             CSR_MPU_BASE:    R[nib[2:0]] <= mpu_base;
                             CSR_MPU_LIMIT:   R[nib[2:0]] <= mpu_limit;
+                            CSR_FPCSR:       R[nib[2:0]] <= {55'd0, fpcsr};
                             CSR_COREID:      R[nib[2:0]] <= {{(64-CORE_ID_W){1'b0}}, core_id};
                             CSR_NCORES:      R[nib[2:0]] <= 64'd16;  // updated at SoC level
                             CSR_IVEC_ID:     R[nib[2:0]] <= {56'd0, ivec_id};
@@ -2085,6 +2165,29 @@ module mp64_cpu #(
             end
 
             // ============================================================
+            // FPU: wait for the scalar FP unit, then write back
+            // ============================================================
+            CPU_FPU: begin
+                fpu_start_r <= 1'b0;
+                if (fpu_done) begin
+                    if (fpu_write) begin
+                        R[dst_reg] <= fpu_result;
+                    end else begin
+                        // FCMP: Z, G, N, V from the comparison; C and P
+                        // clear; S and I unchanged.
+                        flags[0] <= fpu_cmp[0];
+                        flags[5] <= fpu_cmp[1];
+                        flags[2] <= fpu_cmp[2];
+                        flags[3] <= fpu_cmp[3];
+                        flags[1] <= 1'b0;
+                        flags[4] <= 1'b0;
+                    end
+                    fpcsr[8:4] <= fpcsr[8:4] | fpu_flags;
+                    cpu_state  <= CPU_FETCH;
+                end
+            end
+
+            // ============================================================
             // MULDIV: wait for multiplier or divider, then writeback
             // ============================================================
             CPU_MULDIV: begin
@@ -2258,9 +2361,11 @@ module mp64_cpu #(
                             icache_req  <= 1'b1;
                             icache_addr <= R[psel] + 64'd1;
                             cpu_state   <= CPU_SKIP_REX;
-                        end else if (skip_byte == 8'hFB) begin
+                        end else if (skip_byte == 8'hFB ||
+                                     skip_byte == 8'hFC) begin
                             skip_has_rex <= 1'b0;
                             skip_is_mex <= 1'b0;
+                            skip_is_fp  <= skip_byte == 8'hFC;
                             icache_req  <= 1'b1;
                             icache_addr <= R[psel] + 64'd1;
                             cpu_state   <= CPU_SKIP_CRYPTO;
@@ -2299,8 +2404,9 @@ module mp64_cpu #(
                         reg [3:0] skip_len;
                         skip_byte = select_icache_byte(icache_data,
                                                        icache_addr[2:0]);
-                        if (skip_byte == 8'hFB) begin
+                        if (skip_byte == 8'hFB || skip_byte == 8'hFC) begin
                             skip_is_mex <= 1'b0;
+                            skip_is_fp  <= skip_byte == 8'hFC;
                             icache_req  <= 1'b1;
                             icache_addr <= R[psel] + 64'd2;
                             cpu_state   <= CPU_SKIP_CRYPTO;
@@ -2342,6 +2448,10 @@ module mp64_cpu #(
                                      + skip_mex_len
                                      + (crypto_sub_op[2:0] == 3'd7
                                         ? 4'd1 : 4'd0);
+                        else if (skip_is_fp)
+                            skip_len = (skip_has_rex ? 4'd1 : 4'd0)
+                                     + (fp_has_t(crypto_sub_op)
+                                        ? 4'd4 : 4'd3);
                         else
                             skip_len = (skip_has_rex ? 4'd1 : 4'd0)
                                      + (crypto_is_bare(crypto_sub_op)

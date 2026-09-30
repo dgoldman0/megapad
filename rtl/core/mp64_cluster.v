@@ -143,6 +143,20 @@ module mp64_cluster #(
     reg  [127:0]        mul_result_reg;
     reg                 mul_done_reg;
 
+    // Per-micro-core scalar FP wires
+    wire [N-1:0]        mc_fp_req;
+    wire [N*8-1:0]      mc_fp_op;
+    wire [N*64-1:0]     mc_fp_a;
+    wire [N*64-1:0]     mc_fp_b;
+    wire [N*64-1:0]     mc_fp_c;
+    wire [N*3-1:0]      mc_fp_rm;
+    reg  [63:0]         fp_result_reg;
+    reg                 fp_write_reg;
+    reg  [4:0]          fp_flags_reg;
+    reg  [3:0]          fp_cmp_reg;
+    reg                 fp_done_reg;
+    reg  [ARB_BITS-1:0] fp_grant;
+
     // Per-micro-core cluster CSR wires
     wire [N*8-1:0]      mc_cl_csr_addr;
     wire [N-1:0]        mc_cl_csr_wen;
@@ -309,6 +323,18 @@ module mp64_cluster #(
                 .mul_b      (mc_mul_b  [gi*64 +: 64]),
                 .mul_result (mul_result_reg),
                 .mul_done   (mul_done_reg && (mul_grant == gi[ARB_BITS-1:0])),
+
+                .fp_req     (mc_fp_req[gi]),
+                .fp_op      (mc_fp_op [gi*8  +: 8]),
+                .fp_a       (mc_fp_a  [gi*64 +: 64]),
+                .fp_b       (mc_fp_b  [gi*64 +: 64]),
+                .fp_c       (mc_fp_c  [gi*64 +: 64]),
+                .fp_rm      (mc_fp_rm [gi*3  +: 3]),
+                .fp_result  (fp_result_reg),
+                .fp_write   (fp_write_reg),
+                .fp_flags   (fp_flags_reg),
+                .fp_cmp     (fp_cmp_reg),
+                .fp_done    (fp_done_reg && (fp_grant == gi[ARB_BITS-1:0])),
 
                 .crc_req    (mc_crc_req[gi]),
                 .crc_op     (mc_crc_op [gi*4  +: 4]),
@@ -781,6 +807,115 @@ module mp64_cluster #(
                 (tacc_ctl_done_reg &&
                  tacc_ctl_fault_reg == MEX_FAULT_PRIV))
                 cl_priv_level <= 1'b0;
+        end
+    end
+
+    // ====================================================================
+    // Shared scalar FP unit (EXT.FP, docs/floating-point.md §8.7)
+    // ====================================================================
+    // One mp64_fpu serves the micro-cores round-robin, one operation at a
+    // time.  Each core keeps its own FPCSR and sends its RM with the
+    // request.  After a result the arbiter drains for one cycle so the
+    // finished core's request has dropped before the next grant.
+
+    localparam FP_IDLE  = 2'd0;
+    localparam FP_BUSY  = 2'd1;
+    localparam FP_DRAIN = 2'd2;
+
+    reg [1:0]           fp_state;
+    reg [ARB_BITS-1:0]  fp_last;
+    reg                 fp_start;
+    reg [7:0]           fp_op_reg;
+    reg [63:0]          fp_a_reg, fp_b_reg, fp_c_reg;
+    reg [2:0]           fp_rm_reg;
+    wire                fpu_busy;
+    wire                fpu_done;
+    wire [63:0]         fpu_result;
+    wire                fpu_write;
+    wire [4:0]          fpu_flags;
+    wire [3:0]          fpu_cmp;
+
+    mp64_fpu u_cl_fpu (
+        .clk     (clk),
+        .rst     (cl_rst),
+        .start   (fp_start),
+        .op      (fp_op_reg),
+        .rd_val  (fp_a_reg),
+        .rs_val  (fp_b_reg),
+        .rt_val  (fp_c_reg),
+        .rm_dyn  (fp_rm_reg),
+        .busy    (fpu_busy),
+        .done    (fpu_done),
+        .result  (fpu_result),
+        .write_rd(fpu_write),
+        .flags   (fpu_flags),
+        .cmp     (fpu_cmp)
+    );
+
+    reg [ARB_BITS-1:0] fp_next;
+    reg                fp_any;
+    reg [ARB_BITS:0]   fp_cand;
+    integer            fi;
+
+    always @(*) begin
+        fp_next = fp_last;
+        fp_any  = 1'b0;
+        for (fi = 1; fi <= N; fi = fi + 1) begin
+            fp_cand = {1'b0, fp_last} + fi[ARB_BITS:0];
+            if (fp_cand >= N_VAL)
+                fp_cand = fp_cand - N_VAL;
+            if (!fp_any && mc_fp_req[fp_cand[ARB_BITS-1:0]]) begin
+                fp_next = fp_cand[ARB_BITS-1:0];
+                fp_any  = 1'b1;
+            end
+        end
+    end
+
+    always @(posedge clk) begin
+        if (cl_rst) begin
+            fp_state      <= FP_IDLE;
+            fp_grant      <= {ARB_BITS{1'b0}};
+            fp_last       <= {ARB_BITS{1'b0}};
+            fp_start      <= 1'b0;
+            fp_done_reg   <= 1'b0;
+            fp_result_reg <= 64'd0;
+            fp_write_reg  <= 1'b0;
+            fp_flags_reg  <= 5'd0;
+            fp_cmp_reg    <= 4'd0;
+            fp_op_reg     <= 8'd0;
+            fp_a_reg      <= 64'd0;
+            fp_b_reg      <= 64'd0;
+            fp_c_reg      <= 64'd0;
+            fp_rm_reg     <= 3'd0;
+        end else begin
+            fp_start    <= 1'b0;
+            fp_done_reg <= 1'b0;
+            case (fp_state)
+                FP_IDLE: begin
+                    if (fp_any) begin
+                        fp_grant  <= fp_next;
+                        fp_op_reg <= mc_fp_op[fp_next*8  +: 8];
+                        fp_a_reg  <= mc_fp_a [fp_next*64 +: 64];
+                        fp_b_reg  <= mc_fp_b [fp_next*64 +: 64];
+                        fp_c_reg  <= mc_fp_c [fp_next*64 +: 64];
+                        fp_rm_reg <= mc_fp_rm[fp_next*3  +: 3];
+                        fp_start  <= 1'b1;
+                        fp_state  <= FP_BUSY;
+                    end
+                end
+                FP_BUSY: begin
+                    if (fpu_done) begin
+                        fp_result_reg <= fpu_result;
+                        fp_write_reg  <= fpu_write;
+                        fp_flags_reg  <= fpu_flags;
+                        fp_cmp_reg    <= fpu_cmp;
+                        fp_done_reg   <= 1'b1;
+                        fp_last       <= fp_grant;
+                        fp_state      <= FP_DRAIN;
+                    end
+                end
+                default: fp_state <= FP_IDLE;
+            endcase
         end
     end
 

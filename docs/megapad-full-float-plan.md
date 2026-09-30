@@ -676,19 +676,59 @@ Progress:
   Akashic `f2f06799` and this branch at `9adbd94`. It passed in 232 s, with
   a peak aggregate RSS of 512 MB and the native simulator executor.
 
-### Phase 7 — Scalar FP unit
+### Phase 7 — Scalar FP unit (complete)
 
-- **Engine and state.** Implement the `FC` engine (D12-D16) in the Python
-  emulator, native C++ decode and DBT lowering, RTL full core, and RTL
-  cluster. Include `FPCSR` and the F7/FD-FF traps.
-- **Divide and square root.** These are iterative with a fixed documented
-  latency, using the existing start/busy/done pattern
-  (`rtl/prim/mp64_mul.v`, the divider in `mp64_cpu.v:2067-2130`).
-- **Tools and words.**
-  - Add assembler mnemonics to `asm.py`.
-  - Add BIOS Forth words on cells; Phase 1 fixes the names.
-  - The hosted simulator gets matching words bound to the oracle, since it
-    models no instruction encodings.
+Progress:
+
+- **One definition.** `shared/scalar_fp.py` defines the engine: decoding
+  rules, reserved encodings, which operations use `FPCSR.RM`, the §10
+  costs, every result and flag (from the exact oracle), and the §11 BIOS
+  word table. The spec now fixes two details Phase 1 left open: operations
+  `0x00`–`0x04`, `0x07`, `0x08`, `0x38`–`0x3B`, and `0x3D` use `FPCSR.RM`,
+  decided by `op[5:0]` alone; and FDIV/FSQRT cost 15 extra cycles on S and
+  30 on D.
+- **Python emulator.** Executes `FC` and REX+`FC`, keeps `FPCSR` (CSR
+  `0x0D`), traps F7 and FD–FF at the prefix byte, and sizes `FC` for SKIP.
+  Microcores keep a private `FPCSR`, pay the +3-cycle cluster cost, and trap
+  when standalone.
+- **Native accelerator.** `FPCSR` is native state (CSR access, sync,
+  checkpoint). The shared decoder treats `FC` as an extension engine and
+  F7/FD–FF as an illegal prefix; each `FC` instruction is rewound and run
+  by the Python oracle. This keeps one exact implementation; a native
+  arithmetic path is a later speed-up if software starts to depend on it.
+  The DBT needs no change, because it lowers only ordinary decoded
+  operations and leaves engines to the interpreter.
+- **Tools and words.** The assembler and disassembler know the `FC`
+  mnemonics. The BIOS gains the 52 §11 words (538 words), and the hosted
+  simulator binds the same 52 to `shared/scalar_fp` (432 words).
+- **RTL.**
+  - `mp64_fp_round.v` rounds an exact magnitude once to binary16, bfloat16,
+    binary32, or binary64 in any mode, with OF, UF (tininess after
+    rounding), and NX. The FMA core now rounds through it, with a mode input
+    and flags output; the tile lanes pass RNE, and all FMA vectors still
+    pass.
+  - `mp64_fpu.v` is the scalar unit: add, subtract, multiply, FMA, and FMS
+    on one FMA lane; conversions, FRND, and divide/square-root results
+    through the rounder; and a restoring divide and square-root recurrence
+    at two bits per cycle. Its latency is always the §10 cost.
+  - Each full core owns one unit. Each cluster shares one unit through a
+    round-robin arbiter with its own request port; each microcore keeps its
+    own `FPCSR` and sends its RM with the request.
+  - Both cores decode `FC`, grow to four bytes for FMA/FMS, trap reserved
+    encodings and F7/FD–FF, SKIP over `FC`, and set FLAGS for FCMP.
+- **Vectors and benches.**
+  - `tb_fpu` replays 3,200 rows from `shared/scalar_fp` over all 78 legal
+    operations in both formats and every mode, checking results, flags,
+    FCMP bits, and exact latency.
+  - `tb_cpu_fp` runs a generated full-core program through fetch, decode,
+    FPU, writeback, SKIP, and three trap kinds with RTI, and compares
+    registers, `FPCSR`, FLAGS, and 396 stored results with the Python
+    emulator.
+  - `tb_cluster` runs `FC` on four contending microcores with private
+    rounding modes and checks each against the Python microcores.
+- **Found on the way.** The RTL gives REX+LDI the ten-byte EXT.IMM64 length
+  (§7). A KDOS APP-LOAD test that already failed on `main` now loops instead
+  of failing, because its wild code reaches the new prefix traps (§7).
 
 ### Phase 8 — Tile divide and square root (optional, D11)
 
@@ -734,8 +774,10 @@ These are recorded here and left alone unless a phase cannot be correct
 without fixing them.
 
 - **RTL instruction length.** `instr_len` uses a generic `has_ext` flag, so a
-  REX prefix in front of IMM may be given a 10-byte length
-  (`rtl/pkg/mp64_cpu_funcs.vh:98-104`). This needs verification.
+  REX prefix in front of IMM is given the 10-byte EXT.IMM64 length
+  (`rtl/pkg/mp64_cpu_funcs.vh`). Confirmed in Phase 7: `ldi r16, 0` makes
+  the full core skip the following bytes. `tb_cpu_fp` clears R16-R31 with
+  MOV instead.
 - **Unknown crypto units.** Full-core RTL runs EXT.CRYPTO units 3-F as a NOP,
   while Python and the microcores trap (`mp64_cpu.v:1745-1748`).
 - **Divide timing.** Emulator DIV costs 4 cycles, while RTL takes about 65.
@@ -770,6 +812,22 @@ without fixing them.
   DOT, and DOTACC in the single compute cycle, while the §10 model (and the
   emulator) charges 1, 2, 2, 2, 3, and 3 extra cycles. FP32/FP64 match the
   model.
+- **KDOS loads after a THROW.** A THROW inside a load leaves the next load
+  broken. Three tests show it, and all fail the same way on `main`
+  (`c9134b2`) or at the end of Phase 6:
+  - `TestAppLoad::test_app_load_throw_restores_loader_and_machine_state`
+    runs into wild code after `-88 THROW` inside `APP-LOAD`. Since Phase 7
+    makes F7 and FD-FF trap, that wild code traps in a loop the harness
+    counts as one step per trap, so the test no longer ends and its output
+    grows without bound. Deselect it until the loader bug is fixed.
+  - `TestKDOSModuleSystem::test_relative_require_throw_rolls_back_and_retries`
+    and
+    `TestKDOSDynamicModuleRegistry::test_nested_throw_rolls_back_all_provisional_ids_then_retries`
+    fail with the same output before and after Phase 7.
+- **`test_system.py` memory in one process.** Run as one pytest process,
+  the file's memory grows past the 3.5 GiB guard around the network-stack
+  tests, although each test alone stays under 500 MiB. Run it in chunks of
+  a few hundred tests, each in a fresh process under the RSS guard.
 - **Stale benchmark pin on `main`.**
   `tests/test_native_cycle_execution.py::test_phase0_oracle_captures_bus_state_and_requires_quiescence`
   expects `bench_phase0_concurrency.SCHEMA_VERSION == 20`; the script is at

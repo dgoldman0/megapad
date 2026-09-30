@@ -31,6 +31,18 @@ PRIM_SRC = $(PRIM)/mp64_sram_sp.v \
            $(PRIM)/mp64_mul.v \
            $(PRIM)/mp64_pll.v
 
+# The tile engine's floating-point datapath: FP16/BF16 lanes, the FMA
+# units, the shared rounder, the divide/square-root units, and the exact
+# reduction helpers.
+TILE_FP_SRC = $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v \
+              $(CORE)/mp64_fp_round.v $(CORE)/mp64_fp_divsqrt.v \
+              $(CORE)/mp64_fp_exact.v
+
+# Scalar FP unit and the FMA datapath and rounder it shares with the tile
+# engine; every full-core bench compiles it.
+FPU_SRC = $(CORE)/mp64_fpu.v $(CORE)/mp64_fp_divsqrt.v $(CORE)/mp64_fma.v \
+          $(CORE)/mp64_fp_round.v
+
 # Core sources (Phase 3)
 CORE_SRC = $(CORE)/mp64_alu.v \
            $(CORE)/mp64_bitfield.v \
@@ -53,7 +65,7 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
         peripherals disk_controller disk_bus_dma disk_lint crypto sha3_keccak wots aes ntt kem nic \
-        nic_lint nic_bus mailbox trng tile tile_ext fp_exact fma_unit tacc tacc_cycles \
+        nic_lint nic_bus mailbox trng tile tile_ext fp_exact fma_unit fpu cpu_fp tacc tacc_cycles \
         tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
         tacc_transfer tacc_soc soc_smoke soc_wots soc_tile_icache soc_elaborate
@@ -217,7 +229,7 @@ tb_icache.vvp: tb_icache.v $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v
 cpu_smoke: tb_cpu_smoke.vvp
 	$(VVP) $<
 
-tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
+tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_string.v \
                   $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
                   $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
                   $(CRYPTO)/mp64_sha2_isa.v \
@@ -227,14 +239,35 @@ tb_cpu_smoke.vvp: tb_cpu_smoke.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 		$(filter-out $(CPU_FUNCS_DEP),$^)
 
+# --- Full-core EXT.FP program against the Python emulator ---
+cpu_fp: cpu_fp_program_check tb_cpu_fp.vvp
+	$(VVP) tb_cpu_fp.vvp
+
+cpu_fp_program_check: gen_cpu_fp_program.py cpu_fp_program.hex cpu_fp_expected.hex
+	@tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	    python3 gen_cpu_fp_program.py "$$tmp" > /dev/null && \
+	    cmp "$$tmp"/cpu_fp_program.hex cpu_fp_program.hex && \
+	    cmp "$$tmp"/cpu_fp_expected.hex cpu_fp_expected.hex
+
+tb_cpu_fp.vvp: tb_cpu_fp.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_string.v \
+               $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
+               $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
+               $(CRYPTO)/mp64_sha2_isa.v \
+               $(CORE)/mp64_icache.v $(PRIM)/mp64_sram_sp.v \
+               $(PRIM)/mp64_sram_dp.v $(PRIM)/mp64_mul.v \
+               $(MEM)/mp64_memory.v ../pkg/mp64_pkg.vh $(CPU_FUNCS_DEP)
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
+		$(filter-out $(CPU_FUNCS_DEP),$^)
+
 # --- Cluster (4 micro-cores + shared MUL/DIV + shared tile engine) ---
 cluster: tb_cluster.vvp
 	$(VVP) $<
 
 tb_cluster.vvp: tb_cluster.v $(CORE)/mp64_cluster.v $(CORE)/mp64_cpu_micro.v \
+                $(CORE)/mp64_fpu.v \
                 $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v $(PRIM)/mp64_mul.v \
                 $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-                $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_exact.v \
+                $(TILE_FP_SRC) \
                 $(CRYPTO)/mp64_crc_isa.v $(CRYPTO)/mp64_sha2_isa.v \
                 ../pkg/mp64_pkg.vh $(CPU_FUNCS_DEP)
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
@@ -254,7 +287,7 @@ tb_cpu_micro.vvp: tb_cpu_micro.v $(CORE)/mp64_cpu_micro.v $(CORE)/mp64_alu.v \
 opcodes: tb_opcodes.vvp
 	$(VVP) $<
 
-tb_opcodes.vvp: tb_opcodes.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
+tb_opcodes.vvp: tb_opcodes.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_string.v \
                 $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
                 $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
                 $(CRYPTO)/mp64_sha2_isa.v \
@@ -268,7 +301,7 @@ tb_opcodes.vvp: tb_opcodes.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
 string: tb_string.vvp
 	$(VVP) $<
 
-tb_string.vvp: tb_string.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
+tb_string.vvp: tb_string.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_string.v \
                $(CORE)/mp64_dict.v $(CORE)/mp64_alu.v \
                $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
                $(CRYPTO)/mp64_sha2_isa.v \
@@ -282,7 +315,7 @@ tb_string.vvp: tb_string.v $(CORE)/mp64_cpu.v $(CORE)/mp64_string.v \
 dict: tb_dict.vvp
 	$(VVP) $<
 
-tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(CORE)/mp64_dict.v \
+tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_dict.v \
              $(CORE)/mp64_string.v $(CORE)/mp64_alu.v \
              $(CORE)/mp64_bitfield.v $(CRYPTO)/mp64_crc_isa.v \
              $(CRYPTO)/mp64_sha2_isa.v \
@@ -454,13 +487,12 @@ tacc_cycles: tamac_integer_vectors_check tamac_fp_vectors_check \
 tacc_vectors: tacc_cycles
 
 tb_tacc_cycles.vvp: tb_tacc_cycles.v $(GPU)/mp64_tacc.v \
-                    $(GPU)/mp64_tile.v $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v \
-                    $(CORE)/mp64_fp_exact.v \
+                    $(GPU)/mp64_tile.v $(TILE_FP_SRC) \
                     ../pkg/mp64_pkg.vh tamac_integer_vectors.vec \
                     tamac_fp_vectors.vec
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 	    tb_tacc_cycles.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-	    $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_exact.v \
+	    $(TILE_FP_SRC) \
 	    ../pkg/mp64_pkg.vh
 
 # --- Multi-format FMA unit (FP32/FP64 element-wise datapath) ---
@@ -472,8 +504,21 @@ fma_vectors_check: gen_fma_vectors.py fma_vectors.vec
 	    python3 gen_fma_vectors.py > "$$tmp" && \
 	    cmp "$$tmp" fma_vectors.vec
 
-tb_fma_unit.vvp: tb_fma_unit.v $(CORE)/mp64_fma.v fma_vectors.vec
-	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ tb_fma_unit.v $(CORE)/mp64_fma.v
+tb_fma_unit.vvp: tb_fma_unit.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_round.v fma_vectors.vec
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ tb_fma_unit.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_round.v
+
+# --- Scalar FPU (EXT.FP engine) against shared/scalar_fp.py ---
+fpu: fpu_vectors_check tb_fpu.vvp
+	$(VVP) tb_fpu.vvp
+
+fpu_vectors_check: gen_fpu_vectors.py fpu_vectors.vec
+	@tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	    python3 gen_fpu_vectors.py > "$$tmp" && \
+	    cmp "$$tmp" fpu_vectors.vec
+
+tb_fpu.vvp: tb_fpu.v $(FPU_SRC) ../pkg/mp64_pkg.vh ../pkg/mp64_cpu_funcs.vh \
+            fpu_vectors.vec
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ tb_fpu.v $(FPU_SRC)
 
 # EXT.8 VSEL, TCMP, and TCVT golden vectors from the Python emulator.
 tile_ext: tile_ext_vectors_check tb_tile_ext.vvp
@@ -485,11 +530,10 @@ tile_ext_vectors_check: gen_tile_ext_vectors.py tile_ext_vectors.vec
 	    cmp "$$tmp" tile_ext_vectors.vec
 
 tb_tile_ext.vvp: tb_tile_ext.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-                 $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v \
-                 $(CORE)/mp64_fp_exact.v ../pkg/mp64_pkg.vh tile_ext_vectors.vec
+                 $(TILE_FP_SRC) ../pkg/mp64_pkg.vh tile_ext_vectors.vec
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 	    tb_tile_ext.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-	    $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_exact.v
+	    $(TILE_FP_SRC)
 
 # --- Tile engine ---
 tile: fp_exact fma_unit tile_fp tile_ext tb_tile.vvp tb_tile_write_ack.vvp
@@ -506,21 +550,20 @@ tile_fp_vectors_check: gen_tile_fp_vectors.py tile_fp_vectors.vec
 	    cmp "$$tmp" tile_fp_vectors.vec
 
 tb_tile_fp.vvp: tb_tile_fp.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-                $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_exact.v \
+                $(TILE_FP_SRC) \
                 ../pkg/mp64_pkg.vh tile_fp_vectors.vec
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ \
 	    tb_tile_fp.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-	    $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_exact.v
+	    $(TILE_FP_SRC)
 
 tb_tile.vvp: tb_tile.v $(GPU)/mp64_tacc.v $(GPU)/mp64_tile.v \
-             $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v $(CORE)/mp64_fp_exact.v \
+             $(TILE_FP_SRC) \
              ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 tb_tile_write_ack.vvp: tb_tile_write_ack.v $(GPU)/mp64_tacc.v \
                        $(GPU)/mp64_tile.v \
-                       $(CORE)/mp64_fp_half.v $(CORE)/mp64_fma.v \
-                       $(CORE)/mp64_fp_exact.v ../pkg/mp64_pkg.vh
+                       $(TILE_FP_SRC) ../pkg/mp64_pkg.vh
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
 
 # ==========================================================================
@@ -543,7 +586,7 @@ tb_qos.vvp: tb_qos.v $(BUS)/mp64_bus.v
 multicore_smoke: tb_multicore_smoke.vvp
 	$(VVP) $<
 
-tb_multicore_smoke.vvp: tb_multicore_smoke.v $(CORE)/mp64_cpu.v \
+tb_multicore_smoke.vvp: tb_multicore_smoke.v $(CORE)/mp64_cpu.v $(FPU_SRC) \
                         $(CORE)/mp64_dict.v $(CORE)/mp64_string.v \
                         $(CORE)/mp64_alu.v $(CORE)/mp64_bitfield.v \
                         $(CRYPTO)/mp64_crc_isa.v \

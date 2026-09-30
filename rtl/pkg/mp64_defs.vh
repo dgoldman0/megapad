@@ -374,6 +374,7 @@ parameter [7:0] CSR_IE       = 8'h09;   // Interrupt enable (alias of flag_i)
 parameter [7:0] CSR_PRIV     = 8'h0A;   // Privilege level (0=supervisor, 1=user)
 parameter [7:0] CSR_MPU_BASE = 8'h0B;   // MPU lower bound (inclusive)
 parameter [7:0] CSR_MPU_LIMIT= 8'h0C;   // MPU upper bound (exclusive)
+parameter [7:0] CSR_FPCSR    = 8'h0D;   // Scalar FP rounding mode and flags
 parameter [7:0] CSR_SB       = 8'h10;   // Tile bank
 parameter [7:0] CSR_SR       = 8'h11;   // Tile cursor row
 parameter [7:0] CSR_SC       = 8'h12;   // Tile cursor col

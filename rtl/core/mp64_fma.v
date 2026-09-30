@@ -5,10 +5,12 @@
 // docs/floating-point.md defines every result; decision D7 of
 // docs/megapad-full-float-plan.md defines the unit.  One unit computes one
 // binary64 FMA, or two binary32 FMAs in split mode, per beat.  Each result is
-// the exact a * b + c rounded once to nearest-even in the output format, with
-// full subnormal support, IEEE signed zeros, and canonical NaNs.  The tile
-// engine forms ADD as a * 1 + b, SUB as a * 1 + (-b), and MUL and WMUL as
-// a * b + (-0), so every element-wise arithmetic result has one rounding.
+// the exact a * b + c rounded once in the output format, with full subnormal
+// support, IEEE signed zeros, and canonical NaNs.  The tile engine rounds to
+// nearest-even and forms ADD as a * 1 + b, SUB as a * 1 + (-b), and MUL and
+// WMUL as a * b + (-0), so every element-wise arithmetic result has one
+// rounding.  The scalar FPU (mp64_fpu.v) uses the same lane with its own
+// rounding mode and the exception flags.
 //
 // The unit holds two lanes.  Lane 0 has 53-bit significands and serves the
 // binary64 operation or the first binary32 operation; lane 1 has 24-bit
@@ -61,13 +63,13 @@ module mp64_fma_core #(
     input  wire signed [13:0] c_exp,
 
     input  wire               out64,   // round to binary64, else binary32
-    output reg  [63:0]        result   // binary32 results use bits [31:0]
+    input  wire [2:0]         rm,      // 0 RNE, 1 RTZ, 2 RDN, 3 RUP, 4 RMM
+    output wire [63:0]        result,  // binary32 results use bits [31:0]
+    output wire [4:0]         flags    // {NV, DZ, OF, UF, NX}
 );
     localparam PW = 2 * SW;
     localparam W  = (PW + 3 > 56) ? PW + 3 : 56;
-    // The rounded significand holds up to 54 bits (binary64 precision plus
-    // the rounding carry) even in a lane with narrow operands.
-    localparam KW = (W + 1 > 55) ? W + 1 : 55;
+    localparam RDN = 3'd2;
 
     function integer msb_index;
         input [W:0] value;
@@ -98,70 +100,67 @@ module mp64_fma_core #(
         end
     endfunction
 
-    function [63:0] pack;
-        input        is64;
-        input        sign;
-        input [11:0] biased;
-        input [52:0] fraction;
-        begin
-            if (is64)
-                pack = {sign, biased[10:0], fraction[51:0]};
-            else
-                pack = {32'd0, sign, biased[7:0], fraction[22:0]};
-        end
-    endfunction
+    reg [63:0]          special;     // NaN, infinity, and zero results
+    reg                 use_special;
+    reg                 invalid;
+    reg                 sum_sign;
+    reg [W:0]           sum;
+    reg signed [15:0]   sum_lsb_exp;
+
+    wire [63:0] rounded;
+    wire [4:0]  round_flags;
+
+    mp64_fp_round #(.MW(W + 1)) u_round (
+        .sign     (sum_sign),
+        .mag      (sum),
+        .lsb_exp  (sum_lsb_exp),
+        .sticky_in(1'b0),
+        .fmt      (out64 ? 2'd3 : 2'd2),
+        .rm       (rm),
+        .result   (rounded),
+        .flags    (round_flags)
+    );
+
+    assign result = use_special ? special : rounded;
+    assign flags  = use_special ? {invalid, 4'd0} : round_flags;
 
     always @(*) begin : fma
-        integer precision;
-        integer emin;
-        integer bias;
-        integer biased_max;
         integer prod_lead;
         integer c_lead;
         integer prod_top;
         integer c_top;
         integer large_top;
         integer small_top;
-        integer sum_lead;
-        integer quantum;
-        integer shift;
-        integer biased;
         reg [PW-1:0] prod;
         reg          prod_sign;
         reg          prod_zero;
         reg          prod_inf;
         reg          addend_zero;
-        reg          invalid;
         reg          subtract;
         reg          large_is_prod;
-        reg          large_sign;
         reg [W-1:0]  prod_norm;
         reg [W-1:0]  c_norm;
         reg [W-1:0]  major;
         reg [W-1:0]  minor;
         reg [W-1:0]  aligned;
-        reg [W:0]    sum;
-        reg [KW-1:0] kept;
-        reg [W:0]    round_mask;
-        reg          round_bit;
-        reg          sticky;
         reg [63:0]   quiet_nan;
         reg [63:0]   infinity;
+        reg [63:0]   sign_bit;
 
-        precision  = out64 ? 53 : 24;
-        emin       = out64 ? -1022 : -126;
-        bias       = out64 ? 1023 : 127;
-        biased_max = out64 ? 2047 : 255;
-        quiet_nan  = out64 ? 64'h7FF8_0000_0000_0000 : 64'h0000_0000_7FC0_0000;
-        infinity   = out64 ? 64'h7FF0_0000_0000_0000 : 64'h0000_0000_7F80_0000;
+        quiet_nan = out64 ? 64'h7FF8_0000_0000_0000 : 64'h0000_0000_7FC0_0000;
+        infinity  = out64 ? 64'h7FF0_0000_0000_0000 : 64'h0000_0000_7F80_0000;
+        sign_bit  = out64 ? 64'h8000_0000_0000_0000 : 64'h0000_0000_8000_0000;
 
         prod        = a_sig * b_sig;
         prod_sign   = a_sign ^ b_sign;
         prod_inf    = a_inf || b_inf;
         prod_zero   = a_zero || b_zero || (prod == {PW{1'b0}});
         addend_zero = c_zero || (c_sig == {SW{1'b0}});
-        invalid     = (a_inf && b_zero) || (a_zero && b_inf) ||
-                      (prod_inf && c_inf && (prod_sign != c_sign));
+        // 0 * inf is invalid even beside a NaN addend; inf - inf only when
+        // no operand is a NaN.
+        invalid = (a_inf && b_zero) || (a_zero && b_inf) ||
+                  (!a_nan && !b_nan && !c_nan &&
+                   prod_inf && c_inf && (prod_sign != c_sign));
 
         prod_lead = -1;
         c_lead    = -1;
@@ -169,38 +168,30 @@ module mp64_fma_core #(
         c_top     = 0;
         large_top = 0;
         small_top = 0;
-        sum_lead  = -1;
-        quantum   = 0;
-        shift     = 0;
-        biased    = 0;
         subtract  = 1'b0;
         large_is_prod = 1'b0;
-        large_sign = 1'b0;
         prod_norm = {W{1'b0}};
         c_norm    = {W{1'b0}};
         major     = {W{1'b0}};
         minor     = {W{1'b0}};
         aligned   = {W{1'b0}};
         sum       = {(W+1){1'b0}};
-        kept      = {KW{1'b0}};
-        round_mask = {(W+1){1'b0}};
-        round_bit = 1'b0;
-        sticky    = 1'b0;
-        result    = 64'd0;
+        sum_sign  = 1'b0;
+        sum_lsb_exp = 16'sd0;
+        special   = 64'd0;
+        use_special = 1'b1;
 
         if (a_nan || b_nan || c_nan || invalid) begin
-            result = quiet_nan;
+            special = quiet_nan;
         end else if (prod_inf) begin
-            result = infinity | (prod_sign ? (out64 ? 64'h8000_0000_0000_0000
-                                                    : 64'h0000_0000_8000_0000)
-                                           : 64'd0);
+            special = infinity | (prod_sign ? sign_bit : 64'd0);
         end else if (c_inf) begin
-            result = infinity | (c_sign ? (out64 ? 64'h8000_0000_0000_0000
-                                                 : 64'h0000_0000_8000_0000)
-                                        : 64'd0);
+            special = infinity | (c_sign ? sign_bit : 64'd0);
         end else if (prod_zero && addend_zero) begin
-            // An exact zero sum is -0 only when both terms are -0 (RNE).
-            result = pack(out64, prod_sign && c_sign, 12'd0, 53'd0);
+            // An exact zero sum of zeros is -0 when both are -0, or under
+            // round-down when either is.
+            special = (rm == RDN ? (prod_sign || c_sign)
+                                 : (prod_sign && c_sign)) ? sign_bit : 64'd0;
         end else begin
             if (!prod_zero) begin
                 prod_lead = msb_index({{(W+1-PW){1'b0}}, prod});
@@ -223,17 +214,17 @@ module mp64_fma_core #(
                 large_is_prod = prod_norm >= c_norm;
 
             if (large_is_prod) begin
-                major      = prod_norm;
-                large_top  = prod_top;
-                large_sign = prod_sign;
-                minor      = c_norm;
-                small_top  = c_top;
+                major     = prod_norm;
+                large_top = prod_top;
+                sum_sign  = prod_sign;
+                minor     = c_norm;
+                small_top = c_top;
             end else begin
-                major      = c_norm;
-                large_top  = c_top;
-                large_sign = c_sign;
-                minor      = prod_norm;
-                small_top  = prod_top;
+                major     = c_norm;
+                large_top = c_top;
+                sum_sign  = c_sign;
+                minor     = prod_norm;
+                small_top = prod_top;
             end
 
             if (!prod_zero && !addend_zero) begin
@@ -244,48 +235,13 @@ module mp64_fma_core #(
                            : ({1'b0, major} + {1'b0, aligned});
 
             if (sum == {(W+1){1'b0}}) begin
-                // Exact cancellation of nonzero terms is +0 under RNE.
-                result = pack(out64, 1'b0, 12'd0, 53'd0);
+                // Exact cancellation of nonzero terms is +0, or -0 under
+                // round-down.
+                special = rm == RDN ? sign_bit : 64'd0;
             end else begin
                 // Bit 0 of sum has weight 2**(large_top - (W - 1)).
-                sum_lead = msb_index(sum);
-                quantum  = large_top - (W - 1) + sum_lead - (precision - 1);
-                if (quantum < emin - (precision - 1))
-                    quantum = emin - (precision - 1);
-                shift = quantum - (large_top - (W - 1));
-
-                if (shift <= 0) begin
-                    kept = {{(KW-W-1){1'b0}}, sum} << (-shift);
-                end else if (shift > W + 1) begin
-                    kept   = {KW{1'b0}};
-                    sticky = 1'b1;
-                end else begin
-                    kept       = {{(KW-W-1){1'b0}}, sum} >> shift;
-                    round_bit  = sum[shift - 1];
-                    round_mask = ~({(W+1){1'b1}} << (shift - 1));
-                    sticky     = |(sum & round_mask);
-                end
-
-                if (round_bit && (sticky || kept[0]))
-                    kept = kept + 1'b1;
-                if (kept[precision]) begin
-                    kept    = kept >> 1;
-                    quantum = quantum + 1;
-                end
-
-                if (kept[precision - 1]) begin
-                    biased = quantum + (precision - 1) + bias;
-                    if (biased >= biased_max)
-                        result = infinity |
-                            (large_sign ? (out64 ? 64'h8000_0000_0000_0000
-                                                 : 64'h0000_0000_8000_0000)
-                                        : 64'd0);
-                    else
-                        result = pack(out64, large_sign, biased[11:0],
-                                      kept[52:0]);
-                end else begin
-                    result = pack(out64, large_sign, 12'd0, kept[52:0]);
-                end
+                use_special = 1'b0;
+                sum_lsb_exp = large_top - (W - 1);
             end
         end
     end
@@ -369,7 +325,9 @@ module mp64_fma_unit (
         .c_nan (dc0[70]), .c_inf (dc0[69]), .c_zero(dc0[68]),
         .c_sign(dc0[67]), .c_exp (dc0[66:53]), .c_sig (dc0[52:0]),
         .out64 (out64),
-        .result(r0)
+        .rm    (3'd0),
+        .result(r0),
+        .flags ()
     );
 
     mp64_fma_core #(.SW(24)) u_lane1 (
@@ -380,6 +338,8 @@ module mp64_fma_unit (
         .c_nan (dc1[70]), .c_inf (dc1[69]), .c_zero(dc1[68]),
         .c_sign(dc1[67]), .c_exp (dc1[66:53]), .c_sig (dc1[23:0]),
         .out64 (out64),
-        .result(r1)
+        .rm    (3'd0),
+        .result(r1),
+        .flags ()
     );
 endmodule

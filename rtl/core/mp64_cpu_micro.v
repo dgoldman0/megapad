@@ -65,6 +65,19 @@ module mp64_cpu_micro (
     input  wire [127:0] mul_result,
     input  wire        mul_done,
 
+    // === Shared scalar FP unit (to the cluster FP arbiter) ===
+    output reg         fp_req,
+    output reg  [7:0]  fp_op,
+    output reg  [63:0] fp_a,        // Rd
+    output reg  [63:0] fp_b,        // Rs
+    output reg  [63:0] fp_c,        // Rt
+    output reg  [2:0]  fp_rm,       // this core's FPCSR.RM
+    input  wire [63:0] fp_result,
+    input  wire        fp_write,
+    input  wire [4:0]  fp_flags,    // {NV, DZ, OF, UF, NX}
+    input  wire [3:0]  fp_cmp,      // {V, N, G, Z}
+    input  wire        fp_done,
+
     // === Shared CRC interface (to cluster CRC arbiter) ===
     output reg         crc_req,
     output reg  [3:0]  crc_op,
@@ -198,6 +211,8 @@ module mp64_cpu_micro (
     reg        skip_fetch_pending;
     reg        skip_has_rex;
     reg        skip_is_mex;       // lookahead is a MEX function byte
+    reg        skip_is_fp;        // lookahead is an EXT.FP operation byte
+    reg [8:0]  fpcsr;             // private FPCSR: RM [2:0], flags [8:4]
     reg [3:0]  skip_mex_len;      // skipped MEX length without a control byte
 
     wire [3:0] fam = ibuf[0][7:4];
@@ -315,7 +330,15 @@ module mp64_cpu_micro (
             skip_fetch_pending <= 1'b0;
             skip_has_rex <= 1'b0;
             skip_is_mex <= 1'b0;
+            skip_is_fp  <= 1'b0;
             skip_mex_len <= 4'd0;
+            fpcsr       <= 9'd0;
+            fp_req      <= 1'b0;
+            fp_op       <= 8'd0;
+            fp_a        <= 64'd0;
+            fp_b        <= 64'd0;
+            fp_c        <= 64'd0;
+            fp_rm       <= 3'd0;
             ibuf_len      <= 4'd0;
             ibuf_need     <= 4'd1;
 
@@ -489,6 +512,10 @@ module mp64_cpu_micro (
                         // byte zero. Bare sub-ops complete after byte one.
                         ibuf_need <= 4'd2;
                         cpu_state <= CPU_DECODE;
+                    end else if (ibuf_len == 4'd1 && ibuf[0] == 8'hFC &&
+                                 fp_has_t(bus_rdata[7:0])) begin
+                        // EXT.FP FMA and FMS carry the T byte.
+                        ibuf_need <= 4'd4;
                     end else if (ibuf_len == 4'd1 &&
                                  mex_has_control_byte(
                                      ibuf[0], bus_rdata[7:0],
@@ -594,6 +621,43 @@ module mp64_cpu_micro (
                             bus_size <= BUS_DWORD;
                             cpu_state <= CPU_MEM_WRITE;
                         end
+                    end else if (nib == EXT_FP) begin
+                        // EXT.FP — the cluster-shared FP unit.  Reserved
+                        // encodings and modes trap after the instruction.
+                        if (!fp_op_legal(ibuf[1], ibuf[3], fpcsr[2:0])) begin
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        trap_return_pc <= R[psel] + {60'd0, ibuf_len};
+                        mem_data <= {56'd0, flags};
+                        flags[6] <= 1'b0;
+                        ivec_id  <= IRQX_ILLEGAL_OP;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        ext_active <= 1'b0;
+                        cpu_state <= CPU_MEM_WRITE;
+                        end else begin
+                            fp_req     <= 1'b1;
+                            fp_op      <= ibuf[1];
+                            fp_a       <= R[ibuf[2][7:4]];
+                            fp_b       <= R[ibuf[2][3:0]];
+                            fp_c       <= R[ibuf[3][3:0]];
+                            fp_rm      <= fpcsr[2:0];
+                            dst_reg    <= ibuf[2][7:4];
+                            ext_active <= 1'b0;
+                            cpu_state  <= CPU_FPU;
+                        end
+                    end else if (nib == 4'h7 || nib >= 4'hD) begin
+                        // F7 and FD-FF are unassigned and trap.
+                        R[spsel] <= R[spsel] - 64'd8;
+                        effective_addr <= R[spsel] - 64'd8;
+                        trap_return_pc <= R[psel] + {60'd0, ibuf_len};
+                        mem_data <= {56'd0, flags};
+                        flags[6] <= 1'b0;
+                        ivec_id  <= IRQX_ILLEGAL_OP;
+                        post_action <= POST_IRQ_VEC;
+                        bus_size <= BUS_DWORD;
+                        ext_active <= 1'b0;
+                        cpu_state <= CPU_MEM_WRITE;
                     end else begin
                         ext_active <= 1'b1;
                         ext_mod    <= nib;
@@ -945,6 +1009,8 @@ module mp64_cpu_micro (
                                 end
                             end
                             CSR_FLAGS:    flags    <= R[nib[2:0]][7:0];
+                            CSR_FPCSR:    fpcsr    <= {R[nib[2:0]][8:4], 1'b0,
+                                                       R[nib[2:0]][2:0]};
                             CSR_PSEL:     psel     <= R[nib[2:0]][3:0];
                             CSR_XSEL:     xsel     <= R[nib[2:0]][3:0];
                             CSR_SPSEL:    spsel    <= R[nib[2:0]][3:0];
@@ -1007,6 +1073,7 @@ module mp64_cpu_micro (
                             CSR_TACC_STATUS: R[nib[2:0]] <= tacc_status;
                             CSR_TACC_CTL:    R[nib[2:0]] <= 64'd0;
                             CSR_FLAGS:       R[nib[2:0]] <= {56'd0, flags};
+                            CSR_FPCSR:       R[nib[2:0]] <= {55'd0, fpcsr};
                             CSR_PSEL:        R[nib[2:0]] <= {60'd0, psel};
                             CSR_XSEL:        R[nib[2:0]] <= {60'd0, xsel};
                             CSR_SPSEL:       R[nib[2:0]] <= {60'd0, spsel};
@@ -1446,6 +1513,25 @@ module mp64_cpu_micro (
             // ============================================================
             // MULDIV: wait for shared cluster MUL/DIV result
             // ============================================================
+            CPU_FPU: begin
+                if (fp_done) begin
+                    fp_req <= 1'b0;
+                    if (fp_write) begin
+                        R[dst_reg] <= fp_result;
+                    end else begin
+                        // FCMP: Z, G, N, V; C and P clear.
+                        flags[0] <= fp_cmp[0];
+                        flags[5] <= fp_cmp[1];
+                        flags[2] <= fp_cmp[2];
+                        flags[3] <= fp_cmp[3];
+                        flags[1] <= 1'b0;
+                        flags[4] <= 1'b0;
+                    end
+                    fpcsr[8:4] <= fpcsr[8:4] | fp_flags;
+                    cpu_state  <= CPU_FETCH;
+                end
+            end
+
             CPU_MULDIV: begin
                 if (mul_done) begin
                     mul_req <= 1'b0;
@@ -1522,9 +1608,11 @@ module mp64_cpu_micro (
                         bus_rdata[7:0] <= 8'hF5) begin
                         skip_has_rex <= 1'b1;
                         cpu_state <= CPU_SKIP_REX;
-                    end else if (bus_rdata[7:0] == 8'hFB) begin
+                    end else if (bus_rdata[7:0] == 8'hFB ||
+                                 bus_rdata[7:0] == 8'hFC) begin
                         skip_has_rex <= 1'b0;
                         skip_is_mex <= 1'b0;
+                        skip_is_fp  <= bus_rdata[7:0] == 8'hFC;
                         cpu_state <= CPU_SKIP_CRYPTO;
                     end else if (mex_may_have_control_byte(bus_rdata[7:0])) begin
                         skip_has_rex <= 1'b0;
@@ -1553,8 +1641,9 @@ module mp64_cpu_micro (
 
                 if (bus_ready && skip_fetch_pending) begin
                     skip_fetch_pending <= 1'b0;
-                    if (bus_rdata[7:0] == 8'hFB) begin
+                    if (bus_rdata[7:0] == 8'hFB || bus_rdata[7:0] == 8'hFC) begin
                         skip_is_mex <= 1'b0;
+                        skip_is_fp  <= bus_rdata[7:0] == 8'hFC;
                         cpu_state <= CPU_SKIP_CRYPTO;
                     end else if (mex_may_have_control_byte(bus_rdata[7:0])) begin
                         skip_is_mex <= 1'b1;
@@ -1590,6 +1679,11 @@ module mp64_cpu_micro (
                                    + (skip_has_rex ? 64'd1 : 64'd0)
                                    + {60'd0, skip_mex_len}
                                    + ((bus_rdata[2:0] == 3'd7) ? 64'd1 : 64'd0);
+                    else if (skip_is_fp)
+                        R[psel] <= R[psel]
+                                   + (skip_has_rex ? 64'd1 : 64'd0)
+                                   + (fp_has_t(bus_rdata[7:0])
+                                      ? 64'd4 : 64'd3);
                     else
                         R[psel] <= R[psel]
                                    + (skip_has_rex ? 64'd1 : 64'd0)

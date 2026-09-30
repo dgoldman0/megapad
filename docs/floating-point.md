@@ -436,9 +436,11 @@ VS first, or uses FLE.
 | 9 | quiet NaN |
 
 **8.7 Microcores.** Microcores implement the complete `FC` engine through one
-FP unit shared by each cluster. They reach it through the same request and
-completion port as MUL/DIV, and pay the same +3-cycle admission cost. The
-flags an operation raises are ORed into the issuing microcore's own `FPCSR`.
+FP unit shared by each cluster. They reach it through a request and
+completion port of the same kind as MUL/DIV's, with its own round-robin
+arbiter, and pay the same +3-cycle admission cost. Each request carries the
+issuing microcore's `FPCSR.RM`, and the flags the operation raises are ORed
+into that microcore's own `FPCSR`.
 
 ## 9. `FPCSR` (CSR `0x0D`)
 
@@ -575,5 +577,5 @@ models no instruction encodings.
 | FP32/FP64 element-wise operations, operand forms, lane shapes, and the §10 costs; illegal VSHR/VSHL/VCLZ in every float format; the multi-format FMA unit: all four backends | 4 | Implemented |
 | FP32/FP64 reductions, DOT/DOTACC, and TACC formats: all four backends | 5 | Implemented |
 | `TCVT`, `TCMP`, `VSEL`; removal of float PACK and UNPACK: all four backends | 6 | Implemented |
-| Scalar `FC` engine and `FPCSR` | 7 | Specified |
+| Scalar `FC` engine and `FPCSR`, the F7/FD–FF traps, and the §11 BIOS words: Python emulator, native accelerator (through the Python oracle), hosted simulator words, RTL full core and cluster | 7 | Implemented |
 | `TDIV`, `TSQRT` | 8 | Specified |

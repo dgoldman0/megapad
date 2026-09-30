@@ -10,6 +10,8 @@
 //   cond_eval()  — condition code evaluator for BR/LBR/SKIP
 //   instr_len()  — instruction byte length decoder
 //   crypto_is_bare() — identify two-byte EXT.CRYPTO instructions
+//   fp_has_t(), fp_uses_dynamic_rm(), fp_op_legal(), fp_extra_cycles()
+//     — EXT.FP (FC) length, rounding-mode use, legality, and latency
 //
 
 // ========================================================================
@@ -139,8 +141,69 @@ function [3:0] instr_len;
             FAM_EXT:    instr_len = (byte0[3:0] == 4'h9) ? 4'd3  // EXT.STRING
                                   : (byte0[3:0] == 4'hA) ? 4'd3  // EXT.DICT
                                   : (byte0[3:0] == 4'hB) ? 4'd3  // EXT.CRYPTO (max 3)
+                                  : (byte0[3:0] == 4'hC) ? 4'd3  // EXT.FP (4 with T)
                                   : 4'd1;
             default:    instr_len = 4'd1;
         endcase
+    end
+endfunction
+
+// ========================================================================
+// EXT.FP (FC) — docs/floating-point.md §8 and §10
+// ========================================================================
+//   FC op DR [T]: op[7:6] format (0 S, 1 D, 2-3 reserved), op[5:0] operation.
+
+// FMA and FMS carry the T byte, so they are four bytes long.
+function fp_has_t;
+    input [7:0] op;
+    begin
+        fp_has_t = (op[5:0] == 6'h07) || (op[5:0] == 6'h08);
+    end
+endfunction
+
+// Operations that round with FPCSR.RM, decided by op[5:0] alone.
+function fp_uses_dynamic_rm;
+    input [7:0] op;
+    reg   [5:0] c;
+    begin
+        c = op[5:0];
+        fp_uses_dynamic_rm =
+            (c <= 6'h04) || (c == 6'h07) || (c == 6'h08) ||
+            (c >= 6'h38 && c <= 6'h3B) || (c == 6'h3D) ||
+            (c >= 6'h20 && c < 6'h38 && c[2:0] == 3'd7);
+    end
+endfunction
+
+// Legal encoding and mode; anything else raises IVEC_ILLEGAL_OP.
+function fp_op_legal;
+    input [7:0] op;
+    input [7:0] t;
+    input [2:0] rm_dyn;
+    reg   [5:0] c;
+    begin
+        c = op[5:0];
+        fp_op_legal =
+            !op[7] &&
+            ((c <= 6'h08) || (c >= 6'h10 && c <= 6'h14) ||
+             (c >= 6'h20 && c <= 6'h3E)) &&
+            !(fp_has_t(op) && t[7:5] != 3'd0) &&
+            !(c >= 6'h20 && c < 6'h38 &&
+              (c[2:0] == 3'd5 || c[2:0] == 3'd6)) &&
+            !(fp_uses_dynamic_rm(op) && rm_dyn > 3'd4);
+    end
+endfunction
+
+// §10 extra cycles: the unit's start-to-done latency.
+function [5:0] fp_extra_cycles;
+    input [7:0] op;
+    reg   [5:0] c;
+    begin
+        c = op[5:0];
+        if (c == 6'h03 || c == 6'h04)
+            fp_extra_cycles = op[6] ? 6'd30 : 6'd15;
+        else if (c == 6'h05 || c == 6'h06 || (c >= 6'h10 && c <= 6'h14))
+            fp_extra_cycles = 6'd1;
+        else
+            fp_extra_cycles = 6'd3;
     end
 endfunction

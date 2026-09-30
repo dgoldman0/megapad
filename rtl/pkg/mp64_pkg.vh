@@ -100,6 +100,7 @@ localparam [3:0] EXT_ETALU  = 4'd8;     // Extended tile ALU
 localparam [3:0] EXT_STRING = 4'd9;     // EXT.STRING Forth string engine
 localparam [3:0] EXT_DICT   = 4'hA;     // EXT.DICT Forth dictionary engine
 localparam [3:0] EXT_CRYPTO = 4'hB;     // EXT.CRYPTO per-core crypto ISA
+localparam [3:0] EXT_FP     = 4'hC;     // EXT.FP scalar floating-point engine
 
 // ============================================================================
 // §3 — ALU & CPU FSM Shared Encodings
@@ -129,6 +130,7 @@ localparam [4:0] CPU_SHA_WAIT   = 5'd19; // SHA-2: waiting for compression engin
 localparam [4:0] CPU_GF_WAIT    = 5'd20; // Field ALU: waiting for GF engine
 localparam [4:0] CPU_CSR_WAIT   = 5'd21; // acknowledged accelerator CSR access
 localparam [4:0] CPU_TILE_CSR_WAIT = 5'd22; // acknowledged shared-engine CSR
+localparam [4:0] CPU_FPU        = 5'd25; // EXT.FP: waiting for the FP unit
 
 // --- ALU operation codes (4-bit) ---
 localparam [3:0] ALU_ADD = 4'd0;
@@ -315,6 +317,7 @@ localparam [7:0] CSR_IE        = 8'h09;  // Interrupt enable
 localparam [7:0] CSR_PRIV      = 8'h0A;  // 0=supervisor, 1=user
 localparam [7:0] CSR_MPU_BASE  = 8'h0B;  // MPU lower bound
 localparam [7:0] CSR_MPU_LIMIT = 8'h0C;  // MPU upper bound
+localparam [7:0] CSR_FPCSR     = 8'h0D;  // Scalar FP rounding mode and flags
 
 // Tile engine CSRs
 localparam [7:0] CSR_SB        = 8'h10;  // Tile bank

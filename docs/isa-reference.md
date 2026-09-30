@@ -1091,10 +1091,8 @@ implementation-specific.
 
 ### EXT.FP — Scalar Floating-Point Engine (FC)
 
-> **Implementation status:** specified in `docs/floating-point.md` §8–§9 and
-> implemented in Phase 7 of `docs/megapad-full-float-plan.md`.  Until then,
-> `FC`, `F7`, and `FD`–`FF` still latch as silent modifiers in current
-> backends.
+> **Implementation status:** defined in `docs/floating-point.md` §8–§10 and
+> implemented in every backend.  `F7` and `FD`–`FF` trap as `ILLEGAL_OP`.
 
 Self-contained scalar IEEE 754 binary32/binary64 instructions operating on
 raw values in the 64-bit GPRs.  There is no separate floating-point register
@@ -1133,11 +1131,12 @@ sticky flags in `FPCSR` (CSR `0x0D`) and never trap.  An S result writes zero
 to bits `[63:32]`.
 
 **Micro-cores:** execute EXT.FP through one cluster-shared FP unit, reached
-like MUL/DIV, with the same +3-cycle admission cost.
+through a request port like MUL/DIV's, with the same +3-cycle admission
+cost.  Each micro-core keeps its own `FPCSR`.
 
 **Cycle counts:** base 1 plus 3 for arithmetic, FMA, rounding, and
 conversions, or plus 1 for min/max, compares, and FCLASS.  FDIV and FSQRT
-take a data-independent constant fixed in Phase 7.
+add 15 cycles on S and 30 on D, whatever the operands.
 
 ---
 

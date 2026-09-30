@@ -2569,6 +2569,47 @@ module tb_cluster;
         release uut.mc_bus_wen;
         release uut.mc_bus_size;
 
+        // -----------------------------------------------------------------
+        // Test FP: EXT.FP on all four micro-cores through the shared unit.
+        // Each core converts its COREID, divides by 3 in RM = COREID & 3,
+        // runs FMA, FSQRT.S, and FCMP, and reads FLAGS and its private
+        // FPCSR.  The four requests contend for the one cluster FPU.
+        // Expected values are the Python microcores' (shared/scalar_fp.py).
+        // -----------------------------------------------------------------
+        for (i = 0; i < 4096; i = i + 1) mem[i] = 8'h00;
+        mem[0] = 8'h60; mem[1] = 8'h00; mem[2] = 8'h00; mem[3] = 8'hD8; mem[4] = 8'h00; mem[5] = 8'hD1; mem[6] = 8'h20; mem[7] = 8'h78;
+        mem[8] = 8'h61; mem[9] = 8'h63; mem[10] = 8'h10; mem[11] = 8'h03; mem[12] = 8'hD9; mem[13] = 8'h0D; mem[14] = 8'hFC; mem[15] = 8'h78;
+        mem[16] = 8'h46; mem[17] = 8'h60; mem[18] = 8'h50; mem[19] = 8'h03; mem[20] = 8'hFC; mem[21] = 8'h78; mem[22] = 8'h55; mem[23] = 8'hFC;
+        mem[24] = 8'h43; mem[25] = 8'h45; mem[26] = 8'h78; mem[27] = 8'h74; mem[28] = 8'hFC; mem[29] = 8'h47; mem[30] = 8'h74; mem[31] = 8'h05;
+        mem[32] = 8'hFC; mem[33] = 8'h04; mem[34] = 8'h84; mem[35] = 8'hFC; mem[36] = 8'h50; mem[37] = 8'h45; mem[38] = 8'hD0; mem[39] = 8'h00;
+        mem[40] = 8'h78; mem[41] = 8'h90; mem[42] = 8'hD0; mem[43] = 8'h0D; mem[44] = 8'h78; mem[45] = 8'hA0; mem[46] = 8'h02;
+
+        rst = 1'b1;
+        repeat (4) @(posedge clk);
+        rst = 1'b0;
+
+        wait_all_halt(20000);
+        check64("FP mc0 R4 id/3", uut.mc[0].u_micro.R[4], 64'h3FF5555555555555);
+        check64("FP mc0 R7 fma", uut.mc[0].u_micro.R[7], 64'h4015555555555555);
+        check64("FP mc0 R8 fsqrt.s", uut.mc[0].u_micro.R[8], 64'h000000004A69B1E9);
+        check64("FP mc0 R9 FLAGS", uut.mc[0].u_micro.R[9], 64'h0000000000000004);
+        check64("FP mc0 R10 FPCSR", uut.mc[0].u_micro.R[10], 64'h0000000000000010);
+        check64("FP mc1 R4 id/3", uut.mc[1].u_micro.R[4], 64'h3FFAAAAAAAAAAAAA);
+        check64("FP mc1 R7 fma", uut.mc[1].u_micro.R[7], 64'h401AAAAAAAAAAAAA);
+        check64("FP mc1 R8 fsqrt.s", uut.mc[1].u_micro.R[8], 64'h000000007FC00000);
+        check64("FP mc1 R9 FLAGS", uut.mc[1].u_micro.R[9], 64'h0000000000000004);
+        check64("FP mc1 R10 FPCSR", uut.mc[1].u_micro.R[10], 64'h0000000000000111);
+        check64("FP mc2 R4 id/3", uut.mc[2].u_micro.R[4], 64'h4000000000000000);
+        check64("FP mc2 R7 fma", uut.mc[2].u_micro.R[7], 64'h4020000000000000);
+        check64("FP mc2 R8 fsqrt.s", uut.mc[2].u_micro.R[8], 64'h0000000000000000);
+        check64("FP mc2 R9 FLAGS", uut.mc[2].u_micro.R[9], 64'h0000000000000004);
+        check64("FP mc2 R10 FPCSR", uut.mc[2].u_micro.R[10], 64'h0000000000000002);
+        check64("FP mc3 R4 id/3", uut.mc[3].u_micro.R[4], 64'h4002AAAAAAAAAAAB);
+        check64("FP mc3 R7 fma", uut.mc[3].u_micro.R[7], 64'h4022AAAAAAAAAAAB);
+        check64("FP mc3 R8 fsqrt.s", uut.mc[3].u_micro.R[8], 64'h000000007FC00000);
+        check64("FP mc3 R9 FLAGS", uut.mc[3].u_micro.R[9], 64'h0000000000000004);
+        check64("FP mc3 R10 FPCSR", uut.mc[3].u_micro.R[10], 64'h0000000000000113);
+
         // =================================================================
         $display("===========================================");
         if (fail_count == 0)
