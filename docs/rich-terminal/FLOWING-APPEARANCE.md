@@ -479,3 +479,64 @@ fallback, quotas and atomic retries, all data roles, headers/unavailable
 cells, immutable projection and full/delta JSON, acknowledged input, clipping,
 bounded glyph rendering, and complete/partial repaint equivalence. The host
 accepted no new style-run or TEXT_AREA behavior.
+
+## Completed MegaPad scope and runtime integration
+
+The MegaPad side of the agreed pane-and-channel design is implemented through
+`d743206`: pane chrome, structured status fields, taskbar entries, editable
+fields, and typed spreadsheet cells all have negotiated contracts, bounded
+guest writers, host validation, immutable transport, rendering, and applicable
+input authority. The existing WAVEFORM family already supplies the remaining
+Sound Lab waveform contract. Reference remains the default appearance;
+flowing is opt-in. Product capability profiles remain unchanged.
+
+The isolated integration branch combines this work with runtime code through
+`6b67833` and its documentation follow-up `2393829`. Both native extensions
+were rebuilt from the combined source. The shared launcher/session, wire,
+display-proof/input, emulator field-receive, and viewer gate passed 375 tests
+in 34.26 seconds. One existing Unix-socket boundary case was skipped because
+the environment denies AF_UNIX creation. A second 80-test gate passed in
+4.37 seconds, exercising all five guest publishers on both simulator
+executors, the simulator session/server boundary, and typed grid transport,
+input, and rendering.
+
+The dedicated retained-hybrid test passed both executor cases in 1.50 seconds.
+It loads the complete production Forth module, negotiates and publishes CELL,
+TASKBAR/TASK, and FIELD through public writers, delivers and acknowledges the
+display through the shared dispatcher, then calls a declared native routine.
+Forth receives the exact subsequent ACTIVATE and signed ADJUST metadata;
+stale generation/offer proofs are rejected and the field remains unchanged
+until guest publication. Cleanup releases runtime ownership and the display
+lease, stops the owner thread, and closes both backends. The test does not
+replace the driver, retained state, or control-event codecs with test doubles.
+
+A fresh six-application Desk acceptance ran at integration `ec790b3` with
+Akashic `f2f067991bb51e0c90445f5338db69c826b4e908`. The unified native-simulator
+launcher completed all 52 stages and 51 inputs: 33.74 seconds to desktop
+ready, 122.12 seconds overall, and 283.84 MiB peak RSS. Production shutdown
+released the owner thread, backend, terminal driver, runtime owner, and
+display lease. This is a single acceptance observation including fresh image
+preparation and paced input, with other local validation work running; it is
+not an isolated performance comparison.
+
+The Desk harness used production in-process server dispatch and display ACKs
+with SDL's dummy software sink. It did not qualify Unix-socket transport,
+physical display/audio, or live publication of the new families. Akashic's
+existing producer continues to publish its original objects, so this journey
+checks compatibility while focused guest tests qualify the new contracts.
+
+The next implementation work belongs in Akashic: publish pane/content-region
+bindings and taskbar entries from Desk, lower status fields through the
+shared widgets, use typed fields for Sound Lab, map Grid to TEXT_GRID roles,
+and publish Sound Lab samples through WAVEFORM. Preserve the current cell
+geometry and ordinary drawing/event fallback throughout. Then advertise the
+new capability bits in the paired profile and repeat the live visual/input
+review. Producer-driven evidence may call for MegaPad fixes, but no further
+host-side schema is currently required for this agreed scope.
+
+The runtime team's later `7acbdcd` was reviewed during final qualification:
+it adds an interoperability design document and roadmap links only, with no
+new executable capability. Their native tile changes were still uncommitted
+in the separate worktree and were not imported. Reconcile the next committed
+runtime checkpoint before a final main merge; the qualified code boundary
+here remains `6b67833`. Neither main nor Akashic was modified by this work.
