@@ -644,3 +644,23 @@ cases (162 total). This qualifies full-core strict FP retirement, including
 provisional execution and bus replay. FP remains coordinator/interpreter work;
 this does not claim private worker/DBT lowering, micro-core strict support, or
 execution of the math team's unavailable solver.
+
+### Phase 4 bounded architectural runner — 2026-09-30
+
+The architectural extension exposes the immutable numeric routine spec and a
+bounded integer runner over the existing decoded interpreter and instruction
+cache. Its operations adapter checks each complete access before ordinary
+mapping, routes only CALL/RET control accesses to a separate private arena, and
+rejects unsupported instructions without Python fallback. It retains mapping
+and buffer leases, normalizes private architectural state at entry, checks the
+original root return slot, and reports completed-prefix effects and separate
+machine instructions/cycles. Closing the runner revokes later use.
+
+All 79 runner cases passed, including differential architectural state/cycles,
+memory permissions and wrap, MMIO/alias rejection, recursive return bounds,
+failure prefixes, cache publication, mapping freezes and buffer lifetime. The
+rebuilt extension also passed the strict FP and private execution regressions
+above. Independent read-only review found no unresolved contract issue. The
+composition layer must still validate semantic allocation leases and code
+seals, preserve semantic stacks, and enforce cumulative dispatch limits before
+the application can advertise hybrid mode.
