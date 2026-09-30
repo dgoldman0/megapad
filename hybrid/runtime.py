@@ -22,9 +22,14 @@ from shared.hybrid_abi import (
     HYBRID_CALLBACK_ABI_VERSION, MAX_DISPATCH_CALLBACKS,
     MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS, CallbackRequestV2, CallbackSiteV2,
     MachineExitKindV2, MachineSegmentResultV2, RoutineDeclarationV2, RoutineImageV2,
+    HYBRID_CLOSED_ABI_VERSION, CallbackRequestV3, MachineSegmentResultV3,
+    RoutineDeclarationV3, RoutineImageV3,
 )
 from simulator.dictionary import HEADER_FIXED_BYTES, SEMANTIC_CODE_SLOT_BYTES, Word
 from simulator.errors import ExecutionBlocked, ExecutionError
+from simulator.interop_exports import (
+    CallbackExportBudgetExceeded, CallbackExportResult, ClosedCallbackReceipt,
+)
 from simulator.memory import AddressClass, MMIO_BASE, MMIO_LIMIT, SparseAddressSpace
 from simulator.platform import create_one_core_address_space
 from simulator.runtime import ExecutionContext, MegaForthRuntime
@@ -313,6 +318,20 @@ class HybridRuntime:
         return self._callbacks_available
 
     @property
+    def closed_callback_abi_available(self) -> bool:
+        """Whether this owner admits V3 closed policies over the V2 transport."""
+        return (
+            self._callbacks_available
+            and getattr(self.semantic, "callback_export_abi_version", None)
+            == HYBRID_CLOSED_ABI_VERSION
+            and callable(getattr(self.semantic, "inspect_callback_export", None))
+            and callable(getattr(self.semantic, "callback_policy_core_xt", None))
+            and callable(getattr(self.semantic, "consume_callback_budget_failure", None))
+            and callable(getattr(self.semantic, "begin_closed_callback_accounting", None))
+            and callable(getattr(self.semantic, "consume_closed_callback_accounting", None))
+        )
+
+    @property
     def callback_requests(self) -> int:
         return self._callback_requests
 
@@ -356,6 +375,11 @@ class HybridRuntime:
         """Publish an integer image with explicit canonical semantic callbacks."""
         return self._register_routine(image, RoutineImageV2, values)
 
+    def register_routine_v3(self, image: RoutineImageV3 | None = None,
+                            **values: Any) -> Word:
+        """Publish an integer image with admitted closed semantic policies."""
+        return self._register_routine(image, RoutineImageV3, values)
+
     def _require_authority(self) -> None:
         if (self.semantic.dictionary is not self._dictionary
                 or self._dictionary._mutation_guard is not self._dictionary_guard
@@ -384,7 +408,12 @@ class HybridRuntime:
                 image = image_type(**values)
             if type(image) is not image_type:
                 raise TypeError(f"registration requires a {image_type.__name__}")
-            callbacks = image_type is RoutineImageV2
+            callbacks = image_type in (RoutineImageV2, RoutineImageV3)
+            if image_type is RoutineImageV3 and not self.closed_callback_abi_available:
+                raise RuntimeError(
+                    "hybrid closed callbacks require semantic profile v3 and "
+                    "a matching _mp64_accel v2; run make build"
+                )
             if callbacks:
                 if not self._callbacks_available:
                     raise RuntimeError("hybrid callbacks require a matching _mp64_accel v2; run make build")
@@ -454,7 +483,11 @@ class HybridRuntime:
                         raise HybridExecutionError("stale_registration", "body publication geometry changed")
                     generation = len(self._registrations) + 1
                     control = _ControlLease(self._session_nonce, generation, stack_base, stack_size)
-                    declaration_type = RoutineDeclarationV2 if callbacks else RoutineDeclarationV1
+                    declaration_type = {
+                        RoutineImageV1: RoutineDeclarationV1,
+                        RoutineImageV2: RoutineDeclarationV2,
+                        RoutineImageV3: RoutineDeclarationV3,
+                    }[image_type]
                     extra = dict(
                         callbacks=image.callbacks,
                         dispatch_callback_limit=self._dispatch_callback_limit,
@@ -522,7 +555,7 @@ class HybridRuntime:
             return registration.declaration
 
     @property
-    def registered_routines(self) -> tuple[RoutineImageV1 | RoutineImageV2, ...]:
+    def registered_routines(self) -> tuple[RoutineImageV1 | RoutineImageV2 | RoutineImageV3, ...]:
         """Fresh value-only snapshots of issued declarations, without leases.
 
         These describe registrations, including ones whose dictionary leases
@@ -533,8 +566,12 @@ class HybridRuntime:
             values = []
             for registration in self._registrations.values():
                 declaration = registration.declaration
-                callbacks = type(declaration) is RoutineDeclarationV2
-                image_type = RoutineImageV2 if callbacks else RoutineImageV1
+                callbacks = type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3)
+                image_type = {
+                    RoutineDeclarationV1: RoutineImageV1,
+                    RoutineDeclarationV2: RoutineImageV2,
+                    RoutineDeclarationV3: RoutineImageV3,
+                }[type(declaration)]
                 extra = dict(callbacks=tuple(
                     replace(site, export=replace(site.export)) for site in declaration.callbacks
                 )) if callbacks else {}
@@ -718,11 +755,78 @@ class HybridRuntime:
             raise
         return raw
 
+    def _closed_callback_boundary(self, handle, arguments, allowance, local_limit):
+        """Settle only the exact engine-owned invocation, including failures.
+
+        Accounting hooks may have changed the outer meter or raised before an
+        effect. A closed invocation's one-shot receipt owns its charged count;
+        this path never reads or subtracts the mutable meter's step fields.
+        """
+        remaining = allowance.callback_semantic_limit - allowance.callback_semantic_steps
+        consume = self.semantic.consume_closed_callback_accounting
+        checkpoint = self.semantic.begin_closed_callback_accounting(handle)
+
+        def settle():
+            receipt = consume(checkpoint, handle)
+            if type(receipt) is not ClosedCallbackReceipt:
+                raise RuntimeError("closed callback accounting returned a foreign receipt")
+            steps = receipt.semantic_steps
+            if (type(steps) is not int or not 0 <= steps <= min(local_limit, remaining)
+                    or type(receipt.entered) is not bool or type(receipt.completed) is not bool
+                    or (not receipt.entered and (steps != 0 or receipt.completed))
+                    or (receipt.completed and steps == 0)):
+                raise RuntimeError("closed callback accounting receipt is inconsistent")
+            allowance.callback_semantic_steps += steps
+            self._callback_semantic_steps += steps
+            return receipt
+
+        try:
+            callback_result = self.semantic.invoke_callback_export(
+                handle, arguments, semantic_step_limit=remaining,
+            )
+        except BaseException as error:
+            try:
+                settle()
+            except BaseException as cleanup:
+                self._registration_cleanup_error(error, cleanup)
+            raise
+        try:
+            receipt = settle()
+            if (not receipt.entered or not receipt.completed
+                    or type(callback_result) is not CallbackExportResult
+                    or type(callback_result.semantic_steps) is not int
+                    or callback_result.semantic_steps != receipt.semantic_steps):
+                raise RuntimeError("closed callback result has no matching completed invocation")
+        except BaseException as error:
+            self._registration_failure = f"closed callback accounting failed: {_error_detail(error)}"
+            raise HybridExecutionError("callback_accounting", self._registration_failure) from error
+        return callback_result
+
+    def _semantic_callback_boundary(self, handle, request, meter, allowance):
+        if request.site.export.effect == "closed_integer_colon":
+            return self._closed_callback_boundary(
+                handle, request.arguments, allowance, request.site.export.max_semantic_steps,
+            )
+        # The locked leaf path retains its existing one-tick behavior.
+        starting_steps = meter.steps
+        try:
+            return self.semantic.invoke_callback_export(
+                handle, request.arguments,
+                semantic_step_limit=(allowance.callback_semantic_limit - allowance.callback_semantic_steps),
+            )
+        finally:
+            completed_steps = meter.steps - starting_steps
+            allowance.callback_semantic_steps += completed_steps
+            self._callback_semantic_steps += completed_steps
+
     def _drive_callbacks(self, registration: _Registration, arguments: tuple,
                          spans: tuple, protected: tuple, meter: object,
                          allowance: _MachineAllowance, remaining: int):
         runner = self._runner
         pending = None
+        closed_metadata = type(registration.declaration) is RoutineDeclarationV3
+        request_type = CallbackRequestV3 if closed_metadata else CallbackRequestV2
+        result_type = MachineSegmentResultV3 if closed_metadata else MachineSegmentResultV2
         try:
             before_segment = self._v2_segment_id
             try:
@@ -750,11 +854,11 @@ class HybridRuntime:
                     if len(matching) != 1 or pending is None:
                         raise HybridExecutionError("invalid_callback", "native callback site was not declared")
                     site, handle = matching[0]
-                    request = CallbackRequestV2(
+                    request = request_type(
                         invocation_id=callback.invocation_id, sequence=callback.sequence,
                         site=site, arguments=tuple(callback.arguments),
                     )
-                result = MachineSegmentResultV2(
+                result = result_type(
                     **self._result_fields(raw), invocation_id=raw.invocation_id,
                     invocation_instructions=raw.invocation_instructions,
                     invocation_cycles=raw.invocation_cycles, callback=request,
@@ -777,13 +881,21 @@ class HybridRuntime:
                         "callback_semantic_limit", "outer callback semantic allowance exhausted",
                         result=result,
                     )
-                starting_steps = meter.steps
                 try:
-                    callback_result = self.semantic.invoke_callback_export(handle, request.arguments)
-                finally:
-                    completed_steps = meter.steps - starting_steps
-                    allowance.callback_semantic_steps += completed_steps
-                    self._callback_semantic_steps += completed_steps
+                    callback_result = self._semantic_callback_boundary(
+                        handle, request, meter, allowance,
+                    )
+                except CallbackExportBudgetExceeded as exc:
+                    if self._registration_failure is not None:
+                        raise
+                    try:
+                        issued = self.semantic.consume_callback_budget_failure(exc)
+                    except BaseException as cleanup:
+                        self._registration_cleanup_error(exc, cleanup)
+                        raise exc
+                    if not issued:
+                        raise
+                    raise HybridExecutionError(exc.reason, str(exc), result=result) from exc
                 self._validate_registration(registration)
                 if self._runner is not runner:
                     raise HybridExecutionError("stale_registration", "native invocation owner changed")
@@ -843,7 +955,7 @@ class HybridRuntime:
                 raise HybridExecutionError("instruction_limit", "outer dispatch machine allowance exhausted")
             self._active_machine = True
             try:
-                if type(declaration) is RoutineDeclarationV2:
+                if type(declaration) in (RoutineDeclarationV2, RoutineDeclarationV3):
                     result = self._drive_callbacks(
                         registration, arguments, tuple(spans), protected, meter, allowance, remaining
                     )

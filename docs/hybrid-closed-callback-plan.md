@@ -2,10 +2,12 @@
 
 Date: 2026-09-30
 
-Status: locked narrow implementation contract, committed before code. Phase
-5A has passed its native, composition, manifest and application gates. This
-document enables no additional capability. The version 1 routine ABI and
-version 2 canonical leaf descriptors remain unchanged.
+Status: implemented and functionally qualified locally. The combined closed
+export, bridge, application and existing callback gate passed 761 checks;
+472 ordinary dispatcher, suspension, stack, rollback and KDOS checks passed.
+The contract was committed before implementation. Version 1 routines and
+version 2 canonical leaf descriptors retain their existing behavior. Bounded
+performance evidence is recorded separately; this profile claims no speedup.
 
 ## Purpose and boundary
 

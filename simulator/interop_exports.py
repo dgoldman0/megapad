@@ -13,7 +13,8 @@ from typing import Iterator
 
 from shared.cells import CELL_BYTES, MASK64
 from shared.hybrid_abi import (
-    CallbackExportV2, MAX_CALLBACK_EXPORTS, MAX_SIGNATURE_CELLS,
+    CallbackExportV2, CallbackExportV3, MAX_CALLBACK_EXPORTS, MAX_SIGNATURE_CELLS,
+    MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS,
 )
 from simulator import core_words
 from simulator.dictionary import Word
@@ -30,11 +31,24 @@ _CANONICAL_CALLBACKS = {
     "AND": core_words._and,
     "OR": core_words._or,
     "XOR": core_words._xor,
+    "DUP": core_words._dup,
+    "DROP": core_words._drop,
+    "SWAP": core_words._swap,
+    "OVER": core_words._over,
+    "ROT": core_words._rotate,
 }
 
 
 class CallbackExportError(ExecutionError):
     """An export is unadmitted, stale or violates its bounded leaf contract."""
+
+
+class CallbackExportBudgetExceeded(CallbackExportError):
+    """An engine-owned callback allowance was exhausted before another tick."""
+
+    def __init__(self, reason, limit, semantic_steps):
+        self.reason, self.limit, self.semantic_steps = reason, limit, semantic_steps
+        super().__init__(f"{reason}: callback allowance {limit} exhausted after {semantic_steps} steps")
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -52,6 +66,26 @@ class CallbackExportResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ClosedCallbackReceipt:
+    semantic_steps: int
+    entered: bool
+    completed: bool
+
+
+@dataclass(slots=True)
+class _ClosedAccounting:
+    token: object
+    handle: CallbackExportHandle
+    meter: object
+    namespace: object = None
+    starting_steps: int = 0
+    semantic_steps: int = 0
+    entered: bool = False
+    completed: bool = False
+    admitting: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class _CanonicalLeaf:
     word: Word
     implementation: PrimitiveDefinition
@@ -61,8 +95,9 @@ class _CanonicalLeaf:
 @dataclass(frozen=True, slots=True)
 class _ExportBinding:
     handle: CallbackExportHandle
-    descriptor: CallbackExportV2
-    leaf: _CanonicalLeaf
+    descriptor: CallbackExportV2 | CallbackExportV3
+    leaf: _CanonicalLeaf | None
+    closed: object = None
 
 
 @dataclass(slots=True)
@@ -117,9 +152,9 @@ class _PrivateStackSeal:
         )
 
 
-def _descriptor(value: CallbackExportV2) -> CallbackExportV2:
-    if type(value) is not CallbackExportV2:
-        raise TypeError("callback descriptor must be a CallbackExportV2")
+def _descriptor(value):
+    if type(value) not in (CallbackExportV2, CallbackExportV3):
+        raise TypeError("callback descriptor must be an exact CallbackExportV2 or CallbackExportV3")
     # Revalidate even a forged frozen value and keep our own metadata copy.
     return replace(value)
 
@@ -145,6 +180,17 @@ class CallbackExportEngine:
         self._active: _ActiveExport | None = None
         self._registration: _ExportRegistration | None = None
         self._registration_failure: str | None = None
+        self._budget_failure: CallbackExportBudgetExceeded | None = None
+        self._closed_accounting = None
+        self._unwind_error = None
+        self._unwind_contexts = ()
+        runtime._closed_cleanup_guard = self._guard_outer_unwind
+        runtime._closed_accounting_guard = self._guard_accounting_entry
+        self._accounting_routes = {
+            "begin": ("begin_closed_accounting", type(self).begin_closed_accounting),
+            "consume": ("consume_closed_accounting", type(self).consume_closed_accounting),
+        }
+        runtime._closed_accounting_dispatch = self._accounting_call
         if core_installed:
             for name, callback in _CANONICAL_CALLBACKS.items():
                 word = runtime.dictionary.find(name)
@@ -154,6 +200,63 @@ class CallbackExportEngine:
                     self._canonical[name] = _CanonicalLeaf(
                         word, word.implementation, callback
                     )
+        # Capture canonical dispatch/memory routes at the core-install boundary,
+        # before a caller can customize this runtime or its private stack path.
+        from simulator.interop_closed import ClosedCapture, ClosedDispatch
+
+        self._closed_capture_type = ClosedCapture
+        self._closed_dispatch_type = ClosedDispatch
+
+    def _guard_accounting_entry(self, operation):
+        record = self._closed_accounting
+        if record is not None and not record.admitting:
+            raise CallbackExportError(f"cannot {operation} during closed callback accounting")
+
+    def _accounting_call(self, operation, *arguments):
+        name, callback = self._accounting_routes[operation]
+        attributes = object.__getattribute__(self, "__dict__")
+        if name in attributes or vars(type(self)).get(name) is not callback:
+            raise CallbackExportError("closed callback accounting route changed")
+        return callback(self, *arguments)
+
+    def begin_closed_accounting(self, handle):
+        with self._runtime._session_owner_lock:
+            self._require_owner("begin closed callback accounting")
+            if self._active is not None or self._registration is not None or self._closed_accounting is not None:
+                raise CallbackExportError("closed callback accounting already has an active owner")
+            if self._binding(handle).closed is None:
+                raise CallbackExportError("closed callback accounting requires a closed export")
+            frames = self._runtime._active_dispatches
+            states = self._runtime._active_input_states
+            meter = frames[-1].meter if frames else (states[-1].meter if states else None)
+            token = object()
+            record = _ClosedAccounting(token, handle, meter)
+            if meter is not None:
+                from simulator.interop_closed import capture_meter
+                record.namespace, record.starting_steps = capture_meter(meter)
+            self._closed_accounting = record
+            return token
+
+    def consume_closed_accounting(self, token, handle):
+        with self._runtime._session_owner_lock:
+            record = self._closed_accounting
+            # Cleanup proof deliberately remains available after fail-closing.
+            if (record is None or record.token is not token or record.handle is not handle
+                    or self._runtime._callback_exports is not self or self._active is not None):
+                raise CallbackExportError("closed callback accounting checkpoint is not issued here")
+            if (type(record.semantic_steps) is not int or not 0 <= record.semantic_steps <= 4096
+                    or type(record.entered) is not bool or type(record.completed) is not bool):
+                raise CallbackExportError("closed callback accounting receipt changed")
+            if record.meter is not None:
+                from simulator.interop_closed import repair_meter
+                if repair_meter(record.meter, record.namespace, record.starting_steps + record.semantic_steps):
+                    self._registration_failure = "closed callback accounting meter changed"
+            result = ClosedCallbackReceipt(record.semantic_steps, record.entered, record.completed)
+            self._closed_accounting = None
+            return result
+
+    def _guard_outer_unwind(self, error, context):
+        return self._unwind_error is error and any(item is context for item in self._unwind_contexts)
 
     @property
     def _active_context(self) -> ExecutionContext | None:
@@ -189,8 +292,14 @@ class CallbackExportEngine:
         binding = self._exports.get(handle.export_id)
         if binding is None or binding.handle is not handle:
             raise CallbackExportError("callback export handle is not the issued identity")
-        self._require_leaf(binding.leaf)
+        self._require_binding(binding)
         return binding
+
+    def _require_binding(self, binding):
+        if binding.closed is None:
+            self._require_leaf(binding.leaf)
+        else:
+            binding.closed.verify(self)
 
     def bind(self, descriptor: CallbackExportV2) -> CallbackExportHandle:
         with self._runtime._session_owner_lock:
@@ -209,16 +318,21 @@ class CallbackExportEngine:
         if existing is not None:
             if existing.descriptor != descriptor:
                 raise CallbackExportError("callback export ID has a conflicting descriptor")
-            self._require_leaf(existing.leaf)
+            self._require_binding(existing)
             return existing.handle
-        leaf = self._canonical.get(descriptor.name)
-        if leaf is None:
-            raise CallbackExportError("canonical installed callback Word is unavailable")
-        self._require_leaf(leaf)
+        closed = None
+        leaf = None
+        if descriptor.effect == "closed_integer_colon":
+            closed = self._closed_capture_type.create(self, descriptor)
+        else:
+            leaf = self._canonical.get(descriptor.name)
+            if leaf is None:
+                raise CallbackExportError("canonical installed callback Word is unavailable")
+            self._require_leaf(leaf)
         if len(self._exports) >= MAX_CALLBACK_EXPORTS:
             raise CallbackExportError("callback export table is full")
         handle = CallbackExportHandle(descriptor.export_id, self._owner)
-        binding = _ExportBinding(handle, descriptor, leaf)
+        binding = _ExportBinding(handle, descriptor, leaf, closed)
         if self._registration is not None:
             # Record the exact identity before insertion, so a failure after
             # publication but before return still has complete rollback data.
@@ -312,27 +426,88 @@ class CallbackExportEngine:
             self._require_owner("verify a semantic callback export")
             return replace(self._binding(handle).descriptor)
 
+    def inspect(self, handle):
+        with self._runtime._session_owner_lock:
+            self._require_owner("inspect a callback export")
+            closed = self._binding(handle).closed
+            return None if closed is None else replace(closed.proof)
+
+    def policy_core_xt(self, name):
+        with self._runtime._session_owner_lock:
+            self._require_owner("resolve a canonical policy dependency")
+            self._runtime._require_no_suspension("resolve a canonical policy dependency")
+            if self._active is not None or self._registration is not None:
+                raise CallbackExportError("canonical policy resolution requires an idle export boundary")
+            if type(name) is not str or name not in _CANONICAL_CALLBACKS:
+                raise CallbackExportError("policy core name is not in the canonical catalog")
+            leaf = self._canonical.get(name)
+            if leaf is None:
+                raise CallbackExportError("canonical policy Word is unavailable")
+            from simulator.interop_closed import _require_metadata_routes
+            _require_metadata_routes()
+            self._require_leaf(leaf)
+            return leaf.word.xt
+
+    def _budget_error(self, reason, limit, semantic_steps):
+        error = CallbackExportBudgetExceeded(reason, limit, semantic_steps)
+        self._budget_failure = error
+        return error
+
+    def consume_budget_failure(self, error):
+        with self._runtime._session_owner_lock:
+            self._require_owner("identify an owned callback budget failure")
+            if self._budget_failure is error and error is not None:
+                self._budget_failure = None
+                return True
+            return False
+
     def invoke(
-        self, handle: CallbackExportHandle, arguments: tuple[int, ...],
+        self, handle: CallbackExportHandle, arguments: tuple[int, ...], *,
+        semantic_step_limit: int | None = None,
     ) -> CallbackExportResult:
         with self._runtime._session_owner_lock:
             self._require_owner("invoke a semantic callback export")
-            self._runtime._require_no_suspension("invoke a semantic callback export")
+            record = self._closed_accounting
+            if record is not None:
+                if record.handle is not handle or record.entered:
+                    raise CallbackExportError("closed accounting admits one exact callback invocation")
+                record.admitting = True
+            try:
+                self._runtime._require_no_suspension("invoke a semantic callback export")
+            finally:
+                if record is not None:
+                    record.admitting = False
             if self._active is not None:
                 raise CallbackExportError("nested semantic callback exports are not admitted")
             if self._registration is not None:
                 raise CallbackExportError("cannot invoke an export during export registration")
+            record = self._closed_accounting
+            if record is not None:
+                if record.handle is not handle or record.entered:
+                    raise CallbackExportError("closed accounting admits one exact callback invocation")
+                record.entered = True
+            self._budget_failure = None
             binding = self._binding(handle)
             _cells(arguments, count=binding.descriptor.input_cells, label="arguments")
+            if semantic_step_limit is not None:
+                if type(semantic_step_limit) is not int:
+                    raise TypeError("callback semantic step limit must be an exact integer")
+                if not 0 <= semantic_step_limit <= MAX_DISPATCH_CALLBACK_SEMANTIC_STEPS:
+                    raise ValueError("callback semantic step limit must be in 0..65536")
+                if semantic_step_limit == 0:
+                    raise self._budget_error("callback_semantic_limit", 0, 0)
 
             # Real finite stack bounds, using the canonical stack classes and
             # a separate tiny memory owner. No caller stack or guest byte is
             # copied, aliased or restored across this dispatch.
             half = MAX_SIGNATURE_CELLS * CELL_BYTES
             memory = SparseAddressSpace(bank0_size=2 * half, page_size=2 * half)
+            memory.write8(0, 0)  # Materialize the one private page even for zero-input policies.
             data = DataStack(arguments, memory=memory, floor=0, empty_pointer=half)
             returns = ReturnStack(memory=memory, floor=half, empty_pointer=2 * half)
             context = ExecutionContext(data=data, returns=returns)
+            if binding.closed is not None:
+                return self._invoke_closed(binding, context, semantic_step_limit)
             active = _ActiveExport(
                 binding, context, data, returns, arguments,
                 _PrivateStackSeal.capture(data), _PrivateStackSeal.capture(returns),
@@ -359,6 +534,43 @@ class CallbackExportEngine:
                 return CallbackExportResult(outputs, result.semantic_steps)
             finally:
                 self._active = None
+
+    def _invoke_closed(self, binding, context, semantic_step_limit):
+        meter, starting_steps = self._runtime._meter_for_public_call(
+            None if self._runtime._active_dispatches else binding.descriptor.max_semantic_steps
+        )
+        record = self._closed_accounting
+        if record is not None:
+            if record.meter is not None and record.meter is not meter:
+                raise CallbackExportError("closed callback accounting meter owner changed")
+            if record.meter is None:
+                from simulator.interop_closed import capture_meter
+                record.namespace, record.starting_steps = capture_meter(meter)
+            record.meter = meter
+        active = self._closed_dispatch_type(self, binding, context, meter, semantic_step_limit)
+        self._active = active
+        try:
+            active.require_state()
+            self._runtime._execute_guarded(
+                binding.closed.entry.word, context, meter, closed_guard=active,
+            )
+            active.require_state()
+            binding.closed.verify(self)
+            if not active.completed or context.returns.depth() != 0:
+                raise CallbackExportError("closed callback did not return balanced private state")
+            outputs = context.data.snapshot()
+            _cells(outputs, count=binding.descriptor.output_cells, label="outputs")
+            if record is not None:
+                record.completed = True
+            return CallbackExportResult(outputs, active.charged_ticks)
+        except BaseException as error:
+            try:
+                active.prepare_unwind(error)
+            except BaseException:
+                active.cleanup_failed(error)
+            raise
+        finally:
+            self._active = None
 
     def _guard_primitive(self, implementation, context: ExecutionContext):
         """Recheck after the admitted tick, immediately before its invocation.
@@ -393,6 +605,6 @@ def verify_callback_export(runtime, handle: CallbackExportHandle) -> CallbackExp
 
 
 __all__ = [
-    "CallbackExportError", "CallbackExportHandle", "CallbackExportResult",
+    "CallbackExportError", "CallbackExportBudgetExceeded", "CallbackExportHandle", "CallbackExportResult",
     "verify_callback_export",
 ]
