@@ -72,26 +72,56 @@ removed when the benchmark's support for older runtime roots is migrated.
 
 Both detailed and lightweight status contain the same `runtime` descriptor:
 
-| Field | Emulator | Simulator |
-|---|---|---|
-| `mode` | `emulator` | `simulator` |
-| `executor` | `native` | Selected `python` or `native` |
-| `step_unit` | `mp64_instruction` | `semantic_step` |
-| `step_request_unit` | `mp64_instruction` | `semantic_boundary` |
-| `batch_unit` | `instruction_batch` | `semantic_boundary` |
-| `timing.timer_unit` | `mp64_system_cycle` | `semantic_step` |
-| `timing.rtc_mode` | `virtual` or `realtime` | `manual` or `host_monotonic` |
-| `capabilities.machine_code` | `true` | `false` |
-| `capabilities.cpu_diagnostics` | `true` | `false` |
-| `capabilities.network_diagnostics` | `true` | `false` |
-| `capabilities.reset` | `true` | `false` |
-| `capabilities.host_profiling` | `true` | `false` |
+| Field | Emulator | Simulator | Hybrid |
+|---|---|---|---|
+| `mode` | `emulator` | `simulator` | `hybrid` |
+| `executor` | `native` | Selected `python` or `native` | Selected semantic `python` or `native` |
+| `step_unit` | `mp64_instruction` | `semantic_step` | `semantic_step` |
+| `step_request_unit` | `mp64_instruction` | `semantic_boundary` | `semantic_boundary` |
+| `batch_unit` | `instruction_batch` | `semantic_boundary` | `semantic_boundary` |
+| `timing.model` | `instruction_batched` | `semantic` | `semantic` |
+| `timing.models_shared_clock_latency` | `false` | `false` | `false` |
+| `timing.timer_unit` | `mp64_system_cycle` | `semantic_step` | `semantic_step` |
+| `timing.rtc_mode` | `virtual` or `realtime` | `manual` or `host_monotonic` | `manual` or `host_monotonic` |
+| `capabilities.machine_code` | `true` | `false` | `true`, declared routines only |
+| `capabilities.cpu_diagnostics` | `true` | `false` | `false` |
+| `capabilities.network_diagnostics` | `true` | `false` | `false` |
+| `capabilities.reset` | `true` | `false` | `false` |
+| `capabilities.host_profiling` | `true` | `false` | `false` |
+
+`hybrid.session.HybridSession` retains the semantic session backend and its
+terminal/continuation authority. Registered primitive words enter the bounded
+architectural interpreter over the same ordinary buffers. `HybridSharedMachine`
+adds `machine_execution` with the native interpreter, ABI identity and separate
+lifetime instruction, cycle and transition counts. Machine cycles do not advance
+the semantic timer or claim whole-application shared-clock timing. Status also
+explicitly denies arbitrary machine code, machine MMIO, callbacks into source,
+native BIOS boot, multicore execution and native snapshots. The v1 manifest and
+host entry contract are in [the hybrid ABI](hybrid-runtime-abi.md).
 
 The executor identifies the selected engine; native execution can include
 Python fallbacks. Capabilities identify supported session operations,
 independently of whether optional facilities are enabled. Existing emulator
 instruction batches do not enable the system's separate strict cycle-bounded
-runner. Semantic work does not claim hardware cycles. The standalone simulator
+runner. `instruction_batched` advances functional time once per equal-credit
+scheduler round, using the maximum accumulated per-core cycle cost. Wake and
+interrupt delivery occur at the model's round boundaries. CPU memory accesses
+are ordered without strict main-bus timing. Its clock can drive devices and
+report progress, but it cannot measure shared-clock worker wake latency or bus
+contention. Host worker count and a native executor do not change that model.
+
+Use `MegapadSystem.run_cycle_batch(...)` with a virtual RTC and a supported
+full-core-only topology for modeled wake, interrupt, and bus timing. Its
+`SystemRunStats.timing_model` is `strict_shared_clock`, and
+`models_shared_clock_latency` is true. `run_batch_stats(...)` reports
+`instruction_batched` and false. Zero-budget and host-backpressure results
+retain the requested model. The same cycle field names exist in both results;
+compare them only with their timing model recorded. The strict model does not
+establish physical RTL latency or guarantee multicore speedup. The shared
+application session currently selects instruction batches, including its
+paused one-instruction requests.
+
+Semantic work does not claim hardware cycles. The standalone simulator
 server binds its RTC to host monotonic time; a directly constructed runtime
 starts with a manually advanced RTC. Reading its RTC policy does not sample
 or advance the clock.

@@ -4,7 +4,8 @@ Started: 2026-09-30
 
 Status: Phase 1A and the Phase 1B session extraction are implemented and
 qualified locally. Executor default promotion remains deferred to workload
-qualification. Phase 2 profiles are next; hybrid execution is not implemented.
+qualification. Bounded Phase 2 kernel baselines are recorded; broader workload qualification
+remains open. Hybrid execution is not implemented.
 
 Branch: `feature/unified-runtime`
 
@@ -186,6 +187,38 @@ independently checkable compatibility result. The observed scalar-FP
 fallback mechanism justifies preparing its extraction before all workload
 families have been profiled.
 
+### 2B. Multicore timing qualification — math-team finding
+
+The user supplied a math-team report on 2026-09-30: instruction-batched
+multicore execution makes worker wake appear near 130,000 cycles, versus about
+1,000 under the shared-clock model; four-core explicit work scales only
+1.3–1.4× under modeled bus contention; scalar FP64 previously blocked the
+strict-mode solver. Those workload figures are reported observations, not
+independently reproduced solver measurements in this branch. Work stays within
+MegaPad; the team's separately edited Akashic sources are outside scope.
+
+The exact native FC kernel removes the known full-core FP Python fallback. A
+real one-core SystemState strict-cycle division check already proves 30+1-cycle
+retirement. Extend this to 1/2/4 full cores, distinct FPCSR state, cold and warm
+instruction fetches, sliced versus whole execution, shared bus traffic and
+representative BIOS F64 word calls. Full-core strict execution and clustered
+microcore support remain separate capabilities. Qualify the actual solver only
+when its reproducer is available; kernel tests do not establish solver support.
+
+Separately, make timing-model identity explicit in run results/status and
+benchmark evidence. Instruction-batched functional cycle accounting must not
+be presented as shared-clock wake latency or multicore scaling evidence. Add a
+bounded wake/IPI and contention fixture that reports instructions, per-core
+work, elapsed model cycles, selected timing model and host wall time separately.
+Use the strict shared-clock path for modeled latency/scaling comparisons; retain
+the fast path's established functional behavior and documented accounting.
+
+The gate is reproducible wake/accounting classification, strict FP retirement
+and cross-core state parity, and honest measured contention. Moving work into
+C++ improves host execution cost; it must not erase modeled bus waits or force
+a nominal fourfold result. Any remaining contention optimization needs its own
+architectural equivalence and paired evidence before being credited.
+
 ## Phase 3 — Shared native computation and hot runtime state
 
 ### 3A. Scalar floating point
@@ -293,13 +326,14 @@ limits. Machine-level claims continue to require the architectural oracle.
 
 | Slice | Status | Evidence |
 |---|---|---|
-| Plan | Locked | Read-only source review at the base above; local commit `512ed32` |
+| Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
-| 2 — workload profiles | Pending | |
-| 3A — native scalar FP | Pending | |
-| 3B/3C — remaining native extraction | Pending, profile-driven | |
-| 4 — initial hybrid ABI and execution | Pending | |
+| 2 — workload profiles | Kernels, KDOS controls/attribution and captured Desktop composition recorded; live Desktop pending | 19 harness checks; source controls in both executors; 3 exact captured-frame gates; separate evidence in `docs/performance/runtime-hotspots-2026-09-30.md` |
+| 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
+| 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
+| 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
+| 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
 | 5 — expanded interoperability | Pending | |
 
 ### Phase 1A implementation and validation — 2026-09-30
@@ -425,3 +459,296 @@ its focused checks do not constitute representative workload qualification.
 Phase 2 must record current baselines before changing defaults or selecting
 additional hot-path extraction. No new performance or full Desktop acceptance
 claim is made by this slice.
+
+### Phase 3A shared value kernel — 2026-09-30
+
+Both extensions compile `shared/accel/scalar_fp.cpp`. The kernel uses bounded
+integer arithmetic for exact FP32/64 arithmetic, FMA/FMS, square root,
+conversions, comparisons and classification. No host floating-point rounding
+mode or third-party big-integer package is required. The Python value models
+remain independent. Build object directories are isolated between extensions
+so their optimization/sanitizer flags cannot reuse the same shared object.
+
+Full-core emulator FC instructions now call the kernel directly, preserving
+full-tail validation, fault PC, REX/PC register aliasing, sticky flags, cycle
+charges, strict-cycle retirement, and intentional I-cache noncoherence.
+Microcore oracle/fault policy remains unchanged. Native-selected hosted FP
+binds the same value kernel; Python selection retains the reference model.
+An obsolete native extension fails clearly in required-native mode and falls
+back in auto mode. Direct semantic FP dispatch is the next slice.
+
+Validation through sequential Make targets: 198 existing/new kernel and machine
+checks passed, covering all legal operations/modes, directed and seeded values,
+all FP16/BF16 widening bit patterns, FMA exponent extremes and machine state.
+Two additional service-bypass/stale-build checks passed. All 53 hosted scalar
+word tests passed in Python selection and again with native selected. Both
+extensions built with GCC; no RTL change or new RTL parity claim is involved.
+The paired bounded FP evidence is recorded in the performance report.
+
+### Phase 3C qualified audio transfers — 2026-09-30
+
+The shared audio model accepts a backend-qualified synchronous span reader.
+After existing descriptor validation it rechecks exact scalar/validator
+identities and backend method/span eligibility. Canonical ordinary spans copy
+once to immutable PCM; custom or replaced methods retain byte-level dispatch.
+The emulator additionally excludes spans intersecting overlapping apertures,
+whose byte-priority routing can differ from an accepted Bank0 span. Sparse
+hosted reads preserve absent-page zeros without allocating pages.
+
+No capture/generation is published on a short, invalid or failed bulk read,
+and no retry or sink call follows that failure. Existing sink/reset/close
+ordering remains intact. All 57 focused audio tests passed through sequential
+Make execution. Read-only independent review prompted late-helper replacement
+and aperture-overlap regressions before commit. Paired hosted measurements
+are recorded in the performance report; physical playback is not claimed.
+
+### Phase 3A direct semantic FP calls — 2026-09-30
+
+Compiled calls to original BIOS FP and FPCSR words now use two-tick native
+operations. Plans bind original Word identity and the service captured by BIOS
+closures; public attribute replacement, shadowing and XT reuse do not retarget
+those calls. Each native interval imports and settles one FPCSR cell before
+clocks or fallback. The raw semantic API is versioned with this new state.
+
+Invalid operation/RM descriptors, insufficient operands, stack capacity and
+unavailable output backing decline without effects or ticks. Python executes
+the original operation with its partial pops, fault callback and budget order.
+Direct primitive execution and primitive XTs reached via EXECUTE retain the
+service path; no additional execution profiles are silently admitted.
+
+All 399 selected checks passed through `make test-simulator`: the 104 new
+direct-FP cases, the existing 228 native executor cases, 53 hosted scalar word
+cases and 14 shared kernel/service cases. Coverage includes all BIOS words,
+rounding/flags, tiny budgets, stack faults/retained bytes, missing/fragmented
+backing, fault observers, callbacks/quanta and original service/word identities.
+Independent read-only review found no additional issue. The native extension
+built successfully and paired timings are recorded in the performance report.
+
+### Phase 4 contract checkpoint — 2026-09-30
+
+`docs/hybrid-runtime-abi.md` locks the initial declared integer-routine profile
+before execution changes. It specifies fixed shared ordinary backing, bounded
+use of the existing decoded architectural interpreter, original semantic
+stack ownership, body-allocation leases, code publication and failure effects.
+A separate private control arena avoids altering inactive semantic SP!/RP!
+frontiers. Its bytes are never an alternate copy of shared guest data and its
+addresses are absent from semantic geometry. Machine access remains checked
+before modulo aliasing or any device route.
+
+The contract includes versioned host registration, a bounded manifest, normal
+source-word calls, honest launcher/status capabilities, separate machine and
+semantic accounting, and staged acceptance gates. The launcher remains disabled
+for hybrid until those gates pass. No machine execution or performance claim
+is added by the document. Dense memory and allocation lifetime are the next
+implementation foundations; callback/service/JIT interoperability stays later.
+
+### Phase 3B shared Keccak values — 2026-09-30
+
+Extracted the existing architectural Keccak-f[1600] permutation into
+`shared/accel/keccak.{h,cpp}` and linked it into both extensions. The native
+round scratch still receives volatile erasure. The immutable Python value
+boundary validates exactly 25 uint64 lanes, preserves sequence iteration order
+and clears its local copied state on success or exceptions. The independent
+Python oracle is unchanged.
+
+Native-selected hosted SHA3 binds this kernel without changing device owner,
+MMIO, padding, buffers, staged publication or fault cleanup. Explicitly injected
+permutations, service subclasses and prior oracle overrides retain their
+implementation. A new explicit Python runtime using the same platform clears
+a previous runtime-selected value executor; guest CLEAR retains the binding.
+
+Both extensions built and 86 kernel/device/differential checks passed, plus
+47 hosted SHA3 checks in each backend and 26 WOTS borrowing/timing checks.
+Read-only review caught a custom-Sequence iteration edge before final build.
+Native source qualification exposed a pre-existing fault-continuation bug;
+`957d272` fixes it independently after baseline reproduction and three focused
+regressions. Paired SHA3 timing and exact-output evidence is in the performance
+report. Python byte-level transfer costs remain; this is not a complete crypto
+service or Desktop performance claim.
+
+### Phase 2 representative source-loading controls — 2026-09-30
+
+The existing full KDOS source-loading benchmark passed three fresh-process
+trials per executor at the preserved baseline and at the runtime committed as
+`bb50f9b`, with 90-second per-process watchdogs. All 12 runs passed exact source,
+startup transcript, dictionary, stack and representative-word validation. Each
+performed 36,116 semantic steps while loading 1,461 KDOS definitions. The raw
+reports retain preparation versus loading time, source/binary identities and
+peak memory. No compiler optimization or loading speedup is claimed; this is
+a representative compatibility/control workload. Desktop and source-loading
+attribution remain open, as does executor default promotion.
+
+### Phase 4 shared backing foundation — 2026-09-30
+
+`DenseMemoryBacking` owns a fixed buffer for each ordinary guest region.
+Independent pinned views keep each buffer alive and prevent resizing. The
+existing semantic address-space type accepts this owner explicitly; its sparse
+default remains unchanged. Native semantic execution receives direct dense
+descriptors and retains independent buffer leases. Complete range, stack and
+geometry checks precede pointer access, and dense mappings cannot physically
+alias each other. The native API is version 2 so stale binaries fail admission.
+
+The semantic extension built successfully. All 56 new dense owner/adapter tests
+and 664 existing memory, platform, stack, native execution, bulk memory,
+suspension and FP regressions passed. Independent review verified pin lifetime
+and checked access ordering. This establishes shared bytes, not hybrid calls;
+the launcher remains disabled until registration, runner and session gates pass.
+
+### Phase 4 allocation and declaration validation — 2026-09-30
+
+Dictionary body leases now bind the exact live Word, original initial-body
+extent and a monotonic allocation serial. Allocator writes, reclamation,
+rollback and zone reopening revoke overlapping leases before reuse; unrelated
+definitions and ordinary stores do not. Reusing the XT and identical bytes
+cannot revive a revoked lease. All 66 new lease and existing dictionary/rollback
+checks passed, including inactive zones and forged lease objects.
+
+Immutable v1 declaration values and the local manifest loader validate bounded
+signatures, code sizes, stack and instruction limits, buffer expressions and
+duplicate names. Every metadata row is validated before any image is read, and
+all images are read before publication. Names must be printable nonwhitespace
+ASCII; paths must be filesystem encodable. All 94 manifest/value cases passed.
+Independent review found and closed name, path-encoding and forged-lease gaps.
+These foundations do not yet publish an executable hybrid session.
+
+### Phase 2B timing identity — 2026-09-30
+
+System batch results now identify `instruction_batched` versus
+`strict_shared_clock`, including zero-budget and host-backpressure returns.
+Shared session status reports its actual execution policy; semantic sessions
+report `semantic`. Only strict results advertise modeled shared-clock latency.
+The Phase 0 benchmark carries this identity into serialized accounting, and
+the session documentation explains round time, strict bus time and host time.
+No scheduler behavior or existing cycle accounting changed in this slice.
+
+All eight focused model tests passed, along with shared-session and Phase 3
+benchmark regressions in a 221-pass combined foundation gate. Two socket tests
+were skipped because this environment cannot create their sockets. These tags
+prevent a functional round clock from being presented as strict wake latency;
+they do not reproduce the unavailable math solver or establish physical RTL
+timing. Strict FP and bounded wake/contention evidence are separate gates.
+
+### Phase 2B strict multicore scalar FP — 2026-09-30
+
+The existing native scalar FP implementation passes 13 additional strict-system
+cases. All 52 BIOS scalar/FPCSR operations execute on one, two and four full
+cores with warm and cold instruction fetch, checked against the independent
+Python value oracle. Four-core division/square-root with store prefixes matches
+whole-run state when split at strict cycle boundaries across one, two and four
+host lanes. Four actual assembled BIOS bodies (`F64+`, `F64/`, `F64FMA`,
+`F64SQRT`) also produce exact stacks, bits and flags on four cores.
+
+The tests poison Python fallback and require zero native continuations. All 13
+passed with 27 existing native FP, 43 private execution and 79 hybrid-runner
+cases (162 total). This qualifies full-core strict FP retirement, including
+provisional execution and bus replay. FP remains coordinator/interpreter work;
+this does not claim private worker/DBT lowering, micro-core strict support, or
+execution of the math team's unavailable solver.
+
+### Phase 4 bounded architectural runner — 2026-09-30
+
+The architectural extension exposes the immutable numeric routine spec and a
+bounded integer runner over the existing decoded interpreter and instruction
+cache. Its operations adapter checks each complete access before ordinary
+mapping, routes only CALL/RET control accesses to a separate private arena, and
+rejects unsupported instructions without Python fallback. It retains mapping
+and buffer leases, normalizes private architectural state at entry, checks the
+original root return slot, and reports completed-prefix effects and separate
+machine instructions/cycles. Closing the runner revokes later use.
+
+All 79 runner cases passed, including differential architectural state/cycles,
+memory permissions and wrap, MMIO/alias rejection, recursive return bounds,
+failure prefixes, cache publication, mapping freezes and buffer lifetime. The
+rebuilt extension also passed the strict FP and private execution regressions
+above. Independent read-only review found no unresolved contract issue. The
+composition layer must still validate semantic allocation leases and code
+seals, preserve semantic stacks, and enforce cumulative dispatch limits before
+the application can advertise hybrid mode.
+
+### Phase 2B bounded wake and contention evidence — 2026-09-30
+
+`bench_execution_timing.py` now provides local integer fixtures for masked-IPI
+wake, fixed-total private compute and disjoint-cell shared-bus traffic. It
+records the two timing models separately, with guest cores and host lanes as
+independent axes. Strict latency observations come from a separate one-cycle
+replay whose completed state/counts must match unobserved timed trials. Fast
+execution retains its large batch and makes no shared-clock latency claim.
+
+All 19 harness cases and 48 fresh-process measured cases passed. Sixteen host
+lane comparisons preserved guest state and model clocks. Strict compute scales
+4.00× in guest cycles from one to four cores; the memory fixture scales 2.49×.
+The minimal masked-IPI marker appears 1–3 modeled cycles after assertion at the
+replay's resolution. These local kernels neither reproduce the BIOS worker
+protocol nor establish the reported solver ratios. The source/binary hashes,
+raw samples and full limits are in `docs/performance/execution-timing-2026-09-30.json`
+and `docs/performance/execution-timing-benchmark.md`. No modeled bus wait was
+removed or scheduler behavior changed to obtain these results.
+
+### Phase 2 source and captured-frame attribution — 2026-09-30
+
+Separate cProfile runs of full KDOS loading passed existing source, dictionary,
+transcript, stack and media validation in both semantic executors. Three
+existing Make-selected compositor tests passed exact pixel/hit-map comparison
+for ready/typed Desktop captures and all 12 typing offers. The 11 later offers
+used partial repaint with damage below one quarter of the frame each.
+
+Raw diagnostic reports retain source/fixture hashes and clearly include setup,
+collection and reference costs. They are not throughput samples or live
+Desktop latency measurements. Parsing, scalar memory checks, frame composition
+and wire decoding remain visible Python work, but each further extraction still
+needs a targeted compatibility and paired-performance gate. No external project
+was accessed or modified. Live Desktop and executor default promotion remain
+open; recorded offers cannot establish those outcomes.
+
+### Phase 4 composition and application admission — 2026-09-30
+
+`HybridRuntime` now owns the semantic runtime, fixed shared ordinary memory,
+bounded machine runner and exact declaration registry. Original registered
+words are callable through interpreted names, compiled calls and `EXECUTE`.
+Lease identity and sealed bytes are rechecked before machine entry. Inputs are
+peeked and final capacity is checked before execution; only successful returns
+replace those inputs. Completed shared-memory effects and machine accounting
+settle before a structured failure reaches the semantic caller.
+
+Machine allowance is cumulative across the outer semantic meter, including
+nested calls, direct semantic session entry, host quanta and idle/resume. It is
+never charged as semantic timer work. Full main/current/enclosing stack spans
+are excluded from borrowed memory. Introduced custom stacks remain protected
+through inactive periods while their stack objects live; `register_context`
+introduces host arenas otherwise unknown to the composition owner. Closing
+revokes machine calls before releasing private mapping ownership.
+
+Independent review identified a registration rollback gap: word publication
+could update the guest dictionary index before a later failure. Publication is
+now guarded from the first definition, with dictionary rollback and index
+rebuild. Six injected failure checks prove prior metadata/index restoration,
+successful retry and preservation of the original error if cleanup itself
+fails; an unsuccessfully repaired machine registry is then unusable.
+
+`HybridSession` uses the existing semantic terminal and continuation owner.
+The server validates every manifest/image before creating a visible session,
+registers declared words before boot source, and uses a narrow preconstructed
+runtime seam in the existing image bootstrap. Status exposes its bounded
+capabilities and separate machine counters. `megapad.py --mode hybrid` is now
+available with required `--hybrid-routines`, and all three modes retain the
+same viewer/control protocol. Semantic executor defaults are unchanged; native
+machine execution is mandatory even when semantics use Python or auto.
+
+Validation: the unified `make build` succeeded. The application acceptance gate
+passed 194 cases with two environment-dependent socket skips. The final gate
+after registration cleanup passed all 149 selected cases: 93 bridge cases,
+six publication failures, 18 hybrid session cases, 20 existing bootstrap/server
+cases and 12 launcher cases. The bridge includes an explicit compiled-call
+comparison against standalone MP64 execution for output cells, complete shared
+buffer contents, instructions and cycles in both semantic executors. Unknown
+XTs, stale allocation/code, inactive stack bytes, failure prefixes and resumed
+budgets retain their required behavior. Help remains usable without importing
+native extensions. No physical presentation, native-default promotion or live
+Desktop performance claim follows from these gates.
+
+This completes the initial bounded hybrid application profile. Phase 5 remains
+a separate capability expansion: machine-to-source callbacks, guest JIT/native
+dictionary integration, arbitrary binaries and multicore hybrid execution are
+not implied by selecting hybrid mode. The math-team solver's original latency
+and scaling figures likewise remain outside reproduced evidence until its
+MegaPad-side reproducer is supplied.

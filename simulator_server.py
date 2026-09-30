@@ -58,10 +58,11 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
-def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Run a shared MegaPad semantic-simulator session"
-    )
+def build_argument_parser(
+    *,
+    description: str = "Run a shared MegaPad semantic-simulator session",
+) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--storage", type=Path, required=True)
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--ram-kib", type=_positive_int, default=1024)

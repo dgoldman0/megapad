@@ -10,11 +10,13 @@ The report keeps four quantities separate:
 * returned aggregate instructions (the legacy ``run_batch`` result);
 * exact per-core instructions from native system-batch results;
 * per-core architectural cycle-counter deltas; and
-* authoritative virtual system cycles passed through ``DeviceBus.tick()``.
+* virtual system cycles together with the execution model that advanced them.
 
-The native owner contains the authoritative system clock. The coordinator
-advances it from exact core results while keeping aggregate and per-core
-architectural counters distinct.
+The native owner contains the shared clock, but instruction-batched scenarios
+advance it only at functional round boundaries. They do not model shared-clock
+wake latency or CPU main-bus contention. The separate strict-cycle DMA probe
+uses ready-cycle and bus timing. Neither model establishes physical RTL latency.
+Aggregate and per-core architectural counters remain distinct in both models.
 
 Default coverage:
 
@@ -1320,6 +1322,8 @@ def _host_worker_diagnostics(
 
 def _system_run_stats_state(result) -> dict:
     return {
+        "timing_model": str(result.timing_model),
+        "models_shared_clock_latency": bool(result.models_shared_clock_latency),
         "instructions_executed": int(result.instructions_executed),
         "system_cycles_advanced": int(result.system_cycles_advanced),
         "per_core_instructions": [
@@ -4749,7 +4753,14 @@ def run_report(
             "device_bus_tick_argument_units":
                 "sum of virtual-cycle arguments passed to DeviceBus.tick()",
             "virtual_system_cycles":
-                "delta of the authoritative native SystemState clock",
+                "delta of the native SystemState clock under the recorded "
+                "timing_model; instruction_batched is functional round "
+                "accounting, not shared-clock wake or CPU-bus latency",
+            "timing_model":
+                "instruction_batched for ordinary throughput scenarios; "
+                "strict_shared_clock for the separate strict DMA probe. "
+                "Only the latter models shared-clock latency, and neither "
+                "is a physical RTL timing claim",
             "virtual_system_cycles_availability":
                 "available for every accounting replay",
             "host_cpu_utilization_percent":

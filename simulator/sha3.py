@@ -9,7 +9,7 @@ parallel hashlib-only shortcut.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from shared.cells import MASK64
 from shared.crypto_caps import (
@@ -65,6 +65,11 @@ CALLER_SPAN_PROTECTED = 3
 
 GuestIdentity = tuple[int, int]
 SpanStatus = Callable[[int, int], int]
+Permutation = Callable[[Sequence[int]], Sequence[int]]
+
+# Remember the canonical oracle so native selection cannot replace a caller's
+# pre-existing module override. The Python oracle itself remains independent.
+_REFERENCE_PERMUTATION = keccak_f1600
 
 _RATES = (136, 72, 168, 136)
 _OUTPUT_SIZES = (32, 64, 0, 0)
@@ -99,7 +104,12 @@ class SHA3AccessError(ValueError):
 class HostedSHA3Service:
     """One raw MMIO device plus its checked BIOS transaction record."""
 
-    def __init__(self, capabilities: int) -> None:
+    def __init__(
+        self,
+        capabilities: int,
+        *,
+        permutation: Permutation | None = None,
+    ) -> None:
         if isinstance(capabilities, bool) or not isinstance(capabilities, int):
             raise TypeError("SHA capabilities must be a uint64 integer")
         if not 0 <= capabilities <= MASK64:
@@ -107,7 +117,11 @@ class HostedSHA3Service:
         admitted = CRYPTO_CAP_SHA3_STREAM | CRYPTO_CAP_KECCAK_F1600
         if capabilities & ~admitted:
             raise ValueError("SHA service received unrelated capability bits")
+        if permutation is not None and not callable(permutation):
+            raise TypeError("SHA permutation must be callable")
 
+        self._permutation = permutation
+        self._native_permutation: Permutation | None = None
         self._capabilities = capabilities
         self._stream_available = bool(capabilities & CRYPTO_CAP_SHA3_STREAM)
         self._raw_available = bool(capabilities & CRYPTO_CAP_KECCAK_F1600)
@@ -134,6 +148,39 @@ class HostedSHA3Service:
         self._checked_mode = 0
         self._checked_phase = 0
         self._checked_window_offset = 0
+
+    def bind_native_permutation(self, permutation: Permutation | None) -> bool:
+        """Select an optional value executor without changing guest state.
+
+        This service belongs to the platform memory, which may outlive a
+        runtime. A new runtime clears its prior selection with ``None`` before
+        optionally binding its admitted extension. Guest CLEAR/reset retains
+        the selection. An explicitly injected permutation, subclass, or
+        existing Python-oracle override keeps its implementation.
+        """
+
+        if permutation is not None and not callable(permutation):
+            raise TypeError("SHA permutation must be callable")
+        if type(self) is not HostedSHA3Service:
+            return False
+        self._native_permutation = None
+        if permutation is None:
+            return True
+        if (
+            self._permutation is not None
+            or keccak_f1600 is not _REFERENCE_PERMUTATION
+        ):
+            return False
+        self._native_permutation = permutation
+        return True
+
+    def _permute(self) -> Sequence[int]:
+        permutation = self._permutation
+        if permutation is None:
+            permutation = self._native_permutation
+        if permutation is None:
+            permutation = keccak_f1600
+        return permutation(self._state)
 
     @property
     def capabilities(self) -> int:
@@ -684,7 +731,7 @@ class HostedSHA3Service:
                 "little",
             )
             self._state[lane_index] ^= lane
-        self._state[:] = keccak_f1600(self._state)
+        self._state[:] = self._permute()
         self._buffer[:] = bytes(len(self._buffer))
         self._buffer_length = 0
         self._phase = SHA3_PHASE_IDLE
@@ -701,7 +748,7 @@ class HostedSHA3Service:
                 "little",
             )
             self._state[lane_index] ^= lane
-        self._state[:] = keccak_f1600(self._state)
+        self._state[:] = self._permute()
         rate_bytes = self._extract_rate()
         output_size = _OUTPUT_SIZES[self._mode] or 64
         self._digest[:] = bytes(64)
@@ -721,7 +768,7 @@ class HostedSHA3Service:
         ]
         self._squeeze_cursor += tail
         if tail != 64:
-            self._state[:] = keccak_f1600(self._state)
+            self._state[:] = self._permute()
             current = self._extract_rate()
             head = 64 - tail
             next_window[tail:] = current[:head]
@@ -730,7 +777,7 @@ class HostedSHA3Service:
         self._phase = SHA3_PHASE_DONE
 
     def _complete_raw(self) -> None:
-        self._state[:] = keccak_f1600(self._state)
+        self._state[:] = self._permute()
         self._phase = SHA3_PHASE_DONE
 
     def _extract_rate(self) -> bytes:

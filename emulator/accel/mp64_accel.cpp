@@ -41,11 +41,14 @@
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
 
+#include "../../shared/accel/scalar_fp_bindings.h"
+#include "../../shared/accel/keccak_bindings.h"
 #include "dbt/executable_arena.h"
 #include "dbt/x86_64/lowering.h"
 #include "cpu/mp64/block_ir.h"
 #include "cpu/mp64/decode.h"
 #include "cpu/mp64/interpreter.h"
+#include "cpu/mp64/routine_runner.h"
 #include "cpu/mp64/semantics.h"
 #include "machine/memory.h"
 #include "machine/settlement.h"
@@ -59,6 +62,8 @@
 
 namespace py = pybind11;
 namespace mp64_x86_64 = mp64::dbt::x86_64;
+namespace mp64_scalar_fp = megapad::scalar_fp;
+namespace mp64_routine = mp64::cpu::routine_v1;
 
 using mp64::machine::SystemClock;
 using mp64::machine::UnboundedSettlementRequest;
@@ -331,6 +336,10 @@ static constexpr uint8_t TACC_OWNER_NONE = 31;
 // ---------------------------------------------------------------------------
 
 struct MemoryMappings : GuestMemoryMap {
+    // A declared-routine runner retains this CPUState and its buffer leases.
+    // Its region identities cannot change while the runner remains alive.
+    uint32_t routine_mapping_pins = 0;
+
     // Python ownership for Bank 0
     uint64_t mem_capacity = 0;
     std::unique_ptr<py::buffer_info> mem_lease;
@@ -6737,6 +6746,9 @@ static inline void require_private_memory_mapping(const CPUState& s) {
     if (!s.private_memory)
         throw std::runtime_error(
             "system-owned CPUState mappings must be changed through SystemState");
+    if (s.memory->routine_mapping_pins != 0)
+        throw std::runtime_error(
+            "declared routine runner pins CPUState memory mappings");
 }
 
 static inline void require_unsealed_system_mappings(
@@ -7822,8 +7834,47 @@ static void csr_write(CPUState& s, int addr, uint64_t val) {
 
 // EXT.FP is FC op DR, plus the T byte for FMA and FMS.
 static int fp_instruction_size(uint8_t op) {
-    const uint8_t code = op & 0x3F;
-    return code == 0x07 || code == 0x08 ? 4 : 3;
+    return static_cast<int>(mp64_scalar_fp::instruction_length(op));
+}
+
+static int exec_fp(CPUState& s) {
+    const uint8_t op = fetch8(s);
+    const uint8_t operands = fetch8(s);
+    const uint8_t t_byte =
+        fp_instruction_size(op) == 4 ? fetch8(s) : 0;
+
+    // Reserved encodings consume their complete instruction before trapping.
+    // Fetch through the normal cache/bus path, then validate before touching
+    // registers, integer flags, or sticky FP flags.
+    if (const char* error =
+            mp64_scalar_fp::validate(op, t_byte, s.fpcsr)) {
+        throw std::runtime_error(
+            std::string("TRAP:ILLEGAL_OP:EXT.FP: ") + error);
+    }
+    const int rd =
+        (rex_d(s.ext_modifier) << 4) | (operands >> 4);
+    const int rs =
+        (rex_s(s.ext_modifier) << 4) | (operands & 0xF);
+    const int rt = t_byte & 0x1F;
+    // All inputs are sampled after fetch, including any PC-selected register.
+    const uint64_t d = s.regs[rd];
+    const uint64_t source = s.regs[rs];
+    const uint64_t third = s.regs[rt];
+    const auto outcome =
+        mp64_scalar_fp::execute(op, d, source, third, s.fpcsr);
+    s.fpcsr |= outcome.flags;
+    if (outcome.has_relation) {
+        // Shared IEEE relations: less=-1, equal=0, greater=1, unordered=2.
+        s.flag_z = outcome.relation == 0;
+        s.flag_g = outcome.relation == 1;
+        s.flag_n = outcome.relation == -1;
+        s.flag_v = outcome.relation == 2;
+        s.flag_c = 0;
+        s.flag_p = 0;
+    } else {
+        s.regs[rd] = outcome.value;
+    }
+    return static_cast<int>(mp64_scalar_fp::extra_cycles(op));
 }
 
 static int crypto_instruction_size(uint8_t sub_op) {
@@ -13017,6 +13068,498 @@ static void commit_decoded_instruction(
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Declared integer routine ABI v1
+// ---------------------------------------------------------------------------
+
+static uint64_t routine_exact_uint64(py::handle value, const char* label) {
+    if (!PyLong_CheckExact(value.ptr()))
+        throw py::type_error(std::string(label) + " must be an exact integer");
+    const unsigned long long converted = PyLong_AsUnsignedLongLong(value.ptr());
+    if (PyErr_Occurred()) {
+        PyErr_Clear();
+        throw py::value_error(std::string(label) + " must fit uint64");
+    }
+    return static_cast<uint64_t>(converted);
+}
+
+static void routine_validate_span(
+        const mp64_routine::Span& span, const char* label) {
+    // All profile spans have a representable exclusive end. In particular,
+    // no span may contain the reserved UINT64_MAX root-return sentinel.
+    if (span.size > MASK64 - span.base)
+        throw py::value_error(std::string(label) + " wraps or contains root return");
+}
+
+static py::sequence routine_exact_sequence(
+        py::handle value, const char* label, std::size_t maximum) {
+    if (!PyTuple_CheckExact(value.ptr()) && !PyList_CheckExact(value.ptr()))
+        throw py::type_error(std::string(label) + " must be a tuple or list");
+    py::sequence sequence = py::reinterpret_borrow<py::sequence>(value);
+    if (static_cast<std::size_t>(sequence.size()) > maximum)
+        throw py::value_error(std::string(label) + " exceeds the profile limit");
+    return sequence;
+}
+
+static mp64_routine::Spec make_routine_spec_v1(
+        py::handle code_base, py::handle code_size, py::handle entry_offset,
+        py::handle input_cells, py::handle output_cells,
+        py::handle stack_base, py::handle stack_size,
+        py::handle max_instructions) {
+    mp64_routine::Spec spec{
+        routine_exact_uint64(code_base, "code_base"),
+        routine_exact_uint64(code_size, "code_size"),
+        routine_exact_uint64(entry_offset, "entry_offset"),
+        routine_exact_uint64(input_cells, "input_cells"),
+        routine_exact_uint64(output_cells, "output_cells"),
+        routine_exact_uint64(stack_base, "stack_base"),
+        routine_exact_uint64(stack_size, "stack_size"),
+        routine_exact_uint64(max_instructions, "max_instructions"),
+    };
+    routine_validate_span(spec.code(), "code span");
+    routine_validate_span(spec.stack(), "private stack span");
+    if (spec.code_base % CPUState::ICACHE_LINE_BYTES != 0 ||
+        spec.code_size == 0 ||
+        spec.code_size % CPUState::ICACHE_LINE_BYTES != 0 ||
+        spec.code_size > mp64_routine::MAX_CODE_BYTES)
+        throw py::value_error("code must be aligned, line-padded, and at most 1 MiB");
+    if (spec.entry_offset >= spec.code_size)
+        throw py::value_error("entry_offset lies outside the code span");
+    if (spec.input_cells > 8 || spec.output_cells > 8)
+        throw py::value_error("routine signatures admit at most eight cells");
+    if (spec.stack_base % 8 != 0 || spec.stack_size == 0 ||
+        spec.stack_size % 8 != 0 ||
+        spec.stack_size > mp64_routine::MAX_STACK_BYTES)
+        throw py::value_error("private stack must have 1 through 8192 aligned cells");
+    if (spec.max_instructions == 0 ||
+        spec.max_instructions > mp64_routine::MAX_CALL_INSTRUCTIONS)
+        throw py::value_error("max_instructions must be in [1, 1000000]");
+    if (spec.code().overlaps(spec.stack()))
+        throw py::value_error("routine code and private stack overlap");
+    return spec;
+}
+
+class RoutineRunnerV1 {
+public:
+    RoutineRunnerV1(
+            py::object state_owner, py::handle control_base,
+            py::buffer control_buffer)
+        : state_owner_(std::move(state_owner)),
+          state_(&state_owner_.cast<CPUState&>()) {
+        if (state_->profile != CoreProfile::FULL || !state_->private_memory ||
+            state_->system_batch_active != nullptr)
+            throw py::value_error("routine runner requires a standalone full core");
+        require_private_memory_mapping(*state_);
+        control_.base = routine_exact_uint64(control_base, "control_base");
+        auto memory_guard = acquire_shared_memory_use(*state_);
+        PreparedBuffer prepared =
+            prepare_writable_byte_buffer(control_buffer, 0, false);
+        control_.size = prepared.capacity;
+        routine_validate_span(control_, "private control arena");
+        if (control_.base % 8 != 0 || control_.size == 0 ||
+            control_.size % 8 != 0 ||
+            control_.size > mp64_routine::MAX_CONTROL_BYTES)
+            throw py::value_error("private control arena must be aligned and at most 4 MiB");
+        if (control_.overlaps({mp64_routine::MMIO_BASE, mp64_routine::MMIO_SIZE}))
+            throw py::value_error("private control arena overlaps MMIO");
+        // Lock acquisition briefly released the GIL and acquiring a custom
+        // buffer can re-enter Python. Recheck before publishing this owner.
+        require_private_memory_mapping(*state_);
+        control_bytes_ = prepared.ptr;
+        validate_mappings();
+        control_owner_ = control_buffer;
+        control_lease_ = std::move(prepared.lease);
+        ++state_->memory->routine_mapping_pins;
+        owns_mapping_pin_ = true;
+    }
+
+    ~RoutineRunnerV1() { release(); }
+    RoutineRunnerV1(const RoutineRunnerV1&) = delete;
+    RoutineRunnerV1& operator=(const RoutineRunnerV1&) = delete;
+
+    void close() {
+        if (active_)
+            throw std::runtime_error("routine runner cannot close during an active boundary");
+        release();
+    }
+
+    uint64_t control_base() const noexcept { return control_.base; }
+    uint64_t control_size() const noexcept { return control_.size; }
+
+    void publish_code(const mp64_routine::Spec& spec) {
+        ActiveBoundary boundary(*this);
+        auto execution_guard = acquire_execution();
+        validate_spec(spec);
+        // Publication is explicit. Per-call initialization and raw backing
+        // writes never flush the cache. Admitted architectural stores retain
+        // their existing address-local invalidation below.
+        icache_invalidate_span(*state_, spec.code_base, spec.code_size);
+        state_->ifetch_window_valid = false;
+    }
+
+    mp64_routine::Result run(
+            const mp64_routine::Spec& spec, py::handle argument_values,
+            py::handle span_values, py::handle instruction_limit,
+            py::handle protected_values, bool cancelled) {
+        ActiveBoundary boundary(*this);
+        const uint64_t requested =
+            routine_exact_uint64(instruction_limit, "instruction_limit");
+        if (requested == 0 || requested > mp64_routine::MAX_DISPATCH_INSTRUCTIONS)
+            throw py::value_error("instruction_limit must be in [1, 10000000]");
+        const auto arguments = parse_arguments(argument_values, spec.input_cells);
+        const auto spans = parse_spans(span_values);
+        const auto protected_spans = parse_protected(protected_values);
+        auto execution_guard = acquire_execution();
+        validate_spec(spec);
+        validate_borrowed(spec, spans, protected_spans);
+
+        mp64_routine::Result result;
+        result.entry_pc = spec.entry();
+        result.instruction_pc = result.entry_pc;
+        result.pc = result.entry_pc;
+        result.outputs.reserve(static_cast<std::size_t>(spec.output_cells));
+        if (cancelled) {
+            result.exit_kind = "cancelled";
+            result.detail = "cancelled before machine entry";
+            return result;
+        }
+
+        initialize_entry(spec, arguments);
+        const uint64_t allowance = std::min(requested, spec.max_instructions);
+        Operations operations{*this, spec, spans};
+        Reader reader{*state_, spec};
+        for (uint64_t step = 0; step < allowance; ++step) {
+            result.instruction_pc = pc(*state_);
+            try {
+                icache_begin_instruction(*state_);
+                const DecodeResult decoded = decode_instruction(reader, state_->ext_modifier);
+                if (decoded.status == DecodeStatus::ILLEGAL_PREFIX ||
+                    decoded.status == DecodeStatus::ILLEGAL_DOUBLE_PREFIX) {
+                    result.exit_kind = "decode_fault";
+                    result.trap_id = IVEC_ILLEGAL_OP;
+                    result.detail = decoded.status == DecodeStatus::ILLEGAL_PREFIX
+                        ? "unassigned instruction prefix" : "double instruction prefix";
+                    break;
+                }
+                if (decoded.status == DecodeStatus::UNAVAILABLE)
+                    throw std::logic_error("bounded routine reader became unavailable");
+                if (decoded.status != DecodeStatus::DECODED ||
+                    !mp64_routine::admitted(decoded.instruction)) {
+                    result.exit_kind = "unsupported_instruction";
+                    result.detail = "instruction is outside the declared integer profile";
+                    break;
+                }
+
+                operations.operation = decoded.instruction.operation;
+                const uint64_t previous_sp = state_->regs[15];
+                const int cycles = execute_decoded_instruction(
+                    *state_, operations, decoded.instruction);
+                commit_decoded_instruction(*state_, decoded.instruction, cycles);
+                ++result.instructions;
+                result.cycles += static_cast<uint64_t>(cycles);
+
+                if (pc(*state_) == mp64_routine::ROOT_RETURN) {
+                    if (decoded.instruction.operation == DecodedOperation::RETURN_LONG &&
+                        previous_sp == spec.stack_empty() - 8 &&
+                        state_->regs[15] == spec.stack_empty() &&
+                        state_->psel == 3 && state_->xsel == 2 && state_->spsel == 15) {
+                        result.exit_kind = "returned";
+                        for (uint64_t i = 0; i < spec.output_cells; ++i)
+                            result.outputs.push_back(state_->regs[4 + i]);
+                    } else {
+                        result.exit_kind = "invalid_return";
+                        result.detail = "root return requires RET.L from the original root slot";
+                    }
+                    break;
+                }
+            } catch (const mp64_routine::AccessFault& fault) {
+                result.exit_kind = "rejected_access";
+                result.access_address = fault.address;
+                result.access_width = fault.width;
+                result.access_operation = fault.operation;
+                result.detail = fault.detail;
+                break;
+            }
+        }
+        result.pc = pc(*state_);
+        if (result.exit_kind == "instruction_limit")
+            result.detail = "machine instruction allowance exhausted before root return";
+        return result;
+    }
+
+private:
+    struct ActiveBoundary {
+        RoutineRunnerV1& owner;
+        explicit ActiveBoundary(RoutineRunnerV1& value) : owner(value) {
+            if (owner.closed_)
+                throw std::runtime_error("routine runner is closed");
+            if (owner.active_)
+                throw std::runtime_error("routine runner boundary is already active");
+            owner.active_ = true;
+        }
+        ~ActiveBoundary() { owner.active_ = false; }
+    };
+
+    struct Reader {
+        CPUState& state;
+        const mp64_routine::Spec& spec;
+        bool read(uint8_t& value) {
+            const uint64_t address = pc(state);
+            if (!spec.code().contains(address, 1))
+                throw mp64_routine::AccessFault{
+                    address, 1, "fetch", "instruction fetch escapes declared code"};
+            // Aligned/padded code was wholly qualified before entry. An
+            // architectural I-cache line fill cannot escape that region.
+            value = fetch8(state);
+            return true;
+        }
+        void observe_prefix(uint8_t modifier) { state.ext_modifier = modifier; }
+    };
+
+    struct Operations {
+        RoutineRunnerV1& runner;
+        const mp64_routine::Spec& spec;
+        const std::vector<mp64_routine::BufferSpan>& spans;
+        DecodedOperation operation = DecodedOperation::INVALID;
+
+        DecodedCallAcceleration accelerate_call(uint64_t) const { return {}; }
+        uint64_t read64(uint64_t address) {
+            const bool control = operation == DecodedOperation::RETURN_LONG;
+            const uint8_t* source = control
+                ? runner.control_access(spec, address, "return_stack_read")
+                : runner.ordinary_access(spans, address, 8, false);
+            uint64_t value = 0;
+            for (unsigned i = 0; i < 8; ++i)
+                value |= static_cast<uint64_t>(source[i]) << (8 * i);
+            return value;
+        }
+        void write64(uint64_t address, uint64_t value) {
+            const bool control = operation == DecodedOperation::CALL_LONG;
+            uint8_t* destination = control
+                ? runner.control_access(spec, address, "call_stack_write")
+                : runner.ordinary_access(spans, address, 8, true);
+            for (unsigned i = 0; i < 8; ++i)
+                destination[i] = static_cast<uint8_t>(value >> (8 * i));
+            if (!control)
+                icache_invalidate_span(*runner.state_, address, 8);
+        }
+        uint8_t read8(uint64_t address) {
+            return *runner.ordinary_access(spans, address, 1, false);
+        }
+        void write8(uint64_t address, uint8_t value) {
+            *runner.ordinary_access(spans, address, 1, true) = value;
+            icache_invalidate_span(*runner.state_, address, 1);
+        }
+    };
+
+    std::unique_ptr<CPUExecutionGuard> acquire_execution() {
+        // Only lock acquisition releases the GIL. The bounded machine
+        // interval retains it and cannot call Python or enter a device.
+        py::gil_scoped_release release;
+        return std::make_unique<CPUExecutionGuard>(*state_);
+    }
+
+    void release() {
+        if (closed_)
+            return;
+        closed_ = true;
+        if (owns_mapping_pin_) {
+            --state_->memory->routine_mapping_pins;
+            owns_mapping_pin_ = false;
+        }
+        control_bytes_ = nullptr;
+        state_ = nullptr;
+        control_lease_.reset();
+        control_owner_ = py::object();
+        state_owner_ = py::object();
+    }
+
+    void validate_mappings() const {
+        const GuestMemoryMap& memory = *state_->memory;
+        struct Region { mp64_routine::Span span; const uint8_t* bytes; };
+        const std::array<Region, 4> regions{{
+            {{0, memory.mem_size}, memory.mem},
+            {{memory.ext_mem_base, memory.ext_mem_size}, memory.ext_mem},
+            {{memory.hbw_base, memory.hbw_size}, memory.hbw_mem},
+            {{memory.vram_base, memory.vram_size}, memory.vram_mem},
+        }};
+        if (memory.mem_size == 0 || memory.mem == nullptr)
+            throw py::value_error("routine runner requires attached Bank 0");
+        for (std::size_t i = 0; i < regions.size(); ++i) {
+            const Region& region = regions[i];
+            if (region.span.size == 0)
+                continue;
+            routine_validate_span(region.span, "shared ordinary region");
+            if (region.bytes == nullptr)
+                throw py::value_error("ordinary region has no attached buffer");
+            if (region.span.overlaps({mp64_routine::MMIO_BASE, mp64_routine::MMIO_SIZE}))
+                throw py::value_error("ordinary region overlaps MMIO");
+            if (region.span.overlaps(control_) || host_spans_overlap(
+                    region.bytes, region.span.size, control_bytes_, control_.size))
+                throw py::value_error("private control arena aliases shared memory");
+            for (std::size_t j = 0; j < i; ++j) {
+                const Region& earlier = regions[j];
+                if (earlier.span.size != 0 &&
+                    (region.span.overlaps(earlier.span) || host_spans_overlap(
+                        region.bytes, region.span.size, earlier.bytes, earlier.span.size)))
+                    throw py::value_error("shared ordinary regions alias each other");
+            }
+        }
+    }
+
+    void validate_spec(const mp64_routine::Spec& spec) const {
+        if (!control_.contains(spec.stack_base, spec.stack_size))
+            throw py::value_error("routine private stack escapes its pinned control arena");
+        const ResolvedMemorySpan code = resolve_memory_span(
+            *state_->memory, spec.code_base,
+            MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+        if (!code.covers(spec.code_size))
+            throw py::value_error("routine code must fit one mapped ordinary region");
+    }
+
+    static std::vector<uint64_t> parse_arguments(
+            py::handle values, uint64_t expected) {
+        const auto sequence = routine_exact_sequence(values, "arguments", 8);
+        if (static_cast<uint64_t>(sequence.size()) != expected)
+            throw py::value_error("argument count does not match routine signature");
+        std::vector<uint64_t> result;
+        result.reserve(static_cast<std::size_t>(expected));
+        for (py::handle value : sequence)
+            result.push_back(routine_exact_uint64(value, "argument cell"));
+        return result;
+    }
+
+    static std::vector<mp64_routine::BufferSpan> parse_spans(py::handle values) {
+        const auto sequence = routine_exact_sequence(
+            values, "borrowed spans", mp64_routine::MAX_BUFFER_SPANS);
+        std::vector<mp64_routine::BufferSpan> result;
+        result.reserve(static_cast<std::size_t>(sequence.size()));
+        for (py::handle item : sequence) {
+            const auto entry = routine_exact_sequence(item, "borrowed span", 3);
+            if (entry.size() != 3)
+                throw py::value_error("borrowed span must be (base, size, access)");
+            const mp64_routine::Span span{
+                routine_exact_uint64(entry[0], "span base"),
+                routine_exact_uint64(entry[1], "span size")};
+            routine_validate_span(span, "borrowed span");
+            if (!PyUnicode_CheckExact(entry[2].ptr()))
+                throw py::type_error("span access must be a string");
+            const std::string access = entry[2].cast<std::string>();
+            if (access != "read" && access != "write" && access != "read_write")
+                throw py::value_error("span access must be read, write, or read_write");
+            result.push_back({span, access != "write", access != "read"});
+        }
+        return result;
+    }
+
+    static std::vector<mp64_routine::Span> parse_protected(py::handle values) {
+        const auto sequence = routine_exact_sequence(
+            values, "protected spans", mp64_routine::MAX_PROTECTED_SPANS);
+        std::vector<mp64_routine::Span> result;
+        result.reserve(static_cast<std::size_t>(sequence.size()));
+        for (py::handle item : sequence) {
+            const auto entry = routine_exact_sequence(item, "protected span", 2);
+            if (entry.size() != 2)
+                throw py::value_error("protected span must be (base, size)");
+            const mp64_routine::Span span{
+                routine_exact_uint64(entry[0], "protected span base"),
+                routine_exact_uint64(entry[1], "protected span size")};
+            routine_validate_span(span, "protected span");
+            result.push_back(span);
+        }
+        return result;
+    }
+
+    void validate_borrowed(
+            const mp64_routine::Spec& spec,
+            const std::vector<mp64_routine::BufferSpan>& spans,
+            const std::vector<mp64_routine::Span>& protected_spans) const {
+        for (const auto& span : spans) {
+            if (span.size == 0)
+                continue;
+            if (span.overlaps(spec.code()) || span.overlaps(control_))
+                throw py::value_error("ordinary borrow exposes code or private control bytes");
+            for (const auto& protected_span : protected_spans)
+                if (span.overlaps(protected_span))
+                    throw py::value_error("ordinary borrow intersects protected semantic state");
+            const auto resolved = resolve_memory_span(
+                *state_->memory, span.base,
+                MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+            if (!resolved.covers(span.size))
+                throw py::value_error("ordinary borrow must fit one mapped region without aliases");
+        }
+    }
+
+    uint8_t* ordinary_access(
+            const std::vector<mp64_routine::BufferSpan>& spans,
+            uint64_t address, uint64_t width, bool write) const {
+        for (const auto& span : spans) {
+            if ((write ? span.write : span.read) && span.contains(address, width)) {
+                // Preflight proved this complete borrowed span ordinary and
+                // disjoint from protected/control/code bytes. Routing remains
+                // bounded; neither modulo aliases nor MMIO can be consulted.
+                const auto resolved = resolve_memory_span(
+                    *state_->memory, address,
+                    MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+                if (resolved.covers(width))
+                    return resolved.data;
+                break;
+            }
+        }
+        throw mp64_routine::AccessFault{
+            address, width, write ? "write" : "read",
+            "scalar access escapes its permitted ordinary span"};
+    }
+
+    uint8_t* control_access(
+            const mp64_routine::Spec& spec, uint64_t address,
+            const char* operation) const {
+        if (address % 8 != 0 || !spec.stack().contains(address, 8))
+            throw mp64_routine::AccessFault{
+                address, 8, operation, "machine return stack is out of bounds"};
+        return control_bytes_ + (address - control_.base);
+    }
+
+    void initialize_entry(
+            const mp64_routine::Spec& spec,
+            const std::vector<uint64_t>& arguments) {
+        std::fill(std::begin(state_->regs), std::end(state_->regs), uint64_t{0});
+        state_->psel = 3;
+        state_->xsel = 2;
+        state_->spsel = 15;
+        state_->sw = 1;
+        state_->flag_z = state_->flag_c = state_->flag_n = state_->flag_v = 0;
+        state_->flag_p = state_->flag_g = state_->flag_i = state_->flag_s = 0;
+        state_->d_reg = state_->q_out = state_->t_reg = state_->ef_flags = 0;
+        state_->halted = state_->idle = false;
+        state_->ext_modifier = -1;
+        state_->ivt_base = state_->ivec_id = state_->trap_addr = state_->wake_ms = 0;
+        state_->priv_level = 0;
+        state_->core_id = 0;
+        state_->num_cores = 1;
+        state_->private_irq_ipi.store(false, std::memory_order_release);
+        state_->instruction_bus_access = nullptr;
+        state_->icache_enabled = 1;
+        state_->ifetch_window_valid = false;
+        state_->regs[3] = spec.entry();
+        state_->regs[15] = spec.stack_empty() - 8;
+        for (std::size_t i = 0; i < arguments.size(); ++i)
+            state_->regs[4 + i] = arguments[i];
+        uint8_t* root = control_bytes_ + state_->regs[15] - control_.base;
+        std::fill(root, root + 8, uint8_t{0xFF});
+    }
+
+    py::object state_owner_;
+    CPUState* state_ = nullptr;
+    py::object control_owner_;
+    std::unique_ptr<py::buffer_info> control_lease_;
+    mp64_routine::Span control_;
+    uint8_t* control_bytes_ = nullptr;
+    bool owns_mapping_pin_ = false;
+    bool active_ = false;
+    bool closed_ = false;
+};
+
 static int step_one(
         CPUState& s,
         const StepCallbacks& cb,
@@ -13114,19 +13657,15 @@ static int step_one(
             cycles += exec_dict(s, cb);
         else if (n == 0xB)
             cycles += exec_crypto(s, cb);
-        else if (n == 0xC) {
-            // EXT.FP executes in the Python oracle, which owns its exact
-            // rounding and flags. Rewind the complete instruction.
-            pc(s) = pc_start;
-            s.ext_modifier = -1;
-            icache_rollback_instruction(s);
-            throw std::runtime_error("EXT_ISA_FALLBACK");
-        }
+        else if (n == 0xC)
+            cycles += exec_fp(s);
         else
             throw std::logic_error(
                 "shared MP64 decoder deferred an invalid extension");
         s.ext_modifier = -1;
         s.cycle_count += cycles;
+        if (n == 0xC && s.perf_enable)
+            s.perf_cycles += cycles;
         return cycles;
     }
 
@@ -30011,6 +30550,8 @@ build_system_dma_callbacks(
 // ---------------------------------------------------------------------------
 
 PYBIND11_MODULE(_mp64_accel, m) {
+    megapad::scalar_fp::register_bindings(m);
+    megapad::keccak::register_bindings(m);
     m.doc() = "C++ accelerated core for Megapad-64 emulator";
 
     py::class_<PythonMemoryUseScope>(m, "_MemoryUseScope")
@@ -35323,6 +35864,78 @@ PYBIND11_MODULE(_mp64_accel, m) {
         []() {
             return make_cpu_state(CoreProfile::MICRO);
         });
+
+    m.attr("HYBRID_ROUTINE_ABI_ID") = "megapad.hybrid.integer-routine";
+    m.attr("HYBRID_ROUTINE_ABI_VERSION") = 1;
+    m.attr("HYBRID_ROOT_RETURN_V1") = py::int_(mp64_routine::ROOT_RETURN);
+
+    py::class_<mp64_routine::Spec>(m, "RoutineSpecV1")
+        .def(py::init([](
+                py::object code_base, py::object code_size,
+                py::object entry_offset, py::object input_cells,
+                py::object output_cells, py::object stack_base,
+                py::object stack_size, py::object max_instructions) {
+            return make_routine_spec_v1(
+                code_base, code_size, entry_offset, input_cells,
+                output_cells, stack_base, stack_size, max_instructions);
+        }), py::arg("code_base"), py::arg("code_size"),
+            py::arg("entry_offset"), py::arg("input_cells"),
+            py::arg("output_cells"), py::arg("stack_base"),
+            py::arg("stack_size"), py::arg("max_instructions"))
+        .def_readonly("code_base", &mp64_routine::Spec::code_base)
+        .def_readonly("code_size", &mp64_routine::Spec::code_size)
+        .def_readonly("entry_offset", &mp64_routine::Spec::entry_offset)
+        .def_readonly("input_cells", &mp64_routine::Spec::input_cells)
+        .def_readonly("output_cells", &mp64_routine::Spec::output_cells)
+        .def_readonly("stack_base", &mp64_routine::Spec::stack_base)
+        .def_readonly("stack_size", &mp64_routine::Spec::stack_size)
+        .def_readonly("max_instructions", &mp64_routine::Spec::max_instructions);
+
+    py::class_<mp64_routine::Result>(m, "RoutineResultV1")
+        .def_readonly("exit_kind", &mp64_routine::Result::exit_kind)
+        .def_readonly("instructions", &mp64_routine::Result::instructions)
+        .def_readonly("cycles", &mp64_routine::Result::cycles)
+        .def_readonly("steps_executed", &mp64_routine::Result::instructions)
+        .def_readonly("total_cycles", &mp64_routine::Result::cycles)
+        .def_readonly("entry_pc", &mp64_routine::Result::entry_pc)
+        .def_readonly("instruction_pc", &mp64_routine::Result::instruction_pc)
+        .def_readonly("pc", &mp64_routine::Result::pc)
+        .def_readonly("access_address", &mp64_routine::Result::access_address)
+        .def_readonly("access_width", &mp64_routine::Result::access_width)
+        .def_property_readonly("access_operation", [](const mp64_routine::Result& result)
+                -> py::object {
+            return result.access_operation.empty()
+                ? py::object(py::none()) : py::object(py::str(result.access_operation));
+        })
+        .def_readonly("trap_id", &mp64_routine::Result::trap_id)
+        .def_readonly("detail", &mp64_routine::Result::detail)
+        .def_property_readonly("outputs", [](const mp64_routine::Result& result) {
+            py::tuple output(result.outputs.size());
+            for (std::size_t i = 0; i < result.outputs.size(); ++i)
+                output[i] = py::int_(result.outputs[i]);
+            return output;
+        });
+
+    py::class_<RoutineRunnerV1>(m, "RoutineRunnerV1")
+        .def(py::init<py::object, py::handle, py::buffer>(),
+            py::arg("state"), py::arg("control_base"), py::arg("control_buffer"))
+        .def_property_readonly("control_base", &RoutineRunnerV1::control_base)
+        .def_property_readonly("control_size", &RoutineRunnerV1::control_size)
+        .def("close", &RoutineRunnerV1::close)
+        .def("publish_code", &RoutineRunnerV1::publish_code, py::arg("spec"))
+        .def("run", [](
+                RoutineRunnerV1& runner, const mp64_routine::Spec& spec,
+                py::object arguments, py::object spans,
+                py::object instruction_limit, py::object protected_spans,
+                py::object cancelled) {
+            if (!PyBool_Check(cancelled.ptr()))
+                throw py::type_error("cancelled must be a boolean");
+            return runner.run(
+                spec, arguments, spans, instruction_limit, protected_spans,
+                cancelled.ptr() == Py_True);
+        }, py::arg("spec"), py::arg("arguments"), py::arg("spans"),
+            py::arg("instruction_limit"), py::arg("protected_spans") = py::tuple(),
+            py::arg("cancelled") = py::bool_(false));
 
     // Expose RunResult
     py::class_<RunResult>(m, "RunResult")

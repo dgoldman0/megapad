@@ -1,0 +1,1905 @@
+{
+  "baseline_runtime_commit": "ca66ad7",
+  "current_runtime_commit": "bb50f9b",
+  "method": "Three fresh-process unprofiled runs per executor and phase, individually bounded by a90-second subprocess watchdog; baseline first trial captured earlier. Setup excluded from each source-load wall_time_s. Current measured runtime files match bb50f9b; per-run metadata captures intermediate local commit/status. No cProfile or Desktop claim.",
+  "runs": [
+    {
+      "phase": "baseline",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "python",
+          "extension": null
+        },
+        "generated_at_utc": "2026-09-30T13:39:31.165555+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "",
+            "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+            "status_porcelain": [
+              "?? bench_runtime_hotspots.py",
+              "?? tests/test_runtime_hotspots_benchmark.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.05806711799959885,
+          "fixture_preparation_time_s": 0.2061960770006408,
+          "host_system_time_s": 0.0,
+          "host_user_time_s": 0.39413999999999993,
+          "kdos_publications_per_s": 3705.012898432413,
+          "max_rss_kib": 119432,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.6646996340004989,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.005948613999862573,
+          "setup_time_s": 0.2702179990010336,
+          "source_bytes_per_s": 563986.1420757517,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.3943306109995319
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "",
+          "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+          "status_porcelain": [
+            "?? bench_runtime_hotspots.py",
+            "?? tests/test_runtime_hotspots_benchmark.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "python",
+      "trial": 1
+    },
+    {
+      "phase": "baseline",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "python",
+          "extension": null
+        },
+        "generated_at_utc": "2026-09-30T13:54:36.267803+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "",
+            "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+            "status_porcelain": [
+              "?? bench_runtime_hotspots.py",
+              "?? tests/test_runtime_hotspots_benchmark.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.05756705699968734,
+          "fixture_preparation_time_s": 0.29629458599993086,
+          "host_system_time_s": 0.0,
+          "host_user_time_s": 0.398191,
+          "kdos_publications_per_s": 3669.2137732494784,
+          "max_rss_kib": 119396,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.7580699200007075,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.005872478001037962,
+          "setup_time_s": 0.359741001000657,
+          "source_bytes_per_s": 558536.7115190721,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.39817794500049786
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "",
+          "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+          "status_porcelain": [
+            "?? bench_runtime_hotspots.py",
+            "?? tests/test_runtime_hotspots_benchmark.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "python",
+      "trial": 2
+    },
+    {
+      "phase": "baseline",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "python",
+          "extension": null
+        },
+        "generated_at_utc": "2026-09-30T13:54:37.207608+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "",
+            "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+            "status_porcelain": [
+              "?? bench_runtime_hotspots.py",
+              "?? tests/test_runtime_hotspots_benchmark.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.06067910100136942,
+          "fixture_preparation_time_s": 0.2707170120011142,
+          "host_system_time_s": 0.0,
+          "host_user_time_s": 0.37919899999999995,
+          "kdos_publications_per_s": 3852.9090853372154,
+          "max_rss_kib": 119396,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.7168035249997047,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.0060732259989890736,
+          "setup_time_s": 0.3374745069995697,
+          "source_bytes_per_s": 586499.2620477349,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.3791939980001189
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "",
+          "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+          "status_porcelain": [
+            "?? bench_runtime_hotspots.py",
+            "?? tests/test_runtime_hotspots_benchmark.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "python",
+      "trial": 3
+    },
+    {
+      "phase": "baseline",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "native",
+          "extension": {
+            "bytes": 5504912,
+            "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/_megaforth_native.cpython-312-x86_64-linux-gnu.so",
+            "sha256": "10b549d62123ae6b7eda78766771815ad7a3a7d05f74d547a42856cc088cc75d"
+          }
+        },
+        "generated_at_utc": "2026-09-30T13:39:31.950833+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "",
+            "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+            "status_porcelain": [
+              "?? bench_runtime_hotspots.py",
+              "?? tests/test_runtime_hotspots_benchmark.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.058236558999851695,
+          "fixture_preparation_time_s": 0.1357799800007342,
+          "host_system_time_s": 0.0,
+          "host_user_time_s": 0.381027,
+          "kdos_publications_per_s": 3834.1228499119784,
+          "max_rss_kib": 119400,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.5985474310000427,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.008051673999943887,
+          "setup_time_s": 0.21735846500087064,
+          "source_bytes_per_s": 583639.5752579564,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.38105195299976913
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "",
+          "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+          "status_porcelain": [
+            "?? bench_runtime_hotspots.py",
+            "?? tests/test_runtime_hotspots_benchmark.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "native",
+      "trial": 1
+    },
+    {
+      "phase": "baseline",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "native",
+          "extension": {
+            "bytes": 5504912,
+            "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/_megaforth_native.cpython-312-x86_64-linux-gnu.so",
+            "sha256": "10b549d62123ae6b7eda78766771815ad7a3a7d05f74d547a42856cc088cc75d"
+          }
+        },
+        "generated_at_utc": "2026-09-30T13:54:37.947156+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "",
+            "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+            "status_porcelain": [
+              "?? bench_runtime_hotspots.py",
+              "?? tests/test_runtime_hotspots_benchmark.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.07112176699956763,
+          "fixture_preparation_time_s": 0.10266717500053346,
+          "host_system_time_s": 0.0004559999999999981,
+          "host_user_time_s": 0.361942,
+          "kdos_publications_per_s": 4031.4841416826453,
+          "max_rss_kib": 119392,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.56185085099969,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.009906560999297653,
+          "setup_time_s": 0.19932298099956824,
+          "source_bytes_per_s": 613682.3947007497,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.36239755600036005
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "",
+          "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+          "status_porcelain": [
+            "?? bench_runtime_hotspots.py",
+            "?? tests/test_runtime_hotspots_benchmark.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "native",
+      "trial": 2
+    },
+    {
+      "phase": "baseline",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "native",
+          "extension": {
+            "bytes": 5504912,
+            "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/_megaforth_native.cpython-312-x86_64-linux-gnu.so",
+            "sha256": "10b549d62123ae6b7eda78766771815ad7a3a7d05f74d547a42856cc088cc75d"
+          }
+        },
+        "generated_at_utc": "2026-09-30T13:54:38.701692+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "",
+            "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+            "status_porcelain": [
+              "?? bench_runtime_hotspots.py",
+              "?? tests/test_runtime_hotspots_benchmark.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.05945523599984881,
+          "fixture_preparation_time_s": 0.0996144689997891,
+          "host_system_time_s": 0.0,
+          "host_user_time_s": 0.377567,
+          "kdos_publications_per_s": 3869.4574514690703,
+          "max_rss_kib": 119400,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.5484637700010353,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.007448375999956625,
+          "setup_time_s": 0.17075579400079732,
+          "source_bytes_per_s": 589018.2948900525,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.3775723129983817
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "",
+          "commit": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-profile-baseline",
+          "status_porcelain": [
+            "?? bench_runtime_hotspots.py",
+            "?? tests/test_runtime_hotspots_benchmark.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "native",
+      "trial": 3
+    },
+    {
+      "phase": "current",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "python",
+          "extension": null
+        },
+        "generated_at_utc": "2026-09-30T13:54:39.469167+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "feature/unified-runtime",
+            "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+            "status_porcelain": [
+              "M emulator/accel/mp64_accel.cpp",
+              " M emulator/accel/mp64_crypto.h",
+              " M setup_accel.py",
+              " M setup_simulator_accel.py",
+              " M simulator/accel/semantic_executor.cpp",
+              " M simulator/native_execution.py",
+              " M simulator/runtime.py",
+              " M simulator/sha3.py",
+              "?? shared/accel/keccak.cpp",
+              "?? shared/accel/keccak.h",
+              "?? shared/accel/keccak_bindings.h",
+              "?? tests/test_native_keccak.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.057841814999846974,
+          "fixture_preparation_time_s": 0.09633523699994839,
+          "host_system_time_s": 0.00018899999999999473,
+          "host_user_time_s": 0.4346199999999999,
+          "kdos_publications_per_s": 3360.134696832998,
+          "max_rss_kib": 119452,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.594494623999708,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.0053891409988864325,
+          "setup_time_s": 0.15957106899986684,
+          "source_bytes_per_s": 511487.937146864,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.43480399799955194
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "feature/unified-runtime",
+          "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+          "status_porcelain": [
+            "M emulator/accel/mp64_accel.cpp",
+            " M emulator/accel/mp64_crypto.h",
+            " M setup_accel.py",
+            " M setup_simulator_accel.py",
+            " M simulator/accel/semantic_executor.cpp",
+            " M simulator/native_execution.py",
+            " M simulator/runtime.py",
+            " M simulator/sha3.py",
+            "?? shared/accel/keccak.cpp",
+            "?? shared/accel/keccak.h",
+            "?? shared/accel/keccak_bindings.h",
+            "?? tests/test_native_keccak.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "python",
+      "trial": 1
+    },
+    {
+      "phase": "current",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "python",
+          "extension": null
+        },
+        "generated_at_utc": "2026-09-30T13:54:40.198494+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "feature/unified-runtime",
+            "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+            "status_porcelain": [
+              "M emulator/accel/mp64_accel.cpp",
+              " M emulator/accel/mp64_crypto.h",
+              " M setup_accel.py",
+              " M setup_simulator_accel.py",
+              " M simulator/accel/semantic_executor.cpp",
+              " M simulator/native_execution.py",
+              " M simulator/runtime.py",
+              " M simulator/sha3.py",
+              "?? shared/accel/keccak.cpp",
+              "?? shared/accel/keccak.h",
+              "?? shared/accel/keccak_bindings.h",
+              "?? tests/test_native_keccak.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.062291205998917576,
+          "fixture_preparation_time_s": 0.10043228100039414,
+          "host_system_time_s": 0.0,
+          "host_user_time_s": 0.39070599999999994,
+          "kdos_publications_per_s": 3737.0629135883996,
+          "max_rss_kib": 119432,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.5600849759994162,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.006238721998670371,
+          "setup_time_s": 0.16896702600024582,
+          "source_bytes_per_s": 568864.8739173986,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.3909487300006731
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "feature/unified-runtime",
+          "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+          "status_porcelain": [
+            "M emulator/accel/mp64_accel.cpp",
+            " M emulator/accel/mp64_crypto.h",
+            " M setup_accel.py",
+            " M setup_simulator_accel.py",
+            " M simulator/accel/semantic_executor.cpp",
+            " M simulator/native_execution.py",
+            " M simulator/runtime.py",
+            " M simulator/sha3.py",
+            "?? shared/accel/keccak.cpp",
+            "?? shared/accel/keccak.h",
+            "?? shared/accel/keccak_bindings.h",
+            "?? tests/test_native_keccak.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "python",
+      "trial": 2
+    },
+    {
+      "phase": "current",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "python",
+          "extension": null
+        },
+        "generated_at_utc": "2026-09-30T13:54:40.962722+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "feature/unified-runtime",
+            "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+            "status_porcelain": [
+              "M emulator/accel/mp64_accel.cpp",
+              " M emulator/accel/mp64_crypto.h",
+              " M setup_accel.py",
+              " M setup_simulator_accel.py",
+              " M simulator/accel/semantic_executor.cpp",
+              " M simulator/native_execution.py",
+              " M simulator/runtime.py",
+              " M simulator/sha3.py",
+              "?? shared/accel/keccak.cpp",
+              "?? shared/accel/keccak.h",
+              "?? shared/accel/keccak_bindings.h",
+              "?? tests/test_native_keccak.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.06041540799924405,
+          "fixture_preparation_time_s": 0.09388065199891571,
+          "host_system_time_s": 0.0038750000000000034,
+          "host_user_time_s": 0.39723299999999995,
+          "kdos_publications_per_s": 3642.380510815289,
+          "max_rss_kib": 119424,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.5613339850006014,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.005771097999968333,
+          "setup_time_s": 0.16007277599965164,
+          "source_bytes_per_s": 554452.0865597453,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.40111130500008585
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "feature/unified-runtime",
+          "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+          "status_porcelain": [
+            "M emulator/accel/mp64_accel.cpp",
+            " M emulator/accel/mp64_crypto.h",
+            " M setup_accel.py",
+            " M setup_simulator_accel.py",
+            " M simulator/accel/semantic_executor.cpp",
+            " M simulator/native_execution.py",
+            " M simulator/runtime.py",
+            " M simulator/sha3.py",
+            "?? shared/accel/keccak.cpp",
+            "?? shared/accel/keccak.h",
+            "?? shared/accel/keccak_bindings.h",
+            "?? tests/test_native_keccak.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "python",
+      "trial": 3
+    },
+    {
+      "phase": "current",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "native",
+          "extension": {
+            "bytes": 5848008,
+            "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/_megaforth_native.cpython-312-x86_64-linux-gnu.so",
+            "sha256": "ff605366137bddda6cb789056b9acdcc49e4c6f8c9ae8188b29f9e219b54e2b4"
+          }
+        },
+        "generated_at_utc": "2026-09-30T13:54:41.675508+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "feature/unified-runtime",
+            "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+            "status_porcelain": [
+              "M emulator/accel/mp64_accel.cpp",
+              " M emulator/accel/mp64_crypto.h",
+              " M setup_accel.py",
+              " M setup_simulator_accel.py",
+              " M simulator/accel/semantic_executor.cpp",
+              " M simulator/native_execution.py",
+              " M simulator/runtime.py",
+              " M simulator/sha3.py",
+              "?? shared/accel/keccak.cpp",
+              "?? shared/accel/keccak.h",
+              "?? shared/accel/keccak_bindings.h",
+              "?? tests/test_native_keccak.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.05699056999947061,
+          "fixture_preparation_time_s": 0.09083452499908162,
+          "host_system_time_s": 0.0003660000000000052,
+          "host_user_time_s": 0.35070900000000005,
+          "kdos_publications_per_s": 4161.446996347666,
+          "max_rss_kib": 119428,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.5111996910000016,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.007501473999582231,
+          "setup_time_s": 0.15999218700017082,
+          "source_bytes_per_s": 633465.6588957781,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.3510798050010635
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "feature/unified-runtime",
+          "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+          "status_porcelain": [
+            "M emulator/accel/mp64_accel.cpp",
+            " M emulator/accel/mp64_crypto.h",
+            " M setup_accel.py",
+            " M setup_simulator_accel.py",
+            " M simulator/accel/semantic_executor.cpp",
+            " M simulator/native_execution.py",
+            " M simulator/runtime.py",
+            " M simulator/sha3.py",
+            "?? shared/accel/keccak.cpp",
+            "?? shared/accel/keccak.h",
+            "?? shared/accel/keccak_bindings.h",
+            "?? tests/test_native_keccak.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "native",
+      "trial": 1
+    },
+    {
+      "phase": "current",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "native",
+          "extension": {
+            "bytes": 5848008,
+            "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/_megaforth_native.cpython-312-x86_64-linux-gnu.so",
+            "sha256": "ff605366137bddda6cb789056b9acdcc49e4c6f8c9ae8188b29f9e219b54e2b4"
+          }
+        },
+        "generated_at_utc": "2026-09-30T13:54:42.366603+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "feature/unified-runtime",
+            "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+            "status_porcelain": [
+              "M emulator/accel/mp64_accel.cpp",
+              " M emulator/accel/mp64_crypto.h",
+              " M setup_accel.py",
+              " M setup_simulator_accel.py",
+              " M simulator/accel/semantic_executor.cpp",
+              " M simulator/native_execution.py",
+              " M simulator/runtime.py",
+              " M simulator/sha3.py",
+              "?? shared/accel/keccak.cpp",
+              "?? shared/accel/keccak.h",
+              "?? shared/accel/keccak_bindings.h",
+              "?? tests/test_native_keccak.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.05825879999974859,
+          "fixture_preparation_time_s": 0.09364744699996663,
+          "host_system_time_s": 0.00013699999999999823,
+          "host_user_time_s": 0.36445799999999995,
+          "kdos_publications_per_s": 4007.453479469321,
+          "max_rss_kib": 119428,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.5285788920009509,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.00692320699999982,
+          "setup_time_s": 0.16381129100045655,
+          "source_bytes_per_s": 610024.3884144686,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.36457066999901144
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "feature/unified-runtime",
+          "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+          "status_porcelain": [
+            "M emulator/accel/mp64_accel.cpp",
+            " M emulator/accel/mp64_crypto.h",
+            " M setup_accel.py",
+            " M setup_simulator_accel.py",
+            " M simulator/accel/semantic_executor.cpp",
+            " M simulator/native_execution.py",
+            " M simulator/runtime.py",
+            " M simulator/sha3.py",
+            "?? shared/accel/keccak.cpp",
+            "?? shared/accel/keccak.h",
+            "?? shared/accel/keccak_bindings.h",
+            "?? tests/test_native_keccak.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "native",
+      "trial": 2
+    },
+    {
+      "phase": "current",
+      "report": {
+        "configuration": {
+          "clusters": 0,
+          "compiled_forth_cache": false,
+          "ext_mem_mib": 128,
+          "full_cores": 1,
+          "hbw_mib": 3,
+          "lanes": 1,
+          "ram_kib": 1024,
+          "terminal": [
+            280,
+            84
+          ],
+          "terminal_model": "hosted-uart-byte-stream",
+          "vram_mib": 4
+        },
+        "errors": [],
+        "executor": {
+          "backend": "native",
+          "extension": {
+            "bytes": 5848008,
+            "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/_megaforth_native.cpython-312-x86_64-linux-gnu.so",
+            "sha256": "ff605366137bddda6cb789056b9acdcc49e4c6f8c9ae8188b29f9e219b54e2b4"
+          }
+        },
+        "generated_at_utc": "2026-09-30T13:54:43.090893+00:00",
+        "harness": {
+          "path": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime/bench_simulator_kdos_load.py",
+          "repository": {
+            "branch": "feature/unified-runtime",
+            "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+            "dirty": true,
+            "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+            "status_porcelain": [
+              "M emulator/accel/mp64_accel.cpp",
+              " M emulator/accel/mp64_crypto.h",
+              " M setup_accel.py",
+              " M setup_simulator_accel.py",
+              " M simulator/accel/semantic_executor.cpp",
+              " M simulator/native_execution.py",
+              " M simulator/runtime.py",
+              " M simulator/sha3.py",
+              "?? shared/accel/keccak.cpp",
+              "?? shared/accel/keccak.h",
+              "?? shared/accel/keccak_bindings.h",
+              "?? tests/test_native_keccak.py"
+            ]
+          },
+          "schema": "megapad.simulator-kdos-source-load",
+          "schema_version": 1,
+          "sha256": "1ab9f7f959b0baeaa302802e99f2b45758b5eec999bc9c560dae4c2ac541d40c"
+        },
+        "host": {
+          "cpu": "AMD EPYC 9V74 80-Core Processor",
+          "platform": "Linux-6.18.44-x86_64-with-glibc2.39",
+          "python": "3.12.14"
+        },
+        "machine_state": {
+          "core_words": 437,
+          "dictionary_index_count": 1891,
+          "dictionary_index_slots": 65536,
+          "dictionary_name_sha256": "dd8aaf89b4a2e704c36754c8e4e695da117dc0ad696be62539729b3f1c3ac43d",
+          "dictionary_words": 1898,
+          "here": 99655,
+          "kdos_words": 1461,
+          "latest": 99625,
+          "storage_completion": 7,
+          "storage_media_after_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "storage_media_before_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "uart_output_sha256": "b3c04a2e9be77ca7e26e70e3bdea43522adfcb9c55f83cfd8cb5de7c922d26d5",
+          "uart_output_utf8": "\r\n------------------------------------------------------------\r\n  KDOS v1.1 \u2014 Kernel Dashboard OS\r\n------------------------------------------------------------\r\n Type HELP for commands, HELP <word> for details.\r\n Type SCREENS for interactive TUI (or N SCREEN for screen N).\r\n Type TOPICS or LESSONS for documentation.\r\n MP64FS loaded\r\n Running autoexec.f...\r\n[megapad-bench] BIOS+KDOS source load complete\r\n\r\n",
+          "unique_bindings": 1891
+        },
+        "measurement": {
+          "backend_local_semantic_steps": 36116,
+          "backend_preparation_time_s": 0.06017981900004088,
+          "fixture_preparation_time_s": 0.09583931700035464,
+          "host_system_time_s": 0.007498000000000005,
+          "host_user_time_s": 0.35687899999999995,
+          "kdos_publications_per_s": 4009.763205288781,
+          "max_rss_kib": 119428,
+          "packed_source_bytes": 222397,
+          "ready_from_run_entry_s": 0.5335633429986046,
+          "reason": "semantic-evaluator-finished",
+          "runtime_construction_time_s": 0.008285195999633288,
+          "setup_time_s": 0.16893476800032659,
+          "source_bytes_per_s": 610375.9805384045,
+          "submitted_lines": 6684,
+          "submitted_payload_bytes": 215713,
+          "timing_qualified_for_throughput": true,
+          "wall_time_s": 0.36436066799979017
+        },
+        "measurement_semantics": {
+          "backend_local_semantic_steps_are_mp64_cycles": false,
+          "compiled_forth_cache": false,
+          "excludes": [
+            "MP64 instruction execution",
+            "BIOS ROM execution",
+            "MP64FS transfer of kdos.f into a BIOS load buffer",
+            "MegaPad optional system modules",
+            "Akashic",
+            "Desk",
+            "rich terminal"
+          ],
+          "includes": [
+            "complete hosted KDOS source evaluation",
+            "KDOS filesystem and heap initialization",
+            "normal KDOS autoexec lookup and evaluation"
+          ],
+          "source_mode": "same executable LF records as MP64FS packed source",
+          "start": "prepared semantic BIOS immediately before first checked KDOS line",
+          "stop": "successful EVALUATE-FINISH after the complete packed KDOS source and its normal marker-only autoexec"
+        },
+        "outcome": "pass",
+        "repository": {
+          "branch": "feature/unified-runtime",
+          "commit": "957d27258c67b63935e4d5376bd1094e63f737ae",
+          "dirty": true,
+          "root": "/workspace/scratch/bf1956fffbfc/megapad-unified-runtime",
+          "status_porcelain": [
+            "M emulator/accel/mp64_accel.cpp",
+            " M emulator/accel/mp64_crypto.h",
+            " M setup_accel.py",
+            " M setup_simulator_accel.py",
+            " M simulator/accel/semantic_executor.cpp",
+            " M simulator/native_execution.py",
+            " M simulator/runtime.py",
+            " M simulator/sha3.py",
+            "?? shared/accel/keccak.cpp",
+            "?? shared/accel/keccak.h",
+            "?? shared/accel/keccak_bindings.h",
+            "?? tests/test_native_keccak.py"
+          ]
+        },
+        "schema": "megapad.simulator-kdos-source-load",
+        "schema_version": 1,
+        "sources": {
+          "autoexec_sha256": "ebd108c3cdd7093906de0ed975c9ed0a29a018dbf485732b23fb8fcc3bf91299",
+          "bios_sha256": "320eb5226b291e98c30b2c5d220d456d9210e68c975d5b0e733ad663df5b23bb",
+          "image_bytes": 33554432,
+          "image_sha256": "2d8b805a63eea3e9c3c2cc2fcf3bc98989ba6715e3b576521035fcffc582d3d2",
+          "kdos_source_bytes": 343925,
+          "kdos_source_sha256": "108ed1c00a12fa7590ec1ab92115c57bc628d511a5540e3b923135e965a272db",
+          "mp64fs_fixture_mtime": 0,
+          "mp64fs_total_sectors": 65536,
+          "packed_kdos_bytes": 222397,
+          "packed_kdos_sha256": "98c31a3d0b5a6d4997f2be1d3fa5ea4750d4ae04419f8e124652d564b43a0205"
+        },
+        "validation": {
+          "authoritative_dictionary_index": true,
+          "canonical_one_core_memory_shape": true,
+          "evaluator_finish_succeeded": true,
+          "exact_core_and_kdos_publications": true,
+          "exact_semantic_startup_transcript": true,
+          "exact_source_payload": true,
+          "filesystem_and_heap_initialized": true,
+          "ordinary_checked_source_mode": true,
+          "qualified_definition_frontier": true,
+          "representative_vocabulary_present": true,
+          "stacks_and_locks_balanced": true,
+          "startup_registries_complete": true,
+          "storage_media_unchanged": true,
+          "temporary_interpreter_control_absent": true
+        }
+      },
+      "requested_executor": "native",
+      "trial": 3
+    }
+  ],
+  "schema": "megapad.unified-kdos-controls",
+  "schema_version": 1
+}

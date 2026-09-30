@@ -405,6 +405,7 @@ class SharedMachine(SharedSessionOwner):
                     step_request_unit="mp64_instruction",
                     batch_unit="instruction_batch",
                     timer_unit="mp64_system_cycle",
+                    timing_model="instruction_batched",
                     rtc_mode=system.rtc.clock_mode,
                     machine_code=True,
                     cpu_diagnostics=True,

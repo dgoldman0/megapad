@@ -32,6 +32,7 @@ class SessionRuntimeDescriptor:
     network_diagnostics: bool
     reset: bool
     host_profiling: bool
+    timing_model: str
 
     def to_dict(self) -> dict:
         return {
@@ -41,6 +42,10 @@ class SessionRuntimeDescriptor:
             "step_request_unit": self.step_request_unit,
             "batch_unit": self.batch_unit,
             "timing": {
+                "model": self.timing_model,
+                "models_shared_clock_latency": (
+                    self.timing_model == "strict_shared_clock"
+                ),
                 "timer_unit": self.timer_unit,
                 "rtc_mode": self.rtc_mode,
             },

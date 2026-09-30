@@ -86,6 +86,8 @@ def test_facade_reports_semantic_work_without_hardware_statistics() -> None:
             "step_request_unit": "semantic_boundary",
             "batch_unit": "semantic_boundary",
             "timing": {
+                "model": "semantic",
+                "models_shared_clock_latency": False,
                 "timer_unit": "semantic_step",
                 "rtc_mode": "manual",
             },
@@ -176,6 +178,8 @@ def test_semantic_quantum_prefers_caller_then_environment_then_executor(
             assert descriptor["timing"]["rtc_mode"] == "manual"
             session.runtime.rtc.bind_monotonic_clock(lambda: 0)
             assert owner.status()["runtime"]["timing"] == {
+                "model": "semantic",
+                "models_shared_clock_latency": False,
                 "timer_unit": "semantic_step",
                 "rtc_mode": "host_monotonic",
             }

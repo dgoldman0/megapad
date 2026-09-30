@@ -6,6 +6,7 @@ import os
 
 import pybind11
 from setuptools import Extension, setup
+from setuptools.command.build_ext import build_ext
 
 sanitizer = os.environ.get("MEGAFORTH_NATIVE_SANITIZER", "none")
 if sanitizer not in ("none", "address-undefined"):
@@ -18,11 +19,24 @@ else:
     instrumentation = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all"]
     flags += ["-O1", "-g", "-fno-omit-frame-pointer", *instrumentation]
     links += instrumentation
+
+class IsolatedBuildExt(build_ext):
+    """Keep shared source objects specific to this extension's compile flags."""
+
+    def finalize_options(self):
+        super().finalize_options()
+        self.build_temp = os.path.join(self.build_temp, "megaforth")
+
 setup(
+    cmdclass={"build_ext": IsolatedBuildExt},
     name="megaforth_native",
     version="0.1.0",
     ext_modules=[Extension(
-        "_megaforth_native", ["simulator/accel/semantic_executor.cpp"],
+        "_megaforth_native", [
+            "simulator/accel/semantic_executor.cpp", "shared/accel/scalar_fp.cpp", "shared/accel/keccak.cpp",
+        ],
+        depends=["shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h",
+                 "shared/accel/keccak.h", "shared/accel/keccak_bindings.h"],
         include_dirs=[pybind11.get_include()], language="c++",
         extra_compile_args=flags, extra_link_args=links,
     )],

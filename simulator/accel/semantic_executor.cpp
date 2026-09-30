@@ -1,12 +1,15 @@
 // Generic hosted Forth execution. This file contains no terminal/app policy.
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include "../../shared/accel/scalar_fp_bindings.h"
+#include "../../shared/accel/keccak_bindings.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -40,6 +43,7 @@ enum Opcode : uint32_t {
     OP_BSWAP, OP_CELL_PLUS, OP_EXECUTE, OP_COMPARE, OP_FILL,
     OP_CMOVE, OP_CMOVE_UP, OP_MOVE,
     OP_SP_FETCH, OP_RP_FETCH,
+    OP_SCALAR_FP, OP_FPCSR_FETCH, OP_FPCSR_STORE,
 };
 
 struct Instruction;
@@ -63,6 +67,10 @@ struct Region {
     Cell base;
     Cell size;
     py::dict pages;
+    // A dense descriptor owns a buffer export for the program's full
+    // lifetime. The pointer cannot be invalidated by exporter resizing.
+    std::unique_ptr<py::buffer_info> dense_lease;
+    uint8_t* dense = nullptr;
 };
 
 struct ByteChunk {
@@ -217,6 +225,12 @@ public:
             const Cell offset = address - region.base;
             if (width > region.size - offset)
                 return false;
+            if (region.dense != nullptr) {
+                scalar.fragmented = false;
+                scalar.contiguous = region.dense + offset;
+                hot = HotPage{region.base, region.size, region.dense};
+                return true;
+            }
             Cell page_index = offset >> page_shift_;
             Cell page_offset = offset & (page_size_ - 1);
             scalar.fragmented = width > page_size_ - page_offset;
@@ -280,6 +294,11 @@ public:
             if (address < region.base || address - region.base >= region.size) continue;
             Cell offset = address - region.base;
             if (length > region.size - offset) return false;
+            if (region.dense != nullptr) {
+                span.append(region.dense + offset, length);
+                ordinary_page_ = HotPage{region.base, region.size, region.dense};
+                return true;
+            }
             while (length != 0) {
                 uint8_t* page = nullptr;
                 if (!resolve_page(r, offset >> page_shift_, page) ||
@@ -423,6 +442,7 @@ struct RunState {
     StackState data;
     StackState returns;
     Cell cookie;
+    Cell fpcsr;
     ContinuationChanges changed{returns.pointer};
     Cell pointer_captures = 0;
 };
@@ -516,16 +536,11 @@ private:
 class NativeProgram {
 public:
     NativeProgram(const py::iterable& regions, Cell page_size,
-                  py::object continuation_type)
+                  py::object continuation_type, const py::iterable& dense_regions)
         : page_size_(page_size), continuation_type_(std::move(continuation_type)) {
         if (page_size == 0 || (page_size & (page_size - 1)) != 0)
             throw py::value_error("page size must be a positive power of two");
-        for (py::handle item : regions) {
-            auto entry = py::cast<py::tuple>(item);
-            if (entry.size() != 3)
-                throw py::value_error("region must be (base, size, pages)");
-            const Cell base = entry[0].cast<Cell>();
-            const Cell size = entry[1].cast<Cell>();
+        auto validate_region = [&](Cell base, Cell size) {
             if (size == 0 || base > MASK - (size - 1))
                 throw py::value_error("region has an invalid ordinary span");
             for (const Region& previous : regions_) {
@@ -533,7 +548,52 @@ public:
                     previous.base <= base + size - 1)
                     throw py::value_error("ordinary regions must not overlap");
             }
-            regions_.push_back(Region{base, size, entry[2].cast<py::dict>()});
+        };
+        for (py::handle item : regions) {
+            auto entry = py::cast<py::tuple>(item);
+            if (entry.size() != 3)
+                throw py::value_error("region must be (base, size, pages)");
+            const Cell base = entry[0].cast<Cell>();
+            const Cell size = entry[1].cast<Cell>();
+            validate_region(base, size);
+            regions_.push_back(Region{base, size, entry[2].cast<py::dict>(), nullptr});
+        }
+        for (py::handle item : dense_regions) {
+            auto entry = py::cast<py::tuple>(item);
+            if (entry.size() != 3)
+                throw py::value_error("dense region must be (base, size, buffer)");
+            const Cell base = entry[0].cast<Cell>();
+            const Cell size = entry[1].cast<Cell>();
+            validate_region(base, size);
+            auto buffer = entry[2].cast<py::buffer>();
+            // Export from an independent view, not a caller-owned memoryview:
+            // releasing the caller's view must not detach or invalidate us.
+            PyObject* raw_view = PyMemoryView_FromObject(buffer.ptr());
+            if (raw_view == nullptr) throw py::error_already_set();
+            auto owned_view = py::reinterpret_steal<py::buffer>(raw_view);
+            auto lease = std::make_unique<py::buffer_info>(owned_view.request(true));
+            if (lease->readonly)
+                throw py::buffer_error("dense region requires a writable buffer");
+            if (lease->ndim != 1 || lease->itemsize != 1 ||
+                lease->shape.size() != 1 || lease->shape[0] < 0)
+                throw py::value_error("dense region requires a one-dimensional byte buffer");
+            if (lease->strides.size() != 1 || lease->strides[0] != 1 ||
+                !lease->view() || !PyBuffer_IsContiguous(lease->view(), 'C'))
+                throw py::value_error("dense region requires a C-contiguous buffer");
+            if (static_cast<Cell>(lease->shape[0]) != size)
+                throw py::value_error("dense region size must equal buffer capacity");
+            if (lease->ptr == nullptr)
+                throw py::value_error("dense region exposes a null data pointer");
+            auto* pointer = static_cast<uint8_t*>(lease->ptr);
+            const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+            for (const Region& previous : regions_) {
+                if (previous.dense == nullptr) continue;
+                const auto prior = reinterpret_cast<std::uintptr_t>(previous.dense);
+                if (address <= prior ? prior - address < size
+                                     : address - prior < previous.size)
+                    throw py::value_error("dense region buffers must not alias");
+            }
+            regions_.push_back(Region{base, size, py::dict(), std::move(lease), pointer});
         }
     }
 
@@ -546,7 +606,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_RP_FETCH)
+            if (opcode > OP_FPCSR_STORE)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -631,20 +691,20 @@ public:
 
     py::tuple run(Cell xt, Cell ip, const std::array<Cell, 3>& data_state,
                   const py::tuple& return_state, const py::dict& continuations,
-                  Cell remaining_steps) {
+                  Cell remaining_steps, Cell fpcsr) {
         if (return_state.size() != 4)
             throw py::value_error("return state must contain four cells");
         RunState state{xt, ip, 0,
             StackState{data_state[0], data_state[1], data_state[2]},
             StackState{return_state[0].cast<Cell>(), return_state[1].cast<Cell>(),
-                       return_state[2].cast<Cell>()}, 0};
+                       return_state[2].cast<Cell>()}, 0, fpcsr};
         // Python's continuation sequence is deliberately unbounded. Decline
         // very large sequences rather than wrap or truncate their identity.
         try {
             state.cookie = return_state[3].cast<Cell>();
         } catch (const py::cast_error&) {
             return py::make_tuple(xt, ip, 0, state.data.pointer,
-                state.returns.pointer, return_state[3], py::list(), 0);
+                state.returns.pointer, return_state[3], py::list(), 0, fpcsr);
         }
         if (!state.data.valid() || !state.returns.valid() ||
             !(state.data.empty <= state.returns.floor ||
@@ -753,7 +813,7 @@ private:
         state.changed.append_to(updates);
         return py::make_tuple(state.xt, state.ip, state.steps,
             state.data.pointer, state.returns.pointer, state.cookie, updates,
-            state.pointer_captures);
+            state.pointer_captures, state.fpcsr);
     }
 
     enum SlotKind { USER_CELL, CONTINUATION, PYTHON_BOUNDARY };
@@ -781,7 +841,7 @@ private:
         // Root and fault returns retain their dispatcher-owned control effects.
         if (py::cast<Cell>(py::handle(PyTuple_GET_ITEM(entry, 1))) != raw ||
             continuation.attr("root").cast<bool>() ||
-            continuation.attr("fault_abort").cast<bool>())
+            !continuation.attr("fault_abort").is_none())
             return PYTHON_BOUNDARY;
         value = ContinuationUpdate{continuation.attr("xt").cast<Cell>(),
                                    continuation.attr("ip").cast<Cell>(), raw};
@@ -1040,6 +1100,45 @@ private:
             out[0] = opcode == OP_SP_FETCH ? s.data.pointer : s.returns.pointer;
             produced = 1;
             break;
+        case OP_FPCSR_FETCH:
+            if (!stack.inputs(0)) return false;
+            out[0] = s.fpcsr; produced = 1;
+            break;
+        case OP_FPCSR_STORE:
+            if (!stack.inputs(1) || !stack.outputs(0)) return false;
+            stack.commit();
+            s.fpcsr = v[0] & 0x1f7;
+            ++s.ip;
+            return true;
+        case OP_SCALAR_FP: {
+            if (operation.a > 0xff || operation.b < 1 || operation.b > 3)
+                return false;
+            const auto fc = static_cast<unsigned>(operation.a);
+            const auto arity = static_cast<unsigned>(operation.b);
+            // FCMP has no cell result and is not a hosted BIOS scalar word.
+            // Decline all malformed descriptors and reserved rounding modes
+            // before any stack/flag effects. Python retains its partial pops
+            // and instruction-fault flow at this original call boundary.
+            const auto code = fc & 0x3f;
+            const unsigned expected_arity =
+                code <= 3 || code == 5 || code == 6 ||
+                    (code >= 0x11 && code <= 0x13) ? 2 :
+                code == 7 || code == 8 ? 3 :
+                code == 4 || code == 0x14 || code >= 0x20 ? 1 : 0;
+            if (arity != expected_arity ||
+                megapad::scalar_fp::validate(fc, 0, s.fpcsr) != nullptr ||
+                !stack.inputs(arity) || !stack.outputs(1))
+                return false;
+            const Cell rd = arity == 2 ? v[1] : v[0];
+            const Cell rs = arity == 3 ? v[2] : v[0];
+            const Cell rt = arity == 3 ? v[1] : 0;
+            const auto outcome = megapad::scalar_fp::execute(fc, rd, rs, rt, s.fpcsr);
+            out[0] = outcome.value;
+            stack.commit();
+            s.fpcsr |= outcome.flags;
+            ++s.ip;
+            return true;
+        }
         case OP_LITERAL: case OP_PUSH_CELL:
             if (!stack.inputs(0)) return false;
             out[0] = operation.a; produced = 1;
@@ -1240,17 +1339,22 @@ private:
 }  // namespace
 
 PYBIND11_MODULE(_megaforth_native, module) {
+    megapad::scalar_fp::register_bindings(module);
+    megapad::keccak::register_bindings(module);
+    module.attr("SEMANTIC_API_VERSION") = 2;
     module.doc() = "Native execution of generic hosted Forth semantic plans";
     py::class_<NativeProgram>(module, "NativeProgram")
-        .def(py::init<const py::iterable&, Cell, py::object>(), py::arg("regions"),
-             py::arg("page_size"), py::arg("continuation_type"))
+        .def(py::init<const py::iterable&, Cell, py::object, const py::iterable&>(),
+             py::arg("regions"), py::arg("page_size"), py::arg("continuation_type"),
+             py::arg("dense_regions") = py::tuple())
         .def("install", &NativeProgram::install, py::arg("xt"), py::arg("operations"))
         .def("clear", &NativeProgram::clear)
         .def("snapshot_stack", &NativeProgram::snapshot_stack,
              py::arg("bounds"), py::arg("continuations") = py::none())
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
              py::arg("data_state"), py::arg("return_state"),
-             py::arg("continuations"), py::arg("remaining_steps"));
+             py::arg("continuations"), py::arg("remaining_steps"),
+             py::arg("fpcsr") = 0);
 #define EXPORT_OPCODE(name) module.attr(#name) = py::int_(static_cast<uint32_t>(name))
     EXPORT_OPCODE(OP_STOP);
     EXPORT_OPCODE(OP_LITERAL); EXPORT_OPCODE(OP_BRANCH); EXPORT_OPCODE(OP_BRANCH_ZERO);
@@ -1259,6 +1363,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_R_PUSH); EXPORT_OPCODE(OP_R_POP); EXPORT_OPCODE(OP_R_PEEK);
     EXPORT_OPCODE(OP_DO); EXPORT_OPCODE(OP_QUESTION_DO); EXPORT_OPCODE(OP_LOOP);
     EXPORT_OPCODE(OP_PLUS_LOOP); EXPORT_OPCODE(OP_UNLOOP);
+    EXPORT_OPCODE(OP_SCALAR_FP); EXPORT_OPCODE(OP_FPCSR_FETCH);
+    EXPORT_OPCODE(OP_FPCSR_STORE);
     py::dict primitives;
 #define PRIMITIVE(word, name) EXPORT_OPCODE(name); primitives[py::bytes(word)] = py::int_(static_cast<uint32_t>(name))
     PRIMITIVE("DUP", OP_DUP); PRIMITIVE("DROP", OP_DROP); PRIMITIVE("SWAP", OP_SWAP);

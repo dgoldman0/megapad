@@ -1,8 +1,10 @@
 """Sparse guest memory and caller-bounded allocation for the hosted simulator.
 
 The hosted backend exposes machine-shaped guest addresses without allocating
-the gaps between physical memory classes.  Ordinary memory is zero-initialized
-and materialized in fixed-size pages on first write.  MMIO is a reserved routed
+the gaps between physical memory classes. Ordinary memory is zero-initialized
+and, by default, materialized in fixed-size pages on first write. Explicit
+dense construction instead shares fixed contiguous ordinary-region buffers.
+MMIO is a reserved routed
 aperture: it never falls through to sparse RAM when no service is installed.
 
 This module owns address geometry and allocation lifetime only.  It does not
@@ -14,9 +16,10 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Protocol
+from typing import Literal, Protocol
 
 from shared.cells import MASK64
+from shared.memory_backing import DenseMemoryBacking
 from simulator.errors import ExecutionError, SimulatorError
 
 
@@ -273,6 +276,38 @@ class _SparseRegion:
             consumed += chunk_size
 
 
+class _DenseRegion:
+    """One fixed contiguous region using the shared backing owner's bytes."""
+
+    __slots__ = ("spec", "_buffer")
+
+    def __init__(self, spec: RegionSpec, backing: DenseMemoryBacking) -> None:
+        self.spec = spec
+        self._buffer = backing.buffer_at(spec.base)
+
+    def read(self, offset: int, length: int) -> bytes:
+        return bytes(self._buffer[offset : offset + length])
+
+    def read_integer(self, offset: int, width: int) -> int:
+        return struct.unpack_from(_INTEGER_FORMATS[width], self._buffer, offset)[0]
+
+    def write(self, offset: int, payload: bytes) -> None:
+        self._buffer[offset : offset + len(payload)] = payload
+
+    def write_integer(self, offset: int, value: int, width: int) -> None:
+        struct.pack_into(_INTEGER_FORMATS[width], self._buffer, offset, value)
+
+    def fill(self, offset: int, length: int, value: int) -> None:
+        # Bound temporary storage even when a whole configured region is
+        # cleared. Equal-length view writes can never resize the exporter.
+        chunk = bytes((value,)) * min(length, 65536)
+        end = offset + length
+        while offset < end:
+            count = min(len(chunk), end - offset)
+            self._buffer[offset : offset + count] = chunk[:count]
+            offset += count
+
+
 class _QualifiedOrdinarySpan:
     """Trusted scalar and cell-span access into an already-qualified region."""
 
@@ -280,7 +315,7 @@ class _QualifiedOrdinarySpan:
 
     def __init__(
         self,
-        region: _SparseRegion,
+        region: _SparseRegion | _DenseRegion,
         *,
         base: int,
         offset: int,
@@ -314,12 +349,16 @@ class _ResolvedSpan:
     kind: AddressClass
     address: int
     length: int
-    region: _SparseRegion | None
+    region: _SparseRegion | _DenseRegion | None
     offset: int
 
 
 class SparseAddressSpace:
-    """Sparse 64-bit byte address space with an explicit MMIO boundary."""
+    """64-bit byte address space, sparse by default, with explicit MMIO.
+
+    An optional fixed dense backing must match the complete configured
+    ordinary geometry. Backing is chosen at construction and never replaced.
+    """
 
     def __init__(
         self,
@@ -330,6 +369,7 @@ class SparseAddressSpace:
         hbw_size: int = 0,
         mmio: MMIOPort | None = None,
         page_size: int = DEFAULT_PAGE_SIZE,
+        dense_backing: DenseMemoryBacking | Literal[True] | None = None,
     ) -> None:
         page_size = _require_nonnegative(page_size, label="page size")
         if page_size == 0 or page_size & (page_size - 1):
@@ -360,8 +400,21 @@ class SparseAddressSpace:
                     f"{previous.kind.name} and {current.kind.name} regions overlap"
                 )
 
+        if dense_backing is True:
+            dense_backing = DenseMemoryBacking((spec.base, spec.size) for spec in specs)
+        if dense_backing is not None:
+            if type(dense_backing) is not DenseMemoryBacking:
+                raise TypeError("dense backing must be True or a DenseMemoryBacking")
+            if dense_backing.regions != tuple((spec.base, spec.size) for spec in specs):
+                raise ValueError("dense backing must match the configured region geometry")
+
         self._page_size = page_size
-        self._regions = tuple(_SparseRegion(spec, page_size) for spec in specs)
+        self._dense_backing = dense_backing
+        self._regions = tuple(
+            _SparseRegion(spec, page_size) if dense_backing is None
+            else _DenseRegion(spec, dense_backing)
+            for spec in specs
+        )
         self._specs = tuple(region.spec for region in self._regions)
         self._mmio = mmio
 
@@ -374,6 +427,12 @@ class SparseAddressSpace:
         return self._page_size
 
     @property
+    def dense_backing(self) -> DenseMemoryBacking | None:
+        """Fixed shared backing, or ``None`` for default sparse regions."""
+
+        return self._dense_backing
+
+    @property
     def mmio(self) -> MMIOPort | None:
         """Return the installed platform port without bypassing its methods."""
 
@@ -381,8 +440,11 @@ class SparseAddressSpace:
 
     @property
     def resident_page_count(self) -> int:
-        """Number of ordinary-memory pages materialized by writes."""
+        """Backed pages: written sparse pages or all configured dense pages."""
 
+        if self._dense_backing is not None:
+            return sum((spec.size + self._page_size - 1) // self._page_size
+                       for spec in self._specs)
         return sum(len(region.pages) for region in self._regions)
 
     def classify(self, address: int) -> AddressClass | None:
@@ -754,7 +816,7 @@ class SparseAddressSpace:
             )
         region.write_integer(address - region.spec.base, masked, width)
 
-    def _region_at(self, address: int) -> _SparseRegion | None:
+    def _region_at(self, address: int) -> _SparseRegion | _DenseRegion | None:
         for region in self._regions:
             if region.spec.base <= address < region.spec.limit:
                 return region

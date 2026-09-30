@@ -83,6 +83,7 @@ from simulator.platform import (
 )
 from simulator.scalar_float import HostedScalarFloatService
 from simulator.sha2 import HostedSHA2Service
+from simulator.sha3 import HostedSHA3Service
 from simulator.tile import HostedTileService
 from simulator.spinlocks import HostedSpinlockBank
 from simulator.storage import HostedStorageService
@@ -670,6 +671,8 @@ class MegaForthRuntime:
         self.crc = HostedCRCService(crc_capabilities)
         self.aes = platform_mmio.aes
         self.sha3 = platform_mmio.sha3
+        if type(self.sha3) is HostedSHA3Service:
+            self.sha3.bind_native_permutation(None)
         self.entropy = platform_mmio.entropy
         self.rtc = platform_mmio.rtc
         self.sha2 = HostedSHA2Service(core_count=num_full)
@@ -806,6 +809,14 @@ class MegaForthRuntime:
                 self, required=selected_backend == "native",
                 admit_core=install_core_words,
             )
+            if self._native_execution is not None:
+                self.scalar_float._native_execute = (
+                    self._native_execution.extension.scalar_fp_execute
+                )
+                if type(self.sha3) is HostedSHA3Service:
+                    self.sha3.bind_native_permutation(
+                        self._native_execution.extension.keccak_f1600
+                    )
         self.storage.claim()
 
     @property

@@ -1838,6 +1838,8 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
             "step_request_unit": "mp64_instruction",
             "batch_unit": "instruction_batch",
             "timing": {
+                "model": "instruction_batched",
+                "models_shared_clock_latency": False,
                 "timer_unit": "mp64_system_cycle",
                 "rtc_mode": "virtual",
             },

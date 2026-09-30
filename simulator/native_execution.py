@@ -10,6 +10,7 @@ from collections import Counter
 import os
 from time import perf_counter_ns
 
+from shared import scalar_fp
 from simulator import ir
 from simulator import runtime as rt
 from simulator.diagnostics import HostedDiagnosticsService
@@ -21,6 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
+SEMANTIC_API_VERSION = 2
 
 
 class NativeExecutor:
@@ -35,16 +37,34 @@ class NativeExecutor:
                     "run python setup_simulator_accel.py build_ext --inplace"
                 ) from None
             return None
+        if (getattr(extension, "SEMANTIC_API_VERSION", None) != SEMANTIC_API_VERSION
+                or not hasattr(extension, "scalar_fp_execute")
+                or not hasattr(extension, "keccak_f1600")):
+            if required:
+                raise RuntimeError(
+                    "native semantic execution requires a matching "
+                    "_megaforth_native build; run make build"
+                )
+            return None
         return cls(runtime, extension, admit_core=admit_core)
 
     def __init__(self, runtime, extension, *, admit_core: bool):
         self.runtime = runtime
         self.extension = extension
+        memory = runtime.memory
+        if memory.dense_backing is None:
+            sparse_regions = [(region.spec.base, region.spec.size, region.pages)
+                              for region in memory._regions]
+            dense_regions = ()
+        else:
+            sparse_regions = ()
+            dense_regions = [(spec.base, spec.size, memory.dense_backing.buffer_at(spec.base))
+                             for spec in memory.regions]
         self.program = extension.NativeProgram(
-            [(region.spec.base, region.spec.size, region.pages)
-             for region in runtime.memory._regions],
-            runtime.memory.page_size,
+            sparse_regions,
+            memory.page_size,
             Continuation,
+            dense_regions=dense_regions,
         )
         # Only original installed BIOS callbacks may become native primitives.
         # Later same-named host callbacks and source definitions keep their XT.
@@ -53,6 +73,24 @@ class NativeExecutor:
             for word in runtime.dictionary.words
             if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
             and word.name in extension.PRIMITIVE_OPCODES
+        }
+        # BIOS closures retain this service even if the public runtime
+        # attribute is replaced later. Native calls must keep the same owner.
+        self.scalar_float = runtime.scalar_float
+        scalar_operations = {
+            name.encode("ascii"): (
+                (extension.OP_FPCSR_FETCH, 0, 0) if shape == "fetch" else
+                (extension.OP_FPCSR_STORE, 0, 0) if shape == "store" else
+                (extension.OP_SCALAR_FP, operation,
+                 {"unary": 1, "binary": 2, "fma": 3}[shape])
+            )
+            for name, shape, operation in scalar_fp.BIOS_WORDS
+        }
+        self.scalar_primitives = {
+            word.xt: (word, scalar_operations[word.name])
+            for word in runtime.dictionary.words
+            if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
+            and word.name in scalar_operations
         }
         self.generation = runtime.dictionary.execution_generation
         self.plans = {}
@@ -147,6 +185,9 @@ class NativeExecutor:
             admitted = self.primitives.get(target.xt)
             if admitted is not None and admitted[0] is target:
                 return admitted[1], 0, 0
+            scalar = self.scalar_primitives.get(target.xt)
+            if scalar is not None and scalar[0] is target:
+                return scalar[1]
         if isinstance(implementation, rt.ColonDefinition):
             if target.xt not in self.runtime._colon_accelerators:
                 pending.append(target)
@@ -261,9 +302,13 @@ class NativeExecutor:
              returns._continuation_cookie),
             returns._continuations,
             allowance,
+            self.scalar_float.fpcsr,
         )
         (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
-         updates, pointer_captures) = result
+         updates, pointer_captures, fpcsr) = result
+        # Publish the completed prefix before clocks, profiling, fallback or
+        # any host observer can see the native interval's boundary.
+        self.scalar_float._fpcsr = fpcsr
         if self.profile_enabled:
             self.native_run_ns += perf_counter_ns() - started
             self._profile_exit(xt, resumed_ip, steps, allowance)
