@@ -330,7 +330,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
 | 2 — workload profiles | Bounded kernels and KDOS load controls recorded; Desktop/attribution pending | 19 harness checks; separate baseline timings and attribution in `docs/performance/runtime-hotspots-2026-09-30.md` |
-| 2B — math-team timing qualification | Timing identity and strict multicore FP qualified; wake/contention measurement underway | 8 timing-model cases; 13 strict FP cases across 1/2/4 full cores |
+| 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Qualified bulk audio and shared Keccak complete; further work profile-driven | 57 audio checks; 86 Keccak/device checks, 47 hosted SHA3 checks per executor and 26 WOTS checks; paired workload measurements |
 | 4 — initial hybrid ABI and execution | Integer-routine v1 ABI locked; shared backing qualified, execution integration underway | `docs/hybrid-runtime-abi.md`; 56 dense backing checks and 664 existing runtime regressions |
@@ -664,3 +664,22 @@ above. Independent read-only review found no unresolved contract issue. The
 composition layer must still validate semantic allocation leases and code
 seals, preserve semantic stacks, and enforce cumulative dispatch limits before
 the application can advertise hybrid mode.
+
+### Phase 2B bounded wake and contention evidence — 2026-09-30
+
+`bench_execution_timing.py` now provides local integer fixtures for masked-IPI
+wake, fixed-total private compute and disjoint-cell shared-bus traffic. It
+records the two timing models separately, with guest cores and host lanes as
+independent axes. Strict latency observations come from a separate one-cycle
+replay whose completed state/counts must match unobserved timed trials. Fast
+execution retains its large batch and makes no shared-clock latency claim.
+
+All 19 harness cases and 48 fresh-process measured cases passed. Sixteen host
+lane comparisons preserved guest state and model clocks. Strict compute scales
+4.00× in guest cycles from one to four cores; the memory fixture scales 2.49×.
+The minimal masked-IPI marker appears 1–3 modeled cycles after assertion at the
+replay's resolution. These local kernels neither reproduce the BIOS worker
+protocol nor establish the reported solver ratios. The source/binary hashes,
+raw samples and full limits are in `docs/performance/execution-timing-2026-09-30.json`
+and `docs/performance/execution-timing-benchmark.md`. No modeled bus wait was
+removed or scheduler behavior changed to obtain these results.
