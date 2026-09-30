@@ -234,10 +234,10 @@ static constexpr bool tile_format_is_float(int ew) {
 // Whether a MEX operation may run in a format (shared/tile_formats.py
 // admits).  funct is the effective function (0 for the immediate form),
 // extended marks the EXT.8 forms, and ss and funct_byte are the source
-// selector and complete function byte that the EXT.8 rules check.  docs/floating-point.md §5.2 makes PACK,
-// UNPACK, VSHR, VSHL, and VCLZ illegal in float formats and WMUL illegal in
-// FP64; the EXT.8 functions 4-7 land in Phases 6 and 8, and FP32/FP64 VSEL
-// in Phase 6.  FP16/BF16 PACK and UNPACK remain until TCVT replaces them.
+// selector and complete function byte that the EXT.8 rules check.
+// docs/floating-point.md §5.2 makes PACK, UNPACK, VSHR, VSHL, and VCLZ
+// illegal in float formats and WMUL illegal in FP64; §6 restricts each EXT.8
+// operation's formats, sources, and function-byte bits.
 static constexpr bool tile_op_admitted(
         int ew,
         int op,
@@ -263,8 +263,10 @@ static constexpr bool tile_op_admitted(
             }
             case 7:  // TCMP
                 return ss != 2 && !(funct_byte & 0xC0);
-            default:  // TDIV and TSQRT land in Phase 8
-                return false;
+            case 4:  // TDIV
+                return format.is_float() && ss != 2 && !(funct_byte & 0xF8);
+            default:  // TSQRT
+                return format.is_float() && ss == 0 && !(funct_byte & 0xF8);
         }
     }
     if (extended && op == 0x3)
@@ -274,8 +276,14 @@ static constexpr bool tile_op_admitted(
     if (op == 0x1)
         return funct != 2 || ew != EW_FP64;
     if (op == 0x3)
-        return ew == EW_FP16 || ew == EW_BF16 || (funct != 5 && funct != 6);
+        return funct != 5 && funct != 6;
     return true;
+}
+
+// docs/floating-point.md §10: TDIV and TSQRT extra cycles.  Two divide and
+// square-root units take the lanes in pairs at bits / 2 + 2 cycles a pair.
+static constexpr int tile_divide_extra_cycles(int ew) {
+    return ew == EW_FP32 || ew == EW_FP64 ? 120 : 144;
 }
 
 // docs/floating-point.md §10: extra cycles of float tile operations in
@@ -9840,8 +9848,9 @@ static int exec_mex(
     Tile src_a{}, src_b{}, dst{};
     tile_read_64bytes(s, cb, s.tsrc0, src_a);
 
-    if (ss == 0x0) {  // tile-tile
-        tile_read_64bytes(s, cb, s.tsrc1, src_b);
+    if (ss == 0x0) {  // tile-tile; TSQRT reads only operand A (§6.2)
+        if (!(extended && op == 0x0 && funct == 5))
+            tile_read_64bytes(s, cb, s.tsrc1, src_b);
     } else if (ss == 0x1) {  // broadcast
         uint64_t bval = (broadcast_reg >= 0) ? s.regs[broadcast_reg] : 0;
         uint64_t mask = (elem_bytes < 8) ? ((1ULL << (elem_bytes*8)) - 1) : MASK64;
@@ -9866,6 +9875,24 @@ static int exec_mex(
 
     // Extended Tile ALU (EXT modifier 8)
     if (s.ext_modifier == 8 && op == 0x0) {
+        if (funct == 4 || funct == 5) {  // TDIV, TSQRT (§6.1, §6.2)
+            // binary64 division and square root are correctly rounded, and
+            // rounding them once to a narrower lane format is exact because
+            // 53 >= 2p + 2 for every lane format.
+            const TileFloatFormat& fmt = tile_float_format(ew_bits);
+            for (int lane = 0; lane < num_lanes; lane++) {
+                const double x = tile_float_to_double(
+                    fmt, tile_get_elem(src_a, lane, elem_bytes));
+                const double r = funct == 4
+                    ? x / tile_float_to_double(
+                          fmt, tile_get_elem(src_b, lane, elem_bytes))
+                    : std::sqrt(x);
+                tile_set_elem(dst, lane, elem_bytes,
+                              tile_float_from_double(fmt, r));
+            }
+            tile_write_64bytes(s, cb, s.tdst, dst);
+            return tile_divide_extra_cycles(ew_bits);
+        }
         if (funct == 2) {  // VSEL: msb(M) ? A : B, M = old [TDST] (§6.4)
             Tile masks{};
             tile_read_64bytes(s, cb, s.tdst, masks);

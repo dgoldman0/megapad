@@ -15,13 +15,14 @@ from simulator.stacks import StackUnderflow
 def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
     runtime = MegaForthRuntime()
 
-    scalar_float_words = tuple(
-        name.encode("ascii") for name, _, _ in scalar_fp.BIOS_WORDS)
-    assert len(runtime.dictionary.words) == 380 + len(scalar_float_words)
-    words = runtime.dictionary.words[:-len(scalar_float_words)]
+    frontier = tuple(
+        name.encode("ascii") for name, _, _ in scalar_fp.BIOS_WORDS
+    ) + (b"TDIV", b"TSQRT")
+    assert len(runtime.dictionary.words) == 380 + len(frontier)
+    words = runtime.dictionary.words[:-len(frontier)]
     assert tuple(
-        word.name for word in runtime.dictionary.words[-len(scalar_float_words):]
-    ) == scalar_float_words
+        word.name for word in runtime.dictionary.words[-len(frontier):]
+    ) == frontier
     assert tuple(word.name for word in words[-61:]) == (
         b"UM*",
         b"WITHIN",

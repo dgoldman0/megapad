@@ -213,6 +213,20 @@ def compare_mask(lane_format, predicate: int, a: Sequence[int],
     return out
 
 
+def divide(lane_format, a: Sequence[int], b: Sequence[int]) -> list[int]:
+    """TDIV: ``RN(a[i] / b[i])`` in a float format (§6.1)."""
+
+    fmt = lane_format.float_format
+    return [fp.div(fmt, x, y)[0] for x, y in zip(a, b)]
+
+
+def square_root(lane_format, a: Sequence[int]) -> list[int]:
+    """TSQRT: ``RN(sqrt(a[i]))`` in a float format (§6.2)."""
+
+    fmt = lane_format.float_format
+    return [fp.sqrt(fmt, x)[0] for x in a]
+
+
 def convert_region(source, target, lanes: Sequence[int], signed: bool,
                    round_nearest: bool) -> list[int]:
     """TCVT lane values from ``source`` to ``target`` formats (§6.3).

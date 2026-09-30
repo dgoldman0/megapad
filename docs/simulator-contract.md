@@ -774,7 +774,8 @@ keeps bits `[8:4]` and `[2:0]`, operations OR their flags into it, and a word
 whose operation would trap on the machine, such as a dynamic-mode word under
 a reserved `FPCSR.RM`, fails with `IllegalScalarFloatError` after taking its
 operands, as the BIOS word does, without changing `FPCSR` or pushing a
-result.
+result. `TDIV` and `TSQRT` follow them; `TSQRT` reads only `TSRC0`, and both
+fail closed in integer formats.
 
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal

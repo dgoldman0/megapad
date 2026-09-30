@@ -22109,13 +22109,29 @@ d_tvsel:
     call.l r11
     ret.l
 
+; === TDIV ( -- ) [TDST] <- RN([TSRC0] / [TSRC1]) per float lane ===
+d_tdiv:
+    .dq d_tvsel
+    .db 4
+    .ascii "TDIV"
+    t.div
+    ret.l
+
+; === TSQRT ( -- ) [TDST] <- RN(sqrt([TSRC0])) per float lane ===
+d_tsqrt:
+    .dq d_tdiv
+    .db 5
+    .ascii "TSQRT"
+    t.sqrt
+    ret.l
+
 ; === Scalar floating-point words (docs/floating-point.md §11) ===
 ; FP32 values live in the low 32 bits of a cell.  Arithmetic words and the
 ; integer-to-float conversions round with FPCSR.RM; flags are -1 or 0.
 
 ; === FPCSR@ ( -- u ) ===
 d_fpcsrfetch:
-    .dq d_tvsel
+    .dq d_tsqrt
     .db 6
     .ascii "FPCSR@"
     csrr r0, 0x0D

@@ -2848,6 +2848,16 @@ def install_core(runtime: MegaForthRuntime) -> None:
             _scalar_float_word(runtime.scalar_float, shape, op),
         )
 
+    # The tile divide and square-root words follow at the frontier.
+    runtime.define_primitive(
+        b"TDIV",
+        lambda _context: runtime.tile.divide(),
+    )
+    runtime.define_primitive(
+        b"TSQRT",
+        lambda _context: runtime.tile.square_root(),
+    )
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""

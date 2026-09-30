@@ -442,8 +442,8 @@ VSHR, VSHL, and VCLZ are illegal in float formats.  VSEL, TDIV, TSQRT,
 TCVT, and TCMP are defined normatively in `docs/floating-point.md` §6,
 including their legal source selectors and how TCVT widens into several
 destination tiles or narrows from several source tiles.  VSEL, TCVT, and
-TCMP run in all four backends.  TDIV and TSQRT land in Phase 8 of the
-full-float plan; until then they trap `IVEC_ILLEGAL_OP` in every format.
+TCMP run in all four backends, and so do TDIV and TSQRT, which trap in
+integer formats.  TSQRT reads only `[TSRC0]`.
 
 **Rounding shifts**: When TMODE bit 6 is set, VSHR adds the bit that's
 about to be shifted out before truncating (round-to-nearest).  This is
@@ -528,8 +528,9 @@ canonical tree schedules its products, levels, and reserved `ACC_ACC` beats
 over the same units, and `TAMAC` gives each unit one binary64 lane per beat,
 all at the §10 costs.  VSEL, TCMP, and TCVT run in every format in all four
 backends; the RTL converts sixteen lanes per beat and pads each TCVT to its
-§10 cost.  Float PACK and UNPACK trap.  TDIV and TSQRT (Phase 8) trap
-`IVEC_ILLEGAL_OP` before any access until they land.
+§10 cost.  Float PACK and UNPACK trap.  TDIV and TSQRT take the lanes in
+pairs through two divide and square-root units (`rtl/core/mp64_fp_divsqrt.v`,
+shared with the scalar engine) at the §10 cost.
 
 
 ---
@@ -855,8 +856,8 @@ long to retry:
 | `TCVT` | `( ew -- )` | Convert from the current format to `ew` |
 | `TCMP` | `( pred -- )` | Compare to lane mask, predicate 0–7 |
 | `TVSEL` | `( -- )` | Select lanes by the mask in `[TDST]` |
-| `TDIV` | `( -- )` | Lane divide (Phase 8) |
-| `TSQRT` | `( -- )` | Lane square root (Phase 8) |
+| `TDIV` | `( -- )` | Lane divide, `[TSRC0] / [TSRC1]` |
+| `TSQRT` | `( -- )` | Lane square root of `[TSRC0]` |
 
 The scalar floating-point words (`F32+`, `F64*`, `S>F64`, `FPCSR@`, and so
 on) are listed in `docs/floating-point.md` §11.

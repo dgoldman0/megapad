@@ -297,8 +297,11 @@ data analysis. It is optional.
 
 **D11. Tile divide and square root.** `TDIV` and `TSQRT` (`F8 E0`, functions 4
 and 5) are correctly rounded and defined only in float formats; integer formats
-trap. They run iteratively in the FMA units. They are scheduled last and may be
-deferred.
+trap. They were planned to run iteratively in the FMA units. Phase 8 instead
+runs them on dedicated digit-recurrence units, the same design as the scalar
+engine's FDIV and FSQRT: the recurrence gives exact results without a seed
+table or a final correction step, its latency is fixed, and one unit design
+serves both engines.
 
 **D12. Scalar FP encoding.** A new self-contained engine prefix, `FC`:
 
@@ -730,10 +733,31 @@ Progress:
   (§7). A KDOS APP-LOAD test that already failed on `main` now loops instead
   of failing, because its wild code reaches the new prefix traps (§7).
 
-### Phase 8 — Tile divide and square root (optional, D11)
+### Phase 8 — Tile divide and square root (complete)
 
-Correctly rounded `TDIV` and `TSQRT` in FP16, BF16, FP32, and FP64. They are
-iterative in the FMA units, and every backend is checked against the oracle.
+Progress:
+
+- **Definition.** `shared/tile_formats` admits TDIV in float formats with
+  SS=0, 1, or 3 and TSQRT with SS=0 only, both with function-byte bits
+  `[7:3]` clear. `shared/tile_float` computes the lanes with the oracle's
+  `div` and `sqrt`. TSQRT reads only `[TSRC0]` in every backend.
+- **Cost.** `TDIV` and `TSQRT` cost 144 extra cycles in FP16 and BF16 and
+  120 in FP32 and FP64 (§10): two units take the lanes in pairs, each pair
+  one start cycle, the recurrence (14, 26, or 56 bits at two per cycle),
+  and one capture cycle.
+- **Software.** The Python emulator and hosted simulator use the oracle.
+  The native accelerator divides and takes square roots in binary64 and
+  rounds once to the lane format, which is exact because 53 ≥ 2p + 2 for
+  every lane format; seeded differentials hold it to the emulator. The
+  BIOS gains `TDIV` and `TSQRT` (540 words) and the hosted simulator binds
+  them at the frontier (434 words).
+- **RTL.** The tile engine instantiates `FMA_UNITS` copies of
+  `mp64_fp_divsqrt.v`, the unit the scalar FPU uses, and sequences lane
+  groups in a new `S_DIV` state. `tb_tile_ext` replays 64 new
+  emulator-generated TDIV and TSQRT rows in every float format and source
+  form and checks the exact extra cycles.
+- **Cleanup.** The native admission table no longer allows FP16/BF16 PACK
+  and UNPACK; it now mirrors `shared/tile_formats.admits` exactly.
 
 ### Phase 9 — Closure
 

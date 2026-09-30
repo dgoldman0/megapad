@@ -416,7 +416,8 @@ _RESERVED_MODE_INSTRUCTIONS = (
 # Operations FP32/FP64 do not admit yet (TDIV and TSQRT land in Phase 8) or
 # at all (PACK, UNPACK, VSHR, VSHL, VCLZ, and noncanonical EXT.8 encodings).
 _WIDE_FLOAT_UNADMITTED = (
-    "t.pack", "t.unpack", "t.vshr", "t.vshl", "t.vclz", "t.div", "t.sqrt",
+    "t.pack", "t.unpack", "t.vshr", "t.vshl", "t.vclz", "t.sqrt r5",
+    "t.sqrt inplace", ".db 0xF8, 0xE0, 0x0C",
     "t.vsel inplace", ".db 0xF8, 0xE0, 0x6E",
     ".db 0xF8, 0xE4, 0x46, 0x03", ".db 0xF8, 0xE0, 0x47",
 )
@@ -436,7 +437,7 @@ _UNADMITTED_CASES = (
         pytest.param(mode, instruction, id=f"{name}-{instruction}")
         for mode, name in ((0x04, "fp16"), (0x05, "bf16"))
         for instruction in ("t.vshr", "t.vshl", "t.vclz", "t.pack",
-                            "t.unpack", ".db 0xF8, 0xE0, 0x05")
+                            "t.unpack", "t.sqrt r5")
     ]
     + [
         # TCVT between two integer formats, to a reserved target, and TCMP
@@ -447,6 +448,7 @@ _UNADMITTED_CASES = (
         pytest.param(0x00, "t.cvt 9", id="u8-cvt-reserved-target"),
         pytest.param(0x01, ".db 0xF8, 0xE0, 0x8F", id="u16-cmp-high-bits"),
         pytest.param(0x02, "t.div", id="u32-div"),
+        pytest.param(0x00, "t.sqrt", id="u8-sqrt"),
     ]
 )
 
@@ -3481,6 +3483,33 @@ def test_select_and_compare_masks_match_oracle(
     tmode: int,
 ) -> None:
     """VSEL and TCMP run natively and bit-exactly in every format."""
+    rng = random.Random(f"{instruction}/{tmode}")
+    for index in range(8):
+        src0 = _random_format_tile(rng, tmode)
+        src1 = src0 if index == 0 else _random_format_tile(rng, tmode)
+        dst0 = _random_format_tile(rng, tmode)
+        register = rng.getrandbits(64)
+
+        def setup(cpu: Any) -> Watchers:
+            watchers = _seed_common_state(
+                cpu, tmode=tmode, src0=src0, src1=src1, dst0=dst0,
+            )
+            cpu.regs[3] = register
+            return watchers
+
+        _assert_native_matches_oracle(
+            instruction, setup, expected_dispatch="native"
+        )
+
+
+@pytest.mark.parametrize(
+    "instruction", ["t.div", "t.div r3", "t.div inplace", "t.sqrt"])
+@pytest.mark.parametrize("tmode", (EW_FP16, EW_BF16, EW_FP32, EW_FP64))
+def test_divide_and_square_root_match_oracle(
+    instruction: str,
+    tmode: int,
+) -> None:
+    """TDIV and TSQRT run natively, correctly rounded, at the §10 cost."""
     rng = random.Random(f"{instruction}/{tmode}")
     for index in range(8):
         src0 = _random_format_tile(rng, tmode)

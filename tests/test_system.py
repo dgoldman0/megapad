@@ -5710,7 +5710,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 538)
+        self.assertEqual(len(seen), 540)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -5898,8 +5898,8 @@ class TestBIOSTileModes(unittest.TestCase):
     def test_float_format_words_follow_bf16_in_the_chain(self):
         labels = self._bios_harness._bios_labels
         code = self._bios_harness.bios_code
-        # The scalar floating-point words sit between TVSEL and ICACHE-ON in
-        # the order of shared.scalar_fp.BIOS_WORDS.
+        # The scalar floating-point words sit between TSQRT and ICACHE-ON
+        # in the order of shared.scalar_fp.BIOS_WORDS.
         address = int.from_bytes(
             code[labels["d_icache_on"]:labels["d_icache_on"] + 8], "little")
         names = []
@@ -5909,8 +5909,10 @@ class TestBIOSTileModes(unittest.TestCase):
             address = int.from_bytes(code[address:address + 8], "little")
         self.assertEqual(
             names[::-1], [name for name, _, _ in scalar_fp.BIOS_WORDS])
-        self.assertEqual(address, labels["d_tvsel"])
+        self.assertEqual(address, labels["d_tsqrt"])
         for current, previous in (
+            ("d_tsqrt", "d_tdiv"),
+            ("d_tdiv", "d_tvsel"),
             ("d_tvsel", "d_tcmp"),
             ("d_tcmp", "d_tcvt"),
             ("d_tcvt", "d_fp64_mode"),
@@ -5971,6 +5973,23 @@ class TestBIOSTileModes(unittest.TestCase):
         self.assertIn("M15=4294967295 ", text)
         self.assertIn("S0=0 ", text)
 
+
+    def test_divide_and_square_root_words(self):
+        """TDIV and TSQRT round each FP32 lane to nearest-even."""
+        sys_obj, buf = self._bios_harness._boot_bios()
+        text = self._bios_harness._run_forth(sys_obj, buf, [
+            "CREATE TBUF 320 ALLOT",
+            "TBUF 63 + -64 AND CONSTANT TB",
+            ": FILL32 ( u addr -- ) 16 0 DO 2DUP I 4 * + L! LOOP 2DROP ;",
+            "1065353216 TB FILL32 1077936128 TB 64 + FILL32",
+            "6 TMODE! TB TSRC0! TB 64 + TSRC1! TB 128 + TDST!",
+            'TDIV ." Q=" TB 128 + L@ .',
+            '1082130432 TB FILL32 TSQRT ." R=" TB 128 + 60 + L@ .',
+            "0 TMODE!",
+        ])
+        # 1/3 rounds to 0x3EAAAAAB; sqrt(4) is 2.0 = 0x40000000.
+        self.assertIn("Q=1051372203 ", text)
+        self.assertIn("R=1073741824 ", text)
 
     def test_scalar_float_words_run_their_fc_operations(self):
         """Every §11 word applies its FC operation to the data stack."""
@@ -15586,7 +15605,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 538)
+        self.assertEqual(len(seen), 540)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)

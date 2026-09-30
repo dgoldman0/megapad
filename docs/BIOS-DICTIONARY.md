@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **538** entries.  The numbered
+The `bios.asm` dictionary link chain contains **540** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -693,7 +693,7 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 243 | `TLOAD2D` | `( -- )` | | 2D strided load into tile register (t.load2d) |
 | 244 | `TSTORE2D` | `( -- )` | | 2D strided store from tile register (t.store2d) |
 
-### Floating-Point Tile Words (7 words)
+### Floating-Point Tile Words (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
@@ -704,6 +704,8 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 484 | `TCVT` | `( ew -- )` | | Convert the region from `TMODE.EW` to `ew` (t.cvt); illegal pairs trap |
 | 485 | `TCMP` | `( pred -- )` | | Lane mask from predicate 0–7 (t.cmp); other values trap |
 | 486 | `TVSEL` | `( -- )` | | Select lanes by the mask in `[TDST]` (t.vsel) |
+| 539 | `TDIV` | `( -- )` | | Lane divide `[TSRC0] / [TSRC1]` (t.div); float formats only |
+| 540 | `TSQRT` | `( -- )` | | Lane square root of `[TSRC0]` (t.sqrt); float formats only |
 
 ### Scalar Floating-Point (52 words)
 

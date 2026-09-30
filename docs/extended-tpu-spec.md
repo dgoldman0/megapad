@@ -28,7 +28,7 @@ existing tile engine and SoC infrastructure:
 | Family | Purpose | Area Estimate | Status |
 |--------|---------|---------------|--------|
 | **Enhanced Tile Engine** | TMUL/MAC, views, richer reductions, strided addressing | Medium | ✅ Implemented |
-| **Numeric Acceleration** | FP16/BF16/FP32/FP64 tile ops, scalar FP32/FP64 engine | Medium | ✅ FP16/BF16/FP32/FP64 element-wise, reductions, TACC, conversions, compares, and the scalar engine bit-exact in all four backends; ☐ tile divide and square root per `docs/floating-point.md` |
+| **Numeric Acceleration** | FP16/BF16/FP32/FP64 tile ops, scalar FP32/FP64 engine | Medium | ✅ FP16/BF16/FP32/FP64 element-wise, reductions, TACC, conversions, compares, divide and square root, and the scalar engine bit-exact in all four backends (`docs/floating-point.md`) |
 | **Full-width TACC** | Persistent widened lane accumulation with explicit ownership | Medium | ✅ Emulator and functional RTL; ☐ routed FPGA acceptance |
 | **Security / Integrity** | AES-256-GCM, SHA-3/SHAKE/raw Keccak, checked WOTS chain, 32/64-bit CRC tuples | Large | ✅ Checkpoint-3 WOTS path qualified across execution models, integrated RTL, and BIOS; FPGA routing remains a separate acceptance gate |
 | **Data Movement / QoS** | HW tile DMA, descriptor rings, prefetch, per-core QoS | Medium | Weighted arbiter implemented; architectural QoS programming is not integrated; DMA remains design-only |

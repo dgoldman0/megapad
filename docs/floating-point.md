@@ -494,9 +494,13 @@ for existing operations.
 | `TAMAC` arithmetic (plus 1 broadcast or 2 tile source cycles) | 4 | 8 | 4 |
 | `TCVT`, width ratio `k` (1 for equal widths) | `4 + (k − 1)` | `4 + (k − 1)` | `4 + (k − 1)` |
 | `TCMP`, `VSEL` | 1 | 1 | 1 |
-| `TDIV`, `TSQRT` | fixed in Phase 8 | fixed in Phase 8 | fixed in Phase 8 |
+| `TDIV`, `TSQRT` | 144 | 120 | 120 |
 
-`TCVT`, `TCMP`, and `VSEL` cost the same in integer formats.
+`TCVT`, `TCMP`, and `VSEL` cost the same in integer formats. `TDIV` and
+`TSQRT` run on `P` divide and square-root units, the recurrence the scalar
+engine uses (two result bits per cycle; 14 bits for FP16 and BF16, 26 for
+FP32, 56 for FP64). Each group of `P` lanes takes one start cycle, the
+recurrence, and one capture cycle, whatever the operands.
 
 The resulting full-core `TAMAC` totals are:
 
@@ -578,4 +582,4 @@ models no instruction encodings.
 | FP32/FP64 reductions, DOT/DOTACC, and TACC formats: all four backends | 5 | Implemented |
 | `TCVT`, `TCMP`, `VSEL`; removal of float PACK and UNPACK: all four backends | 6 | Implemented |
 | Scalar `FC` engine and `FPCSR`, the F7/FD–FF traps, and the §11 BIOS words: Python emulator, native accelerator (through the Python oracle), hosted simulator words, RTL full core and cluster | 7 | Implemented |
-| `TDIV`, `TSQRT` | 8 | Specified |
+| `TDIV`, `TSQRT`: all four backends | 8 | Implemented |

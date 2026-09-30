@@ -4181,7 +4181,10 @@ class Megapad64:
         # Resolve source tiles based on SS
         src_a = read_tile(self.tsrc0)
         if ss == 0x0:
-            src_b = read_tile(self.tsrc1)
+            # TSQRT reads only operand A (docs/floating-point.md §6.2).
+            tsqrt = (self._ext_modifier == 8 and op == 0x0
+                     and funct == tile_formats.EXT_TSQRT)
+            src_b = bytearray(64) if tsqrt else read_tile(self.tsrc1)
         elif ss == 0x1:
             # Broadcast Rn across all lanes
             bval = self.regs[broadcast_reg] if broadcast_reg >= 0 else 0
@@ -4213,6 +4216,16 @@ class Megapad64:
         # Extended Tile ALU (EXT modifier 8 = 0xF8 prefix)
         if self._ext_modifier == 8 and op == 0x0:
             bits = lane_format.lane_bits
+            if funct in (tile_formats.EXT_TDIV, tile_formats.EXT_TSQRT):
+                a = tile_float.unpack_bits(bits, src_a)
+                lanes = (
+                    tile_float.divide(lane_format, a,
+                                      tile_float.unpack_bits(bits, src_b))
+                    if funct == tile_formats.EXT_TDIV
+                    else tile_float.square_root(lane_format, a)
+                )
+                write_tile(self.tdst, tile_float.pack_bits(bits, lanes))
+                return tile_formats.divide_extra_cycles(lane_format)
             if funct == 2:  # VSEL — msb(M) ? A : B, M = old [TDST] (§6.4)
                 masks = tile_float.unpack_bits(bits, read_tile(self.tdst))
                 write_tile(self.tdst, tile_float.pack_bits(

@@ -1042,7 +1042,7 @@ memory regions (e.g., extracting an 8×8 patch from a 640-wide framebuffer).
 
 ---
 
-## Floating-Point Tile Words (7 words)
+## Floating-Point Tile Words (9 words)
 
 Floating-point tile formats. `docs/floating-point.md` defines every result.
 FP16 and BF16 reductions publish raw binary32 bits in ACC0: lanes or their
@@ -1059,11 +1059,13 @@ emulator, native accelerator, hosted simulator, and RTL give the same bits.
 | `TCVT` | `( ew -- )` | Convert from the current format to `ew`. Widening writes several `[TDST]` tiles and narrowing reads several `[TSRC0]` tiles. Illegal pairs trap. |
 | `TCMP` | `( pred -- )` | Write all-ones or zero lanes from predicate 0–7 (EQ NE LT LE GT GE UNORD ORD). Other values trap. |
 | `TVSEL` | `( -- )` | Take `[TSRC0]` lanes where the old `[TDST]` lane's top bit is set, else `[TSRC1]` lanes. |
+| `TDIV` | `( -- )` | `[TDST]` lanes = `[TSRC0]` / `[TSRC1]`, correctly rounded. Float formats only. |
+| `TSQRT` | `( -- )` | `[TDST]` lanes = square root of `[TSRC0]`, correctly rounded. Float formats only. |
 
 FP32 and FP64 element-wise operations, reductions, and dot products run in
 every backend; their reductions publish binary64 to ACC0. Codes 8–15 are
-reserved and always trap. `TCVT`, `TCMP`, and `TVSEL` follow
-`docs/floating-point.md` §6.
+reserved and always trap. `TCVT`, `TCMP`, `TVSEL`, `TDIV`, and
+`TSQRT` follow `docs/floating-point.md` §6.
 
 ---
 

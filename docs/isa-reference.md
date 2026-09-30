@@ -625,9 +625,7 @@ VSHR, VSHL, and VCLZ are illegal in float formats.  With SS=2 the function
 byte is the immediate and the function is forced to 0, so functions 4–7 need
 another selector.  The definitions, including the legal function-byte bits,
 the TCVT multi-tile rule, and the TCMP predicates, are in
-`docs/floating-point.md` §6.  VSEL, TCVT, and TCMP run in every backend.
-TDIV and TSQRT land in Phase 8 of `docs/megapad-full-float-plan.md` and trap
-until then.
+`docs/floating-point.md` §6.  All eight functions run in every backend.
 
 **Extended TSYS** (EXT.8 prefix + TSYS):
 

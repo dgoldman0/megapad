@@ -139,8 +139,7 @@ def admits(
     ``funct_byte`` is the complete function byte.  docs/floating-point.md §5.2
     and §6 define the rules: PACK, UNPACK, VSHR, VSHL, and VCLZ are illegal in
     float formats, WMUL in FP64, and TDIV and TSQRT in integer formats; each
-    EXT.8 operation also restricts its sources and function-byte bits.
-    TDIV and TSQRT land in Phase 8 of docs/megapad-full-float-plan.md.  TACC
+    EXT.8 operation also restricts its sources and function-byte bits.  TACC
     operations follow their own format rule.
     """
 
@@ -180,7 +179,21 @@ def _extended_alu_admits(
         )
     if funct == EXT_TCMP:
         return ss in (0, 1, 3) and not funct_byte & 0xC0
-    return False  # TDIV and TSQRT land in Phase 8
+    if funct == EXT_TDIV:
+        return lane_format.is_float and ss in (0, 1, 3) and not funct_byte & 0xF8
+    return lane_format.is_float and ss == 0 and not funct_byte & 0xF8  # TSQRT
+
+
+def divide_extra_cycles(lane_format: TileFormat) -> int:
+    """§10 extra cycles of TDIV and TSQRT in a float format.
+
+    Two divide and square-root units take the lanes in pairs; each pair
+    costs one start cycle, bits / 2 recurrence cycles (14 bits for FP16 and
+    BF16, 26 for FP32, 56 for FP64), and one capture cycle.
+    """
+
+    half_bits = {EW_FP16: 7, EW_BF16: 7, EW_FP32: 13, EW_FP64: 28}
+    return lane_format.lanes // 2 * (half_bits[lane_format.ew] + 2)
 
 
 __all__ = [
@@ -204,6 +217,7 @@ __all__ = [
     "TMODE_WRITE_MASK",
     "TileFormat",
     "admits",
+    "divide_extra_cycles",
     "tcvt_ratio",
     "decode",
     "element_width",

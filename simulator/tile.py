@@ -466,6 +466,38 @@ class HostedTileService:
             )
         self._account()
 
+    def divide(self) -> None:
+        """TDIV: ``RN([TSRC0] / [TSRC1])`` per lane (§6.1)."""
+
+        lane_format = self._extended_format(tile_formats.EXT_TDIV,
+                                            tile_formats.EXT_TDIV)
+        bits = lane_format.lane_bits
+        left = self._memory.read_bytes(self.source0, TILE_BYTES)
+        right = self._memory.read_bytes(self.source1, TILE_BYTES)
+        self._memory.write_bytes(
+            self.destination,
+            bytes(tile_float.pack_bits(bits, tile_float.divide(
+                lane_format,
+                tile_float.unpack_bits(bits, left),
+                tile_float.unpack_bits(bits, right),
+            ))),
+        )
+        self._account()
+
+    def square_root(self) -> None:
+        """TSQRT: ``RN(sqrt([TSRC0]))`` per lane; TSRC1 is not read (§6.2)."""
+
+        lane_format = self._extended_format(tile_formats.EXT_TSQRT,
+                                            tile_formats.EXT_TSQRT)
+        bits = lane_format.lane_bits
+        source = self._memory.read_bytes(self.source0, TILE_BYTES)
+        self._memory.write_bytes(
+            self.destination,
+            bytes(tile_float.pack_bits(bits, tile_float.square_root(
+                lane_format, tile_float.unpack_bits(bits, source)))),
+        )
+        self._account()
+
     def _extended_format(self, funct: int, funct_byte: int):
         lane_format = tile_formats.decode(self._mode)
         if not tile_formats.admits(

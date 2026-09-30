@@ -792,3 +792,33 @@ def test_convert_compare_and_select_words_fail_closed() -> None:
         with pytest.raises(UnsupportedTileModeError):
             call()
     assert runtime.memory.read_bytes(0x800, 64) == bytes((0x5A,)) * 64
+
+
+@pytest.mark.parametrize("mode", (FP16_FORMAT, BF16_FORMAT, FP32_FORMAT,
+                                  FP64_FORMAT))
+def test_divide_and_square_root_match_the_executable_machine(mode: int
+                                                             ) -> None:
+    import random
+
+    rng = random.Random(f"div/{mode}")
+    for _ in range(6):
+        left = bytes(rng.getrandbits(8) for _ in range(64))
+        right = bytes(rng.getrandbits(8) for _ in range(64))
+        destination = bytes(rng.getrandbits(8) for _ in range(64))
+        assert _hosted_region(
+            lambda tile: tile.divide(), mode, left, right, destination,
+        ) == _oracle_region("t.div", mode, left, right, destination)[0]
+        assert _hosted_region(
+            lambda tile: tile.square_root(), mode, left, right, destination,
+        ) == _oracle_region("t.sqrt", mode, left, right, destination)[0]
+
+
+def test_divide_and_square_root_fail_closed_in_integer_formats() -> None:
+    runtime = MegaForthRuntime()
+    runtime.memory.write_bytes(0x800, bytes((0x5A,)) * 64)
+    runtime.tile.set_destination(0x800)
+    runtime.tile.set_mode(0x02)
+    for call in (runtime.tile.divide, runtime.tile.square_root):
+        with pytest.raises(UnsupportedTileModeError):
+            call()
+    assert runtime.memory.read_bytes(0x800, 64) == bytes((0x5A,)) * 64
