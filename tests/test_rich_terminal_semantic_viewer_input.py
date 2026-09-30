@@ -21,7 +21,11 @@ from rich_terminal.pygame_view import (
 )
 from rich_terminal.retained_scene import ControlKind
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
-from session import TerminalCell, TerminalDisplayOffer, TerminalSnapshot
+from shared.session import (
+    TerminalCell,
+    TerminalDisplayOffer,
+    TerminalSnapshot,
+)
 from session_viewer import (
     _GuestKeyboardForwarder,
     _RetainedDisplayState,

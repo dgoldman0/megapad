@@ -9,6 +9,30 @@ from simulator.runtime import MegaForthRuntime
 from simulator.session import SimulatorMachineSession
 
 
+def test_clock_mode_observation_does_not_sample_or_advance_time() -> None:
+    rtc = HostedRTCService(2000, initial_uptime_ms=123)
+    assert rtc.clock_mode == "manual"
+    rtc.read8(RTC_UPTIME)
+    rtc.read8(RTC_EPOCH)
+    latches = (rtc.uptime_latch, rtc.epoch_latch)
+    now_ns = [4_000_000_000]
+    samples = []
+
+    def monotonic_ns():
+        samples.append(now_ns[0])
+        return now_ns[0]
+
+    rtc.bind_monotonic_clock(monotonic_ns)
+    assert samples == [4_000_000_000]
+    now_ns[0] += 25_000_000
+    assert rtc.clock_mode == "host_monotonic"
+    assert rtc.clock_mode == "host_monotonic"
+    assert samples == [4_000_000_000]
+    assert (rtc.uptime_latch, rtc.epoch_latch) == latches
+    assert rtc.uptime_ms == 148
+    assert samples == [4_000_000_000, 4_025_000_000]
+
+
 def test_unbound_session_clock_stays_deterministic_across_host_quanta() -> None:
     memory = create_one_core_address_space(
         initial_epoch_ms=1_788_890_400_000,

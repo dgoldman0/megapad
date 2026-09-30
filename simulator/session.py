@@ -10,8 +10,9 @@ import time
 from dataclasses import dataclass
 
 from rich_terminal import DriverServiceResult, DriverStatus
-from session import MachineSession, RichTerminalSessionConfig
-from shared_session import SharedMachine
+from shared.session import TerminalSession, RichTerminalSessionConfig
+from shared.session_status import SessionRuntimeDescriptor, terminal_status
+from shared_session import SharedSessionOwner
 from simulator.rich_terminal_host import (
     SemanticBatchResult,
     SemanticBatchStop,
@@ -62,7 +63,7 @@ class SimulatorSessionRun:
     terminal_progress: bool
 
 
-class SimulatorMachineSession(MachineSession):
+class SimulatorMachineSession(TerminalSession):
     """Bind one hosted Forth runtime to the normal terminal session authority.
 
     The semantic runtime has no instruction/cycle batch. One owner call runs a
@@ -114,7 +115,7 @@ class SimulatorMachineSession(MachineSession):
         self._dispatch_started = False
         self._halted = False
         self._semantic_steps_total = 0
-        self._initialize_terminal_frontend(cols, rows, rich_terminal)
+        super().__init__(cols, rows, rich_terminal)
 
         backend = SimulatorSessionBackend(
             runtime,
@@ -311,15 +312,7 @@ class SimulatorMachineSession(MachineSession):
             return
         backend = self._backend
         try:
-            driver = self._rich_terminal_driver
-            if driver is not None:
-                driver.close()
-                self._rich_terminal_driver = None
-            self._logical_composite_output = None
-            self._displayed_composite_output = None
-            self._clear_display_offer_tokens()
-            self._display_cadence_scope = None
-            self._display_cadence = None
+            self._close_terminal_frontend()
         finally:
             try:
                 if backend is not None:
@@ -328,7 +321,7 @@ class SimulatorMachineSession(MachineSession):
                 self._closed = True
 
 
-class SimulatorSharedMachine(SharedMachine):
+class SimulatorSharedMachine(SharedSessionOwner):
     """Expose one semantic session through the shared JSON-session authority.
 
     Presentation, display acknowledgement, input authorization, and terminal
@@ -464,10 +457,6 @@ class SimulatorSharedMachine(SharedMachine):
             session = self.semantic_session
             rich_terminal_failure = session.rich_terminal_failure
             rich_terminal_pending = session.rich_terminal_work_pending
-            rich_terminal_driver = session.rich_terminal_driver
-            rich_terminal_core = (
-                None if rich_terminal_driver is None else rich_terminal_driver.core
-            )
             operational = rich_terminal_failure is None
             halted = session.halted
             idle = session.idle and operational
@@ -491,6 +480,20 @@ class SimulatorSharedMachine(SharedMachine):
 
             result = {
                 "backend": "simulator",
+                "runtime": SessionRuntimeDescriptor(
+                    mode="simulator",
+                    executor=session.runtime.execution_backend,
+                    step_unit="semantic_step",
+                    step_request_unit="semantic_boundary",
+                    batch_unit="semantic_boundary",
+                    timer_unit="semantic_step",
+                    rtc_mode=session.runtime.rtc.clock_mode,
+                    machine_code=False,
+                    cpu_diagnostics=False,
+                    network_diagnostics=False,
+                    reset=False,
+                    host_profiling=False,
+                ).to_dict(),
                 "semantic_execution": {
                     "backend": session.runtime.execution_backend,
                     "quantum_steps": session.semantic_quantum_steps,
@@ -517,63 +520,11 @@ class SimulatorSharedMachine(SharedMachine):
                 "terminal": [visible_cols, visible_rows],
                 "uptime_s": time.time() - self.started_at,
                 "error": self.last_error,
-                "rich_terminal": {
-                    "enabled": session.rich_terminal_enabled,
-                    "display_required": session.retained_display_required,
-                    "state": (
-                        None
-                        if session.rich_terminal_state is None
-                        else session.rich_terminal_state.value
-                    ),
-                    "pending": rich_terminal_pending,
-                    "lost": session.rich_terminal_lost,
-                    "failure": rich_terminal_failure,
-                    "machine_publications": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.machine_publications_received
-                    ),
-                    "machine_publication_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.machine_publication_bytes_received
-                    ),
-                    "frames": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.frames_received
-                    ),
-                    "frame_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.frame_bytes_received
-                    ),
-                    "frames_by_type": (
-                        {}
-                        if rich_terminal_core is None
-                        else {
-                            f"0x{frame_type:04X}": count
-                            for frame_type, count in sorted(
-                                rich_terminal_core.frames_received_by_type.items()
-                            )
-                        }
-                    ),
-                    "frame_bytes_by_type": (
-                        {}
-                        if rich_terminal_core is None
-                        else {
-                            f"0x{frame_type:04X}": byte_count
-                            for frame_type, byte_count in sorted(
-                                rich_terminal_core.frames_received_by_type.items()
-                            )
-                        }
-                    ),
-                    "decoder_buffered_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.decoder_buffered_bytes
-                    ),
-                },
+                "rich_terminal": terminal_status(
+                    session,
+                    pending=rich_terminal_pending,
+                    failure=rich_terminal_failure,
+                ),
             }
             if detailed:
                 result["simulator"] = {

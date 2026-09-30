@@ -1,13 +1,13 @@
 # Development Sessions
 
-`session.py` provides one synchronous owner for a MegaPad machine and its
-terminal. It is intended for tests, development automation, and coding agents
+`emulator/session.py` provides one synchronous owner for a MegaPad machine
+and its terminal. It is intended for tests, development automation, and coding agents
 that need to interact with the guest without opening pygame.
 
 ## Python API
 
 ```python
-from session import MachineSession
+from emulator.session import MachineSession
 
 with MachineSession.from_bios(
     "bios.asm",
@@ -46,6 +46,60 @@ width. The selection is immutable for the machine lifetime.
 Direct sessions use deterministic cycle-derived RTC time by default. Pass
 `realtime_clock=True` for interactive or external-network work whose deadlines
 must continue to track host time while the emulator is idle or variably loaded.
+
+## Common session boundary
+
+`shared/session.py` owns terminal configuration, immutable captures, rich
+terminal attachment, display offers, acknowledgments, and input admission.
+`shared_session.py` owns the JSON protocol, socket/display leases, shared
+mutation lock, and `SharedSessionOwner` lifecycle interface. Neither imports
+an execution backend. Common CLI policy decoders live in
+`shared/session_options.py`.
+
+The architectural adapters are `emulator.session.MachineSession` and
+`emulator.shared_session.SharedMachine`. The hosted adapters are
+`simulator.session.SimulatorMachineSession` and `SimulatorSharedMachine`.
+Both inherit the common authorities directly. Construction, run loops,
+work accounting, diagnostics, and backend resource release stay in their
+adapters. The simulator does not inherit architectural run or BIOS methods.
+The viewer imports only common terminal/protocol interfaces.
+
+The root `session` import temporarily aliases `emulator.session` for the
+benchmark runtime loader and existing callers. Import terminal types from
+`shared.session` and the architectural owner from `emulator.shared_session`;
+`shared_session.SharedMachine` has been removed. The remaining alias can be
+removed when the benchmark's support for older runtime roots is migrated.
+
+Both detailed and lightweight status contain the same `runtime` descriptor:
+
+| Field | Emulator | Simulator |
+|---|---|---|
+| `mode` | `emulator` | `simulator` |
+| `executor` | `native` | Selected `python` or `native` |
+| `step_unit` | `mp64_instruction` | `semantic_step` |
+| `step_request_unit` | `mp64_instruction` | `semantic_boundary` |
+| `batch_unit` | `instruction_batch` | `semantic_boundary` |
+| `timing.timer_unit` | `mp64_system_cycle` | `semantic_step` |
+| `timing.rtc_mode` | `virtual` or `realtime` | `manual` or `host_monotonic` |
+| `capabilities.machine_code` | `true` | `false` |
+| `capabilities.cpu_diagnostics` | `true` | `false` |
+| `capabilities.network_diagnostics` | `true` | `false` |
+| `capabilities.reset` | `true` | `false` |
+| `capabilities.host_profiling` | `true` | `false` |
+
+The executor identifies the selected engine; native execution can include
+Python fallbacks. Capabilities identify supported session operations,
+independently of whether optional facilities are enabled. Existing emulator
+instruction batches do not enable the system's separate strict cycle-bounded
+runner. Semantic work does not claim hardware cycles. The standalone simulator
+server binds its RTC to host monotonic time; a directly constructed runtime
+starts with a manually advanced RTC. Reading its RTC policy does not sample
+or advance the clock.
+
+Simulator reset still requires a newly prepared runtime. The established
+status keys and detailed diagnostic selection are preserved. Shared terminal
+status now consistently reports bytes, rather than frame counts, in
+`rich_terminal.frame_bytes_by_type` for both adapters.
 
 ## Shared Live Session
 

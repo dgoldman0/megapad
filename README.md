@@ -312,7 +312,14 @@ Each running session needs its own writable image and socket/runtime namespace.
 execution. Omission preserves `MEGAFORTH_EXECUTOR`, otherwise Python; explicit
 `native` requires the extension, and `auto` uses it when available. Emulator
 lane and clock controls remain emulator options. Python-only simulation and
-launcher help do not require the emulator extension.
+launcher help do not require the emulator extension. The simulator and viewer
+also import no architectural backend.
+
+Both modes report a common `runtime` object in session status: selected mode
+and executor, work/step units, timer and RTC policy, and supported diagnostic
+and reset actions. A native executor may still use Python service fallbacks.
+See [the session API](docs/development-session.md) for the boundary and status
+fields. Executor defaults remain unchanged.
 
 Hybrid execution is planned in [the unified runtime plan](docs/unified-runtime-plan.md).
 Available modes are currently emulator and simulator. The architectural

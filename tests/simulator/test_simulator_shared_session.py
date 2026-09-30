@@ -6,7 +6,11 @@ import importlib.util
 
 import pytest
 
-from shared_session import SessionServer, SharedMachine, snapshot_from_wire
+from shared_session import (
+    SessionServer,
+    SharedSessionOwner,
+    snapshot_from_wire,
+)
 from simulator.runtime import MegaForthRuntime
 from simulator.session import (
     DEFAULT_SEMANTIC_QUANTUM_STEPS,
@@ -61,7 +65,7 @@ def test_facade_reports_semantic_work_without_hardware_statistics() -> None:
         SimulatorSharedMachine(session, host_profile=True)
 
     machine = SimulatorSharedMachine(session)
-    assert isinstance(machine, SharedMachine)
+    assert isinstance(machine, SharedSessionOwner)
     machine.paused = True
     machine.start()
     try:
@@ -75,6 +79,28 @@ def test_facade_reports_semantic_work_without_hardware_statistics() -> None:
 
         status = machine.status()
         assert status["backend"] == "simulator"
+        assert status["runtime"] == {
+            "mode": "simulator",
+            "executor": runtime.execution_backend,
+            "step_unit": "semantic_step",
+            "step_request_unit": "semantic_boundary",
+            "batch_unit": "semantic_boundary",
+            "timing": {
+                "timer_unit": "semantic_step",
+                "rtc_mode": "manual",
+            },
+            "capabilities": {
+                "machine_code": False,
+                "cpu_diagnostics": False,
+                "network_diagnostics": False,
+                "reset": False,
+                "host_profiling": False,
+            },
+        }
+        lightweight = machine.status(detailed=False)
+        assert lightweight["runtime"] == status["runtime"]
+        assert lightweight["rich_terminal"] == status["rich_terminal"]
+        assert "simulator" not in lightweight
         assert status["state"] == "paused"
         assert status["paused"]
         assert status["idle"]
@@ -144,6 +170,15 @@ def test_semantic_quantum_prefers_caller_then_environment_then_executor(
             expected = DEFAULT_SEMANTIC_QUANTUM_STEPS[backend]
             assert session.semantic_quantum_steps == expected
             assert session.backend._semantic_quantum_steps == expected
+            owner = SimulatorSharedMachine(session)
+            descriptor = owner.status(detailed=False)["runtime"]
+            assert descriptor["executor"] == backend
+            assert descriptor["timing"]["rtc_mode"] == "manual"
+            session.runtime.rtc.bind_monotonic_clock(lambda: 0)
+            assert owner.status()["runtime"]["timing"] == {
+                "timer_unit": "semantic_step",
+                "rtc_mode": "host_monotonic",
+            }
 
     monkeypatch.setenv(SEMANTIC_QUANTUM_ENVIRONMENT, "40000")
     for backend in backends:
@@ -283,6 +318,17 @@ def test_unchanged_server_dispatch_reaches_cell_view_and_input_flow() -> None:
         assert status["terminal"] == [2, 2]
         assert status["rich_terminal"]["state"] == "ACTIVE"
         assert not status["rich_terminal"]["pending"]
+        core = machine.semantic_session.rich_terminal_driver.core
+        assert core.frames_received > 0
+        assert status["rich_terminal"]["frame_bytes_by_type"] == {
+            f"0x{frame_type:04X}": byte_count
+            for frame_type, byte_count in sorted(
+                core.frame_bytes_received_by_type.items()
+            )
+        }
+        assert status["rich_terminal"]["frame_bytes_by_type"] != (
+            status["rich_terminal"]["frames_by_type"]
+        )
         assert "simulator" not in status
 
         screen = server.dispatch("screen", {"since": -1})

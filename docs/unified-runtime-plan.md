@@ -2,8 +2,9 @@
 
 Started: 2026-09-30
 
-Status: Phase 1A implemented and qualified; Phase 1B is next. Hybrid execution
-is not implemented.
+Status: Phase 1A and the Phase 1B session extraction are implemented and
+qualified locally. Executor default promotion remains deferred to workload
+qualification. Phase 2 profiles are next; hybrid execution is not implemented.
 
 Branch: `feature/unified-runtime`
 
@@ -294,7 +295,7 @@ limits. Machine-level claims continue to require the architectural oracle.
 |---|---|---|
 | Plan | Locked | Read-only source review at the base above; local commit `512ed32` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
-| 1B — common session boundary | Pending | |
+| 1B — common session boundary | Extraction complete; default promotion deferred | 277 emulator/frontend checks, 49 simulator/default checks, 34 native-selected checks; 3 socket-dependent checks skipped |
 | 2 — workload profiles | Pending | |
 | 3A — native scalar FP | Pending | |
 | 3B/3C — remaining native extraction | Pending, profile-driven | |
@@ -352,3 +353,75 @@ sequentially:
 The execution engines, arithmetic, guest scheduling, display implementation,
 and source workloads are unchanged. This is launcher/lifecycle qualification;
 no performance improvement or complete physical Desktop acceptance is claimed.
+
+
+### Phase 1B implementation and validation — 2026-09-30
+
+Extracted `shared.session.TerminalSession` and its configuration/capture
+values from architectural construction. `emulator.session.MachineSession`
+and `simulator.session.SimulatorMachineSession` now inherit it directly.
+Common close cleanup is shared; emulator storage save, UART restoration,
+audio/NIC release, and simulator backend detachment retain their previous
+ordering and failure behavior.
+
+`shared_session.SharedSessionOwner` now owns only common control, phase
+observation, locking, display/input authority, and lifecycle interfaces.
+`emulator.shared_session.SharedMachine` retains architectural execution and
+diagnostics; the simulator owner is its sibling. Their existing run loops,
+IDL/wake rules, units of work, host cadence, and reset behavior are unchanged.
+Server/client socket and display-lease code remain in the common module.
+
+Terminal policy decoding moved to `shared.session_options`; the simulator
+server no longer imports the emulator server. In-repository frontend and
+backend callers use canonical modules. A small root `session` alias remains
+for the benchmark's historical `--runtime-root` loader and preserves canonical
+module identity, following the package contract. The former architectural
+`shared_session.SharedMachine` export is removed. Legacy server script entry
+points still reach the same owners and are retained during launcher migration.
+
+Both status variants expose the shared `runtime` descriptor: actual mode and
+executor, accounting and step-request units, timer/RTC policy, and supported
+machine-code/diagnostic/reset/profile actions. Python service fallbacks are
+still possible under native execution. This does not turn instruction batching
+into strict cycle-bounded execution or semantic steps into hardware cycles.
+The hosted RTC exposes its binding policy without sampling the clock.
+Consolidating terminal status also corrected an existing simulator diagnostic:
+`frame_bytes_by_type` previously returned frame counts; it now reports actual
+byte counters and has a real CELL-session regression check.
+
+Validation used the same CPython 3.12.14 environment and runtime namespace as
+Phase 1A, with sequential Make invocations:
+
+- `CC=gcc CXX=g++ make test-sequential`, selecting `test_session`,
+  `test_shared_session`, `test_session_viewer`, `test_terminal_text_cells`,
+  the four `test_rich_terminal_semantic_{session_input,shared_input,shared_wire,
+  viewer_input}` files, `test_backend_package_layout`,
+  `test_rich_terminal_vertical_contract`, and `test_runtime_consumers`:
+  **277 passed, 2 skipped**. This covers BIOS interaction, display offers and
+  acknowledgments, stale input generations, retained resource leases, reset
+  failures, close cleanup, media/runtime claims, idle wakeups, backpressure,
+  phase accounting, viewer rendering, and detailed/lightweight status.
+- `make test-simulator`, selecting `test_session_boundary`,
+  `test_unified_launcher`, and simulator session/shared-session/clock/server/
+  image-bootstrap files: **49 passed, 1 skipped**. Fresh processes block the
+  emulator package, architectural import aliases, both native extensions,
+  assembler, and pygame while importing frontend help or running a real
+  Python session through the control dispatcher. The direct path exercises
+  paused boot, KEY/IDL, output, rejected stale input, accepted input/resume,
+  completion, close, and reacquisition of the same runtime.
+- `MEGAFORTH_EXECUTOR=native make test-simulator` over simulator
+  session/shared-session/clock/server/image-bootstrap files: **34 passed**.
+  These overlap the preceding test set and are not additional unique tests.
+- After finalizing the temporary root alias, the three package-layout checks
+  were rerun and passed. `git diff --check` also passed.
+- Socket-dependent tests skip because this execution environment returns
+  `PermissionError` for AF_UNIX creation. Socket ownership source is unchanged;
+  actual socket transport/reconnection is not newly qualified here. The new
+  cold-import lifecycle check runs through direct dispatch regardless.
+
+Explicit `--executor native` remains available and tested. Automatic native
+production-default promotion is still deferred: this session refactor and
+its focused checks do not constitute representative workload qualification.
+Phase 2 must record current baselines before changing defaults or selecting
+additional hot-path extraction. No new performance or full Desktop acceptance
+claim is made by this slice.

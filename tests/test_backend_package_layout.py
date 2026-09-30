@@ -16,6 +16,7 @@ def test_flat_machine_imports_alias_canonical_emulator_modules() -> None:
         ("accel_wrapper", "emulator.accel_wrapper"),
         ("devices", "emulator.devices"),
         ("system", "emulator.system"),
+        ("session", "emulator.session"),
         ("rich_terminal.megapad", "emulator.rich_terminal_host"),
     )
 

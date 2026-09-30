@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from session import MachineSession, RunReport
+from emulator.session import MachineSession, RunReport
 
 
 class ScenarioFailure(RuntimeError):

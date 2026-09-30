@@ -7,7 +7,13 @@ import pytest
 from rich_terminal import DriverStatus
 from rich_terminal.retained_view import DisplayScope
 from rich_terminal.retained_wire import ControlEventKind
-from shared_session import SessionServer, SharedMachine, display_scope_to_wire
+from shared_session import (
+    SessionServer,
+    display_scope_to_wire,
+)
+from emulator.shared_session import (
+    SharedMachine,
+)
 
 
 GENERATION = 4

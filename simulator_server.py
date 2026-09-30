@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from session_server import _retained_policy, _rich_terminal_policy
+from shared.session_options import retained_policy, rich_terminal_policy
 from shared_session import DEFAULT_SOCKET, SessionServer
 from simulator.image_bootstrap import (
     ImageBootstrapPreparation,
@@ -95,7 +95,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--rich-terminal-policy",
-        type=_rich_terminal_policy,
+        type=rich_terminal_policy,
         metavar="JSON",
         help=(
             "attach the optional rich terminal with the complete "
@@ -104,7 +104,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--retained-terminal-policy",
-        type=_retained_policy,
+        type=retained_policy,
         metavar="JSON",
         help=(
             "enable RETAINED-1 with the complete caller-owned JSON policy; "
