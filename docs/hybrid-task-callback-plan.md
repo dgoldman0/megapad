@@ -970,3 +970,20 @@ cleanup. Preserve all private transport/application gates. This first adapter
 and synchronous session slice leaves public task and composite-suspension
 capabilities disabled. Activation requires a separately reviewed application
 capability gate; callback suspension remains separately deferred.
+
+#### Lost suffix-cancellation delivery recovery
+
+Before native suffix cancellation, retain one exact checkpoint of the owned
+frame chain and the requested suffix boundary. If delivery raises, preserve
+that exception and disable further task execution. A later successful native
+all-cancel may return either the entire original chain (the suffix call failed
+before retirement) or the exact surviving ancestor prefix (the suffix was
+already retired). Validate those identities and the empty native survivor
+before reconciling host control.
+
+That all-cancel proves every original owned frame is now retired. Its neutral
+result may therefore report their combined deepest-first IDs, including the
+suffix already retired by the failed delivery. It does not claim the earlier
+suffix call succeeded, create a work receipt, or permit guest reuse. Any other
+retirement list fails closed. Qualification covers both native outcomes,
+malformed IDs, exact original exception propagation and released ownership.
