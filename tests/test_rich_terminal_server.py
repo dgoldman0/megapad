@@ -1307,6 +1307,7 @@ def test_present_region_hidden_replace_commits_then_reveals_atomically():
     assert hidden.active.owners == {}
     assert hidden.hidden.owners[7].regions[1].geometry_generation == 0
     assert not hidden.retained_visible
+    assert core.presents_committed == {"REPLACE_START": 1}
     assert core.owner_state is not None
     assert core.owner_state.records[7].high_water.region == 1
     core.settle_result_delivery(2)
@@ -1334,6 +1335,7 @@ def test_present_region_hidden_replace_commits_then_reveals_atomically():
     assert state.active.owners[7].regions[1].visible
     assert state.retained_visible
     assert revealed.views[0].retained is state
+    assert core.presents_committed == {"REPLACE_START": 1, "REPLACE_CONTINUE": 1}
     core.settle_result_delivery(3)
 
 
@@ -1372,6 +1374,7 @@ def test_present_declared_byte_mismatch_rejects_without_scene_or_id_publication(
     assert rejected.views == ()
     assert core.retained_state is scene_source
     assert core.owner_state is owner_source
+    assert core.presents_committed == {}
     core.settle_result_delivery(2)
 
 

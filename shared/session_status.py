@@ -105,6 +105,8 @@ def terminal_status(session, *, pending: bool, failure: str | None) -> dict:
         "decoder_buffered_bytes": (
             0 if core is None else core.decoder_buffered_bytes
         ),
+        # Committed PRESENT transactions by retained mode.
+        "presents_committed": {} if core is None else core.presents_committed,
         # Requests for more retained space the terminal refused.
         "capacity_denials": 0 if core is None else core.capacity_denials,
         "last_capacity_denial": None if core is None else core.last_capacity_denial,

@@ -594,6 +594,8 @@ class RichTerminalCore:
         self._most_recent_wire_aborted_id = 0
         self._machine_publications_received = 0
         self._machine_publication_bytes_received = 0
+        # Committed PRESENT transactions by retained mode, for status and logs.
+        self._presents_committed: dict[str, int] = {}
         # Refused requests for more retained space, kept for status and logs.
         self._capacity_denials = 0
         self._last_capacity_denial: dict | None = None
@@ -691,6 +693,12 @@ class RichTerminalCore:
     @property
     def state(self) -> TerminalState:
         return self._state
+
+    @property
+    def presents_committed(self) -> dict[str, int]:
+        """Committed PRESENT transactions counted by retained mode name."""
+
+        return dict(self._presents_committed)
 
     @property
     def capacity_denials(self) -> int:
@@ -2954,6 +2962,10 @@ class RichTerminalCore:
                         self._fatal(f"cannot install PRESENT publication: {exc}", cause=exc)
                     status = 0
                     view = prepared.view
+                    mode = PresentRetainedMode(wire.retained_mode).name
+                    self._presents_committed[mode] = (
+                        self._presents_committed.get(mode, 0) + 1
+                    )
                 else:
                     result_lease = self._reject_present_transaction(lease)
                     status = 1
