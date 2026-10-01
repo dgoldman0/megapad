@@ -64,7 +64,14 @@ go one at a time; commit each coherent slice once it is green.
    capability probing, fallback to older runners, legacy facades and the
    legacy embedder subclass path. The new runner keeps test-only failure
    hooks out of the production build and releases the GIL during long
-   machine runs.
+   machine runs. A machine routine calls a Forth word the way the chip does,
+   as an ordinary call on the caller's own data and return stacks. The
+   manifest names the word at each call site and how many cells go in and
+   come out, and the stack depth is checked when the word returns. Any word
+   may be named, but nothing is chosen at run time. The private callback
+   stacks and the closed-callback proofs go: they are a wall the chip does
+   not have, they stop a callback from ever becoming a plain native call,
+   and budgets and the depth check already bound a callback.
 4. **Remove whole-program re-checks from the call path.** Keep checks that
    guest execution can trigger: a forgotten or reused word, stale code,
    budgets and receipts. Remove per-call scans of the dictionary, of Python
@@ -86,7 +93,9 @@ go one at a time; commit each coherent slice once it is green.
 9. **Capacity negotiation.** Designed with the owner before implementation:
    a request-and-answer step through which a producer asks the terminal for
    more retained space and receives an approval or a denial, replacing silent
-   fallback.
+   fallback. On a denial that part stays CELL, and a record says which part
+   fell back, how much space it asked for and how much it had. The host,
+   logs and tests can read the record; nothing is drawn on screen.
 10. **Docs.** Remove the raw benchmark JSON and sandbox paths, and remove the
     dropped AES experiment reports; their reasons stay in commit history.
     Update commit IDs cited in docs to the re-authored IDs. Fold completed
@@ -98,7 +107,11 @@ go one at a time; commit each coherent slice once it is green.
     reference does. Done for the diagnostic and `perf_cycles`. The failure
     hooks and the GIL release live in the routine runners that step 3
     replaces, so they are done there.
-12. **Final gates.** Rerun step 1's gates, run the physical Desktop journey
+12. **Tests that already failed.** After everything else, fix the tests that
+    also fail on main, here `test_native_cycle_execution.py`'s phase-0 oracle
+    test, which expects schema version 20 where the oracle now writes 26,
+    together with Akashic's.
+13. **Final gates.** Rerun step 1's gates, run the physical Desktop journey
     once through Akashic's `physical_desktop_acceptance.py`, and run Akashic's
     numeric suites against this branch. Then merge into main and push both
     repositories together.
