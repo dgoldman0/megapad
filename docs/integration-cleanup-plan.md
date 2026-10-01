@@ -108,12 +108,18 @@ go one at a time; commit each coherent slice once it is green.
 8. **Launcher migration.** Once Akashic's tools start MegaPad through
    `megapad.py` or the packaged servers, delete the root `session_server.py`
    and `simulator_server.py` forwarders. Done.
-9. **Capacity negotiation.** Designed with the owner before implementation:
-   a request-and-answer step through which a producer asks the terminal for
-   more retained space and receives an approval or a denial, replacing silent
-   fallback. On a denial that part stays CELL, and a record says which part
-   fell back, how much space it asked for and how much it had. The host,
-   logs and tests can read the record; nothing is drawn on screen.
+9. **Capacity negotiation.** A request-and-answer step through which a
+   producer asks the terminal for more retained space and receives an
+   approval or a denial, replacing silent fallback. On a denial that part
+   stays CELL, and a record says which part fell back, how much space it
+   asked for and how much it had; nothing is drawn on screen. Done:
+   `OWNER_RESIZE` grows a live owner's reservation within the budget the
+   terminal shares between its owners, or answers `NO_CAPACITY` and leaves
+   it unchanged. The terminal counts its refusals and keeps the last one
+   (request, owner, quotas asked and held) in its session status. Akashic's
+   producer opens an owner with what its first frame needs and asks to grow
+   it as frames grow; its own record is described in Akashic's cleanup plan,
+   step 8.
 10. **Docs.** Remove the raw benchmark JSON and sandbox paths, and remove the
     dropped AES experiment reports; their reasons stay in commit history.
     Update commit IDs cited in docs to the re-authored IDs. Fold completed
