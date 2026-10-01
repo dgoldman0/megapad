@@ -96,7 +96,7 @@ from simulator.source import (
     SourceCursor,
     SourceLocation,
 )
-from simulator.stacks import DataStack, FaultAbort, ReturnEntry, ReturnStack
+from simulator.stacks import DataStack, FaultAbort, MachineReturn, ReturnEntry, ReturnStack
 from simulator.timer import HostedTimerService
 from simulator.terminal_geometry import HostedTerminalGeometryState
 
@@ -225,6 +225,13 @@ class ColonDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class RoutineDefinition:
+    """A declared machine routine, run by the runtime's installed machine owner."""
+
+    routine: object
+
+
+@dataclass(frozen=True, slots=True)
 class _ColonAccelerator:
     """One identity-bound host overlay for an unchanged colon definition."""
 
@@ -338,6 +345,7 @@ WordImplementation: TypeAlias = (
     | CreatedDefinition
     | DirectiveDefinition
     | ForeignDefinition
+    | RoutineDefinition
 )
 
 
@@ -545,6 +553,70 @@ class _DispatchCursor:
     host_yield: bool = False
 
 
+# A machine routine owner (installed by the hybrid composition) answers each
+# call, resume and advance with one of these steps. The dispatcher then runs
+# the callback word, continues the routine's caller, or suspends.
+
+@dataclass(frozen=True, slots=True)
+class RoutineResume:
+    """Continue a colon caller after the machine routine it called returns."""
+
+    caller: Word
+    ip: int
+
+
+@dataclass(frozen=True, slots=True)
+class RoutineRoot:
+    """Complete the dispatch whose entry word was a machine routine."""
+
+    root_id: int
+
+
+class _RoutineReturn:
+    """Return through whatever the routine's caller left on the return stack."""
+
+    __slots__ = ()
+
+
+ROUTINE_RETURN = _RoutineReturn()
+
+
+@dataclass(frozen=True, slots=True)
+class MachineCallback:
+    """Run ``word`` on the caller's stacks; its arguments and machine return are in place."""
+
+    word: Word
+
+
+@dataclass(frozen=True, slots=True)
+class MachineReturned:
+    """A machine routine returned and its outputs are on the data stack."""
+
+    resume: object
+
+
+@dataclass(frozen=True, slots=True)
+class MachineYield:
+    """A machine entry used up its host turn and resumes from a suspension."""
+
+    entry: object
+
+
+@dataclass(frozen=True, slots=True)
+class _MachineCursor:
+    """Resume location of a yielded machine entry."""
+
+    entry: object
+    host_yield: bool = True
+
+
+class _DispatchDone:
+    __slots__ = ()
+
+
+_DISPATCH_DONE = _DispatchDone()
+
+
 @dataclass(slots=True)
 class _SuspendedExecution:
     """Runtime-owned continuation and guard state for one blocked dispatch."""
@@ -554,7 +626,7 @@ class _SuspendedExecution:
     meter: _StepMeter
     starting_steps: int
     root_id: int
-    cursor: _DispatchCursor | ForeignMachineCursor
+    cursor: _DispatchCursor | ForeignMachineCursor | _MachineCursor
     return_snapshot: tuple[ReturnEntry, ...]
     capture_checkpoint: int
     had_pointer_capture: bool
@@ -806,6 +878,8 @@ class MegaForthRuntime:
         self._active_dispatches: list[_DispatchFrame] = []
         self._transient_words: dict[int, Word] = {}
         self._colon_accelerators: dict[int, _ColonAccelerator] = {}
+        # The hybrid composition installs the owner of declared machine routines.
+        self._machine_owner = None
         self._primitive_host_escapes: dict[int, tuple[PrimitiveDefinition, object]] = {}
         from simulator.private_host_escape import PrivateHostAbortProvenance
 
@@ -2209,6 +2283,22 @@ class MegaForthRuntime:
             initial_body=initial_body,
         )
 
+    def define_routine(
+        self,
+        name: bytes | str,
+        routine: object,
+        *,
+        initial_body: bytes = b"",
+    ) -> Word:
+        """Publish a word whose execution belongs to the installed machine owner."""
+
+        self._require_session_owner_access("define a machine routine")
+        return self._define_public_dictionary_word(
+            name,
+            RoutineDefinition(routine),
+            initial_body=initial_body,
+        )
+
     def define_colon(
         self,
         name: bytes | str,
@@ -3036,6 +3126,7 @@ class MegaForthRuntime:
             dict.__setitem__(machine_namespace, "_machine_host_turn", None)
             dict.__setitem__(machine_namespace, "_machine_selection", None)
             self._idle_deadline_ms = None
+            self._finish_machine_dispatch(failure)
             if root is None:
                 blocked.context._release_suspension(suspension.sequence)
             else:
@@ -3727,6 +3818,8 @@ class MegaForthRuntime:
         machine_call, machine_call_seal = machine_engine._machine_methods[0][1:]
         self._active_dispatches.append(frame)
         try:
+            if machine_outer and self._machine_owner is not None:
+                self._machine_owner.begin_turn(machine_quantum_instructions)
             if machine_quantum_instructions is not None:
                 machine_call_seal.verify()
                 machine_call(machine_engine, "begin_host_machine_turn", frame,
@@ -3887,6 +3980,8 @@ class MegaForthRuntime:
                     dict.__setitem__(machine_namespace, "_machine_host_turn", None)
                     if suspended is None:
                         dict.__setitem__(machine_namespace, "_machine_selection", None)
+                if machine_outer and suspended is None:
+                    self._finish_machine_dispatch(primary_error)
                 active = self._active_dispatches.pop()
                 if active is not frame:
                     raise AssertionError("active semantic dispatch stack is corrupted")
@@ -3918,6 +4013,8 @@ class MegaForthRuntime:
         machine_call, machine_call_seal = machine_engine._machine_methods[0][1:]
         self._active_dispatches.append(frame)
         try:
+            if self._machine_owner is not None:
+                self._machine_owner.begin_turn(suspended.machine_quantum_instructions)
             turn = None
             if suspended.machine_quantum_instructions is not None:
                 machine_call_seal.verify()
@@ -4076,6 +4173,7 @@ class MegaForthRuntime:
                 dict.__setitem__(machine_namespace, "_machine_host_turn", None)
                 if primary_error is not None or cursor is None:
                     dict.__setitem__(machine_namespace, "_machine_selection", None)
+                    self._finish_machine_dispatch(primary_error)
                 active = self._active_dispatches.pop()
                 if active is not frame:
                     raise AssertionError("active semantic dispatch stack is corrupted")
@@ -4334,10 +4432,24 @@ class MegaForthRuntime:
         if closed_guard is not None:
             closed_guard.begin(word, root_id)
         fault_entry = fault_request is not None
+        # A machine routine may yield its host turn only where an IDL could
+        # suspend: the outermost dispatch, outside source evaluation.
+        machine_can_yield = (allow_idle and len(self._active_dispatches) == 1
+                             and not self._active_input_states)
         if resume_cursor is not None:
             if word is not None or fault_request is not None:
                 raise AssertionError("resumed dispatch cannot have a new entry target")
-            if type(resume_cursor) is ForeignMachineCursor:
+            if type(resume_cursor) is _MachineCursor:
+                owner = self._machine_owner
+                flow = self._machine_flow(
+                    lambda: owner.advance(resume_cursor.entry, context, meter, machine_can_yield),
+                    context, meter, root_id, machine_can_yield)
+                if flow is _DISPATCH_DONE:
+                    return None
+                if type(flow) is _MachineCursor:
+                    return flow
+                current, ip = flow
+            elif type(resume_cursor) is ForeignMachineCursor:
                 task = self._current_task_root(context)
                 if task is None:
                     raise ExecutionError("machine cursor lost its original task root")
@@ -4366,6 +4478,17 @@ class MegaForthRuntime:
             entry_ip = 0
             while True:
                 implementation = target.implementation
+                if type(implementation) is RoutineDefinition:
+                    meter.tick()
+                    flow = self._machine_call(target, context, meter, RoutineRoot(root_id),
+                                              root_id, machine_can_yield)
+                    if flow is _DISPATCH_DONE:
+                        return None
+                    if type(flow) is _MachineCursor:
+                        return flow
+                    target, entry_ip = flow
+                    fault_entry = True
+                    break
                 if type(implementation) is ForeignDefinition:
                     entered = self._call_from_colon(target, caller=None, return_ip=0,
                                                     context=context, meter=meter)
@@ -4489,6 +4612,14 @@ class MegaForthRuntime:
                 # An accelerator represents the complete colon body, including
                 # its final Return.  Resume through the same continuation that
                 # the unchanged definition would have consumed.
+                flow = self._machine_return_flow(context, meter, root_id, machine_can_yield)
+                if flow is not None:
+                    if flow is _DISPATCH_DONE:
+                        return None
+                    if type(flow) is _MachineCursor:
+                        return flow
+                    current, ip = flow
+                    continue
                 continuation = context.returns.pop_continuation()
                 if continuation.fault_abort is not None:
                     self._abort_guest_fault(continuation.fault_abort, context)
@@ -4546,9 +4677,13 @@ class MegaForthRuntime:
                         context=context,
                         meter=meter,
                         closed_guard=closed_guard,
+                        machine_can_yield=machine_can_yield,
+                        root_id=root_id,
                     )
-                    if type(entered) is ForeignMachineCursor:
+                    if type(entered) is ForeignMachineCursor or type(entered) is _MachineCursor:
                         return entered
+                    if entered is _DISPATCH_DONE:
+                        return None
                     if entered is None:
                         ip += 1
                     else:
@@ -4560,9 +4695,13 @@ class MegaForthRuntime:
                         return_ip=ip + 1,
                         context=context,
                         meter=meter,
+                        machine_can_yield=machine_can_yield,
+                        root_id=root_id,
                     )
-                    if type(entered) is ForeignMachineCursor:
+                    if type(entered) is ForeignMachineCursor or type(entered) is _MachineCursor:
                         return entered
+                    if entered is _DISPATCH_DONE:
+                        return None
                     if entered is None:
                         ip += 1
                     else:
@@ -4711,6 +4850,14 @@ class MegaForthRuntime:
                                 return entered
                             current, ip = entered
                             continue
+                    flow = self._machine_return_flow(context, meter, root_id, machine_can_yield)
+                    if flow is not None:
+                        if flow is _DISPATCH_DONE:
+                            return None
+                        if type(flow) is _MachineCursor:
+                            return flow
+                        current, ip = flow
+                        continue
                     continuation = context.returns.pop_continuation()
                     if task is not None:
                         task.ordinary_return(continuation)
@@ -4785,7 +4932,9 @@ class MegaForthRuntime:
         meter: _StepMeter,
         closed_guard=None,
         callback_entry=False,
-    ) -> tuple[Word, int] | ForeignMachineCursor | None:
+        machine_can_yield=False,
+        root_id=0,
+    ) -> tuple[Word, int] | ForeignMachineCursor | _MachineCursor | _DispatchDone | None:
         if closed_guard is not None:
             implementation = target.implementation
             if type(implementation) is PrimitiveDefinition:
@@ -4808,6 +4957,10 @@ class MegaForthRuntime:
             if task is not None and task.active:
                 task.require_target(target)
             implementation = target.implementation
+            if type(implementation) is RoutineDefinition:
+                meter.tick()
+                resume = ROUTINE_RETURN if callback_entry else RoutineResume(caller, return_ip)
+                return self._machine_call(target, context, meter, resume, root_id, machine_can_yield)
             if type(implementation) is ForeignDefinition:
                 if task is not None and task.active:
                     task.tick(target)
@@ -4887,6 +5040,144 @@ class MegaForthRuntime:
                 raise ExecutionError("task transport returned invalid semantic control")
             target = action.word
             callback_entry = True
+
+    def _machine_call(self, target, context, meter, resume, root_id, can_yield):
+        owner = self._machine_owner
+        if owner is None:
+            raise ExecutionError(f"machine routine {target.name!r} has no installed owner")
+        return self._machine_flow(
+            lambda: owner.call(target, context, meter, resume, can_yield),
+            context, meter, root_id, can_yield)
+
+    def _machine_return_flow(self, context, meter, root_id, can_yield):
+        """Resume the machine when Forth returns into a machine return; else None."""
+
+        owner = self._machine_owner
+        if owner is None or not owner.parked:
+            return None
+        entry = context.returns._peek_entry(0, "return")
+        if type(entry) is not MachineReturn:
+            return None
+        return self._machine_flow(
+            lambda: owner.resume(entry, context, meter, can_yield),
+            context, meter, root_id, can_yield)
+
+    def _machine_flow(self, produce, context, meter, root_id, can_yield):
+        """Follow machine steps until Forth code runs next.
+
+        Returns the ``(word, ip)`` to continue at, a ``_MachineCursor`` to
+        suspend at, or ``_DISPATCH_DONE`` when the dispatch's root returned.
+        A machine fault enters the guest fault callback like an instruction
+        fault in a primitive.
+        """
+
+        owner = self._machine_owner
+        while True:
+            try:
+                step = produce()
+            except InstructionFault as fault:
+                request = _GuestFaultRequest(
+                    self._fault_xt,
+                    context,
+                    str(fault),
+                    FaultAbort(fault.report, str(fault)),
+                    fault.throw_code,
+                )
+                if self._has_older_dispatch(context):
+                    raise request from None
+                return self._begin_guest_fault(request, context, meter)
+            kind = type(step)
+            if kind is MachineCallback:
+                entered = self._enter_machine_callback(step.word, context, meter, root_id, can_yield)
+                if entered is not None:
+                    return entered
+                # The word finished inline, so control returns to the machine.
+                produce = lambda: owner.resume(
+                    context.returns._peek_entry(0, "return"), context, meter, can_yield)
+                continue
+            if kind is MachineYield:
+                return _MachineCursor(step.entry)
+            if kind is not MachineReturned:
+                raise ExecutionError("machine owner returned an unknown step")
+            resume = step.resume
+            if type(resume) is RoutineResume:
+                return resume.caller, resume.ip
+            if type(resume) is RoutineRoot:
+                if resume.root_id != root_id:
+                    raise _GuestControlTransfer(resume.root_id, context)
+                return _DISPATCH_DONE
+            # Return through whatever the routine's caller left on the stack.
+            entry = context.returns._peek_entry(0, "return")
+            if type(entry) is MachineReturn:
+                produce = lambda entry=entry: owner.resume(entry, context, meter, can_yield)
+                continue
+            continuation = context.returns.pop_continuation()
+            if continuation.fault_abort is not None:
+                self._abort_guest_fault(continuation.fault_abort, context)
+            if continuation.root:
+                if continuation.dispatch_id != root_id:
+                    raise _GuestControlTransfer(continuation.dispatch_id, context)
+                return _DISPATCH_DONE
+            caller = self._resolve_dispatch_word(continuation.xt)
+            if not isinstance(caller.implementation, ColonDefinition):
+                raise ExecutionError("continuation does not name a colon word")
+            return caller, int(continuation.ip)
+
+    def _enter_machine_callback(self, target, context, meter, root_id, can_yield):
+        """Start a callback word above its machine return.
+
+        Returns where Forth continues, or None when the word finished inline
+        and control goes straight back to the machine.
+        """
+
+        while True:
+            implementation = target.implementation
+            if isinstance(implementation, ColonDefinition):
+                return target, 0
+            meter.tick()
+            if type(implementation) is RoutineDefinition:
+                return self._machine_call(target, context, meter, ROUTINE_RETURN, root_id, can_yield)
+            if isinstance(implementation, ConstantDefinition):
+                context.data.push(implementation.value)
+                return None
+            if isinstance(implementation, ValueDefinition):
+                context.data.push(self.memory.read64(target.body_address))
+                return None
+            if isinstance(implementation, CreatedDefinition):
+                context.data.push(target.body_address)
+                if implementation.action is None:
+                    return None
+                return self._resolve_does_entry(implementation.action)
+            if not isinstance(implementation, PrimitiveDefinition):
+                raise ExecutionError(f"word {target.name!r} is not executable")
+            try:
+                invocation = self._invoke_primitive(implementation, context)
+            except _GuestFaultRequest as request:
+                if request.context is not context or self._has_older_dispatch(context):
+                    raise
+                return self._begin_guest_fault(request, context, meter)
+            if invocation is None:
+                return None
+            if not isinstance(invocation, Invoke):
+                raise ExecutionError("primitive returned an invalid control result")
+            target = self._resolve_dispatch_word(invocation.xt)
+
+    def _finish_machine_dispatch(self, primary_error=None) -> None:
+        """Cancel machine entries left behind by a finished outermost dispatch."""
+
+        owner = self._machine_owner
+        if owner is None:
+            return
+        try:
+            owner.finish_dispatch()
+        except BaseException as error:
+            if primary_error is None:
+                raise
+            try:
+                BaseException.add_note(
+                    primary_error, f"machine entry cleanup also failed: {error!r}")
+            except BaseException:
+                pass
 
     def _resolve_does_entry(self, action: DoesBodyRef) -> tuple[Word, int]:
         source = self._resolve_dispatch_word(action.source_xt)

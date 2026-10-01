@@ -133,7 +133,20 @@ class Continuation:
             raise ValueError("a continuation cannot be both root and fault-abort")
 
 
-ReturnEntry: TypeAlias = int | Continuation | ForeignContinuation
+@dataclass(frozen=True, slots=True, eq=False)
+class MachineReturn:
+    """A machine routine's CALL.L return address at a callback site.
+
+    The slot holds the real return address, as it would on the chip. ``entry``
+    is the parked machine entry that resumes when Forth returns into it.
+    """
+
+    entry: object
+    raw: int
+
+
+ReturnEntry: TypeAlias = int | Continuation | ForeignContinuation | MachineReturn
+_CONTROL_ENTRIES = (Continuation, ForeignContinuation, MachineReturn)
 
 _FOREIGN_RESTORE_SLOTS = tuple(
     (kind, tuple((name, vars(kind)[name]) for name in names))
@@ -644,7 +657,7 @@ class ReturnStack:
         """Implement user ``R>``, rejecting an exposed continuation."""
 
         entry = self._peek_entry(0, "R>")
-        if isinstance(entry, (Continuation, ForeignContinuation)):
+        if isinstance(entry, _CONTROL_ENTRIES):
             raise self._shape_error("R>", "user cell", entry)
         self._discard_entries(1)
         return entry
@@ -653,7 +666,7 @@ class ReturnStack:
         """Implement user ``R@``, rejecting an exposed continuation."""
 
         entry = self._peek_entry(0, "R@")
-        if isinstance(entry, (Continuation, ForeignContinuation)):
+        if isinstance(entry, _CONTROL_ENTRIES):
             raise self._shape_error("R@", "user cell", entry)
         return entry
 
@@ -670,9 +683,9 @@ class ReturnStack:
         self._require(2, operation)
         second = self._peek_entry(0, operation)
         first = self._peek_entry(1, operation)
-        if isinstance(second, (Continuation, ForeignContinuation)):
+        if isinstance(second, _CONTROL_ENTRIES):
             raise self._shape_error(operation, "top user cell", second)
-        if isinstance(first, (Continuation, ForeignContinuation)):
+        if isinstance(first, _CONTROL_ENTRIES):
             raise self._shape_error(operation, "deeper user cell", first)
         return first, second
 
@@ -716,6 +729,40 @@ class ReturnStack:
             raise self._shape_error("return", "continuation", entry)
         self._discard_entries(1)
         return entry
+
+    def mark_machine_return(self, entry: MachineReturn) -> None:
+        """Type the top slot, which already holds ``entry.raw``, as a machine return."""
+
+        self._require_backing("hold machine returns")
+        assert self._pointer is not None
+        assert self._memory_view is not None
+        if self._pointer == self._empty_pointer:
+            raise StackUnderflow("return", "machine return", required=1, available=0)
+        if self._memory_view.read64(self._pointer) != entry.raw:
+            raise ValueError("the top return slot does not hold this machine return address")
+        self._continuations[self._pointer] = (entry, entry.raw)
+
+    def set_machine_frontier(self, pointer: int) -> None:
+        """Adopt the stack pointer a machine routine left.
+
+        Machine CALL.L and RET.L wrote the cells above it directly. Typed
+        metadata that earlier Forth frames left in those slots no longer
+        matches their bytes, so reading a slot treats it as a plain cell.
+        """
+
+        self._validate_pointer(pointer)
+        self._pointer = pointer
+
+    def holds_machine_return(self, entry: MachineReturn, slot: int) -> bool:
+        """Whether ``entry`` is still live at ``slot``, not unwound or overwritten."""
+
+        if self._memory is None or self._pointer is None or self._pointer > slot:
+            return False
+        typed = self._continuations.get(slot)
+        if typed is None or typed[0] is not entry:
+            return False
+        assert self._memory_view is not None
+        return self._memory_view.read64(slot) == entry.raw
 
     def has_fault_abort_continuation(self) -> bool:
         """Whether a live guest-fault fail-closed frame remains."""
@@ -874,7 +921,7 @@ class ReturnStack:
         for entry in snapshot:
             if isinstance(entry, ForeignContinuation):
                 raise TypeError("return stack restore cannot install foreign continuations")
-            if isinstance(entry, Continuation):
+            if isinstance(entry, (Continuation, MachineReturn)):
                 entries.append(entry)
             elif isinstance(entry, int):
                 entries.append(u64(entry))
@@ -903,6 +950,9 @@ class ReturnStack:
                     dispatch_id=entry.dispatch_id,
                     fault_abort=entry.fault_abort,
                 )
+            elif isinstance(entry, MachineReturn):
+                self.push(entry.raw)
+                self.mark_machine_return(entry)
             else:
                 self.push(entry)
 
@@ -1001,13 +1051,13 @@ class ReturnStack:
         self._require(offset + 2, operation)
         index_entry = self._peek_entry(offset, operation)
         limit_entry = self._peek_entry(offset + 1, operation)
-        if isinstance(index_entry, (Continuation, ForeignContinuation)):
+        if isinstance(index_entry, _CONTROL_ENTRIES):
             raise self._shape_error(
                 operation,
                 f"loop index cell at offset {offset}",
                 index_entry,
             )
-        if isinstance(limit_entry, (Continuation, ForeignContinuation)):
+        if isinstance(limit_entry, _CONTROL_ENTRIES):
             raise self._shape_error(
                 operation,
                 f"loop limit cell at offset {offset + 1}",
@@ -1082,6 +1132,8 @@ class ReturnStack:
     ) -> ReturnStackShapeError:
         if isinstance(actual, ForeignContinuation):
             actual_kind = "foreign continuation"
+        elif isinstance(actual, MachineReturn):
+            actual_kind = "machine return"
         else:
             actual_kind = "continuation" if isinstance(actual, Continuation) else "user cell"
         return ReturnStackShapeError(operation, expected, actual_kind)
@@ -1091,6 +1143,7 @@ __all__ = [
     "Continuation",
     "ForeignContinuation",
     "DataStack",
+    "MachineReturn",
     "ReturnEntry",
     "ReturnStack",
     "ReturnStackShapeError",
