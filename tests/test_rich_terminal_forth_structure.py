@@ -112,7 +112,7 @@ def test_transaction_frames_batch_until_an_atomic_protocol_boundary() -> None:
         "_PT-SEND-RESET-ACK",
         "_PT-SEND-RET-QUERY",
         "_PT-SEND-FATAL-ERROR",
-        "PT-OWNER-OPEN",
+        "_PT-OWNER-QUOTA-REQUEST",
         "PT-OWNER-DROP",
         "PT-PRESENT-COMMIT",
         "_PT-COMMIT",
@@ -837,12 +837,15 @@ def test_layout_serial_names_the_init_that_fixed_borrowed_geometry() -> None:
 
 def test_owner_lifecycle_uses_ret_result_and_shared_drop_tx_result() -> None:
     source = SOURCE.read_text(encoding="utf-8")
-    owner_open = _definition(source, "PT-OWNER-OPEN")
+    owner_request = _definition(source, "_PT-OWNER-QUOTA-REQUEST")
     owner_drop = _definition(source, "PT-OWNER-DROP")
     ret_result = _definition(source, "_PT-DISPATCH-RET-RESULT")
 
-    assert "_PT-M-OWNER-OPEN 64" in owner_open
-    assert "TRUE _PT-OO-S @ _PT-FRAME-SEND" in owner_open
+    # OWNER_OPEN and OWNER_RESIZE share one quota request frame.
+    assert "_PT-M-OWNER-OPEN _PT-OO-MESSAGE !" in _definition(source, "PT-OWNER-OPEN")
+    assert "_PT-M-OWNER-RESIZE _PT-OO-MESSAGE !" in _definition(source, "PT-OWNER-RESIZE")
+    assert "_PT-OO-MESSAGE @ 64" in owner_request
+    assert "TRUE _PT-OO-S @ _PT-FRAME-SEND" in owner_request
     assert "_PT-M-OWNER-DROP 32" in owner_drop
     assert "FALSE _PT-OD-S @ _PT-FRAME-SEND" in owner_drop
     assert "_PT-AWAIT-OWNER-DROP" in owner_drop
@@ -2003,7 +2006,7 @@ def test_retained_resize_and_reset_barriers_preserve_the_wire_profile() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     resize = _definition(source, "_PT-DISPATCH-RESIZE")
     resize_state = _definition(source, "_PT-RESIZE-STATE?")
-    owner_open = _definition(source, "PT-OWNER-OPEN")
+    owner_open = _definition(source, "_PT-OWNER-QUOTA-REQUEST")
     owner_drop = _definition(source, "PT-OWNER-DROP")
     service_credit = _definition(source, "_PT-SERVICE-CREDIT")
     close = _definition(source, "PT-CLOSE")

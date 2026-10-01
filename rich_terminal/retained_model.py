@@ -494,6 +494,12 @@ class OwnerQuotas:
             )
 
 
+_QUOTA_FIELDS = (
+    "regions", "resources", "objects", "series",
+    "resource_bytes", "utf8_bytes", "sample_slots",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ReservationTotals:
     live_owners: int = 0
@@ -589,6 +595,11 @@ class OwnerDropDisposition(str, Enum):
     IDEMPOTENT = "IDEMPOTENT"
 
 
+class OwnerResizeDisposition(str, Enum):
+    RESIZED = "RESIZED"
+    UNCHANGED = "UNCHANGED"
+
+
 @dataclass(frozen=True, slots=True)
 class OwnerLedgerState:
     records: Mapping[int, OwnerRecord]
@@ -598,7 +609,7 @@ class OwnerLedgerState:
 @dataclass(frozen=True, slots=True)
 class PreparedOwnerLedgerInstall:
     state: OwnerLedgerState
-    disposition: OwnerOpenDisposition | OwnerDropDisposition | None
+    disposition: OwnerOpenDisposition | OwnerDropDisposition | OwnerResizeDisposition | None
     _ledger_token: object
     _source_state: OwnerLedgerState
 
@@ -704,10 +715,50 @@ class OwnerLedger:
         updated[identity.owner_id] = OwnerRecord(identity, quotas, high_water)
         return self._prepared(self._make_state(updated, reservations), disposition)
 
+    def prepare_resize(
+        self, identity: OwnerIdentity, quotas: OwnerQuotas
+    ) -> PreparedOwnerLedgerInstall:
+        """Grow a live owner's reservation to ``quotas``.
+
+        Every field must be at least the current one. The request fails with
+        NO_CAPACITY, leaving the owner as it was, when the larger reservation
+        would not fit the caller's policy.
+        """
+
+        self._validate_scope(identity)
+        if not isinstance(quotas, OwnerQuotas):
+            raise TypeError("quotas must be OwnerQuotas")
+        self._validate_quotas(quotas)
+        record = self.require_live(identity)
+        current = record.quotas
+        assert current is not None
+        if any(getattr(quotas, name) < getattr(current, name) for name in _QUOTA_FIELDS):
+            raise OwnerLedgerError(
+                OwnerLedgerErrorCode.INVALID, "an owner reservation can only grow"
+            )
+        if quotas == current:
+            return self._prepared(self._state, OwnerResizeDisposition.UNCHANGED)
+        try:
+            reservations = self._state.reservations.subtract(current).add(quotas)
+        except ValueError as exc:
+            raise OwnerLedgerError(OwnerLedgerErrorCode.NO_CAPACITY, str(exc)) from exc
+        self._validate_reservation_totals(reservations)
+        updated = dict(self._state.records)
+        updated[identity.owner_id] = replace(record, quotas=quotas)
+        return self._prepared(
+            self._make_state(updated, reservations), OwnerResizeDisposition.RESIZED
+        )
+
     def open(self, identity: OwnerIdentity, quotas: OwnerQuotas) -> OwnerOpenDisposition:
         prepared = self.prepare_open(identity, quotas)
         self.install_prepared(prepared)
         assert isinstance(prepared.disposition, OwnerOpenDisposition)
+        return prepared.disposition
+
+    def resize(self, identity: OwnerIdentity, quotas: OwnerQuotas) -> OwnerResizeDisposition:
+        prepared = self.prepare_resize(identity, quotas)
+        self.install_prepared(prepared)
+        assert isinstance(prepared.disposition, OwnerResizeDisposition)
         return prepared.disposition
 
     def prepare_drop(self, identity: OwnerIdentity) -> PreparedOwnerLedgerInstall:
@@ -896,7 +947,7 @@ class OwnerLedger:
     def _prepared(
         self,
         state: OwnerLedgerState,
-        disposition: OwnerOpenDisposition | OwnerDropDisposition | None,
+        disposition: OwnerOpenDisposition | OwnerDropDisposition | OwnerResizeDisposition | None,
     ) -> PreparedOwnerLedgerInstall:
         return PreparedOwnerLedgerInstall(
             state,
@@ -918,6 +969,7 @@ __all__ = [
     "OwnerOpenDisposition",
     "OwnerQuotas",
     "OwnerRecord",
+    "OwnerResizeDisposition",
     "PreparedOwnerLedgerInstall",
     "ReservationTotals",
     "ResourceFormat",

@@ -329,6 +329,7 @@ CREATE _PT-OWNER  0 ,
 0x2000 CONSTANT _PT-M-PRESENT-BEGIN
 0x2001 CONSTANT _PT-M-PRESENT-COMMIT
 0x2002 CONSTANT _PT-M-OWNER-OPEN
+0x2003 CONSTANT _PT-M-OWNER-RESIZE
 0x2010 CONSTANT _PT-M-REGION-DEFINE
 0x2011 CONSTANT _PT-M-REGION-REPLACE
 0x2012 CONSTANT _PT-M-REGION-DROP
@@ -349,6 +350,7 @@ CREATE _PT-OWNER  0 ,
 \ retained lifecycle and transaction writers, not the private message table.
 _PT-M-PRESENT-COMMIT CONSTANT PT-REQUEST-PRESENT-COMMIT
 _PT-M-OWNER-OPEN     CONSTANT PT-REQUEST-OWNER-OPEN
+_PT-M-OWNER-RESIZE   CONSTANT PT-REQUEST-OWNER-RESIZE
 _PT-M-OWNER-DROP     CONSTANT PT-REQUEST-OWNER-DROP
 _PT-M-TX-COMMIT      CONSTANT PT-REQUEST-TX-COMMIT
 _PT-M-RESOURCE-BEGIN  CONSTANT PT-REQUEST-RESOURCE-BEGIN
@@ -1901,7 +1903,8 @@ VARIABLE _PT-RRS-STATUS
 
 : _PT-RET-RESULT-STATUS?  ( request status -- flag )
     _PT-RRS-STATUS ! _PT-RRS-REQUEST !
-    _PT-RRS-REQUEST @ _PT-M-OWNER-OPEN = IF
+    _PT-RRS-REQUEST @ _PT-M-OWNER-OPEN =
+    _PT-RRS-REQUEST @ _PT-M-OWNER-RESIZE = OR IF
         _PT-RRS-STATUS @ PT-RET-NO-CAPACITY _PT-U<= EXIT
     THEN
     _PT-RRS-REQUEST @ _PT-M-RESOURCE-BEGIN = IF
@@ -3216,6 +3219,7 @@ VARIABLE _PT-OO-SERIES
 VARIABLE _PT-OO-RESOURCE-BYTES
 VARIABLE _PT-OO-UTF8-BYTES
 VARIABLE _PT-OO-SAMPLE-SLOTS
+VARIABLE _PT-OO-MESSAGE
 
 : _PT-RETAINED-WRITE-STATE?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
@@ -3247,11 +3251,14 @@ VARIABLE _PT-OO-SAMPLE-SLOTS
     TRUE ;
 
 \ Stack: owner generation region-q resource-q object-q series-q
-\        resource-byte-q utf8-byte-q sample-slot-q session -- status
-: PT-OWNER-OPEN
+\        resource-byte-q utf8-byte-q sample-slot-q session --
+: _PT-OWNER-QUOTA-ARGS
     _PT-OO-S ! _PT-OO-SAMPLE-SLOTS ! _PT-OO-UTF8-BYTES !
     _PT-OO-RESOURCE-BYTES ! _PT-OO-SERIES ! _PT-OO-OBJECTS !
-    _PT-OO-RESOURCES ! _PT-OO-REGIONS ! _PT-OO-GENERATION ! _PT-OO-OWNER !
+    _PT-OO-RESOURCES ! _PT-OO-REGIONS ! _PT-OO-GENERATION ! _PT-OO-OWNER ! ;
+
+\ Send OWNER_OPEN or OWNER_RESIZE with the quota set held above.
+: _PT-OWNER-QUOTA-REQUEST  ( -- status )
     _PT-OO-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-OO-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
     _PT-OO-S @ _PT-RETAINED-WRITE-STATE? 0= IF
@@ -3270,7 +3277,7 @@ VARIABLE _PT-OO-SAMPLE-SLOTS
     THEN
     _PT-OO-S @ _PT.S.PEER-GRANT @ _PT-OO-S @ _PT.S.PEER-SENT @ -
     104 U< IF PT-S-WOULD-BLOCK EXIT THEN
-    _PT-M-OWNER-OPEN 64 _PT-OO-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
+    _PT-OO-MESSAGE @ 64 _PT-OO-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
     _PT-OO-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!
     _PT-OO-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!
     _PT-OO-REGIONS @ _PT-FRAME-PAYLOAD 16 + L!
@@ -3282,13 +3289,27 @@ VARIABLE _PT-OO-SAMPLE-SLOTS
     _PT-OO-SAMPLE-SLOTS @ _PT-FRAME-PAYLOAD 48 + _PT-U64!
     TRUE _PT-OO-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
     TRUE _PT-OO-S @ _PT.S.LIFE-AWAIT? !
-    _PT-M-OWNER-OPEN _PT-OO-S @ _PT.S.LIFE-TYPE !
+    _PT-OO-MESSAGE @ _PT-OO-S @ _PT.S.LIFE-TYPE !
     _PT-OO-OWNER @ _PT-OO-S @ _PT.S.LIFE-OWNER !
     _PT-OO-GENERATION @ _PT-OO-S @ _PT.S.LIFE-GENERATION !
     0 _PT-OO-S @ _PT.S.LIFE-ITEM !
     0 _PT-OO-S @ _PT.S.LIFE-WATERMARK !
     0 _PT-OO-S @ _PT.S.LIFE-BYTES !
     PT-S-OK ;
+
+\ Stack: owner generation region-q resource-q object-q series-q
+\        resource-byte-q utf8-byte-q sample-slot-q session -- status
+: PT-OWNER-OPEN
+    _PT-OWNER-QUOTA-ARGS _PT-M-OWNER-OPEN _PT-OO-MESSAGE ! _PT-OWNER-QUOTA-REQUEST ;
+
+\ Ask the terminal to grow a live owner's reservation to the complete quota
+\ set given, each at least the current one. The completion's status is
+\ PT-RET-OK when it is granted and PT-RET-NO-CAPACITY when the terminal has
+\ no room; a refusal leaves the old reservation in force.
+\ Stack: owner generation region-q resource-q object-q series-q
+\        resource-byte-q utf8-byte-q sample-slot-q session -- status
+: PT-OWNER-RESIZE
+    _PT-OWNER-QUOTA-ARGS _PT-M-OWNER-RESIZE _PT-OO-MESSAGE ! _PT-OWNER-QUOTA-REQUEST ;
 
 VARIABLE _PT-OD-S
 VARIABLE _PT-OD-OWNER

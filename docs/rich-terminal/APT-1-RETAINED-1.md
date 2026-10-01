@@ -101,6 +101,7 @@ use the APT-1 control reserve under Section 17.
 | `2000` | `PRESENT_BEGIN` | C -> T | ordinary | 64 bytes |
 | `2001` | `PRESENT_COMMIT` | C -> T | ordinary | 16 bytes |
 | `2002` | `OWNER_OPEN` | C -> T | ordinary | 64 bytes |
+| `2003` | `OWNER_RESIZE` | C -> T | ordinary | 64 bytes |
 | `2010` | `REGION_DEFINE` | C -> T | ordinary, in transaction | 64 bytes |
 | `2011` | `REGION_REPLACE` | C -> T | ordinary, in transaction | 64 bytes |
 | `2012` | `REGION_DROP` | C -> T | ordinary, in transaction | 24 bytes |
@@ -525,7 +526,7 @@ Logical scene usage is target-local. For each owner, the active target and a
 committed hidden target independently check region count, combined
 object/control/semantic-item count, series count, complete
 GLYPH_RUN/READOUT/control label/shortcut/semantic-content UTF-8 bytes, and
-declared series history sample slots against the same immutable OWNER_OPEN
+declared series history sample slots against the same owner
 reservation. Those two logical scene ledgers are not summed. Controls use an
 independent identity namespace, but each CONTROL record and each carried STX1
 item consume one object-quota slot; their complete text consumes the same UTF-8
@@ -640,7 +641,7 @@ that worst case for accepted object reservations.
 
 Region, combined object/control/semantic-item, series, UTF-8, and sample-slot
 quotas bound each logical scene target independently: active usage and
-committed hidden usage must each fit the same immutable owner reservation and
+committed hidden usage must each fit the same owner reservation and
 are not added together. Control labels, shortcuts, and semantic-content text
 share the UTF-8 ledger with GLYPH_RUN and READOUT text. Resource count and
 bytes instead bound the one owner-wide resource-store usage described in
@@ -658,6 +659,21 @@ to a tombstone, or a different generation for a live ID, is stale authority.
 
 `OWNER_OPEN` is serialized outside transactions and resource upload. One
 `RET_RESULT` completes it before another lifecycle request.
+
+`OWNER_RESIZE` asks the terminal to grow a live owner's reservation. It has
+the `OWNER_OPEN` layout and carries the owner's complete new quota set. Every
+field must be at least the owner's current quota and at most its advertised
+maximum. The terminal checks the new aggregate sums exactly as for an open,
+with the owner's old reservation replaced by the new one, and installs the new
+reservation atomically before RET_OK. A request equal to the current quotas
+succeeds and changes nothing. A request that would exceed any aggregate total
+returns RET_NO_CAPACITY and leaves every reservation unchanged. A reservation
+never shrinks within an owner generation; a smaller field is RET_INVALID.
+`OWNER_RESIZE` follows the same serialization and reset-crossing rules as
+`OWNER_OPEN`. The terminal keeps a count of refused reservations and the last
+refusal (owner, requested quotas, quotas still held) for host status and logs;
+nothing about a refusal is shown on screen, and the owner's content keeps its
+CELL fallback.
 
 `OWNER_DROP` is a control-reserve message with exact layout `<QQQQ>`:
 
@@ -742,7 +758,7 @@ Status values are:
 | 6 | `RET_BAD_CONTENT` | uploaded resource bytes fail digest/content validation |
 | 7 | `RET_ABORTED` | upload was explicitly or semantically aborted |
 
-Exactly one RET_RESULT is sent for OWNER_OPEN, RESOURCE_BEGIN, RESOURCE_COMMIT,
+Exactly one RET_RESULT is sent for OWNER_OPEN, OWNER_RESIZE, RESOURCE_BEGIN, RESOURCE_COMMIT,
 RESOURCE_DROP, and RESOURCE_ABORT. A rejected RESOURCE_CHUNK also sends exactly
 one RET_RESULT with request type RESOURCE_CHUNK. It destroys an upload only for
 an exact-upload semantic rejection under Section 8; a wrong tuple leaves the
@@ -760,6 +776,10 @@ Lifecycle status selection is deterministic:
 | OWNER_OPEN stale/different generation | RET_STALE_OWNER | unchanged |
 | OWNER_OPEN scalar, feature, or quota-above-advertised error | RET_INVALID | unchanged |
 | OWNER_OPEN valid reservation cannot fit record/global totals | RET_NO_CAPACITY | unchanged |
+| OWNER_RESIZE larger or equal quotas that fit the global totals | RET_OK | reservation replaced by the request |
+| OWNER_RESIZE absent, dropped, or different-generation owner | RET_STALE_OWNER | unchanged |
+| OWNER_RESIZE scalar, feature, smaller-than-current, or quota-above-advertised error | RET_INVALID | unchanged |
+| OWNER_RESIZE valid growth cannot fit global totals | RET_NO_CAPACITY | unchanged |
 | RESOURCE_BEGIN stale owner | RET_STALE_OWNER | no upload opened |
 | RESOURCE_BEGIN ID at/below namespace high-water | RET_DUPLICATE_ID | no upload opened |
 | RESOURCE_BEGIN invalid format/dimensions/length/flags | RET_INVALID | no upload opened |
@@ -876,7 +896,7 @@ matching open upload and returns RET_ABORTED. It never publishes a resource.
 outside a transaction/upload and when the resource has no reference in either
 the active model or a committed hidden rebuild. It releases that resource's
 owner-wide count and byte usage and returns RET_OK. It does not shrink the
-OWNER_OPEN reservation or aggregate live-owner reservation sums. Dropping an
+owner reservation or aggregate live-owner reservation sums. Dropping an
 absent ID is RET_INVALID; IDs are not reused.
 
 ## 9. Regions
@@ -1761,7 +1781,7 @@ PRESENT because the mandatory new-epoch CELL snapshot invalidates and rebuilds
 the optimistic front.
 
 The terminal must defer a locally planned SOFT_RESET_REQUEST while an accepted
-OWNER_OPEN or RESOURCE lifecycle request still owes RET_RESULT, or while an
+OWNER_OPEN, OWNER_RESIZE, or RESOURCE lifecycle request still owes RET_RESULT, or while an
 accepted OWNER_DROP still owes TX_RESULT. It first emits the exact old-epoch
 result, clears that bounded lifecycle/result slot, and only then constructs the
 reset request. A successfully accepted OWNER_DROP therefore advances revision
@@ -2048,7 +2068,7 @@ Implementations must share byte-exact vectors for:
 Vectors must include complete 40-byte headers, CRC-32C, directional sequence,
 session, epoch, expected credit watermark, expected global revision, visible
 CELL state, active/hidden retained state, quota ledger, and result status. The
-quota state must distinguish immutable owner reservation, active scene usage,
+quota state must distinguish owner reservation, active scene usage,
 hidden scene usage, and owner-wide resource count/byte usage; a single combined
 `used` total is nonconforming. A parser-only success is not a conformance
 success.
@@ -2060,7 +2080,7 @@ grant counters, separate per-direction control-reserve occupancy,
 `presentation_epoch`, model revision, and transaction-ID high-water,
 open/result/upload lifecycle,
 selected geometry/generation, visible CELL digest,
-active and hidden retained digests/mode, immutable owner reservations, separate
+active and hidden retained digests/mode, owner reservations, separate
 active and hidden scene usage, owner-wide resource usage, live/tombstone ledger,
 and the emitted result/status. An independently implemented deterministic state
 reducer consumes the decoded transcript plus declared initial state and derives

@@ -68,7 +68,7 @@ The module owns:
   and lifecycle-bounded access to the accepted records;
 * the shared CELL/PRESENT transaction-ID, revision, sequence, byte, credit, and
   completion gate;
-* core OWNER_OPEN/OWNER_DROP and immutable RGBA8 resource lifecycle
+* core OWNER_OPEN/OWNER_RESIZE/OWNER_DROP and immutable RGBA8 resource lifecycle
   publication, exact RET_RESULT reconciliation, and covering-CREDIT chunk
   settlement;
 * PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
@@ -147,6 +147,9 @@ PT-OUTBOUND-MAX-PAYLOAD@ ( session -- bytes )
 PT-COMPLETION-POLL  ( completion session -- status has-completion )
 
 PT-OWNER-OPEN       ( owner generation region-q resource-q object-q series-q
+                      resource-byte-q utf8-byte-q sample-slot-q session
+                      -- status )
+PT-OWNER-RESIZE     ( owner generation region-q resource-q object-q series-q
                       resource-byte-q utf8-byte-q sample-slot-q session
                       -- status )
 PT-OWNER-DROP       ( owner generation session -- status )
@@ -461,7 +464,10 @@ The retained APIs make the narrow RETAINED-1 result exceptions explicit rather
 than weakening that CELL rule. `PT-COMPLETION-POLL` returns one fixed 80-byte
 native descriptor containing completion kind, completed request type, status,
 detail, transaction ID, revision, owner tuple, item, and accepted bytes.
-OWNER_OPEN always completes through RET_RESULT. OWNER_DROP and PRESENT complete
+OWNER_OPEN and OWNER_RESIZE always complete through RET_RESULT. A resize
+names the owner's complete new quota set, each field at least the current
+one; RET_NO_CAPACITY leaves the old reservation in force and is an ordinary
+answer, not a loss. OWNER_DROP and PRESENT complete
 through TX_RESULT. RESOURCE_BEGIN, RESOURCE_COMMIT, RESOURCE_DROP, and
 RESOURCE_ABORT complete through RET_RESULT, as does a rejected RESOURCE_CHUNK.
 An accepted RESOURCE_CHUNK has no wire result: only cumulative CREDIT covering

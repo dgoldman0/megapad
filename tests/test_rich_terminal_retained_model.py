@@ -18,6 +18,7 @@ from rich_terminal.retained_model import (
     OwnerLedgerErrorCode,
     OwnerOpenDisposition,
     OwnerQuotas,
+    OwnerResizeDisposition,
     RetainedFeature,
     RetainedPolicy,
 )
@@ -218,6 +219,40 @@ def test_individually_valid_aggregate_overcommit_is_atomic_no_capacity():
         ledger.open(_identity(3), _quotas(regions=9))
     assert individually_invalid.value.code is OwnerLedgerErrorCode.INVALID
     assert ledger.state is before
+
+
+def test_owner_resize_grows_a_live_reservation_or_leaves_it_unchanged():
+    ledger = _ledger()
+    owner = _identity(1)
+    ledger.open(owner, _quotas())
+    ledger.open(_identity(2), _quotas(resource_bytes=2048))
+    larger = _quotas(objects=8, resource_bytes=2048)
+
+    assert ledger.resize(owner, larger) is OwnerResizeDisposition.RESIZED
+    grown = ledger.state
+    assert ledger.require_live(owner).quotas == larger
+    assert grown.reservations.objects == 12
+    assert grown.reservations.resource_bytes == 4096
+    assert ledger.resize(owner, larger) is OwnerResizeDisposition.UNCHANGED
+    assert ledger.state is grown
+
+    refusals = (
+        (owner, _quotas(objects=8, resource_bytes=2049), OwnerLedgerErrorCode.NO_CAPACITY),
+        (owner, _quotas(objects=7, resource_bytes=2048), OwnerLedgerErrorCode.INVALID),
+        (owner, _quotas(objects=17, resource_bytes=2048), OwnerLedgerErrorCode.INVALID),
+        (_identity(1, 2), _quotas(objects=9), OwnerLedgerErrorCode.STALE_OWNER),
+        (_identity(3), _quotas(), OwnerLedgerErrorCode.STALE_OWNER),
+    )
+    for identity, quotas, code in refusals:
+        with pytest.raises(OwnerLedgerError) as caught:
+            ledger.resize(identity, quotas)
+        assert caught.value.code is code
+        assert ledger.state is grown
+
+    ledger.drop(owner)
+    with pytest.raises(OwnerLedgerError) as dropped:
+        ledger.resize(owner, _quotas(objects=9))
+    assert dropped.value.code is OwnerLedgerErrorCode.STALE_OWNER
 
 
 def test_exact_scope_generation_drop_tombstone_and_reopen_lifecycle():

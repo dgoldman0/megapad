@@ -63,6 +63,7 @@ from rich_terminal.retained_wire import (
     decode_object_set_visibility,
     decode_owner_drop,
     decode_owner_open,
+    decode_owner_resize,
     decode_present_begin,
     decode_present_commit,
     decode_region_definition,
@@ -85,6 +86,7 @@ from rich_terminal.retained_wire import (
     encode_object_set_visibility,
     encode_owner_drop,
     encode_owner_open,
+    encode_owner_resize,
     encode_present_begin,
     encode_present_commit,
     encode_region_definition,
@@ -486,6 +488,24 @@ def test_resource_codecs_preserve_semantic_errors_for_authority_precedence():
     assert decode_resource_commit(encode_resource_commit(commit)) == commit
     assert decode_resource_drop(encode_resource_drop(drop)) == drop
     assert decode_resource_abort(encode_resource_abort(abort)) == abort
+
+
+def test_owner_resize_carries_the_owner_open_layout_and_result_rules():
+    request = OwnerOpen(7, 3, OwnerQuotas(2, 0, 4, 0, 0, 64, 0))
+    payload = encode_owner_resize(request)
+    assert payload == encode_owner_open(request)
+    assert decode_owner_resize(payload) == request
+    with pytest.raises(RetainedWireError) as truncated:
+        decode_owner_resize(payload[:-1])
+    assert truncated.value.code is RetainedWireErrorCode.PAYLOAD
+
+    for status in (RetStatus.OK, RetStatus.INVALID, RetStatus.STALE_OWNER, RetStatus.NO_CAPACITY):
+        result = RetainedResult(RetainedMessageType.OWNER_RESIZE, status, 7, 3, 0, 11)
+        assert decode_ret_result(encode_ret_result(result)) == result
+    with pytest.raises(ValueError, match="item_id must be zero"):
+        RetainedResult(RetainedMessageType.OWNER_RESIZE, RetStatus.OK, 7, 3, 1, 11)
+    with pytest.raises(ValueError, match="not valid for OWNER_RESIZE"):
+        RetainedResult(RetainedMessageType.OWNER_RESIZE, RetStatus.IN_USE, 7, 3, 0, 11)
 
 
 @pytest.mark.parametrize(
