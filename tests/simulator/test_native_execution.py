@@ -955,7 +955,8 @@ def test_native_prefix_stops_before_a_fault_continuation_without_consuming_it():
 
     result = program.run(1, 0, (0, 2048, 2048), returns, continuations,
                          20, fpcsr=0x91)
-    assert result == (1, 1, 1, 2040, slot, 1, [], 0, 0x91)
+    # No machine routine ran: no instructions, no calls, no stop.
+    assert result == (1, 1, 1, 2040, slot, 1, [], 0, 0x91, 0, 0, False)
     assert int.from_bytes(page[2040:2048], "little") == 17
     assert int.from_bytes(page[slot:slot + 8], "little") == raw
     assert continuations == {slot: (frame, raw)}
@@ -965,7 +966,7 @@ def test_native_prefix_stops_before_a_fault_continuation_without_consuming_it():
     # Neither its backing bytes nor its typed metadata may be retired.
     before = bytes(page)
     assert program.run(1, 1, (0, 2048, 2040), returns, continuations,
-                       20, fpcsr=0x91) == (1, 1, 0, 2040, slot, 1, [], 0, 0x91)
+                       20, fpcsr=0x91) == (1, 1, 0, 2040, slot, 1, [], 0, 0x91, 0, 0, False)
     assert bytes(page) == before
     assert continuations[slot][0] is frame
 

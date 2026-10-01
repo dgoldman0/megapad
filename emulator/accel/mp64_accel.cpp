@@ -45,6 +45,7 @@
 #include "../../shared/accel/scalar_fp_bindings.h"
 #include "../../shared/accel/keccak_bindings.h"
 #include "../../shared/accel/tile_values_bindings.h"
+#include "../../shared/accel/routine_call.h"
 #include "dbt/executable_arena.h"
 #include "dbt/x86_64/lowering.h"
 #include "cpu/mp64/block_ir.h"
@@ -12783,6 +12784,7 @@ public:
             py::handle spans, py::handle frontier_value, py::handle floor_value,
             py::handle allowance_value) {
         Scope scope(*this);
+        require_settled();
         if (!image)
             throw py::type_error("entry requires a RoutineImage");
         if (!is_published(image))
@@ -12792,39 +12794,99 @@ public:
         const uint64_t frontier = routine_exact_uint64(frontier_value, "return frontier");
         const uint64_t floor = routine_exact_uint64(floor_value, "return floor");
         const uint64_t allowance = parse_allowance(allowance_value);
-        if (frontier % 8 != 0 || floor % 8 != 0 || frontier < floor || frontier - floor < 8)
-            throw py::value_error("the return stack has no room for a machine entry");
-        if (!entries_.empty()) {
-            const Entry& parked = entries_.back();
-            if (parked.state != Entry::CALLBACK || frontier > parked.registers[15])
-                throw py::value_error("a nested entry must start below a parked callback");
+        auto prepared = prepare_entry(image, std::move(borrowed), frontier, floor);
+        return start_entry(std::move(prepared), values, allowance);
+    }
+
+    // The native semantic executor's entry. It runs a published image that
+    // has no callback sites, under the caller's GIL. Nothing runs unless the
+    // whole entry is admitted; an entry that stops short of returning leaves
+    // its outcome for Python to collect with take_event().
+    static int native_call(void* self, std::uintptr_t image_address,
+                           const uint64_t* arguments, std::size_t argument_count,
+                           const megapad::hybrid::RoutineSpan* spans, std::size_t span_count,
+                           uint64_t frontier, uint64_t floor, uint64_t allowance,
+                           uint64_t* outputs, std::size_t output_count,
+                           uint64_t* instructions) noexcept {
+        using megapad::hybrid::ROUTINE_DECLINED;
+        auto& runner = *static_cast<RoutineRunner*>(self);
+        *instructions = 0;
+        if (runner.closed_ || runner.active_ || runner.pending_ || allowance == 0)
+            return ROUTINE_DECLINED;
+        std::shared_ptr<mp64_hybrid::Image> image;
+        for (const auto& item : runner.published_)
+            if (reinterpret_cast<std::uintptr_t>(item.get()) == image_address)
+                image = item;
+        if (!image || !image->sites.empty() || argument_count != image->input_cells ||
+                output_count != image->output_cells)
+            return ROUTINE_DECLINED;
+        std::optional<Scope> scope;
+        Prepared prepared;
+        std::vector<uint64_t> values(arguments, arguments + argument_count);
+        try {
+            scope.emplace(runner);
+            std::vector<mp64_routine::BufferSpan> borrowed;
+            borrowed.reserve(span_count);
+            for (std::size_t index = 0; index < span_count; ++index) {
+                const mp64_routine::Span span{spans[index].base, spans[index].size};
+                if (span.size > MASK64 - span.base)
+                    return ROUTINE_DECLINED;
+                borrowed.push_back({span, (spans[index].access & megapad::hybrid::SPAN_READ) != 0,
+                                    (spans[index].access & megapad::hybrid::SPAN_WRITE) != 0});
+            }
+            prepared = runner.prepare_entry(image, std::move(borrowed), frontier, floor);
+        } catch (...) {
+            // Python makes the same call and reports why it was refused.
+            return ROUTINE_DECLINED;
         }
-        std::unique_ptr<RoutineCPUReservation> reservation;
-        if (entries_.empty())
-            reservation = std::make_unique<RoutineCPUReservation>(*state_, this);
-        auto guard = acquire_execution(this);
-        const auto stack = resolve_memory_span(*state_->memory, floor,
-            MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
-        if (!stack.covers(frontier - floor))
-            throw py::value_error("the return stack must fit one mapped ordinary region");
-        validate_spans(borrowed, {floor, frontier - floor});
-        Entry entry;
-        entry.image = image;
-        entry.spans = std::move(borrowed);
-        entry.floor = floor;
-        entry.root_slot = frontier - 8;
-        entry.stack = stack.data;
-        uint8_t* sentinel = entry.stack + (entry.root_slot - floor);
-        std::fill(sentinel, sentinel + 8, uint8_t{0xFF});
-        if (reservation)
-            reservation_ = std::move(reservation);
-        entries_.push_back(std::move(entry));
-        initialize_entry(*image, entries_.back().root_slot, values);
-        return run(allowance, false);
+        mp64_hybrid::Event event;
+        try {
+            event = runner.start_entry(std::move(prepared), values, allowance);
+        } catch (const std::exception& error) {
+            runner.pending_error_ = error.what();
+            runner.pending_ = true;
+            return megapad::hybrid::ROUTINE_STOPPED;
+        } catch (...) {
+            runner.pending_error_ = "routine runner failed";
+            runner.pending_ = true;
+            return megapad::hybrid::ROUTINE_STOPPED;
+        }
+        *instructions = event.instructions;
+        if (event.kind == mp64_hybrid::EventKind::RETURNED) {
+            std::copy(event.values.begin(), event.values.end(), outputs);
+            return megapad::hybrid::ROUTINE_RETURNED;
+        }
+        if (!event.image)
+            event.image = image;
+        runner.pending_event_ = std::move(event);
+        runner.pending_error_.clear();
+        runner.pending_ = true;
+        return megapad::hybrid::ROUTINE_STOPPED;
+    }
+
+    py::capsule native_entry() {
+        if (closed_)
+            throw std::runtime_error("routine runner is closed");
+        native_call_ = megapad::hybrid::RoutineCall{this, &RoutineRunner::native_call};
+        return py::capsule(&native_call_, megapad::hybrid::ROUTINE_CALL_CAPSULE);
+    }
+
+    // The outcome of the last native call that stopped short of returning.
+    mp64_hybrid::Event take_event() {
+        if (!pending_)
+            throw py::value_error("no native routine call is waiting to be settled");
+        pending_ = false;
+        if (!pending_error_.empty()) {
+            const std::string error = std::move(pending_error_);
+            pending_error_.clear();
+            throw std::runtime_error(error);
+        }
+        return std::move(pending_event_);
     }
 
     mp64_hybrid::Event resume(py::handle outputs, py::handle allowance_value) {
         Scope scope(*this);
+        require_settled();
         if (entries_.empty() || entries_.back().state != Entry::CALLBACK)
             throw py::value_error("no machine entry is waiting for a callback");
         Entry& entry = entries_.back();
@@ -12842,6 +12904,7 @@ public:
 
     mp64_hybrid::Event advance(py::handle allowance_value) {
         Scope scope(*this);
+        require_settled();
         if (entries_.empty() || entries_.back().state != Entry::YIELDED)
             throw py::value_error("no machine entry has yielded");
         const uint64_t allowance = parse_allowance(allowance_value);
@@ -12858,6 +12921,9 @@ public:
             entries_.pop_back();
         if (entries_.empty())
             reservation_.reset();
+        // An unsettled native outcome belongs to an entry being abandoned.
+        pending_ = false;
+        pending_error_.clear();
     }
 
     uint64_t entries() const noexcept { return entries_.size(); }
@@ -12867,6 +12933,65 @@ public:
     uint64_t callbacks() const noexcept { return callbacks_; }
 
 private:
+    void require_settled() const {
+        if (pending_)
+            throw py::value_error("a native routine call is waiting to be settled");
+    }
+
+    struct Prepared {
+        std::shared_ptr<mp64_hybrid::Image> image;
+        std::vector<mp64_routine::BufferSpan> spans;
+        uint64_t floor = 0, frontier = 0;
+        uint8_t* stack = nullptr;
+        std::unique_ptr<RoutineCPUReservation> reservation;
+        std::unique_ptr<CPUExecutionGuard> guard;
+    };
+
+    // Checks everything a new entry needs, without any guest effect.
+    Prepared prepare_entry(const std::shared_ptr<mp64_hybrid::Image>& image,
+                           std::vector<mp64_routine::BufferSpan> borrowed,
+                           uint64_t frontier, uint64_t floor) {
+        if (frontier % 8 != 0 || floor % 8 != 0 || frontier < floor || frontier - floor < 8)
+            throw py::value_error("the return stack has no room for a machine entry");
+        if (!entries_.empty()) {
+            const Entry& parked = entries_.back();
+            if (parked.state != Entry::CALLBACK || frontier > parked.registers[15])
+                throw py::value_error("a nested entry must start below a parked callback");
+        }
+        Prepared prepared;
+        if (entries_.empty())
+            prepared.reservation = std::make_unique<RoutineCPUReservation>(*state_, this);
+        prepared.guard = acquire_execution(this);
+        const auto stack = resolve_memory_span(*state_->memory, floor,
+            MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+        if (!stack.covers(frontier - floor))
+            throw py::value_error("the return stack must fit one mapped ordinary region");
+        validate_spans(borrowed, {floor, frontier - floor});
+        prepared.image = image;
+        prepared.spans = std::move(borrowed);
+        prepared.floor = floor;
+        prepared.frontier = frontier;
+        prepared.stack = stack.data;
+        return prepared;
+    }
+
+    mp64_hybrid::Event start_entry(Prepared prepared, const std::vector<uint64_t>& values,
+                                   uint64_t allowance) {
+        Entry entry;
+        entry.image = prepared.image;
+        entry.spans = std::move(prepared.spans);
+        entry.floor = prepared.floor;
+        entry.root_slot = prepared.frontier - 8;
+        entry.stack = prepared.stack;
+        uint8_t* sentinel = entry.stack + (entry.root_slot - entry.floor);
+        std::fill(sentinel, sentinel + 8, uint8_t{0xFF});
+        if (prepared.reservation)
+            reservation_ = std::move(prepared.reservation);
+        entries_.push_back(std::move(entry));
+        initialize_entry(*entries_.back().image, entries_.back().root_slot, values);
+        return run(allowance, false);
+    }
+
     struct Entry {
         enum State : uint8_t { RUNNING, CALLBACK, YIELDED };
         std::shared_ptr<mp64_hybrid::Image> image;
@@ -13260,6 +13385,10 @@ private:
     std::vector<std::shared_ptr<mp64_hybrid::Image>> published_;  // sorted by code_base
     std::vector<Entry> entries_;
     std::unique_ptr<RoutineCPUReservation> reservation_;
+    megapad::hybrid::RoutineCall native_call_{};
+    mp64_hybrid::Event pending_event_;
+    std::string pending_error_;
+    bool pending_ = false;
     uint64_t instructions_ = 0, cycles_ = 0, segments_ = 0, callbacks_ = 0;
     bool pinned_ = false, active_ = false, closed_ = false;
 };
@@ -35987,6 +36116,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def_readonly("entry_offset", &mp64_hybrid::Image::entry_offset)
         .def_readonly("input_cells", &mp64_hybrid::Image::input_cells)
         .def_readonly("output_cells", &mp64_hybrid::Image::output_cells)
+        .def_property_readonly("native_handle", [](const mp64_hybrid::Image& image) {
+            return reinterpret_cast<std::uintptr_t>(&image);
+        })
         .def_property_readonly("sites", [](const mp64_hybrid::Image& image) {
             py::tuple sites(image.sites.size());
             for (std::size_t index = 0; index < image.sites.size(); ++index) {
@@ -36038,6 +36170,8 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("resume", &RoutineRunner::resume, py::arg("outputs"), py::arg("allowance"))
         .def("advance", &RoutineRunner::advance, py::arg("allowance"))
         .def("cancel", &RoutineRunner::cancel, py::arg("keep") = py::int_(0))
+        .def("native_entry", &RoutineRunner::native_entry)
+        .def("take_event", &RoutineRunner::take_event)
         .def_property_readonly("entries", &RoutineRunner::entries)
         .def_property_readonly("instructions", &RoutineRunner::instructions)
         .def_property_readonly("cycles", &RoutineRunner::cycles)

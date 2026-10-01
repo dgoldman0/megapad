@@ -3997,11 +3997,24 @@ class MegaForthRuntime:
                     and len(self._active_dispatches) == 1
                     and not self._active_input_states else None
                 )
+                owner = self._machine_owner
                 progressed = self._native_execution.run(
-                    current, ip, context, meter, native_quantum
+                    current, ip, context, meter, native_quantum,
+                    0 if owner is None else owner.native_allowance(meter, machine_can_yield),
                 )
                 if progressed is not None:
                     current, ip = progressed
+                    if self._native_execution.machine_stopped:
+                        # A routine called natively stopped short of returning.
+                        resume = RoutineResume(current, ip + 1)
+                        flow = self._machine_flow(
+                            lambda: owner.settle_native(context, meter, resume, machine_can_yield),
+                            context, meter, root_id, machine_can_yield)
+                        if flow is _DISPATCH_DONE:
+                            return None
+                        if type(flow) is _MachineCursor:
+                            return flow
+                        current, ip = flow
                     continue
 
             operation = definition.operations[ip]

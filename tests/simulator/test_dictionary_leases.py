@@ -117,7 +117,9 @@ def test_partial_body_reclaim_does_not_revive_when_frontier_and_bytes_return(
     assert dictionary.resolve(word.xt) is word
     assert dictionary.is_body_lease_live(retained_lease)
     assert not dictionary.is_body_lease_live(lease)
-    assert dictionary.execution_generation == generation + (rewind == "rollback_to")
+    # Reclaiming the body changes what native plans may call, and a
+    # rollback also republishes the definition list.
+    assert dictionary.execution_generation == generation + 1 + (rewind == "rollback_to")
 
     dictionary.allot(1)
     memory.write_bytes(word.body_address, b"abcdefgh")

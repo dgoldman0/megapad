@@ -39,7 +39,7 @@ setup(
         depends=["shared/accel/scalar_fp.h", "shared/accel/scalar_fp_bindings.h",
                  "shared/accel/keccak.h", "shared/accel/keccak_bindings.h",
                  "shared/accel/tile_values.h", "shared/accel/tile_values_bindings.h",
-                 "shared/accel/tile_guard_bindings.h"],
+                 "shared/accel/tile_guard_bindings.h", "shared/accel/routine_call.h"],
         include_dirs=[pybind11.get_include()], language="c++",
         extra_compile_args=flags, extra_link_args=links,
     )],

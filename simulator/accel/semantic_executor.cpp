@@ -4,6 +4,7 @@
 #include "../../shared/accel/scalar_fp_bindings.h"
 #include "../../shared/accel/keccak_bindings.h"
 #include "../../shared/accel/tile_values_bindings.h"
+#include "../../shared/accel/routine_call.h"
 
 #include <algorithm>
 #include <array>
@@ -45,6 +46,7 @@ enum Opcode : uint32_t {
     OP_CMOVE, OP_CMOVE_UP, OP_MOVE,
     OP_SP_FETCH, OP_RP_FETCH,
     OP_SCALAR_FP, OP_FPCSR_FETCH, OP_FPCSR_STORE,
+    OP_CALL_ROUTINE,
 };
 
 struct Instruction;
@@ -446,6 +448,28 @@ struct RunState {
     Cell fpcsr;
     ContinuationChanges changed{returns.pointer};
     Cell pointer_captures = 0;
+    // Machine routines called during this interval.
+    Cell machine_allowance = 0;
+    Cell machine_instructions = 0;
+    Cell machine_calls = 0;
+    bool machine_stopped = false;
+};
+
+// A declared machine routine the executor may call through the hybrid
+// runner. Its buffer rules turn argument cells into borrowed spans.
+struct RoutineRule {
+    unsigned address_argument;
+    unsigned length_argument;
+    Cell element_bytes;
+    Cell max_bytes;  // zero when the rule has no maximum
+    uint32_t access;
+};
+
+struct NativeRoutine {
+    std::uintptr_t image = 0;
+    unsigned inputs = 0;
+    unsigned outputs = 0;
+    std::vector<RoutineRule> rules;
 };
 
 static Cell flag(bool value) noexcept { return value ? MASK : 0; }
@@ -607,7 +631,7 @@ public:
             if (operation.size() != 3)
                 throw py::value_error("operation must be (opcode, a, b)");
             const auto opcode = operation[0].cast<uint32_t>();
-            if (opcode > OP_FPCSR_STORE)
+            if (opcode > OP_CALL_ROUTINE)
                 throw py::value_error("unknown native semantic opcode");
             plan.push_back(Instruction{opcode, OP_STOP, operation[1].cast<Cell>(),
                                       operation[2].cast<Cell>()});
@@ -636,6 +660,45 @@ public:
     }
 
     void clear() { plans_.clear(); }
+
+    // Bind the hybrid runner's call capsule, or None to unbind. Routine
+    // indexes are installed afterwards with set_routine().
+    void bind_routines(py::object entry) {
+        routines_.clear();
+        routine_call_ = nullptr;
+        routine_entry_ = py::object();
+        if (entry.is_none())
+            return;
+        if (!PyCapsule_IsValid(entry.ptr(), megapad::hybrid::ROUTINE_CALL_CAPSULE))
+            throw py::type_error("routine entry must be the hybrid runner's call capsule");
+        routine_call_ = static_cast<const megapad::hybrid::RoutineCall*>(
+            PyCapsule_GetPointer(entry.ptr(), megapad::hybrid::ROUTINE_CALL_CAPSULE));
+        routine_entry_ = std::move(entry);
+    }
+
+    void set_routine(Cell index, std::uintptr_t image, unsigned inputs, unsigned outputs,
+                     const py::iterable& rules) {
+        if (inputs > 8 || outputs > 8)
+            throw py::value_error("routines pass at most eight cells");
+        NativeRoutine routine{image, inputs, outputs, {}};
+        for (py::handle item : rules) {
+            auto rule = py::cast<py::tuple>(item);
+            if (rule.size() != 5)
+                throw py::value_error("rule must be (address, length, element_bytes, max_bytes, access)");
+            const auto address = rule[0].cast<unsigned>();
+            const auto length = rule[1].cast<unsigned>();
+            if (address >= inputs || length >= inputs)
+                throw py::value_error("rule names an argument the routine does not take");
+            if (rule[2].cast<Cell>() == 0)
+                throw py::value_error("rule element size must be positive");
+            routine.rules.push_back(RoutineRule{address, length, rule[2].cast<Cell>(),
+                                                rule[3].cast<Cell>(), rule[4].cast<uint32_t>()});
+        }
+        if (index > routines_.size())
+            throw py::value_error("routine indexes are installed in order");
+        if (index == routines_.size()) routines_.push_back(std::move(routine));
+        else routines_[index] = std::move(routine);
+    }
 
     py::object snapshot_stack(const std::array<Cell, 3>& bounds,
                               const py::object& continuations) {
@@ -692,7 +755,7 @@ public:
 
     py::tuple run(Cell xt, Cell ip, const std::array<Cell, 3>& data_state,
                   const py::tuple& return_state, const py::dict& continuations,
-                  Cell remaining_steps, Cell fpcsr) {
+                  Cell remaining_steps, Cell fpcsr, Cell machine_allowance) {
         if (return_state.size() != 4)
             throw py::value_error("return state must contain four cells");
         RunState state{xt, ip, 0,
@@ -705,8 +768,9 @@ public:
             state.cookie = return_state[3].cast<Cell>();
         } catch (const py::cast_error&) {
             return py::make_tuple(xt, ip, 0, state.data.pointer,
-                state.returns.pointer, return_state[3], py::list(), 0, fpcsr);
+                state.returns.pointer, return_state[3], py::list(), 0, fpcsr, 0, 0, false);
         }
+        state.machine_allowance = machine_allowance;
         if (!state.data.valid() || !state.returns.valid() ||
             !(state.data.empty <= state.returns.floor ||
               state.returns.empty <= state.data.floor))
@@ -732,6 +796,9 @@ public:
                 if (!execute(operation, memory, state, continuations, plan))
                     break;
                 state.steps += cost(operation.opcode);
+                // A routine that did not return leaves its outcome to Python.
+                if (state.machine_stopped)
+                    break;
             }
         } catch (const py::error_already_set&) {
             // No guest/Python callback runs here. Any page lookup failure is
@@ -814,7 +881,67 @@ private:
         state.changed.append_to(updates);
         return py::make_tuple(state.xt, state.ip, state.steps,
             state.data.pointer, state.returns.pointer, state.cookie, updates,
-            state.pointer_captures, state.fpcsr);
+            state.pointer_captures, state.fpcsr, state.machine_instructions,
+            state.machine_calls, state.machine_stopped);
+    }
+
+    // Call a machine routine directly. Anything the fast path cannot admit
+    // is left untouched for Python, which makes the same call itself.
+    bool call_routine(const Instruction& operation, MemoryRun& memory, RunState& s) {
+        if (routine_call_ == nullptr || operation.a >= routines_.size() ||
+                s.machine_allowance == 0)
+            return false;
+        const NativeRoutine& routine = routines_[operation.a];
+        const unsigned inputs = routine.inputs;
+        const unsigned outputs = routine.outputs;
+        if (s.data.depth() < inputs) return false;
+        const Cell after_pop = s.data.pointer + Cell(inputs) * 8;
+        if (after_pop - s.data.floor < Cell(outputs) * 8) return false;
+        std::array<uint64_t, 8> arguments{};
+        for (unsigned i = 0; i < inputs; ++i) {
+            // The deepest input cell is the routine's first argument.
+            Scalar cell;
+            if (!memory.resolve(s.data.pointer + Cell(inputs - 1 - i) * 8, 8, false, false, cell))
+                return false;
+            arguments[i] = cell.read(8);
+        }
+        std::array<Scalar, 8> destinations;
+        for (unsigned i = 0; i < outputs; ++i) {
+            if (!memory.resolve(after_pop - Cell(i + 1) * 8, 8, true, false, destinations[i]))
+                return false;
+        }
+        std::array<megapad::hybrid::RoutineSpan, 16> spans;
+        std::size_t span_count = 0;
+        for (const RoutineRule& rule : routine.rules) {
+            const Cell base = arguments[rule.address_argument];
+            const Cell count = arguments[rule.length_argument];
+            if (count > MASK / rule.element_bytes) return false;
+            const Cell size = count * rule.element_bytes;
+            if (rule.max_bytes != 0 && size > rule.max_bytes) return false;
+            if (size == 0) continue;
+            if (span_count == spans.size()) return false;
+            spans[span_count++] = megapad::hybrid::RoutineSpan{base, size, rule.access};
+        }
+        std::array<uint64_t, 8> results{};
+        uint64_t instructions = 0;
+        const int outcome = routine_call_->call(routine_call_->runner, routine.image,
+            arguments.data(), inputs, spans.data(), span_count, s.returns.pointer,
+            s.returns.floor, s.machine_allowance, results.data(), outputs, &instructions);
+        if (outcome == megapad::hybrid::ROUTINE_DECLINED) return false;
+        s.machine_instructions += instructions;
+        s.machine_allowance -= std::min<Cell>(instructions, s.machine_allowance);
+        ++s.machine_calls;
+        s.data.pointer = after_pop;
+        if (outcome != megapad::hybrid::ROUTINE_RETURNED) {
+            // The call consumed its inputs and stays at this IP for Python.
+            s.machine_stopped = true;
+            return true;
+        }
+        for (unsigned i = 0; i < outputs; ++i)
+            destinations[i].write(results[i], 8);
+        s.data.pointer = after_pop - Cell(outputs) * 8;
+        ++s.ip;
+        return true;
     }
 
     enum SlotKind { USER_CELL, CONTINUATION, PYTHON_BOUNDARY };
@@ -1305,6 +1432,8 @@ private:
             break;
         case OP_COMPARE: case OP_FILL: case OP_CMOVE: case OP_CMOVE_UP: case OP_MOVE:
             return execute_bulk(opcode, memory, s, stack);
+        case OP_CALL_ROUTINE:
+            return call_routine(operation, memory, s);
         case OP_STORE: case OP_C_STORE: case OP_W_STORE: case OP_L_STORE:
         case OP_OFF: case OP_ON: case OP_PLUS_STORE: {
             const bool unary = opcode == OP_OFF || opcode == OP_ON;
@@ -1336,6 +1465,9 @@ private:
     py::object continuation_type_;
     std::vector<Region> regions_;
     std::unordered_map<Cell, Plan> plans_;
+    const megapad::hybrid::RoutineCall* routine_call_ = nullptr;
+    py::object routine_entry_;
+    std::vector<NativeRoutine> routines_;
 };
 }  // namespace
 
@@ -1343,7 +1475,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::scalar_fp::register_bindings(module);
     megapad::keccak::register_bindings(module);
     megapad::tile_values::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 2;
+    module.attr("SEMANTIC_API_VERSION") = 3;
     module.doc() = "Native execution of generic hosted Forth semantic plans";
     py::class_<NativeProgram>(module, "NativeProgram")
         .def(py::init<const py::iterable&, Cell, py::object, const py::iterable&>(),
@@ -1356,7 +1488,10 @@ PYBIND11_MODULE(_megaforth_native, module) {
         .def("run", &NativeProgram::run, py::arg("xt"), py::arg("ip"),
              py::arg("data_state"), py::arg("return_state"),
              py::arg("continuations"), py::arg("remaining_steps"),
-             py::arg("fpcsr") = 0);
+             py::arg("fpcsr") = 0, py::arg("machine_allowance") = 0)
+        .def("bind_routines", &NativeProgram::bind_routines, py::arg("entry"))
+        .def("set_routine", &NativeProgram::set_routine, py::arg("index"), py::arg("image"),
+             py::arg("inputs"), py::arg("outputs"), py::arg("rules"));
 #define EXPORT_OPCODE(name) module.attr(#name) = py::int_(static_cast<uint32_t>(name))
     EXPORT_OPCODE(OP_STOP);
     EXPORT_OPCODE(OP_LITERAL); EXPORT_OPCODE(OP_BRANCH); EXPORT_OPCODE(OP_BRANCH_ZERO);
@@ -1366,7 +1501,7 @@ PYBIND11_MODULE(_megaforth_native, module) {
     EXPORT_OPCODE(OP_DO); EXPORT_OPCODE(OP_QUESTION_DO); EXPORT_OPCODE(OP_LOOP);
     EXPORT_OPCODE(OP_PLUS_LOOP); EXPORT_OPCODE(OP_UNLOOP);
     EXPORT_OPCODE(OP_SCALAR_FP); EXPORT_OPCODE(OP_FPCSR_FETCH);
-    EXPORT_OPCODE(OP_FPCSR_STORE);
+    EXPORT_OPCODE(OP_FPCSR_STORE); EXPORT_OPCODE(OP_CALL_ROUTINE);
     py::dict primitives;
 #define PRIMITIVE(word, name) EXPORT_OPCODE(name); primitives[py::bytes(word)] = py::int_(static_cast<uint32_t>(name))
     PRIMITIVE("DUP", OP_DUP); PRIMITIVE("DROP", OP_DROP); PRIMITIVE("SWAP", OP_SWAP);

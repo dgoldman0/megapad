@@ -746,6 +746,8 @@ class Dictionary:
             (lease.body_limit for lease in self._body_allocations.values()),
             default=0,
         )
+        # A reclaimed body may hold machine code that native plans call.
+        self._execution_generation += 1
 
     def _prepare_body_write(self, address: int, limit: int) -> None:
         """Preflight overlapping emission, then revoke before its first byte."""

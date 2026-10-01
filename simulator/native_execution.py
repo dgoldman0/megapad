@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 2
+SEMANTIC_API_VERSION = 3
 
 
 class NativeExecutor:
@@ -101,6 +101,11 @@ class NativeExecutor:
         self.plans = {}
         self.entry_costs = {}
         self.continuation_frames = {}
+        # Machine routines planned for direct calls, by execution token.
+        self.routine_owner = None
+        self.routine_slots = {}
+        self.routine_count = 0
+        self.machine_stopped = False
         self.entries = 0
         self.semantic_steps = 0
         self.profile_enabled = os.environ.get("MEGAFORTH_NATIVE_PROFILE") == "1"
@@ -113,7 +118,40 @@ class NativeExecutor:
         self.plans.clear()
         self.entry_costs.clear()
         self.continuation_frames.clear()
+        self.unbind_routines()
         self.generation = self.runtime.dictionary.execution_generation
+
+    def unbind_routines(self):
+        if self.routine_owner is not None:
+            self.program.bind_routines(None)
+        self.routine_owner = None
+        self.routine_slots.clear()
+        self.routine_count = 0
+
+    def _routine_index(self, word):
+        """Plan a direct call to a machine routine the owner admits for one."""
+
+        owner = self.runtime._machine_owner
+        if owner is None:
+            return None
+        slot = self.routine_slots.get(word.xt)
+        if slot is not None and slot[0] is word and self.routine_owner is owner:
+            return slot[2]
+        native = owner.native_routine(word)
+        if native is None:
+            return None
+        image, inputs, outputs, rules = native
+        if self.routine_owner is None:
+            self.program.bind_routines(owner.native_entry())
+            self.routine_owner = owner
+        elif self.routine_owner is not owner:
+            return None
+        index = self.routine_count
+        self.program.set_routine(index, image.native_handle, inputs, outputs, rules)
+        # The slot keeps the image alive while a plan can name its index.
+        self.routine_slots[word.xt] = (word, image, index)
+        self.routine_count += 1
+        return index
 
     def stats(self):
         result = {"entries": self.entries, "semantic_steps": self.semantic_steps,
@@ -197,6 +235,10 @@ class NativeExecutor:
             if target.xt not in self.runtime._colon_accelerators:
                 pending.append(target)
                 return op.OP_CALL, target.xt, 0
+        if isinstance(implementation, rt.RoutineDefinition):
+            index = self._routine_index(target)
+            if index is not None:
+                return op.OP_CALL_ROUTINE, index, 0
         return op.OP_STOP, 0, 0
 
     def _prepare(self, initial):
@@ -270,7 +312,8 @@ class NativeExecutor:
                 for operation in operations
             )
 
-    def run(self, current, ip, context, meter, quantum_limit):
+    def run(self, current, ip, context, meter, quantum_limit, machine_allowance=0):
+        self.machine_stopped = False
         if not self._admitted_context(context, meter):
             return None
         # This is an internal return to the same dispatcher, never a guest
@@ -308,9 +351,11 @@ class NativeExecutor:
             returns._continuations,
             allowance,
             self.scalar_float.fpcsr,
+            machine_allowance,
         )
         (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
-         updates, pointer_captures, fpcsr) = result
+         updates, pointer_captures, fpcsr, machine_instructions, machine_calls,
+         machine_stopped) = result
         # Publish the completed prefix before clocks, profiling, fallback or
         # any host observer can see the native interval's boundary.
         self.scalar_float._fpcsr = fpcsr
@@ -345,6 +390,9 @@ class NativeExecutor:
         meter.steps += steps
         self.runtime.diagnostics.account_work_many(steps)
         self.runtime.timer.advance_by(steps)
+        if machine_calls:
+            self.routine_owner.account_native(meter, machine_instructions, machine_calls)
+            self.machine_stopped = machine_stopped
         self.entries += 1
         self.semantic_steps += steps
         if self.profile_enabled:

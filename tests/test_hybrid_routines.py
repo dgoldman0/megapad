@@ -285,3 +285,79 @@ def test_a_routine_needs_its_argument_cells(hybrid):
     hybrid.register(RoutineDeclaration("H+", code("add r4, r5\nret.l"), input_cells=2, output_cells=1))
     with pytest.raises(StackUnderflow):
         hybrid.semantic.evaluate(b"1 H+")
+
+
+@pytest.fixture
+def native_hybrid():
+    pytest.importorskip("_megaforth_native")
+    owner = HybridRuntime.create(executor="native",
+                                 geometry={"bank0_size": 1 << 20, "external_size": 1 << 20})
+    yield owner
+    owner.close()
+
+
+def _forbid_python_calls(monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the native executor should call this routine itself")
+    monkeypatch.setattr(HybridRuntime, "call", refuse)
+
+
+def test_native_code_calls_a_leaf_routine_without_python(native_hybrid, monkeypatch):
+    runtime = native_hybrid.semantic
+    native_hybrid.register(RoutineDeclaration("H+", code("add r4, r5\nret.l"),
+                                              input_cells=2, output_cells=1))
+    runtime.evaluate(b": SUMS ( n -- total ) 0 SWAP 0 DO I H+ LOOP ;")
+    runtime.evaluate(b"10 SUMS DROP")  # the first run plans the loop
+    _forbid_python_calls(monkeypatch)
+    runtime.main_context.data.clear()
+    runtime.evaluate(b"100 SUMS")
+    assert stack(native_hybrid) == (sum(range(100)),)
+    assert native_hybrid.transitions >= 100
+
+
+def test_a_natively_called_routine_reaches_its_borrowed_buffers(native_hybrid, monkeypatch):
+    runtime = native_hybrid.semantic
+    native_hybrid.register(RoutineDeclaration(
+        "HSTORE", code("str r4, r6\nret.l"), input_cells=3,
+        buffers=(BufferRule(0, 1, element_bytes=8, access="write"),)))
+    address = EXTERNAL_BASE + 0x2000
+    runtime.evaluate(f": FILL8 8 0 DO {address} I 8 * + 1 I HSTORE LOOP ;".encode())
+    runtime.execute("FILL8")
+    _forbid_python_calls(monkeypatch)
+    runtime.execute("FILL8")
+    assert [runtime.memory.read64(address + 8 * i) for i in range(8)] == list(range(8))
+
+
+def test_a_natively_called_routine_that_yields_is_resumed_through_python(native_hybrid):
+    runtime = native_hybrid.semantic
+    native_hybrid.register(RoutineDeclaration("HCOUNT", code("loop:\nsubi r4, 1\nbrne loop\nret.l"),
+                                              input_cells=1, output_cells=1))
+    runtime.evaluate(b": RUN 1000 HCOUNT 5 + ;")
+    result = runtime.run_until_blocked("RUN", machine_quantum_instructions=300)
+    turns = 1
+    while isinstance(result, YieldedExecution):
+        result = runtime.resume_yielded(result.suspension)
+        turns += 1
+    assert isinstance(result, ExecutionResult) and stack(native_hybrid) == (5,)
+    assert turns == 7 and native_hybrid.parked is False
+
+
+def test_a_natively_called_routine_fault_reaches_the_fault_callback(native_hybrid):
+    runtime = native_hybrid.semantic
+    native_hybrid.register(RoutineDeclaration("HJUMP", code("ldi64 r12, 0x1230\ncall.l r12\nret.l")))
+    runtime.evaluate(b"VARIABLE CODE : ON-FAULT ( n -- ) CODE ! ; ' ON-FAULT FAULT-XT!")
+    runtime.evaluate(b": JUMPER 1 DROP HJUMP ;")
+    with pytest.raises(ForthAbort):
+        runtime.execute("JUMPER")
+    assert runtime.memory.read64(runtime.find("CODE").body_address) == (-21) & ((1 << 64) - 1)
+
+
+def test_a_reclaimed_routine_is_replanned_and_refused(native_hybrid):
+    runtime = native_hybrid.semantic
+    word = native_hybrid.register(RoutineDeclaration("HINC", code("inc r4\nret.l"),
+                                                     input_cells=1, output_cells=1))
+    runtime.evaluate(b": BUMP 1 HINC ;")
+    runtime.execute("BUMP")
+    runtime.allot_dictionary(word.body_address - runtime.dictionary.here, runtime.main_context)
+    with pytest.raises(HybridExecutionError, match="reclaimed"):
+        runtime.execute("BUMP")

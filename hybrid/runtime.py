@@ -30,6 +30,7 @@ from simulator.stacks import MachineReturn, StackOverflow
 
 CODE_ALIGNMENT = 16
 NATIVE_REVISION = 1
+_ACCESS_BITS = {"read": 1, "write": 2, "read_write": 3}
 # An allowance this large means "until the routine returns or calls back".
 UNBOUNDED = 1 << 62
 _RUNNING, _CALLBACK, _YIELDED = range(3)
@@ -313,6 +314,53 @@ class HybridRuntime:
         event = self._runner.resume(outputs, self._allowance(meter, can_yield))
         return self._settle(entry, event, meter, can_yield)
 
+    # -- direct calls from the native semantic executor -----------------------
+
+    def native_routine(self, word):
+        """What the native executor needs to call ``word`` itself, or None.
+
+        Routines with callback sites go through the dispatcher, which runs
+        their callbacks.
+        """
+
+        routine = word.implementation.routine
+        if (self._closed or routine.image is None or routine.declaration.callbacks
+                or not self.semantic.dictionary.is_body_lease_live(routine.lease)):
+            return None
+        declaration = routine.declaration
+        rules = tuple((rule.address_argument, rule.length_argument, rule.element_bytes,
+                       rule.max_bytes or 0, _ACCESS_BITS[rule.access])
+                      for rule in declaration.buffers)
+        return routine.image, declaration.input_cells, declaration.output_cells, rules
+
+    def native_entry(self):
+        return self._runner.native_entry()
+
+    def native_allowance(self, meter, can_yield: bool) -> int:
+        """Machine instructions the native executor may spend; 0 sends calls to Python."""
+
+        if self._closed:
+            return 0
+        try:
+            return self._allowance(meter, can_yield)
+        except MachineBudgetExceeded:
+            return 0
+
+    def account_native(self, meter, instructions: int, calls: int) -> None:
+        self._account(meter, instructions)
+        self._transitions += calls
+
+    def settle_native(self, context, meter, resume, can_yield):
+        """Take over a natively called routine that yielded or failed."""
+
+        event = self._runner.take_event()
+        routine = self._by_image.get(event.image)
+        entry = _Entry(routine, context, context.returns.pointer, resume)
+        if event.kind != "yielded":
+            raise self._fault(entry, event)
+        self._entries.append(entry)
+        return self._settle(entry, event, meter, can_yield, accounted=True)
+
     def advance(self, entry, context, meter, can_yield):
         if not self._entries or self._entries[-1] is not entry or entry.state != _YIELDED:
             raise HybridExecutionError("stale_machine_entry", "the yielded machine entry is gone")
@@ -322,9 +370,11 @@ class HybridRuntime:
 
     # -- settlement ---------------------------------------------------------
 
-    def _settle(self, entry: _Entry, event, meter, can_yield):
+    def _settle(self, entry: _Entry, event, meter, can_yield, accounted=False):
         while True:
-            self._account(meter, event.instructions)
+            if not accounted:
+                self._account(meter, event.instructions)
+            accounted = False
             kind = event.kind
             if kind == "returned":
                 self._entries.pop()
@@ -498,6 +548,9 @@ class HybridRuntime:
             self._entries.clear()
             self._closed = True
             semantic._machine_owner = None
+            if semantic._native_execution is not None:
+                # Drop plans that call this owner's routines directly.
+                semantic._native_execution.invalidate()
             self._runner.close()
 
 
