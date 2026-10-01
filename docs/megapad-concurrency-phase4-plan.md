@@ -380,9 +380,8 @@ python3 bench_phase0_concurrency.py \
   --host-profile
 ```
 
-The before invocation ran from
-`/tmp/megapad-p4e2-baseline.fMZeaG` and appended
-`--output /home/kir/Documents/Projects/fantasy-computing/.worktrees/megapad-concurrency/build/phase4-e2-before.json`.
+The before invocation ran from a temporary checkout of the baseline and
+wrote `build/phase4-e2-before.json` in the concurrency worktree.
 The after invocation ran from the isolated concurrency worktree and appended
 `--output build/phase4-e2-after.json`. Timed samples remained unprofiled.
 Profiling was enabled only for each separate accounting replay.

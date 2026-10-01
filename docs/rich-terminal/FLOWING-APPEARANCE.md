@@ -179,8 +179,8 @@ preview.
 
 ## Unified-runtime integration checkpoint
 
-The flowing branch integrates the committed runtime extraction at `ca66ad7`
-with the appearance work at `4e8bf26`. The checkpoints were combined in a
+The flowing branch integrates the committed runtime extraction at `990c144`
+with the appearance work at `9953afc`. The checkpoints were combined in a
 separate worktree before advancing the appearance branch. Their common edits
 were the README and viewer; the viewer now imports terminal types from
 `shared.session`. Both native extensions built from the combined checkout.
@@ -304,7 +304,7 @@ These checks qualify the MegaPad implementation and the constructed preview;
 they do not represent a new live Desk run with Akashic pane producers. The
 earlier unified-runtime Desk acceptance above remains a separate checkpoint.
 
-Runtime commits through `6bea7e5` were reviewed at this checkpoint. Their native
+Runtime commits through `efe6425` were reviewed at this checkpoint. Their native
 floating-point, fault-return, Keccak, and hybrid-ABI work does not change the
 pane, retained-view, or shared-session contracts, so no additional runtime
 merge was needed. The next integration must rebuild both native extensions
@@ -483,7 +483,7 @@ accepted no new style-run or TEXT_AREA behavior.
 ## Completed MegaPad scope and runtime integration
 
 The MegaPad side of the agreed pane-and-channel design is implemented through
-`d743206`: pane chrome, structured status fields, taskbar entries, editable
+`3266da4`: pane chrome, structured status fields, taskbar entries, editable
 fields, and typed spreadsheet cells all have negotiated contracts, bounded
 guest writers, host validation, immutable transport, rendering, and applicable
 input authority. The existing WAVEFORM family already supplies the remaining
@@ -491,7 +491,7 @@ Sound Lab waveform contract. Reference remains the default appearance;
 flowing is opt-in. Product capability profiles remain unchanged.
 
 The isolated integration branch combines this work with runtime code through
-`6b67833` and its documentation follow-up `2393829`. Both native extensions
+`7fd2734` and its documentation follow-up `2393829`. Both native extensions
 were rebuilt from the combined source. The shared launcher/session, wire,
 display-proof/input, emulator field-receive, and viewer gate passed 375 tests
 in 34.26 seconds. One existing Unix-socket boundary case was skipped because
@@ -510,7 +510,7 @@ until guest publication. Cleanup releases runtime ownership and the display
 lease, stops the owner thread, and closes both backends. The test does not
 replace the driver, retained state, or control-event codecs with test doubles.
 
-A fresh six-application Desk acceptance ran at integration `ec790b3` with
+A fresh six-application Desk acceptance ran at integration `362608e` with
 Akashic `f2f067991bb51e0c90445f5338db69c826b4e908`. The unified native-simulator
 launcher completed all 52 stages and 51 inputs: 33.74 seconds to desktop
 ready, 122.12 seconds overall, and 283.84 MiB peak RSS. Production shutdown
@@ -534,9 +534,9 @@ new capability bits in the paired profile and repeat the live visual/input
 review. Producer-driven evidence may call for MegaPad fixes, but no further
 host-side schema is currently required for this agreed scope.
 
-The runtime team's later `7acbdcd` was reviewed during final qualification:
+The runtime team's later `27d39b2` was reviewed during final qualification:
 it adds an interoperability design document and roadmap links only, with no
 new executable capability. Their native tile changes were still uncommitted
 in the separate worktree and were not imported. Reconcile the next committed
 runtime checkpoint before a final main merge; the qualified code boundary
-here remains `6b67833`. Neither main nor Akashic was modified by this work.
+here remains `7fd2734`. Neither main nor Akashic was modified by this work.

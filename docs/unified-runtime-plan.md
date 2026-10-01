@@ -12,7 +12,7 @@ page access and longer continuation intervals need no further rewrite on
 current evidence. Kernel/source/captured-frame evidence and strict multicore
 FP/timing checks are recorded. Prepared Desktop journeys are complete in the
 documented direct-dispatch scope, with Python requiring expanded diagnostic
-deadlines. Final selected acceptance of the original implementation passed on `4ef08d8`:
+deadlines. Final selected acceptance of the original implementation passed on `0205541`:
 2,466 application checks with three environment-dependent socket skips, 2,569
 simulator checks under each explicit executor, and eight production-source
 rich-terminal checks. The pinned retained frontend changes are integrated and
@@ -301,7 +301,7 @@ compiled Forth or BIOS code as machine code is the separate staged design in
 ### Local completion and deferred scope
 
 The approved local work is complete at the qualified activation checkpoint
-`4ef08d8`. Both native engines rebuilt successfully and the final application,
+`0205541`. Both native engines rebuilt successfully and the final application,
 Python-selected simulator, native-selected simulator and production-source
 rich-terminal gates passed serially. The
 [acceptance report](unified-runtime-acceptance-2026-09-30.md) and its JSON record
@@ -379,7 +379,7 @@ coverage.
 
 | Slice | Status | Evidence |
 |---|---|---|
-| Plan | Locked | Read-only source review at the base above; local commit `51108a8` |
+| Plan | Locked | Read-only source review at the base above; local commit `e95bcc9` |
 | 1A — unified launcher/build | Complete | Both engines built; 32 launcher/bootstrap checks, 20 native-selected bootstrap checks, 11 emulator lifecycle checks |
 | 1B — common session boundary | Extraction complete; production native default and pinned frontend integration qualified | Original boundary gates plus 30 default-selection cases and the 317-check application gate; merged frontend passed 1,346 checks with three socket skips and another 30 default-selection checks; all three native-selected prepared Desktop modes passed |
 | 2 — workload profiles | Kernels, KDOS controls/attribution and prepared Desktop subsets recorded | 56 Desktop harness checks; eight-step emulator/native, simulator/native and hybrid/native journeys passed through direct session dispatch; Python completed the identical assertions in 758.105 seconds under explicit expanded diagnostic deadlines, exceeding the standard step bound |
@@ -388,7 +388,7 @@ coverage.
 | 3B/3C — remaining native extraction | Bulk audio, shared Keccak, SHA3 and NTT transfer work qualified; AES candidate declined on current measurements | Existing oracle gates plus 109 NTT checks; 200 AES candidate checks with no measured speed benefit; retained raw comparisons |
 | 4–5 — hybrid execution | Replaced in the integration cleanup by one manifest, one routine runner and callbacks on the caller's stacks | [`hybrid-runtime.md`](hybrid-runtime.md) and the cleanup commits |
 | Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
-| Final unified acceptance | Qualified locally on `4ef08d8` | Both extensions rebuilt; 2,466 application passes with three socket skips; 2,569 simulator passes under each explicit executor; eight rich-terminal passes; exact selectors and identities in the acceptance report, counts overlap |
+| Final unified acceptance | Qualified locally on `0205541` | Both extensions rebuilt; 2,466 application passes with three socket skips; 2,569 simulator passes under each explicit executor; eight rich-terminal passes; exact selectors and identities in the acceptance report, counts overlap |
 
 ### Phase 1B server consumer migration — 2026-09-30
 
@@ -622,7 +622,7 @@ Both extensions built and 86 kernel/device/differential checks passed, plus
 47 hosted SHA3 checks in each backend and 26 WOTS borrowing/timing checks.
 Read-only review caught a custom-Sequence iteration edge before final build.
 Native source qualification exposed a pre-existing fault-continuation bug;
-`957d272` fixes it independently after baseline reproduction and three focused
+`c8cc5a5` fixes it independently after baseline reproduction and three focused
 regressions. Paired SHA3 timing and exact-output evidence is in the performance
 report. Python byte-level transfer costs remain; this is not a complete crypto
 service or Desktop performance claim.
@@ -631,7 +631,7 @@ service or Desktop performance claim.
 
 The existing full KDOS source-loading benchmark passed three fresh-process
 trials per executor at the preserved baseline and at the runtime committed as
-`bb50f9b`, with 90-second per-process watchdogs. All 12 runs passed exact source,
+`a3384e8`, with 90-second per-process watchdogs. All 12 runs passed exact source,
 startup transcript, dictionary, stack and representative-word validation. Each
 performed 36,116 semantic steps while loading 1,461 KDOS definitions. The raw
 reports retain preparation versus loading time, source/binary identities and

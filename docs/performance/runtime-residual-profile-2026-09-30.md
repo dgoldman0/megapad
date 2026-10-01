@@ -1,6 +1,6 @@
 # Residual hosted runtime profile
 
-These bounded probes were run on the clean `c0958bd61ce3aac5378a595685c043f9f4d92fe9`
+These bounded probes were run on the clean `e6b1145393b538770e17975d001b15b1148e2e62`
 checkpoint with its matching native extensions. Every case used three fresh
 unprofiled trials, one discarded warmup and a separate attribution run.
 Preparation, oracle validation and cleanup are outside the measured interval.

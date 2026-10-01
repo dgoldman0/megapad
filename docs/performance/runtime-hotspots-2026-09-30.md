@@ -1,6 +1,6 @@
 # Unified runtime hotspot baseline — 2026-09-30
 
-Measured the unchanged runtime at `ca66ad7` in a separate detached worktree,
+Measured the unchanged runtime at `990c144` in a separate detached worktree,
 using its preserved native binaries and the new benchmark harness. The report
 records every source hash, binary hash, host/interpreter identity, guest result,
 unprofiled sample, and separate attribution sample. Only the harness and its
@@ -161,14 +161,14 @@ Validation: 86 direct-kernel/native-device/differential checks, 47 hosted KDOS
 SHA3 checks in each executor, and 26 native WOTS dependency checks pass.
 The native-selected source gate also exposed an older FaultAbort continuation
 classification bug, reproduced at the untouched baseline and fixed separately
-in `957d272` with three focused regressions.
+in `c8cc5a5` with three focused regressions.
 
 
 ## Representative KDOS source-loading controls
 
 The existing `bench_simulator_kdos_load.py` completed three fresh-process,
 unprofiled trials per executor on the preserved baseline and the runtime now
-committed as `bb50f9b`. Each subprocess had a 90-second wall watchdog. Runtime
+committed as `a3384e8`. Each subprocess had a 90-second wall watchdog. Runtime
 and fixture preparation are reported separately from the source-load interval.
 
 All twelve runs passed the existing source hash, dictionary/publication, startup

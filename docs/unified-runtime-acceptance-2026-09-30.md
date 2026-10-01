@@ -1,7 +1,7 @@
 # Unified runtime local acceptance — 2026-09-30
 
 The approved local unified-runtime scope passed final selected acceptance on
-`4ef08d88817af1fbe9c6a5ef17e834295bc1f17e`. All gates ran serially through Make in an isolated clean checkout.
+`0205541a93f5257db2433f7c2b5497ee0ff4f846`. All gates ran serially through Make in an isolated clean checkout.
 The application gate includes private hybrid profiles 1–5 and host-prepared
 task sessions, both semantic executors, all 38 native composite journeys, exact
 capability reporting and production close after polling-proof failure.
@@ -21,7 +21,7 @@ were added to obtain these results.
 ## Build and source identity
 
 `CC=gcc CXX=g++ make build` succeeded with Python 3.12.14. It rebuilt both
-extensions at `abd77639be99284d42c55ed6c09288bae2d7c60b`. The tested activation commit changes
+extensions at `88cf7d48c21e96a67054bad858f45ce1825fd3dd`. The tested activation commit changes
 only Python/tests/documentation; native source and build configuration are
 unchanged. Each final gate used the same rebuilt artifacts:
 

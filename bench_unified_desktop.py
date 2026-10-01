@@ -36,8 +36,8 @@ MAX_JOURNEY_BYTES = 256 << 10
 REFERENCE_PROVENANCE = {
     "harness": "run_desk_flowing_unified.py",
     "harness_sha256": "a9fa986c62fe9768af2f5f67d041551dfc68c7729ff3eb9e0ad55470196fd56a",
-    "runtime_checkpoint": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
-    "appearance_checkpoint": "4e8bf26a18346043ea6b903fc8251a14e46e15b0",
+    "runtime_checkpoint": "990c1442e27db88fa376872daf7809a2ccfbe66f",
+    "appearance_checkpoint": "9953afcb079b550e0b5ca656a47b754e7c34158b",
     "recorded_image_before_journey_sha256": "db0b8a2d7c5b77eb8d08fb10774b5819f698792adda1dc4468d032034dbc7e2a",
     "recorded_result_sha256": "6ab957e2d9f1d0bfb9bbbce7d42b482b7f562f5a634b8df67722c5ffd5dfb48a",
 }

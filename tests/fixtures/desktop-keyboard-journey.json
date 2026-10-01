@@ -6,8 +6,8 @@
     "scope": "CELL marker checks and retained presentation; a bounded keyboard subset, not the original 52-stage semantic and pointer journey",
     "reference_source": "rich_terminal_desktop_acceptance.py DesktopAcceptanceJourney stages 3 through 10",
     "reference_source_sha256": "4f971973c645278c35f663672740a26544aae25acdd4c63670fc50cdf57ee1fc",
-    "reference_runtime_checkpoint": "ca66ad7bb0bde9bfc57067f7067a1bf9151c6ff0",
-    "reference_appearance_checkpoint": "4e8bf26a18346043ea6b903fc8251a14e46e15b0",
+    "reference_runtime_checkpoint": "990c1442e27db88fa376872daf7809a2ccfbe66f",
+    "reference_appearance_checkpoint": "9953afcb079b550e0b5ca656a47b754e7c34158b",
     "reference_image_before_journey_sha256": "db0b8a2d7c5b77eb8d08fb10774b5819f698792adda1dc4468d032034dbc7e2a",
     "fixture_requirement": "280x84 Desktop, Pad initially focused, blank Pad acceptance marker, no active Daybook prompt"
   },

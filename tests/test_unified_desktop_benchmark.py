@@ -179,7 +179,7 @@ def test_python_diagnostic_preserves_exact_standard_journey_except_declared_time
     standard = json.loads(standard_bytes)
     diagnostic = json.loads(diagnostic_path.read_bytes())
     standard_sha = hashlib.sha256(standard_bytes).hexdigest()
-    assert standard_sha == "6446634c46a53013b16b27ceaf8b1b90fbe0715bfd881d698dc65ab9bcac3049"
+    assert standard_sha == "74868f100c96edb0f0c4f8a78a50e5b3448fbd579857f7fe69681a6ab76c1244"
     assert "diagnostic" in diagnostic["name"]
     provenance = diagnostic["provenance"]
     assert provenance["derived_from"] == "tests/fixtures/desktop-keyboard-journey.json"

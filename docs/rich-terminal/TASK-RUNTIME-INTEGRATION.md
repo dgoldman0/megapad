@@ -1,7 +1,7 @@
 # Rich Desk and committed task runtime integration
 
-The first local checkpoint merges rich-object integration `fb94ade` with the parallel
-runtime branch through committed `c6e7852`. The source merge is `7f834e5`; it was
+The first local checkpoint merges rich-object integration `4f07f4e` with the parallel
+runtime branch through committed `76757ad`. The source merge is `66cdf57`; it was
 conflict-free and includes no uncommitted changes from the parallel worktree.
 The new task adapter still being edited there is outside this checkpoint.
 
@@ -16,7 +16,7 @@ child-count comparison; it does not prevent compilation or these tests.
 
 This qualifies the merged runtime and semantic-object boundaries. It does not
 claim a complete combined rich-shell Desk journey. The in-flight FIELD and
-SERIES qualifications keep their frozen `f2ec566` and `fb94ade` runtimes; their
+SERIES qualifications keep their frozen `856f025` and `4f07f4e` runtimes; their
 source/image hashes and timing records belong to those runs. The final Desk
 qualification will identify its own actual paired source checkpoint.
 
@@ -25,8 +25,8 @@ main branch nor any remote branch is changed by this integration.
 
 ## Committed ownership and accounting alignment
 
-Source merge `b2f1fdc7cbd1891927a99d9df93192003c09c048` advances the peer
-checkpoint to `58260e9ae72efd5ac5a34d520a00c1df779f901b`, again conflict-free.
+Source merge `b2414dba4711a5bfcc33bf8e50953c398d65ffcf` advances the peer
+checkpoint to `c70e2de165dd6783e5c8e565c02ca20c6f8c5884`, again conflict-free.
 This includes atomic foreign-word publication, preserved return frontiers,
 the original-owner task adapter, parked native validation and engine-issued
 semantic receipt settlement. The peer's uncommitted suspension/cursor work
@@ -40,14 +40,14 @@ registration, dispatch/guards, semantic receipts, return frontiers and host
 abort; and simulator/viewer input boundaries for all five rich control families.
 
 The final combined Desk run may use this rebuilt checkpoint. The in-flight
-standalone waveform run remains on `fb94ade`; this synchronization does not
+standalone waveform run remains on `4f07f4e`; this synchronization does not
 rewrite its provenance or timing evidence.
 
 ## Committed callback idle and deadline alignment
 
-Source merge `737867a6710cddf9104bd7bbfb3ad5390c3fbc9a` advances the peer
-checkpoint to `e723e50accbfb811a4bb26deb6ddff735f398660`, without conflicts.
-It includes `d5ab2d9` task-only receipt accounting: cumulative native and
+Source merge `0d242029f235fa8b5900d3d4ac0252a5341f1a9f` advances the peer
+checkpoint to `573fc6df74565dc45bfbc045c97f5b7820b54e9e`, without conflicts.
+It includes `ba32c30` task-only receipt accounting: cumulative native and
 semantic work remains attached to the original installed owner, independently
 of mixed-profile diagnostics. Repeated receipt observation, interrupted
 counter publication and later private roots cannot duplicate or refund that
@@ -81,11 +81,11 @@ frozen standalone runs' source and timing records.
 
 The next qualification uses the isolated branch
 `integration/flowing-machine-runtime`.
-Conflict-free source merge `162086eb663dd069fff6e4457ff444e0186dc453`
+Conflict-free source merge `50df833e470143b48856b76fb48c061a2d9ecb44`
 starts from the previous integration
-`5bf70614ce7f06105463f6448abe5f342fcc1b70` and imports the committed peer
-through frozen `4ef08d88817af1fbe9c6a5ef17e834295bc1f17e`. This includes
-`abd77639be99284d42c55ed6c09288bae2d7c60b` machine scheduling plus the
+`f0f392851f7df00cdb2b943c54783eb32edf4008` and imports the committed peer
+through frozen `0205541a93f5257db2433f7c2b5497ee0ff4f846`. This includes
+`88cf7d48c21e96a67054bad858f45ce1825fd3dd` machine scheduling plus the
 successor's prepared-task exception and capability activation. No peer working
 files or later commits are part of this checkpoint.
 
@@ -123,7 +123,7 @@ idle/deadline and KDOS exceptions; native task adapters/parked state; prepared,
 private, nested and service sessions; and FIELD, STATUS_FIELD, GRID, PANE and
 TASKBAR simulator/viewer-input boundaries.
 
-Test-only commit `b52374cb130e26ad47db820a3c98081044bc1589` adds the missing
+Test-only commit `5ed629738880541f9fe9c158383551a37540585c` adds the missing
 intersection of enhanced input with a retained prepared-task cursor. The
 existing rich hybrid-session scenario now runs synchronous private and genuine
 prepared-task quantum1 profiles on both Python and native executors. At the
@@ -141,5 +141,5 @@ benchmark.
 This qualifies the combined runtime and rich input boundary for the next full
 Desk journey; it does not claim that journey has completed or alter the source
 and timing records of frozen standalone qualifications. The older task-runtime
-checkout remains at `5bf70614ce7f06105463f6448abe5f342fcc1b70`. Neither main
+checkout remains at `f0f392851f7df00cdb2b943c54783eb32edf4008`. Neither main
 nor a remote branch was changed, and nothing was pushed.
