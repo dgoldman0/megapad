@@ -30,11 +30,10 @@ unchanged. Each final gate used the same rebuilt artifacts:
 | `_mp64_accel.cpython-312-x86_64-linux-gnu.so` | `c3568a689aa09ef86da8b112c2644d00d75013a2cf1de44559ac0f707887665b` |
 | `_megaforth_native.cpython-312-x86_64-linux-gnu.so` | `cc70cfdd2bc65942cae452ff52cee4171affa5e1e3fb442ef841166e7da35b37` |
 
-The [machine-readable record](unified-runtime-acceptance-2026-09-30.json)
-contains exact selected test files, Make commands, executor environments,
-source revisions, binary identities, log hashes and outcomes. The recorded
-virtual-environment path belongs to this execution workspace; another checkout
-should supply its own Python 3.12 environment through `VENV_PY`.
+A machine-readable record with the exact selected test files, Make commands,
+executor environments, source revisions, binary identities, log hashes and
+outcomes remains in the repository history. Another checkout supplies its own
+Python environment through `VENV_PY`.
 
 ## Reproduction
 

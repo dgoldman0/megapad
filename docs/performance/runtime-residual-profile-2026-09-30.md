@@ -56,9 +56,5 @@ return-byte SHA-256
 `f6519e2e14e0d3b53ef3c9cc4684ba07bb0ac24ff4802691f4c8233a49899de9`.
 
 The benchmark additions passed 105 Make-selected checks before these runs.
-Raw reports retain all samples, separate attribution, guest evidence, native
-artifact hashes and checkout identity:
-
-- [Crypto and transfer probes](runtime-residual-crypto-2026-09-30.json)
-- [Page probes](runtime-residual-pages-2026-09-30.json)
-- [Continuation probes](runtime-residual-continuations-2026-09-30.json)
+The raw reports, with all samples, separate attribution, guest evidence,
+native artifact hashes and checkout identity, remain in the repository history.

@@ -6,7 +6,7 @@ half a second, while a native semantic loop completed the equivalent array
 operation in 0.149 ms. This profile provides interoperability, not an
 acceleration recommendation for a tiny signed clamp.
 
-The [complete report](hybrid-closed-clamp-2026-09-30.json) records a clean
+The complete report, which remains in the repository history, records a clean
 `c6c12ab` checkout, all relevant source and native binary hashes, independent
 untimed validation, one discarded warmup pair and three fresh-owner trials.
 Only execution is timed; construction, registration, validation and cleanup

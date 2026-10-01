@@ -24,13 +24,11 @@ separate. Setup is reported separately from the measured guest workload.
 
 Every timed and attributed case completed with 5,381 semantic steps, stack
 `[0]`, and digest-output SHA-256
-`f738f9d89ade028668ccef67cfce240c3f2e58970390eafe370940c11ad2e114`.
-The baseline is a detached checkout of `2393829` with its pre-tile native
-artifacts. Reports include exact source and extension hashes. These are host
-workload measurements, not hardware timing or Desktop throughput claims.
-
-- [`runtime-sha3-transfer-baseline-2026-09-30.json`](runtime-sha3-transfer-baseline-2026-09-30.json)
-- [`runtime-sha3-transfer-native-2026-09-30.json`](runtime-sha3-transfer-native-2026-09-30.json)
+`f738f9d89ade028668ccef67cfce240c3f2e58970390eafe370940c11ad2e114`. The
+baseline is a detached checkout of `2393829` with its pre-tile native
+artifacts. The raw reports, with exact source and extension hashes, remain in
+the repository history. These are host workload measurements, not hardware
+timing or Desktop throughput claims.
 
 ## Compatibility evidence
 

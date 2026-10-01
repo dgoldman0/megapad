@@ -13,26 +13,23 @@ bundled eight-step prepared Desktop journey also completed with
 simulator/native on 2026-09-30: 31.111 seconds to ready, 36.340 seconds overall,
 12 presented offers and 258,785,280 bytes peak RSS. Every expected step and
 shutdown check passed, and the original image hash was preserved. This is one
-bounded acceptance run, not a throughput comparison. Its report is
-[`performance/unified-desktop-simulator-native-2026-09-30.json`](performance/unified-desktop-simulator-native-2026-09-30.json).
+bounded acceptance run, not a throughput comparison. The raw JSON reports of
+the runs described here remain in the repository history.
 
 The hybrid/native prepared journey also completed on 2026-09-30: 28.516 seconds
 to ready, 33.357 seconds overall, 12 presented offers, and 603,410,432 bytes peak
 RSS. All eight steps and cleanup checks passed, and the original image was
 preserved. It used an empty routine registry with zero machine instructions
 and transitions, so this qualifies session composition compatibility only.
-The report is
-[`performance/unified-desktop-hybrid-native-2026-09-30.json`](performance/unified-desktop-hybrid-native-2026-09-30.json).
 
 The simulator/Python prepared run timed out at initial readiness after 240.286
 seconds, including 33.138 seconds of preparation. Its final CELL snapshot
 contained the initial Desktop markers, but no retained offer was acknowledged
 and no journey step completed. All cleanup checks passed and the original
-image was preserved. The report is
-[`performance/unified-desktop-simulator-python-2026-09-30.json`](performance/unified-desktop-simulator-python-2026-09-30.json).
-It did not retain the latest protocol status, so it cannot distinguish ANSI
-fallback from work still preparing the first retained presentation. That
-historical attempt does not qualify Python prepared-journey completion.
+image was preserved. It did not retain the latest protocol status, so it
+cannot distinguish ANSI fallback from work still preparing the first retained
+presentation. That historical attempt does not qualify Python prepared-journey
+completion.
 
 The production-quantum Python diagnostic reached retained readiness at 426.339
 seconds, then passed the Pad edit and Daybook focus steps. It failed the
@@ -40,25 +37,22 @@ unchanged 30-second prompt deadline after 498.668 seconds overall. The final
 polled status shows 249,277,972 semantic steps, quantum 8,192, and a running
 session with an ACTIVE retained terminal and no protocol error. All cleanup
 checks passed and the original image was preserved. This establishes progress,
-not full completion or the exact cause of the slow prompt. Its report is
-[`performance/unified-desktop-simulator-python-production-2026-09-30.json`](performance/unified-desktop-simulator-python-production-2026-09-30.json).
+not full completion or the exact cause of the slow prompt.
 
 The emulator/native prepared journey completed on 2026-09-30: 123.902 seconds
 to ready, 169.325 seconds overall and 12 presented offers. All eight steps and
 cleanup checks passed, with the original image preserved. The private image
 copy used the explicit emulator-tail restoration described below. Execution
 used the existing instruction-batched timing model; this is no shared-clock
-latency comparison. The report is
-[`performance/unified-desktop-emulator-native-2026-09-30.json`](performance/unified-desktop-emulator-native-2026-09-30.json).
+latency comparison.
 
-These three historical reports used an explicit 65,536-step semantic quantum
-and remain unchanged. The harness now leaves an omitted quantum to production
-session policy and records the actual selected value. Production defaults are
-8,192 steps for Python and 65,536 for native, unless
-`MEGAFORTH_QUANTUM_STEPS` supplies an override. The prepared guest's terminal
-negotiation uses host-clock deadlines and can fall back to ANSI; this policy
-difference warrants a diagnostic rerun, but does not establish the cause of
-the earlier timeout.
+These three historical runs used an explicit 65,536-step semantic quantum. The
+harness now leaves an omitted quantum to production session policy and records
+the actual selected value. Production defaults are 8,192 steps for Python and
+65,536 for native, unless `MEGAFORTH_QUANTUM_STEPS` supplies an override. The
+prepared guest's terminal negotiation uses host-clock deadlines and can fall
+back to ANSI; this policy difference warrants a diagnostic rerun, but does not
+establish the cause of the earlier timeout.
 
 The separate `tests/fixtures/desktop-keyboard-python-diagnostic.json` retains
 every input and assertion from the standard journey. It records that source
@@ -76,8 +70,7 @@ offers, quantum 8,192 and 250,957,824 bytes peak RSS. Prompt, commit and date
 steps took 70.261, 86.472 and 78.693 seconds, respectively; each exceeds the
 standard 30-second bound. Every assertion and cleanup check passed, with the
 original image preserved. This qualifies functional completion with the
-explicit diagnostic deadlines, not production responsiveness. The report is
-[`performance/unified-desktop-simulator-python-diagnostic-2026-09-30.json`](performance/unified-desktop-simulator-python-diagnostic-2026-09-30.json).
+explicit diagnostic deadlines, not production responsiveness.
 
 ## Scope
 
@@ -111,13 +104,8 @@ depend on the host date.
 
 ## Prepared fixture and provenance
 
-The inspected prepared image is:
-
-```text
-/workspace/scratch/64bce13821f6/desk-flowing-unified-integration/desktop-fresh-simulator.img
-```
-
-It is 33,554,432 bytes. Its SHA-256, observed on 2026-09-30, is
+The inspected prepared image, `desktop-fresh-simulator.img`, is 33,554,432
+bytes. Its SHA-256, observed on 2026-09-30, is
 `13bbe7264c8735180fb0841ed96a863e962bba28c56b4a3f5312e180487aad88`.
 It is a **used prepared image**: a previous journey persisted files, including
 Daybook tasks. Its filename does not establish that it is pristine. The
@@ -136,13 +124,11 @@ The reference evidence is pinned independently of this current image:
 | Image hash recorded before the previous journey | `db0b8a2d7c5b77eb8d08fb10774b5819f698792adda1dc4468d032034dbc7e2a` |
 | Reference keyboard journey source SHA-256 | `4f971973c645278c35f663672740a26544aae25acdd4c63670fc50cdf57ee1fc` |
 
-The old result and captures are in
-`/workspace/scratch/64bce13821f6/desk-flowing-unified-integration/`.
-That report recorded a 52-stage journey, 32.76 seconds to ready and 118.87 seconds
-overall, using the merged working tree of the two checkpoints above. Those
-numbers are historical context, not measurements of this harness or the
-current branch. Its old harness imported external image-building and journey
-helpers; the new harness has no such dependency.
+The earlier reference report recorded a 52-stage journey, 32.76 seconds to
+ready and 118.87 seconds overall, using the merged working tree of the two
+checkpoints above. Those numbers are historical context, not measurements of
+this harness or the current branch. Its old harness imported external
+image-building and journey helpers; the new harness has no such dependency.
 
 The bundled `tests/fixtures/desktop-keyboard-journey.json` copies a bounded
 keyboard subset from the reference journey's stages 3 through 10: edit Pad,
@@ -188,8 +174,8 @@ After defining the two policy variables above, the first recommended live
 attempt is simulator/native:
 
 ```bash
-desktop_python=/workspace/scratch/64bce13821f6/runcheck-venv/bin/python
-desktop_image=/workspace/scratch/64bce13821f6/desk-flowing-unified-integration/desktop-fresh-simulator.img
+desktop_python=python3   # an environment with pygame
+desktop_image=/path/to/desktop-fresh-simulator.img
 "$desktop_python" bench_unified_desktop.py \
   --image "$desktop_image" \
   --journey tests/fixtures/desktop-keyboard-journey.json \
@@ -294,7 +280,6 @@ For the focused regression gate, use the repository's serialized Make entry:
 
 ```bash
 CC=gcc CXX=g++ make test-sequential \
-  VENV_PY=/workspace/scratch/64bce13821f6/runcheck-venv/bin/python \
   MP64_RUNTIME_NAMESPACE=unified-runtime \
   TEST_PATH=tests/test_unified_desktop_benchmark.py
 ```

@@ -60,14 +60,14 @@ also preserve the original RTC route and clock identity. Wake-up does not
 replenish execution limits; invalid suspension authority is rejected, and
 cancellation releases native frames before return-stack cleanup.
 
-Both native build targets, `accel` and `simulator-accel`, completed successfully
-with GCC/G++ (`/tmp/rich-task-idle-build.log`). The Make-supervised regression
-gate passed **410 tests in 45.50 seconds**, with no skips
-(`/tmp/task-idle-rich-gates.log`). This adds callback idle/deadline suspension,
-clock and witness authority, deadline host abort, task-only receipts and KDOS
-exception checks to the ordinary suspension, registration/runtime/stack,
-native adapter and prepared-session coverage. It also rechecks FIELD,
-STATUS_FIELD, GRID, PANE and TASKBAR simulator/viewer-input boundaries.
+Both native build targets, `accel` and `simulator-accel`, completed
+successfully with GCC/G++. The Make-supervised regression gate passed **410
+tests in 45.50 seconds**, with no skips. This adds callback idle/deadline
+suspension, clock and witness authority, deadline host abort, task-only
+receipts and KDOS exception checks to the ordinary suspension,
+registration/runtime/stack, native adapter and prepared-session coverage. It
+also rechecks FIELD, STATUS_FIELD, GRID, PANE and TASKBAR
+simulator/viewer-input boundaries.
 
 The public task/composite capability gates remain unchanged. Prepared-session
 tests still require `callback_suspension`, `shared_task_exceptions` and
@@ -80,8 +80,7 @@ frozen standalone runs' source and timing records.
 ## Prepared-task machine quanta and qualified composite sessions
 
 The next qualification uses the isolated branch
-`integration/flowing-machine-runtime` in
-`/workspace/scratch/64bce13821f6/megapad-flowing-machine-integration`.
+`integration/flowing-machine-runtime`.
 Conflict-free source merge `162086eb663dd069fff6e4457ff444e0186dc453`
 starts from the previous integration
 `5bf70614ce7f06105463f6448abe5f342fcc1b70` and imports the committed peer
@@ -105,12 +104,10 @@ composite support before session entry. `None` preserves synchronous execution,
 including the supported older revision2 transport path. Generic task manifests,
 automatic publication ordering and task launcher support remain deferred.
 
-Both native extensions were rebuilt using `make build`, `CC=gcc`, `CXX=g++`
-and `VENV_PY=/workspace/scratch/64bce13821f6/runcheck-venv/bin/python`.
-The toolchain was GCC/G++ 13.3.0 and Python 3.12.14; the build log is
-`/tmp/flowing-machine-build.log`. The existing task child-count signedness
-warning remains the only compiler warning. The built extension SHA-256 values
-are:
+Both native extensions were rebuilt using `make build`, `CC=gcc` and `CXX=g++`.
+The toolchain was GCC/G++ 13.3.0 and Python 3.12.14. The existing task
+child-count signedness warning remains the only compiler warning. The built
+extension SHA-256 values are:
 
 | Extension | SHA-256 |
 | --- | --- |
@@ -118,13 +115,13 @@ are:
 | `_megaforth_native.cpython-312-x86_64-linux-gnu.so` | `c70a2c53201ae1196d4237f7c662e8c8911b4c048c7d5c636708cc336625f3f0` |
 
 The focused regression gate ran through `make test-sequential` in supervisor
-namespace `flowing-machine`: **644 passed in 182.94 seconds**, with no skips
-(`/tmp/flowing-machine-task-rich-gates.log`). It covers the new foreign machine
-quantum, session quantum, composite session and capability suites; existing
-foreign suspension authority, task deadlines/abort, receipt accounting,
-registration, stack and runtime behavior; idle/deadline and KDOS exceptions;
-native task adapters/parked state; prepared, private, nested and service sessions;
-and FIELD, STATUS_FIELD, GRID, PANE and TASKBAR simulator/viewer-input boundaries.
+namespace `flowing-machine`: **644 passed in 182.94 seconds**, with no skips.
+It covers the new foreign machine quantum, session quantum, composite session
+and capability suites; existing foreign suspension authority, task
+deadlines/abort, receipt accounting, registration, stack and runtime behavior;
+idle/deadline and KDOS exceptions; native task adapters/parked state; prepared,
+private, nested and service sessions; and FIELD, STATUS_FIELD, GRID, PANE and
+TASKBAR simulator/viewer-input boundaries.
 
 Test-only commit `b52374cb130e26ad47db820a3c98081044bc1589` adds the missing
 intersection of enhanced input with a retained prepared-task cursor. The
@@ -136,7 +133,7 @@ Subsequent turns return the original invocation and apply the event exactly
 once; a later revision-aware FIELD adjustment also applies once without
 changing the completed task receipt. This separate Make-supervised gate passed
 **4 tests in 4.70 seconds**, with no skips
-(`/tmp/flowing-machine-rich-quantum.log`, namespace `flowing-machine-rich`).
+(namespace `flowing-machine-rich`).
 There are **648 passing tests across the two disjoint gates**. Their wall-clock
 times include brief concurrent execution and are not a Desk performance
 benchmark.

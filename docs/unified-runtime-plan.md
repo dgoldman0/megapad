@@ -1050,9 +1050,9 @@ lane comparisons preserved guest state and model clocks. Strict compute scales
 4.00× in guest cycles from one to four cores; the memory fixture scales 2.49×.
 The minimal masked-IPI marker appears 1–3 modeled cycles after assertion at the
 replay's resolution. These local kernels neither reproduce the BIOS worker
-protocol nor establish the reported solver ratios. The source/binary hashes,
-raw samples and full limits are in `docs/performance/execution-timing-2026-09-30.json`
-and `docs/performance/execution-timing-benchmark.md`. No modeled bus wait was
+protocol nor establish the reported solver ratios. The method and summary
+are in `docs/performance/execution-timing-benchmark.md`; the raw samples, hashes
+and full limits remain in the repository history. No modeled bus wait was
 removed or scheduler behavior changed to obtain these results.
 
 ### Phase 2 source and captured-frame attribution — 2026-09-30

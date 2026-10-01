@@ -4,7 +4,8 @@ Measured the unchanged runtime at `ca66ad7` in a separate detached worktree,
 using its preserved native binaries and the new benchmark harness. The report
 records every source hash, binary hash, host/interpreter identity, guest result,
 unprofiled sample, and separate attribution sample. Only the harness and its
-tests were untracked; runtime sources were unchanged.
+tests were untracked; runtime sources were unchanged. The raw JSON reports of
+these runs remain in the repository history.
 
 ## Method
 
@@ -73,7 +74,6 @@ remain unmeasured by this harness. Executor default promotion remains deferred.
 Peak RSS is the subprocess lifetime high-water mark, including preparation; it
 is not isolated workload allocation.
 
-Raw evidence: [runtime-hotspots-baseline-2026-09-30.json](runtime-hotspots-baseline-2026-09-30.json).
 
 ## Shared exact scalar kernel
 
@@ -98,7 +98,6 @@ The source manifest includes unrelated pending audio adapter edits, which this
 FP case does not execute. This comparison supports the scalar path only, with
 no Desktop, full program, or hardware timing claim.
 
-Raw evidence: [runtime-hotspots-fp-kernel-2026-09-30.json](runtime-hotspots-fp-kernel-2026-09-30.json).
 
 ## Qualified PCM span capture
 
@@ -120,7 +119,6 @@ its transfer latency is not measured in this harness.
 All 57 audio tests pass, including late callback replacement, sparse page
 boundaries/holes, all emulator windows, partial aperture overlap, malformed
 bulk returns, capture immutability, failure publication and sink lifecycle.
-Raw evidence: [runtime-hotspots-audio-2026-09-30.json](runtime-hotspots-audio-2026-09-30.json).
 
 ## Direct semantic FP calls
 
@@ -139,7 +137,6 @@ Focused tests prove this independently with a service hook that fails if called.
 The reference timing continues to vary; small absolute timings should not be
 read as a precision ranking or a full-program result.
 
-Raw evidence: [runtime-hotspots-semantic-fp-2026-09-30.json](runtime-hotspots-semantic-fp-2026-09-30.json).
 
 ## Shared Keccak permutation
 
@@ -166,7 +163,6 @@ The native-selected source gate also exposed an older FaultAbort continuation
 classification bug, reproduced at the untouched baseline and fixed separately
 in `957d272` with three focused regressions.
 
-Raw evidence: [runtime-hotspots-keccak-2026-09-30.json](runtime-hotspots-keccak-2026-09-30.json).
 
 ## Representative KDOS source-loading controls
 
@@ -190,14 +186,13 @@ audio or Keccak changes. These trials do not include Desktop modules or input
 interaction. Desktop qualification remains open;
 executor default promotion is still deferred.
 
-Raw evidence: [kdos-controls-2026-09-30.json](kdos-controls-2026-09-30.json).
 
 ## Diagnostic source and compositor attribution
 
 Separate cProfile runs of the existing full KDOS harness passed its exact
 source, dictionary, transcript, stack and storage checks in both executors.
-`kdos-attribution-2026-09-30.json` records source provenance, checked harness
-results and function costs. The profiler covers setup and validation too;
+The attribution run recorded source provenance, checked harness results and
+function costs. The profiler covers setup and validation too;
 none of these wall times replace the unprofiled controls above. Parsing and
 checked scalar memory operations remain visible Python costs in both
 executors: `parse_word` has about 0.14 s cumulative attributed time in each
@@ -212,7 +207,7 @@ through Make with diagnostic profiling. Every pixel and hit map matches the
 complete reference. All 11 later typing offers take the partial-repaint path,
 each with damage below one quarter of the full frame. These are checked-in
 MegaPad fixtures; no external project sources were accessed or changed.
-`compositor-attribution-2026-09-30.json` records their hashes and attribution.
+The run recorded their hashes and attribution.
 
 That profile includes test collection, decoding, both optimized rendering and
 full-reference rendering. It attributes 0.368 s across 12 incremental compose

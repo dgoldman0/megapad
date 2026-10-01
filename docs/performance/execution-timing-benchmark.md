@@ -66,12 +66,13 @@ The benchmark does not modify guest cache publication semantics.
 
 ## Qualified run — 2026-09-30
 
-The checked-in `execution-timing-2026-09-30.json` contains 48 fresh-process
-cases at 256 iterations, three measured trials and one discarded warmup per
-case, using warm guest code caches. All exact-output, accounting and separate
-one-cycle replay checks passed. All 16 comparisons across one, two and four
-host lanes preserved guest state and clock accounting. The 19 harness tests
-also passed. No scheduler implementation changed for these measurements.
+The 2026-09-30 run, whose raw JSON report remains in the repository history,
+measured 48 fresh-process cases at 256 iterations, three measured trials and
+one discarded warmup per case, using warm guest code caches. All exact-output,
+accounting and separate one-cycle replay checks passed. All 16 comparisons
+across one, two and four host lanes preserved guest state and clock accounting.
+The 19 harness tests also passed. No scheduler implementation changed for these
+measurements.
 
 For fixed total work, strict shared-clock results were:
 

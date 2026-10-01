@@ -32,12 +32,10 @@ harness and direct modular DFT oracle as the pre-change residual profile.
 
 The transfer case retains 644 semantic steps, 131,072 transferred bytes, empty
 stack, DONE status, index zero and output SHA-256
-`1aa704129504620655681821da33640f93a1a602045bae1300bb0ed32db948c8`.
-The transform itself remains the existing Python value implementation.
-These small-sample host results support the transfer change, not a general
-NTT or Desktop speed claim. Reports include checkout/working-tree provenance;
-the after run includes the concurrently qualified callback bridge, whose
-machine-callback path this probe does not enter.
-
-- [Before and separate attribution](runtime-residual-crypto-2026-09-30.json)
-- [After and compute control](runtime-ntt-transfer-2026-09-30.json)
+`1aa704129504620655681821da33640f93a1a602045bae1300bb0ed32db948c8`. The
+transform itself remains the existing Python value implementation. These
+small-sample host results support the transfer change, not a general NTT or
+Desktop speed claim. The raw reports, which remain in the repository history,
+include checkout/working-tree provenance; the after run includes the
+concurrently qualified callback bridge, whose machine-callback path this probe
+does not enter.

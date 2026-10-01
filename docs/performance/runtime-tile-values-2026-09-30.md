@@ -39,10 +39,7 @@ All runs produced 12,292 semantic steps, 4,096 tile operations, an empty stack
 and output SHA-256
 `ef7471373af4863191e0115203bb4ebe33028ba5e764fe726198692a375bd33c`.
 No Desktop, full-program, or modeled-hardware speedup follows from this result.
-
-- [`runtime-tile-baseline-2026-09-30.json`](runtime-tile-baseline-2026-09-30.json)
-- [`runtime-tile-python-guard-2026-09-30.json`](runtime-tile-python-guard-2026-09-30.json)
-- [`runtime-tile-native-2026-09-30.json`](runtime-tile-native-2026-09-30.json)
+The raw reports remain in the repository history.
 
 ## Qualification
 
