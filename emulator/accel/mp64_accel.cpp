@@ -15313,6 +15313,709 @@ static py::object marshal_routine_segment_v3(
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Hybrid machine routines
+// ---------------------------------------------------------------------------
+//
+// One runner executes declared MP64 routines on a standalone full core that
+// maps the hybrid session's shared memory. CALL.L and RET.L use the semantic
+// Forth return stack, as on the chip: an entry's sentinel sits one cell below
+// its caller's frontier and its frames grow down toward the stack floor. An
+// entry may touch only the part of that stack below its own sentinel, so a
+// nested entry cannot disturb the frames of an entry parked above it. A
+// declared CALL.L site stops the machine so the owner can run a Forth word on
+// the caller's stacks; the entry then resumes at the site's RET.L stub, which
+// returns past the CALL.L. Machine code may also call any published routine
+// directly, as on the chip.
+
+namespace mp64_hybrid {
+
+struct Site {
+    uint64_t call_offset = 0, stub_offset = 0;
+    uint64_t input_cells = 0, output_cells = 0;
+};
+
+struct Image {
+    uint64_t code_base = 0;
+    std::vector<uint8_t> code;
+    uint64_t entry_offset = 0, input_cells = 0, output_cells = 0;
+    std::vector<Site> sites;
+    std::vector<uint8_t> boundaries;  // 1 where an instruction starts
+    std::vector<int32_t> call_site;   // site index at a callback CALL.L
+    std::vector<uint8_t> stub;        // 1 at a callback RET.L stub
+
+    uint64_t code_end() const noexcept { return code_base + code.size(); }
+    bool contains(uint64_t address) const noexcept {
+        return address >= code_base && address - code_base < code.size();
+    }
+};
+
+enum class EventKind : uint8_t { RETURNED, CALLBACK, YIELDED, FAILED };
+
+inline const char* event_kind_name(EventKind kind) noexcept {
+    switch (kind) {
+    case EventKind::RETURNED: return "returned";
+    case EventKind::CALLBACK: return "callback";
+    case EventKind::YIELDED: return "yielded";
+    default: return "failed";
+    }
+}
+
+struct Event {
+    EventKind kind = EventKind::YIELDED;
+    std::string failure, detail;
+    std::vector<uint64_t> values;  // outputs, or a callback's arguments
+    std::shared_ptr<Image> image;  // the image holding the callback site
+    uint64_t site = 0, sp = 0, pc = 0, instruction_pc = 0;
+    uint64_t instructions = 0, cycles = 0;
+    std::optional<uint64_t> access_address, access_width;
+    std::string access_operation;
+    int trap_id = -1;
+};
+
+}  // namespace mp64_hybrid
+
+static std::shared_ptr<mp64_hybrid::Image> make_hybrid_image(
+        py::handle code_base, py::handle code, py::handle entry_offset,
+        py::handle input_cells, py::handle output_cells, py::handle sites) {
+    if (!PyBytes_CheckExact(code.ptr()))
+        throw py::type_error("routine code must be exact bytes");
+    auto image = std::make_shared<mp64_hybrid::Image>();
+    image->code_base = routine_exact_uint64(code_base, "code_base");
+    const auto* bytes = reinterpret_cast<const uint8_t*>(PyBytes_AS_STRING(code.ptr()));
+    image->code.assign(bytes, bytes + PyBytes_GET_SIZE(code.ptr()));
+    image->entry_offset = routine_exact_uint64(entry_offset, "entry_offset");
+    image->input_cells = routine_exact_uint64(input_cells, "input_cells");
+    image->output_cells = routine_exact_uint64(output_cells, "output_cells");
+    const uint64_t size = image->code.size();
+    routine_validate_span({image->code_base, size}, "code span");
+    // Whole I-cache lines keep every line fill inside the published code.
+    if (image->code_base % CPUState::ICACHE_LINE_BYTES != 0 || size == 0 ||
+            size % CPUState::ICACHE_LINE_BYTES != 0)
+        throw py::value_error("code must be nonempty, line aligned and padded to whole lines");
+    if (image->entry_offset >= size)
+        throw py::value_error("entry_offset lies outside the code");
+    if (image->input_cells > 8 || image->output_cells > 8)
+        throw py::value_error("routines pass at most eight cells in r4-r11");
+    if (!PyTuple_CheckExact(sites.ptr()))
+        throw py::type_error("callback sites must be an exact tuple");
+    image->call_site.assign(size, -1);
+    image->stub.assign(size, 0);
+    std::vector<uint8_t> occupied(size, 0);
+    for (py::handle row : py::reinterpret_borrow<py::tuple>(sites)) {
+        if (!PyTuple_CheckExact(row.ptr()) || PyTuple_GET_SIZE(row.ptr()) != 4)
+            throw py::type_error(
+                "a callback site is (call_offset, stub_offset, input_cells, output_cells)");
+        const mp64_hybrid::Site site{
+            routine_exact_uint64(py::handle(PyTuple_GET_ITEM(row.ptr(), 0)), "call_offset"),
+            routine_exact_uint64(py::handle(PyTuple_GET_ITEM(row.ptr(), 1)), "stub_offset"),
+            routine_exact_uint64(py::handle(PyTuple_GET_ITEM(row.ptr(), 2)), "callback input_cells"),
+            routine_exact_uint64(py::handle(PyTuple_GET_ITEM(row.ptr(), 3)), "callback output_cells")};
+        if (site.call_offset >= size || size - site.call_offset < 2 || site.stub_offset >= size)
+            throw py::value_error("a callback site lies outside the code");
+        if (site.input_cells > 8 || site.output_cells > 8)
+            throw py::value_error("callbacks pass at most eight cells in r4-r11");
+        for (uint64_t offset : {site.call_offset, site.call_offset + 1, site.stub_offset}) {
+            if (occupied[static_cast<std::size_t>(offset)] != 0)
+                throw py::value_error("callback call and stub bytes overlap");
+            occupied[static_cast<std::size_t>(offset)] = 1;
+        }
+        image->call_site[static_cast<std::size_t>(site.call_offset)] =
+            static_cast<int32_t>(image->sites.size());
+        image->stub[static_cast<std::size_t>(site.stub_offset)] = 1;
+        image->sites.push_back(site);
+    }
+
+    struct SealReader {
+        const std::vector<uint8_t>& bytes;
+        std::size_t offset = 0;
+        bool read(uint8_t& value) {
+            if (offset == bytes.size()) return false;
+            value = bytes[offset++];
+            return true;
+        }
+        void observe_prefix(uint8_t) {}
+    } reader{image->code};
+    image->boundaries.assign(size, 0);
+    while (reader.offset < image->code.size()) {
+        const std::size_t start = reader.offset;
+        const DecodeResult decoded = decode_instruction(reader, -1);
+        if (decoded.status != DecodeStatus::DECODED ||
+                !mp64_routine::admitted(decoded.instruction))
+            throw py::value_error("routine code must decode completely to admitted integer instructions");
+        image->boundaries[start] = 1;
+        const auto& instruction = decoded.instruction;
+        if (image->call_site[start] >= 0 &&
+                (instruction.operation != DecodedOperation::CALL_LONG ||
+                 instruction.encoded_size != 2 ||
+                 instruction.has_trait(mp64::cpu::PREFIXED_ENCODING) ||
+                 instruction.has_trait(mp64::cpu::NONCANONICAL_ENCODING)))
+            throw py::value_error("a callback call must be a canonical unprefixed CALL.L");
+        if (image->stub[start] &&
+                (instruction.operation != DecodedOperation::RETURN_LONG ||
+                 instruction.encoded_size != 1 ||
+                 instruction.has_trait(mp64::cpu::PREFIXED_ENCODING)))
+            throw py::value_error("a callback stub must be a canonical unprefixed RET.L");
+    }
+    if (!image->boundaries[static_cast<std::size_t>(image->entry_offset)])
+        throw py::value_error("entry_offset is not an instruction boundary");
+    for (const auto& site : image->sites)
+        if (!image->boundaries[static_cast<std::size_t>(site.call_offset)] ||
+                !image->boundaries[static_cast<std::size_t>(site.stub_offset)])
+            throw py::value_error("callback offsets must be instruction boundaries");
+    return image;
+}
+
+class RoutineRunner {
+public:
+    // The first instructions of a segment run while holding the GIL, so short
+    // routines pay nothing for a release. Longer segments release it.
+    static constexpr uint64_t HELD_INSTRUCTIONS = 4096;
+
+    explicit RoutineRunner(py::object state_owner)
+        : state_owner_(std::move(state_owner)),
+          state_(&state_owner_.cast<CPUState&>()) {
+        if (state_->public_mutation_count.load() != 0)
+            throw std::runtime_error("cannot pin a routine runner during a public CPU operation");
+        if (state_->profile != CoreProfile::FULL || !state_->private_memory ||
+                state_->system_batch_active != nullptr)
+            throw py::value_error("routine runner requires a standalone full core");
+        require_private_memory_mapping(*state_);
+        validate_mappings();
+        ++state_->memory->routine_mapping_pins;
+        pinned_ = true;
+    }
+
+    ~RoutineRunner() { release(); }
+    RoutineRunner(const RoutineRunner&) = delete;
+    RoutineRunner& operator=(const RoutineRunner&) = delete;
+
+    void close() {
+        if (active_)
+            throw std::runtime_error("routine runner cannot close during a machine segment");
+        release();
+    }
+
+    void publish(const std::shared_ptr<mp64_hybrid::Image>& image) {
+        Scope scope(*this);
+        if (!image)
+            throw py::type_error("publication requires a RoutineImage");
+        auto guard = acquire_execution();
+        const auto code = resolve_memory_span(*state_->memory, image->code_base,
+            MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+        if (!code.covers(image->code.size()))
+            throw py::value_error("routine code must fit one mapped ordinary region");
+        if (std::memcmp(code.data, image->code.data(), image->code.size()) != 0)
+            throw py::value_error("routine code in memory differs from its image");
+        const auto position = std::upper_bound(published_.begin(), published_.end(),
+            image->code_base, [](uint64_t base, const auto& item) { return base < item->code_base; });
+        if ((position != published_.end() && (*position)->code_base < image->code_end()) ||
+                (position != published_.begin() && (*(position - 1))->code_end() > image->code_base))
+            throw py::value_error("routine code overlaps a published routine");
+        published_.insert(position, image);
+        icache_invalidate_span(*state_, image->code_base, image->code.size());
+        state_->ifetch_window_valid = false;
+    }
+
+    void revoke(const std::shared_ptr<mp64_hybrid::Image>& image) {
+        Scope scope(*this);
+        const auto found = std::find(published_.begin(), published_.end(), image);
+        if (found == published_.end())
+            throw py::value_error("routine image is not published");
+        // A parked entry inside this code fails at its next fetch.
+        published_.erase(found);
+    }
+
+    bool is_published(const std::shared_ptr<mp64_hybrid::Image>& image) const {
+        return std::find(published_.begin(), published_.end(), image) != published_.end();
+    }
+
+    mp64_hybrid::Event begin(
+            const std::shared_ptr<mp64_hybrid::Image>& image, py::handle arguments,
+            py::handle spans, py::handle frontier_value, py::handle floor_value,
+            py::handle allowance_value) {
+        Scope scope(*this);
+        if (!image)
+            throw py::type_error("entry requires a RoutineImage");
+        if (!is_published(image))
+            throw py::value_error("routine image is not published");
+        const auto values = parse_cells(arguments, image->input_cells, "routine arguments");
+        auto borrowed = parse_spans(spans);
+        const uint64_t frontier = routine_exact_uint64(frontier_value, "return frontier");
+        const uint64_t floor = routine_exact_uint64(floor_value, "return floor");
+        const uint64_t allowance = parse_allowance(allowance_value);
+        if (frontier % 8 != 0 || floor % 8 != 0 || frontier < floor || frontier - floor < 8)
+            throw py::value_error("the return stack has no room for a machine entry");
+        if (!entries_.empty()) {
+            const Entry& parked = entries_.back();
+            if (parked.state != Entry::CALLBACK || frontier > parked.registers[15])
+                throw py::value_error("a nested entry must start below a parked callback");
+        }
+        std::unique_ptr<RoutineCPUReservation> reservation;
+        if (entries_.empty())
+            reservation = std::make_unique<RoutineCPUReservation>(*state_, this);
+        auto guard = acquire_execution(this);
+        const auto stack = resolve_memory_span(*state_->memory, floor,
+            MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+        if (!stack.covers(frontier - floor))
+            throw py::value_error("the return stack must fit one mapped ordinary region");
+        validate_spans(borrowed, {floor, frontier - floor});
+        Entry entry;
+        entry.image = image;
+        entry.spans = std::move(borrowed);
+        entry.floor = floor;
+        entry.root_slot = frontier - 8;
+        entry.stack = stack.data;
+        uint8_t* sentinel = entry.stack + (entry.root_slot - floor);
+        std::fill(sentinel, sentinel + 8, uint8_t{0xFF});
+        if (reservation)
+            reservation_ = std::move(reservation);
+        entries_.push_back(std::move(entry));
+        initialize_entry(*image, entries_.back().root_slot, values);
+        return run(allowance, false);
+    }
+
+    mp64_hybrid::Event resume(py::handle outputs, py::handle allowance_value) {
+        Scope scope(*this);
+        if (entries_.empty() || entries_.back().state != Entry::CALLBACK)
+            throw py::value_error("no machine entry is waiting for a callback");
+        Entry& entry = entries_.back();
+        const auto& site = entry.site_image->sites[entry.site];
+        const auto values = parse_cells(outputs, site.output_cells, "callback outputs");
+        const uint64_t allowance = parse_allowance(allowance_value);
+        auto guard = acquire_execution(this);
+        restore_entry(entry);
+        for (std::size_t index = 0; index < values.size(); ++index)
+            state_->regs[4 + index] = values[index];
+        entry.state = Entry::RUNNING;
+        entry.site_image.reset();
+        return run(allowance, true);
+    }
+
+    mp64_hybrid::Event advance(py::handle allowance_value) {
+        Scope scope(*this);
+        if (entries_.empty() || entries_.back().state != Entry::YIELDED)
+            throw py::value_error("no machine entry has yielded");
+        const uint64_t allowance = parse_allowance(allowance_value);
+        auto guard = acquire_execution(this);
+        restore_entry(entries_.back());
+        entries_.back().state = Entry::RUNNING;
+        return run(allowance, false);
+    }
+
+    void cancel(py::handle keep_value) {
+        Scope scope(*this);
+        const uint64_t keep = routine_exact_uint64(keep_value, "kept entries");
+        while (entries_.size() > keep)
+            entries_.pop_back();
+        if (entries_.empty())
+            reservation_.reset();
+    }
+
+    uint64_t entries() const noexcept { return entries_.size(); }
+    uint64_t instructions() const noexcept { return instructions_; }
+    uint64_t cycles() const noexcept { return cycles_; }
+    uint64_t segments() const noexcept { return segments_; }
+    uint64_t callbacks() const noexcept { return callbacks_; }
+
+private:
+    struct Entry {
+        enum State : uint8_t { RUNNING, CALLBACK, YIELDED };
+        std::shared_ptr<mp64_hybrid::Image> image;
+        std::vector<mp64_routine::BufferSpan> spans;
+        uint64_t floor = 0, root_slot = 0;
+        uint8_t* stack = nullptr;  // guest bytes from floor through the sentinel
+        State state = RUNNING;
+        std::array<uint64_t, 32> registers{};
+        uint8_t flags = 0;
+        std::shared_ptr<mp64_hybrid::Image> site_image;
+        std::size_t site = 0;
+    };
+
+    struct Scope {
+        RoutineRunner& owner;
+        explicit Scope(RoutineRunner& value) : owner(value) {
+            if (owner.closed_)
+                throw std::runtime_error("routine runner is closed");
+            if (owner.active_)
+                throw std::runtime_error("routine runner is already active");
+            require_routine_cpu_access(*owner.state_, &owner);
+            owner.active_ = true;
+        }
+        ~Scope() { owner.active_ = false; }
+    };
+
+    struct Reader {
+        CPUState& state;
+        const mp64_hybrid::Image& image;
+        bool read(uint8_t& value) {
+            const uint64_t address = pc(state);
+            if (!image.contains(address))
+                throw mp64_routine::AccessFault{
+                    address, 1, "fetch", "instruction fetch leaves its routine image"};
+            value = fetch8(state);
+            return true;
+        }
+        void observe_prefix(uint8_t modifier) { state.ext_modifier = modifier; }
+    };
+
+    struct Operations {
+        RoutineRunner& runner;
+        Entry& entry;
+        DecodedOperation operation = DecodedOperation::INVALID;
+
+        DecodedCallAcceleration accelerate_call(uint64_t) const { return {}; }
+        uint64_t read64(uint64_t address) {
+            const uint8_t* source = operation == DecodedOperation::RETURN_LONG
+                ? runner.stack_slot(entry, address, "return_stack_read")
+                : runner.ordinary(entry, address, 8, false);
+            uint64_t value = 0;
+            for (unsigned i = 0; i < 8; ++i)
+                value |= static_cast<uint64_t>(source[i]) << (8 * i);
+            return value;
+        }
+        void write64(uint64_t address, uint64_t value) {
+            const bool control = operation == DecodedOperation::CALL_LONG;
+            uint8_t* destination = control
+                ? runner.stack_slot(entry, address, "call_stack_write")
+                : runner.ordinary(entry, address, 8, true);
+            for (unsigned i = 0; i < 8; ++i)
+                destination[i] = static_cast<uint8_t>(value >> (8 * i));
+            if (!control)
+                icache_invalidate_span(*runner.state_, address, 8);
+        }
+        uint8_t read8(uint64_t address) {
+            return *runner.ordinary(entry, address, 1, false);
+        }
+        void write8(uint64_t address, uint8_t value) {
+            *runner.ordinary(entry, address, 1, true) = value;
+            icache_invalidate_span(*runner.state_, address, 1);
+        }
+    };
+
+    std::unique_ptr<CPUExecutionGuard> acquire_execution(const void* permitted = nullptr) {
+        // Only lock acquisition releases the GIL here.
+        py::gil_scoped_release release;
+        return std::make_unique<CPUExecutionGuard>(*state_, permitted == nullptr ? this : permitted);
+    }
+
+    void release() {
+        if (closed_)
+            return;
+        closed_ = true;
+        entries_.clear();
+        reservation_.reset();
+        published_.clear();
+        if (pinned_) {
+            --state_->memory->routine_mapping_pins;
+            pinned_ = false;
+        }
+        state_ = nullptr;
+        state_owner_ = py::object();
+    }
+
+    void validate_mappings() const {
+        const GuestMemoryMap& memory = *state_->memory;
+        struct Region { mp64_routine::Span span; const uint8_t* bytes; };
+        const std::array<Region, 4> regions{{
+            {{0, memory.mem_size}, memory.mem},
+            {{memory.ext_mem_base, memory.ext_mem_size}, memory.ext_mem},
+            {{memory.hbw_base, memory.hbw_size}, memory.hbw_mem},
+            {{memory.vram_base, memory.vram_size}, memory.vram_mem},
+        }};
+        if (memory.mem_size == 0 || memory.mem == nullptr)
+            throw py::value_error("routine runner requires attached Bank 0");
+        for (std::size_t i = 0; i < regions.size(); ++i) {
+            const Region& region = regions[i];
+            if (region.span.size == 0)
+                continue;
+            routine_validate_span(region.span, "shared ordinary region");
+            if (region.bytes == nullptr)
+                throw py::value_error("ordinary region has no attached buffer");
+            if (region.span.overlaps({mp64_routine::MMIO_BASE, mp64_routine::MMIO_SIZE}))
+                throw py::value_error("ordinary region overlaps MMIO");
+            for (std::size_t j = 0; j < i; ++j) {
+                const Region& earlier = regions[j];
+                if (earlier.span.size != 0 &&
+                        (region.span.overlaps(earlier.span) || host_spans_overlap(
+                            region.bytes, region.span.size, earlier.bytes, earlier.span.size)))
+                    throw py::value_error("shared ordinary regions alias each other");
+            }
+        }
+    }
+
+    static std::vector<uint64_t> parse_cells(
+            py::handle values, uint64_t expected, const char* label) {
+        if (!PyTuple_CheckExact(values.ptr()))
+            throw py::type_error(std::string(label) + " must be an exact tuple");
+        if (static_cast<uint64_t>(PyTuple_GET_SIZE(values.ptr())) != expected)
+            throw py::value_error(std::string(label) + " do not match the declared cell count");
+        std::vector<uint64_t> result;
+        result.reserve(static_cast<std::size_t>(expected));
+        for (Py_ssize_t index = 0; index < PyTuple_GET_SIZE(values.ptr()); ++index)
+            result.push_back(routine_exact_uint64(
+                py::handle(PyTuple_GET_ITEM(values.ptr(), index)), label));
+        return result;
+    }
+
+    static std::vector<mp64_routine::BufferSpan> parse_spans(py::handle values) {
+        if (!PyTuple_CheckExact(values.ptr()))
+            throw py::type_error("borrowed spans must be an exact tuple");
+        std::vector<mp64_routine::BufferSpan> result;
+        result.reserve(static_cast<std::size_t>(PyTuple_GET_SIZE(values.ptr())));
+        for (py::handle item : py::reinterpret_borrow<py::tuple>(values)) {
+            if (!PyTuple_CheckExact(item.ptr()) || PyTuple_GET_SIZE(item.ptr()) != 3)
+                throw py::type_error("a borrowed span is (base, size, access)");
+            const mp64_routine::Span span{
+                routine_exact_uint64(py::handle(PyTuple_GET_ITEM(item.ptr(), 0)), "span base"),
+                routine_exact_uint64(py::handle(PyTuple_GET_ITEM(item.ptr(), 1)), "span size")};
+            routine_validate_span(span, "borrowed span");
+            py::handle access(PyTuple_GET_ITEM(item.ptr(), 2));
+            if (!PyUnicode_CheckExact(access.ptr()))
+                throw py::type_error("span access must be a string");
+            const std::string mode = access.cast<std::string>();
+            if (mode != "read" && mode != "write" && mode != "read_write")
+                throw py::value_error("span access must be read, write, or read_write");
+            result.push_back({span, mode != "write", mode != "read"});
+        }
+        return result;
+    }
+
+    static uint64_t parse_allowance(py::handle value) {
+        const uint64_t allowance = routine_exact_uint64(value, "instruction allowance");
+        if (allowance == 0)
+            throw py::value_error("instruction allowance must be positive");
+        return allowance;
+    }
+
+    void validate_spans(const std::vector<mp64_routine::BufferSpan>& spans,
+                        const mp64_routine::Span& stack) const {
+        for (const auto& span : spans) {
+            if (span.size == 0)
+                continue;
+            if (span.overlaps(stack))
+                throw py::value_error("a borrowed span exposes the return stack");
+            for (const auto& image : published_)
+                if (span.overlaps({image->code_base, image->code.size()}))
+                    throw py::value_error("a borrowed span exposes published routine code");
+            const auto resolved = resolve_memory_span(*state_->memory, span.base,
+                MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+            if (!resolved.covers(span.size))
+                throw py::value_error("a borrowed span must fit one mapped region without aliases");
+        }
+    }
+
+    uint8_t* stack_slot(const Entry& entry, uint64_t address, const char* operation) const {
+        if (address % 8 != 0 || address < entry.floor || address > entry.root_slot)
+            throw mp64_routine::AccessFault{
+                address, 8, operation, "machine return stack is out of bounds"};
+        return entry.stack + (address - entry.floor);
+    }
+
+    uint8_t* ordinary(const Entry& entry, uint64_t address, uint64_t width, bool write) const {
+        for (const auto& span : entry.spans) {
+            if ((write ? span.write : span.read) && span.contains(address, width)) {
+                const auto resolved = resolve_memory_span(*state_->memory, address,
+                    MemoryAccessPolicy::SCALAR, Bank0Addressing::BOUNDED);
+                if (resolved.covers(width))
+                    return resolved.data;
+                break;
+            }
+        }
+        throw mp64_routine::AccessFault{
+            address, width, write ? "write" : "read",
+            "scalar access escapes the routine's borrowed spans"};
+    }
+
+    void reset_controls() noexcept {
+        state_->psel = 3;
+        state_->xsel = 2;
+        state_->spsel = 15;
+        state_->sw = 1;
+        state_->d_reg = state_->q_out = state_->t_reg = state_->ef_flags = 0;
+        state_->halted = state_->idle = false;
+        state_->ext_modifier = -1;
+        state_->ivt_base = state_->ivec_id = state_->trap_addr = state_->wake_ms = 0;
+        state_->priv_level = 0;
+        state_->core_id = 0;
+        state_->num_cores = 1;
+        state_->private_irq_ipi.store(false, std::memory_order_release);
+        state_->instruction_bus_access = nullptr;
+        state_->icache_enabled = 1;
+        state_->ifetch_window_valid = false;
+    }
+
+    void initialize_entry(const mp64_hybrid::Image& image, uint64_t root_slot,
+                          const std::vector<uint64_t>& arguments) noexcept {
+        std::fill(std::begin(state_->regs), std::end(state_->regs), uint64_t{0});
+        reset_controls();
+        state_->flag_z = state_->flag_c = state_->flag_n = state_->flag_v = 0;
+        state_->flag_p = state_->flag_g = state_->flag_i = state_->flag_s = 0;
+        state_->regs[3] = image.code_base + image.entry_offset;
+        state_->regs[15] = root_slot;
+        for (std::size_t index = 0; index < arguments.size(); ++index)
+            state_->regs[4 + index] = arguments[index];
+    }
+
+    void restore_entry(const Entry& entry) noexcept {
+        reset_controls();
+        std::copy(entry.registers.begin(), entry.registers.end(), std::begin(state_->regs));
+        flags_unpack(*state_, entry.flags);
+    }
+
+    void save_entry(Entry& entry, Entry::State state) noexcept {
+        std::copy(std::begin(state_->regs), std::end(state_->regs), entry.registers.begin());
+        entry.flags = flags_pack(*state_);
+        entry.state = state;
+    }
+
+    std::size_t locate(uint64_t address) const noexcept {
+        auto position = std::upper_bound(published_.begin(), published_.end(), address,
+            [](uint64_t value, const auto& item) { return value < item->code_base; });
+        if (position == published_.begin())
+            return published_.size();
+        --position;
+        return (*position)->contains(address)
+            ? static_cast<std::size_t>(position - published_.begin()) : published_.size();
+    }
+
+    static void fail(mp64_hybrid::Event& event, const char* failure, const char* detail) {
+        event.kind = mp64_hybrid::EventKind::FAILED;
+        event.failure = failure;
+        event.detail = detail;
+    }
+
+    // Runs at most `allowance` instructions. No Python object is touched, so
+    // a caller may release the GIL around it.
+    void execute(Entry& entry, uint64_t allowance, bool resume_stub, mp64_hybrid::Event& event) {
+        Operations operations{*this, entry};
+        const mp64_hybrid::Image* image = nullptr;
+        std::size_t image_index = published_.size();
+        const uint64_t limit = event.instructions + allowance;
+        while (event.instructions < limit) {
+            const uint64_t address = pc(*state_);
+            event.instruction_pc = address;
+            if (image == nullptr || !image->contains(address)) {
+                image_index = locate(address);
+                image = image_index == published_.size() ? nullptr : published_[image_index].get();
+            }
+            if (image == nullptr || !image->boundaries[static_cast<std::size_t>(address - image->code_base)]) {
+                fail(event, "invalid_target", "machine control left published routine instructions");
+                return;
+            }
+            const std::size_t offset = static_cast<std::size_t>(address - image->code_base);
+            if (image->stub[offset] && !resume_stub) {
+                fail(event, "invalid_callback", "a callback stub was reached without its callback");
+                return;
+            }
+            resume_stub = false;
+            const int32_t site = image->call_site[offset];
+            Reader reader{*state_, *image};
+            try {
+                icache_begin_instruction(*state_);
+                const DecodeResult decoded = decode_instruction(reader, state_->ext_modifier);
+                if (decoded.status == DecodeStatus::ILLEGAL_PREFIX ||
+                        decoded.status == DecodeStatus::ILLEGAL_DOUBLE_PREFIX) {
+                    event.trap_id = IVEC_ILLEGAL_OP;
+                    fail(event, "decode_fault", decoded.status == DecodeStatus::ILLEGAL_PREFIX
+                        ? "unassigned instruction prefix" : "double instruction prefix");
+                    return;
+                }
+                if (decoded.status != DecodeStatus::DECODED ||
+                        !mp64_routine::admitted(decoded.instruction)) {
+                    fail(event, "unsupported_instruction", "instruction is outside the routine profile");
+                    return;
+                }
+                operations.operation = decoded.instruction.operation;
+                const uint64_t previous_sp = state_->regs[15];
+                const int cycles = execute_decoded_instruction(*state_, operations, decoded.instruction);
+                commit_decoded_instruction(*state_, decoded.instruction, cycles);
+                ++event.instructions;
+                event.cycles += static_cast<uint64_t>(cycles);
+                if (site >= 0) {
+                    const auto& declared = image->sites[static_cast<std::size_t>(site)];
+                    if (pc(*state_) != image->code_base + declared.stub_offset) {
+                        fail(event, "invalid_callback", "a callback CALL.L did not reach its stub");
+                        return;
+                    }
+                    event.kind = mp64_hybrid::EventKind::CALLBACK;
+                    event.image = published_[image_index];
+                    event.site = static_cast<uint64_t>(site);
+                    for (uint64_t index = 0; index < declared.input_cells; ++index)
+                        event.values.push_back(state_->regs[4 + index]);
+                    return;
+                }
+                if (pc(*state_) == mp64_routine::ROOT_RETURN) {
+                    if (decoded.instruction.operation == DecodedOperation::RETURN_LONG &&
+                            previous_sp == entry.root_slot &&
+                            state_->regs[15] == entry.root_slot + 8) {
+                        event.kind = mp64_hybrid::EventKind::RETURNED;
+                        for (uint64_t index = 0; index < entry.image->output_cells; ++index)
+                            event.values.push_back(state_->regs[4 + index]);
+                    } else {
+                        fail(event, "invalid_return", "a routine must return with RET.L from its entry slot");
+                    }
+                    return;
+                }
+            } catch (const mp64_routine::AccessFault& fault) {
+                event.access_address = fault.address;
+                event.access_width = fault.width;
+                event.access_operation = fault.operation;
+                fail(event, "rejected_access", fault.detail);
+                return;
+            }
+        }
+    }
+
+    mp64_hybrid::Event run(uint64_t allowance, bool resume_stub) {
+        Entry& entry = entries_.back();
+        mp64_hybrid::Event event;
+        try {
+            const uint64_t held = std::min(allowance, HELD_INSTRUCTIONS);
+            execute(entry, held, resume_stub, event);
+            if (event.kind == mp64_hybrid::EventKind::YIELDED && held < allowance) {
+                py::gil_scoped_release release;
+                execute(entry, allowance - held, false, event);
+            }
+        } catch (...) {
+            entries_.pop_back();
+            if (entries_.empty())
+                reservation_.reset();
+            throw;
+        }
+        instructions_ += event.instructions;
+        cycles_ += event.cycles;
+        ++segments_;
+        event.sp = state_->regs[15];
+        event.pc = pc(*state_);
+        switch (event.kind) {
+        case mp64_hybrid::EventKind::CALLBACK:
+            ++callbacks_;
+            save_entry(entry, Entry::CALLBACK);
+            entry.site_image = event.image;
+            entry.site = static_cast<std::size_t>(event.site);
+            break;
+        case mp64_hybrid::EventKind::YIELDED:
+            save_entry(entry, Entry::YIELDED);
+            break;
+        default:
+            entries_.pop_back();
+            if (entries_.empty())
+                reservation_.reset();
+            break;
+        }
+        return event;
+    }
+
+    py::object state_owner_;
+    CPUState* state_ = nullptr;
+    std::vector<std::shared_ptr<mp64_hybrid::Image>> published_;  // sorted by code_base
+    std::vector<Entry> entries_;
+    std::unique_ptr<RoutineCPUReservation> reservation_;
+    uint64_t instructions_ = 0, cycles_ = 0, segments_ = 0, callbacks_ = 0;
+    bool pinned_ = false, active_ = false, closed_ = false;
+};
+
 static int step_one(
         CPUState& s,
         const StepCallbacks& cb,
@@ -38532,6 +39235,79 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("_test_fail_marshalling_after_results", &TaskRoutineRunnerV1::test_fail_marshalling,
             py::arg("count"))
         .def("_test_fail_next_cancel_delivery", &TaskRoutineRunnerV1::test_fail_cancel_delivery);
+
+    m.attr("HYBRID_ROUTINE_ABI") = "megapad.hybrid.routines";
+    m.attr("HYBRID_ROUTINE_REVISION") = 1;
+    py::class_<mp64_hybrid::Image, std::shared_ptr<mp64_hybrid::Image>>(m, "RoutineImage")
+        .def(py::init(&make_hybrid_image),
+            py::arg("code_base"), py::arg("code"), py::arg("entry_offset"),
+            py::arg("input_cells"), py::arg("output_cells"), py::arg("sites") = py::tuple())
+        .def_readonly("code_base", &mp64_hybrid::Image::code_base)
+        .def_property_readonly("code_size", [](const mp64_hybrid::Image& image) {
+            return static_cast<uint64_t>(image.code.size());
+        })
+        .def_property_readonly("code", [](const mp64_hybrid::Image& image) {
+            return py::bytes(reinterpret_cast<const char*>(image.code.data()), image.code.size());
+        })
+        .def_readonly("entry_offset", &mp64_hybrid::Image::entry_offset)
+        .def_readonly("input_cells", &mp64_hybrid::Image::input_cells)
+        .def_readonly("output_cells", &mp64_hybrid::Image::output_cells)
+        .def_property_readonly("sites", [](const mp64_hybrid::Image& image) {
+            py::tuple sites(image.sites.size());
+            for (std::size_t index = 0; index < image.sites.size(); ++index) {
+                const auto& site = image.sites[index];
+                sites[index] = py::make_tuple(site.call_offset, site.stub_offset,
+                                              site.input_cells, site.output_cells);
+            }
+            return sites;
+        });
+
+    py::class_<mp64_hybrid::Event>(m, "RoutineEvent")
+        .def_property_readonly("kind", [](const mp64_hybrid::Event& event) {
+            return mp64_hybrid::event_kind_name(event.kind);
+        })
+        .def_property_readonly("failure", [](const mp64_hybrid::Event& event) -> py::object {
+            return event.failure.empty() ? py::object(py::none()) : py::object(py::str(event.failure));
+        })
+        .def_readonly("detail", &mp64_hybrid::Event::detail)
+        .def_property_readonly("values", [](const mp64_hybrid::Event& event) {
+            py::tuple values(event.values.size());
+            for (std::size_t index = 0; index < event.values.size(); ++index)
+                values[index] = py::int_(event.values[index]);
+            return values;
+        })
+        .def_readonly("image", &mp64_hybrid::Event::image)
+        .def_readonly("site", &mp64_hybrid::Event::site)
+        .def_readonly("sp", &mp64_hybrid::Event::sp)
+        .def_readonly("pc", &mp64_hybrid::Event::pc)
+        .def_readonly("instruction_pc", &mp64_hybrid::Event::instruction_pc)
+        .def_readonly("instructions", &mp64_hybrid::Event::instructions)
+        .def_readonly("cycles", &mp64_hybrid::Event::cycles)
+        .def_readonly("access_address", &mp64_hybrid::Event::access_address)
+        .def_readonly("access_width", &mp64_hybrid::Event::access_width)
+        .def_property_readonly("access_operation", [](const mp64_hybrid::Event& event) -> py::object {
+            return event.access_operation.empty()
+                ? py::object(py::none()) : py::object(py::str(event.access_operation));
+        })
+        .def_readonly("trap_id", &mp64_hybrid::Event::trap_id);
+
+    py::class_<RoutineRunner>(m, "RoutineRunner")
+        .def(py::init<py::object>(), py::arg("state"))
+        .def("close", &RoutineRunner::close)
+        .def("publish", &RoutineRunner::publish, py::arg("image").none(false))
+        .def("revoke", &RoutineRunner::revoke, py::arg("image").none(false))
+        .def("is_published", &RoutineRunner::is_published, py::arg("image").none(false))
+        .def("begin", &RoutineRunner::begin, py::arg("image").none(false),
+            py::arg("arguments"), py::arg("spans"), py::arg("frontier"), py::arg("floor"),
+            py::arg("allowance"))
+        .def("resume", &RoutineRunner::resume, py::arg("outputs"), py::arg("allowance"))
+        .def("advance", &RoutineRunner::advance, py::arg("allowance"))
+        .def("cancel", &RoutineRunner::cancel, py::arg("keep") = py::int_(0))
+        .def_property_readonly("entries", &RoutineRunner::entries)
+        .def_property_readonly("instructions", &RoutineRunner::instructions)
+        .def_property_readonly("cycles", &RoutineRunner::cycles)
+        .def_property_readonly("segments", &RoutineRunner::segments)
+        .def_property_readonly("callbacks", &RoutineRunner::callbacks);
 
     // Expose RunResult
     py::class_<RunResult>(m, "RunResult")
