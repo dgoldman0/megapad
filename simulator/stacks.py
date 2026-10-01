@@ -12,13 +12,6 @@ from dataclasses import dataclass
 from typing import Iterable, TypeAlias
 
 from shared.cells import CELL_BYTES, MASK64, u64
-from simulator.foreign_control import (
-    ForeignContinuation,
-    ForeignControlError,
-    ForeignRetirementReason,
-    ForeignReturnControl,
-)
-from simulator.foreign_effects import TaskEffectGuard
 from simulator.memory import SparseAddressSpace
 
 
@@ -145,58 +138,8 @@ class MachineReturn:
     raw: int
 
 
-ReturnEntry: TypeAlias = int | Continuation | ForeignContinuation | MachineReturn
-_CONTROL_ENTRIES = (Continuation, ForeignContinuation, MachineReturn)
-
-_FOREIGN_RESTORE_SLOTS = tuple(
-    (kind, tuple((name, vars(kind)[name]) for name in names))
-    for kind, names in (
-        (Continuation, ("xt", "ip", "root", "dispatch_id", "fault_abort")),
-        (FaultAbort, ("report", "message")),
-    )
-)
-
-
-def _validate_foreign_restore(snapshot: tuple[ReturnEntry, ...]) -> None:
-    """Validate a canonical ordinary snapshot before retiring foreign authority."""
-
-    if type(snapshot) is not tuple:
-        raise TypeError("bound foreign restore requires an exact tuple")
-    continuation_type, continuation_slots = _FOREIGN_RESTORE_SLOTS[0]
-    fault_type, fault_slots = _FOREIGN_RESTORE_SLOTS[1]
-    for kind, fields in _FOREIGN_RESTORE_SLOTS:
-        if any(vars(kind).get(name) is not descriptor for name, descriptor in fields):
-            raise TypeError("ordinary continuation field routing changed")
-    for entry in snapshot:
-        entry_type = type(entry)
-        if entry_type is ForeignContinuation:
-            raise TypeError("return stack restore cannot install foreign continuations")
-        if entry_type is int:
-            if not 0 <= entry <= MASK64:
-                raise ValueError("bound foreign restore cells must be uint64 values")
-            continue
-        if entry_type is not continuation_type:
-            raise TypeError("bound foreign restore requires exact ordinary continuations or cells")
-        values = {name: descriptor.__get__(entry, continuation_type)
-                  for name, descriptor in continuation_slots}
-        for name in ("xt", "ip", "dispatch_id"):
-            value = values[name]
-            if type(value) is not int or not 0 <= value <= MASK64:
-                raise TypeError("ordinary continuation fields must be exact uint64 integers")
-        if type(values["root"]) is not bool:
-            raise TypeError("ordinary continuation root must be an exact boolean")
-        fault = values["fault_abort"]
-        if fault is not None:
-            if type(fault) is not fault_type:
-                raise TypeError("ordinary fault continuation requires an exact FaultAbort")
-            fault_values = {name: descriptor.__get__(fault, fault_type)
-                            for name, descriptor in fault_slots}
-            if type(fault_values["report"]) is not bytes or type(fault_values["message"]) is not str:
-                raise TypeError("ordinary fault continuation report/message must be exact bytes/string")
-        if values["dispatch_id"] and not values["root"]:
-            raise ValueError("only an ordinary root continuation may name a dispatch")
-        if values["root"] and fault is not None:
-            raise ValueError("an ordinary continuation cannot be root and fault-abort")
+ReturnEntry: TypeAlias = int | Continuation | MachineReturn
+_CONTROL_ENTRIES = (Continuation, MachineReturn)
 
 
 def _backing_bounds(
@@ -261,7 +204,6 @@ class DataStack:
         initial_cells = tuple(u64(cell) for cell in cells)
         self._memory = memory
         self._memory_view = None
-        self._task_effect_guard = None
         self._cells: list[int] | None
         self._floor: int | None
         self._empty_pointer: int | None
@@ -333,8 +275,6 @@ class DataStack:
             return
         target = self._push_address()
         assert self._memory_view is not None
-        if self._task_effect_guard is not None:
-            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, target, CELL_BYTES, "write")
         self._memory_view.write64(target, value)
         self._pointer = target
 
@@ -354,8 +294,6 @@ class DataStack:
             return self._cells.pop()
         assert self._pointer is not None
         assert self._memory_view is not None
-        if self._task_effect_guard is not None:
-            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer, CELL_BYTES, "read")
         value = self._memory_view.read64(self._pointer)
         self._pointer += CELL_BYTES
         return value
@@ -380,8 +318,6 @@ class DataStack:
             return self._cells[-1 - offset]
         assert self._pointer is not None
         assert self._memory_view is not None
-        if self._task_effect_guard is not None:
-            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer + offset * CELL_BYTES, CELL_BYTES, "read")
         return self._memory_view.read64(self._pointer + offset * CELL_BYTES)
 
     def replace_top(self, cell: int) -> None:
@@ -395,8 +331,6 @@ class DataStack:
             return
         assert self._pointer is not None
         assert self._memory_view is not None
-        if self._task_effect_guard is not None:
-            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer, CELL_BYTES, "write")
         self._memory_view.write64(self._pointer, value)
 
     def depth(self) -> int:
@@ -449,8 +383,6 @@ class DataStack:
         self._require(1, "SP!")
         assert self._pointer is not None
         assert self._memory_view is not None
-        if self._task_effect_guard is not None:
-            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer, CELL_BYTES, "read")
         target = self._memory_view.read64(self._pointer)
         self._validate_pointer(target)
         self._pointer = target
@@ -536,9 +468,7 @@ class ReturnStack:
         self._memory = memory
         self._memory_view = None
         self._entries: list[ReturnEntry] | None
-        self._continuations: dict[int, tuple[Continuation | ForeignContinuation, int]]
-        self._foreign_control: ForeignReturnControl | None = None
-        self._task_effect_guard = None
+        self._continuations: dict[int, tuple[Continuation, int]]
         self._pointer_capture_generation = 0
         self._continuation_cookie = 0
         self._floor: int | None
@@ -566,34 +496,6 @@ class ReturnStack:
         """Whether entries occupy the caller's shared guest address space."""
 
         return self._memory is not None
-
-    @property
-    def has_foreign_state(self) -> bool:
-        """Whether task foreign authority is bound, including an idle control.
-
-        Retained tombstones after close remain non-resumable control entries,
-        but own no bound foreign authority. Private callback owners must reject
-        a bound control even when its live table is empty.
-        """
-
-        return self._foreign_control is not None
-
-    def _bound_foreign_control(self) -> ForeignReturnControl | None:
-        control = self._foreign_control
-        if control is not None and type(control) is not ForeignReturnControl:
-            raise ForeignControlError("foreign return control is not stack-issued")
-        return control
-
-    def bind_foreign_control(self, issuer: object) -> ForeignReturnControl:
-        """Opt an exact backed stack into one identity-owned foreign control."""
-
-        control = self._bound_foreign_control()
-        if control is not None:
-            ForeignReturnControl._require_issuer(control, issuer)
-            return control
-        control = ForeignReturnControl._issue(self, issuer)
-        self._foreign_control = control
-        return control
 
     @property
     def pointer(self) -> int:
@@ -638,8 +540,6 @@ class ReturnStack:
             return
         target = self._push_address()
         assert self._memory_view is not None
-        if self._task_effect_guard is not None:
-            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, target, CELL_BYTES, "write")
         self._memory_view.write64(target, value)
         self._continuations.pop(target, None)
         self._pointer = target
@@ -716,8 +616,6 @@ class ReturnStack:
         # XT into this machine-private slot must not preserve its host type.
         raw = self._next_continuation_cookie(continuation.xt)
         assert self._memory_view is not None
-        if self._task_effect_guard is not None:
-            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, target, CELL_BYTES, "write")
         self._memory_view.write64(target, raw)
         self._continuations[target] = (continuation, raw)
         self._pointer = target
@@ -810,8 +708,6 @@ class ReturnStack:
         else:
             assert self._pointer is not None
             assert self._memory_view is not None
-            if self._task_effect_guard is not None:
-                TaskEffectGuard.require_stack_access(self._task_effect_guard, self, self._pointer, CELL_BYTES, "write")
             self._memory_view.write64(self._pointer, next_index)
         return True
 
@@ -855,16 +751,10 @@ class ReturnStack:
             # also survive until the enclosing host guard observes ABORT and
             # restores its dispatch-scoped capture checkpoint.
             self._pointer = self._empty_pointer
-            if self._foreign_control is not None:
-                control = self._bound_foreign_control()
-                ForeignReturnControl._retire_all(control, ForeignRetirementReason.CLEARED)
 
     def snapshot(self) -> tuple[ReturnEntry, ...]:
         """Return an immutable bottom-to-top view of the ordered stack."""
 
-        if self._foreign_control is not None:
-            control = self._bound_foreign_control()
-            ForeignReturnControl._reconcile(control)
         if self._memory is None:
             assert self._entries is not None
             return tuple(self._entries)
@@ -880,18 +770,11 @@ class ReturnStack:
                 typed = continuations.get(address)
                 if typed is None:
                     entries.append(raw)
-                elif (self._foreign_control is not None
-                      and (type(typed) is not tuple or len(typed) != 2
-                           or type(typed[1]) is not int)):
-                    raise ForeignControlError("foreign return metadata payload is not canonical")
                 elif raw == typed[1]:
                     entries.append(typed[0])
                 else:
                     # The same stale-type removal as scalar _decode_entry.
                     # Inactive slots remain untouched for a later RP!.
-                    if self._foreign_control is not None:
-                        control = self._bound_foreign_control()
-                        ForeignReturnControl._raw_mismatch(control, address)
                     del continuations[address]
                     entries.append(raw)
                 address += CELL_BYTES
@@ -913,14 +796,10 @@ class ReturnStack:
         this failure restore while blocked.
         """
 
-        if self._foreign_control is not None:
-            _validate_foreign_restore(snapshot)
         if not isinstance(snapshot, tuple):
             raise TypeError("return stack snapshot must be a tuple")
         entries: list[ReturnEntry] = []
         for entry in snapshot:
-            if isinstance(entry, ForeignContinuation):
-                raise TypeError("return stack restore cannot install foreign continuations")
             if isinstance(entry, (Continuation, MachineReturn)):
                 entries.append(entry)
             elif isinstance(entry, int):
@@ -936,9 +815,6 @@ class ReturnStack:
         if len(entries) > self.capacity:
             assert self._floor is not None
             raise StackOverflow("return", floor=self._floor)
-        if self._foreign_control is not None:
-            control = self._bound_foreign_control()
-            ForeignReturnControl._retire_all(control, ForeignRetirementReason.RESTORED)
         self._pointer = self._empty_pointer
         self._pointer_capture_generation = 0
         for entry in entries:
@@ -959,13 +835,8 @@ class ReturnStack:
     def set_pointer(self, pointer: int) -> None:
         """Set a backed return-stack frontier without erasing retained slots."""
 
-        if self._foreign_control is not None and type(pointer) is not int:
-            raise TypeError("bound foreign return pointer must be an exact integer")
         self._validate_pointer(pointer)
         self._pointer = pointer
-        if self._foreign_control is not None:
-            control = self._bound_foreign_control()
-            ForeignReturnControl._frontier_changed(control)
 
     def capture_pointer(self) -> int:
         """Return and register a frontier observed in this host dispatch."""
@@ -1017,31 +888,18 @@ class ReturnStack:
         assert self._pointer is not None
         assert self._memory_view is not None
         address = self._pointer + offset * CELL_BYTES
-        if self._task_effect_guard is not None:
-            TaskEffectGuard.require_stack_access(self._task_effect_guard, self, address, CELL_BYTES, "read")
         raw = self._memory_view.read64(address)
         return self._decode_entry(address, raw)
 
     def _decode_entry(self, address: int, raw: int) -> ReturnEntry:
-        if self._foreign_control is not None:
-            control = self._bound_foreign_control()
-            ForeignReturnControl._require_stack(control)
         typed = self._continuations.get(address)
         if typed is None:
             return raw
-        if (self._foreign_control is not None
-                and (type(typed) is not tuple or len(typed) != 2 or type(typed[1]) is not int)):
-            control = self._bound_foreign_control()
-            ForeignReturnControl._reconcile(control)
-            raise ForeignControlError("foreign return metadata payload is not canonical")
         continuation, expected_raw = typed
         if raw == expected_raw:
             return continuation
         # A raw guest store replaced this return slot.  Shared memory is
         # authoritative; do not resurrect stale host-only type metadata.
-        if self._foreign_control is not None:
-            control = self._bound_foreign_control()
-            ForeignReturnControl._raw_mismatch(control, address)
         del self._continuations[address]
         return raw
 
@@ -1082,9 +940,6 @@ class ReturnStack:
         else:
             assert self._pointer is not None
             self._pointer += count * CELL_BYTES
-            if self._foreign_control is not None:
-                control = self._bound_foreign_control()
-                ForeignReturnControl._frontier_changed(control)
 
     def _push_address(self) -> int:
         assert self._pointer is not None
@@ -1130,18 +985,17 @@ class ReturnStack:
         expected: str,
         actual: ReturnEntry,
     ) -> ReturnStackShapeError:
-        if isinstance(actual, ForeignContinuation):
-            actual_kind = "foreign continuation"
-        elif isinstance(actual, MachineReturn):
+        if isinstance(actual, MachineReturn):
             actual_kind = "machine return"
         else:
-            actual_kind = "continuation" if isinstance(actual, Continuation) else "user cell"
+            actual_kind = (
+                "continuation" if isinstance(actual, Continuation) else "user cell"
+            )
         return ReturnStackShapeError(operation, expected, actual_kind)
 
 
 __all__ = [
     "Continuation",
-    "ForeignContinuation",
     "DataStack",
     "MachineReturn",
     "ReturnEntry",

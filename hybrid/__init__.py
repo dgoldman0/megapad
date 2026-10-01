@@ -1,17 +1,20 @@
-"""Composition helpers for the declared hybrid ABI.
+"""Declared MP64 machine routines inside a semantic MegaForth runtime.
 
-Importing this package or loading a manifest does not select an engine. Import
-HybridRuntime from hybrid.runtime and HybridSession from hybrid.session when
-constructing a bounded integer-routine session.
+Importing this package or loading a manifest does not start an engine. Build
+a runtime with hybrid.runtime.HybridRuntime and a session with
+hybrid.session.HybridSession.
 """
 
 from hybrid.manifest import (
+    BufferRule,
+    CallbackSite,
     HybridManifestError,
+    RoutineDeclaration,
+    RoutineManifest,
     load_manifest,
-    load_manifest_v1,
-    load_manifest_v2,
-    load_manifest_v3,
 )
 
-__all__ = ["HybridManifestError", "load_manifest", "load_manifest_v1", "load_manifest_v2",
-           "load_manifest_v3"]
+__all__ = [
+    "BufferRule", "CallbackSite", "HybridManifestError", "RoutineDeclaration",
+    "RoutineManifest", "load_manifest",
+]

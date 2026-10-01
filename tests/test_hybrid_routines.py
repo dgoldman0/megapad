@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 
 from asm import assemble
-from hybrid.routine_manifest import BufferRule, CallbackSite, RoutineDeclaration
-from hybrid.routines import (
+from hybrid.manifest import BufferRule, CallbackSite, RoutineDeclaration
+from hybrid.runtime import (
     HybridExecutionError,
     HybridRuntime,
     MachineAccessFault,

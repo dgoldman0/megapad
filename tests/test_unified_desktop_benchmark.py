@@ -225,9 +225,8 @@ def test_emulator_and_hybrid_configuration_keep_separate_execution_contracts(tmp
     assert "--executor" not in argv and "--semantic-quantum-steps" not in argv
     args.mode = "hybrid"
     argv = bench._server_arguments(args, args.image, tmp_path)
-    manifest = json.loads((tmp_path / "empty-routines.json").read_text())
-    assert manifest["routines"] == []
-    assert "--hybrid-routines" in argv
+    # The Desktop benchmark defines no routines; hybrid composition only.
+    assert "--hybrid-routines" not in argv
     assert argv[argv.index("--executor") + 1] == "native"
 
 

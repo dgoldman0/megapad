@@ -308,12 +308,6 @@ def _server_arguments(args, image, directory):
             result += ["--semantic-step-budget", str(args.semantic_step_budget)]
     elif args.executor != "native" or args.semantic_step_budget is not None:
         raise ValueError("emulator requires native execution and has no semantic budget")
-    if args.mode == "hybrid":
-        from shared.hybrid_abi import HYBRID_ABI
-        manifest = directory / "empty-routines.json"
-        manifest.write_text(json.dumps({"abi": HYBRID_ABI, "version": 1,
-                                       "dispatch_instruction_limit": 1_000_000, "routines": []}))
-        result += ["--hybrid-routines", str(manifest)]
     return result
 
 

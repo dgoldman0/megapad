@@ -39,9 +39,6 @@ from simulator.errors import (
     StepBudgetExceeded,
 )
 from simulator.field import HostedFieldALUService
-from simulator.foreign_control import ForeignContinuation
-from simulator.foreign_types import ForeignCallbackTarget, ForeignDefinition, ForeignResumeTarget
-from simulator.foreign_cursor import MachineTurn, ForeignMachineCursor
 from simulator.ir import (
     AbortIf,
     Branch,
@@ -344,7 +341,6 @@ WordImplementation: TypeAlias = (
     | ValueDefinition
     | CreatedDefinition
     | DirectiveDefinition
-    | ForeignDefinition
     | RoutineDefinition
 )
 
@@ -528,10 +524,6 @@ class _StepMeter:
         self._on_tick()
 
 
-_TASK_METER_ROUTES = tuple(vars(_StepMeter).items())
-_TASK_METER_NAMESPACE = vars(_StepMeter)["__dict__"]
-
-
 @dataclass(frozen=True, slots=True)
 class _DispatchFrame:
     """One nested host boundary participating in semantic dispatch."""
@@ -539,9 +531,6 @@ class _DispatchFrame:
     context: ExecutionContext
     meter: _StepMeter
     root_id: int
-    closed_guard: object = None
-    task_root: object = None
-    machine_turn: MachineTurn | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -626,7 +615,7 @@ class _SuspendedExecution:
     meter: _StepMeter
     starting_steps: int
     root_id: int
-    cursor: _DispatchCursor | ForeignMachineCursor | _MachineCursor
+    cursor: _DispatchCursor | _MachineCursor
     return_snapshot: tuple[ReturnEntry, ...]
     capture_checkpoint: int
     had_pointer_capture: bool
@@ -635,7 +624,6 @@ class _SuspendedExecution:
     quantum_steps: int | None = None
     machine_quantum_instructions: int | None = None
     wake_receipt: IdleWakeReceipt | None = None
-    task_root: object = None
 
 
 _DICTIONARY_FAULT_ABORT = FaultAbort(
@@ -685,21 +673,8 @@ class _UndefinedWord(SourceError):
         super().__init__(f"unknown word {token!r}", location)
 
 
-_TASK_DISPATCH_ALIASES = tuple((kind.__name__, kind) for kind in (
-    Word, PrimitiveDefinition, ColonDefinition, ConstantDefinition,
-    ValueDefinition, CreatedDefinition, DoesBodyRef, ForeignDefinition,
-    ForeignContinuation, ForeignCallbackTarget, ForeignResumeTarget, Invoke,
-    Literal, Call, CallSelf, StoreValue, Branch, BranchZero, QuestionDo, Loop,
-    PlusLoop, Return, Do, Unloop, RPush, RPop, RPeek, RPushPair, RPopPair,
-    RPeekPair, RestoreDataStackPointer, RestoreReturnStackPointer, Idle, IdleUntil,
-    _DispatchCursor, _SuspendedExecution, ExecutionSuspension, MachineTurn, ForeignMachineCursor,
-))
-
-
 class MegaForthRuntime:
     """Hosted dictionary, evaluator, and explicit semantic dispatcher."""
-
-    NESTED_CALLBACK_ABI_VERSION = 4
 
     def __init__(
         self,
@@ -880,10 +855,6 @@ class MegaForthRuntime:
         self._colon_accelerators: dict[int, _ColonAccelerator] = {}
         # The hybrid composition installs the owner of declared machine routines.
         self._machine_owner = None
-        self._primitive_host_escapes: dict[int, tuple[PrimitiveDefinition, object]] = {}
-        from simulator.private_host_escape import PrivateHostAbortProvenance
-
-        self._private_host_abort = PrivateHostAbortProvenance(self, MegaForthRuntime)
         self._next_dispatch_root_id = 1
         self._uart_input: deque[int] = deque()
         self._uart_output = bytearray()
@@ -891,16 +862,6 @@ class MegaForthRuntime:
             from simulator.core_words import install_core
 
             install_core(self)
-        # Capture only the original installed leaves, before any user can
-        # shadow their names. Shared ABI metadata never carries Word authority.
-        from simulator.interop_exports import CallbackExportEngine
-
-        self._callback_exports = CallbackExportEngine(
-            self, core_installed=install_core_words
-        )
-        from simulator.foreign_runtime import ForeignTaskEngine
-
-        self._foreign_tasks = ForeignTaskEngine(self, core_installed=install_core_words)
         # BIOS S" interpret mode owns one reusable 255-byte payload plus its
         # terminator. Keep it in the protected Bank-0 prefix rather than at
         # transient HERE, so later definitions cannot change its address.
@@ -936,7 +897,6 @@ class MegaForthRuntime:
                         self._native_execution.extension.tile_execute_values,
                         guard_factory=self._native_execution.extension.TileIdentityGuard,
                     )
-        self._callback_exports.finalize_service_executor(self._native_execution)
         self.storage.claim()
 
     @property
@@ -1095,32 +1055,16 @@ class MegaForthRuntime:
         if self._uart_input:
             return True
         deadline = self._idle_deadline_ms
-        blocked = self._suspended_execution
-        if (deadline is not None and blocked is not None
-                and self._foreign_tasks.task_suspension_owner(blocked=blocked) is not None):
-            try:
-                return self._foreign_tasks.parked_idle_wake_due(blocked, deadline)
-            except BaseException as failure:
-                self._cancel_failed_task_suspension(blocked, failure)
-                raise
         return deadline is not None and self.rtc.uptime_ms >= deadline
 
     @property
     def idle_wake_delay_s(self) -> float | None:
-        """Read the selected deadline clock without granting a wake."""
+        """Seconds until a blocked IDLE-UNTIL deadline, or None."""
+
         deadline = self._idle_deadline_ms
         if deadline is None:
             return None
-        blocked = self._suspended_execution
-        if blocked is not None and self._foreign_tasks.task_suspension_owner(blocked=blocked) is not None:
-            try:
-                uptime = self._foreign_tasks.parked_idle_uptime(blocked)
-            except BaseException as failure:
-                self._cancel_failed_task_suspension(blocked, failure)
-                raise
-        else:
-            uptime = self.rtc.uptime_ms
-        return max(deadline - uptime, 0) / 1000
+        return max(deadline - self.rtc.uptime_ms, 0) / 1000
 
     @property
     def uart_input_pending(self) -> int:
@@ -1363,9 +1307,6 @@ class MegaForthRuntime:
 
     def _require_session_owner_access(self, operation: str) -> None:
         with self._session_owner_lock:
-            task_engine = getattr(self, "_foreign_tasks", None)
-            if task_engine is not None and task_engine._batch is not None:
-                raise ExecutionError(f"cannot {operation} during task registration batch")
             if (
                 self._session_owner_token is not None
                 and self._session_owner_thread != threading.get_ident()
@@ -1902,26 +1843,7 @@ class MegaForthRuntime:
             raise ExecutionError("semantic suspension identity space exhausted")
         return ExecutionSuspension(sequence, self._runtime_token)
 
-    def _require_no_closed_callback_entry(self, operation: str) -> None:
-        task_engine = getattr(self, "_foreign_tasks", None)
-        if task_engine is not None and task_engine.suspension_transition_busy():
-            from simulator.foreign_runtime import ForeignTaskError
-            raise ForeignTaskError(f"cannot {operation} during an owned task transition")
-        accounting_guard = getattr(self, "_closed_accounting_guard", None)
-        if accounting_guard is not None:
-            accounting_guard(operation)
-        if any(frame.closed_guard is not None for frame in self._active_dispatches):
-            from simulator.interop_exports import CallbackExportError
-
-            raise CallbackExportError(f"cannot {operation} during a closed callback")
-        if any(frame.task_root is not None and (frame.task_root.active or frame.task_root.busy)
-               for frame in self._active_dispatches):
-            from simulator.foreign_runtime import ForeignTaskError
-
-            raise ForeignTaskError(f"cannot {operation} during a task callback or retained tail")
-
     def _require_no_suspension(self, operation: str) -> None:
-        self._require_no_closed_callback_entry(operation)
         suspended = self._suspended_execution
         if suspended is not None:
             raise ExecutionError(
@@ -1932,25 +1854,7 @@ class MegaForthRuntime:
     def _require_suspension(
         self,
         handle: ExecutionSuspension,
-        *, validate_task: bool = True,
     ) -> _SuspendedExecution:
-        if self._foreign_tasks.suspension_transition_busy():
-            from simulator.foreign_runtime import ForeignTaskError
-            raise ForeignTaskError("cannot change suspension during an owned task transition")
-        witness = self._foreign_tasks._parked_task
-        ownership = self._foreign_tasks._parked_ownership
-        suspended = self._suspended_execution
-        if ownership is not None and ownership[1] is suspended:
-            original_handle = next(evidence[2] for name, evidence in ownership[3] if name == "handle")
-            if handle is not original_handle:
-                raise ExecutionError("suspension is stale, foreign, or already consumed")
-            if validate_task:
-                try:
-                    self._foreign_tasks._verify_parked(witness, suspended)
-                except BaseException as failure:
-                    self._cancel_failed_task_suspension(suspended, failure)
-                    raise
-            return suspended
         if not isinstance(handle, ExecutionSuspension):
             raise TypeError("suspension must be an ExecutionSuspension")
         if handle._runtime_token is not self._runtime_token:
@@ -1972,30 +1876,6 @@ class MegaForthRuntime:
             _DICTIONARY_FAULT_ABORT,
         )
 
-    def _register_primitive_host_escape(self, implementation, callback):
-        """Issue exact implementation authority for a trusted host boundary.
-
-        Hybrid v2 uses this only to preserve an inner callback exception after
-        its native frame has been cancelled. It is not a source-word option.
-        """
-        if (type(implementation) is not PrimitiveDefinition
-                or implementation.callback is not callback or not callable(callback)):
-            raise TypeError("host escape admission requires an exact primitive and callback")
-        key = id(implementation)
-        if key in self._primitive_host_escapes:
-            raise ExecutionError("primitive host escape authority already issued")
-        if len(self._primitive_host_escapes) >= 64:
-            raise ExecutionError("primitive host escape table is full")
-        admission = (implementation, callback)
-        self._primitive_host_escapes[key] = admission
-        return admission
-
-    def _revoke_primitive_host_escape(self, admission) -> None:
-        key = id(admission[0])
-        if self._primitive_host_escapes.get(key) is not admission:
-            raise ExecutionError("primitive host escape authority is no longer issued")
-        del self._primitive_host_escapes[key]
-
     def _invoke_primitive(
         self,
         implementation: PrimitiveDefinition,
@@ -2003,23 +1883,9 @@ class MegaForthRuntime:
     ) -> object:
         """Run a primitive; a machine trap becomes a guest fault request."""
 
-        callback = implementation.callback
-        host_escape = False
-        if self._primitive_host_escapes:
-            admission = self._primitive_host_escapes.get(id(implementation))
-            host_escape = (admission is not None and admission[0] is implementation
-                           and admission[1] is callback)
-        # Pin before calling host code; exception attributes carry no authority.
-        host_abort_issue = self._private_host_abort.issue if host_escape else None
         try:
-            return callback(context)
-        except ForthAbort as error:
-            if host_abort_issue is not None:
-                host_abort_issue(admission, implementation, callback, error)
-            raise
+            return implementation.callback(context)
         except InstructionFault as fault:
-            if host_escape:
-                raise
             raise _GuestFaultRequest(
                 self._fault_xt,
                 context,
@@ -2492,7 +2358,6 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("evaluate source")
-            self._require_no_closed_callback_entry("evaluate source")
             try:
                 return self._evaluate_source(
                     source,
@@ -2533,12 +2398,6 @@ class MegaForthRuntime:
             active_context.returns.pointer_capture_checkpoint()
         )
         has_enclosing_dispatch = self._has_active_dispatch(active_context)
-        host_abort = self._private_host_abort
-        host_abort_matches = host_abort.matches
-        host_abort_leave = host_abort.leave
-        host_abort.enter()
-        closed_cleanup_guard = self._closed_cleanup_guard
-        unsafe_closed_cleanup = False
         state: _EvaluationState | None = None
         line_count = 0
         try:
@@ -2580,9 +2439,6 @@ class MegaForthRuntime:
                 definitions=tuple(state.definitions),
             )
         except _GuestFaultRequest as request:
-            if closed_cleanup_guard(request, active_context):
-                unsafe_closed_cleanup = True
-                raise
             # Nested evaluation must hand the request back to the suspended
             # semantic dispatcher so guest THROW can discard its fault
             # sentinel and resume the existing CATCH continuation.
@@ -2601,9 +2457,6 @@ class MegaForthRuntime:
                     meter,
                 )
             except _GuestControlTransfer as transfer:
-                if closed_cleanup_guard(transfer, active_context):
-                    unsafe_closed_cleanup = True
-                    raise
                 if (
                     transfer.context is not active_context
                     and active_context.returns.has_pointer_captures_after(
@@ -2613,21 +2466,15 @@ class MegaForthRuntime:
                     active_context._mark_host_control_fault(transfer)
                 raise
             except ForthAbort as exc:
-                if closed_cleanup_guard(exc, active_context):
-                    unsafe_closed_cleanup = True
-                    raise
                 if active_context.returns.has_pointer_captures_after(
                     capture_checkpoint
                 ):
                     active_context._mark_host_control_fault(exc)
-                if not host_abort_matches(exc) and exc.bind_origin(active_context):
+                if exc.bind_origin(active_context):
                     active_context.data.clear()
                     active_context.returns.clear()
                 raise
             except BaseException as exc:
-                if closed_cleanup_guard(exc, active_context):
-                    unsafe_closed_cleanup = True
-                    raise
                 if active_context.returns.has_pointer_captures_after(
                     capture_checkpoint
                 ):
@@ -2635,9 +2482,6 @@ class MegaForthRuntime:
                 raise
             raise AssertionError("dictionary fault callback returned to evaluator")
         except _GuestControlTransfer as transfer:
-            if closed_cleanup_guard(transfer, active_context):
-                unsafe_closed_cleanup = True
-                raise
             if (
                 transfer.context is not active_context
                 and active_context.returns.has_pointer_captures_after(
@@ -2647,22 +2491,16 @@ class MegaForthRuntime:
                 active_context._mark_host_control_fault(transfer)
             raise
         except ForthAbort as exc:
-            if closed_cleanup_guard(exc, active_context):
-                unsafe_closed_cleanup = True
-                raise
             self._fail_closed_active_bios_evaluator()
             if active_context.returns.has_pointer_captures_after(
                 capture_checkpoint
             ):
                 active_context._mark_host_control_fault(exc)
-            if not host_abort_matches(exc) and exc.bind_origin(active_context):
+            if exc.bind_origin(active_context):
                 active_context.data.clear()
                 active_context.returns.clear()
             raise
         except BaseException as exc:
-            if closed_cleanup_guard(exc, active_context):
-                unsafe_closed_cleanup = True
-                raise
             self._fail_closed_active_bios_evaluator()
             if active_context.returns.has_pointer_captures_after(
                 capture_checkpoint
@@ -2670,62 +2508,15 @@ class MegaForthRuntime:
                 active_context._mark_host_control_fault(exc)
             raise
         finally:
-            host_abort_leave()
             if state is not None:
                 compiler = state.compiler
                 if compiler is not None and compiler.temporary:
                     state.compiler = None
                     self._discard_temporary_compiler(compiler, state)
-            if not unsafe_closed_cleanup and not has_enclosing_dispatch:
+            if not has_enclosing_dispatch:
                 active_context.returns.restore_pointer_captures(
                     capture_checkpoint
                 )
-
-    def bind_callback_export(self, descriptor):
-        """Bind bounded value metadata to an original installed integer leaf."""
-
-        return self._callback_exports.bind(descriptor)
-
-    def callback_export_registration(self, descriptors):
-        """Stage a bounded export table atomically with its host publication."""
-
-        return self._callback_exports.registration(descriptors)
-
-    def verify_callback_export(self, handle):
-        """Return metadata for a live issued handle, without exposing its Word."""
-
-        return self._callback_exports.verify(handle)
-
-    @property
-    def callback_export_abi_version(self) -> int:
-        """Metadata profile supported by the canonical callback export engine."""
-        return self.NESTED_CALLBACK_ABI_VERSION
-
-    def inspect_callback_export(self, handle):
-        """Return immutable derived proof diagnostics, or None for a leaf."""
-        return self._callback_exports.inspect(handle)
-
-    def callback_policy_core_xt(self, name: str) -> int:
-        """Resolve one verified original canonical policy dependency at idle."""
-        return self._callback_exports.policy_core_xt(name)
-
-    def consume_callback_budget_failure(self, error) -> bool:
-        """Consume exact engine-issued budget-error identity, never a class claim."""
-        return self._callback_exports.consume_budget_failure(error)
-
-    def begin_closed_callback_accounting(self, handle):
-        """Issue one bounded checkpoint for the next exact closed invocation."""
-        return self._closed_accounting_dispatch("begin", handle)
-
-    def consume_closed_callback_accounting(self, checkpoint, handle):
-        """Consume independent admitted-tick evidence, including failed callbacks."""
-        return self._closed_accounting_dispatch("consume", checkpoint, handle)
-
-    def invoke_callback_export(self, handle, arguments: tuple[int, ...], *,
-                               semantic_step_limit: int | None = None):
-        """Invoke an approved export using actual ticks on the original meter."""
-
-        return self._callback_exports.invoke(handle, arguments, semantic_step_limit=semantic_step_limit)
 
     def execute(
         self,
@@ -2737,7 +2528,6 @@ class MegaForthRuntime:
         """Execute one live word to completion or raise ``ExecutionBlocked``."""
 
         self._require_session_owner_access("execute a semantic word")
-        self._require_no_closed_callback_entry("execute a semantic word")
         if self._active_dispatches or self._active_input_states:
             active_context = self.main_context if context is None else context
             if not isinstance(active_context, ExecutionContext):
@@ -2778,7 +2568,6 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("run a semantic dispatch")
-            self._require_no_closed_callback_entry("run a semantic dispatch")
             try:
                 return self._run_until_blocked(
                     name_or_xt,
@@ -2806,11 +2595,10 @@ class MegaForthRuntime:
         """Implement :meth:`run_until_blocked` under its host guard."""
 
         active_context = self.main_context if context is None else context
-        if machine_quantum_instructions is not None:
-            if type(machine_quantum_instructions) is not int:
-                raise TypeError("machine_quantum_instructions must be an exact integer or None")
-            if not 1 <= machine_quantum_instructions <= 10_000_000:
-                raise ValueError("machine_quantum_instructions must be in 1..10000000")
+        if machine_quantum_instructions is not None and (
+                type(machine_quantum_instructions) is not int
+                or machine_quantum_instructions < 1):
+            raise ValueError("machine_quantum_instructions must be a positive integer or None")
         if quantum_steps is not None:
             if isinstance(quantum_steps, bool):
                 raise TypeError("quantum_steps must be an integer or None")
@@ -2902,7 +2690,6 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("resume a semantic dispatch")
-            self._require_no_closed_callback_entry("resume a semantic dispatch")
             return self._resume_locked(suspension, wake_receipt)
 
     def _resume_locked(
@@ -2921,8 +2708,7 @@ class MegaForthRuntime:
             or blocked.wake_receipt is not wake_receipt
         ):
             raise ExecutionError("wake receipt is stale, foreign, or already consumed")
-        if not self.task_suspension_pending(suspension):
-            self._idle_deadline_ms = None
+        self._idle_deadline_ms = None
         return self._continue_suspension_locked(blocked)
 
     def resume_yielded(self, suspension: ExecutionSuspension) -> RunResult:
@@ -2930,7 +2716,6 @@ class MegaForthRuntime:
 
         with self._session_owner_lock:
             self._require_session_owner_access("resume a semantic dispatch")
-            self._require_no_closed_callback_entry("resume a semantic dispatch")
             blocked = self._require_suspension(suspension)
             if not blocked.cursor.host_yield:
                 raise ExecutionError("IDL suspension requires a runtime-issued wake")
@@ -2939,92 +2724,17 @@ class MegaForthRuntime:
     def _stack_snapshot(self, stack):
         """Preserve full suspension evidence through the selected executor."""
 
-        task = self._foreign_tasks._task_root
-        if task is not None:
-            self._foreign_tasks._require_task(task.context)
-            task.reconcile()
-            return stack.snapshot()
         if self._native_execution is not None:
             snapshot = self._native_execution.snapshot_stack(stack)
             if snapshot is not None:
                 return snapshot
         return stack.snapshot()
 
-    def task_suspension_pending(self, handle) -> bool:
-        """Identify a current task proof before a backend polls its deadline."""
-        blocked = self._suspended_execution
-        return (type(handle) is ExecutionSuspension and blocked is not None
-                and self._foreign_tasks.task_suspension_owner(blocked=blocked, handle=handle) is not None)
-
-    def _finish_task_escape(self, root, failure, blocked=None):
-        if root is None:
-            return True
-        engine = self._foreign_tasks
-        safe = True if blocked is None else engine.restore_suspension_cleanup(blocked)
-        if engine._root_ownership is not None and engine._root_ownership[0] is root:
-            try:
-                engine.finish_root(root, completed=False, primary_error=failure)
-            except BaseException:
-                try:
-                    BaseException.add_note(failure, "task suspension transport cleanup also failed")
-                except BaseException:
-                    pass
-        if blocked is not None:
-            engine.release_suspension_lease()
-        if not safe or not engine.task_cleanup_safe(root):
-            engine.mark_task_cleanup_unsafe(root)
-            return False
-        return True
-
-    def _cancel_failed_task_suspension(self, blocked, failure):
-        """Consume failed composite proof before restoring ordinary returns."""
-        engine = self._foreign_tasks
-        machine_namespace = object.__getattribute__(engine, "__dict__")
-        root = engine.task_suspension_owner(blocked=blocked)
-        if root is None:
-            root = engine._root_ownership[0] if engine._root_ownership is not None else blocked.task_root
-        try:
-            if self._finish_task_escape(root, failure, blocked):
-                context = blocked.context
-                if (blocked.had_pointer_capture or context.returns.has_pointer_captures_after(
-                        blocked.capture_checkpoint)):
-                    context._mark_host_control_fault(failure)
-                context.returns.restore(blocked.return_snapshot)
-                context.returns.restore_pointer_captures(blocked.capture_checkpoint)
-        except BaseException:
-            try:
-                BaseException.add_note(failure, "task suspension ordinary cleanup also failed")
-            except BaseException:
-                pass
-        finally:
-            self._suspended_execution = None
-            self._idle_deadline_ms = None
-            dict.__setitem__(machine_namespace, "_machine_host_turn", None)
-            dict.__setitem__(machine_namespace, "_machine_selection", None)
-            self._foreign_tasks.release_suspension_lease()
-
     def _continue_suspension_locked(
         self,
         blocked: _SuspendedExecution,
     ) -> RunResult:
         suspension = blocked.handle
-        machine_engine = self._foreign_tasks
-        machine_call, machine_call_seal = machine_engine._machine_methods[0][1:]
-        if self.task_suspension_pending(suspension) or blocked.task_root is not None:
-            try:
-                machine_call_seal.verify()
-                machine_call(machine_engine, "require_machine_selection", blocked.meter,
-                             blocked.machine_quantum_instructions)
-                self._foreign_tasks.resume_suspension(blocked)
-            except BaseException as failure:
-                self._cancel_failed_task_suspension(blocked, failure)
-                raise
-            if not blocked.cursor.host_yield:
-                self._idle_deadline_ms = None
-        elif blocked.machine_quantum_instructions is not None or machine_engine._machine_selection is not None:
-            machine_call_seal.verify()
-            machine_call(machine_engine, "require_machine_selection", blocked.meter,
-                         blocked.machine_quantum_instructions)
         if self._stack_snapshot(blocked.context.data) != blocked.blocked_data_snapshot:
             raise ExecutionError("data stack changed while dispatch was suspended")
         if self._stack_snapshot(blocked.context.returns) != blocked.blocked_return_snapshot:
@@ -3049,31 +2759,25 @@ class MegaForthRuntime:
 
         handle: ExecutionSuspension | None = None
         lease_installed = False
-        machine_namespace = object.__getattribute__(self._foreign_tasks, "__dict__")
         try:
             handle = self._allocate_suspension_handle()
             blocked.handle = handle
             blocked.cursor = cursor
             blocked.blocked_data_snapshot = self._stack_snapshot(blocked.context.data)
             blocked.blocked_return_snapshot = self._stack_snapshot(blocked.context.returns)
-            if blocked.task_root is not None:
-                self._foreign_tasks.park_suspension(blocked)
             blocked.context._lease_for_suspension(handle.sequence)
             lease_installed = True
             self._suspended_execution = blocked
         except BaseException as exc:
-            dict.__setitem__(machine_namespace, "_machine_host_turn", None)
-            dict.__setitem__(machine_namespace, "_machine_selection", None)
-            if blocked.task_root is not None:
-                self._cancel_failed_task_suspension(blocked, exc)
-            else:
-                if lease_installed:
-                    assert handle is not None
-                    blocked.context._release_suspension(handle.sequence)
-                if blocked.had_pointer_capture:
-                    blocked.context._mark_host_control_fault(exc)
-                blocked.context.returns.restore(blocked.return_snapshot)
-                blocked.context.returns.restore_pointer_captures(blocked.capture_checkpoint)
+            if lease_installed:
+                assert handle is not None
+                blocked.context._release_suspension(handle.sequence)
+            if blocked.had_pointer_capture:
+                blocked.context._mark_host_control_fault(exc)
+            blocked.context.returns.restore(blocked.return_snapshot)
+            blocked.context.returns.restore_pointer_captures(
+                blocked.capture_checkpoint
+            )
             raise
         assert handle is not None
         return self._suspension_result(blocked, semantic_steps)
@@ -3089,50 +2793,24 @@ class MegaForthRuntime:
         self,
         suspension: ExecutionSuspension,
     ) -> None:
-        blocked = self._require_suspension(suspension, validate_task=False)
-        engine = self._foreign_tasks
-        machine_namespace = object.__getattribute__(engine, "__dict__")
-        root = engine.task_suspension_owner(blocked=blocked)
-        if root is None:
-            root = blocked.task_root
-        snapshot_safe = True if root is None else engine.restore_suspension_cleanup(blocked)
-        failure = None
-        try:
-            if root is not None and engine._root_ownership is not None and engine._root_ownership[0] is root:
-                try:
-                    engine.finish_root(root, completed=False)
-                except BaseException as error:
-                    failure = error
-            safe = snapshot_safe and (root is None or engine.task_cleanup_safe(root))
-            if not safe:
-                engine.mark_task_cleanup_unsafe(root)
-                if failure is None:
-                    failure = ExecutionError("task cancellation lost trusted return snapshot authority")
-            else:
-                blocked.had_pointer_capture = (
-                    blocked.had_pointer_capture
-                    or blocked.context.returns.has_pointer_captures_after(blocked.capture_checkpoint)
-                )
-                if blocked.had_pointer_capture:
-                    blocked.context._mark_host_control_fault(
-                        ExecutionError("semantic suspension canceled after RP@"))
-                blocked.context.returns.restore(blocked.return_snapshot)
-                blocked.context.returns.restore_pointer_captures(blocked.capture_checkpoint)
-        except BaseException:
-            if failure is None:
-                raise
-        finally:
-            self._suspended_execution = None
-            dict.__setitem__(machine_namespace, "_machine_host_turn", None)
-            dict.__setitem__(machine_namespace, "_machine_selection", None)
-            self._idle_deadline_ms = None
-            self._finish_machine_dispatch(failure)
-            if root is None:
-                blocked.context._release_suspension(suspension.sequence)
-            else:
-                engine.release_suspension_lease()
-        if failure is not None:
-            raise failure
+        blocked = self._require_suspension(suspension)
+        blocked.had_pointer_capture = (
+            blocked.had_pointer_capture
+            or blocked.context.returns.has_pointer_captures_after(
+                blocked.capture_checkpoint
+            )
+        )
+        if blocked.had_pointer_capture:
+            blocked.context._mark_host_control_fault(
+                ExecutionError("semantic suspension canceled after RP@")
+            )
+        blocked.context.returns.restore(blocked.return_snapshot)
+        blocked.context.returns.restore_pointer_captures(
+            blocked.capture_checkpoint
+        )
+        self._suspended_execution = None
+        blocked.context._release_suspension(suspension.sequence)
+        self._finish_machine_dispatch()
 
     def _evaluate_line(self, state: _EvaluationState) -> None:
         self._active_input_states.append(state)
@@ -3754,54 +3432,9 @@ class MegaForthRuntime:
         starting_steps: int = 0,
         quantum_steps: int | None = None,
         machine_quantum_instructions: int | None = None,
-        closed_guard=None,
     ) -> _SuspendedExecution | None:
         """Execute atomically with respect to internal return-stack state."""
 
-        if closed_guard is not None:
-            # Private storage is discarded, never restored through mutable routes.
-            closed_guard.require_state()
-            release_frame = closed_guard.release_frame
-            cleanup_failed = closed_guard.cleanup_failed
-            root_id = self._allocate_dispatch_root_id()
-            frame = _DispatchFrame(context, meter, root_id, closed_guard)
-            namespace = object.__getattribute__(self, "__dict__")
-            frames = self._active_dispatches
-            prefix = tuple(frames)
-            original = None
-            list.append(frames, frame)
-            try:
-                closed_guard.pin_frame(frames, frame, root_id, prefix)
-                return self._execute_top(word, context, meter, root_id=root_id,
-                                         closed_guard=closed_guard)
-            except BaseException as error:
-                original = error
-                raise
-            finally:
-                try:
-                    clean = (dict.get(namespace, "_active_dispatches") is frames
-                             and len(frames) == len(prefix) + 1
-                             and all(item is frames[index] for index, item in enumerate(prefix))
-                             and frames[-1] is frame)
-                    # Repair only the issued host list, using its original namespace.
-                    list.__setitem__(frames, slice(None), prefix)
-                    dict.__setitem__(namespace, "_active_dispatches", frames)
-                    release_frame(frame)
-                    if not clean:
-                        cleanup_failed(original)
-                except BaseException:
-                    if original is None:
-                        cleanup_failed(None)
-                    cleanup_failed(original)
-
-        host_abort = self._private_host_abort
-        host_abort_matches = host_abort.matches
-        host_abort_leave = host_abort.leave
-        host_abort.enter()
-        host_abort_capture_leaf = host_abort.capture_leaf
-        host_abort_issue_leaf = host_abort.issue_leaf
-        closed_cleanup_guard = self._closed_cleanup_guard
-        unsafe_closed_cleanup = False
         context._require_reusable()
         return_snapshot = context.returns.snapshot()
         capture_checkpoint = context.returns.pointer_capture_checkpoint()
@@ -3809,22 +3442,13 @@ class MegaForthRuntime:
         frame = _DispatchFrame(context, meter, root_id)
         preserve_capture_evidence = False
         completed_successfully = False
-        primary_error = None
+        primary_error: BaseException | None = None
         suspended: _SuspendedExecution | None = None
-        candidate: _SuspendedExecution | None = None
         machine_outer = not self._active_dispatches
-        machine_engine = self._foreign_tasks
-        machine_namespace = object.__getattribute__(machine_engine, "__dict__")
-        machine_call, machine_call_seal = machine_engine._machine_methods[0][1:]
         self._active_dispatches.append(frame)
         try:
             if machine_outer and self._machine_owner is not None:
                 self._machine_owner.begin_turn(machine_quantum_instructions)
-            if machine_quantum_instructions is not None:
-                machine_call_seal.verify()
-                machine_call(machine_engine, "begin_host_machine_turn", frame,
-                             machine_quantum_instructions, resumed=False)
-            host_abort_capture_leaf(word, context)
             cursor = self._execute_top(
                 word,
                 context,
@@ -3835,14 +3459,11 @@ class MegaForthRuntime:
                     None if quantum_steps is None else meter.steps + quantum_steps
                 ),
             )
-            if machine_quantum_instructions is not None:
-                machine_call_seal.verify()
-                machine_call(machine_engine, "require_machine_turn", frame)
             if cursor is None:
                 completed_successfully = True
             else:
                 handle = self._allocate_suspension_handle()
-                candidate = _SuspendedExecution(
+                suspended = _SuspendedExecution(
                     handle=handle,
                     context=context,
                     meter=meter,
@@ -3860,23 +3481,12 @@ class MegaForthRuntime:
                     blocked_return_snapshot=self._stack_snapshot(context.returns),
                     quantum_steps=quantum_steps,
                     machine_quantum_instructions=machine_quantum_instructions,
-                    task_root=frame.task_root,
                 )
-                if frame.task_root is not None:
-                    self._foreign_tasks.park_suspension(candidate)
                 context._lease_for_suspension(handle.sequence)
-                suspended = candidate
                 self._suspended_execution = suspended
                 preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
             primary_error = transfer
-            if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                unsafe_closed_cleanup = True
-                raise
-            if closed_cleanup_guard(transfer, context):
-                unsafe_closed_cleanup = True
-                raise
             if transfer.context is not context:
                 if context.returns.has_pointer_captures_after(
                     capture_checkpoint
@@ -3887,20 +3497,13 @@ class MegaForthRuntime:
             if transfer.root_id != root_id:
                 preserve_capture_evidence = True
                 raise
+            primary_error = None
             # A nested public call executed through this frame's exact guest
             # root after RP! discarded its own Python dispatch boundary.  The
             # nested loop has already completed this semantic dispatch.
             completed_successfully = True
-            primary_error = None
         except _GuestFaultRequest as request:
             primary_error = request
-            if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                unsafe_closed_cleanup = True
-                raise
-            if closed_cleanup_guard(request, context):
-                unsafe_closed_cleanup = True
-                raise
             # A nested public execute/evaluate boundary must not install a
             # fresh fault continuation above an older guest CATCH.  Remove
             # only this nested dispatch's internal return state and let the
@@ -3919,21 +3522,10 @@ class MegaForthRuntime:
             raise
         except ForthAbort as exc:
             primary_error = exc
-            host_abort_issue_leaf(exc)
-            if not self._finish_task_escape(frame.task_root, exc, candidate):
-                unsafe_closed_cleanup = True
-                raise
-            if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                unsafe_closed_cleanup = True
-                raise
-            if closed_cleanup_guard(exc, context):
-                unsafe_closed_cleanup = True
-                raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
-            if not host_abort_matches(exc) and exc.bind_origin(context):
+            if exc.bind_origin(context):
                 # Normalize a direct host primitive ForthAbort to the same
                 # complete-task reset as the BIOS word.
                 context.data.clear()
@@ -3943,85 +3535,45 @@ class MegaForthRuntime:
             raise
         except BaseException as exc:
             primary_error = exc
-            if not self._finish_task_escape(frame.task_root, exc, candidate):
-                unsafe_closed_cleanup = True
-                raise
-            if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                unsafe_closed_cleanup = True
-                raise
-            if closed_cleanup_guard(exc, context):
-                unsafe_closed_cleanup = True
-                raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
             context.returns.restore(return_snapshot)
             raise
         finally:
-            host_abort_leave()
-            try:
-                if (frame.task_root is not None and self._foreign_tasks._task_root is frame.task_root
-                        and suspended is None and frame.task_root.ledger.root_id == frame.root_id):
-                    self._foreign_tasks.finish_root(frame.task_root, completed=completed_successfully,
-                                                    primary_error=primary_error)
-            finally:
-                if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                    self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                    unsafe_closed_cleanup = True
-                if completed_successfully:
-                    if self._has_older_dispatch(
-                        context
-                    ) or self._has_active_evaluation(context):
-                        preserve_capture_evidence = True
-                if not unsafe_closed_cleanup and not preserve_capture_evidence:
-                    context.returns.restore_pointer_captures(capture_checkpoint)
-                if machine_outer:
-                    dict.__setitem__(machine_namespace, "_machine_host_turn", None)
-                    if suspended is None:
-                        dict.__setitem__(machine_namespace, "_machine_selection", None)
-                if machine_outer and suspended is None:
-                    self._finish_machine_dispatch(primary_error)
-                active = self._active_dispatches.pop()
-                if active is not frame:
-                    raise AssertionError("active semantic dispatch stack is corrupted")
+            if completed_successfully:
+                if self._has_older_dispatch(
+                    context
+                ) or self._has_active_evaluation(context):
+                    preserve_capture_evidence = True
+            if not preserve_capture_evidence:
+                context.returns.restore_pointer_captures(capture_checkpoint)
+            if machine_outer and suspended is None:
+                self._finish_machine_dispatch(primary_error)
+            active = self._active_dispatches.pop()
+            if active is not frame:
+                raise AssertionError("active semantic dispatch stack is corrupted")
         return suspended
 
     def _resume_guarded(
         self,
         suspended: _SuspendedExecution,
-    ) -> _DispatchCursor | ForeignMachineCursor | None:
+    ) -> _DispatchCursor | _MachineCursor | None:
         """Continue a detached dispatch under its original host guard."""
 
         context = suspended.context
-        host_abort = self._private_host_abort
-        host_abort_matches = host_abort.matches
-        host_abort_leave = host_abort.leave
-        host_abort.enter()
-        closed_cleanup_guard = self._closed_cleanup_guard
-        unsafe_closed_cleanup = False
         resume_capture_checkpoint = (
             context.returns.pointer_capture_checkpoint()
         )
-        frame = _DispatchFrame(context, suspended.meter, suspended.root_id, task_root=suspended.task_root)
+        frame = _DispatchFrame(context, suspended.meter, suspended.root_id)
         preserve_capture_evidence = False
         completed_successfully = False
-        primary_error = None
-        cursor: _DispatchCursor | ForeignMachineCursor | None = None
-        machine_engine = self._foreign_tasks
-        machine_namespace = object.__getattribute__(machine_engine, "__dict__")
-        machine_call, machine_call_seal = machine_engine._machine_methods[0][1:]
+        primary_error: BaseException | None = None
+        cursor: _DispatchCursor | _MachineCursor | None = None
         self._active_dispatches.append(frame)
         try:
             if self._machine_owner is not None:
                 self._machine_owner.begin_turn(suspended.machine_quantum_instructions)
-            turn = None
-            if suspended.machine_quantum_instructions is not None:
-                machine_call_seal.verify()
-                turn = machine_call(machine_engine, "begin_host_machine_turn",
-                                    frame, suspended.machine_quantum_instructions, resumed=True)
-            if frame.task_root is not None:
-                frame.task_root.begin_machine_turn(turn)
             cursor = self._execute_top(
                 None,
                 context,
@@ -4035,9 +3587,6 @@ class MegaForthRuntime:
                     else suspended.meter.steps + suspended.quantum_steps
                 ),
             )
-            if suspended.machine_quantum_instructions is not None:
-                machine_call_seal.verify()
-                machine_call(machine_engine, "require_machine_turn", frame)
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -4049,13 +3598,6 @@ class MegaForthRuntime:
                 preserve_capture_evidence = True
         except _GuestControlTransfer as transfer:
             primary_error = transfer
-            if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                unsafe_closed_cleanup = True
-                raise
-            if closed_cleanup_guard(transfer, context):
-                unsafe_closed_cleanup = True
-                raise
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -4077,13 +3619,6 @@ class MegaForthRuntime:
             cursor = None
         except _GuestFaultRequest as request:
             primary_error = request
-            if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                unsafe_closed_cleanup = True
-                raise
-            if closed_cleanup_guard(request, context):
-                unsafe_closed_cleanup = True
-                raise
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
                 or context.returns.has_pointer_captures_after(
@@ -4102,16 +3637,6 @@ class MegaForthRuntime:
             raise
         except ForthAbort as exc:
             primary_error = exc
-            if not self._finish_task_escape(frame.task_root, exc):
-                unsafe_closed_cleanup = True
-                raise
-            if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                unsafe_closed_cleanup = True
-                raise
-            if closed_cleanup_guard(exc, context):
-                unsafe_closed_cleanup = True
-                raise
             self._fail_closed_active_bios_evaluator()
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
@@ -4121,7 +3646,7 @@ class MegaForthRuntime:
             )
             if suspended.had_pointer_capture:
                 context._mark_host_control_fault(exc)
-            if not host_abort_matches(exc) and exc.bind_origin(context):
+            if exc.bind_origin(context):
                 context.data.clear()
                 context.returns.clear()
             else:
@@ -4129,16 +3654,6 @@ class MegaForthRuntime:
             raise
         except BaseException as exc:
             primary_error = exc
-            if not self._finish_task_escape(frame.task_root, exc):
-                unsafe_closed_cleanup = True
-                raise
-            if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                unsafe_closed_cleanup = True
-                raise
-            if closed_cleanup_guard(exc, context):
-                unsafe_closed_cleanup = True
-                raise
             self._fail_closed_active_bios_evaluator()
             suspended.had_pointer_capture = (
                 suspended.had_pointer_capture
@@ -4151,32 +3666,20 @@ class MegaForthRuntime:
             context.returns.restore(suspended.return_snapshot)
             raise
         finally:
-            host_abort_leave()
-            try:
-                suspended.task_root = frame.task_root
-                if (frame.task_root is not None and cursor is None and self._foreign_tasks._task_root is frame.task_root):
-                    self._foreign_tasks.finish_root(frame.task_root, completed=completed_successfully,
-                                                    primary_error=primary_error)
-            finally:
-                if frame.task_root is not None and not self._foreign_tasks.task_cleanup_safe(frame.task_root):
-                    self._foreign_tasks.mark_task_cleanup_unsafe(frame.task_root)
-                    unsafe_closed_cleanup = True
-                if completed_successfully and (
-                    self._has_older_dispatch(context)
-                    or self._has_active_evaluation(context)
-                ):
-                    preserve_capture_evidence = True
-                if not unsafe_closed_cleanup and not preserve_capture_evidence:
-                    context.returns.restore_pointer_captures(
-                        suspended.capture_checkpoint
-                    )
-                dict.__setitem__(machine_namespace, "_machine_host_turn", None)
-                if primary_error is not None or cursor is None:
-                    dict.__setitem__(machine_namespace, "_machine_selection", None)
-                    self._finish_machine_dispatch(primary_error)
-                active = self._active_dispatches.pop()
-                if active is not frame:
-                    raise AssertionError("active semantic dispatch stack is corrupted")
+            if completed_successfully and (
+                self._has_older_dispatch(context)
+                or self._has_active_evaluation(context)
+            ):
+                preserve_capture_evidence = True
+            if not preserve_capture_evidence:
+                context.returns.restore_pointer_captures(
+                    suspended.capture_checkpoint
+                )
+            if primary_error is not None or cursor is None:
+                self._finish_machine_dispatch(primary_error)
+            active = self._active_dispatches.pop()
+            if active is not frame:
+                raise AssertionError("active semantic dispatch stack is corrupted")
         return cursor
 
     def _execute_guest_fault_guarded(
@@ -4187,12 +3690,6 @@ class MegaForthRuntime:
     ) -> None:
         """Enter a top-level fault callback with ordinary host escape guards."""
 
-        host_abort = self._private_host_abort
-        host_abort_matches = host_abort.matches
-        host_abort_leave = host_abort.leave
-        host_abort.enter()
-        closed_cleanup_guard = self._closed_cleanup_guard
-        unsafe_closed_cleanup = False
         context._require_reusable()
         return_snapshot = context.returns.snapshot()
         capture_checkpoint = context.returns.pointer_capture_checkpoint()
@@ -4209,9 +3706,6 @@ class MegaForthRuntime:
                 fault_request=request,
             )
         except _GuestControlTransfer as transfer:
-            if closed_cleanup_guard(transfer, context):
-                unsafe_closed_cleanup = True
-                raise
             if transfer.context is context:
                 preserve_capture_evidence = True
             else:
@@ -4222,30 +3716,23 @@ class MegaForthRuntime:
                 context.returns.restore(return_snapshot)
             raise
         except ForthAbort as exc:
-            if closed_cleanup_guard(exc, context):
-                unsafe_closed_cleanup = True
-                raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
-            if not host_abort_matches(exc) and exc.bind_origin(context):
+            if exc.bind_origin(context):
                 context.data.clear()
                 context.returns.clear()
             else:
                 context.returns.restore(return_snapshot)
             raise
         except BaseException as exc:
-            if closed_cleanup_guard(exc, context):
-                unsafe_closed_cleanup = True
-                raise
             self._fail_closed_active_bios_evaluator()
             if context.returns.has_pointer_captures_after(capture_checkpoint):
                 context._mark_host_control_fault(exc)
             context.returns.restore(return_snapshot)
             raise
         finally:
-            host_abort_leave()
-            if not unsafe_closed_cleanup and not preserve_capture_evidence:
+            if not preserve_capture_evidence:
                 context.returns.restore_pointer_captures(capture_checkpoint)
             active = self._active_dispatches.pop()
             if active is not frame:
@@ -4286,13 +3773,6 @@ class MegaForthRuntime:
                 f"0x{request.xt:016x}"
             ) from None
 
-        task = self._current_task_root(context)
-        if task is not None and task.active:
-            capture, _scope = task._scope()
-            if capture.fault_target is not target:
-                from simulator.foreign_runtime import ForeignTaskError
-                raise ForeignTaskError("guest fault target is not the exact captured hook")
-            task.require_target(target)
         if request.code is not None:
             context.data.push(u64(request.code))
         context.returns.push_continuation(
@@ -4302,20 +3782,17 @@ class MegaForthRuntime:
         )
         entry_ip = 0
         while True:
-            if task is not None and task.active:
-                task.require_target(target, entry_ip)
             implementation = target.implementation
             if isinstance(implementation, ConstantDefinition):
-                self._task_tick(context, meter, target, entry_ip)
+                meter.tick()
                 context.data.push(implementation.value)
                 self._abort_guest_fault(abort, context)
             if isinstance(implementation, ValueDefinition):
-                self._task_tick(context, meter, target, entry_ip)
-                self._task_access(context, target.body_address, CELL_BYTES, "read")
+                meter.tick()
                 context.data.push(self.memory.read64(target.body_address))
                 self._abort_guest_fault(abort, context)
             if isinstance(implementation, CreatedDefinition):
-                self._task_tick(context, meter, target, entry_ip)
+                meter.tick()
                 context.data.push(target.body_address)
                 if implementation.action is None:
                     self._abort_guest_fault(abort, context)
@@ -4323,10 +3800,9 @@ class MegaForthRuntime:
                 break
             if not isinstance(implementation, PrimitiveDefinition):
                 break
-            self._task_tick(context, meter, target, entry_ip)
+            meter.tick()
             try:
-                with self._task_effect(context):
-                    invocation = self._invoke_primitive(implementation, context)
+                invocation = self._invoke_primitive(implementation, context)
             except _GuestFaultRequest as nested:
                 self._abort_guest_fault(nested.abort, context)
             if invocation is None:
@@ -4342,81 +3818,6 @@ class MegaForthRuntime:
         return target, entry_ip
 
     def _execute_top(
-        self, word, context, meter, **kwargs,
-    ):
-        try:
-            return self._execute_top_inner(word, context, meter, **kwargs)
-        except _GuestControlTransfer:
-            raise
-        except BaseException as failure:
-            task = self._current_task_root(context)
-            if task is not None:
-                try:
-                    self._foreign_tasks.finish_root(task, completed=False, primary_error=failure)
-                except BaseException:
-                    try:
-                        BaseException.add_note(failure, "task transport cleanup also failed")
-                    except BaseException:
-                        pass
-            raise
-
-    def _current_task_root(self, context):
-        engine = self._foreign_tasks
-        if engine._task_root is not None and engine._context is context:
-            return engine._task_root
-        return None
-
-    def _task_tick(self, context, meter, target, ip=0, operation=None):
-        task = self._current_task_root(context)
-        if task is not None and task.active:
-            task.tick(target, ip, operation)
-        else:
-            meter.tick()
-
-    @contextmanager
-    def _task_effect(self, context):
-        original = None
-        try:
-            yield
-        except BaseException as failure:
-            original = failure
-            raise
-        finally:
-            task = self._current_task_root(context)
-            if task is not None:
-                try:
-                    task.reconcile()
-                except BaseException:
-                    if original is None:
-                        raise
-                    # An actual effect's failure keeps its provenance. A
-                    # guest-fault request must not proceed after failed cancel.
-                    if isinstance(original, _GuestFaultRequest):
-                        raise
-                    try:
-                        BaseException.add_note(original, "task effect reconciliation also failed")
-                    except BaseException:
-                        pass
-
-    def _task_access(self, context, address, width, access):
-        task = self._current_task_root(context)
-        if task is not None and task.active:
-            task.require_access(address, width, access)
-
-    def _continue_foreign(self, action, context, meter):
-        while type(action) is ForeignCallbackTarget and action.word is None:
-            action = self._current_task_root(context).callback_return()
-        if type(action) is ForeignMachineCursor:
-            return action
-        if type(action) is ForeignResumeTarget:
-            return None if action.word is None else (action.word, action.ip)
-        if type(action) is not ForeignCallbackTarget:
-            from simulator.foreign_runtime import ForeignTaskError
-            raise ForeignTaskError("task transport returned an unknown semantic target")
-        return self._call_from_colon(action.word, caller=None, return_ip=0,
-                                     context=context, meter=meter, callback_entry=True)
-
-    def _execute_top_inner(
         self,
         word: Word | None,
         context: ExecutionContext,
@@ -4424,13 +3825,10 @@ class MegaForthRuntime:
         *,
         root_id: int,
         fault_request: _GuestFaultRequest | None = None,
-        resume_cursor: _DispatchCursor | ForeignMachineCursor | None = None,
+        resume_cursor: _DispatchCursor | _MachineCursor | None = None,
         allow_idle: bool = False,
         quantum_limit: int | None = None,
-        closed_guard=None,
-    ) -> _DispatchCursor | ForeignMachineCursor | None:
-        if closed_guard is not None:
-            closed_guard.begin(word, root_id)
+    ) -> _DispatchCursor | _MachineCursor | None:
         fault_entry = fault_request is not None
         # A machine routine may yield its host turn only where an IDL could
         # suspend: the outermost dispatch, outside source evaluation.
@@ -4449,14 +3847,6 @@ class MegaForthRuntime:
                 if type(flow) is _MachineCursor:
                     return flow
                 current, ip = flow
-            elif type(resume_cursor) is ForeignMachineCursor:
-                task = self._current_task_root(context)
-                if task is None:
-                    raise ExecutionError("machine cursor lost its original task root")
-                entered = self._continue_foreign(task.resume_machine(resume_cursor), context, meter)
-                if entered is None or type(entered) is ForeignMachineCursor:
-                    return entered
-                current, ip = entered
             else:
                 current = self._resolve_dispatch_word(resume_cursor.xt)
                 if not isinstance(current.implementation, ColonDefinition):
@@ -4489,14 +3879,6 @@ class MegaForthRuntime:
                     target, entry_ip = flow
                     fault_entry = True
                     break
-                if type(implementation) is ForeignDefinition:
-                    entered = self._call_from_colon(target, caller=None, return_ip=0,
-                                                    context=context, meter=meter)
-                    if entered is None or type(entered) is ForeignMachineCursor:
-                        return entered
-                    target, entry_ip = entered
-                    fault_entry = True
-                    break
                 if isinstance(implementation, ConstantDefinition):
                     meter.tick()
                     context.data.push(implementation.value)
@@ -4516,33 +3898,9 @@ class MegaForthRuntime:
                     break
                 if not isinstance(implementation, PrimitiveDefinition):
                     break
-                if closed_guard is not None:
-                    evidence = closed_guard.before_tick(target)
-                    invoke = closed_guard.invoke_primitive
-                    closed_guard.tick()
-                    callback = closed_guard.after_tick(evidence)
-                    result = invoke(target, callback, context)
-                    if result is not None:
-                        from simulator.interop_exports import CallbackExportError
-                        raise CallbackExportError("closed callback primitive returned dynamic control")
-                    closed_guard.completed = True
-                    return
-                exports = getattr(self, "_callback_exports", None)
-                export_guard = (
-                    exports._guard_primitive
-                    if exports is not None and exports._active_context is context
-                    else None
-                )
                 meter.tick()
                 try:
-                    if export_guard is not None:
-                        # Pin this bound authority before accounting can run
-                        # host hooks. Only the dispatcher invokes the checked
-                        # primitive, without translating faults into FAULT-XT!.
-                        callback = export_guard(implementation, context)
-                        invocation = callback(context)
-                    else:
-                        invocation = self._invoke_primitive(implementation, context)
+                    invocation = self._invoke_primitive(implementation, context)
                 except _GuestFaultRequest as request:
                     if request.context is not context:
                         raise
@@ -4577,11 +3935,6 @@ class MegaForthRuntime:
         assert current is not None
 
         while True:
-            if closed_guard is not None:
-                closed_guard.cursor(current, ip)
-            task = self._current_task_root(context)
-            if task is not None and task.active:
-                task.require_target(current, ip)
             definition = current.implementation
             if not isinstance(definition, ColonDefinition):
                 raise ExecutionError("semantic dispatch entered a non-colon word")
@@ -4600,11 +3953,10 @@ class MegaForthRuntime:
                 and meter.steps >= quantum_limit
                 and len(self._active_dispatches) == 1
                 and not self._active_input_states
-                and not (task is not None and task.active)
             ):
                 return _DispatchCursor(current.xt, ip, host_yield=True)
 
-            if closed_guard is None and not (task is not None and task.active) and ip == 0 and self._try_colon_accelerator(
+            if ip == 0 and self._try_colon_accelerator(
                 current,
                 context,
                 meter,
@@ -4639,7 +3991,7 @@ class MegaForthRuntime:
                 ip = int(continuation.ip)
                 continue
 
-            if closed_guard is None and not (task is not None and task.active) and self._native_execution is not None:
+            if self._native_execution is not None:
                 native_quantum = (
                     quantum_limit if allow_idle
                     and len(self._active_dispatches) == 1
@@ -4653,252 +4005,204 @@ class MegaForthRuntime:
                     continue
 
             operation = definition.operations[ip]
-            if closed_guard is not None:
-                evidence = closed_guard.before_tick(current, ip, operation)
-                closed_guard.tick()
-                closed_guard.after_tick(evidence)
-            elif task is not None and task.active:
-                task.tick(current, ip, operation)
-            else:
-                meter.tick()
+            meter.tick()
 
-            effect_failure = None
-            try:
-                if isinstance(operation, Literal):
-                    context.data.push(operation.value)
+            if isinstance(operation, Literal):
+                context.data.push(operation.value)
+                ip += 1
+            elif isinstance(operation, Call):
+                called = self._resolve_dispatch_word(operation.xt)
+                entered = self._call_from_colon(
+                    called,
+                    caller=current,
+                    return_ip=ip + 1,
+                    context=context,
+                    meter=meter,
+                    machine_can_yield=machine_can_yield,
+                    root_id=root_id,
+                )
+                if type(entered) is _MachineCursor:
+                    return entered
+                if entered is _DISPATCH_DONE:
+                    return None
+                if entered is None:
                     ip += 1
-                elif isinstance(operation, Call):
-                    called = (closed_guard.call_target(operation) if closed_guard is not None
-                              else self._resolve_dispatch_word(operation.xt))
-                    entered = self._call_from_colon(
-                        called,
-                        caller=current,
-                        return_ip=ip + 1,
-                        context=context,
-                        meter=meter,
-                        closed_guard=closed_guard,
-                        machine_can_yield=machine_can_yield,
-                        root_id=root_id,
-                    )
-                    if type(entered) is ForeignMachineCursor or type(entered) is _MachineCursor:
-                        return entered
-                    if entered is _DISPATCH_DONE:
-                        return None
-                    if entered is None:
-                        ip += 1
-                    else:
-                        current, ip = entered
-                elif isinstance(operation, CallSelf):
-                    entered = self._call_from_colon(
-                        current,
-                        caller=current,
-                        return_ip=ip + 1,
-                        context=context,
-                        meter=meter,
-                        machine_can_yield=machine_can_yield,
-                        root_id=root_id,
-                    )
-                    if type(entered) is ForeignMachineCursor or type(entered) is _MachineCursor:
-                        return entered
-                    if entered is _DISPATCH_DONE:
-                        return None
-                    if entered is None:
-                        ip += 1
-                    else:
-                        current, ip = entered
-                elif isinstance(operation, StoreValue):
-                    value = context.data.peek()
-                    self._task_access(context, operation.address, CELL_BYTES, "write")
-                    self.memory.write64(operation.address, value)
-                    context.data.pop()
+                else:
+                    current, ip = entered
+            elif isinstance(operation, CallSelf):
+                entered = self._call_from_colon(
+                    current,
+                    caller=current,
+                    return_ip=ip + 1,
+                    context=context,
+                    meter=meter,
+                    machine_can_yield=machine_can_yield,
+                    root_id=root_id,
+                )
+                if type(entered) is _MachineCursor:
+                    return entered
+                if entered is _DISPATCH_DONE:
+                    return None
+                if entered is None:
                     ip += 1
-                elif isinstance(operation, Branch):
+                else:
+                    current, ip = entered
+            elif isinstance(operation, StoreValue):
+                value = context.data.peek()
+                self.memory.write64(operation.address, value)
+                context.data.pop()
+                ip += 1
+            elif isinstance(operation, Branch):
+                ip = operation.target
+            elif isinstance(operation, BranchZero):
+                ip = operation.target if context.data.pop() == 0 else ip + 1
+            elif isinstance(operation, Idle):
+                if not allow_idle:
+                    raise ExecutionError(
+                        "IDL cannot suspend source evaluation or a nested host "
+                        "dispatch; use run_until_blocked on a compiled word"
+                    )
+                self._idle_deadline_ms = None
+                return _DispatchCursor(current.xt, ip + 1)
+            elif isinstance(operation, IdleUntil):
+                deadline = context.data.pop()
+                ip += 1
+                if allow_idle and deadline > self.rtc.uptime_ms:
+                    self._idle_deadline_ms = deadline
+                    return _DispatchCursor(current.xt, ip)
+            elif isinstance(operation, UartReadAttempt):
+                # Native KEY flushes its buffered TX stream before polling.
+                # Hosted UART output is published immediately, so that flush
+                # has no stateful counterpart here.
+                value = self._take_uart_input_byte()
+                if value is None:
+                    context.data.push(0)
+                else:
+                    context.data.push(value)
+                    context.data.push(MASK64)
+                ip += 1
+            elif isinstance(operation, RPush):
+                context.returns.push(context.data.pop())
+                ip += 1
+            elif isinstance(operation, RPop):
+                context.data.push(context.returns.pop())
+                ip += 1
+            elif isinstance(operation, RPeek):
+                context.data.push(context.returns.peek())
+                ip += 1
+            elif isinstance(operation, RPushPair):
+                # Preflight both stacks before consuming either source cell.
+                context.returns.require_push_capacity(2)
+                first, second = context.data.pop_pair("2>R")
+                context.returns.push_pair(first, second)
+                ip += 1
+            elif isinstance(operation, RPopPair):
+                # Shape and destination checks make the cross-stack transfer
+                # fail without partially consuming the ordered pair.
+                first, second = context.returns.peek_pair("2R>")
+                context.data.require_push_capacity(2)
+                context.returns.pop_pair("2R>")
+                context.data.push_pair(first, second)
+                ip += 1
+            elif isinstance(operation, RPeekPair):
+                first, second = context.returns.peek_pair("2R@")
+                context.data.require_push_capacity(2)
+                context.data.push_pair(first, second)
+                ip += 1
+            elif isinstance(operation, Do):
+                index = context.data.pop()
+                limit = context.data.pop()
+                context.returns.enter_do(limit, index)
+                ip += 1
+            elif isinstance(operation, QuestionDo):
+                index = context.data.pop()
+                limit = context.data.pop()
+                if index == limit:
                     ip = operation.target
-                elif isinstance(operation, BranchZero):
-                    ip = operation.target if context.data.pop() == 0 else ip + 1
-                elif isinstance(operation, Idle):
-                    if not allow_idle:
-                        raise ExecutionError(
-                            "IDL cannot suspend source evaluation or a nested host "
-                            "dispatch; use run_until_blocked on a compiled word"
-                        )
-                    self._idle_deadline_ms = None
-                    return _DispatchCursor(current.xt, ip + 1)
-                elif isinstance(operation, IdleUntil):
-                    deadline = context.data.pop()
-                    ip += 1
-                    if allow_idle:
-                        uptime = (self._foreign_tasks.read_task_uptime(task)
-                                  if task is not None and task.active else self.rtc.uptime_ms)
-                    if allow_idle and deadline > uptime:
-                        self._idle_deadline_ms = deadline
-                        return _DispatchCursor(current.xt, ip)
-                elif isinstance(operation, UartReadAttempt):
-                    # Native KEY flushes its buffered TX stream before polling.
-                    # Hosted UART output is published immediately, so that flush
-                    # has no stateful counterpart here.
-                    value = self._take_uart_input_byte()
-                    if value is None:
-                        context.data.push(0)
-                    else:
-                        context.data.push(value)
-                        context.data.push(MASK64)
-                    ip += 1
-                elif isinstance(operation, RPush):
-                    context.returns.push(context.data.pop())
-                    ip += 1
-                elif isinstance(operation, RPop):
-                    context.data.push(context.returns.pop())
-                    ip += 1
-                elif isinstance(operation, RPeek):
-                    context.data.push(context.returns.peek())
-                    ip += 1
-                elif isinstance(operation, RPushPair):
-                    # Preflight both stacks before consuming either source cell.
-                    context.returns.require_push_capacity(2)
-                    first, second = context.data.pop_pair("2>R")
-                    context.returns.push_pair(first, second)
-                    ip += 1
-                elif isinstance(operation, RPopPair):
-                    # Shape and destination checks make the cross-stack transfer
-                    # fail without partially consuming the ordered pair.
-                    first, second = context.returns.peek_pair("2R>")
-                    context.data.require_push_capacity(2)
-                    context.returns.pop_pair("2R>")
-                    context.data.push_pair(first, second)
-                    ip += 1
-                elif isinstance(operation, RPeekPair):
-                    first, second = context.returns.peek_pair("2R@")
-                    context.data.require_push_capacity(2)
-                    context.data.push_pair(first, second)
-                    ip += 1
-                elif isinstance(operation, Do):
-                    index = context.data.pop()
-                    limit = context.data.pop()
+                else:
                     context.returns.enter_do(limit, index)
                     ip += 1
-                elif isinstance(operation, QuestionDo):
-                    index = context.data.pop()
-                    limit = context.data.pop()
-                    if index == limit:
-                        ip = operation.target
-                    else:
-                        context.returns.enter_do(limit, index)
-                        ip += 1
-                elif isinstance(operation, Loop):
-                    ip = operation.target if context.returns.loop() else ip + 1
-                elif isinstance(operation, PlusLoop):
-                    increment = context.data.pop()
-                    ip = (
-                        operation.target
-                        if context.returns.plus_loop(increment)
-                        else ip + 1
+            elif isinstance(operation, Loop):
+                ip = operation.target if context.returns.loop() else ip + 1
+            elif isinstance(operation, PlusLoop):
+                increment = context.data.pop()
+                ip = (
+                    operation.target
+                    if context.returns.plus_loop(increment)
+                    else ip + 1
+                )
+            elif isinstance(operation, Unloop):
+                context.returns.unloop()
+                ip += 1
+            elif isinstance(operation, InstallDoes):
+                latest = self.dictionary.latest_word
+                if latest is None or not isinstance(
+                    latest.implementation,
+                    CreatedDefinition,
+                ):
+                    raise ExecutionError(
+                        "DOES> requires the latest word to be CREATE-family"
                     )
-                elif isinstance(operation, Unloop):
-                    context.returns.unloop()
-                    ip += 1
-                elif isinstance(operation, InstallDoes):
-                    latest = self.dictionary.latest_word
-                    if latest is None or not isinstance(
-                        latest.implementation,
-                        CreatedDefinition,
-                    ):
-                        raise ExecutionError(
-                            "DOES> requires the latest word to be CREATE-family"
-                        )
-                    latest.implementation.action = DoesBodyRef(
-                        source_xt=current.xt,
-                        entry_ip=operation.entry_ip,
-                    )
-                    if self._native_execution is not None:
-                        self._native_execution.invalidate()
-                    ip += 1
-                elif isinstance(operation, RestoreDataStackPointer):
-                    context.data.restore_from_top()
-                    ip += 1
-                elif isinstance(operation, RestoreReturnStackPointer):
-                    pointer = context.data.peek()
-                    context.returns.set_pointer(pointer)
-                    context.data.pop()
-                    ip += 1
-                elif isinstance(operation, PushStringLiteral):
-                    context.data.push_pair(
-                        current.body_address + operation.offset,
-                        operation.length,
-                    )
-                    ip += 1
-                elif isinstance(operation, WriteOutput):
+                latest.implementation.action = DoesBodyRef(
+                    source_xt=current.xt,
+                    entry_ip=operation.entry_ip,
+                )
+                if self._native_execution is not None:
+                    self._native_execution.invalidate()
+                ip += 1
+            elif isinstance(operation, RestoreDataStackPointer):
+                context.data.restore_from_top()
+                ip += 1
+            elif isinstance(operation, RestoreReturnStackPointer):
+                pointer = context.data.peek()
+                context.returns.set_pointer(pointer)
+                context.data.pop()
+                ip += 1
+            elif isinstance(operation, PushStringLiteral):
+                context.data.push_pair(
+                    current.body_address + operation.offset,
+                    operation.length,
+                )
+                ip += 1
+            elif isinstance(operation, WriteOutput):
+                self.write_uart_bytes(operation.payload)
+                ip += 1
+            elif isinstance(operation, AbortIf):
+                if context.data.pop() != 0:
                     self.write_uart_bytes(operation.payload)
-                    ip += 1
-                elif isinstance(operation, AbortIf):
-                    if context.data.pop() != 0:
-                        self.write_uart_bytes(operation.payload)
-                        context.data.clear()
-                        context.returns.clear()
-                        raise ForthAbort(
-                            'Forth ABORT"',
-                            origin_context=context,
+                    context.data.clear()
+                    context.returns.clear()
+                    raise ForthAbort(
+                        'Forth ABORT"',
+                        origin_context=context,
+                    )
+                ip += 1
+            elif isinstance(operation, Return):
+                flow = self._machine_return_flow(context, meter, root_id, machine_can_yield)
+                if flow is not None:
+                    if flow is _DISPATCH_DONE:
+                        return None
+                    if type(flow) is _MachineCursor:
+                        return flow
+                    current, ip = flow
+                    continue
+                continuation = context.returns.pop_continuation()
+                if continuation.fault_abort is not None:
+                    self._abort_guest_fault(continuation.fault_abort, context)
+                if continuation.root:
+                    if continuation.dispatch_id != root_id:
+                        raise _GuestControlTransfer(
+                            continuation.dispatch_id,
+                            context,
                         )
-                    ip += 1
-                elif isinstance(operation, Return):
-                    if task is not None and task.active:
-                        entry = context.returns._peek_entry(0, "return")
-                        if type(entry) is ForeignContinuation:
-                            task.ordinary_return(entry)
-                            entered = self._continue_foreign(task.callback_return(entry), context, meter)
-                            if entered is None or type(entered) is ForeignMachineCursor:
-                                return entered
-                            current, ip = entered
-                            continue
-                    flow = self._machine_return_flow(context, meter, root_id, machine_can_yield)
-                    if flow is not None:
-                        if flow is _DISPATCH_DONE:
-                            return None
-                        if type(flow) is _MachineCursor:
-                            return flow
-                        current, ip = flow
-                        continue
-                    continuation = context.returns.pop_continuation()
-                    if task is not None:
-                        task.ordinary_return(continuation)
-                    if closed_guard is not None:
-                        caller = closed_guard.returned_target(continuation)
-                        if caller is None:
-                            return
-                        current, ip = caller, continuation.ip
-                        continue
-                    if continuation.fault_abort is not None:
-                        self._abort_guest_fault(continuation.fault_abort, context)
-                    if continuation.root:
-                        if continuation.dispatch_id != root_id:
-                            raise _GuestControlTransfer(
-                                continuation.dispatch_id,
-                                context,
-                            )
-                        return
-                    caller = self._resolve_dispatch_word(continuation.xt)
-                    if not isinstance(caller.implementation, ColonDefinition):
-                        raise ExecutionError("continuation does not name a colon word")
-                    current = caller
-                    ip = int(continuation.ip)
-                else:
-                    raise ExecutionError(f"unknown semantic operation {operation!r}")
-            except BaseException as failure:
-                effect_failure = failure
-                raise
-            finally:
-                task = self._current_task_root(context)
-                if task is not None:
-                    try:
-                        task.reconcile()
-                    except BaseException:
-                        if effect_failure is None or isinstance(effect_failure, _GuestFaultRequest):
-                            raise
-                        try:
-                            BaseException.add_note(effect_failure, "task effect reconciliation also failed")
-                        except BaseException:
-                            pass
-
+                    return
+                caller = self._resolve_dispatch_word(continuation.xt)
+                if not isinstance(caller.implementation, ColonDefinition):
+                    raise ExecutionError("continuation does not name a colon word")
+                current = caller
+                ip = int(continuation.ip)
+            else:
+                raise ExecutionError(f"unknown semantic operation {operation!r}")
 
     def _try_colon_accelerator(
         self,
@@ -4930,116 +4234,58 @@ class MegaForthRuntime:
         return_ip: int,
         context: ExecutionContext,
         meter: _StepMeter,
-        closed_guard=None,
-        callback_entry=False,
-        machine_can_yield=False,
-        root_id=0,
-    ) -> tuple[Word, int] | ForeignMachineCursor | _MachineCursor | _DispatchDone | None:
-        if closed_guard is not None:
-            implementation = target.implementation
-            if type(implementation) is PrimitiveDefinition:
-                evidence = closed_guard.before_tick(target, caller=caller, call_ip=return_ip - 1)
-                invoke = closed_guard.invoke_primitive
-                closed_guard.tick()
-                callback = closed_guard.after_tick(evidence)
-                result = invoke(target, callback, context, caller=caller, call_ip=return_ip - 1)
-                if result is not None:
-                    from simulator.interop_exports import CallbackExportError
-
-                    raise CallbackExportError("closed callback primitive returned dynamic control")
-                return None
-            closed_guard.cursor(target, 0)
-            context.returns.push_continuation(caller.xt, return_ip)
-            return target, 0
-
+        machine_can_yield: bool = False,
+        root_id: int = 0,
+    ) -> tuple[Word, int] | _MachineCursor | _DispatchDone | None:
         while True:
-            task = self._current_task_root(context)
-            if task is not None and task.active:
-                task.require_target(target)
             implementation = target.implementation
             if type(implementation) is RoutineDefinition:
                 meter.tick()
-                resume = ROUTINE_RETURN if callback_entry else RoutineResume(caller, return_ip)
-                return self._machine_call(target, context, meter, resume, root_id, machine_can_yield)
-            if type(implementation) is ForeignDefinition:
-                if task is not None and task.active:
-                    task.tick(target)
-                else:
-                    meter.tick()
-                task = self._foreign_tasks.root_for(context, meter, target)
-                # A directly selected machine callback retains the parent's
-                # completion role, rather than fabricating a semantic caller.
-                resume = ForeignCallbackTarget(None) if callback_entry else ForeignResumeTarget(caller, return_ip)
-                action = task.begin(target, resume)
-            elif isinstance(implementation, ColonDefinition):
-                if not callback_entry:
-                    context.returns.push_continuation(caller.xt, return_ip)
-                return target, 0
-            else:
-                if not isinstance(implementation, (ConstantDefinition, ValueDefinition,
-                                                    CreatedDefinition, PrimitiveDefinition)):
-                    raise ExecutionError(f"word {target.name!r} is not executable")
-                if task is not None and task.active:
-                    task.tick(target)
-                else:
-                    meter.tick()
-                invocation = None
-                try:
-                    if task is None or not task.active:
-                        # Preserve the ordinary call path without allocating
-                        # a task effect context manager for each primitive.
-                        if isinstance(implementation, ConstantDefinition):
-                            context.data.push(implementation.value)
-                        elif isinstance(implementation, ValueDefinition):
-                            context.data.push(self.memory.read64(target.body_address))
-                        elif isinstance(implementation, CreatedDefinition):
-                            context.data.push(target.body_address)
-                        elif isinstance(implementation, PrimitiveDefinition):
-                            invocation = self._invoke_primitive(implementation, context)
-                        else:
-                            raise ExecutionError(f"word {target.name!r} is not executable")
-                    else:
-                        with self._task_effect(context):
-                            if isinstance(implementation, ConstantDefinition):
-                                context.data.push(implementation.value)
-                            elif isinstance(implementation, ValueDefinition):
-                                self._task_access(context, target.body_address, CELL_BYTES, "read")
-                                context.data.push(self.memory.read64(target.body_address))
-                            elif isinstance(implementation, CreatedDefinition):
-                                context.data.push(target.body_address)
-                            elif isinstance(implementation, PrimitiveDefinition):
-                                invocation = self._invoke_primitive(implementation, context)
-                            else:
-                                raise ExecutionError(f"word {target.name!r} is not executable")
-                except _GuestFaultRequest as request:
-                    if request.context is not context or self._has_older_dispatch(context):
-                        raise
-                    return self._begin_guest_fault(request, context, meter)
-                if isinstance(implementation, CreatedDefinition) and implementation.action is not None:
-                    entered = self._resolve_does_entry(implementation.action)
-                    if task is not None and task.active:
-                        task.require_target(*entered)
-                    if not callback_entry:
-                        context.returns.push_continuation(caller.xt, return_ip)
-                    return entered
-                if invocation is not None:
-                    if not isinstance(invocation, Invoke):
-                        raise ExecutionError("primitive returned an invalid control result")
-                    target = self._resolve_dispatch_word(invocation.xt)
-                    continue
-                if not callback_entry:
+                return self._machine_call(
+                    target, context, meter, RoutineResume(caller, return_ip),
+                    root_id, machine_can_yield,
+                )
+            if isinstance(implementation, ConstantDefinition):
+                meter.tick()
+                context.data.push(implementation.value)
+                return None
+            if isinstance(implementation, ValueDefinition):
+                meter.tick()
+                context.data.push(self.memory.read64(target.body_address))
+                return None
+            if isinstance(implementation, CreatedDefinition):
+                meter.tick()
+                context.data.push(target.body_address)
+                if implementation.action is None:
                     return None
-                action = task.callback_return()
-            while type(action) is ForeignCallbackTarget and action.word is None:
-                action = task.callback_return()
-            if type(action) is ForeignMachineCursor:
-                return action
-            if type(action) is ForeignResumeTarget:
-                return None if action.word is None else (action.word, action.ip)
-            if type(action) is not ForeignCallbackTarget:
-                raise ExecutionError("task transport returned invalid semantic control")
-            target = action.word
-            callback_entry = True
+                entered = self._resolve_does_entry(implementation.action)
+                context.returns.push_continuation(caller.xt, return_ip)
+                return entered
+            if not isinstance(implementation, PrimitiveDefinition):
+                break
+            meter.tick()
+            try:
+                invocation = self._invoke_primitive(implementation, context)
+            except _GuestFaultRequest as request:
+                if request.context is not context:
+                    raise
+                if self._has_older_dispatch(context):
+                    raise
+                return self._begin_guest_fault(
+                    request,
+                    context,
+                    meter,
+                )
+            if invocation is None:
+                return None
+            if not isinstance(invocation, Invoke):
+                raise ExecutionError("primitive returned an invalid control result")
+            target = self._resolve_dispatch_word(invocation.xt)
+
+        if not isinstance(target.implementation, ColonDefinition):
+            raise ExecutionError(f"word {target.name!r} is not executable")
+        context.returns.push_continuation(caller.xt, return_ip)
+        return target, 0
 
     def _machine_call(self, target, context, meter, resume, root_id, can_yield):
         owner = self._machine_owner

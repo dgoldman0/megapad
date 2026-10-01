@@ -11,9 +11,9 @@ from dataclasses import replace
 import pytest
 
 from asm import assemble
+from hybrid.manifest import RoutineDeclaration
 from hybrid.runtime import HybridRuntime
 from hybrid.session import HybridSession, HybridSharedMachine
-from hybrid.task_adapter import NativeTaskAdapter
 from rich_terminal.driver import DriverLimits
 from rich_terminal.retained_model import RetainedFeature
 from rich_terminal.retained_scene import ControlKind, ControlState, ObjectBounds
@@ -25,14 +25,11 @@ from rich_terminal.semantic_fields import (
     FieldContent, FieldFlag, FieldKind, FieldRect, encode_field_content,
 )
 from rich_terminal.transport import EgressWatermarks, HostPortLimits
-from shared.foreign_abi import ForeignSignatureV1, ForeignStateV1
-from shared.hybrid_abi import RoutineImageV1
 from shared.session import RichTerminalSessionConfig
 from shared_session import (
     SessionServer, display_offer_from_wire, display_scope_to_wire,
 )
-from simulator.foreign_cursor import ForeignMachineCursor
-from simulator.memory import EXTERNAL_BASE
+from simulator.runtime import _MachineCursor
 from tests.simulator.test_kdos_exceptions import _load_exceptions
 from tests.test_rich_terminal_dual_backend import (
     LIVE_HANDSHAKE_SCENARIO_SOURCE, ONE_CORE_UART_LOCK_SHIMS,
@@ -173,9 +170,9 @@ CREATE HR-RECORDS 256 ALLOT
 
 
 @pytest.mark.parametrize("executor", ("python", "native"))
-@pytest.mark.parametrize("machine_profile", ("private-sync", "task-quantum1"))
+@pytest.mark.parametrize("machine_quantum", (None, 1))
 def test_hybrid_retained_publication_ack_and_guest_control_events(
-    tmp_path, executor, machine_profile,
+    tmp_path, executor, machine_quantum,
 ):
     pytest.importorskip("_mp64_accel")
     if executor == "native":
@@ -183,47 +180,26 @@ def test_hybrid_retained_publication_ack_and_guest_control_events(
     hybrid = HybridRuntime.create(
         executor=executor,
         geometry={"bank0_size": 1 << 20, "external_size": 1 << 20},
-        dispatch_instruction_limit=100,
     )
     runtime = hybrid.semantic
     server = None
-    adapter = None
+    yields = machine_quantum is not None
     try:
-        if machine_profile == "task-quantum1":
-            # Core installation remains in Bank0. Prepared machine code and
-            # the complete guest module share an external dictionary outside
-            # both main-stack allocations.
-            base = EXTERNAL_BASE + 0x1000
-            runtime.configure_dictionary_bounds(
-                base, EXTERNAL_BASE + (1 << 20), runtime.main_context,
-            )
-            runtime.allot_dictionary(base - runtime.dictionary.here, runtime.main_context)
         _load_exceptions(runtime)
         runtime.evaluate(
             ONE_CORE_UART_LOCK_SHIMS + _rich_terminal_module_source(),
             source_name="hybrid-retained:complete-rich-terminal.f",
             step_budget=SIMULATOR_SOURCE_MAX_STEPS,
         )
-        code = bytes(assemble("inc r4\nret.l"))
-        if machine_profile == "task-quantum1":
-            adapter = NativeTaskAdapter(hybrid)
-            with adapter.registration_batch() as batch:
-                batch.define_operation(
-                    "H-INC", code, ForeignSignatureV1(input_cells=1, output_cells=1),
-                    max_instructions=16, max_callbacks=0,
-                )
-        else:
-            hybrid.register_routine_v1(RoutineImageV1(
-                name="H-INC", code=code, entry_offset=0,
-                input_cells=1, output_cells=1, buffers=(), max_instructions=16,
-                return_stack_cells=16,
-            ))
+        hybrid.register(RoutineDeclaration(
+            "H-INC", bytes(assemble("inc r4\nret.l")), input_cells=1, output_cells=1,
+        ))
         runtime.evaluate(_guest_source(), source_name="hybrid-retained-caller.f")
         assert runtime.drain_uart_output() == b""
         session = HybridSession(
             hybrid, "HR-ROOT", cols=2, rows=2,
             semantic_quantum_steps=16_384,
-            machine_quantum_instructions=1 if adapter is not None else None,
+            machine_quantum_instructions=machine_quantum,
             rich_terminal=_configuration(),
         )
         backend = session.backend
@@ -304,30 +280,25 @@ def test_hybrid_retained_publication_ack_and_guest_control_events(
         assert presented["presented"] and presented["status"] == "presented"
         assert session.last_acknowledged_display_offer == (offer.offer_id, offer.scope)
 
-        if adapter is None:
+        if not yields:
             command(6)
         else:
+            # One machine instruction per host turn: INC runs, then the
+            # session suspends with the routine's RET still to come.
             start_command(6)
             advance_until(lambda: hybrid.machine_instructions == 1)
             suspended = runtime._suspended_execution
             cursor = suspended.cursor
-            receipt = adapter.last_receipt()
-            assert type(cursor) is ForeignMachineCursor
-            assert cursor.receipt is receipt and cursor.host_yield is True
-            assert receipt.state is ForeignStateV1.YIELDED
-            assert (receipt.sequence, receipt.root_entries, receipt.root_instructions,
-                    receipt.root_cycles, receipt.root_callbacks) == (2, 1, 1, 1, 0)
-            assert adapter.active_invocations == (cursor.invocation_id,)
+            assert type(cursor) is _MachineCursor and cursor.host_yield is True
+            assert hybrid.parked
             assert _stored_cell(runtime, "HR-DONE") == 5
             assert _stored_cell(runtime, "HR-MACHINE-VALUE") == 0
             context = runtime.main_context
             parked_stacks = (context.data.snapshot(), context.returns.snapshot())
             parked_steps = session.semantic_steps_total
-            parked_token = cursor.operation_token
-            parked_status = server.dispatch("status", {})["task_execution"]
+            parked_status = server.dispatch("status", {})["machine_execution"]
             assert parked_status["quantum_instructions"] == 1
-            assert parked_status["composite_suspension"] is True
-            assert parked_status["active_depth"] == 1
+            assert (parked_status["instructions"], parked_status["transitions"]) == (1, 1)
         assert session.last_acknowledged_display_offer == (offer.offer_id, offer.scope)
 
         events_before = server.dispatch("status", {})["external_events_applied"]
@@ -343,13 +314,13 @@ def test_hybrid_retained_publication_ack_and_guest_control_events(
         assert server.dispatch("send_control_event", activation, connection_id=CONNECTION) == {
             "status": "progress", "accepted_events": 1,
         }
-        if adapter is not None:
-            # Enhanced input is queued while INC's exact runnable cursor is
-            # retained. Admission and status must not resume RET, rotate its
-            # token/receipt, consume the event or touch the guest stacks.
+        if yields:
+            # Enhanced input is queued while the routine's cursor is retained.
+            # Admission and status must not resume RET, consume the event or
+            # touch the guest stacks.
             assert runtime._suspended_execution is suspended
-            assert suspended.cursor is cursor and cursor.operation_token is parked_token
-            assert adapter.last_receipt() is receipt
+            assert suspended.cursor is cursor and hybrid.parked
+            assert hybrid.machine_instructions == 1
             assert session.semantic_steps_total == parked_steps
             assert (context.data.snapshot(), context.returns.snapshot()) == parked_stacks
             assert server.dispatch("status", {})["external_events_applied"] == events_before
@@ -359,15 +330,8 @@ def test_hybrid_retained_publication_ack_and_guest_control_events(
         assert server.dispatch("status", {})["external_events_applied"] == events_before + 1
         assert _stored_cell(runtime, "HR-MACHINE-VALUE") == 42
         assert hybrid.transitions == 1 and hybrid.machine_instructions == 2
-        if adapter is not None:
-            final_receipt = adapter.last_receipt()
-            assert final_receipt.state is ForeignStateV1.RETURNED
-            assert final_receipt.root_id == receipt.root_id
-            assert final_receipt.invocation_id == receipt.invocation_id
-            assert (final_receipt.sequence, final_receipt.root_entries,
-                    final_receipt.root_instructions, final_receipt.root_cycles,
-                    final_receipt.root_callbacks) == (3, 1, 2, 3, 0)
-            assert adapter.active_invocations == ()
+        assert hybrid.machine_segments == (2 if yields else 1)
+        assert not hybrid.parked
         adjustment = dict(proof, owner_id=OWNER, owner_generation=GENERATION,
                           control_id=FIELD_ID, modifiers=2,
                           event_kind=int(ControlEventKind.ADJUST),
@@ -377,10 +341,7 @@ def test_hybrid_retained_publication_ack_and_guest_control_events(
         }
         advance_until(lambda: _stored_cell(runtime, "HR-EVENT-COUNT") == 2)
         assert server.dispatch("status", {})["external_events_applied"] == events_before + 2
-        if adapter is not None:
-            assert adapter.last_receipt() is final_receipt
-            assert adapter.active_invocations == ()
-            assert hybrid.machine_cycles == 3 and hybrid.callback_requests == 0
+        assert hybrid.machine_cycles == 3 and hybrid.callback_requests == 0
         records = runtime.find("HR-RECORDS").body_address
         assert tuple(runtime.memory.read64(records + offset) for offset in range(0, 128, 8)) == (
             OWNER, GENERATION, TASK_ID, int(ControlEventKind.ACTIVATE), 5,

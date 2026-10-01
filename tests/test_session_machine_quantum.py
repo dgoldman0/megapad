@@ -4,7 +4,6 @@ import pytest
 from types import SimpleNamespace
 
 from rich_terminal import AdmissionStatus
-from shared.foreign_abi import MAX_ROOT_INSTRUCTIONS
 from simulator.ir import Idle, Return
 from simulator.rich_terminal_host import SemanticBatchStop, SimulatorSessionBackend
 from simulator.runtime import MegaForthRuntime
@@ -24,7 +23,7 @@ class IntegerSubclass(int):
 @pytest.mark.parametrize("value,error", (
     (True, TypeError), (1.0, TypeError), ("1", TypeError),
     (Indexable(), TypeError), (IntegerSubclass(1), TypeError),
-    (0, ValueError), (-1, ValueError), (MAX_ROOT_INSTRUCTIONS + 1, ValueError),
+    (0, ValueError), (-1, ValueError),
 ))
 def test_invalid_machine_quantum_does_not_claim_runtime_owner(value, error):
     runtime = MegaForthRuntime(execution_backend="python")
@@ -35,7 +34,7 @@ def test_invalid_machine_quantum_does_not_claim_runtime_owner(value, error):
     runtime.evaluate(b"1 DROP")
 
 
-@pytest.mark.parametrize("quantum", (None, 1, MAX_ROOT_INSTRUCTIONS))
+@pytest.mark.parametrize("quantum", (None, 1, 1 << 40))
 def test_session_forwards_machine_quantum_only_at_original_dispatch(monkeypatch, quantum):
     runtime = MegaForthRuntime(execution_backend="python")
     runtime.evaluate(b": POLL BEGIN KEY? UNTIL KEY ;")

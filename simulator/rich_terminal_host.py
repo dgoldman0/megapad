@@ -18,7 +18,6 @@ from enum import Enum
 from typing import Callable, Iterator
 
 from rich_terminal.transport import HostPortLimits, TerminalHostLease
-from shared.foreign_abi import MAX_ROOT_INSTRUCTIONS
 from shared.rich_terminal_host import RichTerminalHostHooks, SharedRichTerminalHost
 from simulator.errors import ExecutionError
 from simulator.runtime import (
@@ -134,9 +133,8 @@ class SimulatorSessionBackend:
         if machine_quantum_instructions is not None:
             if type(machine_quantum_instructions) is not int:
                 raise TypeError("machine_quantum_instructions must be an exact integer or None")
-            if not 1 <= machine_quantum_instructions <= MAX_ROOT_INSTRUCTIONS:
-                raise ValueError(
-                    f"machine_quantum_instructions must be in 1..{MAX_ROOT_INSTRUCTIONS}")
+            if machine_quantum_instructions < 1:
+                raise ValueError("machine_quantum_instructions must be positive")
         self._machine_quantum_instructions = machine_quantum_instructions
         self._runtime = runtime
         self._legacy_output_sink = legacy_output_sink
@@ -187,31 +185,15 @@ class SimulatorSessionBackend:
         with self._boundary_lock:
             return isinstance(self._suspension, BlockedExecution)
 
-    def _poll_idle_runtime(self, attribute):
-        with self._boundary_lock:
-            suspended = self._suspension
-            task_pending = (
-                suspended is not None
-                and self._runtime.task_suspension_pending(suspended.suspension)
-            )
-            if not task_pending:
-                return getattr(self._runtime, attribute)
-            try:
-                with self._runtime._session_owner_scope(self._owner_token):
-                    return getattr(self._runtime, attribute)
-            except BaseException as error:
-                # Runtime proof failure revokes its task continuation. Retire
-                # the backend's copy too, without replacing the first error.
-                self._cancel_failed_resume(suspended, error)
-                raise
-
     @property
     def idle_wake_due(self) -> bool:
-        return self._poll_idle_runtime("idle_wake_due")
+        with self._boundary_lock:
+            return self._runtime.idle_wake_due
 
     @property
     def idle_wake_delay_s(self) -> float | None:
-        return self._poll_idle_runtime("idle_wake_delay_s")
+        with self._boundary_lock:
+            return self._runtime.idle_wake_delay_s
 
     @property
     def closed(self) -> bool:

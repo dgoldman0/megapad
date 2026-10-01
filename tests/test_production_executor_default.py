@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import json
 import os
 from pathlib import Path
 import subprocess
@@ -12,7 +11,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from shared.hybrid_abi import HYBRID_ABI
 from shared.session_options import configured_production_executor
 from tests.simulator.test_image_bootstrap import _boot_image
 
@@ -58,13 +56,6 @@ def production_server(request, tmp_path):
     arguments = ["--storage", str(image), "--socket", str(tmp_path / "session.sock"),
                  "--ram-kib", "64", "--ext-mem-mib", "0", "--vram-mib", "0",
                  "--semantic-step-budget", "10000"]
-    if mode == "hybrid":
-        manifest = tmp_path / "routines.json"
-        manifest.write_text(json.dumps({
-            "abi": HYBRID_ABI, "version": 1,
-            "dispatch_instruction_limit": 1000, "routines": [],
-        }))
-        arguments += ["--hybrid-routines", str(manifest)]
     return module, arguments
 
 
@@ -138,8 +129,8 @@ def test_embedded_hybrid_runtime_retains_python_default(monkeypatch):
     monkeypatch.setitem(sys.modules, "_megaforth_native", None)
     owner = HybridRuntime.create(geometry={"bank0_size": 65536, "external_size": 0})
     try:
-        owner.evaluate(b"2 3 +")
-        assert owner.executor == "python"
+        owner.semantic.evaluate(b"2 3 +")
+        assert owner.semantic.execution_backend == "python"
         assert owner.semantic.main_context.data.snapshot() == (5,)
     finally:
         owner.close()

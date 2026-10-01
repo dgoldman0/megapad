@@ -1,41 +1,45 @@
-"""Start a shared semantic session with declared bounded MP64 routines."""
+"""Start a shared semantic session that also runs declared machine routines."""
 
 from __future__ import annotations
 
 import argparse
 import signal
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from hybrid.manifest import load_manifest
 from hybrid.runtime import HybridRuntime
 from hybrid.session import HybridSession, HybridSharedMachine
-from shared.hybrid_abi import RoutineManifestV2, RoutineManifestV3
-from shared.hybrid_closed import (
-    PolicyBranchV3, PolicyBranchZeroV3, PolicyCallV3, PolicyCoreCallV3,
-    PolicyLiteralV3, PolicyReturnV3, prove_policies,
-)
-from shared.hybrid_nested import PolicyMachineCallV4, RoutineManifestV4
-from shared.hybrid_services import RoutineManifestV5
 from shared.session_options import configured_production_executor
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapPreparation, prepare_image_bootstrap
-from simulator.ir import Branch, BranchZero, Call, Literal, Return
 from simulator.platform import create_one_core_address_space
+from simulator.server import build_argument_parser as semantic_argument_parser
 from simulator.session import configured_semantic_quantum_steps
 from simulator.storage import HostedStorageService
-from simulator.server import build_argument_parser as semantic_argument_parser
+
+
+# A host turn runs at most this many machine instructions before the session
+# can serve its terminal; an unbounded routine still finishes over many turns.
+DEFAULT_MACHINE_QUANTUM_INSTRUCTIONS = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
 class PreparedHybridServer:
-    """One validated routine registry, prepared image, and server authority."""
+    """One registered routine set, prepared image, and server authority."""
 
     hybrid: HybridRuntime
     preparation: ImageBootstrapPreparation
     machine: HybridSharedMachine
     server: SessionServer
+
+
+def _positive(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -45,142 +49,32 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--hybrid-routines",
         type=Path,
-        required=True,
         metavar="MANIFEST",
-        help="version 1 through 5 JSON manifest of bounded integer machine routines",
+        help="JSON manifest of machine routines to define before the image boots",
+    )
+    parser.add_argument(
+        "--machine-quantum-instructions",
+        type=_positive,
+        default=DEFAULT_MACHINE_QUANTUM_INSTRUCTIONS,
+        metavar="N",
+        help="machine instructions per host turn (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--machine-instruction-budget",
+        type=_positive,
+        metavar="N",
+        help="stop a dispatch after this many machine instructions (default: no limit)",
     )
     parser.epilog = (
-        "Hybrid mode requires the native MP64 interpreter. Machine routines "
-        "use declared buffers and fixed call bounds. Version 2 admits declared "
-        "MIN/MAX/ABS/AND/OR/XOR callbacks; version 3 adds declared closed integer "
-        "policies; version 4 adds bounded distinct-registration nested callbacks. "
-        "Version 5 adds private scalar FP/FPCSR service callbacks. "
-        "Machine MMIO, arbitrary callbacks, "
-        "native BIOS boot, and multicore execution are unavailable."
+        "Hybrid mode runs Forth semantically and declared MP64 routines on a native "
+        "core that shares its memory and return stack. Routines reach memory through "
+        "argument-named buffers and call Forth words at declared sites."
     )
     return parser
 
 
-def _install_manifest_policies(hybrid: HybridRuntime, manifest: RoutineManifestV3) -> None:
-    """Install a proved table only into this server's fresh, unexposed owner.
-
-    Failure closes the whole preparation owner. This is deliberately not a
-    caller-owned-runtime publication API with an implied batch transaction.
-    """
-    runtime = hybrid.semantic
-    policies = tuple(replace(policy, operations=tuple(
-        replace(operation) for operation in policy.operations
-    )) for policy in manifest.policies)
-    proofs = prove_policies(policies)
-    by_id = {policy.policy_id: policy for policy in policies}
-    with runtime._session_owner_lock:
-        runtime._require_session_owner_access("install hybrid manifest policies")
-        runtime._require_no_suspension("install hybrid manifest policies")
-        if runtime._active_dispatches or runtime._active_input_states:
-            raise RuntimeError("manifest policies require a fresh idle runtime")
-        # Preflight the complete namespace and original primitive identities
-        # before publishing any policy. Later source may shadow these Words;
-        # callback capture retains the originals, never a fresh name lookup.
-        for policy in policies:
-            if runtime.find(policy.name) is not None:
-                raise ValueError(f"manifest policy name already exists: {policy.name}")
-        core = {name: runtime.callback_policy_core_xt(name)
-                for name in sorted({name for proof in proofs for name in proof.core_names})}
-        defined = {}
-        for proof in proofs:
-            policy = by_id[proof.policy_id]
-            operations = []
-            for operation in policy.operations:
-                kind = type(operation)
-                if kind is PolicyLiteralV3:
-                    lowered = Literal(operation.value)
-                elif kind is PolicyCoreCallV3:
-                    lowered = Call(core[operation.name])
-                elif kind is PolicyCallV3:
-                    lowered = Call(defined[operation.policy_id].xt)
-                elif kind is PolicyBranchV3:
-                    lowered = Branch(operation.target)
-                elif kind is PolicyBranchZeroV3:
-                    lowered = BranchZero(operation.target)
-                elif kind is PolicyReturnV3:
-                    lowered = Return()
-                else:
-                    raise TypeError("manifest policy contains an unsupported operation")
-                operations.append(lowered)
-            defined[policy.policy_id] = runtime.define_colon(policy.name, tuple(operations))
-
-
-def _install_nested_manifest(hybrid: HybridRuntime, manifest: RoutineManifestV4) -> None:
-    """Publish a proved graph only into this fresh, unexposed preparation owner.
-
-    The loader's dependency order is diagnostic. Runtime registration captures
-    and proves the exact newly published static Words independently; no graph
-    ID, copied proof or source-evaluated placeholder grants child authority.
-    """
-    if type(manifest) is not RoutineManifestV4:
-        raise TypeError("nested startup requires a RoutineManifestV4")
-    RoutineManifestV4.__post_init__(manifest)
-    exports = {export.export_id: replace(export) for export in manifest.exports}
-    manifest = replace(
-        manifest,
-        policies=tuple(replace(policy, operations=tuple(replace(operation)
-                       for operation in policy.operations)) for policy in manifest.policies),
-        exports=tuple(exports.values()),
-        routines=tuple(replace(image, callbacks=tuple(replace(
-            site, export=exports[site.export.export_id]) for site in image.callbacks))
-            for image in manifest.routines),
-    )
-    graph = manifest.graph_proof()
-    policies = {policy.policy_id: policy for policy in manifest.policies}
-    routines = {image.routine_id: image for image in manifest.routines}
-    runtime = hybrid.semantic
-    with runtime._session_owner_lock:
-        runtime._require_session_owner_access("install nested hybrid manifest")
-        runtime._require_no_suspension("install nested hybrid manifest")
-        if runtime._active_dispatches or runtime._active_input_states:
-            raise RuntimeError("nested manifest publication requires a fresh idle runtime")
-        if getattr(hybrid, "nested_callback_abi_available", False) is not True:
-            raise RuntimeError("hybrid nested callbacks require full semantic profile v4 and native transport v3")
-        # Check the complete fresh namespace before even the earliest child
-        # is published. Existing V1/V2/V3 startup keeps its original rules.
-        for value in (*manifest.policies, *manifest.routines):
-            if runtime.find(value.name) is not None:
-                raise ValueError(f"nested manifest name already exists: {value.name}")
-        core_names = {name for proof in graph.policy_proofs for name in proof.core_names}
-        core_names.update(export.name for export in manifest.exports
-                          if export.effect == "integer_leaf")
-        core = {name: runtime.callback_policy_core_xt(name) for name in sorted(core_names)}
-        defined_policies, defined_routines = {}, {}
-        for node in graph.publication_order:
-            if node.kind == "routine":
-                defined_routines[node.node_id] = hybrid.register_routine_v4(routines[node.node_id])
-                continue
-            policy = policies[node.node_id]
-            operations = []
-            for operation in policy.operations:
-                kind = type(operation)
-                if kind is PolicyLiteralV3:
-                    lowered = Literal(operation.value)
-                elif kind is PolicyCoreCallV3:
-                    lowered = Call(core[operation.name])
-                elif kind is PolicyCallV3:
-                    lowered = Call(defined_policies[operation.policy_id].xt)
-                elif kind is PolicyMachineCallV4:
-                    lowered = Call(defined_routines[operation.routine_id].xt)
-                elif kind is PolicyBranchV3:
-                    lowered = Branch(operation.target)
-                elif kind is PolicyBranchZeroV3:
-                    lowered = BranchZero(operation.target)
-                elif kind is PolicyReturnV3:
-                    lowered = Return()
-                else:
-                    raise TypeError("nested manifest contains an unsupported operation")
-                operations.append(lowered)
-            defined_policies[node.node_id] = runtime.define_colon(policy.name, tuple(operations))
-
-
 def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
-    """Validate every routine before publication, then prepare the boot image."""
+    """Load the routines, define them, then prepare the boot image."""
 
     if (
         args.retained_terminal_policy is not None
@@ -192,13 +86,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         raise ValueError(f"storage image does not exist: {storage_path}")
     quantum_steps = configured_semantic_quantum_steps(args.semantic_quantum_steps)
     executor = configured_production_executor(args.executor)
-    # The loader resolves and validates all images before any runtime, routine
-    # binding, boot source, or socket is made visible.
-    manifest = load_manifest(args.hybrid_routines)
-    closed_manifest = type(manifest) is RoutineManifestV3
-    nested_manifest = type(manifest) is RoutineManifestV4
-    service_manifest = type(manifest) is RoutineManifestV5
-    callback_manifest = type(manifest) in (RoutineManifestV2, RoutineManifestV3, RoutineManifestV4, RoutineManifestV5)
+    # Every image is read and checked before any runtime or socket exists.
+    manifest = None if args.hybrid_routines is None else load_manifest(args.hybrid_routines)
     rich_terminal = None
     if args.rich_terminal_policy is not None:
         rich_terminal = args.rich_terminal_policy.configuration(
@@ -218,44 +107,13 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
         executor=executor,
         memory=memory,
         storage=storage,
-        dispatch_instruction_limit=manifest.dispatch_instruction_limit,
-        **({"require_nested_callbacks": True} if nested_manifest else {}),
-        **({"require_service_callbacks": True} if service_manifest else {}),
-        **({
-            "dispatch_callback_limit": manifest.dispatch_callback_limit,
-            "dispatch_callback_semantic_limit": manifest.dispatch_callback_semantic_limit,
-        } if callback_manifest else {}),
+        machine_instruction_budget=args.machine_instruction_budget,
     )
     session = None
     try:
-        if service_manifest and getattr(hybrid, "service_callback_abi_available", False) is not True:
-            raise RuntimeError("hybrid scalar callbacks require qualified private scalar services and native transport v2")
-        if nested_manifest and getattr(hybrid, "nested_callback_abi_available", False) is not True:
-            raise RuntimeError(
-                "hybrid nested callbacks require full semantic profile v4 and native transport v3"
-            )
-        if closed_manifest and not hybrid.closed_callback_abi_available:
-            raise RuntimeError(
-                "hybrid closed callbacks require semantic profile v3 and "
-                "a matching _mp64_accel v2; run make build"
-            )
-        if callback_manifest and not hybrid.callback_abi_available:
-            raise RuntimeError("hybrid callbacks require a matching _mp64_accel v2; run make build")
-        # Core BIOS vocabulary already exists. Source compilation and autoexec
-        # can now resolve the exact declared words through ordinary lookup.
-        if nested_manifest:
-            _install_nested_manifest(hybrid, manifest)
-        elif closed_manifest:
-            _install_manifest_policies(hybrid, manifest)
-        for image in (() if nested_manifest else manifest.routines):
-            if service_manifest:
-                hybrid.register_routine_v5(image)
-            elif closed_manifest:
-                hybrid.register_routine_v3(image)
-            elif callback_manifest:
-                hybrid.register_routine_v2(image)
-            else:
-                hybrid.register_routine_v1(image)
+        # Boot source and autoexec can call the routines by name.
+        if manifest is not None:
+            hybrid.register_manifest(manifest)
         preparation = prepare_image_bootstrap(
             memory=memory,
             storage=storage,
@@ -275,8 +133,8 @@ def prepare_server(args: argparse.Namespace) -> PreparedHybridServer:
                 else args.semantic_step_budget - preparation.autoexec_semantic_steps
             ),
             semantic_quantum_steps=quantum_steps,
+            machine_quantum_instructions=args.machine_quantum_instructions,
             rich_terminal=rich_terminal,
-            manifest_abi_version=manifest.version,
         )
         machine = HybridSharedMachine(session)
         machine.paused = args.paused
@@ -310,14 +168,15 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, stop)
     try:
         server.start()
+        routines = ", ".join(routine.name for routine in prepared.hybrid.registered_routines)
         print(f"[shared] socket:  {server.socket_path}", flush=True)
         print("[shared] backend: hybrid", flush=True)
         print("[shared] clock:   realtime", flush=True)
         print(f"[shared] image:   {args.storage.resolve()}", flush=True)
-        print(f"[shared] routines: {args.hybrid_routines.resolve()}", flush=True)
+        print(f"[shared] routines: {routines or 'none'}", flush=True)
         print(
             f"[shared] execution: {prepared.preparation.runtime.execution_backend} "
-            "semantic + bounded MP64 native interpreter",
+            "semantic + MP64 native routine runner",
             flush=True,
         )
         print(
@@ -327,8 +186,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             "[shared] quantum: "
-            f"{prepared.machine.semantic_session.semantic_quantum_steps} "
-            "semantic steps",
+            f"{prepared.machine.semantic_session.semantic_quantum_steps} semantic steps, "
+            f"{args.machine_quantum_instructions} machine instructions",
             flush=True,
         )
         print("[shared] machine owner running; Ctrl+C stops it", flush=True)
@@ -342,4 +201,5 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["PreparedHybridServer", "build_argument_parser", "main", "prepare_server"]
+__all__ = ["DEFAULT_MACHINE_QUANTUM_INSTRUCTIONS", "PreparedHybridServer",
+           "build_argument_parser", "main", "prepare_server"]

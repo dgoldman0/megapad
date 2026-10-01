@@ -12,11 +12,14 @@ import pytest
 
 import megapad
 from asm import assemble
-from hybrid.manifest import HybridManifestError
-from hybrid.runtime import HybridExecutionError, HybridRuntime
-from hybrid.server import build_argument_parser, prepare_server
+from hybrid.manifest import ABI, VERSION, HybridManifestError, RoutineDeclaration
+from hybrid.runtime import HybridRuntime, MachineBudgetExceeded
+from hybrid.server import (
+    DEFAULT_MACHINE_QUANTUM_INSTRUCTIONS,
+    build_argument_parser,
+    prepare_server,
+)
 from hybrid.session import HybridSession, HybridSharedMachine
-from shared.hybrid_abi import HYBRID_ABI, RoutineImageV1
 from shared_session import SessionServer
 from simulator.image_bootstrap import ImageBootstrapError, prepare_image_bootstrap
 from simulator.platform import create_one_core_address_space
@@ -33,18 +36,13 @@ def _manifest(tmp_path, *, extra_routines=()):
     (tmp_path / "increment.bin").write_bytes(bytes(assemble("inc r4\nret.l")))
     path = tmp_path / "routines.json"
     path.write_text(json.dumps({
-        "abi": HYBRID_ABI,
-        "version": 1,
-        "dispatch_instruction_limit": 1000,
+        "abi": ABI,
+        "version": VERSION,
         "routines": [{
             "name": "H-INC",
             "image": "increment.bin",
-            "entry_offset": 0,
             "input_cells": 1,
             "output_cells": 1,
-            "buffers": [],
-            "max_instructions": 100,
-            "return_stack_cells": 16,
         }, *extra_routines],
     }), encoding="utf-8")
     return path
@@ -64,7 +62,7 @@ def _server_args(tmp_path, *, autoexec_body=None, extra_routines=(), executor="p
     ])
 
 
-def _runtime(executor, *, dispatch_instruction_limit=1000):
+def _runtime(executor, *, machine_instruction_budget=None):
     pytest.importorskip("_mp64_accel")
     if executor == "native":
         pytest.importorskip("_megaforth_native")
@@ -73,12 +71,10 @@ def _runtime(executor, *, dispatch_instruction_limit=1000):
     )
     hybrid = HybridRuntime.create(
         executor=executor, memory=memory,
-        dispatch_instruction_limit=dispatch_instruction_limit,
+        machine_instruction_budget=machine_instruction_budget,
     )
-    hybrid.register_routine_v1(RoutineImageV1(
-        name="H-INC", code=bytes(assemble("inc r4\nret.l")), entry_offset=0,
-        input_cells=1, output_cells=1, buffers=(), max_instructions=100,
-        return_stack_cells=16,
+    hybrid.register(RoutineDeclaration(
+        "H-INC", bytes(assemble("inc r4\nret.l")), input_cells=1, output_cells=1,
     ))
     return hybrid
 
@@ -161,16 +157,20 @@ def test_hybrid_server_registers_before_boot_and_preserves_shared_control(
         assert not status["runtime"]["timing"]["models_shared_clock_latency"]
         assert status["runtime"]["timing"]["timer_unit"] == "semantic_step"
         capabilities = status["runtime"]["capabilities"]
-        assert capabilities["machine_code"] and capabilities["declared_machine_routines"]
+        assert all(capabilities[key] for key in (
+            "machine_code", "declared_machine_routines", "semantic_callbacks",
+        ))
         assert all(not capabilities[key] for key in (
-            "arbitrary_machine_code", "machine_mmio", "semantic_callbacks",
+            "arbitrary_machine_code", "machine_mmio",
             "native_bios_boot", "multicore", "native_snapshot", "reset",
             "cpu_diagnostics", "network_diagnostics", "host_profiling",
         ))
         assert status["steps"] == 0
-        assert status["machine_execution"]["instructions"] == 2
-        assert status["machine_execution"]["transitions"] == 1
-        assert status["machine_execution"]["dispatch_instruction_limit"] == 1000
+        machine = status["machine_execution"]
+        assert (machine["abi"], machine["abi_version"], machine["routines"]) == (ABI, VERSION, ["H-INC"])
+        assert (machine["instructions"], machine["transitions"], machine["callbacks"]) == (2, 1, 0)
+        assert machine["quantum_instructions"] == DEFAULT_MACHINE_QUANTUM_INSTRUCTIONS
+        assert machine["instruction_budget"] is None
         assert status["hybrid"]["booted"]
         assert "hybrid" not in prepared.server.dispatch("status", {"detailed": False})
         stepped = prepared.server.dispatch("step", {"count": 1})
@@ -197,7 +197,7 @@ def test_hybrid_server_registers_before_boot_and_preserves_shared_control(
 
 @pytest.mark.parametrize("executor", ("python", "native"))
 def test_hybrid_machine_budget_survives_session_idle_and_resume(tmp_path, executor):
-    hybrid = _runtime(executor, dispatch_instruction_limit=3)
+    hybrid = _runtime(executor, machine_instruction_budget=3)
     hybrid.semantic.evaluate(b": ROOT 0 H-INC DROP KEY DROP 0 H-INC DROP ;")
     session = HybridSession(hybrid, "ROOT", semantic_quantum_steps=4096)
     machine = HybridSharedMachine(session)
@@ -210,10 +210,10 @@ def test_hybrid_machine_budget_survives_session_idle_and_resume(tmp_path, execut
         server.dispatch("send_text", {
             "text": "X", "generation": machine.status()["generation"],
         })
-        with pytest.raises(HybridExecutionError):
+        with pytest.raises(MachineBudgetExceeded):
             server.dispatch("step", {"count": 1})
+        # The second call ran one instruction, then the dispatch's budget was spent.
         assert hybrid.machine_instructions == 3
-        assert hybrid.semantic.main_context.data.snapshot() == (0,)
     finally:
         server.stop()
     assert hybrid.closed
