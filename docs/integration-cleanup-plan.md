@@ -126,9 +126,9 @@ go one at a time; commit each coherent slice once it is green.
     hooks and the GIL release live in the routine runners that step 3
     replaces, so they are done there.
 12. **Tests that already failed.** After everything else, fix the tests that
-    also fail on main, here `test_native_cycle_execution.py`'s phase-0 oracle
-    test, which expects schema version 20 where the oracle now writes 26,
-    together with Akashic's.
+    also fail on main, together with Akashic's. Done here: the phase-0 oracle
+    test in `test_native_cycle_execution.py` pinned schema version 20 while
+    six later benchmark changes had moved the oracle to 26; it now pins 26.
 13. **Final gates.** Rerun step 1's gates, run the physical Desktop journey
     once through Akashic's `physical_desktop_acceptance.py`, and run Akashic's
     numeric suites against this branch. Then merge into main and push both
