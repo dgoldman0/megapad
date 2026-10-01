@@ -15417,7 +15417,8 @@ static int step_one(
                 "shared MP64 decoder deferred an invalid extension");
         s.ext_modifier = -1;
         s.cycle_count += cycles;
-        if (n == 0xC && s.perf_enable)
+        // Every retired extension instruction counts, as in the reference.
+        if (s.perf_enable)
             s.perf_cycles += cycles;
         return cycles;
     }
