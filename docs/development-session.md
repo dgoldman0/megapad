@@ -100,14 +100,15 @@ Both detailed and lightweight status contain the same `runtime` descriptor:
 | `capabilities.host_profiling` | `true` | `false` | `false` |
 
 `hybrid.session.HybridSession` retains the semantic session backend and its
-terminal/continuation authority. Registered primitive words enter the bounded
-architectural interpreter over the same ordinary buffers. `HybridSharedMachine`
-adds `machine_execution` with the native interpreter, ABI identity and separate
-lifetime instruction, cycle and transition counts. Machine cycles do not advance
-the semantic timer or claim whole-application shared-clock timing. Status also
-explicitly denies arbitrary machine code, machine MMIO, callbacks into source,
-native BIOS boot, multicore execution and native snapshots. The v1 manifest and
-host entry contract are in [the hybrid ABI](hybrid-runtime-abi.md).
+terminal/continuation authority. Routine words run on the native routine runner
+over the same ordinary buffers. `HybridSharedMachine` adds `machine_execution`
+with the ABI identity, the routines, lifetime machine instruction, cycle,
+segment, transition and callback counts, and the machine quantum and budget.
+Machine cycles do not advance the semantic timer or claim whole-application
+shared-clock timing. Status advertises declared routines and semantic
+callbacks, and denies arbitrary machine code, machine MMIO, native BIOS boot,
+multicore execution and native snapshots. The manifest and routine contract
+are in [the hybrid design](hybrid-runtime.md).
 
 The executor identifies the selected engine; native execution can include
 Python fallbacks. Capabilities identify supported session operations,

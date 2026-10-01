@@ -298,7 +298,7 @@ make build
 python megapad.py --help
 python megapad.py --mode emulator --bios bios.asm --storage sample.img
 python megapad.py --mode simulator --storage desktop.img --executor native
-python megapad.py --mode hybrid --storage hybrid.img --executor native --hybrid-routines routines-v1.json
+python megapad.py --mode hybrid --storage hybrid.img --executor native --hybrid-routines routines.json
 
 # Each mode documents its own supported options.
 python megapad.py --mode simulator --help
@@ -327,14 +327,13 @@ and reset actions. A native executor may still use Python service fallbacks.
 See [the session API](docs/development-session.md) for the boundary and status
 fields. The default application mode remains emulator.
 
-Hybrid mode uses the semantic dictionary and services, with explicit calls to
-bounded MP64 integer routines declared in a local manifest. Both engines share
-one fixed ordinary-memory image. Machine routines always require the native
-architectural interpreter; their instructions/cycles are reported separately
-from semantic work. This initial profile excludes machine MMIO/services,
-callbacks into source, native BIOS images, and multicore hybrid execution.
-See [the v1 ABI and manifest format](docs/hybrid-runtime-abi.md) and
-[the implementation plan](docs/unified-runtime-plan.md).
+Hybrid mode runs Forth semantically and declared MP64 integer routines on a
+native core that shares one memory image. As on the chip, a routine's CALL.L
+and RET.L use the Forth return stack, and a routine can call Forth words at
+declared sites, which run on the caller's own stacks. Machine instructions and
+cycles are reported separately from semantic work. Machine MMIO, native BIOS
+images and multicore hybrid execution are not part of this mode. See
+[the hybrid design and manifest format](docs/hybrid-runtime.md).
 
 The architectural monitor in `cli.py` remains a separate debugging tool.
 Server implementations and programmatic interfaces live in `emulator.server`,

@@ -2,8 +2,9 @@
 
 Started: 2026-09-30
 
-Status: The unified emulator/simulator/hybrid application and bounded hybrid
-integer-routine v1 are implemented and qualified locally. Shared native scalar
+Status: The unified emulator/simulator/hybrid application is implemented and
+qualified locally; hybrid mode now uses the single routine path described in
+[`hybrid-runtime.md`](hybrid-runtime.md). Shared native scalar
 FP, tile values, Keccak, checked SHA3 input transfers, NTT bulk transfers and
 bulk audio are qualified. The hardened AES transfer candidate showed no gain
 against a fresh scalar baseline, so existing AES routing is retained. Native
@@ -11,12 +12,7 @@ page access and longer continuation intervals need no further rewrite on
 current evidence. Kernel/source/captured-frame evidence and strict multicore
 FP/timing checks are recorded. Prepared Desktop journeys are complete in the
 documented direct-dispatch scope, with Python requiring expanded diagnostic
-deadlines. Closed and nested integer callbacks and private scalar services are
-qualified through the unified application. Shared-task registration, native
-transport, exception frontiers, receipt accounting, callback IDL/deadline
-suspension and retained machine quanta are qualified through host-prepared
-sessions. Public task/composite capabilities are qualified for the exact
-installed host-prepared owner. Final selected acceptance passed on `4ef08d8`:
+deadlines. Final selected acceptance of the original implementation passed on `4ef08d8`:
 2,466 application checks with three environment-dependent socket skips, 2,569
 simulator checks under each explicit executor, and eight production-source
 rich-terminal checks. The pinned retained frontend changes are integrated and
@@ -290,82 +286,17 @@ Gate for each slice: equivalent results and effects, applicable timing and
 accounting parity, focused regression coverage, and workload-specific paired
 performance evidence. No universal speedup is promised.
 
-## Phase 4 — Initial hybrid execution
+## Phases 4 and 5 — Hybrid execution
 
-Write and commit the transition ABI and capability profile before execution
-changes. Resolve these concrete questions in that contract:
-
-- the shared backing representation and its sparse/dense adapters;
-- ordinary-memory admission, aliasing, mapping lifetime, and code regions;
-- machine entry register/selector initialization and preserved state;
-- root return, nested calls, continuation-cookie/trampoline ownership;
-- per-call and cumulative execution limits, traps, cancellation, and close;
-- admitted services and one authoritative FP/tile/device state;
-- separate work counters, RTC behavior, and event-release boundaries;
-- code publication, I-cache visibility, rollback, and XT lifetime.
-
-Implement a declared single-core routine that accepts and updates shared
-buffers, returns results on the agreed stack, and uses the existing MP64
-engine. Ordinary semantic execution resumes at the original caller boundary.
-The first slice may reject callbacks, suspension, or services that have not
-yet received a contract; these rejections must occur at a defined boundary.
-
-Gate: pure-MP64 versus hybrid differential routines cover memory effects,
-results, return-stack integrity, invalid entries, instruction faults, budgets,
-and repeated transitions. The unknown-XT error path remains intact.
-
-## Phase 5 — Expanded hybrid interoperability
-
-The staged callback, ownership, budget and continuation contracts are locked
-in [`hybrid-interop-plan.md`](hybrid-interop-plan.md). The first implementation
-gate is opt-in v2 with sealed local CALL/RET sites and canonical integer
-callbacks; v1 remains unchanged. General task exceptions require their own
-shared-task ABI before admission.
-
-After qualifying 5A, the next bounded implementation contract is
-[`hybrid-closed-callback-plan.md`](hybrid-closed-callback-plan.md): statically
-closed, acyclic integer colon policies on the existing private stacks. Its
-explicit v3 metadata reuses the v2 native transport. Declarative policy IR is
-validated and installed before routine publication and unchanged source
-bootstrap; no arbitrary source prelude or dynamic callback is admitted.
-The following nesting gate is separately locked in
-[`hybrid-nested-callback-plan.md`](hybrid-nested-callback-plan.md): at most eight
-distinct active registrations, narrowed child buffers, per-frame callback
-ceilings and one shared dispatch budget. It requires 5B1 qualification first.
-
-The shared-task exception and suspension boundary is locked separately in
-[`hybrid-task-callback-plan.md`](hybrid-task-callback-plan.md). Its new task ABI
-uses the original main-context stacks, dispatcher-owned foreign continuations,
-permanent cookie revocation, child-suffix cancellation and one composite
-suspension. Private callback stack/failure semantics stay unchanged. Reference,
-native and production session gates precede capability exposure.
-
-The first service crossing is separately locked in
-[`hybrid-service-callback-plan.md`](hybrid-service-callback-plan.md): 14 exact
-scalar FP/FPCSR exports using the existing semantic service owner, explicit
-private metadata v5, and transport 2. It preserves validation/pop/flag order
-and distinguishes issued service faults from raw host failures. Memory and
-checked crypto exports require their own later effect/grant gates.
-
-Add machine-to-semantic callbacks, nested transitions, exceptions,
-suspension/wake, and selected service access in separate qualified slices.
-Then specify native compiler/dictionary integration for guest JIT, machine
-modules, and code introspection. Preserve source-visible CREATE/DOES>, body
-addresses, immediate-word behavior, and rollback for each admitted profile.
-
-That design deliverable is recorded in
-[`hybrid-native-dictionary-plan.md`](hybrid-native-dictionary-plan.md). It
-separates read-only mappings and bounded modules from a later compiler-owned
-stack/accounting ABI, executable arena and defining-word/JIT vocabulary.
-The existing semantic `JIT-ON`/`JIT-OFF` behavior is unchanged; implementing
-those compiler stages is not implied by callback completion.
-
-General native images, arbitrary self-modification, complete snapshots, and
-multicore hybrid execution need explicit capability and state-mapping work.
-They are later deliverables, not implied results of Phase 4.
-
-Gate: each new capability has functional cross-mode evidence and explicit
-limits. Machine-level claims continue to require the architectural oracle.
+Hybrid mode runs Forth semantically and declared MP64 routines on a native
+core that shares its memory and its return stack. The first implementation
+grew five manifest versions and four native transports. The integration
+cleanup replaced them with one manifest, one routine runner and callbacks
+that run on the caller's stacks. The current design is in
+[`hybrid-runtime.md`](hybrid-runtime.md), and the cleanup record is in
+[`integration-cleanup-plan.md`](integration-cleanup-plan.md). Running
+compiled Forth or BIOS code as machine code is the separate staged design in
+[`hybrid-native-dictionary-plan.md`](hybrid-native-dictionary-plan.md).
 
 ### Local completion and deferred scope
 
@@ -382,16 +313,10 @@ integration into main remain outside the current local-work authorization.
 
 The following work remains explicitly deferred:
 
-- Generic task manifests, automatic task bootstrap/publication ordering, and
-  task CLI configuration. Prepared host APIs and sessions are the current gate.
 - Implementation of the staged native dictionary/compiler plan, including
   execution-map/module stages, compiler overlays, defining-word/JIT integration,
   native image authority and arbitrary executable dictionaries. The requested
   design is complete; semantic `JIT-ON`/`JIT-OFF` keep their existing behavior.
-- Additional callback effect services: bounded MOVE, checked crypto, audio,
-  task-stack service extensions, tile/device/MMIO callbacks or other new
-  service catalogs. The qualified private service profile remains the fourteen
-  scalar FP/FPCSR exports; each later effect needs its own contract and gate.
 - The external math solver's latency/scaling reproducer. Its original reported
   figures remain unverified here; local strict FP and timing fixtures do not
   establish solver behavior, and Akashic remains untouched.
@@ -420,9 +345,6 @@ status and implementation ledger include their later completed follow-ups.
   clean shutdown and original image preserved). Other mode/executor runs are
   pending; direct dispatch and SDL dummy do not qualify socket transport or
   physical output.
-- Locked the expanded interoperability plan and v2 callback value contract.
-  Ninety value checks plus 94 existing manifest checks passed. Callback
-  execution and v2 manifest admission are not enabled by those values.
 - Qualified checked SHA3 input routing: 59 new checks, 47 hosted checks per
   executor and 86 native/differential checks passed. For 256 transactions of
   256 bytes, median host wall time fell from 392.772 to 292.855 ms with Python
@@ -464,223 +386,9 @@ coverage.
 | 2B — math-team timing qualification | Timing identity, strict multicore FP and bounded wake/contention qualified; external solver unavailable | 8 timing-model cases; 13 strict FP cases; 19 timing harness cases and 48 measured cases |
 | 3A — native scalar FP | Shared exact kernel and direct semantic words complete | 200 kernel/machine/adapter checks; 399 direct-FP/native/reference checks; paired FP measurements |
 | 3B/3C — remaining native extraction | Bulk audio, shared Keccak, SHA3 and NTT transfer work qualified; AES candidate declined on current measurements | Existing oracle gates plus 109 NTT checks; 200 AES candidate checks with no measured speed benefit; retained raw comparisons |
-| 4 — initial hybrid ABI and execution | Bounded integer-routine v1 available through the unified launcher | 56 dense backing checks, 79 architectural runner cases, 93 bridge cases, 6 failed-publication cases and 18 hybrid session cases; existing runtime/session regressions |
-| 5A — canonical callbacks | Qualified | 476 native/composition/export/v1/exception checks; 9 production callback-session cases and existing application/manifest gates |
-| 5B1 — closed integer callbacks | Qualified; small-policy callback path is substantially slower than direct semantic execution | 483 metadata checks, 761 combined export/bridge/native/session checks, 472 dispatcher regressions and clean-checkout clamp evidence |
-| 5B2 — nested callbacks | Qualified through the generic unified application path | 302 native child/root/publication/legacy checks; 767 private composition checks; rebuilt isolated activation candidate passed all 1,977 checks, including all 11 formerly deferred application journeys |
-| 5C/5D — shared task callbacks | Host-prepared task exceptions, callback suspension and retained machine scheduling qualified and exposed for the exact installed owner | Earlier transport/adapter/frontier gates; 351 prepared accounting checks, 209 task-counter checks, 289 semantic suspension checks, 537 focused scheduling checks, all 38 real native composite-session cases and 75 activation checks; selectors overlap and are not additive |
-| 5E — private scalar services | Fourteen scalar FP/FPCSR services qualified through the unified application; fine-grained crossing path is substantially slower than direct execution | Existing service/bridge/application gates, 35 benchmark checks and clean `ddc986c` measurements at 64/256 iterations under both executors; full costs retained in the scalar-service performance report |
+| 4–5 — hybrid execution | Replaced in the integration cleanup by one manifest, one routine runner and callbacks on the caller's stacks | [`hybrid-runtime.md`](hybrid-runtime.md) and the cleanup commits |
 | Native dictionary/compiler | Requested design deliverable complete | Separate staged plan preserves current JIT behavior and does not imply compiler implementation |
 | Final unified acceptance | Qualified locally on `4ef08d8` | Both extensions rebuilt; 2,466 application passes with three socket skips; 2,569 simulator passes under each explicit executor; eight rich-terminal passes; exact selectors and identities in the acceptance report, counts overlap |
-
-### Shared-task ownership and retained execution — 2026-09-30
-
-The production `NativeTaskAdapter` uses the original hybrid CPU owner and
-atomic dictionary/body publication. Its 607-check gate covers native receipt
-identity, retained root limits, stack grants, callback dependency publication,
-mixed-profile rejection and cancellation-delivery recovery. Native parked
-validation independently passed 444 checks after a matching GCC rebuild. It
-proves retained root/frame/code/control authority without execution, token
-rotation, CPU initialization or new work receipts.
-
-Repeated guest exception unwinds retain the original bounded vector of
-continuation frontiers, with monotonic loss tracking. Repaired cookies or
-metadata cannot restore discarded authority. The combined gate passed 170
-cases; after correcting an overly broad expected error string in one new
-fixture, all eight selected grant and native THROW cases passed. These checks
-include unchanged KDOS exception control and actual native child cancellation.
-
-Engine-issued semantic receipts retain cumulative callback work independently
-of native instruction receipts and public counters. Their original 153-check
-gate covers exact issued identity, optional adapter method seals, root
-finalization and preservation of the first error during accounting or cleanup
-failure. Commit `363f448` then passed 351 checks for prepared-session projection,
-both outer executors, native parent/child CATCH/THROW, interrupted settlement,
-no-work parked proof and cleanup. Commit `d5ab2d9` passed 209 checks for retained
-task-only totals, repeated roots and mixed private/task accounting. These are
-overlapping gates, not additional distinct test totals.
-
-Commit `e723e50` qualified exact `Idle` and `IdleUntil` under the existing
-suspension owner: original main stacks, root, meter, request identities, code,
-grants and retained native-chain authority survive each detach and wake.
-Canonical deadline handling consumes the operand before reading the captured
-RTC owner/clock, preserves host exception identity, and checks authority again
-after polling. Invalid suspension evidence permanently consumes and cancels
-the retained authority before another effect. Its isolated semantic gate
-passed all 289 selected checks. KEY, general MS@/IDLE-MS callbacks and arbitrary
-UART effects are not admitted by the deadline observation.
-
-Commit `abd7763` qualified opt-in `machine_quantum_instructions` from 1 through
-10,000,000 through the existing runtime and prepared session continuation.
-`None` retains synchronous driving. One turn allowance covers every native
-segment, child and later entry; the original instruction, callback, entry and
-semantic limits remain cumulative. Admission and reply retain their actual
-zero-work events and consume inputs/outputs once. A runnable yield adds no
-semantic tick, machine work, interrupt or new work receipt. Zero-semantic
-machine progress remains visible to the session backend, and polling proof
-failure cancels both semantic and native authority.
-
-The scheduling checkpoint passed 537 focused simulator, adapter and session
-checks and all 38 real native composite-session cases across synchronous
-execution and instruction quanta 1, 2, 3, 5 and 64. This is host-prepared,
-direct-session evidence under both outer semantic executors; task callbacks
-still use the Python reference dispatcher. The host API and explicit limits
-are documented in [`hybrid-task-runtime.md`](hybrid-task-runtime.md).
-
-Commit `4ef08d8` qualified public prepared-task capabilities in all 75 selected
-capability, prepared-session and scheduling-admission checks. Status distinguishes
-synchronous task exceptions, callback suspension and composite scheduling using
-the exact installed semantic/native owner. Source-initialized function evidence
-rejects pre-install replacements and changed verifier bodies without invoking
-them. A selected revision-2 transport without parked validation retains its
-synchronous-only fallback; finite hybrid machine quanta require composite
-support before session ownership is claimed. Private ABI status remains separate.
-
-Final unified acceptance passed on this activation checkpoint: 2,466 application
-checks with three existing environment-dependent socket skips, 2,569 simulator
-checks with Python selection and the same 2,569 with native selection, followed
-by all eight production-source rich-terminal checks. The application gate also
-ran the strengthened production-close assertions after polling-proof failure.
-The two rebuilt native artifacts were identical across all final gates. Exact
-selectors, identities and limits are retained in the
-[acceptance report](unified-runtime-acceptance-2026-09-30.md).
-
-Generic task manifests, automatic task source/publication ordering and task
-launcher options remain outside the host-prepared session scope. No new socket,
-physical-display, guest-JIT or callback speedup claim follows from these
-functional gates.
-
-### Private scalar service application — 2026-09-30
-
-The unified hybrid application now accepts strict version 5 manifests and
-public routine registration for the fourteen canonical scalar FP/FPCSR
-services. Capability requires the exact finalized semantic service owner and
-the original native V2 facade. Both outer semantic executors use private
-Python callback dispatch; scalar values use their already selected Python or
-shared native kernel. No second scalar owner is introduced.
-
-The isolated application selection passed 1,939 checks. Eight new fixture
-failures were corrected without product changes: the ordinary MP64 benchmark
-oracle used an obsolete MMIO constant name, and the mixed-profile session
-fixture needed to start paused. All 58 benchmark, service-session and launcher
-checks then passed, including every affected case. Exact IEEE bits, FPCSR
-effects, private failures, raw host errors, cumulative budgets, mixed V4/V5
-transport reporting and empty-profile startup were exercised. Generic loader
-validation still precedes owner publication and boot source. This qualifies
-the private scalar profile; task-stack services, suspension, bulk memory,
-crypto and audio callbacks remain separate effect gates.
-
-### Native task transport and private host exceptions — 2026-09-30
-
-Commits `ac04c8e` and `afe1db0` qualify admission-only task entry, retained root
-fuel, real instruction quanta and bounded native children. Child publication
-accepts bounded cyclic graphs while rejecting stale generations and active
-recursion. Parent control state is restored before child return or suffix
-cancellation is delivered. Committed stores, cache observations and cycle
-prefixes remain intact. The two isolated GCC builds passed 541 and 567 selected
-checks respectively, including ordinary-machine differential execution,
-cancellation and delivery failures. These are transport gates; the semantic
-task adapter, shared exception journeys and composite suspension still need
-their own qualification before a public task capability can be enabled.
-
-Commit `8206806` preserves original host-raised `ForthAbort` objects through
-private callback unwinding using runtime-owned provenance bound to the original
-primitive and guard frames. The isolated gate passed 459 checks, including the
-canonical leaf's inner guard, nested callbacks, guest exception behavior and
-execution quanta. It does not authorize guest exception objects to bypass
-normal ABORT behavior, stack restoration or pointer-capture retirement.
-
-### Nested publication and root execution — 2026-09-30
-
-Native V3 now shares one CPU owner, publication budget and memory pin with
-its legacy V2 facade. Transactional child-edge publication binds exact parent
-sites and child generations. Semantic V4 capture binds original Words and IR
-positions, proves the combined graph, and rejects stale code, changed leases,
-malformed descriptors and publication failures without exposing partial state.
-Older metadata continues through the same qualified legacy routes.
-
-Root V3 begin/resume/cancel uses the existing sealed integer interpreter.
-Independent V3 receipts retain completed work across allocation failures;
-the CPU reservation remains held through Python result delivery. Root work,
-callback limits, output values, stores, cache observations and cycles were
-compared with ordinary MP64 execution. The differential fixture explicitly
-initializes the same integer controls, including the inactive modifier.
-
-Commit `dd971ee`, including capture commit `6d47b1f`, passed 929 checks on a
-clean checkpoint with its matching GCC accelerator and the unchanged qualified
-semantic extension. This qualifies root segments and publication only.
-Public V4 registration, required creation, generic manifest dispatch and full
-capability status remain closed until child execution, private semantic
-composition and production session journeys pass together. The 11 staged V4
-journeys remain deferred, not counted as passes.
-
-The task profile separately has issued foreign-return control and permanent
-retirement after RP!, raw-cell changes and snapshot operations. It has no
-task dispatcher or native task adapter yet. Its contract now makes zero-quantum
-begin admission-only, retains the original ledger across empty-chain quanta,
-and bounds the semantic THROW tail after discarded machine authority expires.
-These foundations do not imply shared-task CATCH/THROW or suspension support.
-
-### Complete private nesting and application activation — 2026-09-30
-
-Native child execution now validates issued parent/site/child authority,
-immediate-parent grants and disjoint control storage before entry. A real
-child return validates and restores the parked parent's integer state without
-rewinding memory, cache or cycle effects. The native child/root/publication
-gate passed 302 checks. The semantic bridge subsequently passed 767 checks
-covering exact requests, child calls, private stacks, inclusive ancestor
-semantic budgets, interrupted settlement and raw host exception identity.
-
-The generic manifest loader now admits strict version 4 after one bounded
-manifest read. It shares validation-error normalization with the explicit
-loader. Required creation, registration, public machine Words and session
-status require the complete semantic profile 4 and native transport 3.
-Older schemas and native transport routes remain supported. The format and
-limits are documented in
-[hybrid-nested-callback-manifest.md](hybrid-nested-callback-manifest.md).
-
-An isolated activation snapshot, with its accelerator rebuilt using GCC,
-passed all 1,977 hybrid metadata, native, bridge, export, runtime and session
-checks. All 11 previously deferred application journeys ran successfully,
-including Python/native outer executors, dependency-ordered startup, empty
-manifest admission, failure cleanup and mixed legacy/version-4 diagnostics.
-The parent/policy/child/ABS journey counts 10 machine instructions, 16 cycles,
-two entries, four segments, two callback requests, four callback semantic
-steps and maximum machine depth two. Callback execution remains the Python
-reference path. These are direct session-dispatch results, with no claim of
-socket, physical display, or shared-task exception/suspension qualification.
-
-Task capture/registration and scalar service capture were separately committed
-and passed a combined 714-check clean-checkout gate. The native task transport
-contract is locked in `5bf9d6f`; its separate facade uses the same CPU owner,
-admission-only zero-quantum entry, retained root receipts and suffix cancellation.
-Task dispatch and service execution are still separate inactive work streams.
-
-### Qualified closed callbacks and frontend integration — 2026-09-30
-
-Closed version 3 policies now use the existing export registry, private
-eight-cell stacks and native transport 2. The reference dispatcher checks
-captured Words, IR, method routes and control evidence around every admitted
-tick. One-shot engine receipts settle actual work on the original meter even
-when host callbacks mutate it or raise after completed work. Raw host errors
-retain identity; failed cleanup closes the affected owner. Manifest policies
-are proved and installed before machine publication and unchanged bootstrap.
-
-The [clamp comparison](performance/hybrid-closed-clamp-2026-09-30.md) records
-identical bytes, guards, checksum and exact work for 128 values. Hybrid medians
-are 485.114 ms with Python outer execution and 477.469 ms with native outer
-execution, versus 6.218 ms and 0.149 ms for the semantic controls. This is a
-functional interoperability result with substantial callback overhead. It
-does not justify moving a small integer policy out of native semantic code.
-
-The reviewed peer integration `b71e6fc` was merged locally into this branch.
-Its peer parent is exactly `b847c5bddc7ab861df0f534816ddb0e888e47af4`; newer
-parallel work was excluded. The merged tree passed 1,346 model, wire, input,
-rendering, guest-source and unified session checks, with three AF_UNIX skips
-because this environment denies socket creation. A separate 30-case gate
-confirmed the required-native production default. Prepared Desktop reports
-retain their original source identities and do not claim that the later
-frontend families were exercised by those historical images.
 
 ### Phase 1B server consumer migration — 2026-09-30
 
@@ -895,24 +603,6 @@ backing, fault observers, callbacks/quanta and original service/word identities.
 Independent read-only review found no additional issue. The native extension
 built successfully and paired timings are recorded in the performance report.
 
-### Phase 4 contract checkpoint — 2026-09-30
-
-`docs/hybrid-runtime-abi.md` locks the initial declared integer-routine profile
-before execution changes. It specifies fixed shared ordinary backing, bounded
-use of the existing decoded architectural interpreter, original semantic
-stack ownership, body-allocation leases, code publication and failure effects.
-A separate private control arena avoids altering inactive semantic SP!/RP!
-frontiers. Its bytes are never an alternate copy of shared guest data and its
-addresses are absent from semantic geometry. Machine access remains checked
-before modulo aliasing or any device route.
-
-The contract includes versioned host registration, a bounded manifest, normal
-source-word calls, honest launcher/status capabilities, separate machine and
-semantic accounting, and staged acceptance gates. The launcher remains disabled
-for hybrid until those gates pass. No machine execution or performance claim
-is added by the document. Dense memory and allocation lifetime are the next
-implementation foundations; callback/service/JIT interoperability stays later.
-
 ### Phase 3B shared Keccak values — 2026-09-30
 
 Extracted the existing architectural Keccak-f[1600] permutation into
@@ -974,13 +664,8 @@ definitions and ordinary stores do not. Reusing the XT and identical bytes
 cannot revive a revoked lease. All 66 new lease and existing dictionary/rollback
 checks passed, including inactive zones and forged lease objects.
 
-Immutable v1 declaration values and the local manifest loader validate bounded
-signatures, code sizes, stack and instruction limits, buffer expressions and
-duplicate names. Every metadata row is validated before any image is read, and
-all images are read before publication. Names must be printable nonwhitespace
-ASCII; paths must be filesystem encodable. All 94 manifest/value cases passed.
-Independent review found and closed name, path-encoding and forged-lease gaps.
-These foundations do not yet publish an executable hybrid session.
+The hybrid routine owner uses these leases to tell when a routine's code
+has been reclaimed.
 
 ### Phase 2B timing identity — 2026-09-30
 
@@ -1016,26 +701,6 @@ provisional execution and bus replay. FP remains coordinator/interpreter work;
 this does not claim private worker/DBT lowering, micro-core strict support, or
 execution of the math team's unavailable solver.
 
-### Phase 4 bounded architectural runner — 2026-09-30
-
-The architectural extension exposes the immutable numeric routine spec and a
-bounded integer runner over the existing decoded interpreter and instruction
-cache. Its operations adapter checks each complete access before ordinary
-mapping, routes only CALL/RET control accesses to a separate private arena, and
-rejects unsupported instructions without Python fallback. It retains mapping
-and buffer leases, normalizes private architectural state at entry, checks the
-original root return slot, and reports completed-prefix effects and separate
-machine instructions/cycles. Closing the runner revokes later use.
-
-All 79 runner cases passed, including differential architectural state/cycles,
-memory permissions and wrap, MMIO/alias rejection, recursive return bounds,
-failure prefixes, cache publication, mapping freezes and buffer lifetime. The
-rebuilt extension also passed the strict FP and private execution regressions
-above. Independent read-only review found no unresolved contract issue. The
-composition layer must still validate semantic allocation leases and code
-seals, preserve semantic stacks, and enforce cumulative dispatch limits before
-the application can advertise hybrid mode.
-
 ### Phase 2B bounded wake and contention evidence — 2026-09-30
 
 `bench_execution_timing.py` now provides local integer fixtures for masked-IPI
@@ -1070,56 +735,3 @@ and wire decoding remain visible Python work, but each further extraction still
 needs a targeted compatibility and paired-performance gate. No external project
 was accessed or modified. Live Desktop and executor default promotion remain
 open; recorded offers cannot establish those outcomes.
-
-### Phase 4 composition and application admission — 2026-09-30
-
-`HybridRuntime` now owns the semantic runtime, fixed shared ordinary memory,
-bounded machine runner and exact declaration registry. Original registered
-words are callable through interpreted names, compiled calls and `EXECUTE`.
-Lease identity and sealed bytes are rechecked before machine entry. Inputs are
-peeked and final capacity is checked before execution; only successful returns
-replace those inputs. Completed shared-memory effects and machine accounting
-settle before a structured failure reaches the semantic caller.
-
-Machine allowance is cumulative across the outer semantic meter, including
-nested calls, direct semantic session entry, host quanta and idle/resume. It is
-never charged as semantic timer work. Full main/current/enclosing stack spans
-are excluded from borrowed memory. Introduced custom stacks remain protected
-through inactive periods while their stack objects live; `register_context`
-introduces host arenas otherwise unknown to the composition owner. Closing
-revokes machine calls before releasing private mapping ownership.
-
-Independent review identified a registration rollback gap: word publication
-could update the guest dictionary index before a later failure. Publication is
-now guarded from the first definition, with dictionary rollback and index
-rebuild. Six injected failure checks prove prior metadata/index restoration,
-successful retry and preservation of the original error if cleanup itself
-fails; an unsuccessfully repaired machine registry is then unusable.
-
-`HybridSession` uses the existing semantic terminal and continuation owner.
-The server validates every manifest/image before creating a visible session,
-registers declared words before boot source, and uses a narrow preconstructed
-runtime seam in the existing image bootstrap. Status exposes its bounded
-capabilities and separate machine counters. `megapad.py --mode hybrid` is now
-available with required `--hybrid-routines`, and all three modes retain the
-same viewer/control protocol. Semantic executor defaults are unchanged; native
-machine execution is mandatory even when semantics use Python or auto.
-
-Validation: the unified `make build` succeeded. The application acceptance gate
-passed 194 cases with two environment-dependent socket skips. The final gate
-after registration cleanup passed all 149 selected cases: 93 bridge cases,
-six publication failures, 18 hybrid session cases, 20 existing bootstrap/server
-cases and 12 launcher cases. The bridge includes an explicit compiled-call
-comparison against standalone MP64 execution for output cells, complete shared
-buffer contents, instructions and cycles in both semantic executors. Unknown
-XTs, stale allocation/code, inactive stack bytes, failure prefixes and resumed
-budgets retain their required behavior. Help remains usable without importing
-native extensions. No physical presentation, native-default promotion or live
-Desktop performance claim follows from these gates.
-
-This completes the initial bounded hybrid application profile. Phase 5 remains
-a separate capability expansion: machine-to-source callbacks, guest JIT/native
-dictionary integration, arbitrary binaries and multicore hybrid execution are
-not implied by selecting hybrid mode. The math-team solver's original latency
-and scaling figures likewise remain outside reproduced evidence until its
-MegaPad-side reproducer is supplied.

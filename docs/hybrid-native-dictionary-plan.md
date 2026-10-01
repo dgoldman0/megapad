@@ -5,10 +5,9 @@ Date: 2026-09-30
 Status: reviewed staged design, committed as the compiler-integration design
 deliverable for the unified-runtime work. Implementation remains separate.
 This document enables no compiler, loader, JIT, or introspection capability. It
-refines Phase 5 of [the unified plan](unified-runtime-plan.md), separately from
-[closed callbacks](hybrid-closed-callback-plan.md) and
-[nested callbacks](hybrid-nested-callback-plan.md). Their metadata versions and
-execution permissions are not widened by this plan.
+builds on the current [hybrid routines](hybrid-runtime.md), whose callbacks
+already run on the caller's stacks and whose machine frames already live on
+the Forth return stack.
 
 If compiler integration proceeds, start with read-only execution mapping and
 lifetime inspection, followed by bounded machine-module publication. Transparent
@@ -25,7 +24,7 @@ and accounting contracts before `JIT-ON` can acquire a new meaning.
 | `CreatedDefinition`, `DoesBodyRef`, `InstallDoes` in the same file | CREATE execution pushes the child's existing body address. Its action identifies a defining word's XT and an absolute IR index. Installing DOES> explicitly invalidates native semantic plans. |
 | [`simulator/native_execution.py`](../simulator/native_execution.py), `NativeExecutor` | Native execution currently means C++ execution of semantic IR. Plans preserve original operation indices and stop at unsupported boundaries. Dictionary execution-generation changes clear plans; this is not an MP64 code cache. |
 | `BodyAllocationLease` in `simulator/dictionary.py` | A lease covers one exact, nonempty `initial_body` allocation. Later comma/ALLOT growth does not extend it. An empty CREATE followed by `,` cannot acquire this lease for the appended bytes. |
-| [`hybrid/runtime.py`](../hybrid/runtime.py), registration and `_validate_registration` | Registered machine words are semantic primitives with separately recorded machine entries. Entry checks exact Word, implementation, allocation/control identity, and sealed bytes. Publication is currently an idle host operation, not an action inside guest compilation. |
+| [`hybrid/runtime.py`](../hybrid/runtime.py), `register` and `call` | A routine word has a `RoutineDefinition` whose body holds its code. Each call checks only that the body allocation is still live. Publication is an idle host operation, not an action inside guest compilation. |
 | [`simulator/stacks.py`](../simulator/stacks.py), `ReturnStack`, and native executor settlement | Raw return cookies, continuation metadata, popped cells, and inactive slots remain observable through later pointer restoration. Native settlement includes popped-slot updates, not merely active stack contents. |
 | [`simulator/core_words.py`](../simulator/core_words.py), `JIT-ON`, `JIT-OFF` | Both are currently semantic no-ops. The architectural BIOS words instead select native emission/peepholes; `JIT-STATS` and `JIT-RESET` operate on those BIOS counters. |
 | [`docs/dictionary-acceleration.md`](dictionary-acceleration.md) | Name caches and indexes accelerate authoritative dictionary lookup. They neither confer executable authority nor replace code-publication and allocation lifetimes. |
@@ -73,16 +72,16 @@ Keep three identities distinct:
    dependencies, and a plan generation. It belongs to the C++ semantic executor
    and has no MP64 entry address.
 3. A machine publication: exact registration/compiler-overlay identity, code
-   allocation lease and serial, sealed padded span, entry offset, profile,
-   private control lease, and native publication identity where applicable.
+   allocation lease and serial, published padded span, entry offset, profile,
+   and native publication identity where applicable.
 
 D1 should extend the existing value-only registration inspection surface with
 a host query for an exact Word or a resolved live XT. Proposed result fields
 are `execution_kind`, `semantic_xt`, `header_address`, `body_address`,
 `ir_entry`, `machine_entry`, `code_span`, `profile`, `publication_id`, and a
 fresh liveness/rejection status. Absent concepts are null, not fabricated
-addresses. Private lease objects, callback tokens, native pointers, and
-continuation cookies are not returned. An old inspection result never grants
+addresses. Private lease objects, native pointers, and continuation cookies
+are not returned. An old inspection result never grants
 entry or renews a lease.
 
 Inspecting a word must not compile it, run it, allocate code, flush I-cache,
@@ -106,7 +105,7 @@ dictionary growth are explicit.
 D2 begins with a package of the existing bounded integer-routine declarations,
 not a general object-file linker. Each export has one independent sealed image,
 one declared entry, zero through eight input/output cells, existing buffer
-rules, and its own private return-stack slice. Code uses the admitted integer
+rules, and the shared Forth return stack like every routine. Code uses the admitted integer
 runner, local relative control flow, and data addresses supplied as arguments.
 No constructors execute during loading.
 
@@ -167,8 +166,8 @@ At one quiescent owner boundary, an overlay publication must:
    only after all prior steps succeed.
 
 Raw backing writes continue to leave resident architectural I-cache lines
-unchanged. Sealed-code mutation causes stale-code rejection before the next
-hybrid entry; it is not an invitation to execute the cache's older bytes.
+unchanged, so Forth writes over published code take effect as the instruction
+cache allows, as on the chip.
 Revocation removes entry authority and semantic plans which depend on that
 publication. It does not globally flush architectural caches. A replacement
 allocation, even at the same address with identical bytes, receives a new

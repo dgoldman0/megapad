@@ -71,22 +71,40 @@ go one at a time; commit each coherent slice once it is green.
    may be named, but nothing is chosen at run time. The private callback
    stacks and the closed-callback proofs go: they are a wall the chip does
    not have, they stop a callback from ever becoming a plain native call,
-   and budgets and the depth check already bound a callback.
+   and budgets and the depth check already bound a callback. Done: one
+   manifest format, one native routine runner whose CALL.L and RET.L use the
+   Forth return stack, and callbacks on the caller's stacks. The old Python
+   layers, about 37,000 lines with their tests, and the four native
+   transports are deleted. The runner has no test hooks and releases the
+   GIL after its first 4,096 instructions. The design is in
+   `hybrid-runtime.md`.
 4. **Remove whole-program re-checks from the call path.** Keep checks that
    guest execution can trigger: a forgotten or reused word, stale code,
    budgets and receipts. Remove per-call scans of the dictionary, of Python
    modules, classes and functions, and interpreter-frame inspection, since
    nothing the guest does can change those. Each removal records why it
-   guards nothing the guest can reach.
+   guards nothing the guest can reach. Done: a call checks only that the
+   routine's body allocation is still live. Code seals, parked-state
+   comparisons, dictionary and namespace scans and frame inspection are
+   gone. Forth writes over code now behave as on the chip, through the
+   instruction cache.
 5. **Native crossings.** When both sides are native, keep a call and its
    return in native code instead of passing through a Python dispatcher.
+   Done for routines without callback sites: the native executor calls them
+   directly, 0.45 us per call against 19 us before. Callbacks still pass
+   through the Python dispatcher, about 40 us per round trip with the native
+   executor.
 6. **Caller-bounded limits.** Replace fixed ceilings (dictionary words,
    namespace keys, nesting depth, instruction and callback ceilings, edge and
    publication counts) with limits the caller supplies or real structural
    bounds. Keep only limits an interface requires, such as the eight
-   register-passed arguments.
+   register-passed arguments. Done: those ceilings left with the old code.
+   What remains is the eight register cells and whole I-cache lines of code.
 7. **Real hybrid workload.** Run Desk in hybrid mode with real machine
-   routines and compare it with simulator mode.
+   routines and compare it with simulator mode. Finding: Desk has no machine
+   code to call. Akashic and KDOS are entirely Forth; on the chip the only
+   machine code is the BIOS and compiler output, which is the separate
+   native dictionary design.
 8. **Launcher migration.** Once Akashic's tools start MegaPad through
    `megapad.py` or the packaged servers, delete the root `session_server.py`
    and `simulator_server.py` forwarders. Done.
