@@ -62,7 +62,9 @@ go one at a time; commit each coherent slice once it is green.
 3. **One format, one transport.** Replace manifest schemas 1–5 with one
    schema and the routine transports V1, V2, V3 and task with one. Remove
    capability probing, fallback to older runners, legacy facades and the
-   legacy embedder subclass path.
+   legacy embedder subclass path. The new runner keeps test-only failure
+   hooks out of the production build and releases the GIL during long
+   machine runs.
 4. **Remove whole-program re-checks from the call path.** Keep checks that
    guest execution can trigger: a forgotten or reused word, stale code,
    budgets and receipts. Remove per-call scans of the dictionary, of Python
@@ -93,7 +95,9 @@ go one at a time; commit each coherent slice once it is green.
     restore the lost cancellation diagnostic in
     `simulator/rich_terminal_host.py`, release the GIL during long hybrid
     machine runs, and count `perf_cycles` for F9, FA and FB as the Python
-    reference does.
+    reference does. Done for the diagnostic and `perf_cycles`. The failure
+    hooks and the GIL release live in the routine runners that step 3
+    replaces, so they are done there.
 12. **Final gates.** Rerun step 1's gates, run the physical Desktop journey
     once through Akashic's `physical_desktop_acceptance.py`, and run Akashic's
     numeric suites against this branch. Then merge into main and push both
