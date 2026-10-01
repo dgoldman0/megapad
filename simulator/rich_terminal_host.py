@@ -478,10 +478,15 @@ class SimulatorSessionBackend:
             # Resume clears the old handle before re-entering guest code. A
             # guest fault after that point therefore makes cancellation stale.
             pass
-        except BaseException:
+        except BaseException as cancel_error:
+            try:
+                detail = str(cancel_error)
+            except BaseException:
+                detail = "error text unavailable"
             try:
                 BaseException.add_note(original_error,
-                    "failed to cancel simulator suspension after resume error")
+                    "failed to cancel simulator suspension after resume error: "
+                    f"{type(cancel_error).__name__}: {detail}")
             except BaseException:
                 pass
         finally:
