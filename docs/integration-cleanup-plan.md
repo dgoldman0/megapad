@@ -90,10 +90,10 @@ go one at a time; commit each coherent slice once it is green.
    instruction cache.
 5. **Native crossings.** When both sides are native, keep a call and its
    return in native code instead of passing through a Python dispatcher.
-   Done for routines without callback sites: the native executor calls them
-   directly, 0.45 us per call against 19 us before. Callbacks still pass
-   through the Python dispatcher, about 40 us per round trip with the native
-   executor.
+   Done. The native executor calls routines directly, 0.45 us per call
+   against 19 us before, and runs their callbacks itself: a round trip from
+   machine code into a Forth word and back takes about 1 us, against 49 to
+   66 us through the Python dispatcher before.
 6. **Caller-bounded limits.** Replace fixed ceilings (dictionary words,
    namespace keys, nesting depth, instruction and callback ceilings, edge and
    publication counts) with limits the caller supplies or real structural

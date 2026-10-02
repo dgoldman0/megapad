@@ -22,7 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 3
+SEMANTIC_API_VERSION = 4
 
 
 class NativeExecutor:
@@ -101,11 +101,14 @@ class NativeExecutor:
         self.plans = {}
         self.entry_costs = {}
         self.continuation_frames = {}
-        # Machine routines planned for direct calls, by execution token.
+        # Machine routines planned for direct calls, by execution token, and
+        # the routine words by native index.
         self.routine_owner = None
         self.routine_slots = {}
+        self.routine_words = []
         self.routine_count = 0
-        self.machine_stopped = False
+        # Machine work a native interval left for Python, if any.
+        self.machine_handoff = None
         self.entries = 0
         self.semantic_steps = 0
         self.profile_enabled = os.environ.get("MEGAFORTH_NATIVE_PROFILE") == "1"
@@ -126,9 +129,10 @@ class NativeExecutor:
             self.program.bind_routines(None)
         self.routine_owner = None
         self.routine_slots.clear()
+        self.routine_words.clear()
         self.routine_count = 0
 
-    def _routine_index(self, word):
+    def _routine_index(self, word, pending):
         """Plan a direct call to a machine routine the owner admits for one."""
 
         owner = self.runtime._machine_owner
@@ -140,18 +144,51 @@ class NativeExecutor:
         native = owner.native_routine(word)
         if native is None:
             return None
-        image, inputs, outputs, rules = native
+        image, inputs, outputs, rules, sites = native
         if self.routine_owner is None:
             self.program.bind_routines(owner.native_entry())
             self.routine_owner = owner
         elif self.routine_owner is not owner:
             return None
         index = self.routine_count
-        self.program.set_routine(index, image.native_handle, inputs, outputs, rules)
+        self.program.set_routine(index, image.native_handle, inputs, outputs, rules, sites)
         # The slot keeps the image alive while a plan can name its index.
         self.routine_slots[word.xt] = (word, image, index)
+        self.routine_words.append(word)
         self.routine_count += 1
+        # A site's word is bound by Python when the site is first used; one
+        # already bound runs here from now on.
+        routine = word.implementation.routine
+        for site in range(len(sites)):
+            target = owner.bound_target(routine, site)
+            if target is not None:
+                self.program.set_routine_target(index, site, *self._site_operation(target, pending))
         return index
+
+    def _site_operation(self, target, pending):
+        """How native code runs a callback word: OP_CALL or one inline operation."""
+
+        op = self.extension
+        operation = self._call(target, pending)
+        if operation[0] == op.OP_CALL or (
+                operation[0] not in (op.OP_STOP, op.OP_CALL_ROUTINE, op.OP_EXECUTE,
+                                     op.OP_I, op.OP_J, op.OP_RP_FETCH)):
+            return operation
+        return op.OP_STOP, 0, 0
+
+    def routine_target_bound(self, routine, site, target):
+        """Run a callback site's newly bound word natively from now on."""
+
+        word = routine.word
+        if (word is None or self.generation != self.runtime.dictionary.execution_generation
+                or self.routine_owner is not self.runtime._machine_owner):
+            return
+        slot = self.routine_slots.get(word.xt)
+        if slot is None or slot[0] is not word:
+            return
+        pending = []
+        self.program.set_routine_target(slot[2], site, *self._site_operation(target, pending))
+        self._install(pending)
 
     def stats(self):
         result = {"entries": self.entries, "semantic_steps": self.semantic_steps,
@@ -236,18 +273,22 @@ class NativeExecutor:
                 pending.append(target)
                 return op.OP_CALL, target.xt, 0
         if isinstance(implementation, rt.RoutineDefinition):
-            index = self._routine_index(target)
+            index = self._routine_index(target, pending)
             if index is not None:
                 return op.OP_CALL_ROUTINE, index, 0
         return op.OP_STOP, 0, 0
 
     def _prepare(self, initial):
-        runtime = self.runtime
-        if self.generation != runtime.dictionary.execution_generation:
+        if self.generation != self.runtime.dictionary.execution_generation:
             self.invalidate()
         if initial.xt in self.plans:
             return
-        pending = [initial]
+        self._install([initial])
+
+    def _install(self, pending):
+        """Plan these colon words and every colon word they reach."""
+
+        runtime = self.runtime
         op = self.extension
         while pending:
             word = pending.pop()
@@ -313,7 +354,7 @@ class NativeExecutor:
             )
 
     def run(self, current, ip, context, meter, quantum_limit, machine_allowance=0):
-        self.machine_stopped = False
+        self.machine_handoff = None
         if not self._admitted_context(context, meter):
             return None
         # This is an internal return to the same dispatcher, never a guest
@@ -354,8 +395,7 @@ class NativeExecutor:
             machine_allowance,
         )
         (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
-         updates, pointer_captures, fpcsr, machine_instructions, machine_calls,
-         machine_stopped) = result
+         updates, pointer_captures, fpcsr, machine) = result
         # Publish the completed prefix before clocks, profiling, fallback or
         # any host observer can see the native interval's boundary.
         self.scalar_float._fpcsr = fpcsr
@@ -390,9 +430,18 @@ class NativeExecutor:
         meter.steps += steps
         self.runtime.diagnostics.account_work_many(steps)
         self.runtime.timer.advance_by(steps)
-        if machine_calls:
-            self.routine_owner.account_native(meter, machine_instructions, machine_calls)
-            self.machine_stopped = machine_stopped
+        if machine is not None:
+            instructions, calls, callbacks, handoff, frames, callback = machine
+            self.routine_owner.account_native(meter, instructions, calls, callbacks)
+            if handoff or frames:
+                # Entries this interval began and did not finish, oldest first.
+                words = self.routine_words
+                self.machine_handoff = (handoff, [
+                    (words[routine], caller_xt, caller_ip, frontier, in_callback,
+                     words[site_routine], site, slot, raw, depth)
+                    for (routine, caller_xt, caller_ip, frontier, in_callback,
+                         site_routine, site, slot, raw, depth) in frames
+                ], callback)
         self.entries += 1
         self.semantic_steps += steps
         if self.profile_enabled:

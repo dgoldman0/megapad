@@ -4004,12 +4004,10 @@ class MegaForthRuntime:
                 )
                 if progressed is not None:
                     current, ip = progressed
-                    if self._native_execution.machine_stopped:
-                        # A routine called natively stopped short of returning.
-                        resume = RoutineResume(current, ip + 1)
-                        flow = self._machine_flow(
-                            lambda: owner.settle_native(context, meter, resume, machine_can_yield),
-                            context, meter, root_id, machine_can_yield)
+                    handoff = self._native_execution.machine_handoff
+                    if handoff is not None:
+                        flow = self._native_machine_handoff(
+                            handoff, current, ip, context, meter, root_id, machine_can_yield)
                         if flow is _DISPATCH_DONE:
                             return None
                         if type(flow) is _MachineCursor:
@@ -4299,6 +4297,42 @@ class MegaForthRuntime:
             raise ExecutionError(f"word {target.name!r} is not executable")
         context.returns.push_continuation(caller.xt, return_ip)
         return target, 0
+
+    def _native_machine_handoff(self, handoff, current, ip, context, meter, root_id, can_yield):
+        """Adopt the machine entries a native interval left, then take its next step.
+
+        The native executor stopped at ``current``/``ip``. Entries it began and
+        did not finish become the owner's, exactly as if this dispatcher had
+        begun them. Returns where Forth continues, a cursor, or _DISPATCH_DONE.
+        """
+
+        kind, frames, callback = handoff
+        owner = self._machine_owner
+        if frames:
+            owner.adopt_native(context, [
+                (routine, RoutineResume(self._resolve_dispatch_word(caller_xt), caller_ip),
+                 frontier, in_callback, site_routine, site, slot, raw, depth)
+                for (routine, caller_xt, caller_ip, frontier, in_callback,
+                     site_routine, site, slot, raw, depth) in frames
+            ])
+        native = self._native_execution.extension
+        if kind == native.MACHINE_STOPPED_CALL:
+            # A routine called natively stopped short of returning.
+            resume = RoutineResume(current, ip + 1)
+            produce = lambda: owner.settle_native(context, meter, resume, can_yield)
+        elif kind == native.MACHINE_STOPPED_RESUME:
+            produce = lambda: owner.settle_native_resume(context, meter, can_yield)
+        elif kind == native.MACHINE_CALLBACK:
+            produce = lambda: owner.native_callback(context, callback)
+        elif kind == native.MACHINE_RETURN:
+            flow = self._machine_return_flow(context, meter, root_id, can_yield)
+            if flow is None:
+                raise ExecutionError("a native callback returned into no machine entry")
+            return flow
+        else:
+            # The interval stopped inside a callback; Forth continues there.
+            return current, ip
+        return self._machine_flow(produce, context, meter, root_id, can_yield)
 
     def _machine_call(self, target, context, meter, resume, root_id, can_yield):
         owner = self._machine_owner

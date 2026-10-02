@@ -100,19 +100,27 @@ machine instruction budget stops runaway code with
 
 ## Crossing costs
 
-The native semantic executor calls routines without callback sites itself,
-through `shared/accel/routine_call.h`. Routines with callback sites, and the
-callbacks, go through the Python dispatcher. A routine that yields or faults
-during a native call is taken over by Python without being run again.
+The native semantic executor makes the whole round trip itself, through
+`shared/accel/routine_call.h`. It calls the routine, and when the machine stops
+at a callback site it runs the site's word on the caller's own stacks and
+resumes the machine when that word returns into it. Python binds a site's word
+the first time the site is used. From then on the word runs natively if it is
+a colon word the executor has planned, or one operation that touches neither
+the return stack nor the instruction stream. Anything else goes to Python at
+the point where Python's own path would be: another routine as the callback, a
+word the executor cannot plan, a callback word that stops partway, or a machine
+entry that yields or faults. The entries begun natively become Python's own
+there, and nothing runs twice.
 
 `bench_hybrid_crossing.py` measures the added cost per crossing. On the
-development machine, with 20,000 iterations:
+development machine, with 20,000 iterations and the machine heavily loaded by
+other work:
 
 | Crossing | Native executor | Python executor |
 |---|---:|---:|
-| Forth to a routine without callback sites | 0.45 us | 9.9 us |
-| Routine calling back a primitive and returning | 39 us | 30 us |
-| Routine calling back a colon word and returning | 47 us | 26 us |
+| Forth to a routine without callback sites | 0.55 us | 15 us |
+| Routine calling back a primitive and returning | 1.2 us | 41 us |
+| Routine calling back a colon word and returning | 1.1 us | 35 us |
 
 These are host wall times, not MP64 cycles. Machine instructions and cycles
 are counted separately from semantic steps.
@@ -174,7 +182,7 @@ boot, multicore execution and native snapshots.
 | Routine runner, images and events | `emulator/accel/mp64_accel.cpp`, `RoutineRunner` |
 | Executor-to-runner call interface | `shared/accel/routine_call.h` |
 | Routine words, machine returns and dispatch | `simulator/runtime.py`, `simulator/stacks.py` |
-| Direct calls from native Forth | `simulator/native_execution.py`, `simulator/accel/semantic_executor.cpp` |
+| Native calls and callbacks | `simulator/native_execution.py`, `simulator/accel/semantic_executor.cpp`; adoption in `hybrid/runtime.py` |
 | Manifest | `hybrid/manifest.py` |
 | Owner, faults, quanta and budgets | `hybrid/runtime.py` |
 | Session and server | `hybrid/session.py`, `hybrid/server.py` |

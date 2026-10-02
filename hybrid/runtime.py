@@ -29,7 +29,7 @@ from simulator.stacks import MachineReturn, StackOverflow
 
 
 CODE_ALIGNMENT = 16
-NATIVE_REVISION = 1
+NATIVE_REVISION = 2
 _ACCESS_BITS = {"read": 1, "write": 2, "read_write": 3}
 # An allowance this large means "until the routine returns or calls back".
 UNBOUNDED = 1 << 62
@@ -72,6 +72,18 @@ class _Routine:
         self.word: Word | None = None
         self.lease = None
         self.targets: list[Word | None] = [None] * len(declaration.callbacks)
+
+
+class _CallbackEvent:
+    """A callback stop reported by the native executor instead of the runner."""
+
+    __slots__ = ("image", "site", "sp", "values")
+
+    def __init__(self, image, site, sp, values) -> None:
+        self.image = image
+        self.site = site
+        self.sp = sp
+        self.values = values
 
 
 class _Entry:
@@ -249,7 +261,7 @@ class HybridRuntime:
     def finish_dispatch(self) -> None:
         """Abandon the entries of a dispatch that ended or was cancelled."""
 
-        if self._entries:
+        if self._entries or self._runner.entries:
             self._entries.clear()
             self._runner.cancel(0)
 
@@ -319,19 +331,27 @@ class HybridRuntime:
     def native_routine(self, word):
         """What the native executor needs to call ``word`` itself, or None.
 
-        Routines with callback sites go through the dispatcher, which runs
-        their callbacks.
+        Each callback site is given as its (input_cells, output_cells).
         """
 
         routine = word.implementation.routine
-        if (self._closed or routine.image is None or routine.declaration.callbacks
+        if (self._closed or routine.image is None
                 or not self.semantic.dictionary.is_body_lease_live(routine.lease)):
             return None
         declaration = routine.declaration
         rules = tuple((rule.address_argument, rule.length_argument, rule.element_bytes,
                        rule.max_bytes or 0, _ACCESS_BITS[rule.access])
                       for rule in declaration.buffers)
-        return routine.image, declaration.input_cells, declaration.output_cells, rules
+        sites = tuple((site.input_cells, site.output_cells) for site in declaration.callbacks)
+        return routine.image, declaration.input_cells, declaration.output_cells, rules, sites
+
+    def bound_target(self, routine: _Routine, index: int) -> Word | None:
+        """The live word a callback site is bound to, or None until it is used."""
+
+        word = routine.targets[index]
+        if word is None or self.semantic.dictionary._by_xt.get(word.xt) is not word:
+            return None
+        return word
 
     def native_entry(self):
         return self._runner.native_entry()
@@ -346,9 +366,31 @@ class HybridRuntime:
         except MachineBudgetExceeded:
             return 0
 
-    def account_native(self, meter, instructions: int, calls: int) -> None:
+    def account_native(self, meter, instructions: int, calls: int, callbacks: int) -> None:
         self._account(meter, instructions)
         self._transitions += calls
+        self._callbacks += callbacks
+
+    def adopt_native(self, context, frames) -> None:
+        """Take over the entries a native interval began and did not finish.
+
+        Each becomes the entry this owner would have made: one whose callback
+        is running gets its machine return typed on the return stack.
+        """
+
+        returns = context.returns
+        for (word, resume, frontier, in_callback, site_word, site, slot, raw,
+             depth) in frames:
+            entry = _Entry(word.implementation.routine, context, frontier, resume)
+            if in_callback:
+                machine_return = MachineReturn(entry, raw)
+                returns.adopt_machine_return(machine_return, slot)
+                entry.state = _CALLBACK
+                entry.slot = slot
+                entry.machine_return = machine_return
+                entry.site = site_word.implementation.routine.declaration.callbacks[site]
+                entry.depth = depth
+            self._entries.append(entry)
 
     def settle_native(self, context, meter, resume, can_yield):
         """Take over a natively called routine that yielded or failed."""
@@ -360,6 +402,27 @@ class HybridRuntime:
             raise self._fault(entry, event)
         self._entries.append(entry)
         return self._settle(entry, event, meter, can_yield, accounted=True)
+
+    def settle_native_resume(self, context, meter, can_yield):
+        """Take over the newest entry, resumed natively, that yielded or failed."""
+
+        entry = self._entries[-1]
+        try:
+            event = self._runner.take_event()
+        except BaseException:
+            # The runner already dropped an entry that failed in the host.
+            self._entries.pop()
+            raise
+        return self._settle(entry, event, meter, can_yield, accounted=True)
+
+    def native_callback(self, context, callback):
+        """Start, as Python, a callback the newest native entry stopped at."""
+
+        image_address, site, slot, values = callback
+        image = next((image for image in self._by_image
+                      if image.native_handle == image_address), None)
+        event = _CallbackEvent(image, site, slot, values)
+        return self._callback(self._entries[-1], event)
 
     def advance(self, entry, context, meter, can_yield):
         if not self._entries or self._entries[-1] is not entry or entry.state != _YIELDED:
@@ -437,6 +500,9 @@ class HybridRuntime:
                     "undefined_callback",
                     f"{routine.declaration.name} calls back {name}, which is not defined")
             routine.targets[index] = word
+            native = self.semantic._native_execution
+            if native is not None:
+                native.routine_target_bound(routine, index, word)
         return word
 
     def _prune(self) -> None:

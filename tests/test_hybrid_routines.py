@@ -361,3 +361,137 @@ def test_a_reclaimed_routine_is_replanned_and_refused(native_hybrid):
     runtime.allot_dictionary(word.body_address - runtime.dictionary.here, runtime.main_context)
     with pytest.raises(HybridExecutionError, match="reclaimed"):
         runtime.execute("BUMP")
+
+
+def _forbid_python_crossings(monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("the native executor should run this crossing itself")
+    for name in ("call", "resume", "_callback"):
+        monkeypatch.setattr(HybridRuntime, name, refuse)
+
+
+SUMS = (b": PLUS1 ( a b -- c ) + 1+ ; "
+        b": SUMS ( n -- p c ) DUP 0 SWAP 0 DO I HPRIM LOOP SWAP 0 SWAP 0 DO I HCOLON LOOP ;")
+
+
+def test_native_code_runs_callbacks_without_python(native_hybrid, monkeypatch):
+    runtime = native_hybrid.semantic
+    native_hybrid.register(callback_routine("HPRIM", "+"))
+    native_hybrid.register(callback_routine("HCOLON", "PLUS1"))
+    runtime.evaluate(SUMS)
+    runtime.evaluate(b"2 SUMS 2DROP")  # Python binds each site when it is first used
+    _forbid_python_crossings(monkeypatch)
+    before = (native_hybrid.transitions, native_hybrid.callback_requests)
+    runtime.evaluate(b"100 SUMS")
+    # HPRIM(t, i) = (t + i) + i; HCOLON(t, i) = (t + i + 1) + i.
+    assert stack(native_hybrid) == (2 * sum(range(100)), sum(2 * i + 1 for i in range(100)))
+    assert (native_hybrid.transitions, native_hybrid.callback_requests) == (
+        before[0] + 200, before[1] + 200)
+    assert runtime.main_context.returns.depth() == 0 and native_hybrid.parked is False
+
+
+def test_native_callbacks_nest_and_recurse_without_python(native_hybrid, monkeypatch):
+    runtime = native_hybrid.semantic
+    native_hybrid.register(callback_routine("HREC", "INNER"))
+    native_hybrid.register(RoutineDeclaration("H+", code("add r4, r5\nret.l"),
+                                              input_cells=2, output_cells=1))
+    runtime.evaluate(b": INNER ( a b -- c ) DUP 0= IF DROP ELSE 2DUP H+ DROP 1- HREC THEN ;")
+    runtime.evaluate(b": GO ( a b -- c ) HREC ; 1 1 GO DROP")
+    _forbid_python_crossings(monkeypatch)
+    runtime.evaluate(b"1 10 GO")
+    assert stack(native_hybrid) == (1 + 10 * 11 // 2,)
+    assert runtime.main_context.returns.depth() == 0 and native_hybrid.parked is False
+
+
+def test_a_callback_site_reached_through_another_routine_runs_natively(native_hybrid, monkeypatch):
+    runtime = native_hybrid.semantic
+    inner = native_hybrid.register(callback_routine("HB", "+"))
+    # HA calls HB's code directly, with r3 at HB's entry as HB's code expects.
+    entry = inner.body_address + (-inner.body_address % 16)
+    native_hybrid.register(RoutineDeclaration(
+        "HA", code(f"ldi64 r3, {entry}\nmov r12, r3\ncall.l r12\nret.l"),
+        input_cells=2, output_cells=1))
+    runtime.evaluate(b": BOTH ( a b -- x y ) 2DUP HB -ROT HA ; 1 2 BOTH 2DROP")
+    _forbid_python_crossings(monkeypatch)
+    runtime.evaluate(b"5 6 BOTH")
+    assert stack(native_hybrid) == (5 + 6 + 6, 5 + 6 + 6)
+    assert native_hybrid.parked is False
+
+
+def test_an_inline_callback_must_leave_the_cells_its_site_declares(hybrid):
+    runtime = hybrid.semantic
+    hybrid.register(callback_routine("HDUP", "DUP"))
+    runtime.evaluate(b": GO 1 2 HDUP ;")
+    # The first use binds the site; natively, the second runs DUP inline.
+    for _ in range(2):
+        with pytest.raises(HybridExecutionError, match="DUP left 3 cells"):
+            runtime.evaluate(b"GO")
+        assert hybrid.parked is False
+        runtime.main_context.data.clear()
+
+
+def test_a_callback_whose_word_is_a_routine_runs_it(hybrid):
+    runtime = hybrid.semantic
+    hybrid.register(RoutineDeclaration("H+", code("add r4, r5\nret.l"), input_cells=2, output_cells=1))
+    hybrid.register(callback_routine("HCB", "H+"))
+    runtime.evaluate(b": GO HCB ; 1 2 GO 3 4 GO")
+    assert stack(hybrid) == (1 + 2 + 2, 3 + 4 + 4)
+    assert hybrid.parked is False
+
+
+CALL_THEN_COUNT = """
+    mov r12, r3
+after_pc:
+    addi r12, 0
+call:
+    call.l r12
+loop:
+    subi r4, 1
+    brne loop
+    ret.l
+stub:
+    ret.l
+"""
+
+
+def test_machine_work_after_a_callback_yields_and_resumes(hybrid):
+    runtime = hybrid.semantic
+    raw, labels = callback_code(CALL_THEN_COUNT)
+    hybrid.register(RoutineDeclaration("HCC", raw, input_cells=1, output_cells=1, callbacks=(
+        CallbackSite(labels["call"], labels["stub"], "1+", 1, 1),)))
+    runtime.evaluate(b": RUN 999 HCC 5 + ;")
+    runtime.execute("RUN")  # binds the site
+    runtime.main_context.data.clear()
+    result = runtime.run_until_blocked("RUN", machine_quantum_instructions=300)
+    turns = 1
+    while isinstance(result, YieldedExecution):
+        result = runtime.resume_yielded(result.suspension)
+        turns += 1
+    assert isinstance(result, ExecutionResult) and stack(hybrid) == (5,)
+    assert turns == 7 and hybrid.parked is False
+
+
+def test_both_executors_count_the_same_steps_across_callbacks():
+    outcomes = []
+    for executor in ("python", "native"):
+        if executor == "native":
+            pytest.importorskip("_megaforth_native")
+        owner = HybridRuntime.create(executor=executor,
+                                     geometry={"bank0_size": 1 << 20, "external_size": 1 << 20})
+        try:
+            runtime = owner.semantic
+            owner.register(callback_routine("HPRIM", "+"))
+            owner.register(callback_routine("HCOLON", "PLUS1"))
+            runtime.evaluate(SUMS)
+            runtime.evaluate(b": RUN 1 SUMS 2DROP 60 SUMS ;")
+            result = runtime.run_until_blocked("RUN", quantum_steps=97)
+            yields = 0
+            while isinstance(result, YieldedExecution):
+                result = runtime.resume_yielded(result.suspension)
+                yields += 1
+            outcomes.append((yields, stack(owner), owner.transitions, owner.callback_requests,
+                             owner.parked))
+        finally:
+            owner.close()
+    assert outcomes[0] == outcomes[1]
+    assert outcomes[0][0] > 5

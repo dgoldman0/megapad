@@ -12798,15 +12798,17 @@ public:
         return start_entry(std::move(prepared), values, allowance);
     }
 
-    // The native semantic executor's entry. It runs a published image that
-    // has no callback sites, under the caller's GIL. Nothing runs unless the
-    // whole entry is admitted; an entry that stops short of returning leaves
-    // its outcome for Python to collect with take_event().
+    // The native semantic executor's entry. It runs a published image under
+    // the caller's GIL. Nothing runs unless the whole entry is admitted. An
+    // entry that reaches a callback site stays parked for native_resume();
+    // one that stops short of returning otherwise leaves its outcome for
+    // Python to collect with take_event().
     static int native_call(void* self, std::uintptr_t image_address,
                            const uint64_t* arguments, std::size_t argument_count,
                            const megapad::hybrid::RoutineSpan* spans, std::size_t span_count,
                            uint64_t frontier, uint64_t floor, uint64_t allowance,
                            uint64_t* outputs, std::size_t output_count,
+                           megapad::hybrid::RoutineCallbackStop* callback,
                            uint64_t* instructions) noexcept {
         using megapad::hybrid::ROUTINE_DECLINED;
         auto& runner = *static_cast<RoutineRunner*>(self);
@@ -12817,7 +12819,7 @@ public:
         for (const auto& item : runner.published_)
             if (reinterpret_cast<std::uintptr_t>(item.get()) == image_address)
                 image = item;
-        if (!image || !image->sites.empty() || argument_count != image->input_cells ||
+        if (!image || argument_count != image->input_cells ||
                 output_count != image->output_cells)
             return ROUTINE_DECLINED;
         std::optional<Scope> scope;
@@ -12843,31 +12845,62 @@ public:
         try {
             event = runner.start_entry(std::move(prepared), values, allowance);
         } catch (const std::exception& error) {
-            runner.pending_error_ = error.what();
-            runner.pending_ = true;
-            return megapad::hybrid::ROUTINE_STOPPED;
+            return runner.fail_native(error.what());
         } catch (...) {
-            runner.pending_error_ = "routine runner failed";
-            runner.pending_ = true;
-            return megapad::hybrid::ROUTINE_STOPPED;
+            return runner.fail_native("routine runner failed");
         }
-        *instructions = event.instructions;
-        if (event.kind == mp64_hybrid::EventKind::RETURNED) {
-            std::copy(event.values.begin(), event.values.end(), outputs);
-            return megapad::hybrid::ROUTINE_RETURNED;
+        return runner.finish_native(event, image, outputs, output_count, callback, instructions);
+    }
+
+    // Resume the newest entry, parked for a callback at ``slot``, with the
+    // callback's output cells, as resume() does for Python. Anything that
+    // does not match the parked entry declines before any effect.
+    static int native_resume(void* self, uint64_t slot,
+                             const uint64_t* callback_outputs, std::size_t callback_output_count,
+                             uint64_t allowance, uint64_t* outputs, std::size_t output_count,
+                             megapad::hybrid::RoutineCallbackStop* callback,
+                             uint64_t* instructions) noexcept {
+        using megapad::hybrid::ROUTINE_DECLINED;
+        auto& runner = *static_cast<RoutineRunner*>(self);
+        *instructions = 0;
+        if (runner.closed_ || runner.active_ || runner.pending_ || allowance == 0 ||
+                runner.entries_.empty())
+            return ROUTINE_DECLINED;
+        Entry& entry = runner.entries_.back();
+        if (entry.state != Entry::CALLBACK || entry.registers[15] != slot || !entry.site_image ||
+                callback_output_count != entry.site_image->sites[entry.site].output_cells ||
+                output_count != entry.image->output_cells)
+            return ROUTINE_DECLINED;
+        const auto image = entry.image;
+        std::optional<Scope> scope;
+        std::unique_ptr<CPUExecutionGuard> guard;
+        try {
+            scope.emplace(runner);
+            guard = runner.acquire_execution(&runner);
+        } catch (...) {
+            return ROUTINE_DECLINED;
         }
-        if (!event.image)
-            event.image = image;
-        runner.pending_event_ = std::move(event);
-        runner.pending_error_.clear();
-        runner.pending_ = true;
-        return megapad::hybrid::ROUTINE_STOPPED;
+        mp64_hybrid::Event event;
+        try {
+            runner.restore_entry(entry);
+            for (std::size_t index = 0; index < callback_output_count; ++index)
+                runner.state_->regs[4 + index] = callback_outputs[index];
+            entry.state = Entry::RUNNING;
+            entry.site_image.reset();
+            event = runner.run(allowance, true);
+        } catch (const std::exception& error) {
+            return runner.fail_native(error.what());
+        } catch (...) {
+            return runner.fail_native("routine runner failed");
+        }
+        return runner.finish_native(event, image, outputs, output_count, callback, instructions);
     }
 
     py::capsule native_entry() {
         if (closed_)
             throw std::runtime_error("routine runner is closed");
-        native_call_ = megapad::hybrid::RoutineCall{this, &RoutineRunner::native_call};
+        native_call_ = megapad::hybrid::RoutineCall{
+            this, &RoutineRunner::native_call, &RoutineRunner::native_resume};
         return py::capsule(&native_call_, megapad::hybrid::ROUTINE_CALL_CAPSULE);
     }
 
@@ -12936,6 +12969,46 @@ private:
     void require_settled() const {
         if (pending_)
             throw py::value_error("a native routine call is waiting to be settled");
+    }
+
+    // A native entry that failed in the host leaves the error for take_event().
+    int fail_native(const char* error) noexcept {
+        try {
+            pending_error_ = error;
+        } catch (...) {
+            pending_error_.clear();
+        }
+        if (pending_error_.empty())
+            pending_error_ = "routine runner failed";
+        pending_ = true;
+        return megapad::hybrid::ROUTINE_STOPPED;
+    }
+
+    // Report a native entry's event. A callback stays parked for
+    // native_resume(); a yield or fault waits for take_event().
+    int finish_native(mp64_hybrid::Event& event, const std::shared_ptr<mp64_hybrid::Image>& image,
+                      uint64_t* outputs, std::size_t output_count,
+                      megapad::hybrid::RoutineCallbackStop* callback,
+                      uint64_t* instructions) noexcept {
+        *instructions = event.instructions;
+        if (event.kind == mp64_hybrid::EventKind::RETURNED && event.values.size() == output_count) {
+            std::copy(event.values.begin(), event.values.end(), outputs);
+            return megapad::hybrid::ROUTINE_RETURNED;
+        }
+        if (event.kind == mp64_hybrid::EventKind::CALLBACK && event.values.size() <= 8) {
+            callback->image = reinterpret_cast<std::uintptr_t>(event.image.get());
+            callback->site = event.site;
+            callback->slot = event.sp;
+            callback->argument_count = event.values.size();
+            std::copy(event.values.begin(), event.values.end(), callback->arguments);
+            return megapad::hybrid::ROUTINE_CALLBACK;
+        }
+        if (!event.image)
+            event.image = image;
+        pending_event_ = std::move(event);
+        pending_error_.clear();
+        pending_ = true;
+        return megapad::hybrid::ROUTINE_STOPPED;
     }
 
     struct Prepared {
@@ -36101,7 +36174,7 @@ PYBIND11_MODULE(_mp64_accel, m) {
         });
 
     m.attr("HYBRID_ROUTINE_ABI") = "megapad.hybrid.routines";
-    m.attr("HYBRID_ROUTINE_REVISION") = 1;
+    m.attr("HYBRID_ROUTINE_REVISION") = 2;
     py::class_<mp64_hybrid::Image, std::shared_ptr<mp64_hybrid::Image>>(m, "RoutineImage")
         .def(py::init(&make_hybrid_image),
             py::arg("code_base"), py::arg("code"), py::arg("entry_offset"),

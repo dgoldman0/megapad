@@ -640,6 +640,22 @@ class ReturnStack:
             raise ValueError("the top return slot does not hold this machine return address")
         self._continuations[self._pointer] = (entry, entry.raw)
 
+    def adopt_machine_return(self, entry: MachineReturn, slot: int) -> None:
+        """Type ``slot``, a live cell holding ``entry.raw``, as a machine return.
+
+        A natively begun callback leaves its machine return at any depth
+        below newer frames; the cell already holds the return address.
+        """
+
+        self._require_backing("hold machine returns")
+        assert self._pointer is not None
+        assert self._memory_view is not None
+        if not self._pointer <= slot < self._empty_pointer or slot % CELL_BYTES:
+            raise ValueError("a machine return must be a live return stack cell")
+        if self._memory_view.read64(slot) != entry.raw:
+            raise ValueError("the return slot does not hold this machine return address")
+        self._continuations[slot] = (entry, entry.raw)
+
     def set_machine_frontier(self, pointer: int) -> None:
         """Adopt the stack pointer a machine routine left.
 
