@@ -101,10 +101,17 @@ go one at a time; commit each coherent slice once it is green.
    register-passed arguments. Done: those ceilings left with the old code.
    What remains is the eight register cells and whole I-cache lines of code.
 7. **Real hybrid workload.** Run Desk in hybrid mode with real machine
-   routines and compare it with simulator mode. Finding: Desk has no machine
-   code to call. Akashic and KDOS are entirely Forth; on the chip the only
+   routines and compare it with simulator mode. Desk has no machine code to
+   call: Akashic and KDOS are entirely Forth, and on the chip the only
    machine code is the BIOS and compiler output, which is the separate
-   native dictionary design.
+   native dictionary design. Done as two checks instead. The physical
+   Desktop journey passes in hybrid mode as it does in simulator mode: 339 s
+   against 364 s on a loaded machine, no capacity refusals and the same CELL
+   fallbacks, with a peak of 927 MB against 525 MB. `bench_hybrid_crossing.py`
+   measures the calls themselves: with the native executor a call from Forth
+   into machine code takes 0.42 us and a round trip from machine code into a
+   Forth word and back 0.84 us; with the Python executor, 9.1 us and about
+   25 us.
 8. **Launcher migration.** Once Akashic's tools start MegaPad through
    `megapad.py` or the packaged servers, delete the root `session_server.py`
    and `simulator_server.py` forwarders. Done.
