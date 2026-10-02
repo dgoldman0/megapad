@@ -123,7 +123,7 @@ go one at a time; commit each coherent slice once it is green.
 10. **Docs.** Remove the raw benchmark JSON and sandbox paths, and remove the
     dropped AES experiment reports; their reasons stay in commit history.
     Update commit IDs cited in docs to the re-authored IDs. Fold completed
-    plans into current documentation.
+    plans into current documentation. Done.
 11. **Small fixes.** Move test-only failure hooks out of production builds,
     restore the lost cancellation diagnostic in
     `simulator/rich_terminal_host.py`, release the GIL during long hybrid
@@ -147,4 +147,4 @@ The imported commits were re-authored as Daniel with a
 are unchanged, and commit IDs cited in messages were remapped. The original
 history is kept at `refs/imports/codex-2026-09-30/main`, and the old-to-new
 commit map is `.git/imports/codex-2026-09-30/commit-map.txt` in the main
-checkout. Docs still cite the original IDs until step 10.
+checkout. Docs cite the re-authored IDs.
