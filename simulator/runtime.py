@@ -1785,6 +1785,17 @@ class MegaForthRuntime:
         self._require_no_suspension("reconfigure the dictionary index")
         return self.dictionary_index.configure(base, slots)
 
+    def arm_dictionary_index_notification(self, count: int, xt: int) -> None:
+        """Implement ``DICT-INDEX-NOTIFY!``; an xt of zero disarms."""
+
+        self._require_session_owner_access("arm the dictionary index notification")
+        self.dictionary_index.arm_notification(count, xt)
+
+    def take_dictionary_index_notification(self) -> int:
+        """Disarm and return the notification xt when it is due, else zero."""
+
+        return self.dictionary_index.take_notification()
+
     def _dictionary_context(
         self,
         context: ExecutionContext | None = None,
@@ -3117,6 +3128,16 @@ class MegaForthRuntime:
             )
             state.definitions.append(word)
             state.compiler = None
+            # The BIOS publishes a colon name at ``:`` and makes the index
+            # notification check as that word's last step; this evaluator
+            # publishes at ``;``, so the check follows here.
+            notification = self.take_dictionary_index_notification()
+            if notification:
+                self._execute_guarded(
+                    self.dictionary.resolve(notification),
+                    state.context,
+                    state.meter,
+                )
         elif kind is DirectiveKind.IF:
             compiler.operations.append(BranchZero(0))
             compiler.controls.append(_IfFrame(len(compiler.operations) - 1))

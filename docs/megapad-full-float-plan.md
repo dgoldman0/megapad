@@ -121,7 +121,7 @@ open production item that must be closed before parity is claimed.
 
 - BIOS: `FP16-MODE`, `BF16-MODE`, the tile words, and the TACC words.
 - KDOS: `F.SUM`, `F.DOT`, `F.SUMSQ`, `F.ADD`, `F.MUL`, `BF.SUM`, `BF.DOT` and
-  the `kf*` kernels (`kdos.f:3112-3216, 3587-3607`). They chain tiles with
+  the `kf*` kernels (`kdos.f:3174-3280, 3654-3670`). They chain tiles with
   ACC_ACC, so they depend on the inter-tile rounding rule.
 - Akashic: `math/fp16.f` and `fp16-ext.f` (scalar FP16 through tile lane 0,
   required by about 35 files); `math/fp32.f` (software binary32, required by

@@ -764,16 +764,19 @@ emulator sessions may select 128 MiB explicitly. RTL's
 `EXT_MEM_SIZE_PARAM=0` instead selects the full window up to VRAM, which is a
 deferred RTL implementation discrepancy.
 
-Exact logical lines 2390 through 2423 now run KDOS's one-shot caller-backed
-dictionary-index initializer. The semantic BIOS validates the complete
-external span, emits exact 16-byte FNV/length/entry slots, rebuilds newest
-first, upserts later shadows, rebuilds after numeric rollback, and exposes
-status 0/1/2 plus the four public flags. Canonical 128 MiB XMEM reserves a
-1 MiB/65,536-slot authoritative table; absent or sub-2,048-byte capacity leaves
-it disabled, while exactly 2,048 bytes deliberately produces a protected
-one-slot saturated fallback. `2/` is an arithmetic right shift; this sizing
-path uses only positive cells and is unchanged by correction of the former
-logical implementation.
+KDOS's caller-backed dictionary-index section, from `_DICT-POW2-FLOOR`
+through its `XMEM-RESET` action, now runs exactly. The semantic BIOS validates
+the complete external span, emits exact 16-byte FNV/length/entry slots,
+rebuilds newest first, upserts later shadows, rebuilds after numeric rollback,
+and exposes status 0/1/2 plus the four public flags. Its `DICT-INDEX-NOTIFY!`
+check follows each named definition and `LATEST!`, as the BIOS's does.
+Canonical 128 MiB XMEM reserves a 1 MiB/65,536-slot authoritative first table
+and arms growth at three quarters of it; absent or sub-2,048-byte capacity
+leaves the index disabled, while exactly 2,048 bytes installs one saturated
+slot that then doubles at each definition until half the free tail refuses the
+next table. `2/` is an arithmetic right shift; this sizing path uses only
+positive cells and is unchanged by correction of the former logical
+implementation.
 
 The caller must reserve the table exclusively: BIOS geometry checks do not
 prove allocator ownership or disjointness, and rebuild clears the supplied

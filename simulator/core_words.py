@@ -552,26 +552,49 @@ def _move(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     runtime.memory.move(source, destination, length)
 
 
-def _constant(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+def _index_notification(runtime: MegaForthRuntime) -> Invoke | None:
+    """Make the BIOS's final-step DICT-INDEX-NOTIFY! check."""
+
+    xt = runtime.take_dictionary_index_notification()
+    return Invoke(xt) if xt else None
+
+
+def _constant(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> Invoke | None:
     value = context.data.pop()
     name = runtime.parse_required_input_word(b"CONSTANT")
     runtime.define_constant(name, value)
+    return _index_notification(runtime)
 
 
-def _value(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+def _value(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> Invoke | None:
     value = context.data.pop()
     name = runtime.parse_required_input_word(b"VALUE")
     runtime.define_value(name, value)
+    return _index_notification(runtime)
 
 
-def _create(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
+def _create(
+    runtime: MegaForthRuntime,
+    _context: ExecutionContext,
+) -> Invoke | None:
     name = runtime.parse_required_input_word(b"CREATE")
     runtime.define_created(name)
+    return _index_notification(runtime)
 
 
-def _variable(runtime: MegaForthRuntime, _context: ExecutionContext) -> None:
+def _variable(
+    runtime: MegaForthRuntime,
+    _context: ExecutionContext,
+) -> Invoke | None:
     name = runtime.parse_required_input_word(b"VARIABLE")
     runtime.define_created(name, initial_body=bytes(CELL_BYTES))
+    return _index_notification(runtime)
 
 
 def _here(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -585,10 +608,11 @@ def _latest(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 def _latest_store(
     runtime: MegaForthRuntime,
     context: ExecutionContext,
-) -> None:
+) -> Invoke | None:
     latest = context.data.peek()
     runtime.set_dictionary_latest(latest, context)
     context.data.pop()
+    return _index_notification(runtime)
 
 
 def _dictionary_rollback(
@@ -648,6 +672,15 @@ def _dictionary_index_fetch(
     context.data.push(state.slots)
     context.data.push(state.count)
     context.data.push(state.flags)
+
+
+def _dictionary_index_notify_store(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    xt = context.data.pop()
+    count = context.data.pop()
+    runtime.arm_dictionary_index_notification(count, xt)
 
 
 def _dictionary_base_fetch(
@@ -2898,6 +2931,12 @@ def install_core(runtime: MegaForthRuntime) -> None:
     runtime.define_primitive(
         b"IDLE-MS",
         lambda context: _idle_ms(runtime, idle_until.xt, context),
+    )
+
+    # The dictionary index's growth notification follows them.
+    runtime.define_primitive(
+        b"DICT-INDEX-NOTIFY!",
+        lambda context: _dictionary_index_notify_store(runtime, context),
     )
 
 

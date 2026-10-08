@@ -29,9 +29,9 @@ from simulator.runtime import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).parent / "fixtures" / "kdos-idle-2791-2805.f"
-FIRST_LINE = 2791
-LAST_LINE = 2805
+FIXTURE = Path(__file__).parent / "fixtures" / "kdos-idle-2846-2860.f"
+FIRST_LINE = 2846
+LAST_LINE = 2860
 SOURCE_SHA256 = "a2f9030f6bf1f3e1bd7c17dfcbd9695b2b6ae844844da48c322ee01ba3a0ab7c"
 SOURCE_GIT_BLOB = "1d89babfba5514cd1b969aca4ee7a9e9b0f37f70"
 

@@ -45,9 +45,12 @@ index. At 16 bytes per slot this is 1 MiB and holds the measured 30,598 live
 entries at a load factor below 0.47. The allocation policy takes at most
 1/128 of currently free XMEM and rounds the resulting slot count down to a
 power of two; that selects 65,536 slots for this arrangement and scales down
-without turning the profile-derived size into an architectural maximum. The
-BIOS interface remains caller-bounded and accepts any valid power-of-two slot
-count.
+without turning the profile-derived size into an architectural maximum. That
+is the first table: KDOS doubles it whenever it holds three quarters of its
+slots (see [Growth](#growth)), so the Desktop never grows it on the canonical
+machine while a smaller machine starts small and grows as programs define
+names. The BIOS interface remains caller-bounded and accepts any valid
+power-of-two slot count.
 
 ## Per-core `EXT.DICT` cache
 
@@ -99,6 +102,15 @@ BIOS validates the span before publishing it and never owns, grows, or frees
 the allocation. With no valid allocation, lookup remains correct through the
 linked list.
 
+`DICT-INDEX-NOTIFY!` `( count xt -- )` lets the owner learn when its table
+fills. It arms one notification, and an xt of zero disarms it. The final step
+of each named definition (`:`, `CREATE`, `VARIABLE`, `CONSTANT`, `VALUE`) and
+of `LATEST!` compares the index count with the armed count; once the count has
+reached it, the BIOS disarms and calls the xt `( -- )` as an ordinary Forth
+call. The definition is completely published by then, so the callback may bind
+another table with `DICT-INDEX!` or arm again. The BIOS keeps no growth
+policy. Boot clears the notification with the other callbacks.
+
 Geometry validation is not an ownership or disjointness proof. The caller
 must reserve the complete span exclusively while it is bound; installation
 and rebuild clear it and can otherwise overwrite live XMEM data or external
@@ -135,14 +147,14 @@ oldest entry using insert-if-absent, so the first (newest) binding wins. A
 normal upsert during that newest-to-oldest walk would incorrectly let an older
 shadowed definition replace the new one.
 
-KDOS allocates a capacity-derived index after the one-shot `XMEM-INIT` and
-before sealing the userland dictionary/general-XMEM partition; that table is
-1 MiB in the canonical 128 MiB arrangement. Its own initializer is also
+KDOS allocates a capacity-derived first table after the one-shot `XMEM-INIT`
+and before sealing the userland dictionary/general-XMEM partition; that table
+is 1 MiB in the canonical 128 MiB arrangement. Its own initializer is also
 one-shot. It uses the checked XMEM allocator, installs the bounded span,
-advances `XMEM-FLOOR` after a successful installation, and rebuilds all BIOS
-and KDOS definitions accumulated before installation. If external memory is
-absent or the reservation cannot be made, installation is skipped and linked
-lookup remains the fallback.
+advances `XMEM-FLOOR` after a successful installation, rebuilds all BIOS and
+KDOS definitions accumulated before installation, and arms growth at three
+quarters of the slots. If external memory is absent or the reservation cannot
+be made, installation is skipped and linked lookup remains the fallback.
 
 The sizing input is `XMEM-FREE`, meaning the virgin bump tail rather than the
 sum of that tail and reclaimed free-list nodes. `_DICT-INDEX-DONE` is published
@@ -150,6 +162,27 @@ before allocation and installation. Consequently, a status-1 BIOS rejection
 after successful allocation aborts with the block consumed, the floor not yet
 advanced, and retry disabled. Normal fresh-boot sizing supplies aligned,
 power-of-two, in-range geometry and cannot reach that edge.
+
+## Growth
+
+Linear probing slows sharply as a table fills, and a full table turns every
+miss into a probe of all slots followed by a walk of the linked dictionary.
+KDOS therefore grows the index before that happens. At the armed count,
+`_DICT-INDEX-GROW` takes a table twice the size from the XMEM allocator, binds
+it with `DICT-INDEX!` (the BIOS rebuilds it from the dictionary), arms again at
+three quarters of the new table, and returns the old table to the free list.
+The index only speeds up lookup, so a new table may take at most half of the
+free XMEM bump tail and never the last of it. When the allocator refuses, KDOS
+arms once more for the moment the table is full; after a second refusal the
+saturated fallback remains in charge. Growth allocates only on core 0, which
+owns the allocator; a definition published on another core arms one name
+later so that core 0 grows the table.
+
+A grown table lies in general XMEM, above `XMEM-FLOOR`. KDOS's `XMEM-RESET`
+action unbinds such a table, resets, binds the same slot count again at the
+floor, and raises the floor past it, as `XBUF` does for other persistent
+kernel buffers. A table below the floor, such as the first table, is not
+touched. `networking.f` wraps that action rather than the raw reset.
 
 ## Publication and rollback
 
@@ -220,7 +253,10 @@ The implementation slice requires focused, seconds-scale checks for:
 - positive and negative side-index lookup, hash collision, saturation fallback,
   long names, latest-binding shadowing, and pre-install fallback;
 - demand-only cache allocation and update-existing definition publication;
-- `MARKER`, `FORGET`, and transactional rollback rejecting stale bindings.
+- `MARKER`, `FORGET`, and transactional rollback rejecting stale bindings;
+- the growth notification after each kind of publication, doubling at three
+  quarters, refusal within half the free tail, and rebinding across
+  `XMEM-RESET`, in the simulator and through KDOS on the machine.
 
 The landed host-cache selector passes all 15 reference/native cases. The
 focused BIOS selectors pass 21 cases covering index behavior, rollback,

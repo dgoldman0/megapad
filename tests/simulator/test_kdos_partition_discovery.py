@@ -34,11 +34,11 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-partition-discovery-4109-4678.f"
+    / "kdos-partition-discovery-4164-4733.f"
 )
 
-FIRST_LINE = 4109
-LAST_LINE = 4678
+FIRST_LINE = 4164
+LAST_LINE = 4733
 SLICE_SHA256 = (
     "bf46ad3acc9deaf380ac4229fe9196219fc0111df8d8f5a6650ffa95fb766112"
 )

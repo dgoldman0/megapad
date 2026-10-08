@@ -9232,7 +9232,9 @@ CREATE _TC-STATIC-END
     0 _TLS-OWNER-RETURN ;
 
 \ Runtime XMEM bulk reset is incompatible with a live exact certificate blob.
-\ Keep the original primitive internal and publish a checked KDOS wrapper.
+\ Wrap the reset action already installed, KDOS's, which keeps the
+\ dictionary index bound, and publish the checked result.
+' XMEM-RESET >BODY @ CONSTANT _TLS-XMEM-RESET-NEXT
 : (TLS-XMEM-RESET) ( -- )
     \ With no external memory the primitive is an unconditional no-op.  The
     \ credential pool itself requires XMEM, so there is no persistent Bank-0
@@ -9243,7 +9245,7 @@ CREATE _TC-STATIC-END
     TLS-CREDENTIAL-ACTIVE @ IF
         TLS-OWNER-RELEASE TLS-CREDENTIAL-E-BUSY THROW
     THEN
-    (XMEM-RESET)
+    _TLS-XMEM-RESET-NEXT EXECUTE
     TLS-OWNER-RELEASE ;
 
 ' (TLS-XMEM-RESET) IS XMEM-RESET

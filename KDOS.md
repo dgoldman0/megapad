@@ -477,7 +477,7 @@ Character & utility words (§1):
 BIOS additions:
 - `LATEST` ( -- addr ): push address of most recent dictionary entry
 - `LATEST!` ( entry -- ): coherently publish a replacement dictionary head without changing HERE
-- `DICT-INDEX!` / `DICT-INDEX@`: bind and inspect the caller-backed dictionary index
+- `DICT-INDEX!` / `DICT-INDEX@` / `DICT-INDEX-NOTIFY!`: bind, inspect, and learn when to grow the caller-backed dictionary index
 - `DICT-ROLLBACK`: atomically restore a validated HERE/LATEST checkpoint and repair accelerators
 
 Deferred to future version:

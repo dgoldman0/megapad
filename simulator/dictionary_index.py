@@ -38,7 +38,13 @@ class DictionaryIndexState:
 class HostedDictionaryIndex:
     """Maintain one bounded, caller-owned open-addressed side index."""
 
-    __slots__ = ("_dictionary", "_memory", "_state")
+    __slots__ = (
+        "_dictionary",
+        "_memory",
+        "_notify_count",
+        "_notify_xt",
+        "_state",
+    )
 
     def __init__(
         self,
@@ -52,12 +58,42 @@ class HostedDictionaryIndex:
         self._memory = memory
         self._dictionary = dictionary
         self._state = DictionaryIndexState()
+        self._notify_count = 0
+        self._notify_xt = 0
 
     @property
     def state(self) -> DictionaryIndexState:
         """Return the stable source-visible index diagnostics."""
 
         return self._state
+
+    @property
+    def notification(self) -> tuple[int, int]:
+        """Return the armed ``(count, xt)``; an xt of zero is disarmed."""
+
+        return self._notify_count, self._notify_xt
+
+    def arm_notification(self, count: int, xt: int) -> None:
+        """Implement ``DICT-INDEX-NOTIFY!``; an xt of zero disarms."""
+
+        self._require_cell(count, label="dictionary index notification count")
+        self._require_cell(xt, label="dictionary index notification xt")
+        self._notify_count = count
+        self._notify_xt = xt
+
+    def take_notification(self) -> int:
+        """Disarm and return the armed xt once the count has reached its mark.
+
+        The BIOS makes this check as the final step of every named definition
+        and of ``LATEST!``.  Zero means nothing is due.
+        """
+
+        xt = self._notify_xt
+        if xt == 0 or self._state.count < self._notify_count:
+            return 0
+        self._notify_count = 0
+        self._notify_xt = 0
+        return xt
 
     def configure(self, base: int, slots: int) -> int:
         """Implement ``DICT-INDEX!`` and return BIOS status 0, 1, or 2."""

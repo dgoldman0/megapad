@@ -216,10 +216,12 @@ allocator may reset. Before userland it protects persistent kernel XMEM
 allocations; userland initialization advances it to `U-DICT-LIMIT`, thereby
 protecting both those earlier objects and the complete dictionary interval.
 The public `XMEM-RESET` is a deferred checked action whose underlying
-primitive never reclaims below the floor. The
-networking module installs a credential-aware wrapper: on an XMEM machine it
-acquires TLS ownership, throws `TLS-CREDENTIAL-E-BUSY` if ownership is
-contended or any credential is active, and otherwise performs the reset. When
+primitive never reclaims below the floor. KDOS's action keeps the dictionary
+index bound: a table that grew above the floor is bound again at the floor,
+which rises past it. The networking module wraps that action with a
+credential-aware check: on an XMEM machine it acquires TLS ownership, throws
+`TLS-CREDENTIAL-E-BUSY` if ownership is contended or any credential is
+active, and otherwise performs the reset. When
 XMEM is absent, `XMEM-RESET` remains a no-op and does not disturb Bank 0 or
 dictionary state.
 
@@ -671,7 +673,7 @@ KDOS splits XMEM into two zones:
 ```
 XMEM region:
   ┌──────────────────────────────┐  EXT-MEM-BASE
-  │  BIOS dictionary index       │  capacity-derived, permanent
+  │  BIOS dictionary index       │  first table, capacity-derived
   ├──────────────────────────────┤
   │  Other pre-init XBUF/loader  │
   ├──────────────────────────────┤  U-DICT-BASE
@@ -684,10 +686,14 @@ XMEM region:
 ```
 
 The one-shot KDOS initializer reserves at most 1/128 of the virgin XMEM bump
-tail for the BIOS dictionary index, rounded down to a power-of-two number of
-16-byte slots. Reclaimed free-list bytes are not part of this sizing input. The
-canonical 128 MiB arrangement uses 1 MiB. `XMEM-FLOOR` protects that table,
-later kernel allocations, and the dictionary from `XMEM-RESET`. The userland
+tail for the first table of the BIOS dictionary index, rounded down to a
+power-of-two number of 16-byte slots. Reclaimed free-list bytes are not part of
+this sizing input. The canonical 128 MiB arrangement uses 1 MiB. `XMEM-FLOOR`
+protects that table, later kernel allocations, and the dictionary from
+`XMEM-RESET`. When the index holds three quarters of its slots, KDOS doubles
+it with a table from the XMEM allocator, taking at most half of the free bump
+tail, and returns the old table to the free list
+([dictionary-acceleration.md](dictionary-acceleration.md#growth)). The userland
 interval is sealed by `USERLAND-INIT`, normally lazily on the first
 `ENTER-USERLAND`, and is not reclaimable by the XMEM allocator.
 `LEAVE-USERLAND` disables the active BIOS bounds and switches `HERE` back to

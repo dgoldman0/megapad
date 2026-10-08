@@ -56,10 +56,12 @@ replacement state. The cache is a working set, not a partial registry whose
 contents become permanent after boot.
 
 KDOS supplies a power-of-two open-addressed index from external memory. The
-canonical 128 MiB arrangement selects 65,536 16-byte slots (1 MiB), keeping the
-measured 30,598-entry Desktop dictionary below 47% load. The caller-bounded
-BIOS interface accepts other valid capacities, and a system without sufficient
-external memory remains correct through the linked fallback.
+canonical 128 MiB arrangement selects a first table of 65,536 16-byte slots
+(1 MiB), keeping the measured 30,598-entry Desktop dictionary below 47% load.
+KDOS doubles the table when it holds three quarters of its slots. The
+caller-bounded BIOS interface accepts other valid capacities, and a system
+without sufficient external memory remains correct through the linked
+fallback.
 
 `DICT-INDEX! ( base slots -- status )` returns 0 after a complete authoritative
 install or disable, 1 for invalid arguments with the old binding unchanged, or
@@ -70,6 +72,11 @@ slot stores its published entry pointer at `+0`, uppercase FNV-1a32 hash at
 `+8`, seven-bit length at `+12`, and zero reserved bytes at `+13..+15`.
 The complete table span must be 16-byte aligned, power-of-two sized,
 non-wrapping, and contained in advertised external memory.
+
+`DICT-INDEX-NOTIFY! ( count xt -- )` arms one notification for the table's
+owner; an xt of zero disarms it. The final step of `:`, `CREATE`, `VARIABLE`,
+`CONSTANT`, `VALUE`, and `LATEST!` compares the index count with the armed
+count and, once it is reached, disarms and calls the xt. Boot clears it.
 
 Definition publication upserts the side index. `MARKER`, `FORGET`, and
 transactional compiler rollback use `DICT-ROLLBACK` to publish `HERE` and
@@ -1080,12 +1087,13 @@ secret-boundary qualifications are recorded in
 | 475 | `DICT-LIMIT@` | `( -- limit )` | | Return the active exclusive external dictionary limit, or zero when disabled |
 | 476 | `DICT-FAULT-XT!` | `( xt -- )` | | Install the dictionary-fault callback used by the checked allocator |
 
-### Dictionary Acceleration Control (4 words)
+### Dictionary Acceleration Control (5 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 477 | `DICT-INDEX!` | `( base slots -- status )` | | Install/rebuild or disable the caller-backed dictionary index; invalid arguments leave the prior binding unchanged |
 | 478 | `DICT-INDEX@` | `( -- base slots count flags )` | | Return bounded index geometry, occupied-slot count, and publication flags |
+| 544 | `DICT-INDEX-NOTIFY!` | `( count xt -- )` | | Arm one call of xt, as the final step of the first named definition or `LATEST!` that leaves the index count at or above count; 0 xt disarms |
 | 479 | `DICT-ROLLBACK` | `( saved-here saved-latest -- )` | | Validate a contiguous-zone checkpoint, globally clear cached bindings, atomically publish HERE/LATEST, and rebuild the side index |
 | 480 | `LATEST!` | `( entry -- )` | | Publish any valid terminating dictionary head without changing HERE, globally clear cached bindings, and rebuild the side index |
 
@@ -1164,7 +1172,8 @@ The complete authoritative link chain is the `.dq` chain in `bios.asm`.
 The checked WOTS word closes the newest appended segment:
 
 ```
-WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX@ → DICT-INDEX!
+WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX-NOTIFY! → DICT-INDEX@
+→ DICT-INDEX!
 → IDLE-MS → IDLE-UNTIL → FAULT-XT! → DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!
 → TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD
 → TACC-CLEAR → TACC-TRY → TAMAC → CALLER-SPAN-STATUS
