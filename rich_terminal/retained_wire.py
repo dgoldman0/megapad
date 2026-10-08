@@ -32,6 +32,9 @@ from .retained_scene import (
     MeterBody,
     ObjectBounds,
     ObjectKind,
+    PaneBody,
+    StatusFieldBody,
+    StatusSeverity,
     PlotBody,
     Point,
     PolylineBody,
@@ -44,6 +47,8 @@ from .retained_scene import (
     UniformSamples,
     validate_control_shape,
     WaveformBody,
+    validate_pane_shape,
+    validate_status_field_shape,
 )
 from .semantic_content import (
     SemanticContentError,
@@ -57,9 +62,10 @@ from .semantic_items import (
     encode_item_view_content,
 )
 
+from .semantic_fields import FieldContent, encode_field_content, decode_field_content
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0x73F
+_RETAINED_FEATURE_MASK = 0xFF3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -82,6 +88,10 @@ _POINT = struct.Struct("<II")
 # ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
 _IMAGE_BODY = struct.Struct("<QIB3s")
 _GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
+_PANE_BODY = struct.Struct("<IHHQiiIIII")
+PANE_BODY_TAG = 0x31454E50
+_STATUS_FIELD_BODY = struct.Struct("<IHHIIIIQ")
+STATUS_FIELD_BODY_TAG = 0x31465453
 _READOUT_BODY = struct.Struct("<8BIIqqII")
 _METER_BODY = struct.Struct("<8BIIqqqQ")
 _STATUS_BODY = struct.Struct("<8BqIIQ")
@@ -97,6 +107,7 @@ _CONTROL_PREFIX = struct.Struct("<QQQHHiQQIiiIIIII")
 _CONTROL_EVENT = struct.Struct("<QQQHHIQ")
 _CONTROL_EVENT_POSITION = struct.Struct("<QQII")
 _CONTROL_EVENT_SCROLL = struct.Struct("<hhI")
+_CONTROL_EVENT_ADJUST = struct.Struct("<Qq")
 
 
 class RetainedMessageType(IntEnum):
@@ -110,6 +121,7 @@ class RetainedMessageType(IntEnum):
     PRESENT_BEGIN = 0x2000
     PRESENT_COMMIT = 0x2001
     OWNER_OPEN = 0x2002
+    OWNER_RESIZE = 0x2003
     REGION_DEFINE = 0x2010
     REGION_REPLACE = 0x2011
     REGION_DROP = 0x2012
@@ -178,6 +190,7 @@ class ControlEventKind(IntEnum):
     EXPAND = 8
     COLLAPSE = 9
     CHECK = 10
+    ADJUST = 11
 
 
 _POSITIONED_CONTROL_EVENTS = frozenset(
@@ -203,6 +216,8 @@ def control_event_payload_size(kind: ControlEventKind) -> int:
     normalized = _enum("event_kind", ControlEventKind, kind)
     if normalized in _KEYED_CONTROL_EVENTS:
         return _CONTROL_EVENT.size + _CONTROL_EVENT_POSITION.size
+    if normalized is ControlEventKind.ADJUST:
+        return _CONTROL_EVENT.size + _CONTROL_EVENT_ADJUST.size
     if normalized is ControlEventKind.SCROLL:
         return _CONTROL_EVENT.size + _CONTROL_EVENT_SCROLL.size
     return _CONTROL_EVENT.size
@@ -369,6 +384,15 @@ class RetainedCaps:
             and not features & RetainedFeature.CONTROL_COLLECTIONS
         ):
             raise ValueError("CONTROL_ITEMS requires CONTROL_COLLECTIONS")
+        if (
+            features & RetainedFeature.TASKBARS
+            and not features & RetainedFeature.CONTROLS
+        ):
+            raise ValueError("TASKBARS requires CONTROLS")
+        if features & RetainedFeature.GRID_CELLS and not features & RetainedFeature.CONTROL_COLLECTIONS:
+            raise ValueError("GRID_CELLS requires CONTROL_COLLECTIONS")
+        if features & RetainedFeature.FIELDS and not features & RetainedFeature.CONTROLS:
+            raise ValueError("FIELDS requires CONTROLS")
         object.__setattr__(self, "features", features)
         for name in (
             "max_owner_records",
@@ -403,6 +427,12 @@ class RetainedCaps:
             raise ValueError("CORE maxima must be positive")
         if features & RetainedFeature.CONTROLS and self.max_objects == 0:
             raise ValueError("CONTROLS requires object capacity")
+        if features & RetainedFeature.PANES and self.max_objects == 0:
+            raise ValueError("PANES requires object capacity")
+        if features & RetainedFeature.STATUS_FIELDS and self.max_objects == 0:
+            raise ValueError("STATUS_FIELDS requires object capacity")
+        if features & RetainedFeature.PANES and self.max_regions < 2:
+            raise ValueError("PANES requires at least two regions")
 
     def policy(
         self,
@@ -510,6 +540,7 @@ class OwnerOpen:
 
 _LIFECYCLE_REQUESTS = {
     RetainedMessageType.OWNER_OPEN,
+    RetainedMessageType.OWNER_RESIZE,
     RetainedMessageType.RESOURCE_BEGIN,
     RetainedMessageType.RESOURCE_CHUNK,
     RetainedMessageType.RESOURCE_COMMIT,
@@ -519,6 +550,13 @@ _LIFECYCLE_REQUESTS = {
 
 _RESULT_STATUSES = {
     RetainedMessageType.OWNER_OPEN: {
+        RetStatus.OK,
+        RetStatus.INVALID,
+        RetStatus.STALE_OWNER,
+        RetStatus.NO_CAPACITY,
+    },
+    # A live owner asks to grow its reservation; NO_CAPACITY leaves it as it was.
+    RetainedMessageType.OWNER_RESIZE: {
         RetStatus.OK,
         RetStatus.INVALID,
         RetStatus.STALE_OWNER,
@@ -590,9 +628,9 @@ class RetainedResult:
                 name,
                 _integer(name, getattr(self, name), minimum=minimum, maximum=UINT64_MAX),
             )
-        if request is RetainedMessageType.OWNER_OPEN:
+        if request in (RetainedMessageType.OWNER_OPEN, RetainedMessageType.OWNER_RESIZE):
             if self.item_id != 0:
-                raise ValueError("OWNER_OPEN result item_id must be zero")
+                raise ValueError(f"{request.name} result item_id must be zero")
         elif self.item_id == 0 and status is not RetStatus.INVALID:
             raise ValueError("resource result item_id must be nonzero")
         successful_commit = (
@@ -932,6 +970,8 @@ class RegionWireDefinition:
 
 ObjectWireBody = (
     GroupBody
+    | PaneBody
+    | StatusFieldBody
     | PolylineBody
     | ImageBody
     | GlyphRunBody
@@ -945,6 +985,8 @@ ObjectWireBody = (
 
 _WIRE_BODY_KIND = {
     GroupBody: ObjectKind.GROUP,
+    PaneBody: ObjectKind.PANE,
+    StatusFieldBody: ObjectKind.STATUS_FIELD,
     PolylineBody: ObjectKind.POLYLINE,
     ImageBody: ObjectKind.IMAGE,
     GlyphRunBody: ObjectKind.GLYPH_RUN,
@@ -989,7 +1031,7 @@ class ControlWireDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | None = None
+    content: SemanticTextContent | ItemViewContent | FieldContent | None = None
 
     def __post_init__(self) -> None:
         for name, minimum in (
@@ -1064,6 +1106,7 @@ class ControlEvent:
     scalar_offset: int = 0
     wheel_x: int = 0
     wheel_y: int = 0
+    adjustment: int = 0
 
     def __post_init__(self) -> None:
         for name in ("owner_id", "owner_generation", "control_id"):
@@ -1092,6 +1135,7 @@ class ControlEvent:
         positioned = kind in _POSITIONED_CONTROL_EVENTS
         keyed = kind in _KEYED_CONTROL_EVENTS
         scroll = kind is ControlEventKind.SCROLL
+        adjust = kind is ControlEventKind.ADJUST
         for name, maximum in (
             ("content_revision", UINT64_MAX),
             ("item_key", UINT64_MAX),
@@ -1102,8 +1146,8 @@ class ControlEvent:
                 _integer(
                     name,
                     getattr(self, name),
-                    minimum=1 if keyed else 0,
-                    maximum=maximum if keyed else 0,
+                    minimum=1 if keyed or (adjust and name == "content_revision") else 0,
+                    maximum=maximum if keyed or (adjust and name == "content_revision") else 0,
                 ),
             )
         object.__setattr__(
@@ -1127,6 +1171,13 @@ class ControlEvent:
                     maximum=(1 << 15) - 1 if scroll else 0,
                 ),
             )
+        object.__setattr__(self, "adjustment", _integer(
+            "adjustment", self.adjustment,
+            minimum=-(1 << 63) if adjust else 0,
+            maximum=(1 << 63) - 1 if adjust else 0,
+        ))
+        if adjust and self.adjustment == 0:
+            raise ValueError("ADJUST requires a nonzero signed adjustment")
         if scroll and not (self.wheel_x or self.wheel_y):
             raise ValueError("SCROLL requires a nonzero wheel detent count")
 
@@ -1184,6 +1235,13 @@ class ObjectWireDefinition:
         object.__setattr__(self, "visible", _boolean("visible", self.visible))
         if type(self.body) not in _WIRE_BODY_KIND:
             raise TypeError("body is not a supported RETAINED-1 wire body")
+        if isinstance(self.body, StatusFieldBody):
+            validate_status_field_shape(self.body, bounds=self.bounds)
+        if isinstance(self.body, PaneBody):
+            validate_pane_shape(
+                self.body, bounds=self.bounds, region_id=self.region_id,
+                parent_object_id=self.parent_object_id, visible=self.visible,
+            )
 
     @property
     def kind(self) -> ObjectKind | int:
@@ -1402,6 +1460,17 @@ def decode_owner_open(payload) -> OwnerOpen:
         )
     except (TypeError, ValueError) as exc:
         raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
+def encode_owner_resize(request: OwnerOpen) -> bytes:
+    """OWNER_RESIZE carries the owner's complete new quota set."""
+
+    return encode_owner_open(request)
+
+
+def decode_owner_resize(payload) -> OwnerOpen:
+    raw = _payload(payload, _OWNER_OPEN.size, "OWNER_RESIZE")
+    return decode_owner_open(raw)
 
 
 def encode_ret_result(result: RetainedResult) -> bytes:
@@ -1711,6 +1780,24 @@ def _body_size(raw: bytes, expected: int, name: str) -> None:
 def _encode_object_body(body: ObjectWireBody) -> bytes:
     if isinstance(body, GroupBody):
         return b""
+    if isinstance(body, StatusFieldBody):
+        label = body.label.encode("utf-8", "strict")
+        value = body.value.encode("utf-8", "strict")
+        label_bytes = _integer("label_bytes", len(label), minimum=0, maximum=UINT32_MAX)
+        value_bytes = _integer("value_bytes", len(value), minimum=0, maximum=UINT32_MAX)
+        return _STATUS_FIELD_BODY.pack(
+            STATUS_FIELD_BODY_TAG, 1, int(body.emphasized), int(body.severity),
+            body.label_cols, label_bytes, value_bytes, 0,
+        ) + label + value
+    if isinstance(body, PaneBody):
+        title = body.title.encode("utf-8", "strict")
+        title_bytes = _integer("title_bytes", len(title), minimum=0, maximum=UINT32_MAX)
+        content = body.content_bounds
+        return _PANE_BODY.pack(
+            PANE_BODY_TAG, 1, int(body.focused), body.content_region_id,
+            content.cell_x, content.cell_y, content.cell_cols, content.cell_rows,
+            title_bytes, 0,
+        ) + title
     if isinstance(body, PolylineBody):
         point_count = _integer(
             "point_count", len(body.points), minimum=2, maximum=UINT32_MAX
@@ -1832,6 +1919,34 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
         if kind is ObjectKind.GROUP:
             _body_size(raw, 0, "GROUP")
             return GroupBody()
+        if kind is ObjectKind.STATUS_FIELD:
+            if len(raw) < _STATUS_FIELD_BODY.size:
+                _body_size(raw, _STATUS_FIELD_BODY.size, "STATUS_FIELD prefix")
+            tag, version, flags, severity, label_cols, label_bytes, value_bytes, reserved = _STATUS_FIELD_BODY.unpack_from(raw)
+            if tag != STATUS_FIELD_BODY_TAG or version != 1:
+                raise RetainedWireError(RetainedWireErrorCode.ENUM, "STATUS_FIELD tag or version is unsupported")
+            if flags & ~0x1 or reserved:
+                raise RetainedWireError(RetainedWireErrorCode.RESERVED, "STATUS_FIELD flags or reserved field is noncanonical")
+            _body_size(raw, _STATUS_FIELD_BODY.size + label_bytes + value_bytes, "STATUS_FIELD")
+            value_start = _STATUS_FIELD_BODY.size + label_bytes
+            return StatusFieldBody(
+                _wire_text(raw[_STATUS_FIELD_BODY.size:value_start], "STATUS_FIELD label"),
+                _wire_text(raw[value_start:], "STATUS_FIELD value"), label_cols,
+                severity, bool(flags),
+            )
+        if kind is ObjectKind.PANE:
+            if len(raw) < _PANE_BODY.size:
+                _body_size(raw, _PANE_BODY.size, "PANE prefix")
+            tag, version, state, region_id, x, y, cols, rows, title_bytes, reserved = _PANE_BODY.unpack_from(raw)
+            if tag != PANE_BODY_TAG or version != 1:
+                raise RetainedWireError(RetainedWireErrorCode.ENUM, "PANE tag or version is unsupported")
+            if state & ~0x1 or reserved:
+                raise RetainedWireError(RetainedWireErrorCode.RESERVED, "PANE state or reserved field is noncanonical")
+            _body_size(raw, _PANE_BODY.size + title_bytes, "PANE")
+            return PaneBody(
+                region_id, ObjectBounds(x, y, cols, rows),
+                _wire_text(raw[_PANE_BODY.size:], "PANE title"), bool(state),
+            )
         if kind is ObjectKind.POLYLINE:
             if len(raw) < _POLYLINE_BODY.size:
                 _body_size(raw, _POLYLINE_BODY.size, "POLYLINE prefix")
@@ -2125,6 +2240,8 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
     )
     if definition.content is None:
         content = b""
+    elif isinstance(definition.content, FieldContent):
+        content = encode_field_content(definition.content)
     elif isinstance(definition.content, ItemViewContent):
         content = encode_item_view_content(definition.content)
     else:
@@ -2205,6 +2322,8 @@ def decode_control_definition(payload) -> ControlWireDefinition:
     try:
         if content_bytes == 0:
             content = None
+        elif kind is ControlKind.FIELD:
+            content = decode_field_content(body)
         elif kind is ControlKind.ITEM_VIEW:
             content = decode_item_view_content(body)
         else:
@@ -2269,6 +2388,8 @@ def encode_control_event(event: ControlEvent) -> bytes:
             event.scalar_offset,
             0,
         )
+    if event.event_kind is ControlEventKind.ADJUST:
+        return prefix + _CONTROL_EVENT_ADJUST.pack(event.content_revision, event.adjustment)
     if event.event_kind is ControlEventKind.SCROLL:
         return prefix + _CONTROL_EVENT_SCROLL.pack(
             event.wheel_x,
@@ -2321,6 +2442,10 @@ def decode_control_event(payload) -> ControlEvent:
             "item_key": item_key,
             "scalar_offset": scalar_offset,
         }
+    elif kind is ControlEventKind.ADJUST:
+        content_revision, adjustment = _CONTROL_EVENT_ADJUST.unpack_from(raw, _CONTROL_EVENT.size)
+        tail = {"content_revision": content_revision, "adjustment": adjustment}
+        tail_reserved = 0
     elif kind is ControlEventKind.SCROLL:
         wheel_x, wheel_y, tail_reserved = _CONTROL_EVENT_SCROLL.unpack_from(
             raw,
@@ -2504,6 +2629,8 @@ __all__ = [
     "ControlWireDefinition", "ImageBody", "ImageFit", "ObjectSetValue",
     "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
+    "PaneBody", "PANE_BODY_TAG",
+    "StatusFieldBody", "StatusSeverity", "STATUS_FIELD_BODY_TAG",
     "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RetainedItemReference",
     "RET1_TAG", "RetStatus", "SeriesWireBatch", "SeriesWireDefinition", "SeriesWireSamples",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",
@@ -2514,7 +2641,7 @@ __all__ = [
     "decode_control_replace",
     "decode_object_definition", "decode_object_drop", "decode_object_replace",
     "decode_object_set_value", "decode_object_set_visibility", "decode_owner_drop",
-    "decode_owner_open", "decode_present_begin", "decode_present_commit",
+    "decode_owner_open", "decode_owner_resize", "decode_present_begin", "decode_present_commit",
     "decode_region_definition", "decode_region_drop", "decode_region_replace",
     "decode_resource_abort", "decode_resource_begin", "decode_resource_chunk",
     "decode_resource_commit", "decode_resource_drop",
@@ -2524,7 +2651,7 @@ __all__ = [
     "encode_control_drop", "encode_control_event", "encode_control_replace",
     "encode_object_definition",
     "encode_object_drop", "encode_object_replace", "encode_object_set_value",
-    "encode_object_set_visibility", "encode_owner_drop", "encode_owner_open",
+    "encode_object_set_visibility", "encode_owner_drop", "encode_owner_open", "encode_owner_resize",
     "encode_present_begin", "encode_present_commit", "encode_region_definition",
     "encode_region_drop", "encode_region_replace", "encode_ret_caps", "encode_ret_formats",
     "encode_resource_abort", "encode_resource_begin", "encode_resource_chunk",

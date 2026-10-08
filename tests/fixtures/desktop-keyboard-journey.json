@@ -1,0 +1,68 @@
+{
+  "schema": "megapad.desktop-journey.v1",
+  "name": "Prepared six-app Desktop keyboard subset",
+  "require_retained": true,
+  "provenance": {
+    "scope": "CELL marker checks and retained presentation; a bounded keyboard subset, not the original 52-stage semantic and pointer journey",
+    "reference_source": "rich_terminal_desktop_acceptance.py DesktopAcceptanceJourney stages 3 through 10",
+    "reference_source_sha256": "4f971973c645278c35f663672740a26544aae25acdd4c63670fc50cdf57ee1fc",
+    "reference_runtime_checkpoint": "990c1442e27db88fa376872daf7809a2ccfbe66f",
+    "reference_appearance_checkpoint": "9953afcb079b550e0b5ca656a47b754e7c34158b",
+    "reference_image_before_journey_sha256": "db0b8a2d7c5b77eb8d08fb10774b5819f698792adda1dc4468d032034dbc7e2a",
+    "fixture_requirement": "280x84 Desktop, Pad initially focused, blank Pad acceptance marker, no active Daybook prompt"
+  },
+  "ready": {
+    "contains": ["[1:Akashic Pa*]", "[2:File Explo", "[3:Daybook"],
+    "absent": ["~", "New task:"]
+  },
+  "steps": [
+    {
+      "name": "Pad receives text",
+      "method": "send_text",
+      "value": "~",
+      "expect": {"contains": ["[1:Akashic Pa*]", "~"]}
+    },
+    {
+      "name": "Daybook receives focus",
+      "method": "send_key",
+      "value": "alt+3",
+      "expect": {"contains": ["[3:Daybook*]", "~"]}
+    },
+    {
+      "name": "Daybook opens its guest prompt",
+      "method": "send_key",
+      "value": "ctrl+n",
+      "expect": {"contains": ["[3:Daybook*]", "New task:"]}
+    },
+    {
+      "name": "Daybook prompt receives text",
+      "method": "send_text",
+      "value": "^",
+      "expect": {"contains": ["[3:Daybook*]", "New task:", "^"]}
+    },
+    {
+      "name": "Daybook commits the task",
+      "method": "send_key",
+      "value": "enter",
+      "expect": {"contains": ["[3:Daybook*]", "^"], "absent": ["New task:"]}
+    },
+    {
+      "name": "Daybook moves to the next date",
+      "method": "send_key",
+      "value": "right",
+      "expect": {"contains": ["[3:Daybook*]", "~"], "absent": ["New task:", "^"]}
+    },
+    {
+      "name": "File Explorer receives focus",
+      "method": "send_key",
+      "value": "alt+2",
+      "expect": {"contains": ["[2:File Explo*]", "~"]}
+    },
+    {
+      "name": "Pad retains its edit after focus changes",
+      "method": "send_key",
+      "value": "alt+1",
+      "expect": {"contains": ["[1:Akashic Pa*]", "~"], "absent": ["New task:"]}
+    }
+  ]
+}

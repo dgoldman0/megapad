@@ -9,15 +9,19 @@ parallel hashlib-only shortcut.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+import sys
+from types import BuiltinFunctionType, ModuleType
 
 from shared.cells import MASK64
+from shared import keccak as _keccak_values
 from shared.crypto_caps import (
     CRYPTO_CAP_KECCAK_F1600,
     CRYPTO_CAP_SHA3_STREAM,
 )
 from shared.keccak import KECCAK_LANES, keccak_f1600
-from simulator.memory import MMIO_BASE, SparseAddressSpace
+from simulator import memory as _memory_module
+from simulator.memory import MMIO_BASE, MMIOAccessError, SparseAddressSpace
 
 
 SHA3_OFFSET = 0x780
@@ -65,6 +69,86 @@ CALLER_SPAN_PROTECTED = 3
 
 GuestIdentity = tuple[int, int]
 SpanStatus = Callable[[int, int], int]
+Permutation = Callable[[Sequence[int]], Sequence[int]]
+
+# Remember the canonical oracle so native selection cannot replace a caller's
+# pre-existing module override. The Python oracle itself remains independent.
+_REFERENCE_PERMUTATION = keccak_f1600
+
+# These identities are captured before callers can customize a constructed
+# memory or service. The platform records its route after defining its class,
+# avoiding a circular import and a first-use snapshot of already changed code.
+_INPUT_PLATFORM_ROUTE = None
+_INPUT_PLATFORM_ORIGINAL = None
+_INPUT_PLATFORM_REGISTERED = False
+_INPUT_MEMORY_METHODS = tuple(
+    (name, SparseAddressSpace.__dict__[name])
+    for name in ("write8", "_write_integer", "_mmio_write", "_mmio_preflight")
+)
+_INPUT_MEMORY_GLOBALS = tuple(
+    (name, getattr(_memory_module, name))
+    for name in ("_require_integer", "_checked_span", "_ResolvedSpan",
+                 "MMIOAccessError", "MMIO_BASE", "MMIO_LIMIT", "_INTEGER_WIDTHS")
+)
+_INPUT_SPAN_INITIALIZER = _memory_module._ResolvedSpan.__init__
+_INPUT_ORACLE_GLOBALS = tuple(
+    (name, getattr(_keccak_values, name))
+    for name in ("keccak_f1600", "_rotate_left", "_ROUND_CONSTANTS", "_ROTATIONS",
+                 "MASK64", "KECCAK_LANES", "Sequence")
+)
+
+
+def _register_input_platform_route(platform_type: type) -> None:
+    """Capture the sole original router once; repeated registration declines."""
+
+    global _INPUT_PLATFORM_ROUTE, _INPUT_PLATFORM_ORIGINAL, _INPUT_PLATFORM_REGISTERED
+    if _INPUT_PLATFORM_REGISTERED:
+        _INPUT_PLATFORM_ROUTE = None
+        return
+    _INPUT_PLATFORM_REGISTERED = True
+    methods = tuple((name, platform_type.__dict__[name])
+                    for name in ("preflight", "write8", "_service"))
+    namespace = platform_type._service.__globals__
+    constants = tuple((name, namespace[name]) for name in (
+        "SYSINFO_OFFSET", "SYSINFO_LIMIT", "AES_OFFSET", "AES_LIMIT",
+        "SHA3_OFFSET", "SHA3_LIMIT", "TRNG_OFFSET", "TRNG_LIMIT",
+        "RTC_UPTIME", "RTC_EPOCH_LIMIT", "AUDIO_OFFSET", "AUDIO_LIMIT",
+    ))
+    _INPUT_PLATFORM_ROUTE = (platform_type, methods, namespace, constants)
+    _INPUT_PLATFORM_ORIGINAL = _INPUT_PLATFORM_ROUTE
+
+
+def _input_methods_match(owner: object, originals: tuple) -> bool:
+    kind = type(owner)
+    if (kind.__getattribute__ is not object.__getattribute__
+            or kind.__setattr__ is not object.__setattr__):
+        return False
+    try:
+        attributes = object.__getattribute__(owner, "__dict__")
+    except AttributeError:
+        attributes = {}
+    return all(name not in attributes and kind.__dict__.get(name) is original
+               for name, original in originals)
+
+
+def _input_permutation_is_canonical(service: "HostedSHA3Service") -> bool:
+    if service._permutation is not None:
+        return False
+    selected = service._native_permutation
+    if selected is None:
+        return (keccak_f1600 is _REFERENCE_PERMUTATION
+                and all(getattr(_keccak_values, name) is original
+                        for name, original in _INPUT_ORACLE_GLOBALS))
+    # Caller-supplied Python callbacks may replace a route during absorb. Only
+    # the admitted extension's actual C function can skip that seam.
+    if (type(selected) is not BuiltinFunctionType
+            or selected.__name__ != "keccak_f1600"
+            or selected.__module__ not in ("_megaforth_native", "_mp64_accel")):
+        return False
+    module = sys.modules.get(selected.__module__)
+    return (type(module) is ModuleType
+            and module.__dict__.get("keccak_f1600") is selected)
+
 
 _RATES = (136, 72, 168, 136)
 _OUTPUT_SIZES = (32, 64, 0, 0)
@@ -99,7 +183,12 @@ class SHA3AccessError(ValueError):
 class HostedSHA3Service:
     """One raw MMIO device plus its checked BIOS transaction record."""
 
-    def __init__(self, capabilities: int) -> None:
+    def __init__(
+        self,
+        capabilities: int,
+        *,
+        permutation: Permutation | None = None,
+    ) -> None:
         if isinstance(capabilities, bool) or not isinstance(capabilities, int):
             raise TypeError("SHA capabilities must be a uint64 integer")
         if not 0 <= capabilities <= MASK64:
@@ -107,7 +196,11 @@ class HostedSHA3Service:
         admitted = CRYPTO_CAP_SHA3_STREAM | CRYPTO_CAP_KECCAK_F1600
         if capabilities & ~admitted:
             raise ValueError("SHA service received unrelated capability bits")
+        if permutation is not None and not callable(permutation):
+            raise TypeError("SHA permutation must be callable")
 
+        self._permutation = permutation
+        self._native_permutation: Permutation | None = None
         self._capabilities = capabilities
         self._stream_available = bool(capabilities & CRYPTO_CAP_SHA3_STREAM)
         self._raw_available = bool(capabilities & CRYPTO_CAP_KECCAK_F1600)
@@ -134,6 +227,39 @@ class HostedSHA3Service:
         self._checked_mode = 0
         self._checked_phase = 0
         self._checked_window_offset = 0
+
+    def bind_native_permutation(self, permutation: Permutation | None) -> bool:
+        """Select an optional value executor without changing guest state.
+
+        This service belongs to the platform memory, which may outlive a
+        runtime. A new runtime clears its prior selection with ``None`` before
+        optionally binding its admitted extension. Guest CLEAR/reset retains
+        the selection. An explicitly injected permutation, subclass, or
+        existing Python-oracle override keeps its implementation.
+        """
+
+        if permutation is not None and not callable(permutation):
+            raise TypeError("SHA permutation must be callable")
+        if type(self) is not HostedSHA3Service:
+            return False
+        self._native_permutation = None
+        if permutation is None:
+            return True
+        if (
+            self._permutation is not None
+            or keccak_f1600 is not _REFERENCE_PERMUTATION
+        ):
+            return False
+        self._native_permutation = permutation
+        return True
+
+    def _permute(self) -> Sequence[int]:
+        permutation = self._permutation
+        if permutation is None:
+            permutation = self._native_permutation
+        if permutation is None:
+            permutation = keccak_f1600
+        return permutation(self._state)
 
     @property
     def capabilities(self) -> int:
@@ -322,11 +448,71 @@ class HostedSHA3Service:
         if checked != CRYPTO_STATUS_OK:
             return self._fail_cleanup(checked, memory)
         payload = memory.read_bytes(source, length)
-        for byte in payload:
-            memory.write8(MMIO_BASE + SHA3_DATA_INPUT, byte)
+        if self._input_transfer_eligible(memory, payload):
+            self._write_qualified_input(payload)
+        else:
+            for byte in payload:
+                memory.write8(MMIO_BASE + SHA3_DATA_INPUT, byte)
         if self._read_device_status(memory) != 0x04:
             return self._fail_cleanup(self._mapped_device_error(), memory)
         return CRYPTO_STATUS_OK
+
+    def _input_transfer_eligible(self, memory: SparseAddressSpace, payload: bytes) -> bool:
+        """Admit only an immutable payload and a callback-free original route."""
+
+        route = _INPUT_PLATFORM_ROUTE
+        if (type(self) is not HostedSHA3Service
+                or type(memory) is not SparseAddressSpace
+                or type(payload) is not bytes or route is None
+                or route is not _INPUT_PLATFORM_ORIGINAL):
+            return False
+        platform_type, methods, namespace, constants = route
+        port = memory._mmio
+        if (type(port) is not platform_type or port.sha3 is not self
+                or not _input_methods_match(memory, _INPUT_MEMORY_METHODS)
+                or not _input_methods_match(port, methods)
+                or not _input_methods_match(self, _INPUT_SERVICE_METHODS)):
+            return False
+        if (any(getattr(_memory_module, name) is not original
+                for name, original in _INPUT_MEMORY_GLOBALS)
+                or _memory_module._ResolvedSpan.__init__ is not _INPUT_SPAN_INITIALIZER
+                or any(namespace.get(name) is not original for name, original in constants)
+                or any(globals().get(name) is not original
+                       for name, original in _INPUT_SERVICE_GLOBALS)
+                or not _input_permutation_is_canonical(self)):
+            return False
+        # Keep customized containers or scalar objects on the byte route too:
+        # their Python operators could replace routing during an absorb.
+        if (type(self._state) is not list
+                or any(type(lane) is not int for lane in self._state)
+                or any(type(getattr(self, name)) is not bytearray
+                       for name in ("_buffer", "_digest", "_wide_bytes"))):
+            return False
+        return (all(type(getattr(self, name)) is int for name in (
+                    "_mode", "_buffer_length", "_squeeze_cursor", "_state_index",
+                    "_phase", "_owner", "_error", "_wide_operation", "_wide_base",
+                    "_wide_position", "_wide_error"))
+                and type(self._stream_available) is bool
+                and type(self._fail_next_operation) is bool)
+
+    def _write_qualified_input(self, payload: bytes) -> None:
+        """Retain each raw byte effect and the ordinary MMIO exception boundary."""
+
+        for byte in payload:
+            try:
+                self.preflight(SHA3_DATA_INPUT, 1, write=True)
+            except Exception as exc:
+                raise MMIOAccessError(
+                    "MMIO service rejected write preflight", operation="write",
+                    address=MMIO_BASE + SHA3_DATA_INPUT, length=1,
+                ) from exc
+            try:
+                self.write8(SHA3_DATA_INPUT, byte)
+            except Exception as exc:
+                raise MMIOAccessError(
+                    "MMIO service failed during write", operation="write",
+                    address=MMIO_BASE + SHA3_DATA_INPUT, length=1,
+                ) from exc
 
     def final(
         self,
@@ -684,7 +870,7 @@ class HostedSHA3Service:
                 "little",
             )
             self._state[lane_index] ^= lane
-        self._state[:] = keccak_f1600(self._state)
+        self._state[:] = self._permute()
         self._buffer[:] = bytes(len(self._buffer))
         self._buffer_length = 0
         self._phase = SHA3_PHASE_IDLE
@@ -701,7 +887,7 @@ class HostedSHA3Service:
                 "little",
             )
             self._state[lane_index] ^= lane
-        self._state[:] = keccak_f1600(self._state)
+        self._state[:] = self._permute()
         rate_bytes = self._extract_rate()
         output_size = _OUTPUT_SIZES[self._mode] or 64
         self._digest[:] = bytes(64)
@@ -721,7 +907,7 @@ class HostedSHA3Service:
         ]
         self._squeeze_cursor += tail
         if tail != 64:
-            self._state[:] = keccak_f1600(self._state)
+            self._state[:] = self._permute()
             current = self._extract_rate()
             head = 64 - tail
             next_window[tail:] = current[:head]
@@ -730,7 +916,7 @@ class HostedSHA3Service:
         self._phase = SHA3_PHASE_DONE
 
     def _complete_raw(self) -> None:
-        self._state[:] = keccak_f1600(self._state)
+        self._state[:] = self._permute()
         self._phase = SHA3_PHASE_DONE
 
     def _extract_rate(self) -> bytes:
@@ -1021,6 +1207,25 @@ class HostedSHA3Service:
             width=width,
             write=write,
         )
+
+
+_INPUT_SERVICE_GLOBALS = tuple(
+    (name, value) for name, value in tuple(globals().items())
+    if name.startswith(("SHA3_", "_WIDE_"))
+    or name in ("_RATES", "_BYTE_WRITES", "_INTEGER_WIDTHS", "MMIO_BASE")
+)
+
+# Include every method reachable from one input-byte preflight/write. This
+# check is repeated after reading each submitted payload, so late overrides
+# retain their ordinary routing and exception behavior.
+_INPUT_SERVICE_METHODS = tuple(
+    (name, HostedSHA3Service.__dict__[name]) for name in (
+        "preflight", "_byte_access_valid", "_reject", "write8",
+        "_require_byte_access", "_consume_wide_write", "_cancel_wide_access",
+        "_write_input", "_rate", "_reject_conflict", "_record_error",
+        "_complete_or_fail", "_wipe_raw", "_absorb_buffer", "_permute",
+    )
+)
 
 
 __all__ = [

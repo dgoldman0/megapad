@@ -22,7 +22,11 @@ from rich_terminal.retained_view import (
     RetainedDrawPlane,
     RetainedRegionDraw,
 )
-from session import TerminalCell, TerminalDisplayOffer, TerminalSnapshot
+from shared.session import (
+    TerminalCell,
+    TerminalDisplayOffer,
+    TerminalSnapshot,
+)
 from session_viewer import (
     DISPLAY_CLAIM_RETRY_SECONDS,
     KEY_REPEAT_DELAY_MS,

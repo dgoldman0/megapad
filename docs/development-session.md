@@ -1,13 +1,13 @@
 # Development Sessions
 
-`session.py` provides one synchronous owner for a MegaPad machine and its
-terminal. It is intended for tests, development automation, and coding agents
+`emulator/session.py` provides one synchronous owner for a MegaPad machine
+and its terminal. It is intended for tests, development automation, and coding agents
 that need to interact with the guest without opening pygame.
 
 ## Python API
 
 ```python
-from session import MachineSession
+from emulator.session import MachineSession
 
 with MachineSession.from_bios(
     "bios.asm",
@@ -47,6 +47,101 @@ Direct sessions use deterministic cycle-derived RTC time by default. Pass
 `realtime_clock=True` for interactive or external-network work whose deadlines
 must continue to track host time while the emulator is idle or variably loaded.
 
+## Common session boundary
+
+`shared/session.py` owns terminal configuration, immutable captures, rich
+terminal attachment, display offers, acknowledgments, and input admission.
+`shared_session.py` owns the JSON protocol, socket/display leases, shared
+mutation lock, and `SharedSessionOwner` lifecycle interface. Neither imports
+an execution backend. Common CLI policy decoders live in
+`shared/session_options.py`.
+
+The architectural adapters are `emulator.session.MachineSession` and
+`emulator.shared_session.SharedMachine`. The hosted adapters are
+`simulator.session.SimulatorMachineSession` and `SimulatorSharedMachine`.
+Both inherit the common authorities directly. Construction, run loops,
+work accounting, diagnostics, and backend resource release stay in their
+adapters. The simulator does not inherit architectural run or BIOS methods.
+The viewer imports only common terminal/protocol interfaces.
+
+Import terminal types from `shared.session`, the architectural session from
+`emulator.session`, and the shared architectural owner from
+`emulator.shared_session`. The root `session.py` shim and
+`shared_session.SharedMachine` have been removed. The BIOS/KDOS benchmark
+detects a selected checkout's layout before importing it: package checkouts
+use `emulator.session` and `emulator.system`; historical flat checkouts use
+their root modules. It validates source and imported-module provenance, and
+an import failure in a package checkout remains an error.
+
+Backend server interfaces live in `emulator.server`, `simulator.server`, and
+`hybrid.server`. Each owns its argument parser and `main(argv=None)`;
+`megapad.py --mode MODE` loads the selected package lazily; top-level help
+requires no backend imports.
+Simulator and hybrid image preparation also expose `prepare_server(args)`
+without opening a listener.
+
+Both detailed and lightweight status contain the same `runtime` descriptor:
+
+| Field | Emulator | Simulator | Hybrid |
+|---|---|---|---|
+| `mode` | `emulator` | `simulator` | `hybrid` |
+| `executor` | `native` | Selected `python` or `native` | Selected semantic `python` or `native` |
+| `step_unit` | `mp64_instruction` | `semantic_step` | `semantic_step` |
+| `step_request_unit` | `mp64_instruction` | `semantic_boundary` | `semantic_boundary` |
+| `batch_unit` | `instruction_batch` | `semantic_boundary` | `semantic_boundary` |
+| `timing.model` | `instruction_batched` | `semantic` | `semantic` |
+| `timing.models_shared_clock_latency` | `false` | `false` | `false` |
+| `timing.timer_unit` | `mp64_system_cycle` | `semantic_step` | `semantic_step` |
+| `timing.rtc_mode` | `virtual` or `realtime` | `manual` or `host_monotonic` | `manual` or `host_monotonic` |
+| `capabilities.machine_code` | `true` | `false` | `true`, declared routines only |
+| `capabilities.cpu_diagnostics` | `true` | `false` | `false` |
+| `capabilities.network_diagnostics` | `true` | `false` | `false` |
+| `capabilities.reset` | `true` | `false` | `false` |
+| `capabilities.host_profiling` | `true` | `false` | `false` |
+
+`hybrid.session.HybridSession` retains the semantic session backend and its
+terminal/continuation authority. Routine words run on the native routine runner
+over the same ordinary buffers. `HybridSharedMachine` adds `machine_execution`
+with the ABI identity, the routines, lifetime machine instruction, cycle,
+segment, transition and callback counts, and the machine quantum and budget.
+Machine cycles do not advance the semantic timer or claim whole-application
+shared-clock timing. Status advertises declared routines and semantic
+callbacks, and denies arbitrary machine code, machine MMIO, native BIOS boot,
+multicore execution and native snapshots. The manifest and routine contract
+are in [the hybrid design](hybrid-runtime.md).
+
+The executor identifies the selected engine; native execution can include
+Python fallbacks. Capabilities identify supported session operations,
+independently of whether optional facilities are enabled. Existing emulator
+instruction batches do not enable the system's separate strict cycle-bounded
+runner. `instruction_batched` advances functional time once per equal-credit
+scheduler round, using the maximum accumulated per-core cycle cost. Wake and
+interrupt delivery occur at the model's round boundaries. CPU memory accesses
+are ordered without strict main-bus timing. Its clock can drive devices and
+report progress, but it cannot measure shared-clock worker wake latency or bus
+contention. Host worker count and a native executor do not change that model.
+
+Use `MegapadSystem.run_cycle_batch(...)` with a virtual RTC and a supported
+full-core-only topology for modeled wake, interrupt, and bus timing. Its
+`SystemRunStats.timing_model` is `strict_shared_clock`, and
+`models_shared_clock_latency` is true. `run_batch_stats(...)` reports
+`instruction_batched` and false. Zero-budget and host-backpressure results
+retain the requested model. The same cycle field names exist in both results;
+compare them only with their timing model recorded. The strict model does not
+establish physical RTL latency or guarantee multicore speedup. The shared
+application session currently selects instruction batches, including its
+paused one-instruction requests.
+
+Semantic work does not claim hardware cycles. The standalone simulator
+server binds its RTC to host monotonic time; a directly constructed runtime
+starts with a manually advanced RTC. Reading its RTC policy does not sample
+or advance the clock.
+
+Simulator reset still requires a newly prepared runtime. The established
+status keys and detailed diagnostic selection are preserved. Shared terminal
+status now consistently reports bytes, rather than frame counts, in
+`rich_terminal.frame_bytes_by_type` for both adapters.
+
 ## Shared Live Session
 
 Use the shared runtime when a person and an automation client need to watch and
@@ -60,7 +155,7 @@ boundary and composites both before acknowledging that revision as displayed.
 Start the machine owner from the workspace root:
 
 ```bash
-python3 megapad/session_server.py
+python3 megapad/megapad.py --mode emulator
 ```
 
 The shared server accepts the same policy as
@@ -69,7 +164,7 @@ The shared server accepts the same policy as
 To attach the shared machine to an already configured Linux TAP interface:
 
 ```bash
-python3 megapad/session_server.py --nic-tap mp64tap0
+python3 megapad/megapad.py --mode emulator --nic-tap mp64tap0
 ```
 
 The server refuses startup if the TAP device is missing or inaccessible; it
@@ -78,7 +173,7 @@ does not create interfaces or alter host routing on the user's behalf.
 Audible one-shot PCM playback is likewise explicit opt-in:
 
 ```bash
-python3 megapad/session_server.py --audio
+python3 megapad/megapad.py --mode emulator --audio
 ```
 
 Without `--audio`, the guest audio device still captures every successful
@@ -94,12 +189,12 @@ deterministic cycle-derived clock in isolated tests.
 
 ### Hosted simulator owner
 
-`simulator_server.py` serves the same shared-session protocol from the hosted
+`megapad.py --mode simulator` serves the same shared-session protocol from the hosted
 semantic simulator instead of the emulator. It prepares an MP64FS image, runs
 its ordinary autoexec, and only then exposes the socket:
 
 ```bash
-MEGAFORTH_EXECUTOR=native python3 megapad/simulator_server.py \
+python3 megapad/megapad.py --mode simulator --executor native \
   --storage path/to/image.img --ext-mem-mib 128
 ```
 
@@ -108,8 +203,10 @@ It takes `--storage` (required), `--socket`, the memory sizes (`--ram-kib`,
 takes `--semantic-step-budget`, `--semantic-quantum-steps`, `--paused`, and
 the complete caller-owned `--rich-terminal-policy` and
 `--retained-terminal-policy` JSON. It has no NIC or audible audio option.
-`MEGAFORTH_EXECUTOR` selects the executor: `python` (the default reference),
-`native`, or `auto`. `MEGAFORTH_QUANTUM_STEPS` sets the semantic steps between
+`--executor python|native|auto` takes precedence over `MEGAFORTH_EXECUTOR`.
+With neither set, the production server requires native execution; only
+`auto` permits fallback to Python. Embedded `MegaForthRuntime` construction
+still defaults to the Python reference. `MEGAFORTH_QUANTUM_STEPS` sets the semantic steps between
 host owner boundaries when the option is absent. The default is 65,536 with
 the native executor and 8,192 with the Python reference. The viewer and `session_ctl.py`
 attach exactly as they do to the emulator owner. Akashic's

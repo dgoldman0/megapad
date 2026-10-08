@@ -32,13 +32,15 @@ from rich_terminal.retained_scene import RetainedScene, SceneModelState
 from rich_terminal.retained_view import DisplayScope, RetainedDrawPlane
 from rich_terminal.update_authority import TerminalGeometry, TerminalUpdateError
 from rich_terminal.retained_model import RetainedFeature, RetainedPolicy
-from session import (
+from emulator.session import (
     MachineSession,
+)
+from shared.session import (
     RichTerminalSessionConfig,
     RichTerminalSessionPolicy,
     TerminalDisplayOffer,
 )
-from session_server import main as session_server_main
+from emulator.server import main as session_server_main
 from system import EXT_MEM_BASE, HBW_BASE, VRAM_BASE, MegapadSystem
 
 
@@ -1288,7 +1290,7 @@ def test_machine_session_close_releases_devices_when_save_fails(monkeypatch):
 
 def test_session_server_rejects_unavailable_tap(monkeypatch):
     monkeypatch.setattr(
-        "sys.argv", ["session_server.py", "--nic-tap", "missing-tap"]
+        "sys.argv", ["megapad.py", "--nic-tap", "missing-tap"]
     )
     with patch("nic_backends.tap_available", return_value=False):
         try:
@@ -1328,16 +1330,17 @@ def test_cli_propagates_explicit_execution_lanes(monkeypatch):
 def test_session_server_propagates_memory_and_lane_policy(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
-        ["session_server.py", "--lanes", "4"],
+        ["megapad.py", "--lanes", "4"],
     )
     with (
-        patch("session_server.MachineSession.from_bios") as from_bios,
-        patch("session_server.SharedMachine") as shared_machine,
-        patch("session_server.SessionServer"),
-        patch("session_server.signal.signal"),
+        patch("emulator.server.MachineSession.from_bios") as from_bios,
+        patch("emulator.server.SharedMachine") as shared_machine,
+        patch("emulator.server.SessionServer"),
+        patch("emulator.server.signal.signal"),
     ):
         assert session_server_main() == 0
 
+    assert from_bios.call_args.args == (BIOS,)
     assert from_bios.call_args.kwargs["ext_mem_size"] == 128 << 20
     assert from_bios.call_args.kwargs["lanes"] == 4
     assert from_bios.call_args.kwargs["rich_terminal"] is None
@@ -1347,13 +1350,13 @@ def test_session_server_propagates_memory_and_lane_policy(monkeypatch):
 def test_session_server_can_opt_into_host_profile_status(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
-        ["session_server.py", "--host-profile"],
+        ["megapad.py", "--host-profile"],
     )
     with (
-        patch("session_server.MachineSession.from_bios"),
-        patch("session_server.SharedMachine") as shared_machine,
-        patch("session_server.SessionServer"),
-        patch("session_server.signal.signal"),
+        patch("emulator.server.MachineSession.from_bios"),
+        patch("emulator.server.SharedMachine") as shared_machine,
+        patch("emulator.server.SessionServer"),
+        patch("emulator.server.signal.signal"),
     ):
         assert session_server_main() == 0
 
@@ -1461,7 +1464,7 @@ def test_session_server_opt_in_uses_exact_rich_terminal_policy(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         [
-            "session_server.py",
+            "megapad.py",
             "--cols",
             "100",
             "--rows",
@@ -1471,10 +1474,10 @@ def test_session_server_opt_in_uses_exact_rich_terminal_policy(monkeypatch):
         ],
     )
     with (
-        patch("session_server.MachineSession.from_bios") as from_bios,
-        patch("session_server.SharedMachine"),
-        patch("session_server.SessionServer"),
-        patch("session_server.signal.signal"),
+        patch("emulator.server.MachineSession.from_bios") as from_bios,
+        patch("emulator.server.SharedMachine"),
+        patch("emulator.server.SessionServer"),
+        patch("emulator.server.signal.signal"),
     ):
         assert session_server_main() == 0
 
@@ -1513,7 +1516,7 @@ def test_session_server_carries_the_exact_retained_policy(monkeypatch):
     monkeypatch.setattr(
         "sys.argv",
         [
-            "session_server.py",
+            "megapad.py",
             "--cols",
             "100",
             "--rows",
@@ -1525,10 +1528,10 @@ def test_session_server_carries_the_exact_retained_policy(monkeypatch):
         ],
     )
     with (
-        patch("session_server.MachineSession.from_bios") as from_bios,
-        patch("session_server.SharedMachine"),
-        patch("session_server.SessionServer"),
-        patch("session_server.signal.signal"),
+        patch("emulator.server.MachineSession.from_bios") as from_bios,
+        patch("emulator.server.SharedMachine"),
+        patch("emulator.server.SessionServer"),
+        patch("emulator.server.signal.signal"),
     ):
         assert session_server_main() == 0
 
@@ -1543,12 +1546,12 @@ def test_session_server_rejects_retained_policy_without_base_attachment(monkeypa
     monkeypatch.setattr(
         "sys.argv",
         [
-            "session_server.py",
+            "megapad.py",
             "--retained-terminal-policy",
             json.dumps(retained.to_dict()),
         ],
     )
-    with patch("session_server.MachineSession.from_bios") as from_bios:
+    with patch("emulator.server.MachineSession.from_bios") as from_bios:
         with pytest.raises(SystemExit, match="2"):
             session_server_main()
     from_bios.assert_not_called()

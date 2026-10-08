@@ -142,6 +142,8 @@ def prepare_image_bootstrap(
     terminal_cols: int = 80,
     terminal_rows: int = 30,
     semantic_step_budget: int | None = None,
+    execution_backend: str | None = None,
+    runtime: MegaForthRuntime | None = None,
 ) -> ImageBootstrapPreparation:
     """Construct and prepare a runtime from one explicit memory/storage pair.
 
@@ -151,7 +153,12 @@ def prepare_image_bootstrap(
     tokens captured from the initial semantic BIOS, then runs ordinary autoexec
     source preparation before returning the exact live root XT. The optional
     budget covers autoexec; callers subtract its reported work from that same
-    budget before dispatching the live entry.
+    budget before dispatching the live entry. An explicit execution backend
+    applies to preparation and live dispatch; None retains the runtime's
+    environment/default selection. A composition owner may supply an already
+    constructed runtime to publish declarations before boot source runs. That
+    runtime must own the exact memory and storage supplied here, and its
+    executor must already have been selected during construction.
     """
 
     if not isinstance(memory, SparseAddressSpace):
@@ -159,7 +166,17 @@ def prepare_image_bootstrap(
     if not isinstance(storage, HostedStorageService):
         raise TypeError("storage must be a HostedStorageService")
 
-    runtime = MegaForthRuntime(memory=memory, storage=storage)
+    if runtime is None:
+        runtime = MegaForthRuntime(
+            memory=memory, storage=storage, execution_backend=execution_backend,
+        )
+    else:
+        if not isinstance(runtime, MegaForthRuntime):
+            raise TypeError("runtime must be a MegaForthRuntime or None")
+        if runtime.memory is not memory or runtime.storage is not storage:
+            raise ValueError("prepared runtime must own the supplied memory and storage")
+        if execution_backend is not None:
+            raise ValueError("a prepared runtime already owns its executor selection")
     # Establish the caller's baseline before any boot source can query it.
     # The later session owns its own geometry state at this same baseline;
     # initial construction does not invent a pending resize notification.

@@ -466,7 +466,7 @@ buffer), then tokenises and interprets:
 
 **System**
 `BL` `TRUE` `FALSE` `LATEST` `LATEST!` `ABORT` `ABORT"` `TALIGN` `FSLOAD`
-`DICT-INDEX!` `DICT-INDEX@` `DICT-ROLLBACK`
+`DICT-INDEX!` `DICT-INDEX@` `DICT-INDEX-NOTIFY!` `DICT-ROLLBACK`
 
 **Tile engine**
 `TVIEW` `TFILL` `TSRC0!` `TSRC1!` `TDST!` `TMODE!` `TCTRL!` `TMODE@` `TCTRL@`

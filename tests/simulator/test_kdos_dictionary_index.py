@@ -33,21 +33,33 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
 FIXTURE = (
     Path(__file__).with_name("fixtures")
-    / "kdos-dictionary-index-2399-2432.f"
+    / "kdos-dictionary-index-2399-2487.f"
 )
 
 FIRST_LINE = 2399
-LAST_LINE = 2432
+LAST_LINE = 2487
 SLICE_SHA256 = (
-    "58d2e25043e7c1c8c6442f60adee8d437610ee9f988533c1132ee4942004e3f3"
+    "c0a96826bdf91ede3a101e5c0ff32e97cd1a7074d99812c38e0dc2b66a84e054"
 )
-SLICE_GIT_BLOB = "9db364a360abe07bc4893c0e8970a412134e6a27"
+SLICE_GIT_BLOB = "d73e709df413f2a32d6193d6e5558342e5c3acbf"
 DEFINITIONS = (
     b"_DICT-POW2-FLOOR",
     b"_DICT-INDEX-DONE",
+    b"_DICT-INDEX-GROW-XT",
+    b"_DICT-INDEX-ARM",
+    b"_DICT-INDEX-WATERMARK",
+    b"_DICT-INDEX-TAKE",
+    b"_DICT-INDEX-GROW",
     b"_DICT-INDEX-INIT",
+    b"_DICT-XMEM-RESET",
 )
-BIOS_WORDS = (b"2/", b"2*", b"DICT-INDEX!", b"DICT-INDEX@")
+BIOS_WORDS = (
+    b"2/",
+    b"2*",
+    b"DICT-INDEX!",
+    b"DICT-INDEX@",
+    b"DICT-INDEX-NOTIFY!",
+)
 
 CANONICAL_INDEX_SLOTS = 65_536
 CANONICAL_INDEX_BYTES = CANONICAL_INDEX_SLOTS * 16
@@ -55,7 +67,7 @@ CANONICAL_INDEX_BYTES = CANONICAL_INDEX_SLOTS * 16
 
 def _verified_slice() -> bytes:
     source = FIXTURE.read_bytes()
-    assert len(source) == 1_388
+    assert len(source) == 4_066
     assert source.count(b"\n") == LAST_LINE - FIRST_LINE + 1
     assert hashlib.sha256(source).hexdigest() == SLICE_SHA256
     assert _git_blob_id(source) == SLICE_GIT_BLOB
@@ -350,31 +362,207 @@ def test_dictionary_rollback_rebuilds_and_removes_reclaimed_bindings(
     assert _execute(runtime, "INDEX-ROLLBACK-A") == (11,)
 
 
-def test_one_slot_boot_index_is_installed_saturated_fallback() -> None:
-    runtime = _runtime_with_external_size(2_048)
-    newest = runtime.find("_DICT-INDEX-INIT")
-    assert newest is not None
+def _define_words(runtime: MegaForthRuntime, prefix: str, count: int) -> None:
+    source = "".join(f": {prefix}-{i} {i} ;\n" for i in range(count))
+    runtime.evaluate(source.encode("ascii"), source_name=prefix.lower())
 
+
+def _grow_xt(runtime: MegaForthRuntime) -> int:
+    word = runtime.find("_DICT-INDEX-GROW")
+    assert word is not None
+    return word.xt
+
+
+def test_one_slot_boot_index_doubles_until_half_the_free_tail_refuses() -> None:
+    runtime = _runtime_with_external_size(2_048)
+
+    # The one boot slot below the floor saturated at installation.  Defining
+    # _DICT-XMEM-RESET reached the armed count of zero, so the slice already
+    # doubled the table once and returned the boot slot to the free list.
+    assert _execute(runtime, "DICT-INDEX@") == (
+        EXTERNAL_BASE + 16,
+        2,
+        2,
+        DICT_INDEX_BOUND | DICT_INDEX_SATURATED,
+    )
+    assert runtime.dictionary_index.notification == (1, _grow_xt(runtime))
+    assert _pointer(runtime, "XMEM-FLOOR") == EXTERNAL_BASE + 16
+    assert _pointer(runtime, "XMEM-HERE") == EXTERNAL_BASE + 48
+    assert _pointer(runtime, "XMEM-FL") == EXTERNAL_BASE
+    assert runtime.memory.read64(EXTERNAL_BASE) == 16
+
+    # While saturated, each definition reaches the re-armed count and doubles
+    # the table again, until the next table would exceed half the free tail.
+    geometry = []
+    for i in range(6):
+        _define_words(runtime, f"TINY-{i}", 1)
+        base, slots, count, flags = _execute(runtime, "DICT-INDEX@")
+        geometry.append((base - EXTERNAL_BASE, slots))
+        assert count == slots
+        assert flags == DICT_INDEX_BOUND | DICT_INDEX_SATURATED
+    assert geometry == [
+        (48, 4),
+        (112, 8),
+        (240, 16),
+        (496, 32),
+        (496, 32),
+        (496, 32),
+    ]
+    # A 1,024-byte table is more than half of the 1,040-byte tail, and a full
+    # table is not re-armed after that refusal.
+    assert _execute(runtime, "XMEM-FREE") == (1_040,)
+    assert runtime.dictionary_index.notification == (0, 0)
+
+    # Lookup beyond the saturated table follows the linked dictionary.
+    assert _execute(runtime, "TINY-5-0") == (0,)
+    runtime.evaluate(b": SATURATED-LINKED 91 ;\n", source_name="saturated-linked")
+    assert _execute(runtime, "SATURATED-LINKED") == (91,)
+
+
+def test_index_doubles_at_three_quarters_and_frees_the_old_table() -> None:
+    runtime = _runtime_with_external_size(2 << 20)
+    grow = _grow_xt(runtime)
+    table_bytes = 1_024 * 16
     assert _execute(runtime, "DICT-INDEX@") == (
         EXTERNAL_BASE,
-        1,
-        1,
-        DICT_INDEX_BOUND | DICT_INDEX_SATURATED,
+        1_024,
+        745,
+        DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
     )
-    assert runtime.memory.read64(EXTERNAL_BASE) == newest.header_address
-    assert _pointer(runtime, "XMEM-HERE") == EXTERNAL_BASE + 16
-    assert _pointer(runtime, "XMEM-FLOOR") == EXTERNAL_BASE + 16
-    assert _execute(runtime, "XMEM-FREE") == (2_032,)
+    assert runtime.dictionary_index.notification == (768, grow)
+    floor = EXTERNAL_BASE + table_bytes
+    assert _pointer(runtime, "XMEM-FLOOR") == floor
 
+    # A general allocation first, so the grown table does not start at the
+    # floor.  The 767th name stays in the boot table.
+    assert _execute(runtime, "XMEM-ALLOT", 100) == (floor,)
+    _define_words(runtime, "BELOW", 22)
+    assert _execute(runtime, "DICT-INDEX@")[:3] == (EXTERNAL_BASE, 1_024, 767)
+
+    _define_words(runtime, "CROSS", 1)
+    grown = floor + 112
+    assert _execute(runtime, "DICT-INDEX@") == (
+        grown,
+        2_048,
+        768,
+        DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
+    )
+    assert runtime.dictionary_index.notification == (1_536, grow)
+    assert _pointer(runtime, "XMEM-HERE") == grown + 2 * table_bytes
+    assert _pointer(runtime, "XMEM-FLOOR") == floor
+    assert _pointer(runtime, "XMEM-FL") == EXTERNAL_BASE
+    assert runtime.memory.read64(EXTERNAL_BASE) == table_bytes
+
+    for word in {word.name.upper(): word for word in runtime.dictionary.words}.values():
+        assert _table_probe(runtime, word.name)[1] == word.header_address
+    assert _execute(runtime, "CROSS-0") == (0,)
+
+
+def test_xmem_reset_rebinds_a_grown_table_at_the_floor() -> None:
+    runtime = _runtime_with_external_size(2 << 20)
+    floor = EXTERNAL_BASE + 1_024 * 16
+    assert _execute(runtime, "XMEM-ALLOT", 100) == (floor,)
+    _define_words(runtime, "GROWN", 23)
+    assert _execute(runtime, "DICT-INDEX@")[:2] == (floor + 112, 2_048)
+
+    assert _execute(runtime, "XMEM-RESET") == ()
+    raised = floor + 2_048 * 16
+    assert _execute(runtime, "DICT-INDEX@") == (
+        floor,
+        2_048,
+        768,
+        DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
+    )
+    assert _pointer(runtime, "XMEM-HERE") == raised
+    assert _pointer(runtime, "XMEM-FLOOR") == raised
+    assert _pointer(runtime, "XMEM-FL") == 0
+    for name in (b"GROWN-0", b"GROWN-22", b"_DICT-XMEM-RESET"):
+        word = runtime.find(name)
+        assert word is not None
+        assert _table_probe(runtime, name)[1] == word.header_address
+
+    # The rebound table keeps indexing new definitions.
+    _define_words(runtime, "AFTER-RESET", 1)
+    word = runtime.find("AFTER-RESET-0")
+    assert word is not None
+    assert _table_probe(runtime, b"AFTER-RESET-0")[1] == word.header_address
+
+
+def test_xmem_reset_leaves_a_table_below_the_floor_in_place(
+    loaded_dictionary_index: MegaForthRuntime,
+) -> None:
+    runtime = loaded_dictionary_index
+    state = _execute(runtime, "DICT-INDEX@")
+    floor = _pointer(runtime, "XMEM-FLOOR")
+    assert _execute(runtime, "XMEM-ALLOT", 4_096) == (floor,)
+
+    assert _execute(runtime, "XMEM-RESET") == ()
+    assert _execute(runtime, "DICT-INDEX@") == state
+    assert _pointer(runtime, "XMEM-HERE") == floor
+    assert _pointer(runtime, "XMEM-FLOOR") == floor
+
+
+def test_boot_arms_growth_at_three_quarters_of_the_canonical_table(
+    loaded_dictionary_index: MegaForthRuntime,
+) -> None:
+    runtime = loaded_dictionary_index
+    assert runtime.dictionary_index.notification == (
+        CANONICAL_INDEX_SLOTS * 3 // 4,
+        _grow_xt(runtime),
+    )
+    assert _execute(runtime, "_DICT-INDEX-WATERMARK", 4) == (3,)
+    assert _execute(runtime, "_DICT-INDEX-WATERMARK", 2) == (1,)
+    assert _execute(runtime, "_DICT-INDEX-WATERMARK", 1) == (0,)
+
+
+def test_notification_runs_once_after_each_kind_of_publication(
+    loaded_dictionary_index: MegaForthRuntime,
+) -> None:
+    runtime = loaded_dictionary_index
     runtime.evaluate(
-        b": SATURATED-LINKED 91 ;\n",
-        source_name="saturated-linked",
+        b"VARIABLE NTF-HITS  VARIABLE NTF-SEEN\n"
+        b": NTF-HOOK  1 NTF-HITS +!  DICT-INDEX@ DROP NIP NIP NTF-SEEN ! ;\n"
+        b": NTF-ARM  ( n -- )  DICT-INDEX@ DROP NIP NIP +"
+        b"  ['] NTF-HOOK DICT-INDEX-NOTIFY! ;\n",
+        source_name="notify-hook",
     )
-    assert _execute(runtime, "SATURATED-LINKED") == (91,)
-    assert _execute(runtime, "DICT-INDEX@")[2:] == (
-        1,
-        DICT_INDEX_BOUND | DICT_INDEX_SATURATED,
+
+    def hits() -> int:
+        return _pointer(runtime, "NTF-HITS")
+
+    # Armed two names ahead: the first new name does not reach the count.
+    runtime.evaluate(b"2 NTF-ARM\n: NTF-ONE 1 ;\n", source_name="notify-one")
+    assert hits() == 0
+    runtime.evaluate(b": NTF-TWO 2 ;\n", source_name="notify-two")
+    assert hits() == 1
+    assert _pointer(runtime, "NTF-SEEN") == _execute(runtime, "DICT-INDEX@")[2]
+    assert runtime.dictionary_index.notification == (0, 0)
+    runtime.evaluate(b": NTF-THREE 3 ;\n", source_name="notify-three")
+    assert hits() == 1
+
+    # Every named-definition builder makes the check.
+    for number, line in enumerate(
+        (
+            b"CREATE NTF-CREATED",
+            b"VARIABLE NTF-VARIABLE",
+            b"7 CONSTANT NTF-CONSTANT",
+            b"8 VALUE NTF-VALUE",
+        ),
+        start=2,
+    ):
+        runtime.evaluate(b"1 NTF-ARM\n" + line + b"\n", source_name="notify-kind")
+        assert hits() == number
+
+    # LATEST! rebuilds without a new name, so it fires at the current count.
+    runtime.evaluate(b"0 NTF-ARM LATEST LATEST!\n", source_name="notify-latest")
+    assert hits() == 6
+
+    # An xt of zero disarms.
+    runtime.evaluate(
+        b"1 NTF-ARM  0 0 DICT-INDEX-NOTIFY!\n: NTF-DISARMED 9 ;\n",
+        source_name="notify-disarmed",
     )
+    assert hits() == 6
 
 
 @pytest.mark.parametrize("external_size", [0, 1_024])

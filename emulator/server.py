@@ -4,53 +4,19 @@
 from __future__ import annotations
 
 import argparse
-import json
 import signal
 from pathlib import Path
 
-from rich_terminal.retained_model import RetainedPolicy
-from session import MachineSession, RichTerminalSessionPolicy
-from shared_session import DEFAULT_SOCKET, SessionServer, SharedMachine
+from emulator.session import MachineSession
+from shared.session_options import retained_policy, rich_terminal_policy
+from shared_session import DEFAULT_SOCKET, SessionServer
+from emulator.shared_session import SharedMachine
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def _rich_terminal_policy(value: str) -> RichTerminalSessionPolicy:
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise argparse.ArgumentTypeError(
-            f"invalid rich-terminal policy JSON: {exc.msg}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise argparse.ArgumentTypeError(
-            "rich-terminal policy JSON must be an object"
-        )
-    try:
-        return RichTerminalSessionPolicy(**payload)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise argparse.ArgumentTypeError(
-            f"invalid rich-terminal policy: {exc}"
-        ) from exc
-
-
-def _retained_policy(value: str) -> RetainedPolicy:
-    try:
-        payload = json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise argparse.ArgumentTypeError(
-            f"invalid retained policy JSON: {exc.msg}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise argparse.ArgumentTypeError("retained policy JSON must be an object")
-    try:
-        return RetainedPolicy(**payload)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise argparse.ArgumentTypeError(f"invalid retained policy: {exc}") from exc
-
-
-def main() -> int:
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a shared MegaPad session")
     parser.add_argument("--bios", type=Path, default=ROOT / "bios.asm")
     parser.add_argument("--storage", type=Path)
@@ -71,7 +37,7 @@ def main() -> int:
     parser.add_argument("--batch-steps", type=int, default=100_000)
     parser.add_argument(
         "--rich-terminal-policy",
-        type=_rich_terminal_policy,
+        type=rich_terminal_policy,
         metavar="JSON",
         help=(
             "attach the optional rich terminal with the complete "
@@ -80,7 +46,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--retained-terminal-policy",
-        type=_retained_policy,
+        type=retained_policy,
         metavar="JSON",
         help=(
             "enable RETAINED-1 with the complete caller-owned JSON policy; "
@@ -112,7 +78,12 @@ def main() -> int:
         ),
     )
     parser.add_argument("--paused", action="store_true")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_argument_parser()
+    args = parser.parse_args(argv)
 
     if (
         args.retained_terminal_policy is not None

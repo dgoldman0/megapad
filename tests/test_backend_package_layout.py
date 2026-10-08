@@ -25,6 +25,12 @@ def test_flat_machine_imports_alias_canonical_emulator_modules() -> None:
         assert flat is canonical
 
 
+def test_session_owner_has_only_its_canonical_package_module() -> None:
+    assert not (ROOT / "session.py").exists()
+    session = importlib.import_module("emulator.session")
+    assert Path(session.__file__).resolve() == ROOT / "emulator" / "session.py"
+
+
 def test_shared_and_backends_obey_the_dependency_direction() -> None:
     forbidden = {
         "shared": {"emulator", "simulator"},

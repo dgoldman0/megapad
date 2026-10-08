@@ -10,7 +10,9 @@ import pytest
 
 from cli import MegapadCLI
 from display import load_snapshot, save_snapshot
-from session import MachineSession
+from emulator.session import (
+    MachineSession,
+)
 from system import MegapadSystem
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+
 import base64
 import binascii
 import json
@@ -16,7 +18,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from megapad64 import Megapad64Error
 from rich_terminal import DriverStatus
 from rich_terminal.apt1 import UINT32_MAX, UINT64_MAX
 from rich_terminal.retained_view import (
@@ -25,6 +26,7 @@ from rich_terminal.retained_view import (
     INT64_MAX,
     INT64_MIN,
     DisplayScope,
+    FieldDraw,
     GlyphRunDraw,
     ImageDraw,
     ItemViewDraw,
@@ -34,6 +36,7 @@ from rich_terminal.retained_view import (
     MenuItemDraw,
     MenuSeparatorDraw,
     MeterDraw,
+    PaneDraw,
     PlotDraw,
     PolylineDraw,
     ReadoutDraw,
@@ -41,8 +44,11 @@ from rich_terminal.retained_view import (
     RetainedRegionDraw,
     SeriesHistoryDraw,
     StatusDraw,
+    StatusFieldDraw,
     TabDraw,
     TabSetDraw,
+    TaskBarDraw,
+    TaskDraw,
     TextAreaDraw,
     TextGridDraw,
     WaveformDraw,
@@ -57,6 +63,7 @@ from rich_terminal.retained_scene import (
     Point,
     RGBA,
     Sample,
+    StatusSeverity,
     validate_control_shape,
 )
 from rich_terminal.retained_resources import RGBAResource
@@ -70,12 +77,15 @@ from rich_terminal.semantic_items import (
     decode_item_view_content,
     encode_item_view_content,
 )
+from rich_terminal.semantic_fields import (
+    FieldContent, decode_field_content, encode_field_content,
+)
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_wire import ControlEventKind
 from display import ATTR_CONTINUATION, ATTR_WIDE
 from runtime_paths import RuntimeOwnershipLock, shared_session_socket
-from session import (
-    MachineSession,
+from shared.session import (
+    TerminalSession,
     TerminalCell,
     TerminalDisplayOffer,
     TerminalSnapshot,
@@ -134,8 +144,10 @@ def _wire_object(data, name: str, fields: tuple[str, ...]) -> Mapping[str, Any]:
 _DISPLAY_INPUT_FIELDS = ("generation", "display_offer_id", "display_scope")
 _CONTROL_TARGET_FIELDS = ("owner_id", "owner_generation", "control_id", "modifiers")
 _CONTROL_INPUT_FIELDS = _DISPLAY_INPUT_FIELDS + _CONTROL_TARGET_FIELDS
-# One exact field set per positioned CONTROL_EVENT kind, mirroring its tail.
+# One exact field set per extended CONTROL_EVENT kind, mirroring its tail.
 _TEXT_EVENT_FIELDS = {
+    int(ControlEventKind.ADJUST): _CONTROL_INPUT_FIELDS
+    + ("event_kind", "content_revision", "adjustment"),
     int(ControlEventKind.PLACE): _CONTROL_INPUT_FIELDS
     + ("event_kind", "content_revision", "item_key", "scalar_offset"),
     int(ControlEventKind.EXTEND): _CONTROL_INPUT_FIELDS
@@ -641,6 +653,29 @@ _IMAGE_WIRE_FIELDS = (
     "fit",
     "opacity",
 )
+_PANE_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "content_region_id",
+    "content_bounds",
+    "title",
+    "focused",
+)
+_STATUS_FIELD_WIRE_FIELDS = (
+    "kind",
+    "object_id",
+    "z_order",
+    "bounds",
+    "parent_bounds",
+    "label",
+    "value",
+    "label_cols",
+    "severity",
+    "emphasized",
+)
 _READOUT_WIRE_FIELDS = (
     "kind",
     "object_id",
@@ -769,6 +804,10 @@ _ITEM_VIEW_WIRE_FIELDS = (
     "bounds",
     "content_itm1_base64",
 )
+_FIELD_WIRE_FIELDS = (
+    "kind", "control_id", "state", "order", "z_order", "bounds", "label",
+    "content_fdc1_base64",
+)
 _TABSET_WIRE_FIELDS = (
     "kind",
     "control_id",
@@ -785,6 +824,12 @@ _TAB_WIRE_FIELDS = (
     "order",
     "label",
     "shortcut",
+)
+_TASKBAR_WIRE_FIELDS = (
+    "kind", "control_id", "state", "order", "z_order", "bounds", "tasks",
+)
+_TASK_WIRE_FIELDS = (
+    "kind", "control_id", "state", "order", "bounds", "label", "shortcut",
 )
 _REGION_HEADER_FIELDS = (
     "owner_id",
@@ -817,6 +862,12 @@ def _item_content_to_wire(content: ItemViewContent) -> str:
     """Carry the one canonical ITM1 schema through JSON without restating it."""
 
     return base64.b64encode(encode_item_view_content(content)).decode("ascii")
+
+
+def _field_content_to_wire(content: FieldContent) -> str:
+    """Carry canonical FDC1 through the same transport as STX1 and ITM1."""
+
+    return base64.b64encode(encode_field_content(content)).decode("ascii")
 
 
 def _bounds_to_wire(bounds: ObjectBounds) -> list[int]:
@@ -971,6 +1022,14 @@ def _item_content_from_wire(value, name: str) -> ItemViewContent:
         raise ValueError(f"{name} is not canonical ITM1: {exc}") from exc
 
 
+def _field_content_from_wire(value, name: str) -> FieldContent:
+    payload = _canonical_base64(value, name)
+    try:
+        return decode_field_content(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical FDC1: {exc}") from exc
+
+
 def _semantic_content_from_wire(value, name: str) -> SemanticTextContent:
     encoded = _wire_text(value, name)
     try:
@@ -1025,6 +1084,20 @@ def _tab_to_wire(tab: TabDraw) -> dict:
     }
 
 
+def _task_to_wire(task: TaskDraw) -> dict:
+    if not isinstance(task, TaskDraw):
+        raise TypeError("task must be TaskDraw")
+    return {
+        "kind": "task" if task.kind is ControlKind.TASK else "launcher",
+        "control_id": task.control_id,
+        "state": int(task.state),
+        "order": task.order,
+        "bounds": _bounds_to_wire(task.bounds),
+        "label": task.label,
+        "shortcut": task.shortcut,
+    }
+
+
 def _menu_entry_to_wire(entry: MenuItemDraw | MenuSeparatorDraw) -> dict:
     if isinstance(entry, MenuItemDraw):
         return {
@@ -1063,6 +1136,8 @@ def _retained_draw_to_wire(
         GlyphRunDraw
         | PolylineDraw
         | ImageDraw
+        | PaneDraw
+        | StatusFieldDraw
         | ReadoutDraw
         | MeterDraw
         | StatusDraw
@@ -1072,6 +1147,8 @@ def _retained_draw_to_wire(
         | TextAreaDraw
         | TextGridDraw
         | TabSetDraw
+        | TaskBarDraw
+        | FieldDraw
     ),
 ) -> dict:
     if isinstance(draw, GlyphRunDraw):
@@ -1123,6 +1200,31 @@ def _retained_draw_to_wire(
             "resource_id": draw.resource_id,
             "fit": int(draw.fit),
             "opacity": draw.opacity,
+        }
+    if isinstance(draw, PaneDraw):
+        return {
+            "kind": "pane",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "content_region_id": draw.content_region_id,
+            "content_bounds": _bounds_to_wire(draw.content_bounds),
+            "title": draw.title,
+            "focused": draw.focused,
+        }
+    if isinstance(draw, StatusFieldDraw):
+        return {
+            "kind": "status_field",
+            "object_id": draw.object_id,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "parent_bounds": _bounds_path_to_wire(draw.parent_bounds),
+            "label": draw.label,
+            "value": draw.value,
+            "label_cols": draw.label_cols,
+            "severity": int(draw.severity),
+            "emphasized": draw.emphasized,
         }
     if isinstance(draw, ReadoutDraw):
         return {
@@ -1283,6 +1385,19 @@ def _retained_draw_to_wire(
             "bounds": _bounds_to_wire(draw.bounds),
             "content_itm1_base64": _item_content_to_wire(draw.content),
         }
+    if isinstance(draw, FieldDraw):
+        validate_control_shape(
+            kind=ControlKind.FIELD, state=draw.state, order=draw.order,
+            z_order=draw.z_order, parent_control_id=0, bounds=draw.bounds,
+            label=draw.label, shortcut="", content=draw.content,
+        )
+        return {
+            "kind": "field", "control_id": draw.control_id,
+            "state": int(draw.state), "order": draw.order,
+            "z_order": draw.z_order, "bounds": _bounds_to_wire(draw.bounds),
+            "label": draw.label,
+            "content_fdc1_base64": _field_content_to_wire(draw.content),
+        }
     if isinstance(draw, TabSetDraw):
         return {
             "kind": "tabset",
@@ -1292,6 +1407,16 @@ def _retained_draw_to_wire(
             "z_order": draw.z_order,
             "bounds": _bounds_to_wire(draw.bounds),
             "tabs": [_tab_to_wire(tab) for tab in draw.tabs],
+        }
+    if isinstance(draw, TaskBarDraw):
+        return {
+            "kind": "taskbar",
+            "control_id": draw.control_id,
+            "state": int(draw.state),
+            "order": draw.order,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "tasks": [_task_to_wire(task) for task in draw.tasks],
         }
     raise TypeError("retained draw is outside the shared-viewer vocabulary")
 
@@ -1579,6 +1704,25 @@ def _item_view_from_wire(data, name: str) -> ItemViewDraw:
     )
 
 
+def _field_from_wire(data, name: str) -> FieldDraw:
+    wire = _wire_object(data, name, _FIELD_WIRE_FIELDS)
+    if wire["kind"] != "field":
+        raise ValueError(f"{name} kind must be field")
+    return FieldDraw(
+        control_id=_wire_integer(wire["control_id"], f"{name} control_id",
+                                 minimum=1, maximum=UINT64_MAX),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(wire["order"], f"{name} order",
+                            minimum=0, maximum=UINT32_MAX),
+        z_order=_wire_integer(wire["z_order"], f"{name} z_order",
+                              minimum=INT32_MIN, maximum=INT32_MAX),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+        label=_wire_text(wire["label"], f"{name} label"),
+        content=_field_content_from_wire(wire["content_fdc1_base64"],
+                                         f"{name} content_fdc1_base64"),
+    )
+
+
 def _tabset_from_wire(data, name: str) -> TabSetDraw:
     wire = _wire_object(data, name, _TABSET_WIRE_FIELDS)
     if wire["kind"] != "tabset":
@@ -1616,6 +1760,73 @@ def _tabset_from_wire(data, name: str) -> TabSetDraw:
     )
 
 
+def _task_from_wire(data, name: str) -> TaskDraw:
+    wire = _wire_object(data, name, _TASK_WIRE_FIELDS)
+    if wire["kind"] not in ("task", "launcher"):
+        raise ValueError(f"{name} kind must be task or launcher")
+    return TaskDraw(
+        control_id=_wire_integer(
+            wire["control_id"], f"{name} control_id", minimum=1, maximum=UINT64_MAX,
+        ),
+        kind=ControlKind.TASK if wire["kind"] == "task" else ControlKind.LAUNCHER,
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(wire["order"], f"{name} order", minimum=0, maximum=UINT32_MAX),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+        label=_wire_text(wire["label"], f"{name} label"),
+        shortcut=_wire_text(wire["shortcut"], f"{name} shortcut"),
+    )
+
+
+def _taskbar_from_wire(data, name: str) -> TaskBarDraw:
+    wire = _wire_object(data, name, _TASKBAR_WIRE_FIELDS)
+    if wire["kind"] != "taskbar":
+        raise ValueError(f"{name} kind must be taskbar")
+    tasks_wire = wire["tasks"]
+    if not isinstance(tasks_wire, (list, tuple)):
+        raise TypeError(f"{name} tasks must be an array")
+    return TaskBarDraw(
+        control_id=_wire_integer(
+            wire["control_id"], f"{name} control_id", minimum=1, maximum=UINT64_MAX,
+        ),
+        state=_control_state_from_wire(wire["state"], f"{name} state"),
+        order=_wire_integer(wire["order"], f"{name} order", minimum=0, maximum=UINT32_MAX),
+        z_order=_wire_integer(
+            wire["z_order"], f"{name} z_order", minimum=INT32_MIN, maximum=INT32_MAX,
+        ),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+        tasks=tuple(
+            _task_from_wire(task, f"{name} task {index}")
+            for index, task in enumerate(tasks_wire)
+        ),
+    )
+
+
+def _cell_bounds_from_wire(value, name: str) -> ObjectBounds:
+    """Decode signed CELL_RECT32 offsets and positive unsigned dimensions."""
+
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise TypeError(f"{name} must be an array of four integers")
+    return ObjectBounds(
+        *(
+            _wire_integer(
+                item, f"{name}[{index}]",
+                minimum=INT32_MIN if index < 2 else 1,
+                maximum=INT32_MAX if index < 2 else UINT32_MAX,
+            )
+            for index, item in enumerate(value)
+        )
+    )
+
+
+def _cell_bounds_path_from_wire(value, name: str) -> tuple[ObjectBounds, ...]:
+    if not isinstance(value, (list, tuple)):
+        raise TypeError(f"{name} must be an array")
+    return tuple(
+        _cell_bounds_from_wire(item, f"{name}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+
 def _retained_draw_from_wire(
     data,
     name: str,
@@ -1623,6 +1834,8 @@ def _retained_draw_from_wire(
     GlyphRunDraw
     | PolylineDraw
     | ImageDraw
+    | PaneDraw
+    | StatusFieldDraw
     | ReadoutDraw
     | MeterDraw
     | StatusDraw
@@ -1632,7 +1845,9 @@ def _retained_draw_from_wire(
     | TextAreaDraw
     | TextGridDraw
     | TabSetDraw
+    | TaskBarDraw
     | ItemViewDraw
+    | FieldDraw
 ):
     if not isinstance(data, Mapping):
         raise TypeError(f"{name} must be an object")
@@ -1749,6 +1964,54 @@ def _retained_draw_from_wire(
                 wire["opacity"], f"{name} opacity", minimum=0, maximum=0xFF
             ),
             parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+        )
+    if kind == "pane":
+        wire = _wire_object(data, name, _PANE_WIRE_FIELDS)
+        return PaneDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"], f"{name} z_order",
+                minimum=INT32_MIN, maximum=INT32_MAX,
+            ),
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            content_region_id=_wire_integer(
+                wire["content_region_id"], f"{name} content_region_id",
+                minimum=1, maximum=UINT64_MAX,
+            ),
+            content_bounds=_cell_bounds_from_wire(
+                wire["content_bounds"], f"{name} content_bounds"
+            ),
+            title=_wire_text(wire["title"], f"{name} title"),
+            focused=_wire_boolean(wire["focused"], f"{name} focused"),
+            parent_bounds=_bounds_path_from_wire(
+                wire["parent_bounds"], f"{name} parent_bounds"
+            ),
+        )
+    if kind == "status_field":
+        wire = _wire_object(data, name, _STATUS_FIELD_WIRE_FIELDS)
+        return StatusFieldDraw(
+            object_id=_wire_integer(
+                wire["object_id"], f"{name} object_id", minimum=1, maximum=UINT64_MAX
+            ),
+            z_order=_wire_integer(
+                wire["z_order"], f"{name} z_order",
+                minimum=INT32_MIN, maximum=INT32_MAX,
+            ),
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            label=_wire_text(wire["label"], f"{name} label"),
+            value=_wire_text(wire["value"], f"{name} value"),
+            label_cols=_wire_integer(
+                wire["label_cols"], f"{name} label_cols", minimum=0, maximum=UINT32_MAX
+            ),
+            severity=StatusSeverity(_wire_integer(
+                wire["severity"], f"{name} severity", minimum=0, maximum=4
+            )),
+            emphasized=_wire_boolean(wire["emphasized"], f"{name} emphasized"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
         )
@@ -1984,8 +2247,12 @@ def _retained_draw_from_wire(
         return _text_collection_from_wire(data, name, ControlKind.TEXT_GRID)
     if kind == "tabset":
         return _tabset_from_wire(data, name)
+    if kind == "taskbar":
+        return _taskbar_from_wire(data, name)
     if kind == "item_view":
         return _item_view_from_wire(data, name)
+    if kind == "field":
+        return _field_from_wire(data, name)
     raise ValueError(f"{name} kind is not a retained draw kind")
 
 
@@ -2294,12 +2561,12 @@ def display_offer_from_wire(
     )
 
 
-class SharedMachine:
-    """Continuously runs one MachineSession and serializes all mutations."""
+class SharedSessionOwner(ABC):
+    """Shared presentation, input, and lifecycle authority for one session."""
 
     def __init__(
         self,
-        session: MachineSession,
+        session: TerminalSession,
         *,
         idle_sleep_s: float = 0.002,
         idle_wait_cap_s: float = 0.02,
@@ -2337,32 +2604,20 @@ class SharedMachine:
             event & _PHASE_EVENT_PHASE_MASK,
         )
 
+    @abstractmethod
     def _phase_profile_address_valid(self, address: int) -> bool:
-        """Restrict diagnostics to regions that may hold Forth variables."""
+        """Whether a complete phase cell is readable in admitted guest memory."""
+        raise NotImplementedError
 
-        system = self.session.system
-        ram_size = int(system.ram_size)
-        if 0 <= address and address + 8 <= ram_size:
-            return True
-        if not int(system.ext_mem_size):
-            return False
-        return int(system.ext_mem_base) <= address and address + 8 <= int(
-            system.ext_mem_end
-        )
-
+    @abstractmethod
     def _phase_profile_read(self, address: int) -> int:
-        """Read the packed phase cell without changing guest state."""
+        """Read a phase cell without changing guest state."""
+        raise NotImplementedError
 
-        return self.session.system.cpu.mem_read64(address)
-
+    @abstractmethod
     def _phase_profile_batch_step_bound(self) -> int | None:
-        """Return the most guest steps one sample interval can retire.
-
-        None means sample intervals have no fixed size.  Every transition
-        still carries the exact bounds of the interval it was seen in.
-        """
-
-        return int(self.session.batch_steps)
+        """Return a fixed sampling work bound, or None for variable intervals."""
+        raise NotImplementedError
 
     def _phase_profile_snapshot_locked(self) -> dict:
         profile = self._phase_profile
@@ -2584,20 +2839,10 @@ class SharedMachine:
             profile.dropped_transitions += sequence_delta
         profile.last_event = event
 
+    @abstractmethod
     def start(self):
-        with self.lock:
-            if self._thread is not None:
-                return
-            self.session.boot()
-            if self._host_profile_enabled:
-                self.session.system.start_host_profile()
-            self._reset_generation += 1
-            self._thread = threading.Thread(
-                target=self._run_loop,
-                name="megapad-shared-machine",
-                daemon=True,
-            )
-            self._thread.start()
+        """Boot the selected session and start its execution owner thread."""
+        raise NotImplementedError
 
     def stop(self):
         with self.condition:
@@ -2608,477 +2853,30 @@ class SharedMachine:
             self._thread.join(timeout=3.0)
         self.session.close()
 
+    @abstractmethod
     def _run_loop(self):
-        while True:
-            idle_wait = False
-            progress_wait = False
-            with self.condition:
-                if self._stopping:
-                    return
-                if self.paused:
-                    self.condition.wait(timeout=0.1)
-                    continue
-                system = self.session.system
-                terminal_failure = self.session.rich_terminal_failure
-                if terminal_failure is not None:
-                    self.last_error = f"TerminalSessionError: {terminal_failure}"
-                    self.paused = True
-                    continue
-                terminal_pending = self.session.rich_terminal_work_pending
-                if system.all_halted and not terminal_pending:
-                    self.condition.wait(timeout=0.05)
-                    continue
-                if (
-                    system.all_idle_or_halted
-                    and not system.uart.has_rx_data
-                    and not terminal_pending
-                ):
-                    idle_wait = True
-                else:
-                    try:
-                        stats = self.session.run_batch_stats(
-                            self.session.batch_steps
-                        )
-                        self.last_stop_reason = stats.system_stop_reason
-                        executed = stats.instructions_executed
-                        if executed > 0:
-                            step_lower_bound = self.total_steps
-                            self.total_steps += executed
-                            self.total_batches += 1
-                            self._sample_phase_profile(
-                                step_lower_bound,
-                                self.total_steps,
-                                source="run_batch",
-                                batch_index=self.total_batches,
-                            )
-                        elif not self.session.last_batch_made_progress:
-                            # A bounded host queue can remain legitimately
-                            # blocked until a client supplies input or another
-                            # runner boundary becomes admissible.  Preserve the
-                            # exact stop reason and wait instead of fake-charging
-                            # a guest instruction or hot-spinning.
-                            progress_wait = True
-                    except Exception as exc:
-                        self.last_error = f"{type(exc).__name__}: {exc}"
-                        self.paused = True
+        """Run the selected backend's work, wait, and event-admission policy."""
+        raise NotImplementedError
 
-            if progress_wait:
-                with self.condition:
-                    self.condition.wait(timeout=self.idle_sleep_s)
-            elif idle_wait:
-                with self.condition:
-                    system = self.session.system
-                    timed_wake = system.idle_wake_delay_s()
-                    timeout = self.idle_wait_cap_s
-                    if timed_wake is not None:
-                        timeout = min(timeout, timed_wake)
-                    started = time.monotonic()
-                    if timeout > 0:
-                        self.condition.wait(timeout=timeout)
-                    if self._stopping or self.paused:
-                        continue
-                    system = self.session.system
-                    try:
-                        # Emulated time follows host time while every core
-                        # sleeps, so timers and WAKE_MS deadlines come due
-                        # on time, then the IDL wake rule settles.
-                        system.advance_idle_time(time.monotonic() - started)
-                    except Exception as exc:
-                        self.last_error = f"{type(exc).__name__}: {exc}"
-                        self.paused = True
-            else:
-                time.sleep(0)
-
-    @staticmethod
-    def _nearest_label(labels: dict[str, int], address: int) -> dict | None:
-        matches = (
-            (value, name) for name, value in labels.items() if value <= address
-        )
-        try:
-            value, name = max(matches)
-        except ValueError:
-            return None
-        return {"name": name, "address": value, "offset": address - value}
-
-    def _forth_dictionary(self, cpu) -> tuple[list[dict], int]:
-        labels = self.session.bios_labels
-        latest_variable = labels.get("var_latest")
-        here_variable = labels.get("var_here")
-        if latest_variable is None or here_variable is None:
-            return [], 0
-
-        # Scalar CPU reads alias unmapped addresses into Bank 0, so validate
-        # headers against the only two regions where Forth may build words.
-        # ENTER/LEAVE-USERLAND can make the link chain alternate between them.
-        system = self.session.system
-        regions = [("ram", 0, int(system.ram_size))]
-        if system.ext_mem_size:
-            regions.append(
-                ("ext", int(system.ext_mem_base), int(system.ext_mem_end))
-            )
-
-        def containing_region(address: int, count: int):
-            if address < 0 or count < 0:
-                return None
-            end = address + count
-            if end < address or end > 1 << 64:
-                return None
-            matches = [
-                region
-                for region in regions
-                if region[1] <= address and end <= region[2]
-            ]
-            return matches[0] if len(matches) == 1 else None
-
-        words = []
-        seen = set()
-        try:
-            entry = int(cpu.mem_read64(latest_variable))
-            here = int(cpu.mem_read64(here_variable))
-            active_regions = [
-                region
-                for region in regions
-                if region[1] <= here < region[2]
-            ]
-            if not active_regions:
-                active_regions = [
-                    region for region in regions if here == region[2]
-                ]
-            if len(active_regions) != 1:
-                return [], 0
-            ceilings = {name: limit for name, _base, limit in regions}
-            ceilings[active_regions[0][0]] = here
-            while entry:
-                if entry in seen:
-                    return words, 0
-                region = containing_region(entry, 9)
-                if region is None:
-                    return words, 0
-                region_name, _region_base, _region_limit = region
-                upper = ceilings[region_name]
-                if entry + 9 > upper:
-                    return words, 0
-                seen.add(entry)
-                flags_len = int(cpu.mem_read8(entry + 8))
-                name_len = flags_len & 0x7F
-                code = entry + 9 + name_len
-                if (
-                    code > upper
-                    or containing_region(entry, 9 + name_len) != region
-                ):
-                    return words, 0
-                name = bytes(
-                    int(cpu.mem_read8(entry + 9 + index))
-                    for index in range(name_len)
-                ).decode("ascii", errors="replace")
-                word = {
-                    "name": name,
-                    "header": entry,
-                    "code": code,
-                    "_region": region_name,
-                    "_upper": upper,
-                }
-                if code + 17 <= upper:
-                    prefix = bytes(
-                        int(cpu.mem_read8(code + index)) for index in range(3)
-                    )
-                    suffix = bytes(
-                        int(cpu.mem_read8(code + 11 + index))
-                        for index in range(6)
-                    )
-                    if (
-                        prefix == b"\xf0\x60\x10"
-                        and suffix == b"\x67\xe0\x08\x54\xe1\x0e"
-                    ):
-                        data_address = sum(
-                            int(cpu.mem_read8(code + 3 + index)) << (index * 8)
-                            for index in range(8)
-                        )
-                        if containing_region(data_address, 8) is not None:
-                            word["data_address"] = data_address
-                            word["value"] = int(cpu.mem_read64(data_address))
-                words.append(word)
-                ceilings[region_name] = entry
-                next_entry = int(cpu.mem_read64(entry))
-                entry = next_entry
-        except (IndexError, Megapad64Error, RuntimeError, ValueError):
-            return words, 0
-
-        # The physical end safely bounds an inactive region during traversal,
-        # but it is too broad for instruction-address lookup.  KDOS records
-        # each inactive dictionary's exact saved HERE before switching banks.
-        saved_here_words = {
-            "ram": "SYS-HERE-SAVE",
-            "ext": "U-DICT-HERE",
-        }
-        active_region = active_regions[0][0]
-        for region_name, base, limit in regions:
-            if region_name == active_region:
-                continue
-            newest = next(
-                (word for word in words if word["_region"] == region_name),
-                None,
-            )
-            saved_candidates = [
-                word
-                for word in words
-                # KDOS owns the oldest Bank-0 definition; later shadows are
-                # ordinary Forth words, not dictionary-switch state.
-                if word["_region"] == "ram"
-                and word["name"].upper() == saved_here_words[region_name]
-                and "value" in word
-            ]
-            saved = int(saved_candidates[-1]["value"]) if saved_candidates else 0
-            if newest is None or saved == 0:
-                continue
-            if not (base <= saved <= limit and newest["code"] <= saved):
-                return words, 0
-            newest["_upper"] = saved
-        return words, here
-
-    @staticmethod
-    def _forth_word_at(words: list[dict], here: int, address: int) -> dict | None:
-        for word in words:
-            code = word["code"]
-            upper = word.get("_upper", here)
-            if code <= address < upper:
-                return {
-                    "name": word["name"],
-                    "header": word["header"],
-                    "code": code,
-                    "offset": address - code,
-                }
-        return None
-
-    def _forth_diagnostics(self, cpu) -> dict:
-        registers = [int(value) for value in cpu.regs]
-
-        def cells(address: int, count: int = 8) -> list[int]:
-            values = []
-            for index in range(count):
-                try:
-                    values.append(int(cpu.mem_read64(address + index * 8)))
-                except (IndexError, RuntimeError, ValueError):
-                    break
-            return values
-
-        ip = registers[3]
-        labels = self.session.bios_labels
-        words, here = self._forth_dictionary(cpu)
-        return_stack = cells(registers[15])
-        result = {
-            "instruction_pointer": ip,
-            "data_stack_pointer": registers[14],
-            "return_stack_pointer": registers[15],
-            "data_stack": cells(registers[14]),
-            "return_stack": return_stack,
-            "return_words": [
-                self._forth_word_at(words, here, address)
-                or self._nearest_label(labels, address)
-                for address in return_stack
-            ],
-            "bios_primitive": self._nearest_label(labels, int(cpu.pc)),
-            "word": self._forth_word_at(words, here, ip),
-        }
-        return result
-
+    @abstractmethod
     def forth(self, names: list[str]) -> dict:
-        with self.lock:
-            words, here = self._forth_dictionary(self.session.system.cpu)
-            wanted = {str(name).upper() for name in names}
-            found = {}
-            for word in words:
-                key = word["name"].upper()
-                if key in wanted and key not in found:
-                    found[key] = {
-                        field: value
-                        for field, value in word.items()
-                        if not field.startswith("_")
-                    }
-            return {"here": here, "words": found}
+        """Resolve dictionary diagnostics using the selected word representation."""
+        raise NotImplementedError
 
+    @abstractmethod
     def peek(self, address: int, count: int = 1) -> dict:
-        address = int(address)
-        count = int(count)
-        if address < 0 or not (1 <= count <= 256):
-            raise ValueError("peek requires a non-negative address and 1..256 cells")
-        with self.lock:
-            cpu = self.session.system.cpu
-            return {
-                "address": address,
-                "cell_size": 8,
-                "values": [
-                    int(cpu.mem_read64(address + index * 8))
-                    for index in range(count)
-                ],
-            }
+        """Read diagnostic cells through the selected guest memory model."""
+        raise NotImplementedError
 
+    @abstractmethod
     def status(self, *, detailed: bool = True) -> dict:
-        """Return machine status.
+        """Report terminal state and the backend's actual execution accounting."""
+        raise NotImplementedError
 
-        Detailed status remains the default for control and diagnostic
-        clients.  High-frequency observers such as the session viewer can
-        opt out of CPU/Forth/network diagnostics, most notably avoiding a
-        complete Forth dictionary walk while holding the machine lock.
-        """
-        with self.lock:
-            system = self.session.system
-            cpu = system.cpu
-            rich_terminal_failure = self.session.rich_terminal_failure
-            rich_terminal_pending = self.session.rich_terminal_work_pending
-            rich_terminal_driver = self.session.rich_terminal_driver
-            rich_terminal_core = (
-                None
-                if rich_terminal_driver is None
-                else rich_terminal_driver.core
-            )
-            quiescent = not system.uart.has_rx_data and not rich_terminal_pending
-            operational = rich_terminal_failure is None
-            halted = system.all_halted
-            idle = system.all_idle_or_halted and quiescent and operational
-            visible_cols, visible_rows = self.session.visible_geometry
-            if self.session.rich_terminal_lost:
-                state = "lost"
-            elif rich_terminal_failure is not None:
-                state = "terminal_failed"
-            elif self.last_error:
-                state = "error"
-            elif self.paused:
-                state = "paused"
-            elif halted and not rich_terminal_pending and operational:
-                state = "halted"
-            elif idle:
-                state = "idle"
-            elif self.last_stop_reason == "host_backpressure":
-                state = "backpressured"
-            else:
-                state = "running"
-            result = {
-                "generation": self._reset_generation,
-                "state": state,
-                "paused": self.paused,
-                "halted": halted,
-                "idle": idle,
-                "stop_reason": self.last_stop_reason,
-                "steps": self.total_steps,
-                "batches": self.total_batches,
-                "revision": self.session.revision,
-                "raw_bytes": self.session.raw_output_end,
-                "raw_start": self.session.raw_output_start,
-                "raw_offset": self.session.raw_output_end,
-                "raw_retained_bytes": len(self.session.raw_output),
-                "output_batches": self.session.output_batches,
-                "byte_callbacks": self.session.output_byte_callbacks,
-                "terminal": [visible_cols, visible_rows],
-                "uptime_s": time.time() - self.started_at,
-                "error": self.last_error,
-                "rich_terminal": {
-                    "enabled": self.session.rich_terminal_enabled,
-                    "display_required": self.session.retained_display_required,
-                    "state": (
-                        None
-                        if self.session.rich_terminal_state is None
-                        else self.session.rich_terminal_state.value
-                    ),
-                    "pending": rich_terminal_pending,
-                    "lost": self.session.rich_terminal_lost,
-                    "failure": rich_terminal_failure,
-                    "machine_publications": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.machine_publications_received
-                    ),
-                    "machine_publication_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.machine_publication_bytes_received
-                    ),
-                    "frames": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.frames_received
-                    ),
-                    "frame_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.frame_bytes_received
-                    ),
-                    "frames_by_type": (
-                        {}
-                        if rich_terminal_core is None
-                        else {
-                            f"0x{frame_type:04X}": count
-                            for frame_type, count in sorted(
-                                rich_terminal_core.frames_received_by_type.items()
-                            )
-                        }
-                    ),
-                    "frame_bytes_by_type": (
-                        {}
-                        if rich_terminal_core is None
-                        else {
-                            f"0x{frame_type:04X}": byte_count
-                            for frame_type, byte_count in sorted(
-                                rich_terminal_core.frame_bytes_received_by_type.items()
-                            )
-                        }
-                    ),
-                    "decoder_buffered_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.decoder_buffered_bytes
-                    ),
-                },
-            }
-            if not detailed:
-                return result
-
-            backend = system.nic.backend
-            result.update(
-                {
-                    "cpu": {
-                        "pc": cpu.pc,
-                        "cycles": cpu.cycle_count,
-                        "registers": [int(value) for value in cpu.regs],
-                        "psel": cpu.psel,
-                        "xsel": cpu.xsel,
-                        "spsel": cpu.spsel,
-                    },
-                    "forth": self._forth_diagnostics(cpu),
-                    "clock": {
-                        "mode": system.rtc.clock_mode,
-                        "uptime_ms": system.rtc.uptime_ms,
-                        "epoch_ms": system.rtc.epoch_ms,
-                    },
-                    "nic": {
-                        "backend": system.nic.backend_name,
-                        "link_up": system.nic.link_up,
-                        "tx_frames": getattr(
-                            backend, "tx_frames", system.nic.tx_count
-                        ),
-                        "rx_frames": getattr(backend, "rx_frames", 0),
-                        "rx_queued": cpu._cs.nic_rx_queue_size(),
-                    },
-                }
-            )
-            if self._host_profile_enabled:
-                result["host_profile"] = system.host_profile_snapshot()
-            return result
-
+    @abstractmethod
     def network(self) -> dict:
-        with self.lock:
-            system = self.session.system
-            backend = system.nic.backend
-            result = {
-                "backend": system.nic.backend_name,
-                "link_up": system.nic.link_up,
-                "guest_tx_frames": system.nic.tx_count,
-                "guest_rx_frames": system.cpu._cs.nic_get_rx_count(),
-                "guest_rx_queued": system.cpu._cs.nic_rx_queue_size(),
-            }
-            if backend is not None and hasattr(backend, "stats"):
-                result["transport"] = backend.stats()
-            return result
+        """Report supported network diagnostics or reject unsupported access."""
+        raise NotImplementedError
 
     def pause(self) -> dict:
         with self.condition:
@@ -3099,84 +2897,15 @@ class SharedMachine:
             self.condition.notify_all()
             return self.status()
 
+    @abstractmethod
     def step(self, count: int = 1) -> dict:
-        count = int(count)
-        if count <= 0 or count > 1_000_000:
-            raise ValueError("step count must be between 1 and 1000000")
-        with self.condition:
-            if not self.paused:
-                raise RuntimeError("machine must be paused before stepping")
-            terminal_failure = self.session.rich_terminal_failure
-            if terminal_failure is not None or self.session.rich_terminal_lost:
-                self.last_error = (
-                    "TerminalSessionError: "
-                    f"{terminal_failure or 'rich-terminal attachment lost'}"
-                )
-                raise RuntimeError(
-                    "rich terminal failure requires a machine reset: "
-                    f"{terminal_failure or 'attachment lost'}"
-                )
-            executed = 0
-            cycles = 0
-            stop_reason = "instruction_limit"
-            for _ in range(count):
-                if (
-                    self.session.system.all_halted
-                    and not self.session.rich_terminal_work_pending
-                ):
-                    stop_reason = "all_halted"
-                    break
-                try:
-                    stats = self.session.run_batch_stats(1)
-                except Exception as exc:
-                    self.last_error = f"{type(exc).__name__}: {exc}"
-                    self.paused = True
-                    raise
-                stop_reason = stats.system_stop_reason
-                cycles += stats.system_cycles_advanced
-                batch_executed = stats.instructions_executed
-                executed += batch_executed
-                if batch_executed == 0:
-                    break
-                step_lower_bound = self.total_steps
-                self.total_steps += batch_executed
-                self._sample_phase_profile(
-                    step_lower_bound,
-                    self.total_steps,
-                    source="step",
-                    batch_index=None,
-                )
-            self.last_stop_reason = stop_reason
-            return {
-                "executed": executed,
-                "cycles": cycles,
-                "stop_reason": stop_reason,
-                "status": self.status(),
-            }
+        """Advance paused execution in the selected backend's work units."""
+        raise NotImplementedError
 
+    @abstractmethod
     def reset(self, *, paused: bool | None = None) -> dict:
-        with self.condition:
-            if paused is not None and not isinstance(paused, bool):
-                raise TypeError("reset paused must be a boolean or null")
-            self._phase_profile = None
-            try:
-                self.session.reset()
-                if self._host_profile_enabled:
-                    self.session.system.start_host_profile()
-            except Exception as exc:
-                self.last_error = f"{type(exc).__name__}: {exc}"
-                self.paused = True
-                self.condition.notify_all()
-                raise
-            self.total_steps = 0
-            self.total_batches = 0
-            self.last_error = None
-            self.last_stop_reason = "reset"
-            self._reset_generation += 1
-            if paused is not None:
-                self.paused = paused
-            self.condition.notify_all()
-            return self.status()
+        """Reset supported execution state or reject an unavailable reset."""
+        raise NotImplementedError
 
     def send_text(
         self,
@@ -3246,6 +2975,7 @@ class SharedMachine:
         scalar_offset: int = 0,
         wheel_x: int = 0,
         wheel_y: int = 0,
+        adjustment: int = 0,
         generation: int | None = None,
         display_authorized: bool = False,
         display_lease_ack: tuple[int, DisplayScope] | None = None,
@@ -3253,9 +2983,9 @@ class SharedMachine:
     ) -> dict:
         """Forward one owner-qualified control intent under the display lease.
 
-        ACTIVATE names a control; PLACE and EXTEND also name one STX1 position
-        and SCROLL carries wheel detents.  The terminal core checks that the
-        fields match the kind and that the position is still carried.
+        ACTIVATE names a control; extended events preserve their exact content
+        revision and tail. The terminal core checks the currently committed
+        target and never substitutes a newer field value or text position.
         """
 
         normalized_owner = _wire_integer(
@@ -3322,6 +3052,18 @@ class SharedMachine:
                 maximum=(1 << 15) - 1,
             ),
         }
+        if normalized_kind is ControlEventKind.ADJUST or adjustment != 0:
+            tail["adjustment"] = _wire_integer(
+                adjustment, "semantic control adjustment",
+                minimum=INT64_MIN, maximum=INT64_MAX,
+            )
+            if normalized_kind is ControlEventKind.ADJUST:
+                if not tail["content_revision"] or not tail["adjustment"]:
+                    raise ValueError("ADJUST requires content revision and nonzero adjustment")
+                if any(tail[name] for name in ("item_key", "scalar_offset", "wheel_x", "wheel_y")):
+                    raise ValueError("ADJUST carries only content revision and adjustment")
+            else:
+                raise ValueError("adjustment is carried only by ADJUST")
         with self.condition:
             if not self._generation_current(generation):
                 return {"status": "stale_generation", "accepted_events": 0}
@@ -3548,7 +3290,7 @@ class SharedMachine:
 
         # Both renderer DTOs are immutable.  Keep the machine lock only for a
         # coherent capture; RLE and rich-plane conversion proceed while the
-        # emulator continues running.
+        # session continues running.
         result = {
             "changed": snapshot is not None or offer is not None,
             "revision": revision,
@@ -3797,9 +3539,9 @@ class SharedMachine:
 
 
 class SessionServer:
-    """Unix-domain JSON request server for one SharedMachine."""
+    """Unix-domain JSON request server for one shared session owner."""
 
-    def __init__(self, machine: SharedMachine, socket_path: str = DEFAULT_SOCKET):
+    def __init__(self, machine: SharedSessionOwner, socket_path: str = DEFAULT_SOCKET):
         self.machine = machine
         self.socket_path = str(Path(socket_path).expanduser())
         self._socket: socket.socket | None = None
@@ -4229,7 +3971,7 @@ class SessionServer:
             if fields is None:
                 raise ValueError(
                     "text event_kind must be 2 PLACE, 3 EXTEND, 4 SCROLL, 5 FOLLOW, "
-                    "6 SELECT, 7 OPEN, 8 EXPAND, 9 COLLAPSE, or 10 CHECK"
+                    "6 SELECT, 7 OPEN, 8 EXPAND, 9 COLLAPSE, 10 CHECK, or 11 ADJUST"
                 )
             params = _wire_object(params, "text control input", fields)
         elif method == "send_pointer":
@@ -4272,6 +4014,7 @@ class SessionServer:
                         "scalar_offset",
                         "wheel_x",
                         "wheel_y",
+                        "adjustment",
                     )
                     if name in params
                 }

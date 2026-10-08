@@ -112,7 +112,7 @@ def test_transaction_frames_batch_until_an_atomic_protocol_boundary() -> None:
         "_PT-SEND-RESET-ACK",
         "_PT-SEND-RET-QUERY",
         "_PT-SEND-FATAL-ERROR",
-        "PT-OWNER-OPEN",
+        "_PT-OWNER-QUOTA-REQUEST",
         "PT-OWNER-DROP",
         "PT-PRESENT-COMMIT",
         "_PT-COMMIT",
@@ -155,7 +155,22 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
     assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
-    assert "0x73F    CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0xFF3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x8000   CONSTANT _PT-RET-GRID-CELLS" in source
+    assert (
+        "_PT-RV-FEATURES @ _PT-RET-GRID-CELLS AND\n"
+        "    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND"
+    ) in caps
+    assert "0x4000   CONSTANT _PT-RET-FIELDS" in source
+    assert (
+        "_PT-RV-FEATURES @ _PT-RET-FIELDS AND\n"
+        "    _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND"
+    ) in caps
+    assert "0x2000   CONSTANT _PT-RET-TASKBARS" in source
+    assert (
+        "_PT-RV-FEATURES @ _PT-RET-TASKBARS AND\n"
+        "    _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND"
+    ) in caps
     assert (
         "_PT-RV-FEATURES @ _PT-RET-CONTROL-ITEMS AND\n"
         "    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND"
@@ -577,6 +592,9 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     assert "_PT-RET-CONTROLS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
     assert "_PT-CT-KIND @ _PT-CT-COLLECTION-KIND? IF" in body
     assert "_PT-RET-CONTROL-COLLECTIONS? 0= IF" in body
+    assert "_PT-CT-KIND @ _PT-CT-TASKBAR-KIND? IF" in body
+    assert "_PT-RET-TASKBARS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
+    assert "_PT-RET-FIELDS? 0= IF PT-S-UNSUPPORTED EXIT THEN" in body
     assert body.index("_PT-PO-ADMIT") < body.index("_PT-CT-PAYLOAD!")
     assert body.index("_PT-CT-PAYLOAD!") < body.index("_PT-PO-SEND")
 
@@ -612,7 +630,7 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
     assert "_PT-CT-X @ _PT-CT-COLS @ _PT-I32-EXTENT?" in root_bounds
     assert "_PT-CT-Y @ _PT-CT-ROWS @ _PT-I32-EXTENT?" in root_bounds
     assert "_PT.S.PEER-MAX-PAY @ U>" in fields
-    assert "_PT-CT-STATE @ 0x1F INVERT AND" in fields
+    assert "_PT-CT-STATE @ 0x3F INVERT AND" in fields
     assert "PT-CONTROL-F-OPEN PT-CONTROL-F-SELECTED OR AND" in fields
     for kind in (
         "PT-CONTROL-MENU-BAR",
@@ -624,6 +642,10 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
         "PT-CONTROL-TABSET",
         "PT-CONTROL-TAB",
         "PT-CONTROL-ITEM-VIEW",
+        "PT-CONTROL-TASKBAR",
+        "PT-CONTROL-TASK",
+        "PT-CONTROL-LAUNCHER",
+        "PT-CONTROL-FIELD",
     ):
         assert kind in kinds
     for value, kind in enumerate(
@@ -633,6 +655,10 @@ def test_typed_control_writers_own_exact_wire_and_declared_accounting() -> None:
             "PT-CONTROL-TABSET",
             "PT-CONTROL-TAB",
             "PT-CONTROL-ITEM-VIEW",
+            "PT-CONTROL-TASKBAR",
+            "PT-CONTROL-TASK",
+            "PT-CONTROL-LAUNCHER",
+            "PT-CONTROL-FIELD",
         ),
         start=5,
     ):
@@ -679,9 +705,10 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
     tail_valid = _definition(source, "_PT-CONTROL-TAIL-VALID?")
 
     assert "_PT-RET-CONTROLS? 0=" in dispatch
-    # Only the ACTIVATE kind is admitted without the collections feature.
+    # ACTIVATE and the independently gated ADJUST do not require collections.
     assert "W@ PT-CONTROL-ACTIVATE <> IF" in dispatch
     assert "_PT-RET-CONTROL-COLLECTIONS? 0=" in dispatch
+    assert "_PT-RET-FIELDS? 0=" in dispatch
     assert "_PT-RX-LEN @ 40 U<" in dispatch
     assert "_PT-CONTROL-EVENT-BYTES DUP 0=" in dispatch
     assert "SWAP _PT-RX-LEN @ <> OR" in dispatch
@@ -692,6 +719,7 @@ def test_control_event_is_feature_revision_and_type_checked() -> None:
     assert "_PT.S.REVISION @ <>" in dispatch
     assert "_PT-ACCEPT-EVENT" in dispatch
     assert "PT-CONTROL-ACTIVATE = IF DROP 40 EXIT THEN" in bytes_for_kind
+    assert "PT-CONTROL-ADJUST = IF DROP 56 EXIT THEN" in bytes_for_kind
     assert "IF DROP 64 EXIT THEN" in bytes_for_kind
     assert "PT-CONTROL-SCROLL = IF 48 EXIT THEN" in bytes_for_kind
     # Positions need a content revision and item key; scroll needs detents.
@@ -809,12 +837,15 @@ def test_layout_serial_names_the_init_that_fixed_borrowed_geometry() -> None:
 
 def test_owner_lifecycle_uses_ret_result_and_shared_drop_tx_result() -> None:
     source = SOURCE.read_text(encoding="utf-8")
-    owner_open = _definition(source, "PT-OWNER-OPEN")
+    owner_request = _definition(source, "_PT-OWNER-QUOTA-REQUEST")
     owner_drop = _definition(source, "PT-OWNER-DROP")
     ret_result = _definition(source, "_PT-DISPATCH-RET-RESULT")
 
-    assert "_PT-M-OWNER-OPEN 64" in owner_open
-    assert "TRUE _PT-OO-S @ _PT-FRAME-SEND" in owner_open
+    # OWNER_OPEN and OWNER_RESIZE share one quota request frame.
+    assert "_PT-M-OWNER-OPEN _PT-OO-MESSAGE !" in _definition(source, "PT-OWNER-OPEN")
+    assert "_PT-M-OWNER-RESIZE _PT-OO-MESSAGE !" in _definition(source, "PT-OWNER-RESIZE")
+    assert "_PT-OO-MESSAGE @ 64" in owner_request
+    assert "TRUE _PT-OO-S @ _PT-FRAME-SEND" in owner_request
     assert "_PT-M-OWNER-DROP 32" in owner_drop
     assert "FALSE _PT-OD-S @ _PT-FRAME-SEND" in owner_drop
     assert "_PT-AWAIT-OWNER-DROP" in owner_drop
@@ -1404,6 +1435,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
         ("_PT-RET-RGBA-IMAGE?", "_PT-RET-RGBA-IMAGE"),
         ("_PT-RET-INSTRUMENT?", "_PT-RET-INSTRUMENT"),
         ("_PT-RET-SERIES?", "_PT-RET-SERIES"),
+        ("_PT-RET-STATUS-FIELDS?", "_PT-RET-STATUS-FIELDS"),
     ):
         definition = _definition(source, helper)
         assert "PT-RETAINED-AVAILABLE? 0=" in definition
@@ -1442,6 +1474,10 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
             "trace-alpha zero-red zero-green zero-blue zero-alpha zero-value "
             "waveform-flags session -- status"
         ),
+        "STATUS-FIELD": (
+            f"{common} label-cols severity field-state label-a label-u "
+            "value-a value-u session -- status"
+        ),
     }
     helpers = {
         "GROUP": "_PT-GROUP-WRITE",
@@ -1452,6 +1488,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
         "STATUS": "_PT-STATUS-WRITE",
         "PLOT": "_PT-PLOT-WRITE",
         "WAVEFORM": "_PT-WAVEFORM-WRITE",
+        "STATUS-FIELD": "_PT-STATUS-FIELD-WRITE",
     }
     for family, signature in signatures.items():
         for operation, message in (
@@ -1475,8 +1512,8 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
     )
 
     # There is no public kind-plus-bytes escape hatch and no guest-side scene
-    # cache or object-count policy.  The only copied span is READOUT's checked
-    # semantic UTF-8 unit, never a prepacked object body.
+    # cache or object-count policy.  The copied spans are READOUT's checked
+    # semantic UTF-8 unit, pane title, and status label/value, never prepacked bodies.
     assert re.search(r"^:\s+PT-OBJECT-(?:DEFINE|REPLACE)\b", source, re.MULTILINE) is None
     objects = source[
         source.index("\\ The remaining OBJECT families share") :
@@ -1486,7 +1523,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
     assert "CREATE " not in objects
     assert "ALLOT" not in objects
     assert " CONSTANT " not in objects
-    assert objects.count(" MOVE") == 1
+    assert objects.count(" MOVE") == 4
     assert "_PT-FRAME-PAYLOAD 104 + SWAP MOVE" in objects
     lowered = objects.lower()
     for consumer in ("pad", "desk", "daybook", "uidl", "applet"):
@@ -1514,7 +1551,7 @@ def test_object_common_prefix_group_and_polyline_are_exact_and_bounded() -> None
     assert "_PT-OB-REGION @ 0= OR" in fields
     assert "_PT-M-OBJECT-DEFINE =" in fields
     assert "_PT-M-OBJECT-REPLACE = OR" in fields
-    assert "_PT-OB-KIND @ DUP 1 U< SWAP 9 U> OR" in fields
+    assert "_PT-OB-KIND @ DUP 1 U< SWAP PT-OBJECT-STATUS-FIELD U> OR" in fields
     assert "_PT-OB-X @ _PT-OB-COLS @ _PT-I32-EXTENT? 0=" in fields
     assert "_PT-OB-Y @ _PT-OB-ROWS @ _PT-I32-EXTENT? 0=" in fields
     assert "_PT-OB-Z @ _PT-I32? 0=" in fields
@@ -1969,7 +2006,7 @@ def test_retained_resize_and_reset_barriers_preserve_the_wire_profile() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     resize = _definition(source, "_PT-DISPATCH-RESIZE")
     resize_state = _definition(source, "_PT-RESIZE-STATE?")
-    owner_open = _definition(source, "PT-OWNER-OPEN")
+    owner_open = _definition(source, "_PT-OWNER-QUOTA-REQUEST")
     owner_drop = _definition(source, "PT-OWNER-DROP")
     service_credit = _definition(source, "_PT-SERVICE-CREDIT")
     close = _definition(source, "PT-CLOSE")

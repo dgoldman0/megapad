@@ -274,16 +274,71 @@ boundaries are recorded in `docs/tls-hardening.md`.
 
 ### Prerequisites
 
-Python 3.8+ (3.12 recommended).  The emulator and all tools run with
-**no external dependencies** — pure Python standard library.
+Use CPython 3.12 for the current build and test workflow. The hosted Python
+executor can run without compiling either native extension.
 
-For the optional **C++ accelerator** (63× speedup), you need CPython 3.12
-and pybind11 (`pip install pybind11`).  Build with `make accel`.
+Architectural emulation requires the C++ extension; hosted simulation also
+has a native executor. Build both with `make build` using CPython 3.12,
+pybind11, and a C++17 compiler. The focused `make accel` and
+`make simulator-accel` targets remain available.
 
 ```bash
 git clone <repository-url>
 cd megapad-64
 ```
+
+### Unified application
+
+`megapad.py` starts one shared session using the selected execution mode.
+The emulator is the default. The existing session viewer and control client
+attach to all three modes through the same socket protocol.
+
+```bash
+make build
+python megapad.py --help
+python megapad.py --mode emulator --bios bios.asm --storage sample.img
+python megapad.py --mode simulator --storage desktop.img --executor native
+python megapad.py --mode hybrid --storage hybrid.img --executor native --hybrid-routines routines.json
+
+# Each mode documents its own supported options.
+python megapad.py --mode simulator --help
+# Equivalent Make entry point:
+make serve ARGS='--mode simulator --storage desktop.img --executor native'
+```
+
+Use a prepared MP64FS source image with the ordinary KDOS autoexec entry for
+simulator sessions; the existing Akashic image preparation remains applicable.
+Each running session needs its own writable image and socket/runtime namespace.
+`--executor python|native|auto` applies to simulator and hybrid preparation and live
+execution. An explicit option takes priority over `MEGAFORTH_EXECUTOR`; when
+both are absent, production sessions require the native semantic extension.
+A missing or stale required extension fails before boot source runs. Select
+`python` for the reference executor, or `auto` to permit fallback when the
+native extension is unavailable or incompatible. Embedded `MegaForthRuntime`
+and `HybridRuntime.create` retain their Python default when no executor or
+environment setting is supplied. Emulator
+lane and clock controls remain emulator options. Python-only simulation and
+launcher help do not require the emulator extension. The simulator and viewer
+also import no architectural backend.
+
+All modes report a common `runtime` object in session status: selected mode
+and executor, work/step units, timer and RTC policy, and supported diagnostic
+and reset actions. A native executor may still use Python service fallbacks.
+See [the session API](docs/development-session.md) for the boundary and status
+fields. The default application mode remains emulator.
+
+Hybrid mode runs Forth semantically and declared MP64 integer routines on a
+native core that shares one memory image. As on the chip, a routine's CALL.L
+and RET.L use the Forth return stack, and a routine can call Forth words at
+declared sites, which run on the caller's own stacks. Machine instructions and
+cycles are reported separately from semantic work. Machine MMIO, native BIOS
+images and multicore hybrid execution are not part of this mode. See
+[the hybrid design and manifest format](docs/hybrid-runtime.md).
+
+The architectural monitor in `cli.py` remains a separate debugging tool.
+Server implementations and programmatic interfaces live in `emulator.server`,
+`simulator.server`, and `hybrid.server`; start a session with
+`megapad.py --mode MODE`, which selects one.
 
 ### Boot the System
 
@@ -445,6 +500,7 @@ The `docs/` directory contains comprehensive reference material:
 | [docs/extended-tpu-spec.md](docs/extended-tpu-spec.md) | Extended TPU specification — crypto, DMA, BIST, perf counters, FP16 |
 | [docs/tools.md](docs/tools.md) | CLI & debug monitor, assembler, disk utility, test suite, C++ accelerator |
 | [docs/development-session.md](docs/development-session.md) | Headless and shared live control, terminal snapshots, JSON scenarios, pygame viewing, and PNG capture |
+| [docs/rich-terminal/FLOWING-APPEARANCE.md](docs/rich-terminal/FLOWING-APPEARANCE.md) | Opt-in rounded-channel rendering, recorded-frame previews, and remaining desktop semantics |
 | [docs/audio-output.md](docs/audio-output.md) | One-shot PCM DMA contract, deterministic capture semantics, and hardware direction |
 
 > **Note:** Some details (e.g., the full multi-bank megapad architecture)

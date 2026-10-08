@@ -9,7 +9,9 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from session_server import _retained_policy, _rich_terminal_policy
+from shared.session_options import (
+    configured_production_executor, retained_policy, rich_terminal_policy,
+)
 from shared_session import DEFAULT_SOCKET, SessionServer
 from simulator.image_bootstrap import (
     ImageBootstrapPreparation,
@@ -58,10 +60,11 @@ def _nonnegative_int(value: str) -> int:
     return parsed
 
 
-def build_argument_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Run a shared MegaPad semantic-simulator session"
-    )
+def build_argument_parser(
+    *,
+    description: str = "Run a shared MegaPad semantic-simulator session",
+) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--storage", type=Path, required=True)
     parser.add_argument("--socket", default=DEFAULT_SOCKET)
     parser.add_argument("--ram-kib", type=_positive_int, default=1024)
@@ -69,6 +72,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vram-mib", type=_nonnegative_int, default=4)
     parser.add_argument("--cols", type=_positive_int, default=80)
     parser.add_argument("--rows", type=_positive_int, default=30)
+    parser.add_argument(
+        "--executor",
+        choices=("python", "native", "auto"),
+        help=(
+            "semantic executor for source preparation and live execution; "
+            "defaults to MEGAFORTH_EXECUTOR, otherwise required native; "
+            "only auto permits a Python fallback"
+        ),
+    )
     parser.add_argument(
         "--semantic-step-budget",
         type=_positive_int,
@@ -87,7 +99,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--rich-terminal-policy",
-        type=_rich_terminal_policy,
+        type=rich_terminal_policy,
         metavar="JSON",
         help=(
             "attach the optional rich terminal with the complete "
@@ -96,7 +108,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--retained-terminal-policy",
-        type=_retained_policy,
+        type=retained_policy,
         metavar="JSON",
         help=(
             "enable RETAINED-1 with the complete caller-owned JSON policy; "
@@ -120,6 +132,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
     storage_path = args.storage.resolve()
     if not storage_path.is_file():
         raise ValueError(f"storage image does not exist: {storage_path}")
+    executor = configured_production_executor(args.executor)
     # Resolve the environment before image preparation so a bad value fails
     # without first running autoexec. None selects the executor's default.
     quantum_steps = configured_semantic_quantum_steps(
@@ -149,6 +162,7 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         terminal_cols=args.cols,
         terminal_rows=args.rows,
         semantic_step_budget=args.semantic_step_budget,
+        execution_backend=executor,
     )
     session = SimulatorMachineSession(
         preparation.runtime,

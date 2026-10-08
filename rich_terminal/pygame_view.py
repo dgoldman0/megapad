@@ -11,10 +11,12 @@ from dataclasses import dataclass, replace
 from itertools import repeat
 
 from . import text_rules
+from .appearance import Appearance, REFERENCE_APPEARANCE, paint_channel
 from .apt1 import UINT32_MAX, UINT64_MAX
 from .retained_model import ResourceFormat
-from .retained_scene import ControlKind, ControlState, ImageFit
+from .retained_scene import ControlKind, ControlState, ImageFit, StatusSeverity
 from .retained_view import (
+    FieldDraw,
     GlyphRunDraw,
     ImageDraw,
     ImageResourceManifest,
@@ -24,19 +26,23 @@ from .retained_view import (
     MenuItemDraw,
     MenuSeparatorDraw,
     MeterDraw,
+    PaneDraw,
     PlotDraw,
     PolylineDraw,
     ReadoutDraw,
     RetainedDrawPlane,
     StatusDraw,
+    StatusFieldDraw,
     TabDraw,
     TabSetDraw,
+    TaskBarDraw,
     TextAreaDraw,
     TextGridDraw,
     WaveformDraw,
     retained_draw_key,
 )
 from .semantic_content import (
+    GRID_DATA_ROLES,
     SemanticContentFlag,
     SemanticTextRole,
     SemanticTextState,
@@ -50,6 +56,7 @@ from .semantic_items import (
     card_field_width,
     card_row_count,
 )
+from .semantic_fields import FieldKind
 
 ATTR_BOLD = 0x01
 ATTR_DIM = 0x02
@@ -140,6 +147,11 @@ _GRID_CELL = (26, 32, 42)
 _GRID_HEADER = (34, 43, 57)
 _GRID_UNAVAILABLE = (23, 28, 36)
 _GRID_PRIMARY = (39, 69, 112)
+_GRID_ROLE_TEXT = {
+    SemanticTextRole.NUMBER: (105, 201, 220),
+    SemanticTextRole.FORMULA: (116, 214, 159),
+    SemanticTextRole.ERROR: (244, 139, 139),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,11 +279,31 @@ class ControlHitTarget:
             ControlKind.MENU,
             ControlKind.MENU_ITEM,
             ControlKind.TAB,
+            ControlKind.TASK,
+            ControlKind.LAUNCHER,
+            ControlKind.FIELD,
         ):
-            raise ValueError("only MENU, MENU_ITEM, and TAB can be hit targets")
+            raise ValueError("only MENU, MENU_ITEM, and TAB, TASK, LAUNCHER, or FIELD can be hit targets")
         object.__setattr__(self, "kind", kind)
         if not isinstance(self.rect, PixelRect):
             raise TypeError("rect must be PixelRect")
+
+
+@dataclass(frozen=True, slots=True)
+class FieldHitTarget(ControlHitTarget):
+    """A writable field's displayed value slot and adjustment authority."""
+
+    content_revision: int
+    adjustable: bool
+
+    def __post_init__(self) -> None:
+        ControlHitTarget.__post_init__(self)
+        if self.kind is not ControlKind.FIELD:
+            raise ValueError("field hit target must name FIELD")
+        object.__setattr__(self, "content_revision", _integer(
+            "content_revision", self.content_revision, minimum=1, maximum=UINT64_MAX))
+        if not isinstance(self.adjustable, bool):
+            raise TypeError("adjustable must be bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -833,13 +865,15 @@ _OBJECT_DRAWS = (
     GlyphRunDraw,
     PolylineDraw,
     ImageDraw,
+    PaneDraw,
     ReadoutDraw,
     MeterDraw,
     StatusDraw,
+    StatusFieldDraw,
     PlotDraw,
     WaveformDraw,
 )
-_ROOT_CONTROLS = (TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw)
+_ROOT_CONTROLS = (TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw, TaskBarDraw, FieldDraw)
 
 
 def _draw_extent(
@@ -1005,6 +1039,53 @@ def _rounded_rect(
         border_radius=min(radius, maximum_margin),
     )
     surface.blit(layer, visible)
+
+
+def _flow_root(pygame_module, surface, rect, appearance, *, radius=12, selected=False):
+    """Opaque backing plus an inset channel, without taking content slots."""
+    visible = _bounded_pygame_rect(pygame_module, rect, surface.get_rect().clip(surface.get_clip()))
+    if visible.width <= 0 or visible.height <= 0:
+        return
+    surface.fill(appearance.surface, visible)
+    paint_channel(
+        pygame_module, surface, rect, appearance.surface, radius=radius,
+        border=appearance.accent if selected else appearance.border,
+        highlight=appearance.highlight,
+    )
+
+
+def _flow_text_radius(inset):
+    """Keep the curve and its antialiased border outside reserved text space."""
+    return max(0, inset - 1)
+
+
+def _flow_button_material(rect, metrics):
+    """Separate button paint from its container without moving text or hits."""
+    inset_x = min(2, max(0, metrics.horizontal_padding - 1),
+                  max(0, (rect.width - 1) // 2))
+    inset_y = min(2, max(0, (rect.height - metrics.font_height) // 2))
+    material = _WideRect(rect.left + inset_x, rect.top + inset_y,
+                         rect.width - 2 * inset_x, rect.height - 2 * inset_y)
+    return material, _flow_text_radius(metrics.horizontal_padding - inset_x)
+
+
+def _flow_pill(pygame_module, surface, rect, appearance, *, selected=False, bright=False,
+               radius=24):
+    paint_channel(
+        pygame_module, surface, rect,
+        appearance.accent if bright else appearance.selection if selected else appearance.channel,
+        radius=min(radius, rect.height // 2),
+        border=appearance.accent if selected else appearance.border,
+        highlight=appearance.highlight if not bright else None,
+    )
+
+
+def _flow_outline(pygame_module, surface, rect, appearance, *, selected=False, radius=12):
+    paint_channel(
+        pygame_module, surface, rect, (0, 0, 0, 0), radius=radius,
+        border=appearance.accent if selected else appearance.border,
+        highlight=appearance.highlight,
+    )
 
 
 def _clip_line_segment(start, end, clip, padding: int):
@@ -1484,6 +1565,7 @@ def _paint_popup(
     root_enabled: bool,
     hovered: ControlIdentity | None,
     pressed: ControlIdentity | None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> list[HitMapEntry]:
     width, height = _popup_dimensions(font, menu, metrics)
     popup = _popup_rect(
@@ -1499,29 +1581,33 @@ def _paint_popup(
     if visible_popup.width <= 0 or visible_popup.height <= 0:
         return []
 
-    shadow = popup.move(metrics.shadow_offset, metrics.shadow_offset)
-    _rounded_rect(
-        pygame_module,
-        surface,
-        shadow,
-        _SHADOW,
-        radius=metrics.corner_radius + 1,
-    )
-    _rounded_rect(
-        pygame_module,
-        surface,
-        popup,
-        _POPUP_SURFACE,
-        radius=metrics.corner_radius,
-    )
-    _rounded_rect(
-        pygame_module,
-        surface,
-        popup,
-        _BORDER,
-        radius=metrics.corner_radius,
-        width=1,
-    )
+    if appearance.flowing:
+        _flow_root(pygame_module, surface, popup, appearance,
+                   radius=_flow_text_radius(metrics.popup_padding))
+    else:
+        shadow = popup.move(metrics.shadow_offset, metrics.shadow_offset)
+        _rounded_rect(
+            pygame_module,
+            surface,
+            shadow,
+            _SHADOW,
+            radius=metrics.corner_radius + 1,
+        )
+        _rounded_rect(
+            pygame_module,
+            surface,
+            popup,
+            _POPUP_SURFACE,
+            radius=metrics.corner_radius,
+        )
+        _rounded_rect(
+            pygame_module,
+            surface,
+            popup,
+            _BORDER,
+            radius=metrics.corner_radius,
+            width=1,
+        )
 
     menu_enabled = root_enabled and bool(menu.state & ControlState.ENABLED)
     entries: list[HitMapEntry] = [
@@ -1581,14 +1667,20 @@ def _paint_popup(
         )
         if fill is None and effectively_enabled:
             fill = _ROW_IDLE
-        if fill is not None:
-            _rounded_rect(
-                pygame_module,
-                surface,
-                row,
-                fill,
-                radius=max(2, metrics.corner_radius - 1),
-            )
+        if appearance.flowing:
+            if effectively_enabled and (entry.state & ControlState.SELECTED
+                    or _matches(identity, hovered) or _matches(identity, pressed)):
+                _flow_pill(pygame_module, surface, row, appearance, selected=True,
+                           radius=_flow_text_radius(metrics.popup_padding))
+        else:
+            if fill is not None:
+                _rounded_rect(
+                    pygame_module,
+                    surface,
+                    row,
+                    fill,
+                    radius=max(2, metrics.corner_radius - 1),
+                )
         text_color = _TEXT if effectively_enabled else _DISABLED_TEXT
         prior_clip = surface.get_clip()
         try:
@@ -1599,7 +1691,8 @@ def _paint_popup(
                     surface,
                     row,
                     metrics,
-                    _ACCENT if effectively_enabled else _DISABLED_TEXT,
+                    (appearance.accent if appearance.flowing else _ACCENT)
+                    if effectively_enabled else _DISABLED_TEXT,
                 )
             _paint_text(
                 pygame_module,
@@ -1650,6 +1743,7 @@ def _paint_menu_bar(
     *,
     hovered: ControlIdentity | None,
     pressed: ControlIdentity | None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> tuple[list[HitMapEntry], list[_MenuPopup]]:
     anchor = _bounds_rect(
         pygame_module,
@@ -1682,29 +1776,33 @@ def _paint_menu_bar(
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(viewport)
-        shadow = anchor.move(0, metrics.shadow_offset)
-        _rounded_rect(
-            pygame_module,
-            surface,
-            shadow,
-            _SHADOW,
-            radius=metrics.corner_radius + 1,
-        )
-        _rounded_rect(
-            pygame_module,
-            surface,
-            anchor,
-            _BAR_SURFACE,
-            radius=metrics.corner_radius,
-        )
-        _rounded_rect(
-            pygame_module,
-            surface,
-            anchor,
-            _BORDER,
-            radius=metrics.corner_radius,
-            width=1,
-        )
+        if appearance.flowing:
+            _flow_root(pygame_module, surface, anchor, appearance,
+                       radius=_flow_text_radius(metrics.horizontal_padding))
+        else:
+            shadow = anchor.move(0, metrics.shadow_offset)
+            _rounded_rect(
+                pygame_module,
+                surface,
+                shadow,
+                _SHADOW,
+                radius=metrics.corner_radius + 1,
+            )
+            _rounded_rect(
+                pygame_module,
+                surface,
+                anchor,
+                _BAR_SURFACE,
+                radius=metrics.corner_radius,
+            )
+            _rounded_rect(
+                pygame_module,
+                surface,
+                anchor,
+                _BORDER,
+                radius=metrics.corner_radius,
+                width=1,
+            )
 
         title_height = min(anchor.height, metrics.title_height)
         title_top = anchor.top + (anchor.height - title_height) // 2
@@ -1736,24 +1834,31 @@ def _paint_menu_bar(
             )
             if fill is None and effectively_enabled:
                 fill = _TITLE_IDLE
-            if fill is not None:
-                _rounded_rect(
-                    pygame_module,
-                    surface,
-                    title,
-                    fill,
-                    radius=max(2, metrics.corner_radius - 1),
-                )
+            if appearance.flowing:
+                material, radius = _flow_button_material(title, metrics)
+                if effectively_enabled and (menu.state & (ControlState.OPEN | ControlState.SELECTED)
+                        or _matches(identity, hovered) or _matches(identity, pressed)):
+                    _flow_pill(pygame_module, surface, material, appearance, selected=True,
+                               radius=radius)
+            else:
+                if fill is not None:
+                    _rounded_rect(
+                        pygame_module,
+                        surface,
+                        title,
+                        fill,
+                        radius=max(2, metrics.corner_radius - 1),
+                    )
             if (
                 menu.state & ControlState.OPEN
                 and visible_title.width > 0
                 and visible_title.height > 0
             ):
-                accent_y = title.bottom - 1
+                accent_y = (material.bottom if appearance.flowing else title.bottom) - 1
                 _alpha_line(
                     pygame_module,
                     surface,
-                    _ACCENT,
+                    appearance.accent if appearance.flowing else _ACCENT,
                     (title.left + metrics.horizontal_padding, accent_y),
                     (title.right - metrics.horizontal_padding - 1, accent_y),
                     width=max(1, metrics.font_height // 10),
@@ -1857,7 +1962,7 @@ def _text_root_entries(region, draw, anchor, visible_anchor) -> list[HitMapEntry
                     item.row_span,
                     item.column_span,
                     item.item_key,
-                    item.role is SemanticTextRole.CONTENT
+                    item.role in GRID_DATA_ROLES
                     and not item.state & SemanticTextState.UNAVAILABLE,
                 )
                 for item in content.items
@@ -1932,6 +2037,8 @@ def _paint_text_area(
     region,
     region_rect,
     draw: TextAreaDraw,
+    *,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> list[HitMapEntry]:
     """Paint one exact logical text viewport with persistent selection state.
 
@@ -1990,7 +2097,11 @@ def _paint_text_area(
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(visible_anchor)
-        surface.fill(_COLLECTION_SURFACE, visible_anchor)
+        if appearance.flowing:
+            _flow_root(pygame_module, surface, anchor, appearance, radius=0,
+                       selected=bool(draw.state & ControlState.SELECTED))
+        else:
+            surface.fill(_COLLECTION_SURFACE, visible_anchor)
         for item in visible_items:
             row_top, row_bottom = row_edges(item.row)
             if _clipped_python_rect(
@@ -2019,7 +2130,7 @@ def _paint_text_area(
                         pygame_module, left, row_top, right, row_bottom, visible_anchor
                     )
                     if selected_rect is not None:
-                        surface.fill(_TEXT_SELECTION, selected_rect)
+                        surface.fill(appearance.selection if appearance.flowing else _TEXT_SELECTION, selected_rect)
                 # A character the viewport edge cuts is not drawn, and a tab
                 # is a renderer-owned blank (APT-1-TEXT Section 6).
                 if first < 0 or last > columns or placed.text == "\t":
@@ -2065,19 +2176,20 @@ def _paint_text_area(
                             )
 
         surface.set_clip(visible_anchor)
-        _paint_clipped_border(
-            pygame_module,
-            surface,
-            _ACCENT[:3]
-            if draw.state & ControlState.SELECTED
-            else _COLLECTION_BORDER,
-            left=anchor.left,
-            top=anchor.top,
-            right=anchor.right,
-            bottom=anchor.bottom,
-            width=1,
-            clip=visible_anchor,
-        )
+        if not appearance.flowing:
+            _paint_clipped_border(
+                pygame_module,
+                surface,
+                _ACCENT[:3]
+                if draw.state & ControlState.SELECTED
+                else _COLLECTION_BORDER,
+                left=anchor.left,
+                top=anchor.top,
+                right=anchor.right,
+                bottom=anchor.bottom,
+                width=1,
+                clip=visible_anchor,
+            )
         if primary_item is not None and row_start <= primary_item.row < row_end:
             # APT-1-TEXT Section 9.2: the caret stands at its character's
             # leading edge, the left at an even level and the right at an odd
@@ -2103,7 +2215,8 @@ def _paint_text_area(
                     visible_anchor,
                 )
                 if caret is not None:
-                    surface.fill(_ACCENT[:3] if enabled else _DISABLED_TEXT, caret)
+                    surface.fill((appearance.accent if appearance.flowing else _ACCENT[:3])
+                                 if enabled else _DISABLED_TEXT, caret)
     finally:
         surface.set_clip(prior_clip)
     return _text_root_entries(region, draw, anchor, visible_anchor)
@@ -2117,6 +2230,8 @@ def _paint_text_grid(
     region_rect,
     draw: TextGridDraw,
     cell_width: int,
+    *,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> list[HitMapEntry]:
     """Paint logical grid spans directly, without materializing a cell matrix."""
 
@@ -2140,7 +2255,11 @@ def _paint_text_grid(
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(visible_anchor)
-        surface.fill(_COLLECTION_SURFACE, visible_anchor)
+        if appearance.flowing:
+            _flow_root(pygame_module, surface, anchor, appearance, radius=0,
+                       selected=bool(draw.state & ControlState.SELECTED))
+        else:
+            surface.fill(_COLLECTION_SURFACE, visible_anchor)
         for item in content.items:
             item_bottom = item.row + item.row_span
             item_right = item.column + item.column_span
@@ -2197,59 +2316,87 @@ def _paint_text_grid(
                 fill = _GRID_HEADER
             else:
                 fill = _GRID_CELL
-            surface.fill(fill, visible_item)
-            _paint_clipped_border(
-                pygame_module,
-                surface,
-                _COLLECTION_BORDER,
-                left=logical_left,
-                top=logical_top,
-                right=logical_right,
-                bottom=logical_bottom,
-                width=1,
-                clip=visible_anchor,
-            )
-            if (
-                item.item_key == content.primary_key
-                and item.state & SemanticTextState.UNAVAILABLE
-            ):
+            if appearance.flowing:
+                item_rect = _WideRect(logical_left, logical_top,
+                                      logical_right - logical_left, logical_bottom - logical_top)
+                primary = item.item_key == content.primary_key
+                unavailable = bool(item.state & SemanticTextState.UNAVAILABLE)
+                if primary and not unavailable:
+                    _flow_pill(pygame_module, surface, item_rect, appearance,
+                               selected=True, bright=True, radius=_flow_text_radius(padding))
+                else:
+                    paint_channel(
+                        pygame_module, surface, item_rect,
+                        _GRID_UNAVAILABLE if unavailable else appearance.channel
+                        if item.role in (SemanticTextRole.ROW_HEADER, SemanticTextRole.COLUMN_HEADER)
+                        else appearance.surface,
+                        radius=min(3, _flow_text_radius(padding)), border=(*appearance.border, 72),
+                    )
+                if item.state & SemanticTextState.CURRENT:
+                    paint_channel(pygame_module, surface, item_rect, (0, 0, 0, 0),
+                                  radius=_flow_text_radius(padding), border=appearance.accent)
+            else:
+                surface.fill(fill, visible_item)
                 _paint_clipped_border(
                     pygame_module,
                     surface,
-                    _MUTED_TEXT,
+                    _COLLECTION_BORDER,
                     left=logical_left,
                     top=logical_top,
                     right=logical_right,
                     bottom=logical_bottom,
-                    width=2,
+                    width=1,
                     clip=visible_anchor,
                 )
-            if item.state & SemanticTextState.CURRENT:
-                _paint_clipped_border(
-                    pygame_module,
-                    surface,
-                    _ACCENT[:3],
-                    left=logical_left,
-                    top=logical_top,
-                    right=logical_right,
-                    bottom=logical_bottom,
-                    width=2,
-                    clip=visible_anchor,
-                )
+                if (
+                    item.item_key == content.primary_key
+                    and item.state & SemanticTextState.UNAVAILABLE
+                ):
+                    _paint_clipped_border(
+                        pygame_module,
+                        surface,
+                        _MUTED_TEXT,
+                        left=logical_left,
+                        top=logical_top,
+                        right=logical_right,
+                        bottom=logical_bottom,
+                        width=2,
+                        clip=visible_anchor,
+                    )
+                if item.state & SemanticTextState.CURRENT:
+                    _paint_clipped_border(
+                        pygame_module,
+                        surface,
+                        _ACCENT[:3],
+                        left=logical_left,
+                        top=logical_top,
+                        right=logical_right,
+                        bottom=logical_bottom,
+                        width=2,
+                        clip=visible_anchor,
+                    )
 
             text_color = (
                 _DISABLED_TEXT
                 if not enabled or item.state & SemanticTextState.UNAVAILABLE
-                else _TEXT
+                else _GRID_ROLE_TEXT.get(item.role, _TEXT)
             )
+            if appearance.flowing and enabled and item.item_key == content.primary_key and not unavailable:
+                text_color = appearance.surface
             text_left = logical_left + padding
             text_right = logical_right - padding
-            # Each item is one paragraph in the content's direction; a
-            # right-to-left one is set against the item's right edge.
-            if (
-                not item.text.isascii()
-                or content.direction == text_rules.DIRECTION_RTL
-            ) and text_rules.cached_row(item.text, content.direction, True).rtl:
+            # Numeric and computed displays use their published role, never
+            # parsed text. Other existing cells retain paragraph alignment;
+            # an ERROR is explicitly left-aligned in its unchanged slot.
+            right_aligned = item.role in (
+                SemanticTextRole.NUMBER, SemanticTextRole.FORMULA,
+            )
+            if item.role is not SemanticTextRole.ERROR and not right_aligned:
+                right_aligned = (
+                    not item.text.isascii()
+                    or content.direction == text_rules.DIRECTION_RTL
+                ) and text_rules.cached_row(item.text, content.direction, True).rtl
+            if right_aligned:
                 text_left = max(
                     text_left,
                     text_right
@@ -2277,19 +2424,20 @@ def _paint_text_grid(
             )
 
         surface.set_clip(visible_anchor)
-        _paint_clipped_border(
-            pygame_module,
-            surface,
-            _ACCENT[:3]
-            if draw.state & ControlState.SELECTED
-            else _COLLECTION_BORDER,
-            left=anchor.left,
-            top=anchor.top,
-            right=anchor.right,
-            bottom=anchor.bottom,
-            width=1,
-            clip=visible_anchor,
-        )
+        if not appearance.flowing:
+            _paint_clipped_border(
+                pygame_module,
+                surface,
+                _ACCENT[:3]
+                if draw.state & ControlState.SELECTED
+                else _COLLECTION_BORDER,
+                left=anchor.left,
+                top=anchor.top,
+                right=anchor.right,
+                bottom=anchor.bottom,
+                width=1,
+                clip=visible_anchor,
+            )
     finally:
         surface.set_clip(prior_clip)
     return _text_root_entries(region, draw, anchor, visible_anchor)
@@ -2311,6 +2459,8 @@ def _paint_item_view(
     region,
     region_rect,
     draw: ItemViewDraw,
+    *,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> list[HitMapEntry]:
     """Paint one item view's viewport, one item per row (a card per item),
     in the monospace font on the root's cell slots (SEMANTIC-CONTENT-1).
@@ -2421,7 +2571,11 @@ def _paint_item_view(
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(visible_anchor)
-        surface.fill(_COLLECTION_SURFACE, visible_anchor)
+        if appearance.flowing:
+            _flow_root(pygame_module, surface, anchor, appearance, radius=0,
+                       selected=bool(draw.state & ControlState.SELECTED))
+        else:
+            surface.fill(_COLLECTION_SURFACE, visible_anchor)
         row = 0
         if header:
             top, bottom = row_edge(0), row_edge(1)
@@ -2453,20 +2607,34 @@ def _paint_item_view(
             state = item.state
             unavailable = bool(state & ItemState.UNAVAILABLE)
             color = _DISABLED_TEXT if (not enabled or unavailable) else _TEXT
+            # Cards reserve a cell at either edge. Ordinary rows may use every
+            # slot, so their selection material must reach the square corners.
+            radius = _flow_text_radius(min(slot_edge(1) - anchor.left,
+                                          anchor.right - slot_edge(slots - 1))) if cards else 0
             if state & ItemState.SELECTED:
-                surface.fill(_TEXT_SELECTION, area)
+                if appearance.flowing:
+                    _flow_pill(pygame_module, surface,
+                               _WideRect(anchor.left, top, anchor.width, bottom - top),
+                               appearance, selected=True, radius=radius)
+                else:
+                    surface.fill(_TEXT_SELECTION, area)
             if state & ItemState.CURRENT:
                 bar = _clipped_python_rect(
                     pygame_module, anchor.left, top, anchor.left + 2, bottom, visible_anchor
                 )
                 if bar is not None:
-                    surface.fill(_ACCENT[:3], bar)
-            if cards:
-                _paint_clipped_border(
-                    pygame_module, surface, _COLLECTION_BORDER,
-                    left=anchor.left, top=top, right=anchor.right, bottom=bottom,
-                    width=1, clip=visible_anchor,
-                )
+                    surface.fill(appearance.accent if appearance.flowing else _ACCENT[:3], bar)
+            if cards and appearance.flowing:
+                _flow_outline(pygame_module, surface,
+                              _WideRect(anchor.left, top, anchor.width, bottom - top), appearance,
+                              radius=radius)
+            else:
+                if cards:
+                    _paint_clipped_border(
+                        pygame_module, surface, _COLLECTION_BORDER,
+                        left=anchor.left, top=top, right=anchor.right, bottom=bottom,
+                        width=1, clip=visible_anchor,
+                    )
             slot = 0
             if role in (ItemViewRole.TREE, ItemViewRole.SECTIONS):
                 slot = _ITEM_INDENT * item.depth
@@ -2488,18 +2656,24 @@ def _paint_item_view(
                 size = max(3, min(box_right - box_left, line_bottom - line_top) - 4)
                 box_top = line_top + (line_bottom - line_top - size) // 2
                 box_left += (box_right - box_left - size) // 2
-                _paint_clipped_border(
-                    pygame_module, surface, color,
-                    left=box_left, top=box_top, right=box_left + size, bottom=box_top + size,
-                    width=1, clip=visible_anchor,
-                )
+                if appearance.flowing:
+                    paint_channel(pygame_module, surface,
+                                  _WideRect(box_left, box_top, size, size), appearance.surface,
+                                  radius=4, border=color)
+                else:
+                    _paint_clipped_border(
+                        pygame_module, surface, color,
+                        left=box_left, top=box_top, right=box_left + size, bottom=box_top + size,
+                        width=1, clip=visible_anchor,
+                    )
                 if state & ItemState.CHECKED:
                     inner = _clipped_python_rect(
                         pygame_module, box_left + 2, box_top + 2,
                         box_left + size - 2, box_top + size - 2, visible_anchor,
                     )
                     if inner is not None:
-                        surface.fill(_ACCENT[:3] if enabled else _DISABLED_TEXT, inner)
+                        surface.fill((appearance.accent if appearance.flowing else _ACCENT[:3])
+                                     if enabled else _DISABLED_TEXT, inner)
                 if not unavailable:
                     check_box = _clipped_python_rect(
                         pygame_module, slot_edge(slot), line_top,
@@ -2508,6 +2682,12 @@ def _paint_item_view(
                 slot += _ITEM_CHECK
             fields = item.fields
             if item.role is ItemRole.SECTION:
+                if appearance.flowing:
+                    rail_left = slot_edge(min(slots, width_of(fields[0].text) + 2))
+                    if rail_left < anchor.right:
+                        _alpha_line(pygame_module, surface, (*appearance.accent, 160),
+                                    (rail_left, (line_top + line_bottom) // 2),
+                                    (anchor.right - 1, (line_top + line_bottom) // 2))
                 paint_text(fields[0], fields[0].text, 0, slots, line_top, line_bottom,
                            color=color, look=heading)
             elif role is ItemViewRole.TABLE:
@@ -2562,12 +2742,13 @@ def _paint_item_view(
                 )
             )
         surface.set_clip(visible_anchor)
-        _paint_clipped_border(
-            pygame_module, surface,
-            _ACCENT[:3] if draw.state & ControlState.SELECTED else _COLLECTION_BORDER,
-            left=anchor.left, top=anchor.top, right=anchor.right, bottom=anchor.bottom,
-            width=1, clip=visible_anchor,
-        )
+        if not appearance.flowing:
+            _paint_clipped_border(
+                pygame_module, surface,
+                _ACCENT[:3] if draw.state & ControlState.SELECTED else _COLLECTION_BORDER,
+                left=anchor.left, top=anchor.top, right=anchor.right, bottom=anchor.bottom,
+                width=1, clip=visible_anchor,
+            )
     finally:
         surface.set_clip(prior_clip)
     rect = _pixel_rect(visible_anchor)
@@ -2578,6 +2759,149 @@ def _paint_item_view(
             _identity(region, draw.control_id), rect, content.content_revision, tuple(parts)
         )
     ]
+
+
+def _paint_field(
+    pygame_module, surface, font, region, region_rect, draw: FieldDraw,
+    cell_width: int, cell_height: int, *, hovered, pressed,
+    appearance: Appearance = REFERENCE_APPEARANCE,
+) -> list[HitMapEntry]:
+    """Render committed field values in explicit, independently clipped slots."""
+    anchor, visible = _semantic_root_rects(
+        pygame_module, surface, region, region_rect, draw.bounds,
+    )
+    if visible.width <= 0 or visible.height <= 0:
+        return []
+    entries: list[HitMapEntry] = [ControlSurface(
+        region.owner_id, region.owner_generation, draw.control_id, _pixel_rect(visible),
+    )]
+    content = draw.content
+    identity = _identity(region, draw.control_id)
+    enabled = bool(draw.state & ControlState.ENABLED)
+    writable = enabled and not content.read_only
+    selected = bool(draw.state & ControlState.SELECTED)
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(visible)
+        surface.fill(appearance.surface if appearance.flowing else _COLLECTION_SURFACE, visible)
+        for bounds, text, is_value in (
+            (content.label_bounds, draw.label, False),
+            (content.value_bounds, content.display_text, True),
+        ):
+            if bounds.empty:
+                continue
+            slot = _WideRect(anchor.left + bounds.x * cell_width,
+                             anchor.top + bounds.y * cell_height,
+                             bounds.cols * cell_width, bounds.rows * cell_height)
+            slot_clip = _bounded_pygame_rect(pygame_module, slot, visible)
+            if slot_clip.width <= 0 or slot_clip.height <= 0:
+                continue
+            surface.set_clip(slot_clip)
+            color = _TEXT if enabled else _DISABLED_TEXT
+            if is_value:
+                hot = writable and (selected or identity in (hovered, pressed))
+                background = ((appearance.selection if hot else appearance.channel)
+                              if appearance.flowing else (_TEXT_SELECTION if hot else _GRID_CELL))
+                surface.fill(background, slot_clip)
+                if hot:
+                    _alpha_line(pygame_module, surface,
+                                appearance.accent if appearance.flowing else _ACCENT,
+                                (slot.left, slot.bottom - 1), (slot.right - 1, slot.bottom - 1))
+                if content.read_only and enabled:
+                    color = _MUTED_TEXT
+                if writable:
+                    entries.append(FieldHitTarget(
+                        identity, ControlKind.FIELD, _pixel_rect(slot_clip),
+                        content.content_revision, content.is_adjustable,
+                    ))
+            else:
+                color = _MUTED_TEXT if enabled else _DISABLED_TEXT
+            left = slot.left
+            tab_advance = max(1, cell_width * 4)
+            if is_value and content.kind is FieldKind.INTEGER:
+                width = _bounded_text_width(font, text, slot.width, tab_advance)
+                if width <= slot.width:
+                    left = slot.right - width
+            _paint_bounded_text(
+                pygame_module, surface, font, text, color, slot_clip,
+                left=left, right=slot.right, top=slot.top, bottom=slot.bottom,
+                tab_advance=tab_advance,
+            )
+    finally:
+        surface.set_clip(prior_clip)
+    return entries
+
+
+def _paint_taskbar(
+    pygame_module, surface, font, region, region_rect, draw: TaskBarDraw,
+    cell_width: int, cell_height: int, *, hovered, pressed,
+    appearance: Appearance = REFERENCE_APPEARANCE,
+) -> list[HitMapEntry]:
+    """Paint task entries in their authored slots; gaps never become targets."""
+    anchor, visible_anchor = _semantic_root_rects(
+        pygame_module, surface, region, region_rect, draw.bounds,
+    )
+    if visible_anchor.width <= 0 or visible_anchor.height <= 0:
+        return []
+    entries: list[HitMapEntry] = [ControlSurface(
+        region.owner_id, region.owner_generation, draw.control_id,
+        _pixel_rect(visible_anchor),
+    )]
+    root_enabled = bool(draw.state & ControlState.ENABLED)
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(visible_anchor)
+        surface.fill(appearance.surface if appearance.flowing else _COLLECTION_SURFACE,
+                     visible_anchor)
+        for task in draw.tasks:
+            rect = _bounds_rect(pygame_module, anchor, task.bounds, cell_width, cell_height)
+            visible = _bounded_pygame_rect(pygame_module, rect, visible_anchor)
+            if visible.width <= 0 or visible.height <= 0:
+                continue
+            surface.set_clip(visible)
+            identity = _identity(region, task.control_id)
+            enabled = root_enabled and bool(task.state & ControlState.ENABLED)
+            selected = enabled and bool(task.state & ControlState.SELECTED)
+            minimized = bool(task.state & ControlState.MINIMIZED)
+            text = task.label + ("  " + task.shortcut if task.shortcut else "")
+            advance = max(1, cell_width * 4)
+            width = _bounded_text_width(font, text, rect.width, advance)
+            # Use only genuinely unused space for curves; long labels retain
+            # the whole slot and square edges rather than losing edge text.
+            spare = max(0, rect.width - width)
+            padding = min(cell_width, spare // 2)
+            inset_x = min(2, max(0, padding - 1))
+            inset_y = min(2, max(0, (rect.height - _font_height(font, cell_height)) // 2))
+            material = _WideRect(rect.left + inset_x, rect.top + inset_y,
+                                 rect.width - 2 * inset_x, rect.height - 2 * inset_y)
+            if appearance.flowing:
+                bright = selected
+                fill = (appearance.accent if bright else appearance.selection
+                        if enabled and identity in (hovered, pressed) else appearance.channel)
+                paint_channel(pygame_module, surface, material, fill,
+                              radius=_flow_text_radius(padding - inset_x),
+                              border=appearance.accent if selected else appearance.border)
+                foreground = appearance.surface if bright else _TEXT
+            else:
+                fill = _control_surface(identity, task.state, effectively_enabled=enabled,
+                                        hovered=hovered, pressed=pressed)
+                _rounded_rect(pygame_module, surface, material,
+                              fill or _TITLE_IDLE, radius=0)
+                foreground = _TEXT
+            if not enabled:
+                foreground = _DISABLED_TEXT
+            elif minimized:
+                foreground = _MUTED_TEXT
+            _paint_bounded_text(
+                pygame_module, surface, font, text, foreground, visible,
+                left=rect.left + padding, right=rect.right - padding,
+                top=rect.top, bottom=rect.bottom, tab_advance=advance,
+            )
+            if enabled:
+                entries.append(ControlHitTarget(identity, task.kind, _pixel_rect(visible)))
+    finally:
+        surface.set_clip(prior_clip)
+    return entries
 
 
 def _tab_width(
@@ -2612,6 +2936,7 @@ def _paint_tabset(
     *,
     hovered: ControlIdentity | None,
     pressed: ControlIdentity | None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> list[HitMapEntry]:
     """Lay out generic tabs: the root surface, then enabled TAB targets."""
 
@@ -2646,18 +2971,22 @@ def _paint_tabset(
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(visible_anchor)
-        surface.fill(_COLLECTION_SURFACE, visible_anchor)
-        _paint_clipped_border(
-            pygame_module,
-            surface,
-            _COLLECTION_BORDER,
-            left=anchor.left,
-            top=anchor.top,
-            right=anchor.right,
-            bottom=anchor.bottom,
-            width=1,
-            clip=visible_anchor,
-        )
+        if appearance.flowing:
+            _flow_root(pygame_module, surface, anchor, appearance,
+                       radius=_flow_text_radius(metrics.horizontal_padding))
+        else:
+            surface.fill(_COLLECTION_SURFACE, visible_anchor)
+            _paint_clipped_border(
+                pygame_module,
+                surface,
+                _COLLECTION_BORDER,
+                left=anchor.left,
+                top=anchor.top,
+                right=anchor.right,
+                bottom=anchor.bottom,
+                width=1,
+                clip=visible_anchor,
+            )
         natural_left = anchor.left
         for index, tab in enumerate(draw.tabs):
             if natural_layout:
@@ -2708,23 +3037,35 @@ def _paint_tabset(
             )
             if fill is None:
                 fill = _TITLE_IDLE if effectively_enabled else _GRID_UNAVAILABLE
-            _rounded_rect(
-                pygame_module,
-                surface,
-                tab_rect,
-                fill,
-                radius=max(2, metrics.corner_radius - 1),
-            )
-            if tab.state & ControlState.SELECTED:
-                accent_y = tab_rect.bottom - 1
-                _alpha_line(
+            flowing_selected = (appearance.flowing and effectively_enabled
+                                and bool(tab.state & ControlState.SELECTED))
+            if appearance.flowing:
+                material, radius = _flow_button_material(tab_rect, metrics)
+                _flow_pill(
+                    pygame_module, surface, material, appearance,
+                    selected=flowing_selected or (effectively_enabled and
+                             (_matches(identity, hovered) or _matches(identity, pressed))),
+                    bright=flowing_selected,
+                    radius=radius,
+                )
+            else:
+                _rounded_rect(
                     pygame_module,
                     surface,
-                    _ACCENT,
-                    (tab_rect.left, accent_y),
-                    (tab_rect.right - 1, accent_y),
-                    width=max(1, metrics.font_height // 10),
+                    tab_rect,
+                    fill,
+                    radius=max(2, metrics.corner_radius - 1),
                 )
+                if tab.state & ControlState.SELECTED:
+                    accent_y = tab_rect.bottom - 1
+                    _alpha_line(
+                        pygame_module,
+                        surface,
+                        _ACCENT,
+                        (tab_rect.left, accent_y),
+                        (tab_rect.right - 1, accent_y),
+                        width=max(1, metrics.font_height // 10),
+                    )
 
             inner_left = tab_rect.left + metrics.horizontal_padding
             inner_right = tab_rect.right - metrics.horizontal_padding
@@ -2740,7 +3081,8 @@ def _paint_tabset(
                 if tab.shortcut
                 else inner_right
             )
-            text_color = _TEXT if effectively_enabled else _DISABLED_TEXT
+            text_color = (appearance.surface if flowing_selected
+                          else _TEXT if effectively_enabled else _DISABLED_TEXT)
             _paint_bounded_text(
                 pygame_module,
                 surface,
@@ -2760,6 +3102,7 @@ def _paint_tabset(
                     surface,
                     font,
                     tab.shortcut,
+                    appearance.surface if flowing_selected else
                     _MUTED_TEXT if effectively_enabled else _DISABLED_TEXT,
                     visible_tab,
                     left=shortcut_left,
@@ -2882,28 +3225,142 @@ def _object_clip(pygame_module, surface, region, region_rect, draw):
     return object_rect, clip
 
 
-def _paint_readout(pygame_module, surface, font, region, region_rect, draw) -> None:
+def _pane_chrome_rects(outer, content):
+    """Partition the declared frame into four disjoint bands around its hole."""
+    return (
+        _WideRect(outer.left, outer.top, outer.width, content.top - outer.top),
+        _WideRect(outer.left, content.bottom, outer.width, outer.bottom - content.bottom),
+        _WideRect(outer.left, content.top, content.left - outer.left, content.height),
+        _WideRect(content.right, content.top, outer.right - content.right, content.height),
+    )
+
+
+def _paint_pane(pygame_module, surface, font, region, region_rect, draw, *,
+                appearance: Appearance = REFERENCE_APPEARANCE) -> None:
+    """Paint explicit chrome only; CELL and retained content keep their pixels.
+
+    Pane focus is committed guest state. This painter creates no input target,
+    reflow, or implicit content clipping. A title without a reserved header
+    row remains metadata, as in Desk's edge-to-edge menu layout.
+    """
+    outer, clip = _object_clip(pygame_module, surface, region, region_rect, draw)
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    cell_w = region_rect.width // region.logical_cols
+    cell_h = region_rect.height // region.logical_rows
+    content = _bounds_rect(pygame_module, outer, draw.content_bounds, cell_w, cell_h)
+    prior_clip = surface.get_clip()
+    border = (appearance.accent if draw.focused else appearance.border) if appearance.flowing else (
+        _ACCENT[:3] if draw.focused else _COLLECTION_BORDER)
+    try:
+        for band in _pane_chrome_rects(outer, content):
+            visible = _bounded_pygame_rect(pygame_module, band, clip)
+            if visible.width <= 0 or visible.height <= 0:
+                continue
+            surface.set_clip(visible)
+            # Opaque backing replaces legacy border cells even outside a
+            # rounded corner. The content hole is never touched or copied.
+            surface.fill(appearance.surface if appearance.flowing else _COLLECTION_SURFACE, visible)
+            if appearance.flowing:
+                paint_channel(
+                    pygame_module, surface, outer, appearance.channel,
+                    radius=_flow_text_radius(cell_w), border=border,
+                    highlight=appearance.highlight,
+                )
+            else:
+                _paint_clipped_border(
+                    pygame_module, surface, border, left=outer.left, top=outer.top,
+                    right=outer.right, bottom=outer.bottom, width=1, clip=visible,
+                )
+        if draw.title and draw.content_bounds.cell_y >= 1 and draw.bounds.cell_cols >= 3:
+            title = _WideRect(outer.left + cell_w, outer.top,
+                              outer.width - 2 * cell_w, cell_h)
+            visible_title = _bounded_pygame_rect(pygame_module, title, clip)
+            surface.set_clip(visible_title)
+            _paint_bounded_text(
+                pygame_module, surface, font, draw.title,
+                border if draw.focused else _MUTED_TEXT, visible_title,
+                left=title.left, right=title.right, top=title.top, bottom=title.bottom,
+                tab_advance=max(1, cell_w * 4),
+            )
+    finally:
+        surface.set_clip(prior_clip)
+
+
+def _paint_status_field(pygame_module, surface, font, region, region_rect, draw, *,
+                        appearance: Appearance = REFERENCE_APPEARANCE) -> None:
+    """Paint two explicit text slots without adding padding or input targets."""
+    rect, clip = _object_clip(pygame_module, surface, region, region_rect, draw)
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    cell_w = region_rect.width // region.logical_cols
+    split = rect.left + draw.label_cols * cell_w
+    colors = {
+        StatusSeverity.NEUTRAL: _TEXT,
+        StatusSeverity.INFO: (143, 199, 245),
+        StatusSeverity.SUCCESS: (132, 246, 218),
+        StatusSeverity.WARNING: (248, 202, 126),
+        StatusSeverity.ERROR: (250, 145, 146),
+    }
+    color = colors[draw.severity]
+    if appearance.flowing:
+        background = appearance.selection if draw.emphasized else appearance.channel
+    else:
+        background = _TEXT_SELECTION if draw.emphasized else _COLLECTION_SURFACE
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(clip)
+        # These one-row fields can occupy every text slot. Square material
+        # leaves the original geometry intact even when there is no padding.
+        surface.fill(background, clip)
+        if draw.emphasized:
+            _alpha_line(pygame_module, surface, color,
+                        (rect.left, rect.bottom - 1), (rect.right - 1, rect.bottom - 1))
+        for text, left, right, foreground in (
+            (draw.label, rect.left, split, _MUTED_TEXT),
+            (draw.value, split, rect.right, color),
+        ):
+            slot = _WideRect(left, rect.top, right - left, rect.height)
+            visible = _bounded_pygame_rect(pygame_module, slot, clip)
+            _paint_bounded_text(
+                pygame_module, surface, font, text, foreground, visible,
+                left=left, right=right, top=rect.top, bottom=rect.bottom,
+                tab_advance=max(1, cell_w * 4),
+            )
+    finally:
+        surface.set_clip(prior_clip)
+
+
+def _paint_readout(pygame_module, surface, font, region, region_rect, draw, *, appearance: Appearance = REFERENCE_APPEARANCE) -> None:
     object_rect, clip = _object_clip(
         pygame_module, surface, region, region_rect, draw
     )
     if clip.width <= 0 or clip.height <= 0:
         return
+    padding = min(
+        max(1, min(object_rect.width, object_rect.height) // 10),
+        object_rect.width // 2,
+    )
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(clip)
-        _rounded_rect(
-            pygame_module,
-            surface,
-            object_rect,
-            (*_rgb(draw.background), draw.background.alpha),
-            radius=0,
-        )
+        if appearance.flowing:
+            background = (*_rgb(draw.background), draw.background.alpha)
+            paint_channel(
+                pygame_module, surface, object_rect, background,
+                radius=_flow_text_radius(padding),
+                border=(*(min(255, channel + 18) for channel in background[:3]), background[3]),
+            )
+        else:
+            _rounded_rect(
+                pygame_module,
+                surface,
+                object_rect,
+                (*_rgb(draw.background), draw.background.alpha),
+                radius=0,
+            )
         if not draw.text or draw.foreground.alpha == 0:
             return
-        padding = min(
-            max(1, min(object_rect.width, object_rect.height) // 10),
-            object_rect.width // 2,
-        )
         left = object_rect.left + padding
         right = object_rect.right - padding
         available = max(0, right - left)
@@ -2934,24 +3391,37 @@ def _contrast_rgba(color) -> tuple[int, int, int, int]:
     return channel, channel, channel, 255
 
 
-def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> None:
+def _paint_meter(pygame_module, surface, font, region, region_rect, draw, *, appearance: Appearance = REFERENCE_APPEARANCE) -> None:
     object_rect, clip = _object_clip(
         pygame_module, surface, region, region_rect, draw
     )
     if clip.width <= 0 or clip.height <= 0:
         return
+    padding = min(
+        max(1, min(object_rect.width, object_rect.height) // 10),
+        object_rect.width // 2,
+    )
+    radius = (_flow_text_radius(padding) if draw.show_value
+              else min(object_rect.width, object_rect.height) // 2)
     prior_clip = surface.get_clip()
     try:
         surface.set_clip(clip)
         background = (*_rgb(draw.background), draw.background.alpha)
         foreground = (*_rgb(draw.foreground), draw.foreground.alpha)
-        _rounded_rect(
-            pygame_module,
-            surface,
-            object_rect,
-            background,
-            radius=0,
-        )
+        if appearance.flowing:
+            paint_channel(
+                pygame_module, surface, object_rect, background,
+                radius=radius,
+                border=(*(min(255, channel + 18) for channel in background[:3]), background[3]),
+            )
+        else:
+            _rounded_rect(
+                pygame_module,
+                surface,
+                object_rect,
+                background,
+                radius=0,
+            )
         span = draw.maximum - draw.minimum
         progress = draw.value - draw.minimum
         extent = object_rect.height if draw.vertical else object_rect.width
@@ -2973,13 +3443,17 @@ def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> Non
                     filled,
                     object_rect.height,
                 )
-            _rounded_rect(
-                pygame_module,
-                surface,
-                fill_rect,
-                foreground,
-                radius=0,
-            )
+            if appearance.flowing:
+                paint_channel(pygame_module, surface, fill_rect, foreground,
+                              radius=radius)
+            else:
+                _rounded_rect(
+                    pygame_module,
+                    surface,
+                    fill_rect,
+                    foreground,
+                    radius=0,
+                )
         if draw.show_value:
             text = str(draw.value)
             center_covered = (
@@ -2987,10 +3461,6 @@ def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> Non
             )
             base = draw.foreground if center_covered else draw.background
             text_color = _contrast_rgba(base)
-            padding = min(
-                max(1, min(object_rect.width, object_rect.height) // 10),
-                object_rect.width // 2,
-            )
             left = object_rect.left + padding
             right = object_rect.right - padding
             available = max(0, right - left)
@@ -3016,7 +3486,7 @@ def _paint_meter(pygame_module, surface, font, region, region_rect, draw) -> Non
         surface.set_clip(prior_clip)
 
 
-def _paint_status(pygame_module, surface, region, region_rect, draw) -> None:
+def _paint_status(pygame_module, surface, region, region_rect, draw, *, appearance: Appearance = REFERENCE_APPEARANCE) -> None:
     object_rect, clip = _object_clip(
         pygame_module, surface, region, region_rect, draw
     )
@@ -3774,6 +4244,8 @@ def _paint_draw(
     pressed,
     hit_entries: list,
     region_popups: list,
+    *,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> None:
     """Paint one draw, adding its hit entries and the popups it opens."""
 
@@ -3810,6 +4282,11 @@ def _paint_draw(
                 )
             ],
         )
+    elif isinstance(draw, PaneDraw):
+        _paint_pane(
+            pygame_module, surface, control_font, region, region_rect, draw,
+            appearance=appearance,
+        )
     elif isinstance(draw, ReadoutDraw):
         _paint_readout(
             pygame_module,
@@ -3818,6 +4295,12 @@ def _paint_draw(
             region,
             region_rect,
             draw,
+            appearance=appearance,
+        )
+    elif isinstance(draw, StatusFieldDraw):
+        _paint_status_field(
+            pygame_module, surface, font, region, region_rect, draw,
+            appearance=appearance,
         )
     elif isinstance(draw, MeterDraw):
         _paint_meter(
@@ -3827,6 +4310,7 @@ def _paint_draw(
             region,
             region_rect,
             draw,
+            appearance=appearance,
         )
     elif isinstance(draw, StatusDraw):
         _paint_status(
@@ -3835,6 +4319,7 @@ def _paint_draw(
             region,
             region_rect,
             draw,
+            appearance=appearance,
         )
     elif isinstance(draw, PlotDraw):
         _paint_plot(
@@ -3870,6 +4355,7 @@ def _paint_draw(
             cell_h,
             hovered=hovered,
             pressed=pressed,
+            appearance=appearance,
         )
         hit_entries.extend(targets)
         region_popups.extend(popups)
@@ -3882,6 +4368,7 @@ def _paint_draw(
                 region,
                 region_rect,
                 draw,
+                appearance=appearance,
             )
         )
     elif isinstance(draw, TextGridDraw):
@@ -3894,6 +4381,7 @@ def _paint_draw(
                 region_rect,
                 draw,
                 cell_w,
+                appearance=appearance,
             )
         )
     elif isinstance(draw, ItemViewDraw):
@@ -3905,8 +4393,19 @@ def _paint_draw(
                 region,
                 region_rect,
                 draw,
+                appearance=appearance,
             )
         )
+    elif isinstance(draw, FieldDraw):
+        hit_entries.extend(_paint_field(
+            pygame_module, surface, font, region, region_rect, draw,
+            cell_w, cell_h, hovered=hovered, pressed=pressed, appearance=appearance,
+        ))
+    elif isinstance(draw, TaskBarDraw):
+        hit_entries.extend(_paint_taskbar(
+            pygame_module, surface, control_font, region, region_rect, draw,
+            cell_w, cell_h, hovered=hovered, pressed=pressed, appearance=appearance,
+        ))
     elif isinstance(draw, TabSetDraw):
         hit_entries.extend(
             _paint_tabset(
@@ -3920,6 +4419,7 @@ def _paint_draw(
                 cell_h,
                 hovered=hovered,
                 pressed=pressed,
+                appearance=appearance,
             )
         )
     else:  # Legitimate newer kinds remain fail-closed until implemented.
@@ -3968,6 +4468,7 @@ def retained_plane_layout(
     cell_height: int,
     *,
     control_font,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> tuple[PaintedRegion, ...]:
     """Lay PLANE out on a WIDTH by HEIGHT frame without painting it.
 
@@ -3975,6 +4476,8 @@ def retained_plane_layout(
     draw its identity and extent; no draw has hit entries yet.
     """
 
+    if not isinstance(appearance, Appearance):
+        raise TypeError("appearance must be Appearance")
     if not isinstance(plane, RetainedDrawPlane):
         raise TypeError("plane must be RetainedDrawPlane")
     cell_w = _integer("cell_width", cell_width, minimum=1)
@@ -4027,6 +4530,8 @@ def _paint_region(
     hovered,
     pressed,
     area: PixelRect | None = None,
+    *,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> list[list]:
     """Paint REGION's draws in order, then the popups they opened.
 
@@ -4060,6 +4565,7 @@ def _paint_region(
             pressed,
             entries,
             popups,
+            appearance=appearance,
         )
         owners.extend([len(painted)] * (len(popups) - popups_start))
         painted.append([index, tuple(entries), []])
@@ -4085,6 +4591,7 @@ def _paint_region(
                     root_enabled=popup.root_enabled,
                     hovered=hovered,
                     pressed=pressed,
+                    appearance=appearance,
                 )
             )
         finally:
@@ -4104,6 +4611,7 @@ def composite_draw_plane_result(
     control_font=None,
     hovered: ControlIdentity | None = None,
     pressed: ControlIdentity | None = None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> CompositeDrawResult:
     """Paint one plane and return its deterministic semantic hit map.
 
@@ -4111,6 +4619,8 @@ def composite_draw_plane_result(
     immutable, renderer-owned integer values and therefore remains stable when
     pygame reuses or mutates Rect instances after this pass.
     """
+    if not isinstance(appearance, Appearance):
+        raise TypeError("appearance must be Appearance")
     if not isinstance(plane, RetainedDrawPlane):
         raise TypeError("plane must be RetainedDrawPlane")
     cell_w = _integer("cell_width", cell_width, minimum=1)
@@ -4131,6 +4641,7 @@ def composite_draw_plane_result(
         cell_w,
         cell_h,
         control_font=control_font,
+        appearance=appearance,
     )
     hit_entries: list[HitMapEntry] = []
     glyphs = {}
@@ -4157,6 +4668,7 @@ def composite_draw_plane_result(
             series_by_key,
             hovered,
             pressed,
+            appearance=appearance,
         )
         record = PaintedRegion(
             planned.key,
@@ -4187,6 +4699,7 @@ def repaint_draw_plane_area(
     control_font=None,
     hovered: ControlIdentity | None = None,
     pressed: ControlIdentity | None = None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> dict[tuple, tuple[tuple[HitMapEntry, ...], tuple[HitMapEntry, ...]]]:
     """Repaint, under the clip AREA, every draw of PLANE whose extent meets it.
 
@@ -4198,6 +4711,8 @@ def repaint_draw_plane_area(
     only a draw whose whole extent lies in AREA painted its exact entries.
     """
 
+    if not isinstance(appearance, Appearance):
+        raise TypeError("appearance must be Appearance")
     if not isinstance(plane, RetainedDrawPlane):
         raise TypeError("plane must be RetainedDrawPlane")
     if not isinstance(area, PixelRect):
@@ -4234,6 +4749,7 @@ def repaint_draw_plane_area(
                 hovered,
                 pressed,
                 area,
+                appearance=appearance,
             ):
                 painted_draws[(planned.key, planned.draws[index].key)] = (
                     entries,
@@ -4256,6 +4772,7 @@ def composite_draw_plane(
     control_font=None,
     hovered: ControlIdentity | None = None,
     pressed: ControlIdentity | None = None,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ):
     """Composite the draw plane between caller-owned CELL and cursor layers."""
     return composite_draw_plane_result(
@@ -4269,6 +4786,7 @@ def composite_draw_plane(
         control_font=control_font,
         hovered=hovered,
         pressed=pressed,
+        appearance=appearance,
     ).surface
 
 
@@ -4277,6 +4795,7 @@ __all__ = [
     "PaintedDraw",
     "PaintedRegion",
     "ControlHitTarget",
+    "FieldHitTarget",
     "ControlIdentity",
     "ControlSurface",
     "HitMapEntry",

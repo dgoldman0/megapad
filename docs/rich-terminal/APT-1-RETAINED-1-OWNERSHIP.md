@@ -81,7 +81,7 @@ UART readers or writers.
 | Hidden retained rebuild | Terminal on valid START commit | Matching CONTINUE commits only | Atomic REVEAL, replacement START, new resize, reset, close | Destroyed | Destroyed |
 | Immutable resource | Terminal after verified upload COMMIT | Never; references change transactionally | Unreferenced RESOURCE_DROP/owner drop/reset | Destroyed | Destroyed |
 | One resource upload | Terminal charges owner-wide usage and physical staging on accepted BEGIN | Ordered exact-tuple chunks, COMMIT, ABORT | Exact COMMIT/ABORT or exact-upload semantic rejection, reset, close | Aborted/destroyed | Destroyed |
-| Owner quota reservation | Terminal on OWNER_OPEN | Never resized in generation | Successful OWNER_DROP status 0/epoch end | Released | Released |
+| Owner quota reservation | Terminal on OWNER_OPEN | Grown only by a granted OWNER_RESIZE; never shrunk in generation | Successful OWNER_DROP status 0/epoch end | Released | Released |
 | Active scene quota usage | Terminal from successful DELTA/reveal within an accepted owner reservation | Exact active-target operations or atomic reveal | Exact active drop, replacement reveal, OWNER_DROP status 0, or epoch end | Released | Released |
 | Hidden scene quota usage | Terminal from successful START/CONTINUE within the same owner reservation | Exact hidden-target operations only | Reveal promotion, replacement START, reset/close, or OWNER_DROP status 0 | Released | Released |
 | Owner-wide resource usage | Terminal charges one count/declared bytes on accepted RESOURCE_BEGIN | Exact-upload completion/abort and exact RESOURCE_DROP | Exact-upload abort/rejection, exact RESOURCE_DROP, OWNER_DROP status 0, or epoch end | Released | Released |
@@ -225,11 +225,19 @@ totals. Every sum is checked before mutation. This makes later admission depend
 on the owner reservation rather than unrelated owners becoming idle.
 
 The reservation ledger and usage ledgers are distinct. OWNER_OPEN increases the
-aggregate live-owner reservation sums; those sums do not decrease when an item
-or resource is dropped and change again only on successful OWNER_DROP status 0
-or epoch retirement. Scene operations consume target-local usage, while
-resource operations consume owner-wide resource-store usage, within that fixed
-reservation. Upload/transaction staging also consumes bounded terminal physical
+aggregate live-owner reservation sums, and a granted OWNER_RESIZE increases
+them by the growth it adds; those sums do not decrease when an item or resource
+is dropped and decrease only on successful OWNER_DROP status 0 or epoch
+retirement. Scene operations consume target-local usage, while resource
+operations consume owner-wide resource-store usage, within the owner's current
+reservation.
+
+When content outgrows its reservation, the backend may ask for more with
+OWNER_RESIZE before it publishes that content. The terminal answers RET_OK and
+installs the larger reservation, or RET_NO_CAPACITY and keeps the old one. On a
+refusal the part that did not fit stays on its CELL fallback, and both sides
+keep a small record of what was asked for and what is held, for host status,
+logs, and tests. Nothing about the refusal is drawn on screen. Upload/transaction staging also consumes bounded terminal physical
 storage, but that transient storage is not a quota reservation and cannot borrow
 wire authority from another owner's unused usage.
 
@@ -254,7 +262,7 @@ Accounting units are exact:
 
 For region/object/control/semantic-item/series counts, UTF-8 bytes, and sample
 slots, active and committed hidden targets each have a separate logical usage
-ledger checked independently against the same immutable owner reservation.
+ledger checked independently against the same owner reservation.
 They are not summed; this permits a complete copy-on-write replacement at the
 negotiated logical quota. A hidden drop changes only hidden usage. Reveal
 atomically promotes the hidden ledger and retires the prior active logical

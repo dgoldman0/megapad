@@ -267,9 +267,11 @@ make test-simulator-native
 ```
 
 `MEGAFORTH_EXECUTOR` accepts `python`, `native`, or `auto` for any runtime.
-`python` remains the code default; current physical acceptance and typing
-runs select `native`. `simulator_server.py` serves a prepared image through
-the shared session protocol. Akashic's
+Embedded runtime construction defaults to `python`. The production
+`megapad.py --mode simulator` entrypoint serves a prepared image through the
+shared session protocol and requires native execution when neither
+`--executor` nor the environment selects an executor. An explicit option
+overrides the environment; only `auto` permits a Python fallback. Akashic's
 `local_testing/akashic_tui.py serve|accept --backend simulator` drives the
 ordinary Desktop through it.
 
@@ -762,16 +764,19 @@ emulator sessions may select 128 MiB explicitly. RTL's
 `EXT_MEM_SIZE_PARAM=0` instead selects the full window up to VRAM, which is a
 deferred RTL implementation discrepancy.
 
-Exact logical lines 2390 through 2423 now run KDOS's one-shot caller-backed
-dictionary-index initializer. The semantic BIOS validates the complete
-external span, emits exact 16-byte FNV/length/entry slots, rebuilds newest
-first, upserts later shadows, rebuilds after numeric rollback, and exposes
-status 0/1/2 plus the four public flags. Canonical 128 MiB XMEM reserves a
-1 MiB/65,536-slot authoritative table; absent or sub-2,048-byte capacity leaves
-it disabled, while exactly 2,048 bytes deliberately produces a protected
-one-slot saturated fallback. `2/` is an arithmetic right shift; this sizing
-path uses only positive cells and is unchanged by correction of the former
-logical implementation.
+KDOS's caller-backed dictionary-index section, from `_DICT-POW2-FLOOR`
+through its `XMEM-RESET` action, now runs exactly. The semantic BIOS validates
+the complete external span, emits exact 16-byte FNV/length/entry slots,
+rebuilds newest first, upserts later shadows, rebuilds after numeric rollback,
+and exposes status 0/1/2 plus the four public flags. Its `DICT-INDEX-NOTIFY!`
+check follows each named definition and `LATEST!`, as the BIOS's does.
+Canonical 128 MiB XMEM reserves a 1 MiB/65,536-slot authoritative first table
+and arms growth at three quarters of it; absent or sub-2,048-byte capacity
+leaves the index disabled, while exactly 2,048 bytes installs one saturated
+slot that then doubles at each definition until half the free tail refuses the
+next table. `2/` is an arithmetic right shift; this sizing path uses only
+positive cells and is unchanged by correction of the former logical
+implementation.
 
 The caller must reserve the table exclusively: BIOS geometry checks do not
 prove allocator ownership or disjointness, and rebuild clears the supplied
@@ -2494,7 +2499,7 @@ evaluation; preparation does not require or manufacture an empty data stack.
 Captured
 boot output remains the distinct pre-attachment legacy output boundary.
 
-The root `simulator_server.py` entry point exposes this prepared runtime through
+The `megapad.py --mode simulator` entry point exposes this prepared runtime through
 the unchanged shared-session socket and `SimulatorSharedMachine`. It accepts
 only semantic memory, geometry, terminal-policy, pause, and optional semantic
 step-budget arguments; emulator BIOS, core scheduling, TAP, audio, cycle
@@ -2511,6 +2516,9 @@ independent read latches retain their usual semantics. Standalone runtimes
 remain deterministic unless their caller explicitly binds a clock; this does
 not add timer interrupts or change semantic-step accounting. Physical retained
 offer and complete Desktop acceptance remain separate qualification evidence.
+
+Its parser, preparation and lifecycle interfaces live in `simulator.server`;
+sessions start with `megapad.py --mode simulator`.
 
 See [`docs/simulator-contract.md`](../docs/simulator-contract.md) for the
 normative compatibility surface and first implementation sequence.

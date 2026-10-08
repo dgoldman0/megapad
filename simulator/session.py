@@ -10,8 +10,9 @@ import time
 from dataclasses import dataclass
 
 from rich_terminal import DriverServiceResult, DriverStatus
-from session import MachineSession, RichTerminalSessionConfig
-from shared_session import SharedMachine
+from shared.session import TerminalSession, RichTerminalSessionConfig
+from shared.session_status import SessionRuntimeDescriptor, terminal_status
+from shared_session import SharedSessionOwner
 from simulator.rich_terminal_host import (
     SemanticBatchResult,
     SemanticBatchStop,
@@ -62,7 +63,7 @@ class SimulatorSessionRun:
     terminal_progress: bool
 
 
-class SimulatorMachineSession(MachineSession):
+class SimulatorMachineSession(TerminalSession):
     """Bind one hosted Forth runtime to the normal terminal session authority.
 
     The semantic runtime has no instruction/cycle batch. One owner call runs a
@@ -80,6 +81,7 @@ class SimulatorMachineSession(MachineSession):
         rows: int = 30,
         semantic_step_budget: int | None = None,
         semantic_quantum_steps: int | None = None,
+        machine_quantum_instructions: int | None = None,
         rich_terminal: RichTerminalSessionConfig | None = None,
     ) -> None:
         if not isinstance(runtime, MegaForthRuntime):
@@ -114,7 +116,7 @@ class SimulatorMachineSession(MachineSession):
         self._dispatch_started = False
         self._halted = False
         self._semantic_steps_total = 0
-        self._initialize_terminal_frontend(cols, rows, rich_terminal)
+        super().__init__(cols, rows, rich_terminal)
 
         backend = SimulatorSessionBackend(
             runtime,
@@ -122,7 +124,9 @@ class SimulatorMachineSession(MachineSession):
             terminal_cols=cols,
             terminal_rows=rows,
             semantic_quantum_steps=semantic_quantum_steps,
+            machine_quantum_instructions=machine_quantum_instructions,
         )
+        self._machine_quantum_instructions = backend.machine_quantum_instructions
         self._backend = backend
         try:
             if rich_terminal is None:
@@ -150,6 +154,10 @@ class SimulatorMachineSession(MachineSession):
         return self._semantic_quantum_steps
 
     @property
+    def machine_quantum_instructions(self) -> int | None:
+        return self._machine_quantum_instructions
+
+    @property
     def booted(self) -> bool:
         return self._booted
 
@@ -163,17 +171,14 @@ class SimulatorMachineSession(MachineSession):
         return bool(
             not self._halted
             and backend.waiting_for_interrupt
-            and not self.runtime.idle_wake_due
+            and not backend.idle_wake_due
             and not self.rich_terminal_work_pending
         )
 
     @property
     def idle_wake_delay_s(self) -> float | None:
         """Seconds until a blocked IDLE-UNTIL deadline, or None."""
-        deadline = self.runtime.idle_deadline_ms
-        if deadline is None:
-            return None
-        return max(deadline - self.runtime.rtc.uptime_ms, 0) / 1000
+        return self.backend.idle_wake_delay_s
 
     @property
     def semantic_steps_total(self) -> int:
@@ -259,6 +264,9 @@ class SimulatorMachineSession(MachineSession):
         )
         self._last_batch_rich_terminal_progress = bool(
             semantic.semantic_steps or terminal_progress
+            # A machine-only scheduling turn can yield without semantic work.
+            # Its runnable result should not trigger the idle/backpressure wait.
+            or semantic.stop_reason is SemanticBatchStop.YIELDED
         )
         self._refresh_output_display_boundary()
         return SimulatorSessionRun(
@@ -311,15 +319,7 @@ class SimulatorMachineSession(MachineSession):
             return
         backend = self._backend
         try:
-            driver = self._rich_terminal_driver
-            if driver is not None:
-                driver.close()
-                self._rich_terminal_driver = None
-            self._logical_composite_output = None
-            self._displayed_composite_output = None
-            self._clear_display_offer_tokens()
-            self._display_cadence_scope = None
-            self._display_cadence = None
+            self._close_terminal_frontend()
         finally:
             try:
                 if backend is not None:
@@ -328,7 +328,7 @@ class SimulatorMachineSession(MachineSession):
                 self._closed = True
 
 
-class SimulatorSharedMachine(SharedMachine):
+class SimulatorSharedMachine(SharedSessionOwner):
     """Expose one semantic session through the shared JSON-session authority.
 
     Presentation, display acknowledgement, input authorization, and terminal
@@ -421,13 +421,13 @@ class SimulatorSharedMachine(SharedMachine):
                     continue
 
                 session = self.semantic_session
-                if (session.halted or session.idle) and not (
-                    session.rich_terminal_work_pending
-                ):
-                    should_wait = True
-                    guest_idle = True
-                else:
-                    try:
+                try:
+                    if (session.halted or session.idle) and not (
+                        session.rich_terminal_work_pending
+                    ):
+                        should_wait = True
+                        guest_idle = True
+                    else:
                         result = session.run_boundary()
                         self._record_boundary_locked(result)
                         failure = self._terminal_failure_locked()
@@ -436,9 +436,9 @@ class SimulatorSharedMachine(SharedMachine):
                             self.paused = True
                         elif not session.last_batch_made_progress:
                             should_wait = True
-                    except Exception as exc:
-                        self.last_error = f"{type(exc).__name__}: {exc}"
-                        self.paused = True
+                except Exception as exc:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self.paused = True
 
             if should_wait:
                 with self.condition:
@@ -447,7 +447,12 @@ class SimulatorSharedMachine(SharedMachine):
                         # Input notifies the condition; a guest blocked in
                         # IDLE-UNTIL resumes at its deadline.
                         timeout = self.idle_wait_cap_s
-                        timed_wake = self.semantic_session.idle_wake_delay_s
+                        try:
+                            timed_wake = self.semantic_session.idle_wake_delay_s
+                        except Exception as exc:
+                            self.last_error = f"{type(exc).__name__}: {exc}"
+                            self.paused = True
+                            continue
                         if timed_wake is not None:
                             timeout = min(timeout, timed_wake)
                     if timeout > 0:
@@ -464,10 +469,6 @@ class SimulatorSharedMachine(SharedMachine):
             session = self.semantic_session
             rich_terminal_failure = session.rich_terminal_failure
             rich_terminal_pending = session.rich_terminal_work_pending
-            rich_terminal_driver = session.rich_terminal_driver
-            rich_terminal_core = (
-                None if rich_terminal_driver is None else rich_terminal_driver.core
-            )
             operational = rich_terminal_failure is None
             halted = session.halted
             idle = session.idle and operational
@@ -491,6 +492,21 @@ class SimulatorSharedMachine(SharedMachine):
 
             result = {
                 "backend": "simulator",
+                "runtime": SessionRuntimeDescriptor(
+                    mode="simulator",
+                    executor=session.runtime.execution_backend,
+                    step_unit="semantic_step",
+                    step_request_unit="semantic_boundary",
+                    batch_unit="semantic_boundary",
+                    timer_unit="semantic_step",
+                    timing_model="semantic",
+                    rtc_mode=session.runtime.rtc.clock_mode,
+                    machine_code=False,
+                    cpu_diagnostics=False,
+                    network_diagnostics=False,
+                    reset=False,
+                    host_profiling=False,
+                ).to_dict(),
                 "semantic_execution": {
                     "backend": session.runtime.execution_backend,
                     "quantum_steps": session.semantic_quantum_steps,
@@ -517,63 +533,11 @@ class SimulatorSharedMachine(SharedMachine):
                 "terminal": [visible_cols, visible_rows],
                 "uptime_s": time.time() - self.started_at,
                 "error": self.last_error,
-                "rich_terminal": {
-                    "enabled": session.rich_terminal_enabled,
-                    "display_required": session.retained_display_required,
-                    "state": (
-                        None
-                        if session.rich_terminal_state is None
-                        else session.rich_terminal_state.value
-                    ),
-                    "pending": rich_terminal_pending,
-                    "lost": session.rich_terminal_lost,
-                    "failure": rich_terminal_failure,
-                    "machine_publications": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.machine_publications_received
-                    ),
-                    "machine_publication_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.machine_publication_bytes_received
-                    ),
-                    "frames": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.frames_received
-                    ),
-                    "frame_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.frame_bytes_received
-                    ),
-                    "frames_by_type": (
-                        {}
-                        if rich_terminal_core is None
-                        else {
-                            f"0x{frame_type:04X}": count
-                            for frame_type, count in sorted(
-                                rich_terminal_core.frames_received_by_type.items()
-                            )
-                        }
-                    ),
-                    "frame_bytes_by_type": (
-                        {}
-                        if rich_terminal_core is None
-                        else {
-                            f"0x{frame_type:04X}": byte_count
-                            for frame_type, byte_count in sorted(
-                                rich_terminal_core.frames_received_by_type.items()
-                            )
-                        }
-                    ),
-                    "decoder_buffered_bytes": (
-                        0
-                        if rich_terminal_core is None
-                        else rich_terminal_core.decoder_buffered_bytes
-                    ),
-                },
+                "rich_terminal": terminal_status(
+                    session,
+                    pending=rich_terminal_pending,
+                    failure=rich_terminal_failure,
+                ),
             }
             if detailed:
                 result["simulator"] = {

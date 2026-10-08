@@ -210,6 +210,12 @@ boot:
     str r11, r1
     ldi64 r11, var_dict_index_epoch
     str r11, r1
+    ; Like the fault callbacks, an armed index notification points into the
+    ; previous KDOS instance.
+    ldi64 r11, var_dict_index_notify_count
+    str r11, r1
+    ldi64 r11, var_dict_index_notify_xt
+    str r11, r1
 
     ; The portable MMIO-crypto guard is a single machine-wide transaction.
     ; Hardware spinlock 8 resets independently, while these full-width owner
@@ -1944,6 +1950,33 @@ dict_cache_seed:
     addi r15, 64
     ret.l
 
+; Final step of the five named-definition builders and LATEST!.  When
+; DICT-INDEX-NOTIFY! armed a count and the index count has reached it, disarm
+; and then call the armed xt ( -- ).  The definition is completely published,
+; so the callback may bind another table with DICT-INDEX! or re-arm.  Only
+; scratch registers are used; the fixed-role registers stay as the builder
+; left them for an ordinary Forth call.
+dict_index_notify:
+    ldi64 r11, var_dict_index_notify_xt
+    ldn r1, r11
+    cmpi r1, 0
+    lbreq .dict_notify_done
+    ldi64 r11, var_dict_index_count
+    ldn r0, r11
+    ldi64 r11, var_dict_index_notify_count
+    ldn r7, r11
+    cmp r0, r7
+    lbrcc .dict_notify_done    ; count < armed count
+    ldi r0, 0
+    ldi64 r11, var_dict_index_notify_xt
+    str r11, r0               ; disarm before the callback can re-arm
+    ldi64 r11, var_dict_index_notify_count
+    str r11, r0
+    mov r11, r1
+    call.l r11
+.dict_notify_done:
+    ret.l
+
 ; =====================================================================
 ;  Entry → Code address
 ; =====================================================================
@@ -3150,6 +3183,23 @@ w_dict_index_fetch:
     str r14, r1
     ret.l
 
+; DICT-INDEX-NOTIFY! ( count xt -- )
+;   Arm one notification.  After the first named definition or LATEST! that
+;   leaves the index count at or above count, the BIOS disarms and calls
+;   xt ( -- ) as that operation's final step.  An xt of zero disarms.  The
+;   BIOS holds no policy: the owner of the index storage chooses when to be
+;   told and what to do, such as binding a larger table with DICT-INDEX!.
+w_dict_index_notify_store:
+    ldn r1, r14               ; xt
+    addi r14, 8
+    ldn r0, r14               ; count
+    addi r14, 8
+    ldi64 r11, var_dict_index_notify_count
+    str r11, r0
+    ldi64 r11, var_dict_index_notify_xt
+    str r11, r1
+    ret.l
+
 ; Validate one linked dictionary header before following it.  R9 is the entry
 ; address and R0 returns its link.  A header may live in any advertised
 ; readable physical-memory window, but its complete link/flags/name span must
@@ -3274,6 +3324,8 @@ w_latest_store:
     call.l r11
 .latest_store_done:
     ldi64 r11, dict_epoch_end
+    call.l r11
+    ldi64 r11, dict_index_notify
     call.l r11
     ret.l
 
@@ -5549,6 +5601,8 @@ w_colon_name_done:
     str r11, r1
     ldi64 r11, var_compile_active
     str r11, r1
+    ldi64 r11, dict_index_notify
+    call.l r11
     ret.l
 
 w_colon_err:
@@ -7211,6 +7265,8 @@ w_create_copy:
     mov r1, r13
     ldi64 r11, reloc_record
     call.l r11
+    ldi64 r11, dict_index_notify
+    call.l r11
     ret.l
 w_create_err:
     ldi64 r10, str_no_name
@@ -7788,6 +7844,8 @@ w_var_name_done:
     mov r1, r9
     ldi64 r11, reloc_record
     call.l r11
+    ldi64 r11, dict_index_notify
+    call.l r11
     ret.l
 
 ; CONSTANT ( n "name" -- )
@@ -7861,6 +7919,8 @@ w_const_name_done:
     str r11, r1
     ; ---- DFIND cache: seed new entry (R1 = entry start) ----
     ldi64 r11, dict_cache_seed
+    call.l r11
+    ldi64 r11, dict_index_notify
     call.l r11
     ret.l
 
@@ -11966,6 +12026,8 @@ w_val_name_done:
     ; ---- DFIND cache: seed new entry (R13 = entry start → R1) ----
     mov r1, r13
     ldi64 r11, dict_cache_seed
+    call.l r11
+    ldi64 r11, dict_index_notify
     call.l r11
     ret.l
 
@@ -24016,9 +24078,18 @@ d_dict_index_fetch:
     call.l r11
     ret.l
 
+; === DICT-INDEX-NOTIFY! ===
+d_dict_index_notify_store:
+    .dq d_dict_index_fetch
+    .db 18
+    .ascii "DICT-INDEX-NOTIFY!"
+    ldi64 r11, w_dict_index_notify_store
+    call.l r11
+    ret.l
+
 ; === DICT-ROLLBACK ===
 d_dict_rollback:
-    .dq d_dict_index_fetch
+    .dq d_dict_index_notify_store
     .db 13
     .ascii "DICT-ROLLBACK"
     ldi64 r11, w_dict_rollback
@@ -24082,6 +24153,11 @@ var_dict_index_flags:
     .dq 0
 var_dict_index_epoch:
     .dq 0                         ; private seqlock epoch: even=stable, odd=writer
+; DICT-INDEX-NOTIFY! state.  A zero xt is disarmed.
+var_dict_index_notify_count:
+    .dq 0
+var_dict_index_notify_xt:
+    .dq 0
 var_crc_owner_base:
     .dq 0                         ; topology-sized records begin at dict_free
 var_crypto_owner_core:

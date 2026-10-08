@@ -48,8 +48,10 @@ from rich_terminal.retained_view import (
     RetainedRegionDraw,
 )
 from rich_terminal.update_authority import TerminalGeometry
-from session import (
+from emulator.session import (
     MachineSession,
+)
+from shared.session import (
     RichTerminalSessionConfig,
     TerminalCell,
     TerminalDisplayOffer,
@@ -58,7 +60,6 @@ from session import (
 from shared_session import (
     SessionClient,
     SessionServer,
-    SharedMachine,
     display_offer_from_wire,
     display_offer_to_wire,
     display_scope_from_wire,
@@ -67,6 +68,9 @@ from shared_session import (
     retained_draw_plane_to_wire,
     snapshot_from_wire,
     snapshot_to_wire,
+)
+from emulator.shared_session import (
+    SharedMachine,
 )
 from system import MegapadSystem, SystemRunStats
 
@@ -1827,6 +1831,26 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
         assert "cpu" not in lightweight
         assert "nic" not in lightweight
         assert "host_profile" not in lightweight
+        assert lightweight["runtime"] == {
+            "mode": "emulator",
+            "executor": "native",
+            "step_unit": "mp64_instruction",
+            "step_request_unit": "mp64_instruction",
+            "batch_unit": "instruction_batch",
+            "timing": {
+                "model": "instruction_batched",
+                "models_shared_clock_latency": False,
+                "timer_unit": "mp64_system_cycle",
+                "rtc_mode": "virtual",
+            },
+            "capabilities": {
+                "machine_code": True,
+                "cpu_diagnostics": True,
+                "network_diagnostics": True,
+                "reset": True,
+                "host_profiling": True,
+            },
+        }
         assert lightweight["rich_terminal"]["display_required"] is False
         assert lightweight["rich_terminal"]["machine_publications"] == 0
         assert lightweight["rich_terminal"]["machine_publication_bytes"] == 0
@@ -1838,6 +1862,7 @@ def test_lightweight_status_skips_forth_diagnostics(monkeypatch):
 
         detailed = machine.status()
         assert calls == [session.system.cpu]
+        assert detailed["runtime"] == lightweight["runtime"]
         assert detailed["forth"] == {"sentinel": True}
         assert "cpu" in detailed
         assert "nic" in detailed
@@ -2431,6 +2456,11 @@ def test_shared_server_clients_control_one_machine(tmp_path):
 
             paused = controller.request("pause")
             assert paused["paused"]
+            # The idle guest sleeps until input or a deadline, so a paused
+            # step runs nothing; queued input gives it an instruction to run.
+            idle = controller.request("step", count=1)
+            assert (idle["executed"], idle["stop_reason"]) == (0, "all_idle")
+            controller.request("send_text", text="1 .\n", generation=generation)
             stepped = controller.request("step", count=1)
             assert stepped["executed"] == 1
             assert stepped["status"]["paused"]

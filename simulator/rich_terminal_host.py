@@ -116,6 +116,7 @@ class SimulatorSessionBackend:
         terminal_cols: int = 80,
         terminal_rows: int = 24,
         semantic_quantum_steps: int | None = None,
+        machine_quantum_instructions: int | None = None,
     ) -> None:
         if not isinstance(runtime, MegaForthRuntime):
             raise TypeError("runtime must be a MegaForthRuntime")
@@ -129,6 +130,12 @@ class SimulatorSessionBackend:
             if semantic_quantum_steps <= 0:
                 raise ValueError("semantic_quantum_steps must be positive")
         self._semantic_quantum_steps = semantic_quantum_steps
+        if machine_quantum_instructions is not None:
+            if type(machine_quantum_instructions) is not int:
+                raise TypeError("machine_quantum_instructions must be an exact integer or None")
+            if machine_quantum_instructions < 1:
+                raise ValueError("machine_quantum_instructions must be positive")
+        self._machine_quantum_instructions = machine_quantum_instructions
         self._runtime = runtime
         self._legacy_output_sink = legacy_output_sink
         self._geometry = HostedTerminalGeometryState(
@@ -156,6 +163,10 @@ class SimulatorSessionBackend:
         return self._runtime
 
     @property
+    def machine_quantum_instructions(self) -> int | None:
+        return self._machine_quantum_instructions
+
+    @property
     def geometry(self) -> HostedTerminalGeometry:
         with self._boundary_lock:
             return self._geometry.snapshot()
@@ -173,6 +184,16 @@ class SimulatorSessionBackend:
     def waiting_for_interrupt(self) -> bool:
         with self._boundary_lock:
             return isinstance(self._suspension, BlockedExecution)
+
+    @property
+    def idle_wake_due(self) -> bool:
+        with self._boundary_lock:
+            return self._runtime.idle_wake_due
+
+    @property
+    def idle_wake_delay_s(self) -> float | None:
+        with self._boundary_lock:
+            return self._runtime.idle_wake_delay_s
 
     @property
     def closed(self) -> bool:
@@ -342,7 +363,7 @@ class SimulatorSessionBackend:
                     )
                 elif (
                     isinstance(suspended, BlockedExecution)
-                    and not self._runtime.idle_wake_due
+                    and not self.idle_wake_due
                 ):
                     result = SemanticBatchResult(
                         0,
@@ -352,6 +373,8 @@ class SimulatorSessionBackend:
                 else:
                     guest_started = True
                     if suspended is None:
+                        scheduling = ({} if self._machine_quantum_instructions is None else
+                                      {"machine_quantum_instructions": self._machine_quantum_instructions})
                         with self._runtime._session_owner_scope(
                             self._owner_token
                         ):
@@ -360,6 +383,7 @@ class SimulatorSessionBackend:
                                 context=context,
                                 step_budget=step_budget,
                                 quantum_steps=self._semantic_quantum_steps,
+                                **scheduling,
                             )
                         prior_steps = 0
                     else:
@@ -437,10 +461,16 @@ class SimulatorSessionBackend:
             # guest fault after that point therefore makes cancellation stale.
             pass
         except BaseException as cancel_error:
-            original_error.add_note(
-                "failed to cancel simulator suspension after resume error: "
-                f"{type(cancel_error).__name__}: {cancel_error}"
-            )
+            try:
+                detail = str(cancel_error)
+            except BaseException:
+                detail = "error text unavailable"
+            try:
+                BaseException.add_note(original_error,
+                    "failed to cancel simulator suspension after resume error: "
+                    f"{type(cancel_error).__name__}: {detail}")
+            except BaseException:
+                pass
         finally:
             self._suspension = None
             self._reported_suspension_steps = 0

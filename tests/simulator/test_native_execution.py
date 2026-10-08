@@ -10,13 +10,13 @@ pytest.importorskip("_megaforth_native")
 from shared.cells import MASK64, TRUE  # noqa: E402
 from simulator.diagnostics import HostedDiagnosticsService  # noqa: E402
 from simulator.dictionary import HEADER_FIXED_BYTES  # noqa: E402
-from simulator.errors import ExecutionError, StepBudgetExceeded  # noqa: E402
+from simulator.errors import ExecutionError, ForthAbort, StepBudgetExceeded  # noqa: E402
 from simulator.ir import Branch, BranchZero, Call, Literal, Return  # noqa: E402
 from simulator.memory import AddressClass  # noqa: E402
 from simulator.platform import create_one_core_address_space  # noqa: E402
 from simulator.runtime import MegaForthRuntime  # noqa: E402
 from simulator.stacks import (  # noqa: E402
-    Continuation, DataStack, ReturnStack, ReturnStackShapeError, StackOverflow,
+    Continuation, DataStack, FaultAbort, ReturnStack, ReturnStackShapeError, StackOverflow,
     StackUnderflow,
 )
 from simulator.timer import HostedTimerService  # noqa: E402
@@ -380,6 +380,32 @@ def test_unknown_callback_keeps_partial_memory_stack_and_output_effects():
     assert result["data"] == (22, 71)
     assert result["memory"] == (b"\x0c\x55" + bytes(6),)
     assert result["uart"] == b"prefix"
+
+
+@pytest.mark.parametrize("returning_callback", [False, True])
+def test_modulo_fault_preserves_abort_after_a_returning_colon_callback(
+    returning_callback,
+):
+    runtimes = _runtimes(
+        b"VARIABLE MARK "
+        b": FAULT-HANDLER DROP 71 MARK ! 65 EMIT 19 ; "
+        b": RUN 23 MARK ! 77 1 0 MOD 99 MARK ! ;"
+    )
+    for runtime in runtimes:
+        if returning_callback:
+            runtime.set_fault_xt(runtime.find("FAULT-HANDLER").xt)
+    mark = runtimes[0].find("MARK").body_address
+    observed = _compare(runtimes, "RUN", spans=((mark, 8),))
+    assert observed["error"] == (ForthAbort, "signed modulo trapped on zero")
+    assert observed["data"] == observed["returns"] == ()
+    assert observed["memory"] == ((71 if returning_callback else 23).to_bytes(8, "little"),)
+    assert observed["uart"] == (
+        (b"A" if returning_callback else b"")
+        + b"\r\n*** DIVIDE BY ZERO CORE=00\r\n"
+    )
+    # The callback's final literal runs natively, but its fault continuation
+    # must return to Python for the report/abort instead of resuming RUN.
+    assert observed["counted_steps"] == (22 if returning_callback else 10)
 
 
 def test_return_stack_work_stays_in_one_native_interval():
@@ -911,6 +937,38 @@ def test_native_call_target_survives_plan_replacement_rehash_and_clear():
     install_target(44)
     assert run()[:3] == (1, 1, 3)
     assert value() == 44
+
+
+def test_native_prefix_stops_before_a_fault_continuation_without_consuming_it():
+    import _megaforth_native as native
+
+    page = bytearray(4096)
+    program = native.NativeProgram([(0, 4096, {0: page})], 4096, Continuation)
+    program.install(1, [(native.OP_LITERAL, 17, 0), (native.OP_RETURN, 0, 0)])
+    program.install(2, [(native.OP_LITERAL, 99, 0), (native.OP_STOP, 0, 0)])
+    frame = Continuation(2, 0, fault_abort=FaultAbort(b"fault-report", "fault-message"))
+    raw = 0xC07ECAFE00000001
+    slot = 4088
+    page[slot:slot + 8] = raw.to_bytes(8, "little")
+    continuations = {slot: (frame, raw)}
+    returns = (3072, 4096, slot, 1)
+
+    result = program.run(1, 0, (0, 2048, 2048), returns, continuations,
+                         20, fpcsr=0x91)
+    # No machine routine ran, so there is no machine record.
+    assert result == (1, 1, 1, 2040, slot, 1, [], 0, 0x91, None)
+    assert int.from_bytes(page[2040:2048], "little") == 17
+    assert int.from_bytes(page[slot:slot + 8], "little") == raw
+    assert continuations == {slot: (frame, raw)}
+    assert continuations[slot][0] is frame
+
+    # Entering that same original return directly is a zero-work boundary.
+    # Neither its backing bytes nor its typed metadata may be retired.
+    before = bytes(page)
+    assert program.run(1, 1, (0, 2048, 2040), returns, continuations,
+                       20, fpcsr=0x91) == (1, 1, 0, 2040, slot, 1, [], 0, 0x91, None)
+    assert bytes(page) == before
+    assert continuations[slot][0] is frame
 
 
 @pytest.mark.parametrize("quantum", [7, 53, 8192])

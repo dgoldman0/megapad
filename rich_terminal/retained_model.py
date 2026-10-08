@@ -29,6 +29,11 @@ class RetainedFeature(IntFlag):
     CONTROLS = 1 << 8
     CONTROL_COLLECTIONS = 1 << 9
     CONTROL_ITEMS = 1 << 10
+    PANES = 1 << 11
+    STATUS_FIELDS = 1 << 12
+    TASKBARS = 1 << 13
+    FIELDS = 1 << 14
+    GRID_CELLS = 1 << 15
 
 
 class ResourceFormat(IntEnum):
@@ -45,6 +50,11 @@ _ALL_FEATURES = (
     | RetainedFeature.CONTROLS
     | RetainedFeature.CONTROL_COLLECTIONS
     | RetainedFeature.CONTROL_ITEMS
+    | RetainedFeature.PANES
+    | RetainedFeature.STATUS_FIELDS
+    | RetainedFeature.TASKBARS
+    | RetainedFeature.FIELDS
+    | RetainedFeature.GRID_CELLS
 )
 
 
@@ -245,9 +255,20 @@ class RetainedPolicy:
 
         instrument = bool(features & RetainedFeature.INSTRUMENT)
         controls = bool(features & RetainedFeature.CONTROLS)
+        panes = bool(features & RetainedFeature.PANES)
+        status_fields = bool(features & RetainedFeature.STATUS_FIELDS)
+        if panes and self.max_regions < 2:
+            raise ValueError("PANES requires at least two regions")
         control_collections = bool(features & RetainedFeature.CONTROL_COLLECTIONS)
         if control_collections and not controls:
             raise ValueError("CONTROL_COLLECTIONS requires CONTROLS")
+        if features & RetainedFeature.GRID_CELLS and not control_collections:
+            raise ValueError("GRID_CELLS requires CONTROL_COLLECTIONS")
+        fields = bool(features & RetainedFeature.FIELDS)
+        if fields and not controls:
+            raise ValueError("FIELDS requires CONTROLS")
+        if features & RetainedFeature.TASKBARS and not controls:
+            raise ValueError("TASKBARS requires CONTROLS")
         # Item views need no larger minimum: the smallest ITM1 body and the
         # 64-byte item events fit CONTROL_COLLECTIONS's minima.
         if features & RetainedFeature.CONTROL_ITEMS and not control_collections:
@@ -259,9 +280,13 @@ class RetainedPolicy:
             raise ValueError("total UTF-8 capacity cannot admit one maximum glyph run")
         if controls and self.total_utf8_bytes == 0:
             raise ValueError("CONTROLS requires aggregate UTF-8 capacity")
-        if not glyph_runs and not controls and self.total_utf8_bytes != 0:
-            raise ValueError("UTF-8 capacity requires glyph-run or control capacity")
-        if (vector or image or instrument or controls) and self.max_objects == 0:
+        if panes and self.total_utf8_bytes == 0:
+            raise ValueError("PANES requires aggregate UTF-8 capacity")
+        if status_fields and self.total_utf8_bytes == 0:
+            raise ValueError("STATUS_FIELDS requires aggregate UTF-8 capacity")
+        if not (glyph_runs or controls or panes or status_fields) and self.total_utf8_bytes != 0:
+            raise ValueError("UTF-8 capacity requires glyph-run, control, pane, or status-field capacity")
+        if (vector or image or instrument or controls or panes or status_fields) and self.max_objects == 0:
             raise ValueError("advertised object features require object capacity")
         if instrument and not glyph_runs:
             raise ValueError("INSTRUMENT requires glyph-run text capacity")
@@ -319,6 +344,18 @@ class RetainedPolicy:
             if inbound < 80:
                 raise ValueError("CONTROLS requires an 80-byte inbound payload")
             operation_payloads.append(80)
+        if fields:
+            if inbound < 176:
+                raise ValueError("FIELDS requires a 176-byte inbound payload")
+            operation_payloads.append(176)
+        if panes:
+            if inbound < 104:
+                raise ValueError("PANES requires a 104-byte inbound payload")
+            operation_payloads.append(104)
+        if status_fields:
+            if inbound < 96:
+                raise ValueError("STATUS_FIELDS requires a 96-byte inbound payload")
+            operation_payloads.append(96)
         if control_collections:
             if inbound < 152:
                 raise ValueError(
@@ -457,6 +494,12 @@ class OwnerQuotas:
             )
 
 
+_QUOTA_FIELDS = (
+    "regions", "resources", "objects", "series",
+    "resource_bytes", "utf8_bytes", "sample_slots",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class ReservationTotals:
     live_owners: int = 0
@@ -552,6 +595,11 @@ class OwnerDropDisposition(str, Enum):
     IDEMPOTENT = "IDEMPOTENT"
 
 
+class OwnerResizeDisposition(str, Enum):
+    RESIZED = "RESIZED"
+    UNCHANGED = "UNCHANGED"
+
+
 @dataclass(frozen=True, slots=True)
 class OwnerLedgerState:
     records: Mapping[int, OwnerRecord]
@@ -561,7 +609,7 @@ class OwnerLedgerState:
 @dataclass(frozen=True, slots=True)
 class PreparedOwnerLedgerInstall:
     state: OwnerLedgerState
-    disposition: OwnerOpenDisposition | OwnerDropDisposition | None
+    disposition: OwnerOpenDisposition | OwnerDropDisposition | OwnerResizeDisposition | None
     _ledger_token: object
     _source_state: OwnerLedgerState
 
@@ -667,10 +715,50 @@ class OwnerLedger:
         updated[identity.owner_id] = OwnerRecord(identity, quotas, high_water)
         return self._prepared(self._make_state(updated, reservations), disposition)
 
+    def prepare_resize(
+        self, identity: OwnerIdentity, quotas: OwnerQuotas
+    ) -> PreparedOwnerLedgerInstall:
+        """Grow a live owner's reservation to ``quotas``.
+
+        Every field must be at least the current one. The request fails with
+        NO_CAPACITY, leaving the owner as it was, when the larger reservation
+        would not fit the caller's policy.
+        """
+
+        self._validate_scope(identity)
+        if not isinstance(quotas, OwnerQuotas):
+            raise TypeError("quotas must be OwnerQuotas")
+        self._validate_quotas(quotas)
+        record = self.require_live(identity)
+        current = record.quotas
+        assert current is not None
+        if any(getattr(quotas, name) < getattr(current, name) for name in _QUOTA_FIELDS):
+            raise OwnerLedgerError(
+                OwnerLedgerErrorCode.INVALID, "an owner reservation can only grow"
+            )
+        if quotas == current:
+            return self._prepared(self._state, OwnerResizeDisposition.UNCHANGED)
+        try:
+            reservations = self._state.reservations.subtract(current).add(quotas)
+        except ValueError as exc:
+            raise OwnerLedgerError(OwnerLedgerErrorCode.NO_CAPACITY, str(exc)) from exc
+        self._validate_reservation_totals(reservations)
+        updated = dict(self._state.records)
+        updated[identity.owner_id] = replace(record, quotas=quotas)
+        return self._prepared(
+            self._make_state(updated, reservations), OwnerResizeDisposition.RESIZED
+        )
+
     def open(self, identity: OwnerIdentity, quotas: OwnerQuotas) -> OwnerOpenDisposition:
         prepared = self.prepare_open(identity, quotas)
         self.install_prepared(prepared)
         assert isinstance(prepared.disposition, OwnerOpenDisposition)
+        return prepared.disposition
+
+    def resize(self, identity: OwnerIdentity, quotas: OwnerQuotas) -> OwnerResizeDisposition:
+        prepared = self.prepare_resize(identity, quotas)
+        self.install_prepared(prepared)
+        assert isinstance(prepared.disposition, OwnerResizeDisposition)
         return prepared.disposition
 
     def prepare_drop(self, identity: OwnerIdentity) -> PreparedOwnerLedgerInstall:
@@ -816,12 +904,13 @@ class OwnerLedger:
             )
         if (
             not policy.max_glyph_run_bytes
-            and not (policy.features & RetainedFeature.CONTROLS)
+            and not (policy.features & (RetainedFeature.CONTROLS | RetainedFeature.PANES
+                                        | RetainedFeature.STATUS_FIELDS))
             and quotas.utf8_bytes
         ):
             raise OwnerLedgerError(
                 OwnerLedgerErrorCode.INVALID,
-                "UTF-8 quota requires glyph-run or control capacity",
+                "UTF-8 quota requires glyph-run, control, pane, or status-field capacity",
             )
         if not policy.features & RetainedFeature.SERIES and (
             quotas.series or quotas.sample_slots
@@ -858,7 +947,7 @@ class OwnerLedger:
     def _prepared(
         self,
         state: OwnerLedgerState,
-        disposition: OwnerOpenDisposition | OwnerDropDisposition | None,
+        disposition: OwnerOpenDisposition | OwnerDropDisposition | OwnerResizeDisposition | None,
     ) -> PreparedOwnerLedgerInstall:
         return PreparedOwnerLedgerInstall(
             state,
@@ -880,6 +969,7 @@ __all__ = [
     "OwnerOpenDisposition",
     "OwnerQuotas",
     "OwnerRecord",
+    "OwnerResizeDisposition",
     "PreparedOwnerLedgerInstall",
     "ReservationTotals",
     "ResourceFormat",

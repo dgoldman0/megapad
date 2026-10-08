@@ -69,6 +69,7 @@ from rich_terminal.retained_wire import (
     encode_object_set_visibility,
     encode_owner_drop,
     encode_owner_open,
+    encode_owner_resize,
     encode_present_begin,
     encode_present_commit,
     encode_region_definition,
@@ -894,6 +895,112 @@ def test_owner_open_reserves_atomically_and_reports_exact_lifecycle_statuses():
     _settle_lifecycle(core, exhausted)
 
 
+def _owner_lifecycle(core, encoder, decoder, request_type, request):
+    encode = encode_owner_open if request_type is RetainedMessageType.OWNER_OPEN else encode_owner_resize
+    sent = core.feed_machine(encoder.encode(request_type, encode(request)))
+    frames = []
+    for outbound in sent.outbound:
+        frames.extend(decoder.feed(outbound.payload))
+    assert [frame.message_type for frame in frames] == [
+        RetainedMessageType.RET_RESULT,
+        MessageType.CREDIT,
+    ]
+    _settle_lifecycle(core, sent)
+    result = decode_ret_result(frames[0].payload)
+    assert (result.request_type, result.owner_id, result.item_id) == (
+        request_type, request.owner_id, 0,
+    )
+    return result.status
+
+
+def test_owner_resize_grows_a_live_reservation_or_records_the_refusal():
+    core, encoder, decoder = _open_retained_core()
+    open_, resize = RetainedMessageType.OWNER_OPEN, RetainedMessageType.OWNER_RESIZE
+    assert _owner_lifecycle(core, encoder, decoder, open_, _owner_open(regions=4)) is RetStatus.OK
+    assert _owner_lifecycle(
+        core, encoder, decoder, open_, _owner_open(owner_id=8, regions=2)
+    ) is RetStatus.OK
+
+    assert _owner_lifecycle(core, encoder, decoder, resize, _owner_open(regions=6)) is RetStatus.OK
+    state = core.owner_state
+    assert state.records[7].quotas.regions == 6
+    assert state.reservations.regions == 8
+    assert core.capacity_denials == 0 and core.last_capacity_denial is None
+
+    assert _owner_lifecycle(
+        core, encoder, decoder, resize, _owner_open(owner_id=8, regions=3)
+    ) is RetStatus.NO_CAPACITY
+    assert core.owner_state is state
+    assert core.capacity_denials == 1
+    denial = core.last_capacity_denial
+    assert (denial["request"], denial["owner_id"], denial["owner_generation"]) == (
+        "OWNER_RESIZE", 8, 1,
+    )
+    assert denial["requested"]["regions"] == 3
+    assert denial["held"]["regions"] == 2
+
+    for request, status in (
+        (_owner_open(regions=5), RetStatus.INVALID),  # a reservation never shrinks
+        (_owner_open(regions=9), RetStatus.INVALID),  # above the advertised maximum
+        (_owner_open(generation=2, regions=6), RetStatus.STALE_OWNER),
+        (_owner_open(owner_id=9, regions=1), RetStatus.STALE_OWNER),
+        (_owner_open(regions=6), RetStatus.OK),  # the same quotas again
+    ):
+        assert _owner_lifecycle(core, encoder, decoder, resize, request) is status
+        assert core.owner_state is state
+    assert core.capacity_denials == 1
+
+    assert _owner_lifecycle(
+        core, encoder, decoder, open_, _owner_open(owner_id=9, regions=0)
+    ) is RetStatus.NO_CAPACITY
+    assert core.capacity_denials == 2
+    assert core.last_capacity_denial["request"] == "OWNER_OPEN"
+    assert core.last_capacity_denial["held"] is None
+
+
+def test_owner_resize_lets_the_next_commit_use_the_larger_reservation():
+    core, encoder, decoder = _open_retained_core()
+    assert _owner_lifecycle(
+        core, encoder, decoder, RetainedMessageType.OWNER_OPEN, _owner_open(regions=1)
+    ) is RetStatus.OK
+    operations = tuple(
+        (
+            RetainedMessageType.REGION_DEFINE,
+            encode_region_definition(
+                RegionWireDefinition(7, 1, region_id, 0, 0, 2, 1, 0, 0, 2, 1, 0, 0x3)
+            ),
+        )
+        for region_id in (1, 2)
+    )
+
+    def present(transaction_id, base_revision):
+        sent = core.feed_machine(
+            _present_frames(
+                encoder,
+                transaction_id=transaction_id,
+                base_revision=base_revision,
+                retained_mode=PresentRetainedMode.REPLACE_START,
+                disposition=PresentDisposition.COMMIT,
+                operations=operations,
+            )
+        )
+        frames = []
+        for outbound in sent.outbound:
+            frames.extend(decoder.feed(outbound.payload))
+        core.settle_result_delivery(transaction_id)
+        return TX_RESULT.unpack(frames[0].payload)
+
+    scene = core.retained_state
+    assert present(2, 1)[1] != 0
+    assert core.retained_state is scene
+
+    assert _owner_lifecycle(
+        core, encoder, decoder, RetainedMessageType.OWNER_RESIZE, _owner_open(regions=2)
+    ) is RetStatus.OK
+    assert present(3, 1) == (3, 0, 0, 2)
+    assert set(core.retained_state.hidden.owners[7].regions) == {1, 2}
+
+
 @pytest.mark.parametrize(
     ("owner_id", "owner_generation", "reserved"),
     ((0, 1, 0), (7, 0, 0), (7, 1, 1)),
@@ -1200,6 +1307,7 @@ def test_present_region_hidden_replace_commits_then_reveals_atomically():
     assert hidden.active.owners == {}
     assert hidden.hidden.owners[7].regions[1].geometry_generation == 0
     assert not hidden.retained_visible
+    assert core.presents_committed == {"REPLACE_START": 1}
     assert core.owner_state is not None
     assert core.owner_state.records[7].high_water.region == 1
     core.settle_result_delivery(2)
@@ -1227,6 +1335,7 @@ def test_present_region_hidden_replace_commits_then_reveals_atomically():
     assert state.active.owners[7].regions[1].visible
     assert state.retained_visible
     assert revealed.views[0].retained is state
+    assert core.presents_committed == {"REPLACE_START": 1, "REPLACE_CONTINUE": 1}
     core.settle_result_delivery(3)
 
 
@@ -1265,6 +1374,7 @@ def test_present_declared_byte_mismatch_rejects_without_scene_or_id_publication(
     assert rejected.views == ()
     assert core.retained_state is scene_source
     assert core.owner_state is owner_source
+    assert core.presents_committed == {}
     core.settle_result_delivery(2)
 
 

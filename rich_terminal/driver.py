@@ -655,6 +655,7 @@ class RichTerminalDriver:
         scalar_offset: int = 0,
         wheel_x: int = 0,
         wheel_y: int = 0,
+        adjustment: int = 0,
     ) -> DriverStatus:
         """Queue one revision-bound semantic-control intent."""
 
@@ -681,6 +682,7 @@ class RichTerminalDriver:
                 scalar_offset=scalar_offset,
                 wheel_x=wheel_x,
                 wheel_y=wheel_y,
+                adjustment=adjustment,
             )
             if outbound is None:
                 return DriverStatus.BACKPRESSURED

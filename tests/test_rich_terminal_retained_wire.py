@@ -17,6 +17,8 @@ from rich_terminal.retained_scene import (
     GlyphRunBody,
     ObjectBounds,
     ObjectKind,
+    PaneBody,
+    StatusFieldBody,
     Point,
     PolylineBody,
     RGBA,
@@ -61,6 +63,7 @@ from rich_terminal.retained_wire import (
     decode_object_set_visibility,
     decode_owner_drop,
     decode_owner_open,
+    decode_owner_resize,
     decode_present_begin,
     decode_present_commit,
     decode_region_definition,
@@ -83,6 +86,7 @@ from rich_terminal.retained_wire import (
     encode_object_set_visibility,
     encode_owner_drop,
     encode_owner_open,
+    encode_owner_resize,
     encode_present_begin,
     encode_present_commit,
     encode_region_definition,
@@ -486,6 +490,24 @@ def test_resource_codecs_preserve_semantic_errors_for_authority_precedence():
     assert decode_resource_abort(encode_resource_abort(abort)) == abort
 
 
+def test_owner_resize_carries_the_owner_open_layout_and_result_rules():
+    request = OwnerOpen(7, 3, OwnerQuotas(2, 0, 4, 0, 0, 64, 0))
+    payload = encode_owner_resize(request)
+    assert payload == encode_owner_open(request)
+    assert decode_owner_resize(payload) == request
+    with pytest.raises(RetainedWireError) as truncated:
+        decode_owner_resize(payload[:-1])
+    assert truncated.value.code is RetainedWireErrorCode.PAYLOAD
+
+    for status in (RetStatus.OK, RetStatus.INVALID, RetStatus.STALE_OWNER, RetStatus.NO_CAPACITY):
+        result = RetainedResult(RetainedMessageType.OWNER_RESIZE, status, 7, 3, 0, 11)
+        assert decode_ret_result(encode_ret_result(result)) == result
+    with pytest.raises(ValueError, match="item_id must be zero"):
+        RetainedResult(RetainedMessageType.OWNER_RESIZE, RetStatus.OK, 7, 3, 1, 11)
+    with pytest.raises(ValueError, match="not valid for OWNER_RESIZE"):
+        RetainedResult(RetainedMessageType.OWNER_RESIZE, RetStatus.IN_USE, 7, 3, 0, 11)
+
+
 @pytest.mark.parametrize(
     ("owner_id", "owner_generation"),
     ((0, 0), (0, 7), (7, 0)),
@@ -825,6 +847,18 @@ def test_every_non_image_object_oracle_round_trips_through_typed_bodies():
     assert decode_object_definition(encode_object_definition(glyph_run)) == glyph_run
     kinds.add(glyph_run.kind)
 
+    pane = ObjectWireDefinition(
+        1, 1, 2, 1, 0, ObjectBounds(0, 0, 20, 10), 0, True,
+        PaneBody(2, ObjectBounds(1, 1, 18, 8), "Pane — 茶", True),
+    )
+    assert decode_object_definition(encode_object_definition(pane)) == pane
+    kinds.add(pane.kind)
+
+    status_field = ObjectWireDefinition(1, 1, 3, 1, 0, ObjectBounds(0, 0, 20, 1),
+                                        0, True, StatusFieldBody("State", "Ready", 8))
+    assert decode_object_definition(encode_object_definition(status_field)) == status_field
+    kinds.add(status_field.kind)
+
     assert kinds == set(ObjectKind) - {ObjectKind.IMAGE}
 
 
@@ -1038,7 +1072,7 @@ def test_object_decoders_reject_reserved_bits_enums_text_and_non_exact_bodies():
     assert reserved.value.code is RetainedWireErrorCode.RESERVED
 
     glyph_run[74:76] = bytes(2)
-    glyph_run[24:26] = (10).to_bytes(2, "little")
+    glyph_run[24:26] = (0xFFFF).to_bytes(2, "little")
     with pytest.raises(RetainedWireError) as unknown:
         decode_object_definition(glyph_run)
     assert unknown.value.code is RetainedWireErrorCode.ENUM

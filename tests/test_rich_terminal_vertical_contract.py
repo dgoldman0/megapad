@@ -27,7 +27,7 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
     compositor = _read(ROOT / "rich_terminal" / "pygame_view.py")
     final_raster = _read(ROOT / "rich_terminal" / "final_raster.py")
     server = _read(ROOT / "rich_terminal" / "server.py")
-    session = _read(ROOT / "session.py")
+    session = _read(ROOT / "shared" / "session.py")
     viewer = _read(ROOT / "session_viewer.py")
 
     # The semantic family and its renderer now exist, while glyph transport
@@ -86,6 +86,8 @@ def test_semantic_guest_and_renderer_path_stays_architecturally_aligned() -> Non
         "STATUS",
         "PLOT",
         "WAVEFORM",
+        "PANE",
+        "STATUS_FIELD",
     ]
 
 

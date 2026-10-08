@@ -4620,6 +4620,41 @@ class TestBIOS(unittest.TestCase):
             r"\[LATEST-EMPTY\s+-1\s+-1\s+-1\s+3\s+\]",
         )
 
+    def test_dict_index_notify_runs_once_as_each_publication_ends(self):
+        """DICT-INDEX-NOTIFY! calls its xt once the index reaches the count."""
+        sys, buf = self._boot_bios(ext_mem_mib=1)
+        text = self._run_forth(sys, buf, [
+            "0x100000 1024 DICT-INDEX! DROP",
+            "VARIABLE NTF-HITS  VARIABLE NTF-SEEN",
+            ": NTF-HOOK  1 NTF-HITS +!  DICT-INDEX@ DROP NIP NIP NTF-SEEN ! ;",
+            ": NTF-ARM  DICT-INDEX@ DROP NIP NIP + "
+            "['] NTF-HOOK DICT-INDEX-NOTIFY! ;",
+            # Armed two names ahead; : runs the check as its own last step.
+            "2 NTF-ARM",
+            ": NTF-ONE 1 ;",
+            'CR ." [NTF-ONE " NTF-HITS @ . ." ]"',
+            ": NTF-TWO 2 ;",
+            'CR ." [NTF-TWO " NTF-HITS @ . '
+            'NTF-SEEN @ DICT-INDEX@ DROP NIP NIP - . ." ]"',
+            ": NTF-THREE 3 ;",
+            'CR ." [NTF-ONCE " NTF-HITS @ . ." ]"',
+            "1 NTF-ARM CREATE NTF-CREATED",
+            "1 NTF-ARM VARIABLE NTF-VARIABLE",
+            "1 NTF-ARM 7 CONSTANT NTF-CONSTANT",
+            "1 NTF-ARM 8 VALUE NTF-VALUE",
+            # LATEST! adds no name, so it fires at the current count.
+            "0 NTF-ARM LATEST LATEST!",
+            'CR ." [NTF-KINDS " NTF-HITS @ . ." ]"',
+            "1 NTF-ARM 0 0 DICT-INDEX-NOTIFY!",
+            ": NTF-DISARMED 9 ;",
+            'CR ." [NTF-DISARMED " NTF-HITS @ . NTF-DISARMED . ." ]"',
+        ])
+        self.assertRegex(text, r"\[NTF-ONE\s+0\s+\]")
+        self.assertRegex(text, r"\[NTF-TWO\s+1\s+0\s+\]")
+        self.assertRegex(text, r"\[NTF-ONCE\s+1\s+\]")
+        self.assertRegex(text, r"\[NTF-KINDS\s+6\s+\]")
+        self.assertRegex(text, r"\[NTF-DISARMED\s+6\s+9\s+\]")
+
     def test_dictionary_rejects_names_over_127_without_header(self):
         """Every native definer rejects 128-byte names before publication."""
         name = "N" * 128
@@ -13386,6 +13421,63 @@ class TestKDOSArena(_KDOSTestBase):
         self.assertIn('Dict:', text)
         self.assertIn('Heap integrity:', text)
         self.assertIn('OK', text)
+
+
+# ---------------------------------------------------------------------------
+#  KDOS dictionary index growth
+# ---------------------------------------------------------------------------
+
+class TestKDOSDictionaryIndexGrowth(_KDOSTestBase):
+    """KDOS grows the BIOS dictionary index through DICT-INDEX-NOTIFY!."""
+
+    def test_index_doubles_on_a_small_machine_and_survives_xmem_reset(self):
+        """A 1 MiB machine's index doubles as names arrive and keeps across reset."""
+        state = "DICT-INDEX@ . . . . XMEM-HERE @ . XMEM-FLOOR @ ."
+        text = self._run_kdos([
+            f'CR ." [IDX-BOOT " {state} ." ]"',
+            *(f": GROW-{i} {i} ;" for i in range(1_100)),
+            f'CR ." [IDX-GROWN " {state} ." ]"',
+            "XMEM-RESET",
+            f'CR ." [IDX-RESET " {state} ." ]"',
+            ": AFTER-RESET 77 ;",
+            'CR ." [IDX-LOOKUP " GROW-0 . GROW-1099 . AFTER-RESET . '
+            'DICT-INDEX@ . DROP DROP DROP ." ]"',
+        ], ext_mem_mib=1, max_steps=600_000_000)
+
+        # flags, then count, slots, base, XMEM-HERE and XMEM-FLOOR
+        fields = r"\s+(\d+)" * 5
+        boot = re.search(r"\[IDX-BOOT\s+3" + fields + r"\s+\]", text)
+        grown = re.search(r"\[IDX-GROWN\s+3" + fields + r"\s+\]", text)
+        reset = re.search(r"\[IDX-RESET\s+3" + fields + r"\s+\]", text)
+        for match in (boot, grown, reset):
+            self.assertIsNotNone(match, text[-2_000:])
+        count, slots, _base, _here, floor = map(int, boot.groups())
+        # The 512-slot boot table (1/128 of 1 MiB) grew to 4,096 slots during
+        # the KDOS load, and KDOS sits below three quarters of them.
+        self.assertEqual(slots, 4_096)
+        self.assertLess(count, slots * 3 // 4)
+
+        grown_count, grown_slots, grown_base, grown_here, grown_floor = map(
+            int, grown.groups()
+        )
+        self.assertEqual(grown_count, count + 1_100)
+        self.assertEqual(grown_slots, 8_192)
+        self.assertEqual(grown_floor, floor)
+        self.assertGreaterEqual(grown_base, floor)
+        self.assertEqual(grown_here, grown_base + 8_192 * 16)
+
+        # XMEM-RESET returns the span above the floor; the grown table is bound
+        # again at the floor, which rises past it.
+        reset_count, reset_slots, reset_base, reset_here, reset_floor = map(
+            int, reset.groups()
+        )
+        self.assertEqual(
+            (reset_count, reset_slots, reset_base),
+            (grown_count, 8_192, floor),
+        )
+        self.assertEqual(reset_here, floor + 8_192 * 16)
+        self.assertEqual(reset_floor, reset_here)
+        self.assertRegex(text, r"\[IDX-LOOKUP\s+0\s+1099\s+77\s+3\s+\]")
 
 
 # ---------------------------------------------------------------------------

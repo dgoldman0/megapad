@@ -35,10 +35,10 @@ from tests.simulator.test_kdos_xmem import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 KDOS_SOURCE = REPOSITORY_ROOT / "kdos.f"
-FIXTURE = Path(__file__).with_name("fixtures") / "kdos-userland-2434-2583.f"
+FIXTURE = Path(__file__).with_name("fixtures") / "kdos-userland-2489-2638.f"
 
-FIRST_LINE = 2434
-LAST_LINE = 2583
+FIRST_LINE = 2489
+LAST_LINE = 2638
 SLICE_SHA256 = (
     "525ef47587fe671593eb0161da47ed3b79c4bb78e6fdce16b91cb1ff5bfdb208"
 )
@@ -519,7 +519,9 @@ def test_absent_and_too_small_xmem_leave_partition_publication_off() -> None:
     (
         (17, EXTERNAL_BASE, EXTERNAL_BASE + 1, 16),
         (1_024, EXTERNAL_BASE, EXTERNAL_BASE + 512, 512),
-        (2_048, EXTERNAL_BASE + 16, EXTERNAL_BASE + 1_024, 1_024),
+        # The index grows from its one boot slot while half the free tail
+        # can hold the next table, ending at 512 bytes below +1,008.
+        (2_048, EXTERNAL_BASE + 1_008, EXTERNAL_BASE + 1_520, 528),
     ),
 )
 def test_small_present_geometries_follow_capacity_instead_of_a_fixed_zone(

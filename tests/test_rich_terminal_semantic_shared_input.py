@@ -7,7 +7,13 @@ import pytest
 from rich_terminal import DriverStatus
 from rich_terminal.retained_view import DisplayScope
 from rich_terminal.retained_wire import ControlEventKind
-from shared_session import SessionServer, SharedMachine, display_scope_to_wire
+from shared_session import (
+    SessionServer,
+    display_scope_to_wire,
+)
+from emulator.shared_session import (
+    SharedMachine,
+)
 
 
 GENERATION = 4
@@ -295,7 +301,7 @@ def test_text_event_rpc_forwards_each_kind_with_its_exact_tail():
     ("params", "match"),
     (
         (_text_params(1), "event_kind must be"),
-        (_text_params(11), "event_kind must be"),
+        (_text_params(12), "event_kind must be"),
         (_text_params(2, wheel_y=1), "fields are not exact"),
         (_text_params(4, item_key=5), "fields are not exact"),
         (

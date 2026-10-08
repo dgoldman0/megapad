@@ -389,6 +389,43 @@ def test_failed_resume_releases_the_backend_owned_suspension() -> None:
     backend.close()
 
 
+def test_failed_cancel_after_failed_resume_is_noted_on_the_resume_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b": WAIT-KEY KEY DROP ;")
+    backend = SimulatorSessionBackend(
+        runtime,
+        legacy_output_sink=lambda payload: None,
+    )
+    lease = backend.attach_rich_terminal(_limits())
+    context = runtime.new_context()
+
+    blocked = backend.run_semantic_batch(entry="WAIT-KEY", context=context)
+    assert blocked.stop_reason is SemanticBatchStop.IDLE
+    context.data.push(0xBAD)
+    assert lease.submit_ingress(b"K") is AdmissionStatus.ACCEPTED
+
+    cancel = runtime.cancel_suspension
+
+    def cancel_then_fail(suspension):
+        cancel(suspension)
+        raise RuntimeError("cancel reporting failed")
+
+    monkeypatch.setattr(runtime, "cancel_suspension", cancel_then_fail)
+    with pytest.raises(ExecutionError, match="data stack changed") as caught:
+        backend.run_semantic_batch()
+
+    assert caught.value.__notes__ == [
+        "failed to cancel simulator suspension after resume error: "
+        "RuntimeError: cancel reporting failed"
+    ]
+    assert not backend.suspended
+    assert not context.suspended
+    assert lease.close() is AdmissionStatus.ACCEPTED
+    backend.close()
+
+
 def test_owned_suspension_can_be_cancelled_explicitly() -> None:
     runtime = MegaForthRuntime()
     runtime.evaluate(b": WAIT-KEY KEY DROP ; : MARK 92 ;")

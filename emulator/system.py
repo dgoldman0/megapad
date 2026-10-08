@@ -183,7 +183,12 @@ def _cpu_memory_use(cpu):
 
 @dataclass(frozen=True)
 class SystemRunStats:
-    """Cycle and instruction progress from one system batch."""
+    """Cycle and instruction progress, identified by its execution model.
+
+    Instruction batches advance a functional round clock. Only strict cycle
+    batches model shared-clock wake, interrupt, and main-bus timing. Neither
+    model's counts measure host time or establish physical RTL latency.
+    """
 
     instructions_executed: int
     system_cycles_advanced: int
@@ -202,6 +207,11 @@ class SystemRunStats:
     external_events_applied: int = 0
     pending_interrupt_core: int = -1
     pending_interrupt_vector: int = -1
+    timing_model: str = "instruction_batched"
+
+    @property
+    def models_shared_clock_latency(self) -> bool:
+        return self.timing_model == "strict_shared_clock"
 
 
 EXTERNAL_INGRESS_RECORDING_SCHEMA = "megapad.external-ingress"
@@ -1406,8 +1416,41 @@ class MegapadSystem:
             read_span=self._raw_mem_read_span,
             write_span=self._raw_mem_write_span,
         )
-        self.audio._mem_read = self._raw_mem_read
-        self.audio._mem_span_valid = self._raw_mem_span_valid
+        # Only the ordinary system methods establish equivalence between
+        # scalar reads and direct span copies. Subclasses and customized
+        # callbacks retain their byte-visible behavior from the first submit.
+        def ordinary_audio_memory():
+            if type(self) is not MegapadSystem:
+                return False
+            for name, implementation in _CANONICAL_AUDIO_MEMORY_METHODS:
+                callback = getattr(self, name)
+                if (getattr(callback, "__self__", None) is not self
+                        or getattr(callback, "__func__", None) is not implementation):
+                    return False
+            return True
+
+        def audio_span_eligible(address, count):
+            if not ordinary_audio_memory():
+                return False
+            address = u64(address)
+            end = address + count
+            # A span can fit Bank 0 while partly overlapping a higher-priority
+            # aperture. Such descriptors retain scalar routing at each byte.
+            windows = (
+                (0, self.ram_size),
+                (HBW_BASE, self.hbw_end),
+                (self.ext_mem_base, self.ext_mem_end),
+                (self.vram_base, self.vram_end),
+            )
+            return sum(base < limit and base < end and address < limit
+                       for base, limit in windows) == 1
+
+        self.audio._bind_memory(
+            read_byte=self._raw_mem_read,
+            span_valid=self._raw_mem_span_valid,
+            read_span=self._raw_mem_read_span if ordinary_audio_memory() else None,
+            span_eligible=audio_span_eligible,
+        )
 
         # ── Shared native NIC, TRNG, and UART ─────────────────
         # DMA uses SystemState's central mappings. TX calls back to Python
@@ -2416,6 +2459,8 @@ class MegapadSystem:
     def _rich_terminal_backpressure_stats_locked(
         self,
         external_events_applied: int,
+        *,
+        timing_model: str = "instruction_batched",
     ) -> SystemRunStats:
         zeros = (0,) * self.num_cores
         return SystemRunStats(
@@ -2428,6 +2473,7 @@ class MegapadSystem:
             ),
             stop_cycle=int(self._native_system.system_cycles),
             external_events_applied=external_events_applied,
+            timing_model=timing_model,
         )
 
     @staticmethod
@@ -3186,6 +3232,7 @@ class MegapadSystem:
             native_continuations=int(result.continuations),
             system_stop_reason=stop_reason,
             stop_cycle=int(result.stop_cycle),
+            timing_model="instruction_batched",
         )
 
     def _service_unbounded_native_dma_locked(self) -> int:
@@ -3263,6 +3310,7 @@ class MegapadSystem:
             external_events_applied=int(result.external_events_applied),
             pending_interrupt_core=int(result.pending_interrupt_core),
             pending_interrupt_vector=int(result.pending_interrupt_vector),
+            timing_model="strict_shared_clock",
         )
 
     def _inspect_storage_dma(self, _current_cycle: int) -> DmaEndpointView:
@@ -3414,7 +3462,12 @@ class MegapadSystem:
         return self.run_batch_stats(n).instructions_executed
 
     def run_batch_stats(self, n: int = 100_000) -> SystemRunStats:
-        """Execute one deterministic native-scheduler batch."""
+        """Execute deterministic instruction batches with functional round time.
+
+        The clock advances at equal-credit round boundaries; these counts do
+        not model shared-clock wake latency or CPU main-bus contention. Use
+        ``run_cycle_batch`` for those modeled timing measurements.
+        """
         with self._scheduler_lock:
             self._reject_native_batch_reentry()
             if n <= 0:
@@ -3458,6 +3511,8 @@ class MegapadSystem:
         trap-frame traffic arbitrated on the equal round-robin main bus. A
         pending interrupt without an installed IVT returns
         ``unhandled_interrupt`` without changing that core.
+        Results identify this model as ``strict_shared_clock`` even when no
+        work runs. This is emulator timing, not a physical RTL timing claim.
         """
         if max_system_cycles < 0:
             raise ValueError("max_system_cycles cannot be negative")
@@ -3500,7 +3555,8 @@ class MegapadSystem:
             )
             if not admitted:
                 return self._rich_terminal_backpressure_stats_locked(
-                    terminal_events
+                    terminal_events,
+                    timing_model="strict_shared_clock",
                 )
             self._begin_external_event_staging_locked()
             try:
@@ -3532,6 +3588,7 @@ class MegapadSystem:
                 stop_cycle=int(
                     self._native_system.system_cycles
                 ),
+                timing_model="instruction_batched",
             )
 
         self._reject_native_batch_reentry()
@@ -3621,4 +3678,11 @@ _CANONICAL_SYSTEM_ADVANCE = MegapadSystem.advance_system_cycles
 _CANONICAL_SYSTEM_ADVANCE_LOCKED = MegapadSystem._advance_system_cycles_locked
 _CANONICAL_NO_EVENT_SETTLEMENT_PROOF = (
     MegapadSystem._native_no_event_settlement_eligible
+)
+_CANONICAL_AUDIO_MEMORY_METHODS = tuple(
+    (name, getattr(MegapadSystem, name))
+    for name in (
+        "_raw_mem_read", "_raw_mem_span_valid", "_raw_mem_read_span",
+        "_raw_mem_window",
+    )
 )

@@ -10,6 +10,7 @@ from collections import Counter
 import os
 from time import perf_counter_ns
 
+from shared import scalar_fp
 from simulator import ir
 from simulator import runtime as rt
 from simulator.diagnostics import HostedDiagnosticsService
@@ -21,6 +22,7 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
+SEMANTIC_API_VERSION = 4
 
 
 class NativeExecutor:
@@ -35,16 +37,39 @@ class NativeExecutor:
                     "run python setup_simulator_accel.py build_ext --inplace"
                 ) from None
             return None
+        if (getattr(extension, "SEMANTIC_API_VERSION", None) != SEMANTIC_API_VERSION
+                or not hasattr(extension, "scalar_fp_execute")
+                or not hasattr(extension, "keccak_f1600")
+                or getattr(extension, "TILE_VALUES_API_VERSION", None) != 1
+                or not callable(getattr(extension, "tile_execute_values", None))
+                or not callable(getattr(extension, "tile_values_supported", None))
+                or getattr(extension, "TILE_GUARD_API_VERSION", None) != 1
+                or not callable(getattr(extension, "TileIdentityGuard", None))):
+            if required:
+                raise RuntimeError(
+                    "native semantic execution requires a matching "
+                    "_megaforth_native build; run make build"
+                )
+            return None
         return cls(runtime, extension, admit_core=admit_core)
 
     def __init__(self, runtime, extension, *, admit_core: bool):
         self.runtime = runtime
         self.extension = extension
+        memory = runtime.memory
+        if memory.dense_backing is None:
+            sparse_regions = [(region.spec.base, region.spec.size, region.pages)
+                              for region in memory._regions]
+            dense_regions = ()
+        else:
+            sparse_regions = ()
+            dense_regions = [(spec.base, spec.size, memory.dense_backing.buffer_at(spec.base))
+                             for spec in memory.regions]
         self.program = extension.NativeProgram(
-            [(region.spec.base, region.spec.size, region.pages)
-             for region in runtime.memory._regions],
-            runtime.memory.page_size,
+            sparse_regions,
+            memory.page_size,
             Continuation,
+            dense_regions=dense_regions,
         )
         # Only original installed BIOS callbacks may become native primitives.
         # Later same-named host callbacks and source definitions keep their XT.
@@ -54,10 +79,36 @@ class NativeExecutor:
             if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
             and word.name in extension.PRIMITIVE_OPCODES
         }
+        # BIOS closures retain this service even if the public runtime
+        # attribute is replaced later. Native calls must keep the same owner.
+        self.scalar_float = runtime.scalar_float
+        scalar_operations = {
+            name.encode("ascii"): (
+                (extension.OP_FPCSR_FETCH, 0, 0) if shape == "fetch" else
+                (extension.OP_FPCSR_STORE, 0, 0) if shape == "store" else
+                (extension.OP_SCALAR_FP, operation,
+                 {"unary": 1, "binary": 2, "fma": 3}[shape])
+            )
+            for name, shape, operation in scalar_fp.BIOS_WORDS
+        }
+        self.scalar_primitives = {
+            word.xt: (word, scalar_operations[word.name])
+            for word in runtime.dictionary.words
+            if admit_core and isinstance(word.implementation, rt.PrimitiveDefinition)
+            and word.name in scalar_operations
+        }
         self.generation = runtime.dictionary.execution_generation
         self.plans = {}
         self.entry_costs = {}
         self.continuation_frames = {}
+        # Machine routines planned for direct calls, by execution token, and
+        # the routine words by native index.
+        self.routine_owner = None
+        self.routine_slots = {}
+        self.routine_words = []
+        self.routine_count = 0
+        # Machine work a native interval left for Python, if any.
+        self.machine_handoff = None
         self.entries = 0
         self.semantic_steps = 0
         self.profile_enabled = os.environ.get("MEGAFORTH_NATIVE_PROFILE") == "1"
@@ -70,7 +121,74 @@ class NativeExecutor:
         self.plans.clear()
         self.entry_costs.clear()
         self.continuation_frames.clear()
+        self.unbind_routines()
         self.generation = self.runtime.dictionary.execution_generation
+
+    def unbind_routines(self):
+        if self.routine_owner is not None:
+            self.program.bind_routines(None)
+        self.routine_owner = None
+        self.routine_slots.clear()
+        self.routine_words.clear()
+        self.routine_count = 0
+
+    def _routine_index(self, word, pending):
+        """Plan a direct call to a machine routine the owner admits for one."""
+
+        owner = self.runtime._machine_owner
+        if owner is None:
+            return None
+        slot = self.routine_slots.get(word.xt)
+        if slot is not None and slot[0] is word and self.routine_owner is owner:
+            return slot[2]
+        native = owner.native_routine(word)
+        if native is None:
+            return None
+        image, inputs, outputs, rules, sites = native
+        if self.routine_owner is None:
+            self.program.bind_routines(owner.native_entry())
+            self.routine_owner = owner
+        elif self.routine_owner is not owner:
+            return None
+        index = self.routine_count
+        self.program.set_routine(index, image.native_handle, inputs, outputs, rules, sites)
+        # The slot keeps the image alive while a plan can name its index.
+        self.routine_slots[word.xt] = (word, image, index)
+        self.routine_words.append(word)
+        self.routine_count += 1
+        # A site's word is bound by Python when the site is first used; one
+        # already bound runs here from now on.
+        routine = word.implementation.routine
+        for site in range(len(sites)):
+            target = owner.bound_target(routine, site)
+            if target is not None:
+                self.program.set_routine_target(index, site, *self._site_operation(target, pending))
+        return index
+
+    def _site_operation(self, target, pending):
+        """How native code runs a callback word: OP_CALL or one inline operation."""
+
+        op = self.extension
+        operation = self._call(target, pending)
+        if operation[0] == op.OP_CALL or (
+                operation[0] not in (op.OP_STOP, op.OP_CALL_ROUTINE, op.OP_EXECUTE,
+                                     op.OP_I, op.OP_J, op.OP_RP_FETCH)):
+            return operation
+        return op.OP_STOP, 0, 0
+
+    def routine_target_bound(self, routine, site, target):
+        """Run a callback site's newly bound word natively from now on."""
+
+        word = routine.word
+        if (word is None or self.generation != self.runtime.dictionary.execution_generation
+                or self.routine_owner is not self.runtime._machine_owner):
+            return
+        slot = self.routine_slots.get(word.xt)
+        if slot is None or slot[0] is not word:
+            return
+        pending = []
+        self.program.set_routine_target(slot[2], site, *self._site_operation(target, pending))
+        self._install(pending)
 
     def stats(self):
         result = {"entries": self.entries, "semantic_steps": self.semantic_steps,
@@ -147,19 +265,30 @@ class NativeExecutor:
             admitted = self.primitives.get(target.xt)
             if admitted is not None and admitted[0] is target:
                 return admitted[1], 0, 0
+            scalar = self.scalar_primitives.get(target.xt)
+            if scalar is not None and scalar[0] is target:
+                return scalar[1]
         if isinstance(implementation, rt.ColonDefinition):
             if target.xt not in self.runtime._colon_accelerators:
                 pending.append(target)
                 return op.OP_CALL, target.xt, 0
+        if isinstance(implementation, rt.RoutineDefinition):
+            index = self._routine_index(target, pending)
+            if index is not None:
+                return op.OP_CALL_ROUTINE, index, 0
         return op.OP_STOP, 0, 0
 
     def _prepare(self, initial):
-        runtime = self.runtime
-        if self.generation != runtime.dictionary.execution_generation:
+        if self.generation != self.runtime.dictionary.execution_generation:
             self.invalidate()
         if initial.xt in self.plans:
             return
-        pending = [initial]
+        self._install([initial])
+
+    def _install(self, pending):
+        """Plan these colon words and every colon word they reach."""
+
+        runtime = self.runtime
         op = self.extension
         while pending:
             word = pending.pop()
@@ -224,7 +353,8 @@ class NativeExecutor:
                 for operation in operations
             )
 
-    def run(self, current, ip, context, meter, quantum_limit):
+    def run(self, current, ip, context, meter, quantum_limit, machine_allowance=0):
+        self.machine_handoff = None
         if not self._admitted_context(context, meter):
             return None
         # This is an internal return to the same dispatcher, never a guest
@@ -261,9 +391,14 @@ class NativeExecutor:
              returns._continuation_cookie),
             returns._continuations,
             allowance,
+            self.scalar_float.fpcsr,
+            machine_allowance,
         )
         (xt, resumed_ip, steps, data_pointer, return_pointer, cookie,
-         updates, pointer_captures) = result
+         updates, pointer_captures, fpcsr, machine) = result
+        # Publish the completed prefix before clocks, profiling, fallback or
+        # any host observer can see the native interval's boundary.
+        self.scalar_float._fpcsr = fpcsr
         if self.profile_enabled:
             self.native_run_ns += perf_counter_ns() - started
             self._profile_exit(xt, resumed_ip, steps, allowance)
@@ -295,6 +430,18 @@ class NativeExecutor:
         meter.steps += steps
         self.runtime.diagnostics.account_work_many(steps)
         self.runtime.timer.advance_by(steps)
+        if machine is not None:
+            instructions, calls, callbacks, handoff, frames, callback = machine
+            self.routine_owner.account_native(meter, instructions, calls, callbacks)
+            if handoff or frames:
+                # Entries this interval began and did not finish, oldest first.
+                words = self.routine_words
+                self.machine_handoff = (handoff, [
+                    (words[routine], caller_xt, caller_ip, frontier, in_callback,
+                     words[site_routine], site, slot, raw, depth)
+                    for (routine, caller_xt, caller_ip, frontier, in_callback,
+                         site_routine, site, slot, raw, depth) in frames
+                ], callback)
         self.entries += 1
         self.semantic_steps += steps
         if self.profile_enabled:

@@ -5,7 +5,9 @@ from __future__ import annotations
 from rich_terminal.driver import DriverLimits
 from rich_terminal.server import TerminalConfig, TerminalState
 from rich_terminal.transport import EgressWatermarks, HostPortLimits
-from session import RichTerminalSessionConfig
+from shared.session import (
+    RichTerminalSessionConfig,
+)
 from simulator.rich_terminal_host import SemanticBatchStop
 from simulator.runtime import MegaForthRuntime
 from simulator.session import SimulatorMachineSession

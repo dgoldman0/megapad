@@ -332,6 +332,18 @@ class TerminalConfig:
         object.__setattr__(self, "rows", rows)
 
 
+def _quota_fields(quotas: OwnerQuotas) -> dict[str, int]:
+    return {
+        "regions": quotas.regions,
+        "resources": quotas.resources,
+        "objects": quotas.objects,
+        "series": quotas.series,
+        "resource_bytes": quotas.resource_bytes,
+        "utf8_bytes": quotas.utf8_bytes,
+        "sample_slots": quotas.sample_slots,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class LifecycleResultLease:
     """Exact object-identity gate for one emitted lifecycle completion.
@@ -358,6 +370,7 @@ class LifecycleResultLease:
             ) from exc
         if request_type not in {
             RetainedMessageType.OWNER_OPEN,
+            RetainedMessageType.OWNER_RESIZE,
             RetainedMessageType.RESOURCE_BEGIN,
             RetainedMessageType.RESOURCE_CHUNK,
             RetainedMessageType.RESOURCE_COMMIT,
@@ -581,6 +594,11 @@ class RichTerminalCore:
         self._most_recent_wire_aborted_id = 0
         self._machine_publications_received = 0
         self._machine_publication_bytes_received = 0
+        # Committed PRESENT transactions by retained mode, for status and logs.
+        self._presents_committed: dict[str, int] = {}
+        # Refused requests for more retained space, kept for status and logs.
+        self._capacity_denials = 0
+        self._last_capacity_denial: dict | None = None
         self._frames_received = 0
         self._frame_bytes_received = 0
         self._frames_received_by_type: dict[int, int] = {}
@@ -675,6 +693,25 @@ class RichTerminalCore:
     @property
     def state(self) -> TerminalState:
         return self._state
+
+    @property
+    def presents_committed(self) -> dict[str, int]:
+        """Committed PRESENT transactions counted by retained mode name."""
+
+        return dict(self._presents_committed)
+
+    @property
+    def capacity_denials(self) -> int:
+        """How many owner reservations this core refused for lack of space."""
+
+        return self._capacity_denials
+
+    @property
+    def last_capacity_denial(self) -> dict | None:
+        """The last refusal: the request, the owner, the quotas it asked for
+        and the quotas it still holds (None when it holds none)."""
+
+        return self._last_capacity_denial
 
     @property
     def machine_publications_received(self) -> int:
@@ -1089,6 +1126,7 @@ class RichTerminalCore:
         scalar_offset: int = 0,
         wheel_x: int = 0,
         wheel_y: int = 0,
+        adjustment: int = 0,
     ) -> OutboundBytes | None:
         """Encode one revision-attested semantic-control intent.
 
@@ -1139,14 +1177,18 @@ class RichTerminalCore:
             scalar_offset=scalar_offset,
             wheel_x=wheel_x,
             wheel_y=wheel_y,
+            adjustment=adjustment,
         )
         if (
-            event.event_kind is not ControlEventKind.ACTIVATE
+            event.event_kind not in (ControlEventKind.ACTIVATE, ControlEventKind.ADJUST)
             and not policy.features & RetainedFeature.CONTROL_COLLECTIONS
         ):
             raise TerminalSessionError(
                 "positioned control input requires active RET_CONTROL_COLLECTIONS"
             )
+        if (event.event_kind is ControlEventKind.ADJUST
+                and not policy.features & RetainedFeature.FIELDS):
+            raise TerminalSessionError("field input requires active RET_FIELDS")
         items_active = bool(policy.features & RetainedFeature.CONTROL_ITEMS)
         if event.names_item and not items_active:
             raise TerminalSessionError("item input requires active RET_CONTROL_ITEMS")
@@ -1160,6 +1202,11 @@ class RichTerminalCore:
         try:
             if event.event_kind is ControlEventKind.ACTIVATE:
                 scene.require_interactable_control(owner, event.control_id)
+            elif event.event_kind is ControlEventKind.ADJUST:
+                scene.require_field_control(
+                    owner, event.control_id,
+                    content_revision=event.content_revision, adjustable=True,
+                )
             elif event.event_kind is ControlEventKind.SCROLL:
                 scene.require_text_control(
                     owner,
@@ -1559,6 +1606,12 @@ class RichTerminalCore:
             self._charge_data(frame, include_in_transaction=False)
             return self._accept_owner_open(frame), None
 
+        if frame.message_type == RetainedMessageType.OWNER_RESIZE:
+            if not self._retained_enabled:
+                self._fatal("OWNER_RESIZE arrived before retained discovery")
+            self._charge_data(frame, include_in_transaction=False)
+            return self._accept_owner_resize(frame), None
+
         if frame.message_type == RetainedMessageType.OWNER_DROP:
             if not self._retained_enabled:
                 self._fatal("OWNER_DROP arrived before retained discovery")
@@ -1867,14 +1920,30 @@ class RichTerminalCore:
     ) -> tuple[OutboundBytes, ...]:
         """Reserve one exact owner quota set and order its RET_RESULT."""
 
+        return self._accept_owner_quotas(frame, RetainedMessageType.OWNER_OPEN)
+
+    def _accept_owner_resize(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        """Grow one live owner's reservation, or refuse with NO_CAPACITY."""
+
+        return self._accept_owner_quotas(frame, RetainedMessageType.OWNER_RESIZE)
+
+    def _accept_owner_quotas(
+        self,
+        frame: Frame,
+        request: RetainedMessageType,
+    ) -> tuple[OutboundBytes, ...]:
+        name = request.name
         ledger, clock = self._require_owner_lifecycle_ready(
-            "OWNER_OPEN",
+            name,
             allow_crossed_reset=True,
         )
-        self._require_no_resource_upload("OWNER_OPEN")
+        self._require_no_resource_upload(name)
         if len(frame.payload) != _OWNER_OPEN.size:
             self._fatal(
-                f"OWNER_OPEN payload length is {len(frame.payload)}, "
+                f"{name} payload length is {len(frame.payload)}, "
                 f"expected {_OWNER_OPEN.size}"
             )
         (
@@ -1905,28 +1974,35 @@ class RichTerminalCore:
                     sample_slots,
                 )
                 identity = self._owner_identity(owner_id, owner_generation)
-                prepared = ledger.prepare_open(identity, quotas)
+                if request is RetainedMessageType.OWNER_OPEN:
+                    prepared = ledger.prepare_open(identity, quotas)
+                else:
+                    prepared = ledger.prepare_resize(identity, quotas)
             except OwnerLedgerError as exc:
                 status = self._owner_open_status(exc)
+                if status is RetStatus.NO_CAPACITY:
+                    self._record_capacity_denial(
+                        request, ledger, identity, quotas, exc.detail
+                    )
             except (TypeError, ValueError) as exc:
-                self._fatal(f"cannot normalize OWNER_OPEN fields: {exc}", cause=exc)
+                self._fatal(f"cannot normalize {name} fields: {exc}", cause=exc)
             else:
                 status = RetStatus.OK
                 try:
                     ledger.validate_prepared(prepared)
                 except (RuntimeError, TypeError) as exc:
                     self._fatal(
-                        f"cannot validate OWNER_OPEN publication: {exc}",
+                        f"cannot validate {name} publication: {exc}",
                         cause=exc,
                     )
 
         result_lease = LifecycleResultLease(
-            RetainedMessageType.OWNER_OPEN,
+            request,
             owner_id,
             owner_generation,
         )
         result = RetainedResult(
-            RetainedMessageType.OWNER_OPEN,
+            request,
             status,
             owner_id,
             owner_generation,
@@ -1940,12 +2016,34 @@ class RichTerminalCore:
         )
         covering_credit = self._release_data(frame.complete_bytes)
         if len(covering_credit) != 1:
-            self._fatal("OWNER_OPEN did not produce one covering CREDIT")
+            self._fatal(f"{name} did not produce one covering CREDIT")
 
         if prepared is not None:
             ledger._install_prevalidated(prepared)
         self._outstanding_lifecycle_result = result_lease
         return (result_record, covering_credit[0])
+
+    def _record_capacity_denial(
+        self,
+        request: RetainedMessageType,
+        ledger: OwnerLedger,
+        identity: OwnerIdentity,
+        quotas: OwnerQuotas,
+        detail: str,
+    ) -> None:
+        """Keep the latest refused request for space, for status and logs."""
+
+        record = ledger.record(identity.owner_id)
+        held = None if record is None or not record.live else _quota_fields(record.quotas)
+        self._capacity_denials += 1
+        self._last_capacity_denial = {
+            "request": request.name,
+            "owner_id": identity.owner_id,
+            "owner_generation": identity.owner_generation,
+            "requested": _quota_fields(quotas),
+            "held": held,
+            "detail": detail,
+        }
 
     def _accept_resource_lifecycle(
         self,
@@ -2864,6 +2962,10 @@ class RichTerminalCore:
                         self._fatal(f"cannot install PRESENT publication: {exc}", cause=exc)
                     status = 0
                     view = prepared.view
+                    mode = PresentRetainedMode(wire.retained_mode).name
+                    self._presents_committed[mode] = (
+                        self._presents_committed.get(mode, 0) + 1
+                    )
                 else:
                     result_lease = self._reject_present_transaction(lease)
                     status = 1

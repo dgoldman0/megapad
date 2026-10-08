@@ -539,6 +539,7 @@ available afterward.
 | `DICT-FAULT-XT!` | `( xt -- )` | Install the caller's dictionary-fault callback used by KDOS to throw `-8`. |
 | `DICT-INDEX!` | `( base slots -- status )` | Install and rebuild a 16-byte-slot, power-of-two caller table, or disable with `0 0`. Returns 0 for authoritative success, 1 for invalid arguments with the old binding unchanged, or 2 for an installed saturated fallback. |
 | `DICT-INDEX@` | `( -- base slots count flags )` | Return table geometry, occupied unique-name slots, and `BOUND=1`, `AUTHORITATIVE=2`, `BUILDING=4`, `SATURATED=8`. |
+| `DICT-INDEX-NOTIFY!` | `( count xt -- )` | Arm one call of xt as the final step of the first named definition or `LATEST!` that leaves the index count at or above count; an xt of zero disarms. The owner uses it to grow its table. |
 | `DICT-ROLLBACK` | `( saved-here saved-latest -- )` | Validate a contiguous active-zone checkpoint, clear cached bindings globally, publish both dictionary pointers, and rebuild the side index. |
 | `LATEST!` | `( entry -- )` | Validate and publish any terminating replacement dictionary chain without changing `HERE`, clear cached bindings globally, and rebuild the side index. |
 
