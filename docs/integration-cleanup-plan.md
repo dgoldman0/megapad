@@ -145,7 +145,12 @@ go one at a time; commit each coherent slice once it is green.
 13. **Final gates.** Rerun step 1's gates, run the physical Desktop journey
     once through Akashic's `physical_desktop_acceptance.py`, and run Akashic's
     numeric suites against this branch. Then merge into main and push both
-    repositories together.
+    repositories together. Done on 2026-10-08, after the dictionary index
+    learned to grow: 2 x 2,957 simulator, 8 dual and 2,693 application and
+    rich-terminal tests passed; Akashic's 3,711 gate tests and 165 numeric
+    tests passed; the Desktop journey passed in simulator and hybrid mode.
+    Three THROW-during-load rollback tests in `tests/test_system.py`, outside
+    these gates, also fail on main and remain open.
 
 ## Provenance
 
