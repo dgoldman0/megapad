@@ -2153,9 +2153,11 @@ struct CPUState {
             SINGLE_CORE_BLOCK_CACHE_ENTRIES>
             regions{};
     };
-    // Only the sole full core in an exact-single topology owns this cache.
-    // Multi-core and microcore configurations must not pay per-CPU storage
-    // for an execution path they cannot enter.
+    // A full core owns this cache once it can run alone on the exact
+    // single-core path: from construction as the sole core of an exact-single
+    // topology, and from its first lone round as one of several full cores
+    // in a topology without micro-core clusters.  Micro-core topologies never
+    // enter the path, so their CPUs pay no storage for it.
     std::unique_ptr<SingleCoreExecutionPlanCache>
         single_core_execution_plan_cache;
 
@@ -5693,6 +5695,12 @@ struct SystemState {
     std::atomic<bool> cycle_execution_pending{false};
     int advertised_core_count = 0;
     bool mappings_sealed = false;
+    // Host execution strategy only.  A round in which exactly one full core
+    // of a cluster-free multi-core topology is awake runs that core on the
+    // exact single-core path; its guest-visible results equal the generic
+    // coordinator's.  Clearing this keeps such rounds on the coordinator so
+    // tests can compare the two.
+    bool lone_core_fast_path = true;
     int configured_worker_count = 1;
     // Declared last so ordinary reverse member destruction also stops helpers
     // before any state they will use in later Phase 3 elements.
@@ -15910,6 +15918,23 @@ static void service_unbounded_native_dma(
     const std::function<
         void(const UnboundedSettlementRequest&)>& settle_round);
 
+// A full core of a cluster-free topology gets its exact-single plan cache on
+// its first lone round.  An allocation failure leaves the round on the
+// generic coordinator, whose guest-visible results are the same.
+static bool ensure_single_core_execution_plan_cache(
+        CPUState& core) noexcept {
+    if (core.single_core_execution_plan_cache)
+        return true;
+    try {
+        core.single_core_execution_plan_cache =
+            std::make_unique<
+                CPUState::SingleCoreExecutionPlanCache>();
+    } catch (const std::bad_alloc&) {
+        return false;
+    }
+    return true;
+}
+
 static SystemBatchResult run_native_system_batch(
         SystemState& system,
         int64_t max_steps,
@@ -16152,9 +16177,28 @@ static SystemBatchResult run_native_system_batch(
         if (reservations.empty())
             break;
 
+        // A round with one awake full core and no micro-core cluster runs
+        // that core alone on the exact single-core path, as an exact-single
+        // topology always does.  No peer executes inside the round, so the
+        // coordinator's private/shared routing has no accesses to order.
+        const bool lone_full_core_round =
+            uncontended_single_full_core ||
+            (
+                system.lone_core_fast_path &&
+                reservations.size() == 1 &&
+                system.cluster_states.empty() &&
+                system.execution_cores[
+                    static_cast<std::size_t>(
+                        reservations.front().core_index)]
+                        ->profile == CoreProfile::FULL &&
+                ensure_single_core_execution_plan_cache(
+                    *system.execution_cores[
+                        static_cast<std::size_t>(
+                            reservations.front().core_index)])
+            );
         CoreFrontierOutcome outcome;
         try {
-            if (uncontended_single_full_core) {
+            if (lone_full_core_round) {
                 run_uncontended_single_core_round(
                     system,
                     reservations.front(),
@@ -21525,6 +21569,22 @@ static std::size_t single_core_block_entry_slot(
     return static_cast<std::size_t>(offset);
 }
 
+// Each full core publishes native code into its own range of the machine's
+// JIT arenas, so one core's code never replaces another's slot.
+static std::size_t single_core_jit_arena_slot_count(
+        const SystemState& system) noexcept {
+    return system.cores.size() *
+        CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES;
+}
+
+static std::size_t single_core_jit_arena_slot(
+        const CPUState& core,
+        const CPUState::SingleCoreDecodedBlockEntry* block) noexcept {
+    return static_cast<std::size_t>(core.core_id) *
+            CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES +
+        single_core_block_entry_slot(core, block);
+}
+
 static std::size_t single_core_block_rejection_cache_set(
         uint64_t address) noexcept {
     return static_cast<std::size_t>(
@@ -22373,7 +22433,7 @@ compile_single_core_jit_block(
             system.single_core_jit_arena;
         if (jit_arena.ready() || jit_arena.failed()) {
             arena_ready = jit_arena.ensure(
-                CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES,
+                single_core_jit_arena_slot_count(system),
                 allocation_attempted,
                 arena_allocated);
         } else {
@@ -22381,7 +22441,7 @@ compile_single_core_jit_block(
                 profile_enabled,
                 &profile.uncontended_jit_arena_allocation_ns);
             arena_ready = jit_arena.ensure(
-                CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES,
+                single_core_jit_arena_slot_count(system),
                 allocation_attempted,
                 arena_allocated);
         }
@@ -22405,7 +22465,7 @@ compile_single_core_jit_block(
                 profile_enabled,
                 &profile.uncontended_jit_publication_ns);
             code = jit_arena.publish(
-                single_core_block_entry_slot(core, &block),
+                single_core_jit_arena_slot(core, &block),
                 lowered_code,
                 rewrote_slot);
         }
@@ -22508,7 +22568,7 @@ compile_single_core_jit_region(
         HostExecutableArena& region_arena =
             system.single_core_jit_region_arena;
         const bool arena_ready = region_arena.ensure(
-            CPUState::SINGLE_CORE_BLOCK_CACHE_ENTRIES,
+            single_core_jit_arena_slot_count(system),
             allocation_attempted,
             arena_allocated);
         if (!arena_ready)
@@ -22516,7 +22576,7 @@ compile_single_core_jit_region(
 
         bool rewrote_slot = false;
         HostExecutableCode code = region_arena.publish(
-            single_core_block_entry_slot(core, &source),
+            single_core_jit_arena_slot(core, &source),
             lowered_code,
             rewrote_slot);
         if (!code)
@@ -24589,24 +24649,46 @@ static void run_uncontended_single_core_round(
         host_profile_enabled,
         &profile.uncontended_round_ns);
 
+    // The core runs alone: either it is the sole core of an exact-single
+    // topology, or it is the one awake full core of a topology without
+    // micro-core clusters, whose peers stay asleep or halted until the next
+    // round's wake check.
+    const std::size_t core_count =
+        system.execution_cores.size();
+    const int core_index = reservation.core_index;
     if (
-        system.execution_cores.size() != 1 ||
-        system.cores.size() != 1 ||
         !system.cluster_states.empty() ||
-        system.execution_cores[0] != system.cores[0].get() ||
-        system.execution_cores[0]->profile !=
-            CoreProfile::FULL ||
-        reservation.core_index != 0 ||
+        core_index < 0 ||
+        static_cast<std::size_t>(core_index) >= core_count ||
         reservation.max_steps < 0 ||
         reservation.max_steps >
             std::numeric_limits<int>::max() ||
-        callbacks.size() != 1
+        callbacks.size() != core_count
     ) {
         throw std::logic_error(
             "uncontended single-core round has an invalid topology");
     }
+    for (std::size_t peer = 0; peer < core_count; peer++) {
+        const CPUState& other = *system.execution_cores[peer];
+        if (
+            peer != static_cast<std::size_t>(core_index) &&
+            !other.halted &&
+            !other.idle
+        ) {
+            throw std::logic_error(
+                "uncontended single-core round has an awake peer");
+        }
+    }
 
-    CPUState& core = *system.execution_cores[0];
+    CPUState& core = *system.execution_cores[
+        static_cast<std::size_t>(core_index)];
+    if (
+        core.profile != CoreProfile::FULL ||
+        !core.single_core_execution_plan_cache
+    ) {
+        throw std::logic_error(
+            "uncontended single-core round has no exact-single core");
+    }
     int64_t remaining = reservation.max_steps;
     system.mappings_sealed = true;
 
@@ -24645,7 +24727,7 @@ static void run_uncontended_single_core_round(
                     stop_reason)] = 1;
         }
         merge_core_dispatch(
-            result, 0, fragment);
+            result, core_index, fragment);
         outcome.steps = checked_scheduler_add(
             outcome.steps,
             steps,
@@ -24655,13 +24737,15 @@ static void run_uncontended_single_core_round(
             cycles,
             "single-core round cycle accounting");
         remaining -= steps;
-        if (steps > 0)
-            system.scheduler_cursor = 0;
+        if (steps > 0) {
+            system.scheduler_cursor =
+                (core_index + 1) % static_cast<int>(core_count);
+        }
     };
 
     while (remaining > 0) {
         if (core.halted || core.idle) {
-            outcome.terminal_cores.push_back(0);
+            outcome.terminal_cores.push_back(core_index);
             break;
         }
         const int pending_interrupt =
@@ -24673,7 +24757,7 @@ static void run_uncontended_single_core_round(
                     profile.uncontended_interrupt_boundaries);
             }
             outcome.interrupt_boundary = true;
-            outcome.interrupt_cores.push_back(0);
+            outcome.interrupt_cores.push_back(core_index);
             break;
         }
 
@@ -24705,7 +24789,8 @@ static void run_uncontended_single_core_round(
             run_uncontended_single_core_segment(
                 system,
                 core,
-                callbacks[0],
+                callbacks[
+                    static_cast<std::size_t>(core_index)],
                 static_cast<int>(dispatch_budget),
                 segment);
         } catch (py::error_already_set& error) {
@@ -24719,14 +24804,14 @@ static void run_uncontended_single_core_round(
                 false,
                 -1);
             PrivateCoreResult prefix;
-            prefix.core_index = 0;
+            prefix.core_index = core_index;
             prefix.steps_executed =
                 segment.run.steps_executed;
             prefix.total_cycles =
                 segment.run.total_cycles;
             CoordinatorBoundarySettlement settlement =
                 settle_coordinator_dispatch_error(
-                    0,
+                    core_index,
                     prefix,
                     dispatch_budget,
                     settle_dispatch_error,
@@ -24752,7 +24837,7 @@ static void run_uncontended_single_core_round(
 
         if (callback_settled) {
             if (callback_terminal) {
-                outcome.terminal_cores.push_back(0);
+                outcome.terminal_cores.push_back(core_index);
                 break;
             }
             continue;
@@ -24772,14 +24857,14 @@ static void run_uncontended_single_core_round(
             publish_fragment(
                 0, 0, true, RUN_LIMIT);
             outcome.interrupt_boundary = true;
-            outcome.interrupt_cores.push_back(0);
+            outcome.interrupt_cores.push_back(core_index);
             break;
         }
 
         if (segment.run.tacc_cancelled) {
             publish_fragment(
                 0, 0, true, RUN_LIMIT);
-            outcome.terminal_cores.push_back(0);
+            outcome.terminal_cores.push_back(core_index);
             break;
         }
 
@@ -24802,7 +24887,7 @@ static void run_uncontended_single_core_round(
                 0,
                 true,
                 segment.run.stop_reason);
-            outcome.terminal_cores.push_back(0);
+            outcome.terminal_cores.push_back(core_index);
             break;
         }
 
@@ -24818,7 +24903,7 @@ static void run_uncontended_single_core_round(
             CoordinatorBoundarySettlement settlement =
                 validated_coordinator_settlement(
                     settle_continuation(
-                        0,
+                        core_index,
                         segment.run.stop_reason,
                         segment.run.trap_id,
                         segment.run.steps_executed,
@@ -24837,7 +24922,7 @@ static void run_uncontended_single_core_round(
                 segment.run.stop_reason,
                 1);
             if (settlement.terminal) {
-                outcome.terminal_cores.push_back(0);
+                outcome.terminal_cores.push_back(core_index);
                 break;
             }
             continue;
@@ -35954,6 +36039,16 @@ PYBIND11_MODULE(_mp64_accel, m) {
             "mappings_sealed",
             [](const SystemState& system) {
                 return system.mappings_sealed;
+            })
+        .def_property(
+            "lone_core_fast_path",
+            [](const SystemState& system) {
+                return system.lone_core_fast_path;
+            },
+            [](SystemState& system, bool enabled) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                system.lone_core_fast_path = enabled;
             })
         .def_property_readonly(
             "mem_size",

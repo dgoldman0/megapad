@@ -215,6 +215,10 @@ def _system(
         worker_count=1,
     )
     if reference:
+        # A lone awake full core would otherwise take the same exact-single
+        # path.  The generic coordinator is the reference these tests prove
+        # that path against.
+        system._native_system.lone_core_fast_path = False
         system.cores[1].halted = True
         system.cores[1].idle = False
     return system
@@ -317,6 +321,126 @@ def test_single_core_ram_loop_matches_generic_coordinator_reference() -> None:
     assert _run_shared_memory_workload(
         reference=False
     ) == _run_shared_memory_workload(reference=True)
+
+
+SHARED_LOOP_SOURCE = """
+loop:
+    st.w r5, r4
+    ld.w r6, r5
+    add r4, r6
+    xori r4, 0x5a
+    br loop
+"""
+# The block cache set of an entry address is (address ^ address >> 7) masked
+# to the set count, so this address shares set 0 with address 0.  Two cores'
+# first blocks there take the same entry in their own plan caches.
+COLLIDING_ENTRY = 0x408
+
+
+def _multicore_system(*, cores: int, fast: bool) -> MegapadSystem:
+    system = MegapadSystem(
+        ram_size=4096,
+        num_cores=cores,
+        num_clusters=0,
+        hbw_size=0,
+        ext_mem_size=0,
+        vram_size=0,
+        worker_count=1,
+    )
+    system._native_system.lone_core_fast_path = fast
+    return system
+
+
+def _set_awake(system: MegapadSystem, awake: set[int]) -> None:
+    for index, cpu in enumerate(system.cores):
+        cpu.halted = index not in awake
+        cpu.idle = False
+
+
+def _multicore_signature(system: MegapadSystem, stats) -> tuple:
+    return (
+        stats.instructions_executed,
+        stats.system_cycles_advanced,
+        stats.per_core_instructions,
+        stats.per_core_cycles,
+        stats.per_core_dispatches,
+        stats.per_core_stop_reasons,
+        stats.native_rounds,
+        stats.native_continuations,
+        stats.system_stop_reason,
+        system._scheduler_cursor,
+        system.timer.counter,
+        system._native_system.system_cycles,
+        tuple(_cpu_execution_signature(cpu) for cpu in system.cores),
+    )
+
+
+def _run_lone_core_workload(*, cores: int, runner: int, fast: bool):
+    system = _multicore_system(cores=cores, fast=fast)
+    system.load_binary(0, assemble(SHARED_LOOP_SOURCE))
+    system.boot(entry=0)
+    _set_awake(system, {runner})
+    cpu = system.cores[runner]
+    cpu.regs[4] = 0x1020_3040
+    cpu.regs[5] = SHARED_WORD
+    system.timer.control = 1
+    system.start_host_profile()
+    stats = system.run_batch_stats(5_003)
+    counts = dict(system.stop_host_profile()["counts"])
+    return _multicore_signature(system, stats), counts["uncontended_rounds"]
+
+
+@pytest.mark.parametrize(
+    ("cores", "runner"),
+    ((2, 0), (2, 1), (4, 0), (4, 1), (4, 3)),
+)
+def test_a_lone_full_core_of_a_multicore_system_matches_the_coordinator(
+    cores: int,
+    runner: int,
+) -> None:
+    fast, fast_rounds = _run_lone_core_workload(
+        cores=cores, runner=runner, fast=True
+    )
+    generic, generic_rounds = _run_lone_core_workload(
+        cores=cores, runner=runner, fast=False
+    )
+    assert fast == generic
+    assert fast_rounds == 6
+    assert generic_rounds == 0
+
+
+def _run_turn_taking_workload(*, fast: bool):
+    system = _multicore_system(cores=2, fast=fast)
+    system.load_binary(0, assemble(REGISTER_BLOCK_SOURCE))
+    system.load_binary(COLLIDING_ENTRY, assemble(REGISTER_BLOCK_SOURCE))
+    system.boot(entry=0)
+    for cpu in system.cores:
+        _initialize_register_workload(cpu)
+    system.cores[1].pc = COLLIDING_ENTRY
+    system.cores[1].regs[4] = 0x0BAD_F00D
+    system.start_host_profile()
+    signatures = []
+    # Core 0 alone, core 1 alone, both together, then core 0 alone again.
+    # Each lone turn compiles or reuses its own native code for the same
+    # plan-cache entry, which must never run the other core's code.
+    for awake in ({0}, {1}, {0, 1}, {0}):
+        _set_awake(system, awake)
+        stats = system.run_batch_stats(20_000)
+        signatures.append(_multicore_signature(system, stats))
+    snapshot = system.stop_host_profile()
+    return tuple(signatures), snapshot
+
+
+def test_cores_taking_turns_alone_run_only_their_own_native_code() -> None:
+    fast, snapshot = _run_turn_taking_workload(fast=True)
+    generic, generic_snapshot = _run_turn_taking_workload(fast=False)
+    assert fast == generic
+    counts = dict(snapshot["counts"])
+    assert counts["uncontended_rounds"] > 0
+    assert dict(generic_snapshot["counts"])["uncontended_rounds"] == 0
+    _assert_jit_used_when_available(snapshot, counts)
+    if snapshot["single_core_jit_storage"]["ready"]:
+        assert snapshot["single_core_jit_storage"]["slot_count"] == 2 * 4_096
 
 
 def _run_register_block_workload(*, reference: bool) -> tuple:
