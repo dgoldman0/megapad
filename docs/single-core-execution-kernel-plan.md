@@ -1294,6 +1294,47 @@ interrupt point, memory order, BIOS ABI, snapshot state, or RTL requirement.
 Changing any of those would be a hardware-design change; reducing the number
 of host x86 entries and C++ settlements while reproducing them exactly is not.
 
+### Run a lone full core on the exact-single path
+
+The exact-single path served only a machine with one core. On a machine with
+more full cores, every round went through the generic coordinator even when
+only one core was awake. That coordinator stops a core's private run at each
+instruction that touches shared memory, hands the next span to a host worker,
+and captures a checkpoint. A Desktop boot whose secondary cores sleep in `IDL`
+ran on core 0 alone yet stopped about every third instruction: 2.3 million
+private steps took 687 thousand logical subfrontiers and 475 thousand worker
+waves, and the block cache and JIT never ran. Four cores were about 45 times
+slower than one, so a four-core Desk session could not boot within the 900 s
+qualification watchdog.
+
+A round in which exactly one full core of a machine without micro-core
+clusters is awake now runs that core on the exact-single path. No other core
+executes inside the round. Sleeping and halted cores do not run until the next
+round's wake check, which is also when the coordinator would first schedule
+them, so its private/shared routing has no other accesses to order. The round
+keeps the 1,000-instruction cadence, its interrupt boundary, callback custody
+and accounting, and it advances the scheduler cursor past that core as the
+coordinator does. Settlement keeps Python custody, because native no-event
+settlement remains admitted only for a singleton topology. Machines with
+micro-core clusters keep the coordinator.
+
+Each full core gets its plan cache on its first lone round. I-cache fills,
+invalidations, rollbacks and checkpoint restores already advance a core's line
+epochs whenever it owns a plan cache, including during coordinator rounds, so
+a plan built in a lone round is revalidated after any later change. Native code
+is published into each core's own range of the machine's JIT arenas, because a
+slot was indexed by the plan-cache entry and two cores' first blocks in one
+set would otherwise share a slot.
+
+Evidence (2026-10-09): 20 million steps of a Desktop boot take 0.5 s on four
+cores, against 17.5 s before and 0.4 s on one core. A two-core and four-core
+selector runs a lone core 0, 1 or 3 against the coordinator, and cores taking
+turns alone with colliding plan-cache entries match the coordinator exactly.
+Restoring one shared JIT slot range fails the turn-taking case, and the old
+cursor rule fails three lone-core cases. The existing exact-single selector now
+compares against a two-core reference that keeps the coordinator, and passes
+with the concurrency selectors (366).
+
 ## Construction-time validation policy
 
 While the vertical is being built, validation stays on the happy path and at
@@ -1374,6 +1415,7 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D23 | Reject the segment-local `EXT.DICT` terminal continuation after exact counters improved but position-balanced control-normalized timing did not. | Avoid retaining host dispatch complexity from a synthetic lookup-count win; the existing authoritative helper boundary and every guest hardware contract remain unchanged. |
 | EK-D24 | Measure eligible native successor edges with a bounded set-local Space-Saving host profile before building another continuation path. | Full admitted bytes remain the exact internal identity; fingerprints are report-only, all helper/memory/timing/interrupt/segment boundaries break adjacency, and schema 16 telemetry does not authorize execution or alter hardware. |
 | EK-D25 | Reopen EK-D11 only for exact two-block generated regions and retain that implementation as a provisional host candidate after its crossed same-binary synthetic A/B won materially. | The candidate removes host x86 entry/return and C++ settlement work without changing guest behavior or hardware. Its private A/B toggle remains only through representative source-mode qualification; production retention is deferred to EK-F10. |
+| EK-D26 | Run the one awake full core of a cluster-free multi-core round on the exact-single path, with a per-core plan cache and JIT slot range. | No peer executes inside such a round, so guest-visible results, cadence, accounting and timing equal the coordinator's. The host-only `lone_core_fast_path` switch stays so that tests keep the coordinator as the reference this path is proved against; it is not an alternate engine. |
 
 ## Deferred findings ledger
 
