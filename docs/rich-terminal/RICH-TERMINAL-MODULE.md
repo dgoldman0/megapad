@@ -129,6 +129,7 @@ PT-STORAGE-DISJOINT? ( a u session -- flag )
 PT-LAYOUT-SERIAL@   ( session -- serial )
 PT-START            ( session -- status )
 PT-SERVICE          ( session -- status )
+PT-SERVICE-PENDING? ( session -- flag )
 PT-STATE@           ( session -- state )
 PT-ACTIVE?          ( session -- flag )
 PT-SNAPSHOT-NEEDED? ( session -- flag )
@@ -346,6 +347,18 @@ the predicate, the query only reads.
 credit, reset, and close without waiting for another byte. `PT-LEGACY-POLL`
 returns ordinary bytes held while a probe was being distinguished from ANSI;
 it never returns enhanced binary.
+
+`PT-SERVICE-PENDING?` is the read-only companion a caller uses before
+sleeping. It is true while `PT-SERVICE`, or the owner polling an event or
+completion, could make progress without new input. That covers unread UART
+bytes beyond one call's bounded read, a complete buffered frame, a pending
+event or completion, owed credit that may be sent now, a held reset that
+nothing blocks, retained activation or discovery that may proceed, and
+sequence exhaustion. It is also true during probing, opening, and closing,
+which advance on their own deadlines. A steady ACTIVE or RESYNCING session
+waiting only for input reports false. Everything else PT waits for arrives as
+UART input, which ends an `IDLE-UNTIL` sleep, so a caller that sees false may
+sleep until input or its own next deadline.
 
 RETAINED-1 discovery is not an automatic consequence of opening a CELL-1
 session. `PT-RETAINED-DISCOVER` is the caller's explicit opt-in; the call

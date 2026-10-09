@@ -3059,6 +3059,79 @@ VARIABLE _PT-CLOSE-STATUS
     THEN
     DROP PT-S-OK ;
 
+\ Each predicate below mirrors one PT-SERVICE step and is true exactly when
+\ that step would act without new input.
+
+\ A complete frame is buffered, or a header whose length the next service
+\ would reject.  Other malformed headers wait for the caller's next pass.
+: _PT-FRAME-BUFFERED?  ( s -- flag )
+    DUP _PT.S.BIN-U @ _PT-HDR U< IF DROP FALSE EXIT THEN
+    DUP _PT-BIN-A 12 + L@                 ( s len )
+    DUP _PT-MAX-PAYLOAD U> IF 2DROP TRUE EXIT THEN
+    DUP 2 PICK _PT.S.CLIENT-MAX-PAY @ U> IF 2DROP TRUE EXIT THEN
+    _PT-HDR + OVER _PT-BIN-CAP OVER U< IF 2DROP TRUE EXIT THEN
+    SWAP _PT.S.BIN-U @ SWAP _PT-U>= ;
+
+\ _PT-SERVICE-CREDIT would send owed credit.
+: _PT-CREDIT-DUE?  ( s -- flag )
+    DUP _PT.S.CREDIT-DIRTY? @ 0= IF DROP FALSE EXIT THEN
+    DUP _PT.S.RESET-PENDING? @ IF DROP FALSE EXIT THEN
+    DUP _PT.S.TX-OPEN? @ IF DROP FALSE EXIT THEN
+    _PT.S.SPAN-REMAIN @ 0= ;
+
+\ _PT-APPLY-PENDING-RESET would apply a held soft reset.
+: _PT-RESET-DUE?  ( s -- flag )
+    DUP _PT.S.RESET-PENDING? @ 0= IF DROP FALSE EXIT THEN
+    DUP _PT.S.TX-OPEN? @ OVER _PT.S.AWAIT? @ OR
+    OVER _PT.S.LIFE-AWAIT? @ OR SWAP _PT.S.COMPLETE? @ OR 0= ;
+
+\ _PT-RET-ACTIVATE-READY would make retained output available.
+: _PT-RET-ACTIVATE-DUE?  ( s -- flag )
+    DUP _PT.S.RET-STATE @ _PT-RD-WAIT-CREDIT <> IF DROP FALSE EXIT THEN
+    DUP _PT.S.PEER-GRANT @ OVER _PT.S.RET-WATERMARK @ U< IF DROP FALSE EXIT THEN
+    DUP _PT.S.TX-OPEN? @ SWAP _PT-RESULT-BUSY? OR 0= ;
+
+\ _PT-SERVICE-RET-QUERY would act.  Every outcome but waiting for more peer
+\ credit changes state or sends the discovery query.
+: _PT-RET-QUERY-DUE?  ( s -- flag )
+    DUP _PT.S.RET-ENABLED? @ 0= IF DROP FALSE EXIT THEN
+    DUP _PT.S.RESET-PENDING? @ IF DROP FALSE EXIT THEN
+    DUP _PT.S.RET-STATE @ _PT-RD-SNAPSHOT <> IF DROP FALSE EXIT THEN
+    DUP _PT.S.STATE @ PT-ST-ACTIVE <> IF DROP FALSE EXIT THEN
+    DUP _PT.S.SNAPSHOT? @ IF DROP FALSE EXIT THEN
+    DUP _PT.S.EVENT-PENDING @ IF DROP FALSE EXIT THEN
+    DUP _PT.S.TX-OPEN? @ OVER _PT.S.AWAIT? @ OR IF DROP FALSE EXIT THEN
+    DUP _PT.S.LOCAL-RECEIVED @ OVER _PT.S.LOCAL-GRANT @ U> IF DROP TRUE EXIT THEN
+    DUP _PT.S.LOCAL-GRANT @ OVER _PT.S.LOCAL-RECEIVED @ -
+    _PT-RET-REPLY-BYTES U< IF DROP TRUE EXIT THEN
+    DUP _PT.S.PEER-SENT @ OVER _PT.S.PEER-GRANT @ U> IF DROP TRUE EXIT THEN
+    DUP _PT.S.PEER-GRANT @ SWAP _PT.S.PEER-SENT @ - 48 _PT-U>= ;
+
+\ PT-SERVICE-PENDING? ( session -- flag )
+\   True when PT-SERVICE, or the owner polling a pending event or
+\   completion, can make progress without new input, or while a handshake
+\   or close advances on its own deadline.  A caller that sees false may
+\   sleep until input: everything else PT waits for arrives as UART input,
+\   which wakes it.  A steady ACTIVE or RESYNCING session reports false.
+: PT-SERVICE-PENDING?  ( session -- flag )
+    DUP _PT-VALID-S? 0= IF DROP FALSE EXIT THEN
+    DUP _PT.S.STATE @
+    DUP PT-ST-ANSI = OVER PT-ST-LOST = OR IF 2DROP FALSE EXIT THEN
+    DUP PT-ST-ACTIVE = SWAP PT-ST-RESYNCING = OR 0= IF
+        DROP TRUE EXIT
+    THEN
+    DUP _PT.S.CLOSE-PENDING? @ IF DROP TRUE EXIT THEN
+    DUP _PT.S.EVENT-PENDING @ IF DROP TRUE EXIT THEN
+    DUP _PT.S.COMPLETE? @ IF DROP TRUE EXIT THEN
+    \ Service reads a bounded number of bytes per call; more may wait.
+    KEY? IF DROP TRUE EXIT THEN
+    DUP _PT-FRAME-BUFFERED? IF DROP TRUE EXIT THEN
+    DUP _PT.S.TX-SEQ @ 0xFFFFFFFFFFFFFFFE _PT-U>= IF DROP TRUE EXIT THEN
+    DUP _PT-CREDIT-DUE? IF DROP TRUE EXIT THEN
+    DUP _PT-RESET-DUE? IF DROP TRUE EXIT THEN
+    DUP _PT-RET-ACTIVATE-DUE? IF DROP TRUE EXIT THEN
+    _PT-RET-QUERY-DUE? ;
+
 VARIABLE _PT-PC-S
 VARIABLE _PT-PC-REASON
 
