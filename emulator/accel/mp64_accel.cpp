@@ -7975,37 +7975,45 @@ struct PrivateInstructionPrefixAdmission {
     }
 };
 
-static int next_instruction_size(CPUState& s) {
-    // SKIP performs its own cache lookup for the target instruction.
-    s.ifetch_window_valid = false;
-    const uint64_t address = pc(s);
-    auto read_byte = [&](uint64_t byte_address, uint8_t& value) {
-        value = icache_read_byte(s, byte_address);
-        return true;
-    };
-    ObservationalInstructionHeaderReader<decltype(read_byte)> reader{
+// The PC advance of a taken EXT.SKIP over the instruction at ADDRESS.
+// READ_BYTE supplies, in order, every byte the sizing inspects, and returns
+// false when its source cannot provide one, which leaves the size unknown.
+// The executor reads through the I-cache, which always provides a byte; the
+// private classifier peeks only resident lines.  Both therefore inspect
+// exactly the same bytes.
+template <typename ReadByte>
+static std::optional<int> skipped_instruction_size(
+        ReadByte& read_byte,
+        uint64_t address) {
+    ObservationalInstructionHeaderReader<ReadByte> reader{
         read_byte,
         address,
     };
     const InstructionHeader header =
         decode_instruction_header(reader);
+    if (header.status == InstructionHeaderStatus::UNAVAILABLE)
+        return std::nullopt;
     if (header.status == InstructionHeaderStatus::EXTENSION_ENGINE) {
         if (header.subop == 0x9 || header.subop == 0xA)
             return header.has_prefix() ? 4 : 3;
         if (header.subop == 0xB) {
-            uint8_t crypto_sub =
-                icache_read_byte(
-                    s,
-                    address + header.bytes_consumed);
+            uint8_t crypto_sub = 0;
+            if (!read_byte(
+                    address + header.bytes_consumed,
+                    crypto_sub)) {
+                return std::nullopt;
+            }
             return
                 header.prefix_size +
                 crypto_instruction_size(crypto_sub);
         }
         if (header.subop == 0xC) {
-            const uint8_t fp_op =
-                icache_read_byte(
-                    s,
-                    address + header.bytes_consumed);
+            uint8_t fp_op = 0;
+            if (!read_byte(
+                    address + header.bytes_consumed,
+                    fp_op)) {
+                return std::nullopt;
+            }
             return header.prefix_size + fp_instruction_size(fp_op);
         }
     }
@@ -8051,15 +8059,29 @@ static int next_instruction_size(CPUState& s) {
             const int ss = (peek >> 2) & 0x3;
             const int op = peek & 0x3;
             int length = ss == 1 ? 3 : 2;
-            if (op == 3 && ss != 2 &&
-                (icache_read_byte(s, address + 1) & 0x7) == 7)
-                length++;
+            if (op == 3 && ss != 2) {
+                uint8_t control = 0;
+                if (!read_byte(address + 1, control))
+                    return std::nullopt;
+                if ((control & 0x7) == 7)
+                    length++;
+            }
             return length;
         }
         case 0xF:
             return 1;
         default: return 1;
     }
+}
+
+static int next_instruction_size(CPUState& s) {
+    // SKIP performs its own cache lookup for the target instruction.
+    s.ifetch_window_valid = false;
+    auto read_byte = [&](uint64_t byte_address, uint8_t& value) {
+        value = icache_read_byte(s, byte_address);
+        return true;
+    };
+    return *skipped_instruction_size(read_byte, pc(s));
 }
 
 // Pure floating-point lane helpers are shared with semantic execution.
@@ -14445,15 +14467,16 @@ classify_private_full_core_instruction(
             ICACHE_BOUNDARY;
     }
 
-    // EXT.SKIP asks next_instruction_size() to read the first byte at the
-    // skipped instruction. Require that exact private-cache read up front
-    // only when the condition is taken.
+    // A taken EXT.SKIP sizes the skipped instruction through the I-cache,
+    // which can read past its first byte into the next line. Require every
+    // byte that sizing reads to be resident, so private execution never
+    // fills a line.
     if (
         family == 0x3 &&
         modifier == 6 &&
         eval_cond(state, subop) &&
-        !private_icache_peek(
-            state,
+        !skipped_instruction_size(
+            read_byte,
             instruction_address +
                 static_cast<uint64_t>(
                     total_length)).has_value()
