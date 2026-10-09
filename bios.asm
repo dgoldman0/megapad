@@ -780,7 +780,11 @@ kc_ready:
 ;   wakes on the UART and NIC receive requests it enables without vectoring
 ;   (the IVT has no handler for them).  Then WAKE_MS, the device enables,
 ;   and IE are restored, and a pending timer or IPI interrupt is taken as
-;   usual.  UART and NIC requests reach core 0 only.  Clobbers R11.
+;   usual.  UART and NIC requests reach core 0 only.  On core 0 an IPI is
+;   a wake-up: the sleep acknowledges every IPI pending when it ends, so a
+;   request no handler takes cannot hold later sleeps awake.  A sender
+;   publishes its work before IPI-SEND and the caller re-checks after the
+;   sleep, so an IPI that arrives before IDL is not lost.  Clobbers R11.
 idle_until:
     subi r15, 8
     str r15, r0
@@ -819,6 +823,24 @@ idle_until:
     or r7, r0
     st.b r11, r7
     idl
+    ; Acknowledge each pending IPI sender.  R0 and R7 are reloaded below.
+    ldi64 r11, 0xFFFF_FF00_0000_0509   ; MBOX_STATUS
+    ld.b r0, r11                ; pending sender mask
+    ldi r7, 0                   ; sender core ID
+.iu_ack:
+    cmpi r0, 0
+    breq .iu_acked
+    mov r11, r0
+    andi r11, 1
+    cmpi r11, 0
+    breq .iu_ack_next
+    ldi64 r11, 0xFFFF_FF00_0000_050A   ; MBOX_ACK
+    st.b r11, r7
+.iu_ack_next:
+    lsri r0, 1
+    addi r7, 1
+    br .iu_ack
+.iu_acked:
     ldn r0, r15
     addi r15, 8
     ldi64 r11, 0xFFFF_FF00_0000_040C
@@ -14331,8 +14353,9 @@ secondary_idle_loop:
 ;  message (an XT), stores it in worker_xt_table, ACKs the IPI,
 ;  and returns.  The secondary_idle_loop picks up the XT.
 ;
-;  For core 0 (which runs the Forth REPL), the handler just stores
-;  the XT and returns — the user can poll with IPI-STATUS.
+;  Core 0 runs the Forth REPL with interrupts masked, so this handler
+;  does not run there: an IPI to core 0 is a wake-up that idle_until
+;  acknowledges.
 ; =====================================================================
 ipi_handler:
     ; ---- Save registers we'll use ----

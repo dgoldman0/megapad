@@ -6111,6 +6111,43 @@ class TestBIOSIdle(unittest.TestCase):
         self.assertTrue(worker.idle)
         self.assertEqual(worker.wake_ms, 0)
 
+    def test_an_ipi_wakes_core_zero_and_is_acknowledged(self):
+        mc = TestMulticore(methodName="test_core_status_word")
+        sys_obj, buf = mc._boot_multicore(num_cores=2)
+        self._type(sys_obj, ": PING 2 IDLE-MS 0 0 IPI-SEND ;")
+        self._type(
+            sys_obj,
+            "' PING 1 WAKE-CORE 1000 IDLE-MS "
+            '." W=" MS@ . ." P=" IPI-STATUS .',
+        )
+        self.assertNotEqual(sys_obj.cpu.wake_ms, 0)
+        start = sys_obj.rtc.uptime_ms
+        # Settling proves core 0 sleeps again in the key wait afterwards:
+        # an unacknowledged IPI would hold every later IDL awake.
+        self._sleep_for(sys_obj, 2)
+        match = re.search(r"W=(\d+) P=(\d+) ", uart_text(buf))
+        self.assertIsNotNone(match)
+        self.assertLess(int(match.group(1)), start + 1000)
+        self.assertEqual(match.group(2), "0")
+        self.assertTrue(sys_obj.cpu.idle)
+
+    def test_an_ipi_sent_before_the_sleep_ends_it_at_once(self):
+        mc = TestMulticore(methodName="test_core_status_word")
+        sys_obj, buf = mc._boot_multicore(num_cores=2)
+        self._type(sys_obj, ": PING 0 0 IPI-SEND ;")
+        self._type(sys_obj, ": DONE? BEGIN 1 CORE-STATUS 0= UNTIL ;")
+        start = sys_obj.rtc.uptime_ms
+        self._type(
+            sys_obj,
+            "' PING 1 WAKE-CORE DONE? "
+            '." B=" IPI-STATUS . 1000 IDLE-MS ." A=" IPI-STATUS . MS@ .',
+        )
+        match = re.search(r"B=(\d+) A=(\d+) (\d+) ", uart_text(buf))
+        self.assertIsNotNone(match)
+        self.assertEqual(match.group(1, 2), ("2", "0"))
+        self.assertLess(int(match.group(3)), start + 1000)
+        self.assertTrue(sys_obj.cpu.idle)
+
 class TestBIOSTileModes(unittest.TestCase):
     """Tile format words and the TMODE/TCTRL register widths."""
 

@@ -655,6 +655,10 @@ Out-of-topology IDs fail without consuming their operand. `WAKE-CORE` always
 fails without consuming either XT or core ID, because no valid secondary
 target exists. It never resolves or executes the XT and creates no host thread,
 worker slot, mailbox, IPI, asynchronous completion, or hidden no-op success.
+`IPI-SEND`, which follows `DICT-INDEX-NOTIFY!` at the frontier, fails the same
+way for every core ID, without consuming its message or core operand: no IPI
+exists in this profile, so it cannot wake a core. Code that only another core
+runs, such as a worker telling core 0 its job is done, may still name it.
 
 It also has no micro-core cluster. `CLUSTER-EN@` returns zero, and
 `CLUSTER-EN!` accepts only zero as an idempotent disable; a nonzero mask fails
