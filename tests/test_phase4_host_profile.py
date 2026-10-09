@@ -172,7 +172,7 @@ def test_phase4_host_profile_is_opt_in_and_reconciles_accounting():
         probe = result["host_profile_probe"]
         assert probe is not None
         assert probe["schema"] == "megapad.phase4-concurrency-host-profile"
-        assert probe["schema_version"] == 17
+        assert probe["schema_version"] == 18
         assert probe["architectural_hash_scope"] == "excluded_host_only"
         assert not probe["used_for_throughput"]
         assert all(probe["validation"].values())
@@ -347,7 +347,7 @@ def test_single_core_profile_attributes_work_across_worker_counts():
     assert all(report["validation"].values())
     for result in report["results"]:
         probe = result["host_profile_probe"]
-        assert probe["schema_version"] == 17
+        assert probe["schema_version"] == 18
         assert all(probe["validation"].values())
         native = probe["native_snapshot"]
         counts = native["counts"]

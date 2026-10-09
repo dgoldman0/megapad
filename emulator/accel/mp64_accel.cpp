@@ -4439,6 +4439,8 @@ struct ConcurrencyProfileCounters {
     uint64_t batches = 0;
     uint64_t prepare_batch_calls = 0;
     uint64_t scheduler_rounds = 0;
+    uint64_t lockstep_rounds = 0;
+    uint64_t lockstep_passes = 0;
     uint64_t uncontended_rounds = 0;
     uint64_t uncontended_dispatches = 0;
     uint64_t uncontended_steps = 0;
@@ -5701,6 +5703,12 @@ struct SystemState {
     // coordinator's.  Clearing this keeps such rounds on the coordinator so
     // tests can compare the two.
     bool lone_core_fast_path = true;
+    // Host execution strategy only.  A round with several awake cores of a
+    // cluster-free topology runs the coordinator's lock-step passes directly
+    // on the scheduler thread; its guest-visible results equal the generic
+    // coordinator's.  Clearing this keeps such rounds on the coordinator so
+    // tests can compare the two.
+    bool lockstep_fast_path = true;
     int configured_worker_count = 1;
     // Declared last so ordinary reverse member destruction also stops helpers
     // before any state they will use in later Phase 3 elements.
@@ -15461,6 +15469,15 @@ static void run_uncontended_single_core_round(
     SystemBatchResult& result,
     CoreFrontierOutcome& outcome);
 
+static void run_lockstep_core_round(
+    SystemState& system,
+    const std::vector<CoreFrontierReservation>& reservations,
+    const std::vector<StepCallbacks>& callbacks,
+    const py::function& settle_continuation,
+    const py::function& settle_dispatch_error,
+    SystemBatchResult& result,
+    CoreFrontierOutcome& outcome);
+
 static int pending_enabled_core_interrupt(
         const SystemState& system,
         const CPUState& core) {
@@ -16238,12 +16255,30 @@ static SystemBatchResult run_native_system_batch(
                         static_cast<std::size_t>(
                             reservations.front().core_index)])
             );
+        // Any other round of a topology whose execution cores are all full
+        // cores runs the coordinator's lock-step passes directly on the
+        // scheduler thread.
+        const bool lockstep_round =
+            !lone_full_core_round &&
+            system.lockstep_fast_path &&
+            system.cluster_states.empty() &&
+            system.execution_cores.size() ==
+                system.cores.size();
         CoreFrontierOutcome outcome;
         try {
             if (lone_full_core_round) {
                 run_uncontended_single_core_round(
                     system,
                     reservations.front(),
+                    callbacks,
+                    settle_continuation,
+                    settle_dispatch_error,
+                    result,
+                    outcome);
+            } else if (lockstep_round) {
+                run_lockstep_core_round(
+                    system,
+                    reservations,
                     callbacks,
                     settle_continuation,
                     settle_dispatch_error,
@@ -27304,6 +27339,738 @@ static void run_parallel_core_round(
     }
 }
 
+// ---------------------------------------------------------------------------
+//  Lock-step rounds on the scheduler thread
+// ---------------------------------------------------------------------------
+//
+// run_parallel_core_round defines a round with several awake cores as a
+// series of passes.  In each pass every participating core runs its private
+// prefix, the register-only instructions before its next shared or I-cache
+// boundary, and then each core in cyclic order executes that one boundary
+// instruction, settled as the coordinator settles it.  For a topology whose
+// execution cores are all full cores, run_lockstep_core_round runs the same
+// passes in the same order directly on the scheduler thread, with no worker
+// wave, frontier admission, per-pass allocation or Python lock exchange.
+//
+// The round holds one memory lease.  Each core turn registers its own
+// ownership record on that lease, whose CPU permission the turn's
+// CPUExecutionGuard consumes, so every existing execution guard applies
+// unchanged and a Python continuation runs with the ownership it has under
+// the coordinator.  The Python lock is held only while Python runs.
+//
+// The coordinator captures a checkpoint before a private prefix mutates its
+// core and restores it only when a host invariant fails inside that prefix.
+// Here such a failure leaves the prefix's partial state and aborts the round
+// as the coordinator does.  No guest program reaches that path: a private
+// prefix executes only instructions the classifier proves register-only.
+
+// One core's part of one pass: its private prefix, then the pass totals that
+// the coordinator's subfrontier result holds for it.
+struct LockstepTurn {
+    std::size_t index = 0;
+    int core_index = -1;
+    int64_t max_steps = 0;
+
+    int64_t prefix_steps = 0;
+    int64_t prefix_cycles = 0;
+    PrivateCoreStopReason prefix_stop =
+        PrivateCoreStopReason::INSTRUCTION_LIMIT;
+    int trap_id = -1;
+    bool prefix_failed = false;
+
+    int64_t steps = 0;
+    int64_t cycles = 0;
+    uint64_t dispatches = 0;
+    uint64_t continuations = 0;
+    int stop_reason = -1;
+    uint64_t stop_count = 0;
+    bool boundary_pending = false;
+    bool dispatch_boundary = false;
+    bool terminal = false;
+};
+
+// One core turn's claim on the round's memory lease.  Its CPU permission is
+// the one a coordinator boundary's logical guard grants; the turn's
+// CPUExecutionGuard consumes it.
+class LockstepTurnScope {
+public:
+    LockstepTurnScope(
+            CPUState& core,
+            const std::shared_ptr<SharedMemoryLease>& lease)
+        : owner_{
+              core.memory,
+              &core,
+              lease,
+              thread_shared_memory_owners,
+          } {
+        thread_shared_memory_owners = &owner_;
+    }
+
+    ~LockstepTurnScope() {
+        unlink_thread_owner(
+            thread_shared_memory_owners,
+            owner_);
+    }
+
+    LockstepTurnScope(const LockstepTurnScope&) = delete;
+    LockstepTurnScope& operator=(
+        const LockstepTurnScope&) = delete;
+
+private:
+    ThreadSharedMemoryOwner owner_;
+};
+
+// Run TURN's private prefix exactly as a coordinator private command runs
+// it: at most max_steps register-only instructions, stopping before the
+// first shared or I-cache boundary.  The caller owns the core's execution.
+static void run_lockstep_private_prefix(
+        CPUState& core,
+        const StepCallbacks& private_callbacks,
+        LockstepTurn& turn) {
+    for (int64_t step = 0; step < turn.max_steps; step++) {
+        if (core.halted) {
+            turn.prefix_stop = PrivateCoreStopReason::HALTED;
+            return;
+        }
+        if (core.idle) {
+            turn.prefix_stop = PrivateCoreStopReason::IDLE;
+            return;
+        }
+        const PrivateInstructionDisposition disposition =
+            classify_private_full_core_instruction(core);
+        if (
+            disposition ==
+            PrivateInstructionDisposition::ICACHE_BOUNDARY
+        ) {
+            turn.prefix_stop =
+                PrivateCoreStopReason::ICACHE_BOUNDARY;
+            return;
+        }
+        if (
+            disposition ==
+            PrivateInstructionDisposition::SHARED_INSTRUCTION
+        ) {
+            turn.prefix_stop =
+                PrivateCoreStopReason::SHARED_INSTRUCTION;
+            return;
+        }
+        try {
+            const int cycles =
+                step_one(core, private_callbacks);
+            turn.prefix_cycles += cycles;
+            turn.prefix_steps++;
+        } catch (const PrivateSharedAccessSignal&) {
+            throw std::logic_error(
+                "private instruction reached a shared "
+                "bus access");
+        } catch (const std::runtime_error& error) {
+            const std::string what = error.what();
+            if (what == "TRAP:RESET") {
+                turn.prefix_stop =
+                    PrivateCoreStopReason::RESET;
+                return;
+            }
+            if (
+                what.size() >= 5 &&
+                what.compare(0, 5, "TRAP:") == 0
+            ) {
+                turn.prefix_stop =
+                    PrivateCoreStopReason::TRAP;
+                turn.trap_id =
+                    trap_id_from_runtime_error(what);
+                return;
+            }
+            throw;
+        }
+        if (core.halted) {
+            turn.prefix_stop = PrivateCoreStopReason::HALTED;
+            return;
+        }
+        if (core.idle) {
+            turn.prefix_stop = PrivateCoreStopReason::IDLE;
+            return;
+        }
+    }
+    turn.prefix_stop =
+        PrivateCoreStopReason::INSTRUCTION_LIMIT;
+}
+
+// Execute and settle the one boundary a pass gives TURN's core, exactly as
+// the coordinator does.  The caller holds the turn's ownership record and
+// has released the Python lock, which is taken only to run Python.
+static CoordinatorBoundarySettlement run_lockstep_boundary(
+        SystemState& system,
+        CPUState& core,
+        const LockstepTurn& turn,
+        const StepCallbacks& callbacks,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error) {
+    PrivateCoreResult prefix;
+    prefix.core_index = turn.core_index;
+    prefix.steps_executed = turn.prefix_steps;
+    prefix.total_cycles = turn.prefix_cycles;
+    prefix.stop_reason = turn.prefix_stop;
+    prefix.trap_id = turn.trap_id;
+    if (
+        turn.prefix_stop == PrivateCoreStopReason::TRAP ||
+        turn.prefix_stop == PrivateCoreStopReason::RESET
+    ) {
+        py::gil_scoped_acquire acquire;
+        return settle_private_core_terminal(
+            system,
+            turn.core_index,
+            prefix,
+            turn.max_steps,
+            settle_continuation);
+    }
+    if (
+        turn.prefix_stop !=
+            PrivateCoreStopReason::ICACHE_BOUNDARY &&
+        turn.prefix_stop !=
+            PrivateCoreStopReason::SHARED_INSTRUCTION
+    ) {
+        throw std::logic_error(
+            "private frontier left an unsupported "
+            "coordinator boundary");
+    }
+
+    RunResult raw{};
+    try {
+        SystemBatchExecutionPermissionGuard
+            execution_permission(
+                system.native_batch_active);
+        CPUExecutionGuard execution_guard(core);
+        raw = run_steps(core, callbacks, 1);
+    } catch (py::error_already_set& error) {
+        py::gil_scoped_acquire acquire;
+        return settle_coordinator_dispatch_error(
+            turn.core_index,
+            prefix,
+            turn.max_steps,
+            settle_dispatch_error,
+            error);
+    }
+    if (coordinator_dispatch_requires_python(raw)) {
+        py::gil_scoped_acquire acquire;
+        return finalize_coordinator_instruction(
+            core,
+            turn.core_index,
+            prefix,
+            turn.max_steps,
+            settle_continuation,
+            raw);
+    }
+    return finalize_coordinator_instruction(
+        core,
+        turn.core_index,
+        prefix,
+        turn.max_steps,
+        settle_continuation,
+        raw);
+}
+
+static void run_lockstep_core_round(
+        SystemState& system,
+        const std::vector<
+            CoreFrontierReservation>& reservations,
+        const std::vector<StepCallbacks>& callbacks,
+        const py::function& settle_continuation,
+        const py::function& settle_dispatch_error,
+        SystemBatchResult& result,
+        CoreFrontierOutcome& outcome) {
+    if (reservations.empty())
+        return;
+    ConcurrencyProfileCounters& profile =
+        system.concurrency_profile;
+    const bool host_profile_enabled =
+        profile.enabled;
+    if (host_profile_enabled) {
+        host_saturating_increment(
+            profile.scheduler_rounds);
+        host_saturating_increment(
+            profile.lockstep_rounds);
+    }
+    HostProfileWallTimer round_timer(
+        host_profile_enabled,
+        &profile.scheduler_round_ns);
+
+    const std::size_t core_count =
+        system.execution_cores.size();
+    if (
+        !system.cluster_states.empty() ||
+        core_count != system.cores.size() ||
+        callbacks.size() != core_count
+    ) {
+        throw std::logic_error(
+            "lock-step round has an invalid topology");
+    }
+
+    const std::size_t count = reservations.size();
+    int64_t total_reserved = 0;
+    std::vector<bool> seen_cores(core_count, false);
+    std::vector<int64_t> remaining_steps;
+    std::vector<int64_t> round_credit;
+    remaining_steps.reserve(count);
+    round_credit.reserve(count);
+    int64_t round_quantum = 0;
+    for (
+        const CoreFrontierReservation& reservation :
+        reservations
+    ) {
+        if (
+            reservation.core_index < 0 ||
+            reservation.core_index >=
+                static_cast<int>(core_count) ||
+            reservation.max_steps < 0 ||
+            reservation.max_steps >
+                std::numeric_limits<int>::max() ||
+            seen_cores[
+                static_cast<std::size_t>(
+                    reservation.core_index)]
+        ) {
+            throw std::logic_error(
+                "lock-step round reservation is invalid");
+        }
+        seen_cores[
+            static_cast<std::size_t>(
+                reservation.core_index)] = true;
+        total_reserved = checked_scheduler_add(
+            total_reserved,
+            reservation.max_steps,
+            "round reservation accounting");
+        remaining_steps.push_back(reservation.max_steps);
+        round_credit.push_back(reservation.max_steps);
+        round_quantum = std::max(
+            round_quantum,
+            reservation.max_steps);
+    }
+    std::vector<int64_t> per_reservation_cycles(count, 0);
+    std::vector<bool> done(count, false);
+    std::vector<bool> dispatch_open(count, false);
+    std::vector<bool> reservation_progress(count, false);
+    const int round_start_cursor =
+        system.scheduler_cursor;
+
+    // The round rules below are the coordinator's, from
+    // run_parallel_core_round, for a topology without clusters.
+    auto refresh_round_cursor = [&]() {
+        int cursor = round_start_cursor;
+        for (std::size_t index = 0; index < count; index++) {
+            if (reservation_progress[index]) {
+                cursor =
+                    (
+                        reservations[index].core_index +
+                        1
+                    ) % static_cast<int>(core_count);
+            }
+        }
+        system.scheduler_cursor = cursor;
+    };
+
+    auto close_dispatch = [&](
+            std::size_t index,
+            int stop_reason) {
+        if (!dispatch_open[index])
+            return;
+        CoreDispatchResult completion;
+        completion.dispatches = 1;
+        if (
+            stop_reason >= RUN_LIMIT &&
+            stop_reason <= RUN_RESET
+        ) {
+            completion.stop_reasons[
+                static_cast<std::size_t>(
+                    stop_reason)] = 1;
+        }
+        merge_core_dispatch(
+            result,
+            reservations[index].core_index,
+            completion);
+        dispatch_open[index] = false;
+    };
+
+    // Credit an earlier core cannot use flows forward to later cyclic peers
+    // whose reservation the aggregate budget truncated, up to the common
+    // round quantum, and never backward.
+    auto release_unused_credit = [&](std::size_t donor) {
+        int64_t available = remaining_steps[donor];
+        if (available == 0)
+            return;
+        if (
+            available < 0 ||
+            available > round_credit[donor]
+        ) {
+            throw std::logic_error(
+                "lock-step round has invalid unused credit");
+        }
+        remaining_steps[donor] = 0;
+        round_credit[donor] -= available;
+        for (
+            std::size_t recipient = donor + 1;
+            recipient < count && available > 0;
+            recipient++
+        ) {
+            if (done[recipient])
+                continue;
+            const int64_t headroom =
+                round_quantum - round_credit[recipient];
+            if (headroom <= 0)
+                continue;
+            const int64_t transferred =
+                std::min(available, headroom);
+            round_credit[recipient] += transferred;
+            remaining_steps[recipient] += transferred;
+            available -= transferred;
+        }
+    };
+
+    auto earlier_reservation_unfinished = [&](
+            std::size_t index) {
+        for (std::size_t earlier = 0; earlier < index; earlier++) {
+            if (!done[earlier])
+                return true;
+        }
+        return false;
+    };
+
+    std::vector<LockstepTurn> turns;
+    turns.reserve(count);
+
+    // Merge a pass into the round, as the coordinator absorbs a subfrontier:
+    // after a complete pass, and after a failed one before its exception
+    // leaves the round.
+    auto absorb_pass = [&]() {
+        for (const LockstepTurn& turn : turns) {
+            const std::size_t index = turn.index;
+            if (
+                turn.steps < 0 ||
+                turn.steps > remaining_steps[index] ||
+                turn.cycles < 0
+            ) {
+                throw std::logic_error(
+                    "lock-step pass returned invalid round "
+                    "progress");
+            }
+            remaining_steps[index] -= turn.steps;
+            per_reservation_cycles[index] =
+                checked_scheduler_add(
+                    per_reservation_cycles[index],
+                    turn.cycles,
+                    "cycle accounting");
+            outcome.steps = checked_scheduler_add(
+                outcome.steps,
+                turn.steps,
+                "round aggregate instruction accounting");
+            if (outcome.steps > total_reserved) {
+                throw std::logic_error(
+                    "lock-step round exceeded its reservation");
+            }
+            outcome.cycles = std::max(
+                outcome.cycles,
+                per_reservation_cycles[index]);
+            CoreDispatchResult progress;
+            progress.steps = turn.steps;
+            progress.cycles = turn.cycles;
+            merge_core_dispatch(
+                result,
+                turn.core_index,
+                progress);
+            if (turn.steps > 0)
+                reservation_progress[index] = true;
+            if (
+                turn.continuations >
+                    std::numeric_limits<uint64_t>::max() -
+                        result.continuations
+            ) {
+                throw std::overflow_error(
+                    "native scheduler continuation "
+                    "counter overflow");
+            }
+            result.continuations += turn.continuations;
+        }
+        refresh_round_cursor();
+    };
+
+    // A private instruction that reached the bus would be a classifier fault,
+    // exactly as in a coordinator private command.
+    StepCallbacks private_callbacks{};
+    PrivateSharedAccessSentinel shared_access_sentinel;
+    private_callbacks.bus_access =
+        &shared_access_sentinel;
+
+    system.mappings_sealed = true;
+    py::gil_scoped_release release;
+    const std::shared_ptr<SharedMemoryLease> lease =
+        std::make_shared<SharedMemoryLease>(
+            system.shared_memory,
+            "CPUState memory is already in use");
+
+    while (true) {
+        turns.clear();
+        for (std::size_t index = 0; index < count; index++) {
+            if (done[index])
+                continue;
+            if (remaining_steps[index] == 0) {
+                if (earlier_reservation_unfinished(index))
+                    continue;
+                close_dispatch(index, RUN_LIMIT);
+                done[index] = true;
+                continue;
+            }
+            const int core_index =
+                reservations[index].core_index;
+            CPUState& core =
+                *system.execution_cores[
+                    static_cast<std::size_t>(core_index)];
+            if (core.halted || core.idle) {
+                close_dispatch(
+                    index,
+                    core.halted ? RUN_HALT : RUN_IDLE);
+                release_unused_credit(index);
+                done[index] = true;
+                continue;
+            }
+            if (
+                pending_enabled_core_interrupt(
+                    system, core) >= 0
+            ) {
+                close_dispatch(index, RUN_LIMIT);
+                release_unused_credit(index);
+                done[index] = true;
+                outcome.interrupt_boundary = true;
+                outcome.interrupt_cores.push_back(
+                    core_index);
+                continue;
+            }
+            if (!dispatch_open[index]) {
+                checked_scheduler_increment(
+                    system.native_dispatches,
+                    "dispatch counter");
+                dispatch_open[index] = true;
+            }
+            LockstepTurn turn;
+            turn.index = index;
+            turn.core_index = core_index;
+            turn.max_steps = remaining_steps[index];
+            turns.push_back(turn);
+        }
+        if (turns.empty())
+            break;
+        if (host_profile_enabled) {
+            host_saturating_increment(
+                profile.lockstep_passes);
+        }
+
+        try {
+            // Every private prefix runs before the first boundary, so a
+            // failure at any boundary leaves every peer's prefix applied,
+            // as under the coordinator.
+            const LockstepTurn* failed = nullptr;
+            std::string failure;
+            for (LockstepTurn& turn : turns) {
+                CPUState& core =
+                    *system.execution_cores[
+                        static_cast<std::size_t>(
+                            turn.core_index)];
+                try {
+                    LockstepTurnScope turn_scope(
+                        core, lease);
+                    SystemBatchExecutionPermissionGuard
+                        execution_permission(
+                            system.native_batch_active);
+                    CPUExecutionGuard execution_guard(core);
+                    run_lockstep_private_prefix(
+                        core,
+                        private_callbacks,
+                        turn);
+                } catch (const std::exception& error) {
+                    turn.prefix_failed = true;
+                    if (failed == nullptr) {
+                        failed = &turn;
+                        failure = error.what();
+                    }
+                } catch (...) {
+                    turn.prefix_failed = true;
+                    if (failed == nullptr) {
+                        failed = &turn;
+                        failure =
+                            "unknown private execution failure";
+                    }
+                }
+            }
+
+            for (LockstepTurn& turn : turns) {
+                if (turn.prefix_failed)
+                    continue;
+                turn.steps = turn.prefix_steps;
+                turn.cycles = turn.prefix_cycles;
+                turn.boundary_pending = true;
+                if (
+                    turn.prefix_stop ==
+                        PrivateCoreStopReason::
+                            INSTRUCTION_LIMIT ||
+                    turn.prefix_stop ==
+                        PrivateCoreStopReason::HALTED ||
+                    turn.prefix_stop ==
+                        PrivateCoreStopReason::IDLE
+                ) {
+                    int reason = RUN_LIMIT;
+                    if (turn.prefix_steps < turn.max_steps) {
+                        if (
+                            turn.prefix_stop ==
+                            PrivateCoreStopReason::HALTED
+                        ) {
+                            reason = RUN_HALT;
+                        } else if (
+                            turn.prefix_stop ==
+                            PrivateCoreStopReason::IDLE
+                        ) {
+                            reason = RUN_IDLE;
+                        }
+                    }
+                    turn.dispatches = 1;
+                    turn.stop_reason = reason;
+                    turn.stop_count = 1;
+                    turn.terminal =
+                        turn.prefix_stop !=
+                        PrivateCoreStopReason::
+                            INSTRUCTION_LIMIT;
+                    turn.boundary_pending = false;
+                }
+            }
+            if (failed != nullptr) {
+                throw std::runtime_error(
+                    "private command failed on core " +
+                    std::to_string(failed->core_index) +
+                    ": " +
+                    failure);
+            }
+
+            for (LockstepTurn& turn : turns) {
+                if (!turn.boundary_pending)
+                    continue;
+                CPUState& core =
+                    *system.execution_cores[
+                        static_cast<std::size_t>(
+                            turn.core_index)];
+                // An earlier boundary's Python continuation may have
+                // halted or idled this core.
+                if (core.halted || core.idle) {
+                    turn.terminal = true;
+                    turn.boundary_pending = false;
+                    continue;
+                }
+                CoordinatorBoundarySettlement settlement;
+                {
+                    LockstepTurnScope turn_scope(
+                        core, lease);
+                    settlement = run_lockstep_boundary(
+                        system,
+                        core,
+                        turn,
+                        callbacks[
+                            static_cast<std::size_t>(
+                                turn.core_index)],
+                        settle_continuation,
+                        settle_dispatch_error);
+                }
+                if (
+                    settlement.total_steps <
+                        turn.prefix_steps ||
+                    settlement.total_cycles <
+                        turn.prefix_cycles
+                ) {
+                    throw std::logic_error(
+                        "coordinator settlement lost a "
+                        "private prefix");
+                }
+                turn.steps = settlement.total_steps;
+                turn.cycles = settlement.total_cycles;
+                turn.dispatches++;
+                turn.continuations +=
+                    settlement.continuations;
+                if (
+                    settlement.stop_reason >= RUN_LIMIT &&
+                    settlement.stop_reason <= RUN_RESET
+                ) {
+                    turn.stop_reason =
+                        settlement.stop_reason;
+                    turn.stop_count++;
+                }
+                turn.dispatch_boundary =
+                    settlement.closes_dispatch;
+                turn.terminal = settlement.terminal;
+                turn.boundary_pending = false;
+            }
+        } catch (...) {
+            absorb_pass();
+            throw;
+        }
+        absorb_pass();
+
+        for (const LockstepTurn& turn : turns) {
+            const std::size_t index = turn.index;
+            if (
+                turn.stop_count > 1 ||
+                turn.dispatches > 1
+            ) {
+                throw std::logic_error(
+                    "lock-step pass closed one dispatch "
+                    "more than once");
+            }
+            const int public_stop_reason =
+                turn.stop_count != 0
+                ? turn.stop_reason
+                : -1;
+            if (turn.dispatch_boundary)
+                close_dispatch(index, public_stop_reason);
+            if (turn.terminal) {
+                if (!turn.dispatch_boundary)
+                    close_dispatch(index, public_stop_reason);
+                release_unused_credit(index);
+                done[index] = true;
+                continue;
+            }
+            if (remaining_steps[index] == 0) {
+                if (earlier_reservation_unfinished(index))
+                    continue;
+                if (!turn.dispatch_boundary)
+                    close_dispatch(index, RUN_LIMIT);
+                done[index] = true;
+                continue;
+            }
+            if (
+                !turn.dispatch_boundary &&
+                public_stop_reason != RUN_LIMIT
+            ) {
+                throw std::logic_error(
+                    "lock-step pass left an unexplained "
+                    "open dispatch");
+            }
+        }
+
+        if (unbounded_device_timing_active(system)) {
+            // A pass may start a device operation; no further pass may run
+            // against the same unadvanced device time.
+            for (std::size_t index = 0; index < count; index++) {
+                if (done[index])
+                    continue;
+                close_dispatch(index, RUN_LIMIT);
+                done[index] = true;
+            }
+            break;
+        }
+    }
+
+    for (std::size_t index = 0; index < count; index++) {
+        if (dispatch_open[index]) {
+            throw std::logic_error(
+                "lock-step round returned with an open "
+                "dispatch");
+        }
+    }
+}
+
 static const char* private_full_core_stop_reason_name(
         PrivateCoreStopReason reason) {
     switch (reason) {
@@ -27503,6 +28270,10 @@ static py::dict concurrency_profile_snapshot_dict(
         profile.prepare_batch_calls;
     counts["scheduler_rounds"] =
         profile.scheduler_rounds;
+    counts["lockstep_rounds"] =
+        profile.lockstep_rounds;
+    counts["lockstep_passes"] =
+        profile.lockstep_passes;
     counts["uncontended_rounds"] =
         profile.uncontended_rounds;
     counts["uncontended_dispatches"] =
@@ -27766,7 +28537,7 @@ static py::dict concurrency_profile_snapshot_dict(
         CPUState::ICACHE_LINE_BYTES;
 
     py::dict result;
-    result["schema_version"] = 17;
+    result["schema_version"] = 18;
     result["enabled"] = profile.enabled;
     result["generation"] = profile.generation;
     result["architectural_hash_scope"] =
@@ -36077,6 +36848,16 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 auto scheduler_guard =
                     acquire_system_scheduler_lock(system);
                 system.lone_core_fast_path = enabled;
+            })
+        .def_property(
+            "lockstep_fast_path",
+            [](const SystemState& system) {
+                return system.lockstep_fast_path;
+            },
+            [](SystemState& system, bool enabled) {
+                auto scheduler_guard =
+                    acquire_system_scheduler_lock(system);
+                system.lockstep_fast_path = enabled;
             })
         .def_property_readonly(
             "mem_size",

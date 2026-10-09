@@ -102,7 +102,7 @@ target:
 
 
 def _assert_block_cache_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 17
+    assert snapshot["schema_version"] == 18
     assert dict(snapshot["single_core_block_cache"]) == {
         "kind": "set-associative-exact-icache-span",
         "sets": 1_024,

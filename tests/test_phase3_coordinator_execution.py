@@ -16,6 +16,23 @@ LINE_BYTES = 16
 SYSINFO_SINK = MMIO_BASE + SYSINFO_BASE
 INT64_MAX = (1 << 63) - 1
 
+# Every oracle here runs on the generic coordinator and on the lock-step
+# executor that replaces it for cluster-free topologies.  Only worker-wave
+# diagnostics differ: the lock-step executor runs no wave.
+_lockstep_rounds = False
+
+
+@pytest.fixture(
+    autouse=True,
+    params=(False, True),
+    ids=("coordinator", "lockstep"),
+)
+def _round_path(request):
+    global _lockstep_rounds
+    _lockstep_rounds = request.param
+    yield
+    _lockstep_rounds = False
+
 
 def _system(
     *,
@@ -23,7 +40,7 @@ def _system(
     worker_count: int,
     num_clusters: int = 0,
 ) -> MegapadSystem:
-    return MegapadSystem(
+    system = MegapadSystem(
         ram_size=4096,
         num_cores=num_cores,
         num_clusters=num_clusters,
@@ -32,6 +49,8 @@ def _system(
         vram_size=0,
         worker_count=worker_count,
     )
+    system._native_system.lockstep_fast_path = _lockstep_rounds
+    return system
 
 
 def _prime_instruction_cache(
@@ -205,6 +224,15 @@ def test_complete_logical_frontier_is_lane_width_independent() -> None:
             (2, SYSINFO_SINK, 0x42),
         ),
     )
+    if _lockstep_rounds:
+        assert observed[1][1] == (0, (0,), (0,))
+        assert observed[2][1] == (0, (0, 0), (0, 0))
+        assert observed[4][1] == (
+            0,
+            (0, 0, 0, 0),
+            (0, 0, 0, 0),
+        )
+        return
     assert observed[1][1] == (4, (4,), (4,))
     assert observed[2][1] == (2, (2, 2), (2, 2))
     assert observed[4][1] == (
@@ -607,7 +635,7 @@ def test_immediate_boundary_bypass_retains_every_peer_private_prefix() -> None:
     )
     assert reference[3][2] == reference[8]
     assert reference[7] == (0, 1)
-    assert reference[9:] == (1, 1)
+    assert reference[9:] == ((0, 0) if _lockstep_rounds else (1, 1))
 
 
 def test_exact_cycle_ceiling_does_not_mask_callback_failure() -> None:
