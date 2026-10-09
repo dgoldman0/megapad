@@ -15941,6 +15941,17 @@ static void service_unbounded_native_dma(
     const std::function<
         void(const UnboundedSettlementRequest&)>& settle_round);
 
+// A SHA3/WOTS operation in flight or NIC cycle DMA makes device time a
+// scheduling boundary: unbounded execution settles device time only between
+// rounds, so execution must not keep running against an unadvanced device.
+static bool unbounded_device_timing_active(
+        const SystemState& system) {
+    return
+        system.shared_crypto
+            .requires_unbounded_timing_boundary() ||
+        system.shared_nic.has_cycle_dma_work();
+}
+
 // A full core of a cluster-free topology gets its exact-single plan cache on
 // its first lone round.  An allocation failure leaves the round on the
 // generic coordinator, whose guest-visible results are the same.
@@ -16204,12 +16215,20 @@ static SystemBatchResult run_native_system_batch(
         // that core alone on the exact single-core path, as an exact-single
         // topology always does.  No peer executes inside the round, so the
         // coordinator's private/shared routing has no accesses to order.
+        //
+        // On a multi-core machine, a device fence already active at round
+        // start makes the coordinator retire one whole pass before ending the
+        // round, while the lone path would stop after one instruction, so
+        // such a round keeps the coordinator's order.  A fence the lone core
+        // raises itself ends the round right after that instruction on both
+        // paths.  An exact-single topology keeps its own established rule.
         const bool lone_full_core_round =
             uncontended_single_full_core ||
             (
                 system.lone_core_fast_path &&
                 reservations.size() == 1 &&
                 system.cluster_states.empty() &&
+                !unbounded_device_timing_active(system) &&
                 system.execution_cores[
                     static_cast<std::size_t>(
                         reservations.front().core_index)]
@@ -23631,9 +23650,7 @@ execute_single_core_decoded_block_plan(
     const bool profile_enabled = profile.enabled;
     const uint64_t address = block->address;
     const bool timing_active =
-        system.shared_crypto
-            .requires_unbounded_timing_boundary() ||
-        system.shared_nic.has_cycle_dma_work();
+        unbounded_device_timing_active(system);
     if (
         single_core_block_has_terminal_sep(*block) &&
         core.priv_level != 0
@@ -24360,11 +24377,7 @@ execute_single_core_decoded_block_plan(
             exit.completed_instructions++;
             exit.completed_cycles += actual_cycle_cost;
 
-            if (
-                system.shared_crypto
-                    .requires_unbounded_timing_boundary() ||
-                system.shared_nic.has_cycle_dma_work()
-            ) {
+            if (unbounded_device_timing_active(system)) {
                 exit.reason = BlockExitReason::TIMING_BOUNDARY;
                 break;
             }
@@ -24507,11 +24520,7 @@ static void run_uncontended_single_core_segment_impl(
                         "scheduler failure");
                 }
             }
-            if (
-                system.shared_crypto
-                    .requires_unbounded_timing_boundary() ||
-                system.shared_nic.has_cycle_dma_work()
-            ) {
+            if (unbounded_device_timing_active(system)) {
                 segment.crypto_timing_boundary = true;
                 break;
             }
@@ -27262,11 +27271,7 @@ static void run_parallel_core_round(
             }
         }
 
-        if (
-            system.shared_crypto
-                .requires_unbounded_timing_boundary() ||
-            system.shared_nic.has_cycle_dma_work()
-        ) {
+        if (unbounded_device_timing_active(system)) {
             // A parallel subfrontier may retire one coordinator-owned SHA
             // command after its private prefixes.  Do not admit another
             // subfrontier against the same unadvanced device timestamp.
