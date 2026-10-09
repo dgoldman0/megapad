@@ -5731,7 +5731,8 @@ class TestBIOSTACC(unittest.TestCase):
         chain = (
             ("d_wots_chain", "d_latest_store"),
             ("d_latest_store", "d_dict_rollback"),
-            ("d_dict_rollback", "d_dict_index_fetch"),
+            ("d_dict_rollback", "d_dict_index_notify_store"),
+            ("d_dict_index_notify_store", "d_dict_index_fetch"),
             ("d_dict_index_fetch", "d_dict_index_store"),
             ("d_dict_index_store", "d_idle_ms"),
             ("d_idle_ms", "d_idle_until"),
@@ -5769,7 +5770,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 543)
+        self.assertEqual(len(seen), 544)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -15959,7 +15960,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 543)
+        self.assertEqual(len(seen), 544)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -17506,7 +17507,8 @@ class TestBIOSEntropyFill(unittest.TestCase):
         )
         dictionary_acceleration_chain = (
             ("d_latest_store", "d_dict_rollback"),
-            ("d_dict_rollback", "d_dict_index_fetch"),
+            ("d_dict_rollback", "d_dict_index_notify_store"),
+            ("d_dict_index_notify_store", "d_dict_index_fetch"),
             ("d_dict_index_fetch", "d_dict_index_store"),
             ("d_dict_index_store", "d_idle_ms"),
             ("d_idle_ms", "d_idle_until"),
