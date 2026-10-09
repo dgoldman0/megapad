@@ -426,7 +426,7 @@ def test_index_doubles_at_three_quarters_and_frees_the_old_table() -> None:
     assert _execute(runtime, "DICT-INDEX@") == (
         EXTERNAL_BASE,
         1_024,
-        745,
+        746,
         DICT_INDEX_BOUND | DICT_INDEX_AUTHORITATIVE,
     )
     assert runtime.dictionary_index.notification == (768, grow)
@@ -436,7 +436,7 @@ def test_index_doubles_at_three_quarters_and_frees_the_old_table() -> None:
     # A general allocation first, so the grown table does not start at the
     # floor.  The 767th name stays in the boot table.
     assert _execute(runtime, "XMEM-ALLOT", 100) == (floor,)
-    _define_words(runtime, "BELOW", 22)
+    _define_words(runtime, "BELOW", 21)
     assert _execute(runtime, "DICT-INDEX@")[:3] == (EXTERNAL_BASE, 1_024, 767)
 
     _define_words(runtime, "CROSS", 1)
@@ -462,7 +462,7 @@ def test_xmem_reset_rebinds_a_grown_table_at_the_floor() -> None:
     runtime = _runtime_with_external_size(2 << 20)
     floor = EXTERNAL_BASE + 1_024 * 16
     assert _execute(runtime, "XMEM-ALLOT", 100) == (floor,)
-    _define_words(runtime, "GROWN", 23)
+    _define_words(runtime, "GROWN", 22)
     assert _execute(runtime, "DICT-INDEX@")[:2] == (floor + 112, 2_048)
 
     assert _execute(runtime, "XMEM-RESET") == ()
@@ -476,7 +476,7 @@ def test_xmem_reset_rebinds_a_grown_table_at_the_floor() -> None:
     assert _pointer(runtime, "XMEM-HERE") == raised
     assert _pointer(runtime, "XMEM-FLOOR") == raised
     assert _pointer(runtime, "XMEM-FL") == 0
-    for name in (b"GROWN-0", b"GROWN-22", b"_DICT-XMEM-RESET"):
+    for name in (b"GROWN-0", b"GROWN-21", b"_DICT-XMEM-RESET"):
         word = runtime.find(name)
         assert word is not None
         assert _table_probe(runtime, name)[1] == word.header_address

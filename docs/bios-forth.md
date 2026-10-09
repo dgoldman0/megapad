@@ -643,6 +643,13 @@ wait for frames use a short one. A worker core wakes on IPIs, interrupts, and
 its deadline. The BIOS key wait sleeps the same way with no deadline, and
 `NET-IDLE` is `20 IDLE-MS`.
 
+On core 0 an IPI is a wake-up. Core 0 runs with interrupts masked, so no
+handler takes the request, and the sleep acknowledges every IPI pending when
+it ends. Otherwise the request would hold each later sleep awake. Another
+core wakes core 0 with `0 0 IPI-SEND` after it publishes its work, and the
+woken loop checks for that work as usual. An IPI that arrives before the
+sleep starts ends it at once, so none is lost.
+
 ### Instruction faults
 
 An illegal instruction, an alignment fault, or a divide by zero prints one

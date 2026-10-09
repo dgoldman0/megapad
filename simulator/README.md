@@ -30,7 +30,8 @@ The implemented slices provide:
 - an explicit one-core worker capability boundary: `CORE-STATUS 0` reports an
   idle secondary-worker slot, other IDs are rejected, and `WAKE-CORE` rejects
   every request without consuming or executing its XT because no secondary
-  core exists;
+  core exists; `IPI-SEND` likewise rejects every request without consuming
+  its operands, because the profile models no IPI;
 - an explicit no-cluster boundary: the cluster-enable mask remains zero,
   barriers and cluster MPU state are unavailable, `SPAD` returns the native
   sentinel without inventing storage, and `MICRO?` retains the BIOS unsigned

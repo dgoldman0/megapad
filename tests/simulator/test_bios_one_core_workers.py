@@ -118,3 +118,26 @@ def test_worker_words_have_native_order_and_no_hidden_side_effects() -> None:
     assert _timer_state(runtime) == before_timer
     assert runtime.spinlocks.owners == before_locks
     assert runtime.uart_output == before_uart
+
+
+@pytest.mark.parametrize("core_id", (0, 1, MASK64))
+def test_ipi_send_fails_without_consuming_or_signalling(core_id: int) -> None:
+    runtime = MegaForthRuntime()
+    ipi = runtime.find("IPI-SEND")
+    notify = runtime.find("DICT-INDEX-NOTIFY!")
+    assert ipi is not None
+    assert notify is not None
+    assert isinstance(ipi.implementation, PrimitiveDefinition)
+    assert runtime.memory.read64(ipi.header_address) == notify.header_address
+    context = runtime.new_context()
+    context.data.push(0xCAFE)
+    context.data.push(0x1234)
+    context.data.push(core_id)
+    context.returns.push(0xBEEF)
+
+    with pytest.raises(ExecutionError, match="IPI-SEND is unavailable"):
+        runtime.execute("IPI-SEND", context=context)
+
+    assert context.data.snapshot() == (0xCAFE, 0x1234, core_id)
+    assert context.returns.snapshot() == (0xBEEF,)
+    assert not context.suspended

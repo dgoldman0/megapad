@@ -1185,6 +1185,16 @@ def _wake_core_unavailable(context: ExecutionContext) -> None:
     )
 
 
+def _ipi_send_unavailable(context: ExecutionContext) -> None:
+    core_id = context.data.peek()
+    message = context.data.peek(1)
+    raise ExecutionError(
+        "IPI-SEND is unavailable in the one-core hosted profile: no IPI "
+        f"reaches core ID 0x{core_id:016x}; message 0x{message:016x} and "
+        "core ID were not consumed"
+    )
+
+
 def _core_status(context: ExecutionContext) -> None:
     core_id = context.data.peek()
     if core_id != 0:
@@ -2938,6 +2948,10 @@ def install_core(runtime: MegaForthRuntime) -> None:
         b"DICT-INDEX-NOTIFY!",
         lambda context: _dictionary_index_notify_store(runtime, context),
     )
+
+    # IPI-SEND follows.  The one-core profile models no IPI, so like
+    # WAKE-CORE it fails without consuming its message or core ID.
+    runtime.define_primitive(b"IPI-SEND", _ipi_send_unavailable)
 
 
 def _scalar_float_word(service, shape: str, op: int | None):
