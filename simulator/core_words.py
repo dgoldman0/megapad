@@ -2818,7 +2818,6 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
 
     runtime.define_directive(b"[CHAR]", DirectiveKind.BRACKET_CHAR)
-    runtime.define_directive(b"LITERAL", DirectiveKind.LITERAL)
     runtime.define_primitive(b"CHAR", lambda context: _char(runtime, context))
     runtime.define_primitive(b"/MOD", _signed_divmod)
     for name, kind in (
@@ -2953,6 +2952,9 @@ def install_core(runtime: MegaForthRuntime) -> None:
     # IPI-SEND follows.  The one-core profile models no IPI, so like
     # WAKE-CORE it fails without consuming its message or core ID.
     runtime.define_primitive(b"IPI-SEND", _ipi_send_unavailable)
+
+    # LITERAL follows: it compiles the top cell into the open definition.
+    runtime.define_directive(b"LITERAL", DirectiveKind.LITERAL)
 
 
 def _scalar_float_word(service, shape: str, op: int | None):
