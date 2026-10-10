@@ -184,6 +184,7 @@ parameter [4:0] RTC_STATUS   = 5'h19;  // bit0=alarm(W1C), bit1=1Hz(W1C), bit2=1
 parameter [4:0] RTC_ALARM_S  = 5'h1A;  // alarm seconds
 parameter [4:0] RTC_ALARM_M  = 5'h1B;  // alarm minutes
 parameter [4:0] RTC_ALARM_H  = 5'h1C;  // alarm hours
+parameter [4:0] RTC_EPOCH_STAT = 5'h1D; // bit0=wall clock valid (R)
 
 // Storage registers use 6-bit offsets for guarded generation submission.
 parameter [5:0] DISK_CMD      = 6'h00;

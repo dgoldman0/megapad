@@ -80,8 +80,10 @@ The implemented slices provide:
   latch state but no raw MMIO or interrupt delivery;
 - a runtime-local deterministic RTC epoch subwindow at `+0xB08..+0xB0F`, with
   explicit host set/advance controls, low-byte read latching, direct MMIO
-  access, and BIOS `EPOCH@`; deterministic by default, with an explicit
-  monotonic clock binding for the live server;
+  access in which bytes 0-6 stage and byte 7 commits, the read-only
+  wall-clock VALID byte `EPOCH_STAT` at `+0xB1D`, and BIOS `EPOCH@`;
+  deterministic by default, with an explicit monotonic clock binding for the
+  live server;
 - a retained one-core semantic tile service for four integer lane widths plus
   FP16/BF16, the source-required legacy and extended element, reduction,
   index, widening, multiply-accumulate, and transpose operations, low-byte
@@ -1200,7 +1202,7 @@ mutation, sync, or UART output. Focused execution uses pathless in-memory media
 and the explicit runtime epoch; it is not file-backed durability evidence.
 
 The hosted epoch register defaults to zero and changes only through explicit
-host set/advance or admitted direct MMIO writes. Reading its low byte latches
+host set/advance or an admitted direct MMIO commit of byte 7. Reading its low byte latches
 all eight little-endian bytes, and `EPOCH@` reconstructs that latched `u64`.
 There is no automatic scheduling, monotonic-host, or wall-time advance.
 `TICKS@` applies signed `/ 1000`; `MKFILE` then stores only the low 32 bits in

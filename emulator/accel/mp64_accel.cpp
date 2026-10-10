@@ -32861,10 +32861,21 @@ PYBIND11_MODULE(_mp64_accel, m) {
         .def("rtc_init", [](CPUState& s, bool realtime,
                              uint64_t epoch_ms, uint8_t sec,
                              uint8_t min, uint8_t hour, uint8_t day,
-                             uint8_t mon, uint32_t year, uint8_t dow) {
+                             uint8_t mon, uint32_t year, uint8_t dow,
+                             bool epoch_valid) {
                 PublicCPUMutationScope mutation_scope(s);
             s.rtc->init(
-                realtime, epoch_ms, sec, min, hour, day, mon, year, dow);
+                realtime, epoch_ms, sec, min, hour, day, mon, year, dow,
+                epoch_valid);
+        },
+        py::arg("realtime"), py::arg("epoch_ms"), py::arg("sec"),
+        py::arg("min"), py::arg("hour"), py::arg("day"), py::arg("mon"),
+        py::arg("year"), py::arg("dow"),
+        // An explicit initial epoch is a host seed, so it sets the clock.
+        py::arg("epoch_valid") = true)
+        .def("rtc_seed_epoch_ms", [](CPUState& s, uint64_t value) {
+                PublicCPUMutationScope mutation_scope(s);
+            s.rtc->seed_epoch_ms(value);
         })
         .def("rtc_enabled", [](CPUState& s) -> bool {
                 PublicCPUMutationScope mutation_scope(s);
@@ -33128,6 +33139,28 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
                 s.rtc->epoch_latch = v;
             })
+        .def_property("rtc_epoch_valid",
+            [](CPUState& s) -> bool {
+                PublicCPUMutationScope mutation_scope(s);
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->epoch_valid;
+            },
+            [](CPUState& s, bool v) {
+                PublicCPUMutationScope mutation_scope(s);
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->epoch_valid = v;
+            })
+        .def_property("rtc_epoch_stage",
+            [](CPUState& s) -> uint64_t {
+                PublicCPUMutationScope mutation_scope(s);
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                return s.rtc->epoch_stage;
+            },
+            [](CPUState& s, uint64_t v) {
+                PublicCPUMutationScope mutation_scope(s);
+                std::lock_guard<std::mutex> rtc_guard(s.rtc->mutex);
+                s.rtc->epoch_stage = v & 0x00FFFFFFFFFFFFFFULL;
+            })
         .def("rtc_snapshot", [](CPUState& s) {
                 PublicCPUMutationScope mutation_scope(s);
             const auto rtc = s.rtc->snapshot();
@@ -33152,7 +33185,9 @@ PYBIND11_MODULE(_mp64_accel, m) {
                 rtc.ms_prescaler,
                 rtc.sec_prescaler,
                 rtc.uptime_latch,
-                rtc.epoch_latch);
+                rtc.epoch_latch,
+                rtc.epoch_valid,
+                rtc.epoch_stage);
         })
         // ── UART Geometry device ──────────────────────────────
         .def("uart_geom_init", [](CPUState& s, uint16_t cols, uint16_t rows) {

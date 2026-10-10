@@ -833,6 +833,8 @@ def _base_system(
     rtc.realtime = False
     rtc.uptime_ms = 0
     rtc.epoch_ms = DETERMINISTIC_RTC_EPOCH_MS
+    rtc.epoch_valid = True      # the deterministic epoch is a host seed
+    rtc._epoch_stage = 0
     rtc.sec = 0
     rtc.min = 0
     rtc.hour = 0
@@ -1790,6 +1792,8 @@ def _native_device_state(cpu) -> dict:
             "second_prescaler": int(rtc[18]),
             "uptime_latch": int(rtc[19]),
             "epoch_latch": int(rtc[20]),
+            "epoch_valid": bool(rtc[21]),
+            "epoch_stage": int(rtc[22]),
         },
         "uart_geometry": {
             "enabled": bool(cs.uart_geom_enabled()),

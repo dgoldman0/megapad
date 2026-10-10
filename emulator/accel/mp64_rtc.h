@@ -5,6 +5,9 @@
 //  The Python RTC in devices.py remains the reference implementation.  This
 //  device mirrors its observable emulator semantics so that MS@/EPOCH@ and
 //  calendar polling stay inside the C++ batch loop.
+//
+//  Writes to EPOCH bytes 0-6 stage them; the byte-7 write commits all eight
+//  at once and sets the wall-clock VALID bit read at EPOCH_STAT (+0x1D).
 // =========================================================================
 
 #include <chrono>
@@ -41,6 +44,8 @@ struct RTCDevice {
         uint64_t sec_prescaler;
         uint64_t uptime_latch;
         uint64_t epoch_latch;
+        bool epoch_valid;
+        uint64_t epoch_stage;
     };
 
     mutable std::mutex mutex;
@@ -69,6 +74,8 @@ struct RTCDevice {
     uint64_t sec_prescaler = 0;
     uint64_t uptime_latch = 0;
     uint64_t epoch_latch = 0;
+    bool epoch_valid = false;      // a commit or host seed has set the clock
+    uint64_t epoch_stage = 0;      // EPOCH bytes 0-6 awaiting the commit
 
     std::chrono::steady_clock::time_point host_mono_anchor{};
     uint64_t host_uptime_anchor = 0;
@@ -78,7 +85,7 @@ struct RTCDevice {
               uint8_t initial_sec, uint8_t initial_min,
               uint8_t initial_hour, uint8_t initial_day,
               uint8_t initial_mon, uint32_t initial_year,
-              uint8_t initial_dow) {
+              uint8_t initial_dow, bool initial_epoch_valid) {
         std::lock_guard<std::mutex> guard(mutex);
         enabled = true;
         realtime = use_realtime;
@@ -101,6 +108,8 @@ struct RTCDevice {
         sec_prescaler = 0;
         uptime_latch = 0;
         epoch_latch = 0;
+        epoch_valid = initial_epoch_valid;
+        epoch_stage = 0;
         host_uptime_anchor = uptime_ms;
         host_epoch_anchor = epoch_ms;
         if (realtime)
@@ -138,6 +147,16 @@ struct RTCDevice {
         sync_realtime_unlocked();
     }
 
+    // Host seeding sets the wall clock exactly as a guest commit does.
+    void seed_epoch_ms(uint64_t value) {
+        std::lock_guard<std::mutex> guard(mutex);
+        sync_realtime_unlocked();
+        epoch_ms = value;
+        epoch_valid = true;
+        if (realtime)
+            reanchor_host_clock_unlocked();
+    }
+
     uint8_t read8(uint32_t mmio_offset) {
         std::lock_guard<std::mutex> guard(mutex);
         uint32_t off = mmio_offset - RTC_BASE;
@@ -171,17 +190,24 @@ struct RTCDevice {
         if (off == 0x1A) return alarm_sec & 0x3F;
         if (off == 0x1B) return alarm_min & 0x3F;
         if (off == 0x1C) return alarm_hour & 0x1F;
+        if (off == 0x1D) return epoch_valid ? 1 : 0;
         return 0;
     }
 
     void write8(uint32_t mmio_offset, uint8_t value) {
         std::lock_guard<std::mutex> guard(mutex);
         uint32_t off = mmio_offset - RTC_BASE;
-        if (off >= 0x08 && off <= 0x0F) {
-            sync_realtime_unlocked();
+        if (off >= 0x08 && off <= 0x0E) {
             uint32_t shift = 8 * (off - 0x08);
             uint64_t mask = 0xFFULL << shift;
-            epoch_ms = (epoch_ms & ~mask) | (static_cast<uint64_t>(value) << shift);
+            epoch_stage = (epoch_stage & ~mask) |
+                (static_cast<uint64_t>(value) << shift);
+            return;
+        }
+        if (off == 0x0F) {
+            sync_realtime_unlocked();
+            epoch_ms = (static_cast<uint64_t>(value) << 56) | epoch_stage;
+            epoch_valid = true;
             if (realtime)
                 reanchor_host_clock_unlocked();
             return;
@@ -283,6 +309,8 @@ struct RTCDevice {
             sec_prescaler,
             uptime_latch,
             epoch_latch,
+            epoch_valid,
+            epoch_stage,
         };
     }
 

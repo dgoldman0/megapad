@@ -3481,6 +3481,12 @@ class RTC(Device):
     Virtual mode starts at the Unix epoch by default, derives its calendar in
     UTC, and advances only from emulated cycles. Realtime mode defaults to host
     wall time and uses host monotonic time after construction.
+
+    Writes to EPOCH bytes 0-6 only stage them; the byte-7 write commits all
+    eight at once and sets the wall-clock VALID bit (EPOCH_STAT, +0x1D).
+    VALID is clear at reset unless the host seeds the clock: an explicit
+    initial epoch, realtime mode, or ``seed_epoch_ms`` all count as setting
+    it.  Software never clears it.
     """
 
     CLOCK_HZ = 100_000_000   # must match RTL CLOCK_HZ
@@ -3516,6 +3522,10 @@ class RTC(Device):
             ) from exc
         self.uptime_ms: int  = 0
         self.epoch_ms: int   = epoch_ms & ((1 << 64) - 1)
+        self.epoch_valid: bool = (
+            self.realtime or initial_epoch_ms is not None
+        )
+        self._epoch_stage: int = 0    # EPOCH bytes 0-6 awaiting the commit
         self.sec: int   = now.second
         self.min: int   = now.minute
         self.hour: int  = now.hour
@@ -3568,7 +3578,19 @@ class RTC(Device):
             self._sec_prescaler,
             self._uptime_latch,
             self._epoch_latch,
+            self.epoch_valid,
+            self._epoch_stage,
         )
+
+    def seed_epoch_ms(self, value: int) -> None:
+        """Set the wall clock from the host, as a commit does, and mark it valid."""
+        if not 0 <= value < (1 << 64):
+            raise ValueError("epoch must fit in an unsigned 64-bit value")
+        self._sync_realtime()
+        self.epoch_ms = value
+        self.epoch_valid = True
+        if self.realtime:
+            self._reanchor_host_clock()
 
     def _reanchor_host_clock(self):
         self._host_mono_anchor = _time.monotonic()
@@ -3638,18 +3660,22 @@ class RTC(Device):
         if offset == 0x1A: return self.alarm_sec & 0x3F
         if offset == 0x1B: return self.alarm_min & 0x3F
         if offset == 0x1C: return self.alarm_hour & 0x1F
+        if offset == 0x1D: return 1 if self.epoch_valid else 0
         return 0
 
     # --- MMIO writes ---
     def write8(self, offset: int, value: int):
         value &= 0xFF
-        # Epoch ms (byte-addressed write)
-        if 0x08 <= offset <= 0x0F:
-            self._sync_realtime()
+        # Epoch ms: bytes 0-6 stage, byte 7 commits all eight and sets VALID
+        if 0x08 <= offset <= 0x0E:
             shift = 8 * (offset - 0x08)
             mask = 0xFF << shift
-            self.epoch_ms = (self.epoch_ms & ~mask) | (value << shift)
-            self.epoch_ms &= (1 << 64) - 1
+            self._epoch_stage = (self._epoch_stage & ~mask) | (value << shift)
+            return
+        if offset == 0x0F:
+            self._sync_realtime()
+            self.epoch_ms = (value << 56) | self._epoch_stage
+            self.epoch_valid = True
             if self.realtime:
                 self._reanchor_host_clock()
             return
@@ -3770,6 +3796,7 @@ class CppRTCProxy(Device):
             reference.mon,
             reference.year,
             reference.dow,
+            epoch_valid=reference.epoch_valid,
         )
 
     @property
@@ -3799,6 +3826,26 @@ class CppRTCProxy(Device):
     @epoch_ms.setter
     def epoch_ms(self, value: int):
         self._cs.rtc_epoch_ms = value
+
+    @property
+    def epoch_valid(self) -> bool:
+        return self._cs.rtc_epoch_valid
+
+    @epoch_valid.setter
+    def epoch_valid(self, value: bool):
+        self._cs.rtc_epoch_valid = bool(value)
+
+    @property
+    def _epoch_stage(self) -> int:
+        return self._cs.rtc_epoch_stage
+
+    @_epoch_stage.setter
+    def _epoch_stage(self, value: int):
+        self._cs.rtc_epoch_stage = value
+
+    def seed_epoch_ms(self, value: int) -> None:
+        """Set the wall clock from the host, as a commit does, and mark it valid."""
+        self._cs.rtc_seed_epoch_ms(value)
 
     @property
     def sec(self) -> int:
