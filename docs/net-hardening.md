@@ -173,7 +173,9 @@ remain unacknowledged. `TLS-CLOSE-TRY` first admits an exact protected
 after the record is acknowledged. FIN-WAIT-1, CLOSING, and LAST-ACK retain the
 FIN sequence intent and replay it with bounded exponential RTO. FIN-WAIT-2 has
 a separate 60-second terminal timeout. TIME-WAIT protects the old four-tuple
-for 2MSL; an exact duplicate FIN is re-ACKed and restarts that quarantine. The
+for 2MSL; an exact duplicate FIN is re-ACKed and restarts that quarantine.
+Every TCP timer, including 2MSL, runs on `MS@` uptime, so setting the wall
+clock can neither shorten nor extend a quarantine. The
 TLS context is wiped only after its exact owner-qualified close is admitted.
 
 `TLS-CLOSE-TRY` and `TLS-CLOSE` are both checked `(ctx -- ior)` operations;
