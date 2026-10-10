@@ -16160,6 +16160,14 @@ static SystemBatchResult run_native_system_batch(
         system.cluster_states.empty() &&
         system.execution_cores[0] == system.cores[0].get() &&
         system.execution_cores[0]->profile == CoreProfile::FULL;
+    // A successful round of a topology whose execution cores are all full
+    // cores settles by advancing the clock and delivering any pending timer
+    // or IPI trap.  When the caller proves the clock advance has no Python
+    // participant, a round with no deliverable interrupt on any core
+    // settles natively.
+    const bool cluster_free_topology =
+        system.cluster_states.empty() &&
+        core_count == system.cores.size();
 
     int64_t remaining = max_steps;
     while (remaining > 0 && !system_all_halted(system)) {
@@ -16314,11 +16322,12 @@ static SystemBatchResult run_native_system_batch(
         remaining -= outcome.steps;
         // A complete equal-credit scheduler round, rather than a
         // physical cohort or cache/shared sub-frontier, is the unbounded
-        // scheduler's clock, device, and interrupt boundary.
+        // scheduler's clock, device, and interrupt boundary.  Its settlement
+        // depends only on the state the round left, whichever path ran it.
         profiled_settle_round(
             UnboundedSettlementRequest::successful_round(
                 outcome.cycles),
-            uncontended_single_full_core);
+            cluster_free_topology);
         service_unbounded_native_dma(
             system,
             profiled_dma_settlement);

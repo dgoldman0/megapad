@@ -14,12 +14,13 @@ from __future__ import annotations
 import pytest
 
 from asm import assemble
-from devices import MBOX_BASE, MMIO_BASE, SHA3_BASE, SYSINFO_BASE
+from devices import MBOX_BASE, MMIO_BASE, SHA3_BASE, SYSINFO_BASE, TIMER_BASE
 from megapad64 import (
     IVEC_BUS_FAULT,
     IVEC_IPI,
     IVEC_PRIV_FAULT,
     IVEC_SW_TRAP,
+    IVEC_TIMER,
 )
 from system import MegapadSystem
 
@@ -29,6 +30,7 @@ SYSINFO_SINK = MMIO_BASE + SYSINFO_BASE
 MBOX_SEND = MMIO_BASE + MBOX_BASE + 0x08
 MBOX_ACK = MMIO_BASE + MBOX_BASE + 0x0A
 SHA3_COMMAND = MMIO_BASE + SHA3_BASE
+TIMER_STATUS = MMIO_BASE + TIMER_BASE + 0x09
 IVT_BASE = 0x0100
 COUNTER = 0x8000
 SLOTS = 0x8100
@@ -591,3 +593,65 @@ def _failing_callback(lockstep: bool) -> tuple:
 
 def test_python_error_mid_pass_leaves_the_coordinators_state() -> None:
     assert _failing_callback(True) == _failing_callback(False)
+
+
+def _timer_and_ipis(system: MegapadSystem, _trace: list) -> None:
+    # Every core takes the periodic timer interrupt and acknowledges it;
+    # core 0 also sends core 1 IPIs, which core 1 takes as interrupts.
+    _ipi_interrupts(system, _trace)
+    _load(system, 0, RACE)
+    _load(
+        system,
+        0x1C00,
+        f"""
+    ldi64 r11, {TIMER_STATUS:#x}
+    ldi r0, 1
+    st.b r11, r0
+    inc r13
+    rti
+""",
+    )
+    entries = {0: 0x1000, 1: 0x1400}
+    for index in range(2, len(system.cores)):
+        system.cores[index].halted = False
+        system.cores[index].pc = 0
+        system.cores[index].regs[5] = COUNTER
+        entries[index] = 0
+    _install_vector(system, IVEC_TIMER, 0x1C00)
+    for cpu in system.cores:
+        cpu.flag_i = 1
+    system.timer.compare = 397
+    system.timer.control = 0x07
+
+
+def _settlement_signatures(*, native: bool) -> tuple:
+    system = _system(4, lockstep=True)
+    if not native:
+        # An instance override voids the clock-topology proof, so every
+        # round settles through Python.
+        system._settle_native_system_round = (
+            system._settle_native_system_round
+        )
+    _timer_and_ipis(system, [])
+    system.start_host_profile()
+    signatures = tuple(
+        _signature(system, system.run_batch_stats(budget))
+        for budget in BUDGETS
+    )
+    counts = dict(system.stop_host_profile()["counts"])
+    return signatures, counts
+
+
+def test_native_round_settlement_matches_python_on_several_cores() -> None:
+    native, native_counts = _settlement_signatures(native=True)
+    python, python_counts = _settlement_signatures(native=False)
+    for index, (left, right) in enumerate(
+        zip(native, python, strict=True)
+    ):
+        assert left == right, f"batch {index} diverged"
+    assert native_counts["settle_round_native_calls"] > 0
+    assert native_counts["settle_round_python_calls"] > 0
+    assert python_counts["settle_round_native_calls"] == 0
+    # Interrupts were delivered: each core ran its timer handler.
+    final_cores = native[-1][12]
+    assert all(core[0][13] > 0 for core in final_cores)
