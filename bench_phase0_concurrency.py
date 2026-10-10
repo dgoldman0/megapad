@@ -5,6 +5,13 @@ This benchmark is deliberately diagnostic rather than aspirational. It
 compares the current deterministic ``MegapadSystem.run_batch()`` behavior
 across fixed one-, two-, and four-lane native worker configurations.
 
+Those lanes belong to the generic coordinator.  Production now runs a round
+with several awake cores of a cluster-free topology as lock-step passes on
+the scheduler thread, with the same guest-visible results and no worker lane,
+and keeps the coordinator for micro-core clusters.  The instruction-batched
+scenarios here therefore select the coordinator explicitly, so the report
+keeps diagnosing the lanes it compares.
+
 The report keeps four quantities separate:
 
 * returned aggregate instructions (the legacy ``run_batch`` result);
@@ -815,6 +822,9 @@ def _base_system(
         num_cores=num_cores,
         worker_count=worker_count,
     )
+    # Diagnose the coordinator's worker lanes rather than the lock-step
+    # executor that production uses for cluster-free topologies.
+    system._native_system.lockstep_fast_path = False
 
     # Independent workload instances must not inherit construction-time host
     # clock or terminal state, otherwise replay equality tests the host rather
@@ -2806,6 +2816,8 @@ _CONCURRENCY_PROFILE_COUNT_FIELDS = (
     "batches",
     "prepare_batch_calls",
     "scheduler_rounds",
+    "lockstep_rounds",
+    "lockstep_passes",
     "uncontended_rounds",
     "uncontended_dispatches",
     "uncontended_steps",
@@ -3222,7 +3234,7 @@ def _host_profile_probe(
 
     validation = {
         "native_profile_schema_supported":
-            native_snapshot["schema_version"] == 17,
+            native_snapshot["schema_version"] == 18,
         "native_profile_frozen": not native_snapshot["enabled"],
         "native_profile_generation_positive":
             native_snapshot["generation"] > 0,
@@ -3696,7 +3708,7 @@ def _host_profile_probe(
     )
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 17,
+        "schema_version": 18,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": native_snapshot,

@@ -2859,13 +2859,20 @@ class MegapadSystem:
         return True
 
     def _native_no_event_settlement_eligible(self, topology_owner) -> bool:
-        """Prove that a successful singleton round has no Python clock work."""
+        """Prove that a successful round of a cluster-free topology has no
+        Python clock work.
+
+        Such a round settles by advancing the clock and delivering any
+        pending timer or IPI trap.  The native scheduler checks every core
+        for a deliverable interrupt and settles the round itself only when
+        there is none, so this proves only that the clock advance has no
+        Python participant.
+        """
         if type(self) is not MegapadSystem:
             return False
         if (
-            self.num_full_cores != 1
-            or self.num_cores != 1
-            or self.num_clusters != 0
+            self.num_clusters != 0
+            or self.num_cores != self.num_full_cores
         ):
             return False
         if "_settle_native_system_round" in vars(self):

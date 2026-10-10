@@ -410,8 +410,8 @@ def _profile_probe(
         normalized["single_core_jit_backend"] == "x86_64"
     )
     validation = {
-        "schema_is_version_17":
-            normalized["schema_version"] == 17,
+        "schema_is_version_18":
+            normalized["schema_version"] == 18,
         "profile_is_frozen": not normalized["enabled"],
         "profile_generation_is_positive":
             normalized["generation"] > 0,
@@ -674,7 +674,7 @@ def _profile_probe(
     }
     return {
         "schema": "megapad.phase4-concurrency-host-profile",
-        "schema_version": 17,
+        "schema_version": 18,
         "architectural_hash_scope": "excluded_host_only",
         "used_for_throughput": False,
         "native_snapshot": normalized,

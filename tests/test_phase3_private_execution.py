@@ -293,6 +293,38 @@ def test_taken_skip_yields_if_its_target_size_byte_is_not_cached() -> None:
 
 
 @pytest.mark.parametrize(
+    "skipped_first_byte",
+    [
+        0xF0,  # a prefix: the header reads the opcode byte after it
+        0xE3,  # an RROT-capable MEX form reads its control byte
+        0xFB,  # a crypto engine op reads its sub-operation byte
+    ],
+)
+def test_taken_skip_yields_if_any_byte_its_target_size_reads_is_not_cached(
+    skipped_first_byte: int,
+) -> None:
+    # The skipped instruction starts on the last byte of a cached line, and
+    # sizing it reads the first byte of the next line, which is not cached.
+    skip = assemble("skip.eq")
+    code = skip + bytes((skipped_first_byte, 0x00))
+    address = LINE_BYTES - len(skip) - 1
+    owner, memory, (core,) = _make_owner(
+        code,
+        address=address,
+    )
+    core.flag_z = 1
+    _prime_instruction_cache(
+        (core,), memory, 0, LINE_BYTES)
+    before = _private_state(core)
+
+    [result] = _run(owner, [(0, 0, 1)])
+
+    assert result["stop_reason"] == "icache_boundary"
+    assert result["steps_executed"] == 0
+    assert _private_state(core) == before
+
+
+@pytest.mark.parametrize(
     ("code", "expected_reason"),
     [
         (assemble("shl.d"), "instruction_limit"),

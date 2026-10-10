@@ -1314,9 +1314,17 @@ round's wake check, which is also when the coordinator would first schedule
 them, so its private/shared routing has no other accesses to order. The round
 keeps the 1,000-instruction cadence, its interrupt boundary, callback custody
 and accounting, and it advances the scheduler cursor past that core as the
-coordinator does. Settlement keeps Python custody, because native no-event
-settlement remains admitted only for a singleton topology. Machines with
-micro-core clusters keep the coordinator.
+coordinator does. Machines with micro-core clusters keep the coordinator.
+
+A device timing fence already active at round start (a SHA3 or WOTS operation
+in flight, or NIC cycle DMA) is the exception. The coordinator then retires
+one whole pass, the core's private prefix and its shared instruction, before
+its post-pass fence check ends the round, while the exact-single path stops
+after every instruction while the fence is active. Such a round therefore runs
+in the coordinator's order (see the next section). A fence the lone core
+raises itself agrees on both paths: it is raised by a device access, the last
+instruction of the coordinator's pass, and the exact-single path stops right
+after it. A one-core machine keeps its own rule.
 
 Each full core gets its plan cache on its first lone round. I-cache fills,
 invalidations, rollbacks and checkpoint restores already advance a core's line
@@ -1334,6 +1342,71 @@ Restoring one shared JIT slot range fails the turn-taking case, and the old
 cursor rule fails three lone-core cases. The existing exact-single selector now
 compares against a two-core reference that keeps the coordinator, and passes
 with the concurrency selectors (366).
+
+### Run several awake cores in lock-step on the scheduler thread
+
+A round in which two or more full cores are awake went through the generic
+coordinator. Its model is the definition of a multi-core round: each pass runs
+every awake core's private prefix, the register-only instructions before its
+next shared or I-cache boundary, and then each core in cyclic order executes
+that one boundary instruction. Its execution cost dominated. Every pass
+allocated its bookkeeping, handed the prefixes to the worker pool, created and
+released a memory admission, exchanged the Python lock several times, captured
+a 7 KiB checkpoint per core and copied the round's results. A loop that touches
+memory every few instructions cost 362 ns per step with one host lane and
+741 ns with four, the default for a four-core machine, against 32 ns for a lone
+core.
+
+For a topology whose execution cores are all full cores, such a round now runs
+the same passes in the same order on the scheduler thread
+(`run_lockstep_core_round`). Its round rules are `run_parallel_core_round`'s:
+credit sharing and its forward release, the wait of an exhausted later core
+behind unfinished earlier ones, interrupt checks at each pass start, halt and
+idle, the post-pass device fence, dispatch accounting and the scheduler cursor.
+Boundaries are settled by the coordinator's own helpers, including Python
+continuations, trap and reset settlement and dispatch errors, and every private
+prefix of a pass runs before its first boundary, so a failure at any boundary
+leaves every peer's prefix applied as before.
+
+The round holds one memory lease. Each core turn registers its own ownership
+record on it, whose CPU permission the turn's `CPUExecutionGuard` consumes, so
+every existing guard applies unchanged and a continuation runs with the
+ownership it had under the coordinator. The Python lock is taken only to run
+Python. The coordinator's per-command checkpoint was restored only when a host
+invariant failed inside a private prefix; here such a failure leaves the
+prefix's partial state and aborts the round the same way. No guest program
+reaches that path.
+
+The coordinator stays as the reference behind the host-only
+`lockstep_fast_path` switch and still runs every topology with micro-core
+clusters. The phase-0 lane benchmark selects it explicitly, since it
+diagnoses the coordinator's worker lanes.
+
+Settlement changed with it. A successful round of a cluster-free topology
+settles by advancing the clock and delivering the shared timer trap to every
+core with interrupts enabled and an IPI trap to every awake core whose line is
+raised. The native check of whether anything is deliverable already covered
+every core, but native no-event settlement was admitted only for one core, so
+every round of a larger machine paid a Python call of roughly 8 us. The Python
+proof now admits any cluster-free topology under its unchanged canonical-bus
+checks, and the scheduler offers native settlement for every successful round
+of such a topology, whichever path ran it.
+
+Evidence (2026-10-09): the memory-heavy loop costs 82 ns per step with two
+awake cores and 68 ns with four, independent of the lane count; a loop shaped
+like threaded Forth costs 110 ns against 809 ns on the coordinator and 25 ns
+for a lone core. A differential selector (`tests/test_lockstep_rounds.py`) runs
+an unlocked shared counter, uneven private runs and credit, Python MMIO
+callbacks, IPI wake from `IDL`, IPI interrupts, traps, halts and a reset,
+self-modifying code with forced I-cache refills, user-mode faults settled by
+Python, the SHA3 fence, changing awake sets and a Python error mid-pass on
+both paths with full signatures, and compares native with Python settlement
+on four cores taking timer and IPI traps. The coordinator's oracle file runs
+every oracle on both paths. In the four-core `desktop-sandbox-modules` journey
+only 14,157 of 2.78 million rounds had several awake cores (about 28 million
+of 2.79 billion steps); the journey took 177 s before, 128 s with lock-step
+rounds alone, and 104.9 s with native settlement, level with 105.1 s on one
+core.
 
 ## Construction-time validation policy
 
@@ -1415,7 +1488,9 @@ does not justify keeping the superseded implementation in the final tree.
 | EK-D23 | Reject the segment-local `EXT.DICT` terminal continuation after exact counters improved but position-balanced control-normalized timing did not. | Avoid retaining host dispatch complexity from a synthetic lookup-count win; the existing authoritative helper boundary and every guest hardware contract remain unchanged. |
 | EK-D24 | Measure eligible native successor edges with a bounded set-local Space-Saving host profile before building another continuation path. | Full admitted bytes remain the exact internal identity; fingerprints are report-only, all helper/memory/timing/interrupt/segment boundaries break adjacency, and schema 16 telemetry does not authorize execution or alter hardware. |
 | EK-D25 | Reopen EK-D11 only for exact two-block generated regions and retain that implementation as a provisional host candidate after its crossed same-binary synthetic A/B won materially. | The candidate removes host x86 entry/return and C++ settlement work without changing guest behavior or hardware. Its private A/B toggle remains only through representative source-mode qualification; production retention is deferred to EK-F10. |
-| EK-D26 | Run the one awake full core of a cluster-free multi-core round on the exact-single path, with a per-core plan cache and JIT slot range. | No peer executes inside such a round, so guest-visible results, cadence, accounting and timing equal the coordinator's. The host-only `lone_core_fast_path` switch stays so that tests keep the coordinator as the reference this path is proved against; it is not an alternate engine. |
+| EK-D26 | Run the one awake full core of a cluster-free multi-core round on the exact-single path, with a per-core plan cache and JIT slot range. | No peer executes inside such a round, so guest-visible results, cadence, accounting and timing equal the coordinator's. The host-only `lone_core_fast_path` switch stays so that tests keep the coordinator as the reference this path is proved against; it is not an alternate engine. A round that starts with a device timing fence active keeps the coordinator's order. |
+| EK-D27 | Run a round with several awake cores of a cluster-free topology as the coordinator's lock-step passes on the scheduler thread. | Same pass order, settlement helpers and round rules, so guest-visible results, accounting and the cursor equal the coordinator's; only the host-invariant checkpoint path differs. The host-only `lockstep_fast_path` switch keeps the coordinator as the reference; micro-core clusters keep it. This is not host-parallel execution. |
+| EK-D28 | Settle a successful round of any cluster-free topology natively when no interrupt is deliverable and the canonical-bus proof holds. | Python settlement of such a round only advances the clock and delivers timer and IPI traps, and the native check covers those conditions on every core. Topologies with clusters keep Python settlement. |
 
 ## Deferred findings ledger
 

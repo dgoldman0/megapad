@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from asm import assemble
-from devices import MMIO_BASE, SYSINFO_BASE
+from devices import MMIO_BASE, SHA3_BASE, SYSINFO_BASE
 from megapad64 import IVEC_IPI, IVEC_TIMER, Megapad64 as PythonMegapad64
 from system import MegapadSystem
 
@@ -102,7 +102,7 @@ target:
 
 
 def _assert_block_cache_profile_reconciles(snapshot: dict) -> None:
-    assert snapshot["schema_version"] == 17
+    assert snapshot["schema_version"] == 18
     assert dict(snapshot["single_core_block_cache"]) == {
         "kind": "set-associative-exact-icache-span",
         "sets": 1_024,
@@ -441,6 +441,50 @@ def test_cores_taking_turns_alone_run_only_their_own_native_code() -> None:
     _assert_jit_used_when_available(snapshot, counts)
     if snapshot["single_core_jit_storage"]["ready"]:
         assert snapshot["single_core_jit_storage"]["slot_count"] == 2 * 4_096
+
+
+# A SHA3 FINAL keeps the engine busy past the round that issues it, so later
+# rounds start with the crypto timing fence already active.  The loop's
+# register work runs before each status read.
+SHA3_FENCE_SOURCE = f"""
+    ldi64 r9, {MMIO_BASE + SHA3_BASE:#x}
+    ldi r1, 1
+    st.b r9, r1
+    ldi r1, 3
+    st.b r9, r1
+loop:
+    inc r4
+    addi r5, 3
+    xor r6, r5
+    add r4, r5
+    ld.b r2, r9
+    br loop
+"""
+
+
+def _run_fenced_lone_core_workload(*, fast: bool):
+    system = _multicore_system(cores=2, fast=fast)
+    system.load_binary(0, assemble(SHA3_FENCE_SOURCE))
+    system.boot(entry=0)
+    _set_awake(system, {0})
+    system.start_host_profile()
+    signatures = []
+    for budget in (3, 5, 7, 11, 40, 1_003):
+        stats = system.run_batch_stats(budget)
+        signatures.append(_multicore_signature(system, stats))
+    counts = dict(system.stop_host_profile()["counts"])
+    return tuple(signatures), counts["uncontended_rounds"]
+
+
+def test_a_lone_core_matches_the_coordinator_while_a_device_fence_is_active() -> (
+    None
+):
+    fast, fast_rounds = _run_fenced_lone_core_workload(fast=True)
+    generic, generic_rounds = _run_fenced_lone_core_workload(fast=False)
+    assert fast == generic
+    # Rounds that start without the fence still take the lone path.
+    assert fast_rounds > 0
+    assert generic_rounds == 0
 
 
 def _run_register_block_workload(*, reference: bool) -> tuple:
