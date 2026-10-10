@@ -694,6 +694,34 @@ and returns it to its idle loop, ready for the next `WAKE-CORE`.
 
 ---
 
+## Clocks (4 words)
+
+The RTC keeps two millisecond counters. Uptime counts from boot and nothing
+can set it. The wall clock (epoch) counts milliseconds since 1970-01-01 UTC
+and can be set at any time, so it can jump forward or back.
+
+| Word | Stack Effect | Description |
+|------|-------------|-------------|
+| `MS@` | `( -- ms )` | Uptime in milliseconds since boot. |
+| `EPOCH@` | `( -- epoch-ms )` | Wall clock in milliseconds since the Unix epoch. |
+| `EPOCH!` | `( epoch-ms -- )` | Set the wall clock. All eight bytes take effect at once, so a concurrent `EPOCH@` never sees a torn value. Use one setter at a time. |
+| `EPOCH-VALID?` | `( -- flag )` | True once the wall clock has been set since reset, by `EPOCH!` or by the host seeding the clock. |
+
+Two rules follow:
+
+- **Intervals use `MS@`.** Timeouts, deadlines, retransmission and rate
+  timers, and elapsed-time measurements must never read `EPOCH@`; setting
+  the wall clock would stretch or cut them.
+- **Wall time uses `EPOCH@` only after `EPOCH-VALID?`.** Until the clock is
+  set, `EPOCH@` counts up from zero at reset and names no calendar instant.
+  Code that needs real dates (calendars, certificate checks, schedules)
+  checks `EPOCH-VALID?` first and says so when the clock is not set.
+
+`EPOCH-VALID?` stays true until the next reset. The flag says the clock was
+set, not that the value is plausible: `0 EPOCH!` also sets it.
+
+---
+
 ## Tile Engine (47 words)
 
 The tile engine (MEX extension) performs **SIMD operations** on 64-byte

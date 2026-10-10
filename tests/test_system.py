@@ -3556,6 +3556,33 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["EPOCH@ ."])
         self.assertIn(f"{expected} ", text)
 
+    def test_epoch_store_sets_the_wall_clock_and_marks_it_valid(self):
+        """EPOCH! commits all eight bytes; EPOCH-VALID? reports the set clock."""
+        sys, buf = self._boot_bios()
+        sys.rtc.ctrl = 0
+        self.assertFalse(sys.rtc.epoch_valid)
+        expected = 0x0123456789ABCDEF
+        text = self._run_forth(sys, buf, [
+            'EPOCH-VALID? ." before=" .',
+            f"7 {expected} EPOCH!",
+            'EPOCH-VALID? ." after=" .',
+            'EPOCH@ ." epoch=" .',
+            '." below=" .',
+        ])
+        self.assertIn("before=0 ", text)
+        self.assertIn("after=-1 ", text)
+        self.assertIn(f"epoch={expected} ", text)
+        self.assertIn("below=7 ", text)
+        self.assertEqual(sys.rtc.epoch_ms, expected)
+        self.assertTrue(sys.rtc.epoch_valid)
+
+    def test_epoch_valid_reports_a_host_seeded_clock(self):
+        """A host-seeded clock is valid before any guest store."""
+        sys, buf = self._boot_bios()
+        sys.rtc.seed_epoch_ms(1_760_000_000_000)
+        text = self._run_forth(sys, buf, ['EPOCH-VALID? ." seeded=" .'])
+        self.assertIn("seeded=-1 ", text)
+
     def test_ei_di(self):
         """EI! and DI! toggle the global interrupt flag.
 
@@ -5770,7 +5797,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 544)
+        self.assertEqual(len(seen), 546)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -15997,7 +16024,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 544)
+        self.assertEqual(len(seen), 546)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)

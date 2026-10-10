@@ -364,7 +364,9 @@ only. The counters run from reset (CTRL resets to `0x01`).
 | ALARM_H | `+0x1C` | RW | Alarm hours |
 | EPOCH_STAT | `+0x1D` | R | **bit 0:** wall clock VALID.  Clear at reset; set by an epoch commit or a host seed.  Writes are ignored. |
 
-**BIOS words:** `MS@` (uptime ms), `EPOCH@` (epoch ms), `RTC@` (read calendar),
+**BIOS words:** `MS@` (uptime ms), `EPOCH@` (epoch ms), `EPOCH!` (set the
+epoch, committing all eight bytes at once), `EPOCH-VALID?` (wall clock set
+since reset), `RTC@` (read calendar),
 `RTC!` (set calendar), `RTC-CTRL!`, `RTC-ALARM!`, `RTC-ACK` (clear alarm flag).
 
 IRQ vector: `IVEC_RTC` (16).

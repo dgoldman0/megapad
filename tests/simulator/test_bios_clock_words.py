@@ -328,3 +328,56 @@ def test_runtimes_own_independent_explicit_clock_state() -> None:
     assert second.rtc.epoch_ms == 2000
     assert first.rtc.uptime_ms == 105
     assert second.rtc.uptime_ms == 200
+
+
+def test_epoch_store_sets_the_wall_clock_and_its_valid_bit() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+
+    runtime.execute("EPOCH-VALID?", context=context)
+    assert context.data.snapshot() == (0,)
+    context.data.pop()
+
+    context.data.push(0xA55A)
+    context.data.push(1_760_000_000_123)
+    runtime.execute("EPOCH!", context=context)
+    assert context.data.snapshot() == (0xA55A,)
+    assert runtime.rtc.epoch_ms == 1_760_000_000_123
+    assert runtime.rtc.epoch_valid
+
+    runtime.execute("EPOCH-VALID?", context=context)
+    runtime.execute("EPOCH@", context=context)
+    assert context.data.snapshot() == (0xA55A, MASK64, 1_760_000_000_123)
+    assert context.returns.snapshot() == ()
+
+
+def test_seeded_runtime_reports_a_valid_wall_clock() -> None:
+    runtime = MegaForthRuntime(
+        memory=create_one_core_address_space(initial_epoch_ms=1_000),
+    )
+    context = runtime.new_context()
+    runtime.execute("EPOCH-VALID?", context=context)
+    assert context.data.snapshot() == (MASK64,)
+
+
+def test_epoch_store_fault_before_the_commit_changes_nothing() -> None:
+    class FaultingRTC(HostedRTCService):
+        def write8(self, offset: int, value: int) -> None:
+            if offset == RTC_EPOCH + 4:
+                raise RuntimeError("injected epoch byte fault")
+            super().write8(offset, value)
+
+    runtime = MegaForthRuntime()
+    assert runtime.memory.mmio is not None
+    faulting = FaultingRTC()
+    runtime.memory.mmio.rtc = faulting
+    context = runtime.new_context()
+    context.data.push(0xA55A)
+    context.data.push(1_760_000_000_000)
+
+    with pytest.raises(MMIOAccessError):
+        runtime.execute("EPOCH!", context=context)
+
+    assert context.data.snapshot() == (0xA55A, 1_760_000_000_000)
+    assert faulting.epoch_ms == 0
+    assert not faulting.epoch_valid

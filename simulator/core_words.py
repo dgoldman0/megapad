@@ -50,6 +50,8 @@ from simulator.platform import (
 from simulator.rtc import (
     RTC_EPOCH,
     RTC_EPOCH_SIZE,
+    RTC_EPOCH_STAT,
+    RTC_EPOCH_VALID,
     RTC_UPTIME,
     RTC_UPTIME_SIZE,
 )
@@ -983,6 +985,30 @@ def _epoch_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
             MMIO_BASE + RTC_EPOCH + index
         ) << (index * 8)
     context.data.push(value)
+
+
+def _epoch_store(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    """Write all eight epoch bytes; the RTC commits them at byte 7.
+
+    The cell stays on the stack until every byte is written, so a fault
+    before the commit leaves the stack, the epoch and VALID unchanged.
+    """
+
+    value = context.data.peek() & MASK64
+    for index in range(RTC_EPOCH_SIZE):
+        runtime.memory.write8(
+            MMIO_BASE + RTC_EPOCH + index,
+            (value >> (index * 8)) & 0xFF,
+        )
+    context.data.pop()
+
+
+def _epoch_valid_query(
+    runtime: MegaForthRuntime,
+    context: ExecutionContext,
+) -> None:
+    status = runtime.memory.read8(MMIO_BASE + RTC_EPOCH_STAT)
+    context.data.push(forth_flag((status & RTC_EPOCH_VALID) != 0))
 
 
 def _ms_fetch(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
@@ -2955,6 +2981,17 @@ def install_core(runtime: MegaForthRuntime) -> None:
 
     # LITERAL follows: it compiles the top cell into the open definition.
     runtime.define_directive(b"LITERAL", DirectiveKind.LITERAL)
+
+    # EPOCH! and EPOCH-VALID? follow: they set the wall clock through the
+    # RTC's byte-7 commit and report whether it has been set.
+    runtime.define_primitive(
+        b"EPOCH!",
+        lambda context: _epoch_store(runtime, context),
+    )
+    runtime.define_primitive(
+        b"EPOCH-VALID?",
+        lambda context: _epoch_valid_query(runtime, context),
+    )
 
 
 def _scalar_float_word(service, shape: str, op: int | None):

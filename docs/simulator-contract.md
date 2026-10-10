@@ -604,6 +604,10 @@ The read-only byte `EPOCH_STAT` at `+0xB1D` reports bit 0 = wall clock valid.
 It starts clear unless the host seeds the epoch (an explicit initial epoch or
 `set_epoch_ms`); a guest commit sets it, and nothing but a new runtime clears
 it. Writes to it are rejected, as uptime writes are.
+The hosted BIOS words `EPOCH!` and `EPOCH-VALID?` use these registers:
+`EPOCH!` writes all eight bytes in ascending order and drops its cell only
+after the commit, so a fault before byte 7 leaves the stack, epoch, and VALID
+unchanged; `EPOCH-VALID?` returns true when `EPOCH_STAT` bit 0 is set.
 
 The ordinary interactive server seeds epoch from host UTC and explicitly
 binds `HostedRTCService.bind_monotonic_clock` before source preparation.
