@@ -120,10 +120,12 @@ use the APT-1 control reserve under Section 17.
 | `8000` | `RET_QUERY` | C -> T | ordinary optional | 8 bytes |
 | `8001` | `RET_CAPS` | T -> C | ordinary optional | 64 bytes |
 | `8002` | `RET_FORMATS` | T -> C | ordinary optional | 64 bytes |
+| `8003` | `PIXELS_QUERY` | C -> T | ordinary optional | 24 bytes |
+| `8004` | `PIXELS` | T -> C | ordinary optional | 40 bytes |
 
 The message IDs not listed here remain reserved by APT-1. In particular,
-`0206..0fff`, `1004..1fff`, `2003..200f`, `2013..201f`, `2025..2fff`,
-`3004..3fff`, `4003..7fff`, and `8003..ffff` have no meaning under this
+`0206..0fff`, `1004..1fff`, `2004..200f`, `2013..201f`, `2025..2fff`,
+`3004..3fff`, `4003..7fff`, and `8005..ffff` have no meaning under this
 contract. A sender must not emit them; a receiver still applies the base bit-15
 optional-skip rule to the latter range.
 
@@ -660,15 +662,22 @@ to a tombstone, or a different generation for a live ID, is stale authority.
 `OWNER_OPEN` is serialized outside transactions and resource upload. One
 `RET_RESULT` completes it before another lifecycle request.
 
-`OWNER_RESIZE` asks the terminal to grow a live owner's reservation. It has
+`OWNER_RESIZE` asks the terminal to change a live owner's reservation. It has
 the `OWNER_OPEN` layout and carries the owner's complete new quota set. Every
-field must be at least the owner's current quota and at most its advertised
-maximum. The terminal checks the new aggregate sums exactly as for an open,
-with the owner's old reservation replaced by the new one, and installs the new
-reservation atomically before RET_OK. A request equal to the current quotas
-succeeds and changes nothing. A request that would exceed any aggregate total
-returns RET_NO_CAPACITY and leaves every reservation unchanged. A reservation
-never shrinks within an owner generation; a smaller field is RET_INVALID.
+field must be at most its advertised maximum. Every field except
+`resource_quota` and `resource_byte_quota` must also be at least the owner's
+current quota: those reservations bound each scene target, which active and
+hidden usage must each fit, so they never shrink within an owner generation.
+The two resource fields may be lower than the current quota, down to the
+owner's current owner-wide resource usage, so an owner can give back resource
+space it no longer uses. No upload may be open during the request, so that
+usage is exactly the owner's committed resources. The terminal checks the new
+aggregate sums exactly as for an open, with the owner's old reservation
+replaced by the new one, and installs the new reservation atomically before
+RET_OK. A request equal to the current quotas succeeds and changes nothing. A
+request that would exceed any aggregate total returns RET_NO_CAPACITY and
+leaves every reservation unchanged; a request that only lowers resource
+fields always fits. A field below what this paragraph allows is RET_INVALID.
 `OWNER_RESIZE` follows the same serialization and reset-crossing rules as
 `OWNER_OPEN`. The terminal keeps a count of refused reservations and the last
 refusal (owner, requested quotas, quotas still held) for host status and logs;
@@ -776,9 +785,9 @@ Lifecycle status selection is deterministic:
 | OWNER_OPEN stale/different generation | RET_STALE_OWNER | unchanged |
 | OWNER_OPEN scalar, feature, or quota-above-advertised error | RET_INVALID | unchanged |
 | OWNER_OPEN valid reservation cannot fit record/global totals | RET_NO_CAPACITY | unchanged |
-| OWNER_RESIZE larger or equal quotas that fit the global totals | RET_OK | reservation replaced by the request |
+| OWNER_RESIZE allowed quotas that fit the global totals | RET_OK | reservation replaced by the request |
 | OWNER_RESIZE absent, dropped, or different-generation owner | RET_STALE_OWNER | unchanged |
-| OWNER_RESIZE scalar, feature, smaller-than-current, or quota-above-advertised error | RET_INVALID | unchanged |
+| OWNER_RESIZE scalar, feature, disallowed-shrink, or quota-above-advertised error | RET_INVALID | unchanged |
 | OWNER_RESIZE valid growth cannot fit global totals | RET_NO_CAPACITY | unchanged |
 | RESOURCE_BEGIN stale owner | RET_STALE_OWNER | no upload opened |
 | RESOURCE_BEGIN ID at/below namespace high-water | RET_DUPLICATE_ID | no upload opened |
@@ -896,8 +905,72 @@ matching open upload and returns RET_ABORTED. It never publishes a resource.
 outside a transaction/upload and when the resource has no reference in either
 the active model or a committed hidden rebuild. It releases that resource's
 owner-wide count and byte usage and returns RET_OK. It does not shrink the
-owner reservation or aggregate live-owner reservation sums. Dropping an
-absent ID is RET_INVALID; IDs are not reused.
+owner reservation or aggregate live-owner reservation sums; an owner gives
+that space back with OWNER_RESIZE. Dropping an absent ID is RET_INVALID; IDs
+are not reused.
+
+### 8.1 Pixel size of a picture area
+
+Before it makes an image resource, a client can ask how many pixels a cell
+rectangle covers on the selected surface, so that it never decodes, holds,
+or sends more pixels than the screen can show. The answer is advice only. The
+terminal still scales every resource to its IMAGE object's rectangle by the
+object's fit, whatever size the resource has.
+
+`PIXELS_QUERY` has exact layout `<QiiII>`:
+
+```text
+u64 query_id
+i32 cell_x
+i32 cell_y
+u32 cols
+u32 rows
+```
+
+The rectangle is a `CELL_RECT32` in the selected surface's cell grid.
+`query_id` is a nonzero value that the client chooses and the answer echoes.
+The client may send a query only while RETAINED-1 is enabled with
+`RET_RGBA_IMAGE`, the session is ACTIVE, and no CELL or PRESENT transaction,
+resource upload, or RET_RESULT is outstanding. At most one query may be
+unanswered: the client sends another only after it has received the answer to
+the last. Before sending a query the client must have granted at least 80
+currently unused terminal-to-client ordinary bytes, enough for the complete
+answer frame. A query with a zero ID or a zero extent, or one that breaks any
+of these rules, is a fatal protocol error under the base contract. A terminal
+without `RET_RGBA_IMAGE` skips and recredits the query under the APT-1
+unknown-optional rule and sends no answer.
+
+The terminal answers each query with exactly one `PIXELS` frame of exact
+layout `<QQiiIIII>`:
+
+```text
+u64 query_id
+u64 geometry_generation
+i32 cell_x
+i32 cell_y
+u32 cols
+u32 rows
+u32 pixel_width
+u32 pixel_height
+```
+
+It echoes the query's ID and rectangle and names the geometry generation, as
+RESIZE carries it, for which it computed the answer. `pixel_width` and
+`pixel_height` count the physical pixels the whole rectangle would cover at
+the selected sink's current cell scale, including any part outside the
+surface. Where parts of the surface differ in pixel density, the terminal
+answers for the densest part the rectangle covers. Both are zero when no sink
+is selected or the selected sink has no pixel raster; one is never zero
+without the other. The answer is ordinary terminal-to-client traffic, sent in
+stream order after the terminal consumes the query; other frames may come
+before or after it. The query frame is recredited as any ordinary frame is.
+
+An answer stays useful while its geometry generation is current, and the
+terminal never sends an answer nobody asked for. After a RESIZE with a newer
+generation or a soft reset, the client asks again if it needs to. The
+selected sink can also change without either, so a client may ask again at
+any time. A soft reset or epoch end cancels an unanswered query, which then
+gets no answer.
 
 ## 9. Regions
 
@@ -1404,9 +1477,18 @@ closed path adds the last-to-first segment; it does not imply fill.
 
 ### 11.3 IMAGE
 
-The body is exact `<QIB3x>` (16 bytes): resource ID, fit mode, and opacity.
-Fit 0 stretches, 1 contains, and 2 covers. Opacity is 0..255 and multiplies
-resource alpha. The resource must be the same owner generation and format 1.
+The body is exact `<QIBB2x>` (16 bytes): resource ID, fit mode, opacity, and
+flags. Fit 0 stretches, 1 contains, and 2 covers. Opacity is 0..255 and
+multiplies resource alpha. The resource must be the same owner generation and
+format 1.
+
+Flags bit 0 is `BACKDROP`. With it set, the renderer first paints its own
+opaque background over the object's whole rectangle, within its clip, and
+then the picture. Letterbox bars, transparent pixels, and pixels faded by
+opacity then show that background, never the CELL plane or any other content
+beneath the object. Opacity does not apply to the backdrop, and its colour is
+the renderer's choice. BACKDROP changes only paint; pointer behavior stays
+the generic OBJECT rule. Other flag bits are zero.
 
 ### 11.4 GLYPH_RUN
 
@@ -2013,8 +2095,9 @@ The journey must exercise ordinary-credit backpressure, the 4096-byte control
 reserve, a rejected over-quota lifecycle request, transaction bytes retained
 through commit/abort processing plus the separate post-COMMIT TX_RESULT gate,
 and one hidden multi-transaction rebuild.
-Image upload/digest qualification is required before advertising RGBA_IMAGE but
-is not a prerequisite when that optional bit is clear.
+Image upload and digest, PIXELS answers, BACKDROP painting, and giving
+resource space back with OWNER_RESIZE must be qualified before advertising
+RGBA_IMAGE; none is a prerequisite when that optional bit is clear.
 
 ## 17. Control reserve lifecycle
 
