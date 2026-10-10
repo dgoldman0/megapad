@@ -315,6 +315,7 @@ class DirectiveKind(Enum):
     LEFT_BRACKET = auto()
     RIGHT_BRACKET = auto()
     BRACKET_CHAR = auto()
+    LITERAL = auto()
     BRACKET_DEFINED = auto()
     BRACKET_UNDEFINED = auto()
     BRACKET_IF = auto()
@@ -3075,6 +3076,16 @@ class MegaForthRuntime:
             if compiler is None or not compiler.compile_mode:
                 self._compile_error(state, "[CHAR] is compile-only")
             compiler.operations.append(Literal(token[0]))
+            return
+
+        if kind is DirectiveKind.LITERAL:
+            # BIOS LITERAL compiles the top cell into the open definition, so
+            # `[ ... ] LITERAL` folds a value computed while interpreting.
+            compiler = state.compiler
+            if compiler is None or not compiler.compile_mode:
+                self._compile_error(state, "LITERAL is compile-only")
+            compiler.operations.append(Literal(state.context.data.peek()))
+            state.context.data.pop()
             return
 
         if kind is DirectiveKind.TO:

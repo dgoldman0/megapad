@@ -185,6 +185,25 @@ def test_recurse_calls_the_definition_being_compiled() -> None:
     assert _execute(runtime, "SUM-DOWN") == (999,)
 
 
+def test_literal_compiles_a_value_computed_while_interpreting() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b"40 CONSTANT FORTY")
+    runtime.evaluate(
+        b": ANSWER  [ FORTY 2 + ] LITERAL ;\n"
+        b": FOLDED  1 [ FORTY ] LITERAL + [ -1 ] LITERAL + ;"
+    )
+
+    assert _execute(runtime, "ANSWER") == (42,)
+    assert _execute(runtime, "FOLDED") == (40,)
+
+
+def test_literal_is_compile_only() -> None:
+    runtime = MegaForthRuntime()
+
+    with pytest.raises(SourceError, match="LITERAL is compile-only"):
+        runtime.evaluate(b"7 LITERAL")
+
+
 def test_recurse_is_compile_only_and_rejects_temporary_interpret_control() -> None:
     runtime = MegaForthRuntime()
 

@@ -49,7 +49,8 @@ The implemented slices provide:
   words needed by unchanged source;
 - memory-backed linked dictionary headers and CREATE-family bodies, including
   signed `ALLOT`, `,`, `C,`, `'`, `[']`, `>BODY`, and semantic `DOES>` actions;
-- separate open-definition and compile/interpret state for `[` and `]`, plus
+- separate open-definition and compile/interpret state for `[` and `]`, with
+  `LITERAL` compiling a value computed between them, plus
   the exact `[ 0 C, ]` admission that compiles MP64 `IDL` as semantic `Idle`
   IR without leaking a native byte into hosted dictionary storage;
 - a runtime-owned one-core IDL suspension boundary with opaque continuation

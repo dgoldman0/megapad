@@ -2953,6 +2953,9 @@ def install_core(runtime: MegaForthRuntime) -> None:
     # WAKE-CORE it fails without consuming its message or core ID.
     runtime.define_primitive(b"IPI-SEND", _ipi_send_unavailable)
 
+    # LITERAL follows: it compiles the top cell into the open definition.
+    runtime.define_directive(b"LITERAL", DirectiveKind.LITERAL)
+
 
 def _scalar_float_word(service, shape: str, op: int | None):
     """Bind one BIOS-shaped scalar FP word to the hosted service."""
