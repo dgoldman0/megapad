@@ -2818,6 +2818,7 @@ def install_core(runtime: MegaForthRuntime) -> None:
     )
 
     runtime.define_directive(b"[CHAR]", DirectiveKind.BRACKET_CHAR)
+    runtime.define_directive(b"LITERAL", DirectiveKind.LITERAL)
     runtime.define_primitive(b"CHAR", lambda context: _char(runtime, context))
     runtime.define_primitive(b"/MOD", _signed_divmod)
     for name, kind in (
