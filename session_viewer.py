@@ -1654,6 +1654,22 @@ class _PointerRouter:
         return False
 
 
+def _report_display_cell_pixels(client, cell_width: int, cell_height: int) -> None:
+    """Tell the terminal how many pixels one of this viewer's cells has.
+
+    The terminal answers guest PIXELS questions from it while this viewer
+    holds the display.
+    """
+
+    response = client.request(
+        "display_cell_pixels", cell_width=cell_width, cell_height=cell_height
+    )
+    if not isinstance(response, Mapping) or set(response) != {"status", "selected"}:
+        raise RuntimeError("display_cell_pixels returned an invalid response shape")
+    if response["selected"] is not (response["status"] == "selected"):
+        raise RuntimeError("display_cell_pixels returned an inconsistent status")
+
+
 def _retry_display_claim(
     client,
     *,
@@ -1661,6 +1677,7 @@ def _retry_display_claim(
     display_state: _RetainedDisplayState,
     revision: int,
     resource_cache: _DisplayResourceCache | None = None,
+    cell_pixels: tuple[int, int] | None = None,
 ) -> tuple[bool, int, bool]:
     """Retry one observer lease claim and invalidate state on exact takeover."""
 
@@ -1668,6 +1685,8 @@ def _retry_display_claim(
     claimed = _display_claimed(client.request("claim_display"))
     if not claimed:
         return False, revision, False
+    if cell_pixels is not None:
+        _report_display_cell_pixels(client, *cell_pixels)
     display_state.reset()
     if resource_cache is not None:
         resource_cache.clear()
@@ -2687,6 +2706,8 @@ def main() -> int:
         )
         cell_w = max(1, font.size("M")[0])
         cell_h = font.get_linesize()
+        if display_holder:
+            _report_display_cell_pixels(client, cell_w, cell_h)
         status_h = max(24, status_font.get_linesize() + 8)
         screen = pygame.display.set_mode(
             (terminal.cols * cell_w, terminal.rows * cell_h + status_h)
@@ -2914,6 +2935,7 @@ def main() -> int:
                         display_state=display_state,
                         revision=revision,
                         resource_cache=resource_cache,
+                        cell_pixels=(cell_w, cell_h),
                     )
                 )
                 last_claim_attempt = now

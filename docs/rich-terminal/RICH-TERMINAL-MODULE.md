@@ -144,6 +144,9 @@ PT-RETAINED-AVAILABLE? ( session -- flag )
 PT-RETAINED-CAPS@      ( session -- a u )
 PT-RETAINED-FORMATS@   ( session -- a u )
 PT-OUTBOUND-MAX-PAYLOAD@ ( session -- bytes )
+PT-PIXELS-QUERY        ( query-id x y cols rows session -- status )
+PT-PIXELS-STATE@       ( session -- state )
+PT-PIXELS-ANSWER@      ( session -- a u )
 
 PT-COMPLETION-POLL  ( completion session -- status has-completion )
 
@@ -195,10 +198,10 @@ PT-POLYLINE-REPLACE ( owner generation object region parent
                       session -- status )
 PT-IMAGE-DEFINE     ( owner generation object region parent
                       x y cols rows z visible resource fit opacity
-                      session -- status )
+                      flags session -- status )
 PT-IMAGE-REPLACE    ( owner generation object region parent
                       x y cols rows z visible resource fit opacity
-                      session -- status )
+                      flags session -- status )
 PT-GLYPH-RUN-DEFINE ( owner generation object region parent
                       x y cols rows z visible
                       fg-red fg-green fg-blue fg-alpha
@@ -478,9 +481,10 @@ than weakening that CELL rule. `PT-COMPLETION-POLL` returns one fixed 80-byte
 native descriptor containing completion kind, completed request type, status,
 detail, transaction ID, revision, owner tuple, item, and accepted bytes.
 OWNER_OPEN and OWNER_RESIZE always complete through RET_RESULT. A resize
-names the owner's complete new quota set, each field at least the current
-one; RET_NO_CAPACITY leaves the old reservation in force and is an ordinary
-answer, not a loss. OWNER_DROP and PRESENT complete
+names the owner's complete new quota set. Each field is at least the current
+one, except the resource count and bytes, which may drop to the resources in
+use so that an owner gives space back; RET_NO_CAPACITY leaves the old
+reservation in force and is an ordinary answer, not a loss. OWNER_DROP and PRESENT complete
 through TX_RESULT. RESOURCE_BEGIN, RESOURCE_COMMIT, RESOURCE_DROP, and
 RESOURCE_ABORT complete through RET_RESULT, as does a rejected RESOURCE_CHUNK.
 An accepted RESOURCE_CHUNK has no wire result: only cumulative CREDIT covering
@@ -524,6 +528,18 @@ exact old-epoch RESET_REBUILD abort from the tracked tuple and waits for its
 RET_RESULT and exposed completion to be polled. Only then may it publish the
 new-epoch RESET_ACK. The upper engine therefore does not acquire a second
 transport-cleanup state machine.
+
+`PT-PIXELS-QUERY` asks how many pixels a cell rectangle covers on the
+selected surface, under the same quiescence as an owner request: ACTIVE, no
+transaction, upload, or unpolled result. It is `PT-S-UNSUPPORTED` without
+RGBA_IMAGE and `PT-S-WOULD-BLOCK` while another question is unanswered. The
+session keeps the exact query, and an answer that does not echo it, arrives
+unasked, or pairs a zero with a nonzero dimension fails the session.
+`PT-PIXELS-STATE@` reports `PT-PIXELS-NONE`, `PT-PIXELS-PENDING`, or
+`PT-PIXELS-ANSWERED`; `PT-PIXELS-ANSWER@` returns the exact 40-byte PIXELS
+payload once answered. A soft reset, lost discovery, or close cancels an
+unanswered question. The query and answer live in the caller-sized session
+record, which grows by 72 bytes for them.
 
 `PT-PRESENT-BEGIN` derives transaction ID, base revision, geometry generation,
 and exact declared bytes, which include four bytes per cluster word of its CELL
@@ -710,6 +726,7 @@ target-dependent checks.
 
 Object booleans use `PT-OBJECT-HIDDEN` and `PT-OBJECT-VISIBLE`. Public typed
 constants also cover `PT-POLYLINE-CLOSED`, the three `PT-IMAGE-FIT-*` modes,
+the `PT-IMAGE-BACKDROP` image flag,
 the three `PT-READOUT-*` formats, horizontal/vertical and show-value meter
 options, the three `PT-STATUS-*` shapes, the two `PT-PLOT-*` flags, and
 `PT-WAVEFORM-DRAW-ZERO-LINE`; callers do not pass reserved wire fields.

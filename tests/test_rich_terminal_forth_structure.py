@@ -113,6 +113,7 @@ def test_transaction_frames_batch_until_an_atomic_protocol_boundary() -> None:
         "_PT-SEND-RET-QUERY",
         "_PT-SEND-FATAL-ERROR",
         "_PT-OWNER-QUOTA-REQUEST",
+        "PT-PIXELS-QUERY",
         "PT-OWNER-DROP",
         "PT-PRESENT-COMMIT",
         "_PT-COMMIT",
@@ -258,7 +259,7 @@ def test_close_intent_is_one_bounded_writer_barrier() -> None:
     close = _definition(source, "PT-CLOSE")
     service = _definition(source, "PT-SERVICE")
 
-    assert "992 CONSTANT /PT-SESSION" in source
+    assert "1064 CONSTANT /PT-SESSION" in source
     assert ": _PT.S.CLOSE-PENDING?  ( s -- a ) 872 + ;" in source
     for field in (
         "_PT.S.AWAIT?",
@@ -874,7 +875,7 @@ def test_resource_lifecycle_exposes_one_generic_typed_abi() -> None:
     ):
         assert declaration in source
 
-    assert "992 CONSTANT /PT-SESSION" in source
+    assert "1064 CONSTANT /PT-SESSION" in source
     for accessor in (
         ": _PT.S.LIFE-ITEM       ( s -- a ) 880 + ;",
         ": _PT.S.LIFE-WATERMARK  ( s -- a ) 888 + ;",
@@ -1448,7 +1449,7 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
             f"{common} stroke-width red green blue alpha path-flags "
             "points-a points-u session -- status"
         ),
-        "IMAGE": f"{common} resource fit opacity session -- status",
+        "IMAGE": f"{common} resource fit opacity flags session -- status",
         "READOUT": (
             f"{common} fg-red fg-green fg-blue fg-alpha bg-red bg-green "
             "bg-blue bg-alpha format decimal-places initial-value scale "
@@ -2023,3 +2024,44 @@ def test_retained_resize_and_reset_barriers_preserve_the_wire_profile() -> None:
     assert "_PT.S.RESET-PENDING?" in service_credit
     assert "_PT.S.RESET-PENDING?" in settlement
     assert "_PT-PUBLISH-PENDING-CLOSE" in close
+
+
+def test_pixels_query_tracks_one_exact_question_in_the_session() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+    query = _definition(source, "PT-PIXELS-QUERY")
+    dispatch = _definition(source, "_PT-DISPATCH-PIXELS")
+    router = _definition(source, "_PT-DISPATCH")
+    records_clear = _definition(source, "_PT-RET-RECORDS-CLEAR")
+    image = _definition(source, "_PT-IMAGE-WRITE")
+
+    for declaration in (
+        "0x8003 CONSTANT _PT-M-PIXELS-QUERY",
+        "0x8004 CONSTANT _PT-M-PIXELS",
+        "0x01 CONSTANT PT-IMAGE-BACKDROP",
+        ": _PT.S.PIXELS-STATE    ( s -- a ) 992 + ;",
+        ": _PT.S.PIXELS-QUERY    ( s -- a ) 1000 + ;",
+        ": _PT.S.PIXELS-ANSWER   ( s -- a ) 1024 + ;",
+    ):
+        assert declaration in source
+
+    # The question waits for the same quiescence as an owner request.
+    for guard in (
+        "_PT-RET-RGBA-IMAGE? 0= IF PT-S-UNSUPPORTED EXIT THEN",
+        "_PT-RETAINED-LIFECYCLE-STATE? 0= IF",
+        "_PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN",
+        "_PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN",
+        "_PT.S.PIXELS-STATE @ PT-PIXELS-PENDING = IF",
+    ):
+        assert guard in query
+    assert "_PT-M-PIXELS-QUERY 24" in query
+    assert query.index("_PT.S.PIXELS-QUERY 24 MOVE") < query.index("_PT-FRAME-SEND")
+
+    # An answer must echo the one pending question exactly.
+    assert "_PT-RX-LEN @ 40 <> IF" in dispatch
+    assert "PT-PIXELS-PENDING <> IF" in dispatch
+    assert "_PT.S.PIXELS-ANSWER 40 MOVE" in dispatch
+    assert router.index("_PT-M-PIXELS = IF") < router.index("0x8000 AND IF")
+    assert "_PT-PIXELS-CLEAR" in records_clear
+
+    assert "_PT-IM-FLAGS @ PT-IMAGE-BACKDROP U> IF PT-S-INVALID EXIT THEN" in image
+    assert "_PT-IM-FLAGS @ _PT-FRAME-PAYLOAD 77 + C!" in image

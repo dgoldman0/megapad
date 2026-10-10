@@ -358,6 +358,7 @@ class ImageDraw:
     resource_id: int
     fit: ImageFit
     opacity: int
+    backdrop: bool = False
     parent_bounds: tuple[ObjectBounds, ...] = ()
 
     def __post_init__(self) -> None:
@@ -395,6 +396,7 @@ class ImageDraw:
             "opacity",
             _integer("opacity", self.opacity, minimum=0, maximum=0xFF),
         )
+        object.__setattr__(self, "backdrop", _boolean("backdrop", self.backdrop))
         object.__setattr__(
             self,
             "parent_bounds",
@@ -2534,6 +2536,7 @@ def project_composite_draw_plane(
                             resource_id=body.resource_id,
                             fit=body.fit,
                             opacity=body.opacity,
+                            backdrop=body.backdrop,
                             parent_bounds=parent_bounds,
                         )
                     )

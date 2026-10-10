@@ -603,6 +603,8 @@ class TerminalSession(ABC):
         self._display_offer_composite: CompositeTerminalView | None = None
         self._acknowledged_display_offer: TerminalDisplayOffer | None = None
         self._next_display_offer_id = 1
+        # The display holder's pixel size of one cell, for PIXELS answers.
+        self._display_cell_pixels: tuple[int, int] | None = None
         self._display_cadence = (
             None
             if rich_terminal is None or rich_terminal.retained_policy is None
@@ -821,6 +823,9 @@ class TerminalSession(ABC):
             ansi_sink=self._receive_rich_terminal_ansi,
             view_sink=self._receive_terminal_output,
             retained_policy=config.retained_policy,
+        )
+        self._rich_terminal_driver.core.select_sink_cell_pixels(
+            self._display_cell_pixels
         )
         self._rich_terminal_failure_reason = None
         self._rich_terminal_lost = False
@@ -1164,6 +1169,27 @@ class TerminalSession(ABC):
         self._display_offer_composite = None
         return True
 
+
+    def select_display_cell_pixels(
+        self, cell_pixels: tuple[int, int] | None
+    ) -> None:
+        """Tell the terminal the display holder's pixel size of one cell.
+
+        None means no holder, or one without a pixel raster.  The value
+        outlives a rich terminal reattachment and is given to each new core.
+        """
+
+        if cell_pixels is not None:
+            if not isinstance(cell_pixels, tuple) or len(cell_pixels) != 2:
+                raise TypeError("cell_pixels must be a width and height pair")
+            width, height = (operator.index(value) for value in cell_pixels)
+            if width < 1 or height < 1:
+                raise ValueError("cell pixel width and height must be positive")
+            cell_pixels = (width, height)
+        self._display_cell_pixels = cell_pixels
+        driver = self._rich_terminal_driver
+        if driver is not None:
+            driver.core.select_sink_cell_pixels(cell_pixels)
 
     def revoke_physical_display(self) -> bool:
         """Revoke all sink state while preserving the CELL observer baseline."""

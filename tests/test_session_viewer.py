@@ -1320,6 +1320,9 @@ def test_pygame_initialization_failure_closes_client_and_pygame(monkeypatch):
         def request(self, method, **params):
             if method == "claim_display":
                 return {"status": "claimed", "claimed": True}
+            if method == "display_cell_pixels":
+                assert set(params) == {"cell_width", "cell_height"}
+                return {"status": "selected", "selected": True}
             if method == "status":
                 return {
                     "generation": 1,
@@ -1437,6 +1440,9 @@ def test_viewer_presents_only_the_rectangles_a_frame_changed(monkeypatch):
         def request(self, method, **params):
             if method == "claim_display":
                 return {"status": "claimed", "claimed": True}
+            if method == "display_cell_pixels":
+                assert set(params) == {"cell_width", "cell_height"}
+                return {"status": "selected", "selected": True}
             if method == "status":
                 return {
                     "generation": 1,
@@ -1525,6 +1531,9 @@ def test_idle_viewer_neither_recomposes_nor_flips_an_unchanged_window(monkeypatc
         def request(self, method, **params):
             if method == "claim_display":
                 return {"status": "claimed", "claimed": True}
+            if method == "display_cell_pixels":
+                assert set(params) == {"cell_width", "cell_height"}
+                return {"status": "selected", "selected": True}
             if method == "status":
                 return {
                     "generation": 1,

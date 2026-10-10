@@ -913,6 +913,7 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         "resource_id": 37,
         "fit": int(ImageFit.COVER),
         "opacity": 211,
+        "backdrop": False,
     }
     assert wire["retained"]["resources"] == [
         {

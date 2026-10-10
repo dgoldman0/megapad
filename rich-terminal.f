@@ -58,7 +58,7 @@ PROVIDED rich-terminal.f
 \ session.
 64  CONSTANT /PT-EVENT
 80  CONSTANT /PT-COMPLETION
-992 CONSTANT /PT-SESSION
+1064 CONSTANT /PT-SESSION
 
 : PT-SESSION-SIZE  ( -- bytes )  /PT-SESSION ;
 : PT-EVENT-SIZE    ( -- bytes )  /PT-EVENT ;
@@ -145,6 +145,15 @@ PROVIDED rich-terminal.f
 0 CONSTANT PT-IMAGE-FIT-STRETCH
 1 CONSTANT PT-IMAGE-FIT-CONTAIN
 2 CONSTANT PT-IMAGE-FIT-COVER
+\ IMAGE flags: BACKDROP asks the renderer to paint its own opaque background
+\ over the object's whole rectangle before the picture.
+0x01 CONSTANT PT-IMAGE-BACKDROP
+
+\ The one PIXELS_QUERY a session may have unanswered: none asked, asked and
+\ waiting, or answered.  PT-PIXELS-ANSWER@ holds an answer.
+0 CONSTANT PT-PIXELS-NONE
+1 CONSTANT PT-PIXELS-PENDING
+2 CONSTANT PT-PIXELS-ANSWERED
 
 0 CONSTANT PT-READOUT-INTEGER
 1 CONSTANT PT-READOUT-FIXED
@@ -322,6 +331,8 @@ CREATE _PT-OWNER  0 ,
 0x8000 CONSTANT _PT-M-RET-QUERY
 0x8001 CONSTANT _PT-M-RET-CAPS
 0x8002 CONSTANT _PT-M-RET-FORMATS
+0x8003 CONSTANT _PT-M-PIXELS-QUERY
+0x8004 CONSTANT _PT-M-PIXELS
 0x1000 CONSTANT _PT-M-RESOURCE-BEGIN
 0x1001 CONSTANT _PT-M-RESOURCE-CHUNK
 0x1002 CONSTANT _PT-M-RESOURCE-COMMIT
@@ -485,6 +496,10 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
 : _PT.S.SPAN-TAIL       ( s -- a ) 976 + ;
 \ Which PT-INIT fixed the borrowed geometry; see PT-LAYOUT-SERIAL@.
 : _PT.S.LAYOUT-SERIAL   ( s -- a ) 984 + ;
+\ The one PIXELS_QUERY: its state, exact sent payload, and exact answer.
+: _PT.S.PIXELS-STATE    ( s -- a ) 992 + ;
+: _PT.S.PIXELS-QUERY    ( s -- a ) 1000 + ;  \ exact 24-byte PIXELS_QUERY payload
+: _PT.S.PIXELS-ANSWER   ( s -- a ) 1024 + ;  \ exact 40-byte PIXELS payload
 
 0 CONSTANT _PT-TX-NONE
 1 CONSTANT _PT-TX-CELL
@@ -559,6 +574,19 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP 0 0 EXIT THEN
     _PT.S.RET-FORMATS 64 ;
 
+\ Where the session's one PIXELS_QUERY stands: PT-PIXELS-NONE,
+\ PT-PIXELS-PENDING, or PT-PIXELS-ANSWERED.  NONE without retained output.
+: PT-PIXELS-STATE@  ( session -- state )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP PT-PIXELS-NONE EXIT THEN
+    _PT.S.PIXELS-STATE @ ;
+
+\ The exact little-endian 40-byte PIXELS answer of APT-1-RETAINED-1 section
+\ 8.1, or 0 0 before one has arrived.  It stays valid until the next query,
+\ soft reset, close, loss, or PT-INIT.
+: PT-PIXELS-ANSWER@  ( session -- a u )
+    DUP PT-PIXELS-STATE@ PT-PIXELS-ANSWERED <> IF DROP 0 0 EXIT THEN
+    _PT.S.PIXELS-ANSWER 40 ;
+
 \ The negotiated client-to-terminal payload ceiling is scalar admission data,
 \ not a borrowed session address.  Consumers need it for semantic families
 \ such as CONTROLS whose variable text has no separate format-specific cap.
@@ -567,7 +595,14 @@ _PT-M-RESOURCE-ABORT  CONSTANT PT-REQUEST-RESOURCE-ABORT
     DUP PT-ACTIVE? 0= IF DROP 0 EXIT THEN
     _PT.S.PEER-MAX-PAY @ ;
 
+\ A soft reset, epoch end, or lost discovery cancels an unanswered query.
+: _PT-PIXELS-CLEAR  ( s -- )
+    DUP _PT.S.PIXELS-STATE OFF
+    DUP _PT.S.PIXELS-QUERY 24 0 FILL
+    _PT.S.PIXELS-ANSWER 40 0 FILL ;
+
 : _PT-RET-RECORDS-CLEAR  ( s -- )
+    DUP _PT-PIXELS-CLEAR
     DUP _PT.S.RET-CAPS 64 0 FILL
     _PT.S.RET-FORMATS 64 0 FILL ;
 
@@ -2687,6 +2722,28 @@ VARIABLE _PT-RSZ-BASE
     THEN
     _PT-ACCEPT-EVENT ;
 
+\ The terminal answers only the one outstanding question, echoing its ID and
+\ rectangle; width and height are zero only together.  Anything else breaks
+\ the contract: the terminal never sends an answer nobody asked for.
+: _PT-DISPATCH-PIXELS  ( s -- status )
+    _PT-RX-LEN @ 40 <> IF
+        1 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    DUP _PT.S.PIXELS-STATE @ PT-PIXELS-PENDING <> IF
+        6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    _PT-RX-P @ _PT-U64@ OVER _PT.S.PIXELS-QUERY _PT-U64@ <>
+    _PT-RX-P @ 16 + _PT-U64@ 2 PICK _PT.S.PIXELS-QUERY 8 + _PT-U64@ <> OR
+    _PT-RX-P @ 24 + _PT-U64@ 2 PICK _PT.S.PIXELS-QUERY 16 + _PT-U64@ <> OR IF
+        6 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    _PT-RX-P @ 32 + L@ 0= _PT-RX-P @ 36 + L@ 0= <> IF
+        9 _PT-RX-TYPE @ _PT-RX-SEQNO @ ROT _PT-SEMANTIC-FAIL EXIT
+    THEN
+    _PT-RX-P @ OVER _PT.S.PIXELS-ANSWER 40 MOVE
+    PT-PIXELS-ANSWERED OVER _PT.S.PIXELS-STATE !
+    _PT-RX-TOTAL @ SWAP _PT-RELEASE-DATA ;
+
 : _PT-DISPATCH  ( s -- status )
     DUP _PT-RET-CHECK-ADJACENCY
     DUP _PT.S.STATE @ PT-ST-OPENING = IF
@@ -2718,6 +2775,7 @@ VARIABLE _PT-RSZ-BASE
     _PT-RX-TYPE @ _PT-M-CONTROL-EVENT = IF
         _PT-DISPATCH-CONTROL-EVENT EXIT
     THEN
+    _PT-RX-TYPE @ _PT-M-PIXELS = IF _PT-DISPATCH-PIXELS EXIT THEN
     _PT-RX-TYPE @ 0x8000 AND IF
         _PT-RX-TOTAL @ SWAP _PT-RELEASE-DATA EXIT
     THEN
@@ -3375,14 +3433,65 @@ VARIABLE _PT-OO-MESSAGE
 : PT-OWNER-OPEN
     _PT-OWNER-QUOTA-ARGS _PT-M-OWNER-OPEN _PT-OO-MESSAGE ! _PT-OWNER-QUOTA-REQUEST ;
 
-\ Ask the terminal to grow a live owner's reservation to the complete quota
-\ set given, each at least the current one. The completion's status is
-\ PT-RET-OK when it is granted and PT-RET-NO-CAPACITY when the terminal has
-\ no room; a refusal leaves the old reservation in force.
+\ Ask the terminal to change a live owner's reservation to the complete quota
+\ set given. Every field is at least the current one, except the resource
+\ count and bytes, which may drop to the resources in use to give space
+\ back. The completion's status is PT-RET-OK when it is granted and
+\ PT-RET-NO-CAPACITY when the terminal has no room; a refusal leaves the old
+\ reservation in force.
 \ Stack: owner generation region-q resource-q object-q series-q
 \        resource-byte-q utf8-byte-q sample-slot-q session -- status
 : PT-OWNER-RESIZE
     _PT-OWNER-QUOTA-ARGS _PT-M-OWNER-RESIZE _PT-OO-MESSAGE ! _PT-OWNER-QUOTA-REQUEST ;
+
+VARIABLE _PT-PQ-S
+VARIABLE _PT-PQ-ID
+VARIABLE _PT-PQ-X
+VARIABLE _PT-PQ-Y
+VARIABLE _PT-PQ-COLS
+VARIABLE _PT-PQ-ROWS
+
+\ Ask how many pixels a cell rectangle covers on the selected surface.  The
+\ answer arrives later: PT-PIXELS-STATE@ turns PT-PIXELS-ANSWERED and
+\ PT-PIXELS-ANSWER@ holds it.  One question may be unanswered at a time.
+\ UNSUPPORTED unless the terminal advertised RGBA_IMAGE.
+\ Stack: query-id x y cols rows session -- status
+: PT-PIXELS-QUERY
+    _PT-PQ-S ! _PT-PQ-ROWS ! _PT-PQ-COLS ! _PT-PQ-Y ! _PT-PQ-X ! _PT-PQ-ID !
+    _PT-PQ-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
+    _PT-PQ-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
+    _PT-PQ-S @ _PT-RETAINED-WRITE-STATE? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-PQ-S @ _PT-RET-RGBA-IMAGE? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    _PT-PQ-ID @ 0= IF PT-S-INVALID EXIT THEN
+    _PT-PQ-X @ _PT-I32? 0= _PT-PQ-Y @ _PT-I32? 0= OR IF PT-S-INVALID EXIT THEN
+    _PT-PQ-COLS @ 0= _PT-PQ-COLS @ _PT-U32? 0= OR IF PT-S-INVALID EXIT THEN
+    _PT-PQ-ROWS @ 0= _PT-PQ-ROWS @ _PT-U32? 0= OR IF PT-S-INVALID EXIT THEN
+    _PT-PQ-S @ _PT-RETAINED-LIFECYCLE-STATE? 0= IF
+        PT-S-WOULD-BLOCK EXIT
+    THEN
+    _PT-PQ-S @ _PT.S.RESET-PENDING? @ IF PT-S-WOULD-BLOCK EXIT THEN
+    _PT-PQ-S @ _PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN
+    _PT-PQ-S @ _PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN
+    _PT-PQ-S @ _PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN
+    _PT-PQ-S @ _PT.S.PIXELS-STATE @ PT-PIXELS-PENDING = IF
+        PT-S-WOULD-BLOCK EXIT
+    THEN
+    _PT-PQ-S @ _PT.S.PEER-SENT @ _PT-PQ-S @ _PT.S.PEER-GRANT @ U> IF
+        PT-ST-LOST _PT-PQ-S @ _PT.S.STATE ! PT-S-SESSION-LOST EXIT
+    THEN
+    _PT-PQ-S @ _PT.S.PEER-GRANT @ _PT-PQ-S @ _PT.S.PEER-SENT @ -
+    64 U< IF PT-S-WOULD-BLOCK EXIT THEN
+    _PT-M-PIXELS-QUERY 24 _PT-PQ-S @ _PT-FRAME-BEGIN ?DUP IF EXIT THEN
+    _PT-PQ-ID @ _PT-FRAME-PAYLOAD _PT-U64!
+    _PT-PQ-X @ _PT-FRAME-PAYLOAD 8 + L!
+    _PT-PQ-Y @ _PT-FRAME-PAYLOAD 12 + L!
+    _PT-PQ-COLS @ _PT-FRAME-PAYLOAD 16 + L!
+    _PT-PQ-ROWS @ _PT-FRAME-PAYLOAD 20 + L!
+    _PT-FRAME-PAYLOAD _PT-PQ-S @ _PT.S.PIXELS-QUERY 24 MOVE
+    TRUE _PT-PQ-S @ _PT-FRAME-SEND ?DUP IF EXIT THEN
+    _PT-PQ-S @ _PT.S.PIXELS-ANSWER 40 0 FILL
+    PT-PIXELS-PENDING _PT-PQ-S @ _PT.S.PIXELS-STATE !
+    PT-S-OK ;
 
 VARIABLE _PT-OD-S
 VARIABLE _PT-OD-OWNER
@@ -5116,10 +5225,11 @@ VARIABLE _PT-IM-TYPE
 VARIABLE _PT-IM-RESOURCE
 VARIABLE _PT-IM-FIT
 VARIABLE _PT-IM-OPACITY
+VARIABLE _PT-IM-FLAGS
 
 \ Stack: common-prefix resource fit opacity session message-type -- status
 : _PT-IMAGE-WRITE
-    _PT-IM-TYPE ! _PT-IM-S ! _PT-IM-OPACITY ! _PT-IM-FIT !
+    _PT-IM-TYPE ! _PT-IM-S ! _PT-IM-FLAGS ! _PT-IM-OPACITY ! _PT-IM-FIT !
     _PT-IM-RESOURCE !
     _PT-IM-S @ _PT-IM-TYPE @ 3 _PT-OBJECT-COMMON!
     _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
@@ -5132,20 +5242,22 @@ VARIABLE _PT-IM-OPACITY
     _PT-IM-FIT @ DUP PT-IMAGE-FIT-STRETCH U<
     SWAP PT-IMAGE-FIT-COVER U> OR IF PT-S-INVALID EXIT THEN
     _PT-IM-OPACITY @ _PT-U8? 0= IF PT-S-INVALID EXIT THEN
+    _PT-IM-FLAGS @ PT-IMAGE-BACKDROP U> IF PT-S-INVALID EXIT THEN
     80 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
     _PT-OBJECT-COMMON-PAYLOAD!
     _PT-IM-RESOURCE @ _PT-FRAME-PAYLOAD 64 + _PT-U64!
     _PT-IM-FIT @ _PT-FRAME-PAYLOAD 72 + L!
     _PT-IM-OPACITY @ _PT-FRAME-PAYLOAD 76 + C!
+    _PT-IM-FLAGS @ _PT-FRAME-PAYLOAD 77 + C!
     _PT-PO-SEND ;
 
 \ Stack: owner generation object region parent x y cols rows z visible
-\        resource fit opacity session -- status
+\        resource fit opacity flags session -- status
 : PT-IMAGE-DEFINE
     _PT-M-OBJECT-DEFINE _PT-IMAGE-WRITE ;
 
 \ Stack: owner generation object region parent x y cols rows z visible
-\        resource fit opacity session -- status
+\        resource fit opacity flags session -- status
 : PT-IMAGE-REPLACE
     _PT-M-OBJECT-REPLACE _PT-IMAGE-WRITE ;
 

@@ -86,7 +86,10 @@ _OBJECT_PREFIX = struct.Struct("<QQQHHiQQiiII")
 _POLYLINE_BODY = struct.Struct("<II4BI")
 _POINT = struct.Struct("<II")
 # ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
-_IMAGE_BODY = struct.Struct("<QIB3s")
+_IMAGE_BODY = struct.Struct("<QIBB2s")
+IMAGE_FLAG_BACKDROP = 0x01
+_PIXELS_QUERY = struct.Struct("<QiiII")
+_PIXELS = struct.Struct("<QQiiIIII")
 _GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
 _PANE_BODY = struct.Struct("<IHHQiiIIII")
 PANE_BODY_TAG = 0x31454E50
@@ -140,6 +143,8 @@ class RetainedMessageType(IntEnum):
     RET_QUERY = 0x8000
     RET_CAPS = 0x8001
     RET_FORMATS = 0x8002
+    PIXELS_QUERY = 0x8003
+    PIXELS = 0x8004
 
 
 class RetStatus(IntEnum):
@@ -345,6 +350,79 @@ def _control_text_bytes(name: str, text: str) -> bytes:
 @dataclass(frozen=True, slots=True)
 class RetainedQuery:
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class PixelsQuery:
+    """Ask how many pixels a cell rectangle covers on the selected surface."""
+
+    query_id: int
+    cell_x: int
+    cell_y: int
+    cols: int
+    rows: int
+
+    def __post_init__(self) -> None:
+        for name, minimum, maximum in (
+            ("query_id", 1, UINT64_MAX),
+            ("cell_x", -(1 << 31), (1 << 31) - 1),
+            ("cell_y", -(1 << 31), (1 << 31) - 1),
+            ("cols", 1, UINT32_MAX),
+            ("rows", 1, UINT32_MAX),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=minimum, maximum=maximum),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PixelsAnswer:
+    """The pixels a queried rectangle covers, or zeros when nobody can say."""
+
+    query_id: int
+    geometry_generation: int
+    cell_x: int
+    cell_y: int
+    cols: int
+    rows: int
+    pixel_width: int
+    pixel_height: int
+
+    def __post_init__(self) -> None:
+        for name, minimum, maximum in (
+            ("query_id", 1, UINT64_MAX),
+            ("geometry_generation", 0, UINT64_MAX),
+            ("cell_x", -(1 << 31), (1 << 31) - 1),
+            ("cell_y", -(1 << 31), (1 << 31) - 1),
+            ("cols", 1, UINT32_MAX),
+            ("rows", 1, UINT32_MAX),
+            ("pixel_width", 0, UINT32_MAX),
+            ("pixel_height", 0, UINT32_MAX),
+        ):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=minimum, maximum=maximum),
+            )
+        if (self.pixel_width == 0) != (self.pixel_height == 0):
+            raise ValueError("pixel width and height are zero only together")
+
+    @property
+    def known(self) -> bool:
+        return self.pixel_width != 0
+
+    def answers(self, query: PixelsQuery) -> bool:
+        """Whether this answer echoes exactly ``query``."""
+
+        return (
+            self.query_id == query.query_id
+            and self.cell_x == query.cell_x
+            and self.cell_y == query.cell_y
+            and self.cols == query.cols
+            and self.rows == query.rows
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1386,6 +1464,45 @@ def decode_ret_query(payload) -> RetainedQuery:
     return RetainedQuery()
 
 
+def encode_pixels_query(query: PixelsQuery) -> bytes:
+    if not isinstance(query, PixelsQuery):
+        raise TypeError("query must be PixelsQuery")
+    return _PIXELS_QUERY.pack(
+        query.query_id, query.cell_x, query.cell_y, query.cols, query.rows
+    )
+
+
+def decode_pixels_query(payload) -> PixelsQuery:
+    raw = _payload(payload, _PIXELS_QUERY.size, "PIXELS_QUERY")
+    try:
+        return PixelsQuery(*_PIXELS_QUERY.unpack(raw))
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
+def encode_pixels(answer: PixelsAnswer) -> bytes:
+    if not isinstance(answer, PixelsAnswer):
+        raise TypeError("answer must be PixelsAnswer")
+    return _PIXELS.pack(
+        answer.query_id,
+        answer.geometry_generation,
+        answer.cell_x,
+        answer.cell_y,
+        answer.cols,
+        answer.rows,
+        answer.pixel_width,
+        answer.pixel_height,
+    )
+
+
+def decode_pixels(payload) -> PixelsAnswer:
+    raw = _payload(payload, _PIXELS.size, "PIXELS")
+    try:
+        return PixelsAnswer(*_PIXELS.unpack(raw))
+    except (TypeError, ValueError) as exc:
+        raise RetainedWireError(RetainedWireErrorCode.SCALAR, str(exc)) from exc
+
+
 def encode_ret_caps(caps: RetainedCaps) -> bytes:
     if not isinstance(caps, RetainedCaps):
         raise TypeError("caps must be RetainedCaps")
@@ -1821,7 +1938,8 @@ def _encode_object_body(body: ObjectWireBody) -> bytes:
             body.resource_id,
             int(body.fit),
             body.opacity,
-            bytes(3),
+            IMAGE_FLAG_BACKDROP if body.backdrop else 0,
+            bytes(2),
         )
     if isinstance(body, GlyphRunBody):
         text = body.text.encode("utf-8", "strict")
@@ -1972,8 +2090,13 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
             )
         if kind is ObjectKind.IMAGE:
             _body_size(raw, _IMAGE_BODY.size, "IMAGE")
-            resource_id, fit, opacity, reserved = _IMAGE_BODY.unpack(raw)
-            if reserved != bytes(3):
+            resource_id, fit, opacity, flags, reserved = _IMAGE_BODY.unpack(raw)
+            if flags & ~IMAGE_FLAG_BACKDROP:
+                raise RetainedWireError(
+                    RetainedWireErrorCode.RESERVED,
+                    "IMAGE flags contain reserved bits",
+                )
+            if reserved != bytes(2):
                 raise RetainedWireError(
                     RetainedWireErrorCode.RESERVED,
                     "IMAGE padding is nonzero",
@@ -1988,7 +2111,12 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
                     RetainedWireErrorCode.SCALAR,
                     "IMAGE resource ID must be nonzero",
                 )
-            return ImageBody(resource_id, ImageFit(fit), opacity)
+            return ImageBody(
+                resource_id,
+                ImageFit(fit),
+                opacity,
+                backdrop=bool(flags & IMAGE_FLAG_BACKDROP),
+            )
         if kind is ObjectKind.GLYPH_RUN:
             if len(raw) < _GLYPH_RUN_BODY.size:
                 _body_size(raw, _GLYPH_RUN_BODY.size, "GLYPH_RUN prefix")
@@ -2626,13 +2754,14 @@ def decode_series_drop(payload) -> RetainedItemReference:
 __all__ = [
     "CONTROL_EVENT_MAX_PAYLOAD", "CellMode", "ControlEvent", "ControlEventKind",
     "ControlKind", "ControlState", "control_event_payload_size",
-    "ControlWireDefinition", "ImageBody", "ImageFit", "ObjectSetValue",
+    "ControlWireDefinition", "IMAGE_FLAG_BACKDROP", "ImageBody", "ImageFit", "ObjectSetValue",
     "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
     "PaneBody", "PANE_BODY_TAG",
     "StatusFieldBody", "StatusSeverity", "STATUS_FIELD_BODY_TAG",
     "PresentRetainedMode", "PresentCommit", "RegionWireDefinition", "RetainedItemReference",
     "RET1_TAG", "RetStatus", "SeriesWireBatch", "SeriesWireDefinition", "SeriesWireSamples",
+    "PixelsAnswer", "PixelsQuery",
     "RetainedCaps", "RetainedFormats", "RetainedMessageType", "RetainedQuery",
     "RetainedResult", "RetainedWireError", "RetainedWireErrorCode", "ResourceAbort",
     "ResourceAbortReason", "ResourceBegin", "ResourceChunk", "ResourceCommit",
@@ -2641,7 +2770,8 @@ __all__ = [
     "decode_control_replace",
     "decode_object_definition", "decode_object_drop", "decode_object_replace",
     "decode_object_set_value", "decode_object_set_visibility", "decode_owner_drop",
-    "decode_owner_open", "decode_owner_resize", "decode_present_begin", "decode_present_commit",
+    "decode_owner_open", "decode_owner_resize", "decode_pixels", "decode_pixels_query",
+    "decode_present_begin", "decode_present_commit",
     "decode_region_definition", "decode_region_drop", "decode_region_replace",
     "decode_resource_abort", "decode_resource_begin", "decode_resource_chunk",
     "decode_resource_commit", "decode_resource_drop",
@@ -2652,6 +2782,7 @@ __all__ = [
     "encode_object_definition",
     "encode_object_drop", "encode_object_replace", "encode_object_set_value",
     "encode_object_set_visibility", "encode_owner_drop", "encode_owner_open", "encode_owner_resize",
+    "encode_pixels", "encode_pixels_query",
     "encode_present_begin", "encode_present_commit", "encode_region_definition",
     "encode_region_drop", "encode_region_replace", "encode_ret_caps", "encode_ret_formats",
     "encode_resource_abort", "encode_resource_begin", "encode_resource_chunk",

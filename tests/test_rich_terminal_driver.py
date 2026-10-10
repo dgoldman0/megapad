@@ -754,7 +754,8 @@ def test_driver_settles_resource_chunk_only_when_covering_credit_is_admitted():
     # The driver has no retained output at this point, so the next chunk can be
     # processed while its own CREDIT remains unable to cross host admission.
     for _ in range(16):
-        _write_native_uart(system, encoder.encode(0x8003))
+        # 0xFFFF is an optional message type that no contract assigns.
+        _write_native_uart(system, encoder.encode(0xFFFF))
         assert driver.service().outbound_records == 1
 
     _write_native_uart(

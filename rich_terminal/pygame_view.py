@@ -4095,8 +4095,15 @@ def _paint_image(
     region_rect,
     draw: ImageDraw,
     source,
+    *,
+    appearance: Appearance = REFERENCE_APPEARANCE,
 ) -> None:
-    """Scale and composite one immutable cached resource without mutating it."""
+    """Scale and composite one immutable cached resource without mutating it.
+
+    A BACKDROP image first fills its whole clipped rectangle with the
+    appearance's surface colour, so letterbox bars and transparent pixels
+    never show the CELL plane beneath.  Opacity does not apply to it.
+    """
 
     object_rect, clip = _object_clip(
         pygame_module,
@@ -4105,7 +4112,11 @@ def _paint_image(
         region_rect,
         draw,
     )
-    if clip.width <= 0 or clip.height <= 0 or draw.opacity == 0:
+    if clip.width <= 0 or clip.height <= 0:
+        return
+    if draw.backdrop:
+        surface.fill(appearance.surface, clip)
+    if draw.opacity == 0:
         return
     geometry = _image_fit_geometry(draw.fit, source.get_size(), object_rect)
     if geometry is None:
@@ -4168,16 +4179,16 @@ def opaque_cell_coverage(
     cell_width: int,
     cell_height: int,
 ) -> bytearray:
-    """Mark each CELL cell whose pixels a GLYPH_RUN fill will overwrite.
+    """Mark each CELL cell whose pixels an opaque retained fill will overwrite.
 
     Returns one byte per cell, row-major, set when the complete cell box lies
-    inside the opaque background fill of a GLYPH_RUN in PLANE.  That painter
-    fills its whole clipped rectangle before drawing any glyph and restores
-    the surface clip afterwards, so every earlier pixel inside the fill,
-    including all CELL pixels, is replaced.  The rectangle is computed with
-    the painter's own object, viewport and clip rules on the full-surface
-    clip that composition starts with.  Translucent, partial and other draws
-    never count, so CELL still paints everything they may reveal.
+    inside the opaque background fill of a GLYPH_RUN, or the backdrop of a
+    BACKDROP IMAGE, in PLANE.  Both painters fill their whole clipped
+    rectangle before drawing anything else in it, so every earlier pixel
+    inside the fill, including all CELL pixels, is replaced.  The rectangle is
+    computed with the painter's own object, viewport and clip rules on the
+    full-surface clip that composition starts with.  Translucent, partial and
+    other draws never count, so CELL still paints everything they may reveal.
     """
     if not isinstance(plane, RetainedDrawPlane):
         raise TypeError("plane must be RetainedDrawPlane")
@@ -4196,12 +4207,18 @@ def opaque_cell_coverage(
         )
         viewport = None
         for draw in region.draws:
-            if not isinstance(draw, GlyphRunDraw):
-                continue
-            background = (
-                draw.foreground if draw.attributes & ATTR_REVERSE else draw.background
-            )
-            if background.alpha != 0xFF:
+            if isinstance(draw, ImageDraw):
+                if not draw.backdrop:
+                    continue
+            elif isinstance(draw, GlyphRunDraw):
+                background = (
+                    draw.foreground
+                    if draw.attributes & ATTR_REVERSE
+                    else draw.background
+                )
+                if background.alpha != 0xFF:
+                    continue
+            else:
                 continue
             if viewport is None:
                 if bounds is None:
@@ -4281,6 +4298,7 @@ def _paint_draw(
                     draw.resource_id,
                 )
             ],
+            appearance=appearance,
         )
     elif isinstance(draw, PaneDraw):
         _paint_pane(

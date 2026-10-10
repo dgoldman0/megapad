@@ -652,6 +652,7 @@ _IMAGE_WIRE_FIELDS = (
     "resource_id",
     "fit",
     "opacity",
+    "backdrop",
 )
 _PANE_WIRE_FIELDS = (
     "kind",
@@ -1200,6 +1201,7 @@ def _retained_draw_to_wire(
             "resource_id": draw.resource_id,
             "fit": int(draw.fit),
             "opacity": draw.opacity,
+            "backdrop": draw.backdrop,
         }
     if isinstance(draw, PaneDraw):
         return {
@@ -1963,6 +1965,7 @@ def _retained_draw_from_wire(
             opacity=_wire_integer(
                 wire["opacity"], f"{name} opacity", minimum=0, maximum=0xFF
             ),
+            backdrop=_wire_boolean(wire["backdrop"], f"{name} backdrop"),
             parent_bounds=_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
@@ -3492,8 +3495,17 @@ class SharedSessionOwner(ABC):
 
         with self.condition:
             changed = self.session.revoke_physical_display()
+            self.session.select_display_cell_pixels(None)
             self.condition.notify_all()
             return changed
+
+    def select_display_cell_pixels(
+        self, cell_pixels: tuple[int, int] | None
+    ) -> None:
+        """Give the terminal the display holder's pixel size of one cell."""
+
+        with self.condition:
+            self.session.select_display_cell_pixels(cell_pixels)
 
     def text(self, trim_right: bool = True) -> dict:
         with self.lock:
@@ -3819,6 +3831,34 @@ class SessionServer:
                 return {"status": "claimed", "claimed": True}
             return {"status": "display_busy", "claimed": False}
 
+    def _display_cell_pixels_for_connection(
+        self,
+        params: Mapping[str, Any],
+        connection_id: int | None,
+    ) -> dict:
+        """Let the display holder say how many pixels one of its cells has.
+
+        The terminal answers PIXELS queries from this until the holder
+        releases the display.
+        """
+
+        wire = _wire_object(
+            params, "display cell pixels", ("cell_width", "cell_height")
+        )
+        cell_pixels = (
+            _wire_integer(
+                wire["cell_width"], "cell width", minimum=1, maximum=UINT32_MAX
+            ),
+            _wire_integer(
+                wire["cell_height"], "cell height", minimum=1, maximum=UINT32_MAX
+            ),
+        )
+        with self._display_lock:
+            if connection_id is None or self._display_holder != connection_id:
+                return {"status": "stale_display", "selected": False}
+            self.machine.select_display_cell_pixels(cell_pixels)
+            return {"status": "selected", "selected": True}
+
     def _release_display_holder(self, connection_id: int) -> bool:
         """Drop one exact lease and requeue all of its physical sink state."""
 
@@ -4098,6 +4138,8 @@ class SessionServer:
                 return result
         if method == "claim_display":
             return self._claim_display(connection_id)
+        if method == "display_cell_pixels":
+            return self._display_cell_pixels_for_connection(params, connection_id)
         if method == "present":
             return self._present_for_connection(params, connection_id)
         if method == "display_resource_chunk":

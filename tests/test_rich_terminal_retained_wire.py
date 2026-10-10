@@ -932,12 +932,18 @@ def test_image_body_rejects_bad_fit_padding_resource_and_length():
     assert fit.value.code is RetainedWireErrorCode.ENUM
 
     payload[72:76] = (1).to_bytes(4, "little")
-    payload[77] = 1
+    payload[77] = 2
+    with pytest.raises(RetainedWireError) as flags:
+        decode_object_definition(payload)
+    assert flags.value.code is RetainedWireErrorCode.RESERVED
+
+    payload[77] = 0
+    payload[78] = 1
     with pytest.raises(RetainedWireError) as padding:
         decode_object_definition(payload)
     assert padding.value.code is RetainedWireErrorCode.RESERVED
 
-    payload[77] = 0
+    payload[78] = 0
     payload[64:72] = bytes(8)
     with pytest.raises(RetainedWireError) as resource:
         decode_object_definition(payload)

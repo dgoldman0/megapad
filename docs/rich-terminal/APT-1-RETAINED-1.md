@@ -933,10 +933,8 @@ The client may send a query only while RETAINED-1 is enabled with
 `RET_RGBA_IMAGE`, the session is ACTIVE, and no CELL or PRESENT transaction,
 resource upload, or RET_RESULT is outstanding. At most one query may be
 unanswered: the client sends another only after it has received the answer to
-the last. Before sending a query the client must have granted at least 80
-currently unused terminal-to-client ordinary bytes, enough for the complete
-answer frame. A query with a zero ID or a zero extent, or one that breaks any
-of these rules, is a fatal protocol error under the base contract. A terminal
+the last. A query with a zero ID or a zero extent, or one that breaks any of
+these rules, is a fatal protocol error under the base contract. A terminal
 without `RET_RGBA_IMAGE` skips and recredits the query under the APT-1
 unknown-optional rule and sends no answer.
 
@@ -958,12 +956,19 @@ It echoes the query's ID and rectangle and names the geometry generation, as
 RESIZE carries it, for which it computed the answer. `pixel_width` and
 `pixel_height` count the physical pixels the whole rectangle would cover at
 the selected sink's current cell scale, including any part outside the
-surface. Where parts of the surface differ in pixel density, the terminal
+surface; a count larger than u32 can hold is answered as the u32 maximum.
+Where parts of the surface differ in pixel density, the terminal
 answers for the densest part the rectangle covers. Both are zero when no sink
 is selected or the selected sink has no pixel raster; one is never zero
-without the other. The answer is ordinary terminal-to-client traffic, sent in
-stream order after the terminal consumes the query; other frames may come
-before or after it. The query frame is recredited as any ordinary frame is.
+without the other.
+
+The answer is ordinary terminal-to-client traffic, sent in stream order after
+the terminal consumes the query. Input the terminal sent in the meantime may
+have used the client's grant, so the client needs no spare grant to ask. If
+the grant has no room for the 80-byte answer frame when the terminal consumes
+the query, the terminal owes the answer: it sends no other ordinary frame
+until a CREDIT makes room and the answer has gone. The query frame is
+recredited as any ordinary frame is.
 
 An answer stays useful while its geometry generation is current, and the
 terminal never sends an answer nobody asked for. After a RESIZE with a newer

@@ -498,6 +498,10 @@ _QUOTA_FIELDS = (
     "regions", "resources", "objects", "series",
     "resource_bytes", "utf8_bytes", "sample_slots",
 )
+# Quotas that bound each scene target; OWNER_RESIZE never shrinks them.
+_GROW_ONLY_QUOTA_FIELDS = (
+    "regions", "objects", "series", "utf8_bytes", "sample_slots",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -716,13 +720,21 @@ class OwnerLedger:
         return self._prepared(self._make_state(updated, reservations), disposition)
 
     def prepare_resize(
-        self, identity: OwnerIdentity, quotas: OwnerQuotas
+        self,
+        identity: OwnerIdentity,
+        quotas: OwnerQuotas,
+        *,
+        resources_in_use: tuple[int, int] | None = None,
     ) -> PreparedOwnerLedgerInstall:
-        """Grow a live owner's reservation to ``quotas``.
+        """Change a live owner's reservation to ``quotas``.
 
-        Every field must be at least the current one. The request fails with
-        NO_CAPACITY, leaving the owner as it was, when the larger reservation
-        would not fit the caller's policy.
+        Region, object, series, UTF-8 and sample-slot quotas bound each scene
+        target, which active and hidden usage must each fit, so they may only
+        grow. The resource count and bytes may also drop, down to
+        ``resources_in_use``: the owner's committed resource count and bytes,
+        which only the caller's resource store knows. Without it they may only
+        grow too. The request fails with NO_CAPACITY, leaving the owner as it
+        was, when the new reservation would not fit the caller's policy.
         """
 
         self._validate_scope(identity)
@@ -732,9 +744,37 @@ class OwnerLedger:
         record = self.require_live(identity)
         current = record.quotas
         assert current is not None
-        if any(getattr(quotas, name) < getattr(current, name) for name in _QUOTA_FIELDS):
+        if any(
+            getattr(quotas, name) < getattr(current, name)
+            for name in _GROW_ONLY_QUOTA_FIELDS
+        ):
             raise OwnerLedgerError(
-                OwnerLedgerErrorCode.INVALID, "an owner reservation can only grow"
+                OwnerLedgerErrorCode.INVALID,
+                "only an owner's resource count and bytes can shrink",
+            )
+        if resources_in_use is None:
+            floor = (current.resources, current.resource_bytes)
+        else:
+            if not isinstance(resources_in_use, tuple) or len(resources_in_use) != 2:
+                raise TypeError("resources_in_use must be a count and byte pair")
+            floor = (
+                _integer(
+                    "resources in use",
+                    resources_in_use[0],
+                    minimum=0,
+                    maximum=UINT32_MAX,
+                ),
+                _integer(
+                    "resource bytes in use",
+                    resources_in_use[1],
+                    minimum=0,
+                    maximum=UINT64_MAX,
+                ),
+            )
+        if quotas.resources < floor[0] or quotas.resource_bytes < floor[1]:
+            raise OwnerLedgerError(
+                OwnerLedgerErrorCode.INVALID,
+                "a resource reservation cannot drop below the resources in use",
             )
         if quotas == current:
             return self._prepared(self._state, OwnerResizeDisposition.UNCHANGED)
@@ -755,8 +795,16 @@ class OwnerLedger:
         assert isinstance(prepared.disposition, OwnerOpenDisposition)
         return prepared.disposition
 
-    def resize(self, identity: OwnerIdentity, quotas: OwnerQuotas) -> OwnerResizeDisposition:
-        prepared = self.prepare_resize(identity, quotas)
+    def resize(
+        self,
+        identity: OwnerIdentity,
+        quotas: OwnerQuotas,
+        *,
+        resources_in_use: tuple[int, int] | None = None,
+    ) -> OwnerResizeDisposition:
+        prepared = self.prepare_resize(
+            identity, quotas, resources_in_use=resources_in_use
+        )
         self.install_prepared(prepared)
         assert isinstance(prepared.disposition, OwnerResizeDisposition)
         return prepared.disposition

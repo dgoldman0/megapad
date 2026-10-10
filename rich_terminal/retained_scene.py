@@ -478,11 +478,16 @@ class PolylineBody:
 
 @dataclass(frozen=True, slots=True)
 class ImageBody:
-    """One renderer-neutral reference to an exact-owner immutable RGBA resource."""
+    """One renderer-neutral reference to an exact-owner immutable RGBA resource.
+
+    ``backdrop`` asks the renderer to paint its own opaque background over the
+    object's whole rectangle first, so nothing beneath shows through.
+    """
 
     resource_id: int
     fit: ImageFit
     opacity: int
+    backdrop: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -504,6 +509,7 @@ class ImageBody:
             "opacity",
             _integer("opacity", self.opacity, minimum=0, maximum=0xFF),
         )
+        object.__setattr__(self, "backdrop", _boolean("backdrop", self.backdrop))
 
 
 @dataclass(frozen=True, slots=True)

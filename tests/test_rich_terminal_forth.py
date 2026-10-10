@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import struct
+from dataclasses import replace
 from pathlib import Path
 
 from tests.test_system import (
@@ -94,6 +95,21 @@ def _core_retained_policy() -> RetainedPolicy:
         client_to_terminal_max_payload=256,
         terminal_to_client_max_payload=64,
         base_max_transaction_bytes=512,
+    )
+
+
+def _image_retained_policy() -> RetainedPolicy:
+    """CORE plus RGBA_IMAGE, so the guest may ask the PIXELS question."""
+    return replace(
+        _core_retained_policy(),
+        features=RetainedFeature.CORE | RetainedFeature.RGBA_IMAGE,
+        max_resources=2,
+        max_objects=2,
+        max_resource_chunk_bytes=16,
+        total_resource_bytes=64,
+        image_format=1,
+        max_image_width=2,
+        max_image_height=2,
     )
 
 
@@ -1488,7 +1504,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-POLYLINE-CLOSED PT-OBJ-POINTS 32 PT-OBJ-SESSION ;",
                 ": PT-OBJ-IMAGE  ( object -- image-args )",
                 "  PT-OBJ-COMMON 0x696A6B6C6D6E6F70",
-                "  PT-IMAGE-FIT-COVER 200 PT-OBJ-SESSION ;",
+                "  PT-IMAGE-FIT-COVER 200 PT-IMAGE-BACKDROP PT-OBJ-SESSION ;",
                 ": PT-OBJ-READOUT  ( object -- readout-args )",
                 "  PT-OBJ-COMMON 1 2 3 4 5 6 7 8",
                 "  PT-READOUT-FIXED 2 -123 100",
@@ -1766,7 +1782,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 struct.pack("<II4BI", 2, 0x01000000, 1, 2, 3, 255, 1)
                 + point_bytes,
             ),
-            (image, 3, struct.pack("<QIB3x", resource, 2, 200)),
+            (image, 3, struct.pack("<QIBB2x", resource, 2, 200, 1)),
             (
                 readout,
                 5,
@@ -2503,6 +2519,191 @@ class TestRichTerminalForth(_KDOSTestBase):
             tuple(range(ord("A"), ord("A") + 32)),
         )
         self.assertIn(expected, terminal_ansi)
+
+    def test_real_core_answers_one_pixel_question_at_a_time(self) -> None:
+        """PT-PIXELS-QUERY asks a real terminal core and keeps its exact answer."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PX-RX 8192 ALLOT",
+                "CREATE PX-TX 8192 ALLOT",
+                "CREATE PX-IN PT-EVENT-SIZE ALLOT",
+                "CREATE PX-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PX-SESSION PX-STORAGE 7 + -8 AND ;",
+                "VARIABLE PX-ERROR",
+                "VARIABLE PX-SECOND",
+                ": PX-STATUS+ PX-ERROR @ OR PX-ERROR ! ;",
+                ": PX-WAIT-ACTIVE",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-ACTIVE? IF PT-S-OK EXIT THEN YIELD",
+                "  AGAIN ;",
+                ": PX-WAIT-SNAPSHOT",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-SNAPSHOT-NEEDED? 0= IF PT-S-OK EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PX-WAIT-RETAINED",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-RETAINED-STATE@ DUP",
+                "    PT-RET-ST-AVAILABLE = IF DROP PT-S-OK EXIT THEN",
+                "    PT-RET-ST-CELL-ONLY = IF PT-S-UNSUPPORTED EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PX-WAIT-ANSWER",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-PIXELS-STATE@ PT-PIXELS-ANSWERED = IF",
+                "      PT-S-OK EXIT",
+                "    THEN YIELD",
+                "  AGAIN ;",
+                ": PX-WAIT-ANSI",
+                "  BEGIN",
+                "    PX-SESSION PT-SERVICE DUP PT-S-OK <> IF EXIT THEN DROP",
+                "    PX-SESSION PT-STATE@ PT-ST-ANSI = IF PT-S-OK EXIT THEN",
+                "    YIELD",
+                "  AGAIN ;",
+                ": PX-SNAPSHOT",
+                "  2 2 2 4 0 PX-SESSION PT-SNAPSHOT-BEGIN PX-STATUS+",
+                "  0 0 2 0 PX-SESSION PT-SPAN-BEGIN PX-STATUS+",
+                "  65 7 0 0 PX-SESSION PT-CELL PX-STATUS+",
+                "  66 7 0 0 PX-SESSION PT-CELL PX-STATUS+",
+                "  1 0 2 0 PX-SESSION PT-SPAN-BEGIN PX-STATUS+",
+                "  67 7 0 0 PX-SESSION PT-CELL PX-STATUS+",
+                "  68 7 0 0 PX-SESSION PT-CELL PX-STATUS+",
+                "  0 0 0 PX-SESSION PT-CURSOR PX-STATUS+",
+                "  PX-SESSION PT-TX-COMMIT PX-STATUS+ ;",
+                ": PX-BEGIN-MARK",
+                "  80 EMIT 88 EMIT 33 EMIT TX-FLUSH ;",
+                "CREATE PX-ANSWER 40 ALLOT",
+                "VARIABLE PX-STATE",
+                "VARIABLE PX-ANSWER-U",
+                ": PX-KEEP  ( -- )",
+                "  PX-SESSION PT-PIXELS-STATE@ PX-STATE !",
+                "  PX-SESSION PT-PIXELS-ANSWER@ DUP PX-ANSWER-U !",
+                "  PX-ANSWER SWAP MOVE ;",
+                ": PX-REPORT  ( -- )",
+                "  80 EMIT 88 EMIT 82 EMIT 32 EMIT",
+                "  PX-ERROR @ . PX-SECOND @ . PX-STATE @ . PX-ANSWER-U @ .",
+                "  PX-ANSWER @ . PX-ANSWER 16 + L@ . PX-ANSWER 20 + L@ .",
+                "  PX-ANSWER 24 + L@ . PX-ANSWER 28 + L@ .",
+                "  PX-ANSWER 32 + L@ . PX-ANSWER 36 + L@ . TX-FLUSH ;",
+                ": PX-RUN",
+                "  0 PX-ERROR !",
+                "  PX-RX 8192 PX-TX 8192 PX-IN PT-EVENT-SIZE PX-SESSION",
+                "    PT-INIT PX-STATUS+",
+                "  PX-SESSION PT-RETAINED-DISCOVER PX-STATUS+",
+                "  PX-BEGIN-MARK",
+                "  PX-SESSION PT-START PX-STATUS+",
+                "  PX-WAIT-ACTIVE PX-STATUS+",
+                "  PX-SNAPSHOT PX-WAIT-SNAPSHOT PX-STATUS+",
+                "  PX-WAIT-RETAINED PX-STATUS+",
+                "  7 -1 2 3 2 PX-SESSION PT-PIXELS-QUERY PX-STATUS+",
+                "  8 0 0 1 1 PX-SESSION PT-PIXELS-QUERY PX-SECOND !",
+                "  PX-WAIT-ANSWER PX-STATUS+ PX-KEEP",
+                "  0 PX-SESSION PT-CLOSE PX-STATUS+",
+                "  PX-WAIT-ANSI PX-STATUS+ PX-REPORT ;",
+                "PX-RUN BYE",
+            ]
+        )
+        payload = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+        terminal_cursor: int | None = None
+        begin_marker = b"PX!"
+        core = RichTerminalCore(
+            TerminalConfig(
+                max_payload=256,
+                max_transaction_bytes=512,
+                terminal_receive_credit=4_096,
+                max_cells=4,
+                max_feed_bytes=4_096,
+                max_cols=2,
+                max_rows=2,
+                cols=2,
+                rows=2,
+            ),
+            attachment_epoch=1,
+            retained_policy=_image_retained_policy(),
+            session_id_factory=lambda: 0x0123456789ABCDEF,
+        )
+        core.select_sink_cell_pixels((11, 21))
+
+        def pump_terminal() -> None:
+            nonlocal terminal_cursor
+            current = bytes(uart)
+            if terminal_cursor is None:
+                marker_at = current.find(begin_marker)
+                if marker_at < 0:
+                    return
+                terminal_cursor = marker_at + len(begin_marker)
+            while terminal_cursor < len(current):
+                end = min(terminal_cursor + 4_096, len(current))
+                result = core.feed_machine(current[terminal_cursor:end])
+                terminal_cursor = end
+                for outbound in result.outbound:
+                    system.uart.inject_input(outbound.payload)
+                    if outbound.result_transaction_id is not None:
+                        core.settle_result_delivery(outbound.result_transaction_id)
+                    if outbound.lifecycle_result is not None:
+                        core.settle_lifecycle_result_delivery(
+                            outbound.lifecycle_result
+                        )
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            pump_terminal()
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data and position < len(payload):
+                chunk = _next_line_chunk(payload, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+            batch_limit = 10_000 if terminal_cursor is not None else RUN_BATCH_STEPS
+            executed = system.run_batch(
+                min(batch_limit, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += executed if executed else batch_limit
+        pump_terminal()
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(payload), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "pixel question test exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog "
+            f"(core={core.state.value}, tail={raw[-160:].hex()})",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "Stack underflow",
+            "Stack overflow",
+            "*** BUS FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+        # No error; the second question waited (PT-S-WOULD-BLOCK); the state
+        # is PT-PIXELS-ANSWERED; then the exact 40-byte answer: query 7 at
+        # x -1 (as u32), y 2, three by two cells, eleven by twenty-one pixels
+        # per cell.
+        self.assertIn(
+            b"PXR 0 1 2 40 7 4294967295 2 3 2 33 42 ",
+            raw,
+        )
+        self.assertEqual(core.state, TerminalState.ANSI)
 
     def test_real_core_owner_region_present_and_legacy_cell_interleave(self) -> None:
         """Drive the production guest writers through one CORE-only terminal."""

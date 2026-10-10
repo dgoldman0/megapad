@@ -105,6 +105,7 @@ from .retained_wire import (
     RetainedMessageType,
     RetainedResult,
     RetainedWireError,
+    PixelsAnswer,
     decode_control_definition,
     decode_control_drop,
     decode_control_replace,
@@ -119,6 +120,7 @@ from .retained_wire import (
     decode_resource_commit,
     decode_resource_drop,
     decode_ret_query,
+    decode_pixels_query,
     decode_present_begin,
     decode_present_commit,
     decode_region_definition,
@@ -129,6 +131,7 @@ from .retained_wire import (
     decode_series_drop,
     decode_series_replace,
     encode_control_event,
+    encode_pixels,
     encode_ret_caps,
     encode_ret_formats,
     encode_ret_result,
@@ -598,6 +601,12 @@ class RichTerminalCore:
         self._presents_committed: dict[str, int] = {}
         # Refused requests for more retained space, kept for status and logs.
         self._capacity_denials = 0
+        # The selected sink's pixel size of one cell; None without a sink or
+        # pixel raster.  PIXELS answers come only from this.
+        self._sink_cell_pixels: tuple[int, int] | None = None
+        # A PIXELS answer the client's grant had no room for.  No other
+        # ordinary frame goes out until CREDIT lets it go.
+        self._owed_pixels: bytes | None = None
         self._last_capacity_denial: dict | None = None
         self._frames_received = 0
         self._frame_bytes_received = 0
@@ -863,6 +872,26 @@ class RichTerminalCore:
         return self._config.cols, self._config.rows
 
     @property
+    def sink_cell_pixels(self) -> tuple[int, int] | None:
+        return self._sink_cell_pixels
+
+    def select_sink_cell_pixels(self, cell_pixels: tuple[int, int] | None) -> None:
+        """Record the selected sink's pixel width and height of one cell.
+
+        None means no sink is selected or it has no pixel raster, so PIXELS
+        answers zeros.  The terminal never guesses a scale of its own.
+        """
+
+        if cell_pixels is None:
+            self._sink_cell_pixels = None
+            return
+        if not isinstance(cell_pixels, tuple) or len(cell_pixels) != 2:
+            raise TypeError("cell_pixels must be a width and height pair")
+        width = _integer("cell pixel width", cell_pixels[0], minimum=1, maximum=UINT32_MAX)
+        height = _integer("cell pixel height", cell_pixels[1], minimum=1, maximum=UINT32_MAX)
+        self._sink_cell_pixels = (width, height)
+
+    @property
     def resize_ready(self) -> bool:
         model = self._model
         decoder = self._decoder
@@ -1053,7 +1082,10 @@ class RichTerminalCore:
         if not payloads:
             raise ValueError("text data must not be empty")
         needed = sum(HEADER_BYTES + len(payload) for payload in payloads)
-        if needed > self._server_data_grant - self._server_data_sent:
+        if (
+            self._owed_pixels is not None
+            or needed > self._server_data_grant - self._server_data_sent
+        ):
             return None
         return tuple(
             self._encode_data(MessageType.TEXT, payload) for payload in payloads
@@ -1359,6 +1391,7 @@ class RichTerminalCore:
             self._fatal(f"cannot arm soft-reset epoch transition: {exc}", cause=exc)
         self._reset_requested_epoch = requested_epoch
         self._reset_crossed_lifecycle_consumed = False
+        self._owed_pixels = None
         self._state = TerminalState.RESYNCING
         return encoded
 
@@ -1485,6 +1518,7 @@ class RichTerminalCore:
         self._retained_query_seen = False
         self._retained_enabled = False
         self._reset_requested_epoch = None
+        self._owed_pixels = None
         self._client_data_grant = self._config.terminal_receive_credit
         self._server_data_grant = record.client_receive_credit
         self._state = TerminalState.OPENING
@@ -1565,6 +1599,13 @@ class RichTerminalCore:
                 return self._release_data(frame.complete_bytes), None
             return self._accept_retained_query(frame), None
 
+        if (
+            frame.message_type == RetainedMessageType.PIXELS_QUERY
+            and self._pixels_supported()
+        ):
+            self._charge_data(frame, include_in_transaction=False)
+            return self._accept_pixels_query(frame), None
+
         if frame.message_type in {
             RetainedMessageType.RESOURCE_BEGIN,
             RetainedMessageType.RESOURCE_CHUNK,
@@ -1637,7 +1678,7 @@ class RichTerminalCore:
 
         if message_type is MessageType.CREDIT:
             self._accept_credit(frame.payload)
-            return (), None
+            return self._send_owed_pixels(), None
         if message_type is MessageType.TX_ABORT:
             return self._accept_abort(frame.payload), None
         if message_type is MessageType.SOFT_RESET_ACK:
@@ -1767,6 +1808,7 @@ class RichTerminalCore:
         self._retained_query_seen = False
         self._retained_enabled = False
         self._reset_requested_epoch = None
+        self._owed_pixels = None
         self._client_data_grant = 0
         self._client_data_received = 0
         self._client_data_released = 0
@@ -1914,6 +1956,79 @@ class RichTerminalCore:
         self._retained_enabled = True
         return (caps_reply, formats_reply, covering_credit[0])
 
+    def _pixels_supported(self) -> bool:
+        """Whether this epoch answers PIXELS_QUERY; otherwise it is skipped."""
+
+        policy = self._session_retained_policy
+        return (
+            self._retained_enabled
+            and policy is not None
+            and bool(policy.features & RetainedFeature.RGBA_IMAGE)
+        )
+
+    def _accept_pixels_query(
+        self,
+        frame: Frame,
+    ) -> tuple[OutboundBytes, ...]:
+        """Answer how many pixels a cell rectangle covers on the selected sink."""
+
+        name = "PIXELS_QUERY"
+        if self._reset_requested_epoch is not None:
+            # A soft reset cancels the query; it gets no answer.
+            return self._release_data(frame.complete_bytes)
+        if self._state is not TerminalState.ACTIVE:
+            self._fatal(f"{name} is outside ACTIVE")
+        if self._outstanding_lifecycle_result is not None:
+            self._fatal(f"{name} crossed an outstanding lifecycle completion")
+        model = self._require_model()
+        clock = self._require_clock()
+        if (
+            self._wire_transaction_id is not None
+            or model.transaction_open
+            or clock.open_transaction is not None
+            or clock.outstanding_result is not None
+        ):
+            self._fatal(f"{name} crossed a transaction/result boundary")
+        self._require_no_resource_upload(name)
+        try:
+            query = decode_pixels_query(frame.payload)
+        except (RetainedWireError, TypeError, ValueError) as exc:
+            self._fatal(f"invalid {name}: {exc}", cause=exc)
+        cell_pixels = self._sink_cell_pixels
+        if cell_pixels is None:
+            width = height = 0
+        else:
+            # A count past u32 is answered as the u32 maximum.
+            width = min(UINT32_MAX, query.cols * cell_pixels[0])
+            height = min(UINT32_MAX, query.rows * cell_pixels[1])
+        answer = PixelsAnswer(
+            query.query_id,
+            self._geometry_generation,
+            query.cell_x,
+            query.cell_y,
+            query.cols,
+            query.rows,
+            width,
+            height,
+        )
+        if self._owed_pixels is not None:
+            self._fatal(f"{name} arrived while an answer was still owed")
+        self._owed_pixels = encode_pixels(answer)
+        return (*self._send_owed_pixels(), *self._release_data(frame.complete_bytes))
+
+    def _send_owed_pixels(self) -> tuple[OutboundBytes, ...]:
+        """Send an owed PIXELS answer once the client's grant has room."""
+
+        owed = self._owed_pixels
+        if owed is None:
+            return ()
+        self._owed_pixels = None
+        reply = self._encode_data(RetainedMessageType.PIXELS, owed)
+        if reply is None:
+            self._owed_pixels = owed
+            return ()
+        return (reply,)
+
     def _accept_owner_open(
         self,
         frame: Frame,
@@ -1977,7 +2092,11 @@ class RichTerminalCore:
                 if request is RetainedMessageType.OWNER_OPEN:
                     prepared = ledger.prepare_open(identity, quotas)
                 else:
-                    prepared = ledger.prepare_resize(identity, quotas)
+                    prepared = ledger.prepare_resize(
+                        identity,
+                        quotas,
+                        resources_in_use=self._owner_resources_in_use(identity),
+                    )
             except OwnerLedgerError as exc:
                 status = self._owner_open_status(exc)
                 if status is RetStatus.NO_CAPACITY:
@@ -2500,6 +2619,25 @@ class RichTerminalCore:
             owner_id=owner_id,
             owner_generation=owner_generation,
         )
+
+    def _owner_resources_in_use(
+        self, identity: OwnerIdentity
+    ) -> tuple[int, int] | None:
+        """The committed resource count and bytes a resize may shrink to.
+
+        None when the owner is not live, so the ledger reports it as stale.
+        No upload is open during a lifecycle request, so usage is exactly the
+        committed resources.
+        """
+
+        store = self._resource_store
+        if store is None:
+            return None
+        try:
+            usage = store.usage(identity)
+        except ResourceStoreError:
+            return None
+        return (usage.resources, usage.bytes)
 
     @staticmethod
     def _owner_open_status(error: OwnerLedgerError) -> RetStatus:
@@ -3324,6 +3462,7 @@ class RichTerminalCore:
             self._fatal("soft-reset acknowledgement has no response encoder")
         encoder.set_presentation_epoch(requested_epoch)
         self._reset_requested_epoch = None
+        self._owed_pixels = None
         self._owner_ledger = None
         self._resource_store = None
         self._retained_model = None
@@ -3420,6 +3559,9 @@ class RichTerminalCore:
         encoder = self._encoder
         if encoder is None:
             self._fatal("data response requested before OPEN")
+        if self._owed_pixels is not None:
+            # An owed PIXELS answer goes before any other ordinary frame.
+            return None
         complete = HEADER_BYTES + len(payload)
         if complete > self._server_data_grant - self._server_data_sent:
             return None
