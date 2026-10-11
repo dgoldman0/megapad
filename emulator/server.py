@@ -8,7 +8,7 @@ import signal
 from pathlib import Path
 
 from emulator.session import MachineSession
-from shared.session_options import retained_policy, rich_terminal_policy
+from shared.session_options import link_pace, retained_policy, rich_terminal_policy
 from shared_session import DEFAULT_SOCKET, SessionServer
 from emulator.shared_session import SharedMachine
 
@@ -54,6 +54,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--terminal-link-pace",
+        type=link_pace,
+        metavar="BYTES_PER_SECOND:FRAME_US",
+        help=(
+            "for testing, pace the guest-to-terminal link at BYTES_PER_SECOND "
+            "and advertise resource chunks it carries in one FRAME_US frame "
+            "time; requires --rich-terminal-policy"
+        ),
+    )
+    parser.add_argument(
         "--nic-tap",
         nargs="?",
         const="mp64tap0",
@@ -92,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             "--retained-terminal-policy requires --rich-terminal-policy"
         )
+    if args.terminal_link_pace is not None and args.rich_terminal_policy is None:
+        parser.error("--terminal-link-pace requires --rich-terminal-policy")
 
     rich_terminal = None
     if args.rich_terminal_policy is not None:
@@ -100,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.cols,
                 args.rows,
                 retained_policy=args.retained_terminal_policy,
+                link_pace=args.terminal_link_pace,
             )
         except (TypeError, ValueError, OverflowError) as exc:
             parser.error(f"invalid selected terminal geometry: {exc}")

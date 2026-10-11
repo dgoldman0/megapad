@@ -16,6 +16,7 @@ from rich_terminal import (
     DriverStatus,
     EgressWatermarks,
     HostPortLimits,
+    LinkPace,
     RichTerminalDriver,
     TerminalConfig,
     TerminalSessionError,
@@ -295,10 +296,14 @@ class RichTerminalSessionConfig:
     ansi_history_bytes: int
     service_batches: int = 1
     retained_policy: RetainedPolicy | None = None
+    # A paced client-to-terminal link, for testing; None for the host's speed.
+    link_pace: LinkPace | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.host_limits, HostPortLimits):
             raise TypeError("host_limits must be HostPortLimits")
+        if self.link_pace is not None and not isinstance(self.link_pace, LinkPace):
+            raise TypeError("link_pace must be LinkPace or None")
         if not isinstance(self.terminal_config, TerminalConfig):
             raise TypeError("terminal_config must be TerminalConfig")
         if not isinstance(self.driver_limits, DriverLimits):
@@ -409,12 +414,29 @@ class RichTerminalSessionPolicy:
         rows: int,
         *,
         retained_policy: RetainedPolicy | None = None,
+        link_pace: LinkPace | None = None,
     ) -> RichTerminalSessionConfig:
-        """Bind selected geometry without weakening the declared maxima."""
+        """Bind selected geometry without weakening the declared maxima.
+
+        On a paced link the terminal advertises resource chunks the link
+        carries in one frame time, so a frame waits behind at most one
+        chunk (APT-1-RETAINED-1 section 8).
+        """
         if retained_policy is not None and not isinstance(
             retained_policy, RetainedPolicy
         ):
             raise TypeError("retained_policy must be RetainedPolicy or None")
+        if link_pace is not None and not isinstance(link_pace, LinkPace):
+            raise TypeError("link_pace must be LinkPace or None")
+        if (
+            link_pace is not None
+            and retained_policy is not None
+            and retained_policy.max_resource_chunk_bytes > link_pace.chunk_bytes
+        ):
+            retained_policy = replace(
+                retained_policy,
+                max_resource_chunk_bytes=link_pace.chunk_bytes,
+            )
         selected: dict[str, int] = {}
         for name, value, maximum in (
             ("cols", cols, self.max_cols),
@@ -476,6 +498,7 @@ class RichTerminalSessionPolicy:
             ansi_history_bytes=self.ansi_history_bytes,
             service_batches=self.service_batches,
             retained_policy=retained_policy,
+            link_pace=link_pace,
         )
 
     def to_dict(self) -> dict[str, int]:
@@ -823,6 +846,7 @@ class TerminalSession(ABC):
             ansi_sink=self._receive_rich_terminal_ansi,
             view_sink=self._receive_terminal_output,
             retained_policy=config.retained_policy,
+            link_pace=config.link_pace,
         )
         self._rich_terminal_driver.core.select_sink_cell_pixels(
             self._display_cell_pixels

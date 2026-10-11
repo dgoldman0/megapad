@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import operator
+import time
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
@@ -23,6 +24,7 @@ from .server import (
 )
 from .transport import (
     AdmissionStatus,
+    EgressDelivery,
     HostPortLimits,
     TerminalHostLease,
 )
@@ -142,6 +144,35 @@ class DriverLimits:
         object.__setattr__(self, "pending_outbound_events", event_limit)
 
 
+@dataclass(frozen=True, slots=True)
+class LinkPace:
+    """A client-to-terminal link slower than the host, for testing.
+
+    The terminal takes the client's bytes no faster than
+    ``bytes_per_second``.  ``frame_interval_us`` is the terminal's frame
+    time.  The terminal advertises resource chunks its link carries in about
+    that time, so a frame waits behind at most one chunk
+    (APT-1-RETAINED-1 section 8).
+    """
+
+    bytes_per_second: int
+    frame_interval_us: int
+
+    def __post_init__(self) -> None:
+        for name in ("bytes_per_second", "frame_interval_us"):
+            object.__setattr__(
+                self,
+                name,
+                _integer(name, getattr(self, name), minimum=1, maximum=UINT64_MAX),
+            )
+
+    @property
+    def chunk_bytes(self) -> int:
+        """The bytes the link carries in one frame time, at least one."""
+
+        return max(1, self.bytes_per_second * self.frame_interval_us // 1_000_000)
+
+
 class DriverStatus(str, Enum):
     IDLE = "idle"
     PROGRESS = "progress"
@@ -190,6 +221,8 @@ class RichTerminalDriver:
         *,
         ansi_sink: Callable[[bytes], None] | None = None,
         view_sink: Callable[[TerminalOutputView], None] | None = None,
+        link_pace: LinkPace | None = None,
+        monotonic_ns: Callable[[], int] = time.monotonic_ns,
     ):
         if not isinstance(lease, TerminalHostLease):
             raise TypeError("lease must be TerminalHostLease")
@@ -203,6 +236,10 @@ class RichTerminalDriver:
             raise TypeError("ansi_sink must be callable or None")
         if view_sink is not None and not callable(view_sink):
             raise TypeError("view_sink must be callable or None")
+        if link_pace is not None and not isinstance(link_pace, LinkPace):
+            raise TypeError("link_pace must be LinkPace or None")
+        if not callable(monotonic_ns):
+            raise TypeError("monotonic_ns must be callable")
         _validate_retained_driver_capacity(
             host_limits,
             limits,
@@ -219,6 +256,13 @@ class RichTerminalDriver:
         self._resize_intent: tuple[int, int] | None = None
         self._failure_reason: str | None = None
         self._closed = False
+        # A paced link: the batch the link is still carrying, when it
+        # arrives, and when the link is free for the next one.
+        self._link_pace = link_pace
+        self._monotonic_ns = monotonic_ns
+        self._held: EgressDelivery | None = None
+        self._held_arrival_ns = 0
+        self._link_free_ns = 0
 
     @classmethod
     def attach(
@@ -232,6 +276,8 @@ class RichTerminalDriver:
         view_sink: Callable[[TerminalOutputView], None] | None = None,
         retained_policy: RetainedPolicy | None = None,
         session_id_factory: Callable[[], int] | None = None,
+        link_pace: LinkPace | None = None,
+        monotonic_ns: Callable[[], int] = time.monotonic_ns,
     ) -> RichTerminalDriver:
         """Validate the complete vertical's capacities before acquisition."""
 
@@ -300,6 +346,8 @@ class RichTerminalDriver:
                 driver_limits,
                 ansi_sink=ansi_sink,
                 view_sink=view_sink,
+                link_pace=link_pace,
+                monotonic_ns=monotonic_ns,
             )
         except BaseException:
             lease.close()
@@ -388,17 +436,34 @@ class RichTerminalDriver:
                     views,
                 )
 
-            polled = self._lease.poll_egress()
-            if polled.status is AdmissionStatus.STALE:
-                self._closed = True
+            delivery = self._held
+            if delivery is None:
+                polled = self._lease.poll_egress()
+                if polled.status is AdmissionStatus.STALE:
+                    self._closed = True
+                    return DriverServiceResult(
+                        DriverStatus.STALE,
+                        batches,
+                        admitted,
+                        ansi_bytes,
+                        views,
+                    )
+                delivery = polled.delivery
+            if delivery is not None and not self._arrived(delivery):
+                # Still on the paced link: the guest's egress stays full, as
+                # on a slow wire, and nothing more reaches the terminal yet.
+                status = (
+                    DriverStatus.PROGRESS
+                    if batches or admitted or ansi_bytes or views
+                    else DriverStatus.IDLE
+                )
                 return DriverServiceResult(
-                    DriverStatus.STALE,
+                    status,
                     batches,
                     admitted,
                     ansi_bytes,
                     views,
                 )
-            delivery = polled.delivery
             if delivery is None:
                 resize_status, materialized = self._materialize_resize()
                 if resize_status in {DriverStatus.FAILED, DriverStatus.STALE}:
@@ -500,6 +565,7 @@ class RichTerminalDriver:
             if flush_status in {DriverStatus.BACKPRESSURED, DriverStatus.STALE}
             else DriverStatus.PROGRESS
         )
+        self._carry_next()
         return DriverServiceResult(status, batches, admitted, ansi_bytes, views)
 
     def send_key(
@@ -748,6 +814,47 @@ class RichTerminalDriver:
         self._resize_intent = geometry
         return DriverStatus.PROGRESS
 
+    def _carry(self, delivery: EgressDelivery) -> None:
+        """Put DELIVERY on the paced link, after the batches before it."""
+
+        pace = self._link_pace
+        assert pace is not None
+        start = max(self._monotonic_ns(), self._link_free_ns)
+        carried = -(
+            -len(delivery.batch.payload) * 1_000_000_000 // pace.bytes_per_second
+        )
+        self._held = delivery
+        self._held_arrival_ns = start + carried
+        self._link_free_ns = self._held_arrival_ns
+
+    def _arrived(self, delivery: EgressDelivery) -> bool:
+        """Whether DELIVERY has reached the terminal.  Without a paced link
+        every batch arrives at once.  On one, a batch arrives once the link
+        has carried it after the batches before it, and the driver holds it
+        until then."""
+
+        if self._link_pace is None:
+            return True
+        if self._held is not delivery:
+            self._carry(delivery)
+        if self._monotonic_ns() < self._held_arrival_ns:
+            return False
+        self._held = None
+        return True
+
+    def _carry_next(self) -> None:
+        """On a paced link, put the next queued batch on the link as soon as
+        the one before it arrives, so queued batches follow back to back."""
+
+        if self._link_pace is None or self._held is not None or self._closed:
+            return
+        polled = self._lease.poll_egress()
+        if polled.status is AdmissionStatus.STALE:
+            self._closed = True
+            return
+        if polled.delivery is not None:
+            self._carry(polled.delivery)
+
     def close(self) -> AdmissionStatus:
         """Hard-retire this outer attachment and restore legacy ownership."""
 
@@ -760,6 +867,7 @@ class RichTerminalDriver:
         self._pending.clear()
         self._pending_bytes = 0
         self._resize_intent = None
+        self._held = None
         return result
 
     def _retain_outbound(self, records: tuple[OutboundBytes, ...]) -> None:
