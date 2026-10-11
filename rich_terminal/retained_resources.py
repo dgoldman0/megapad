@@ -20,6 +20,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from .apt1 import UINT32_MAX, UINT64_MAX
+from .qoi import decode_qoi
 from .retained_model import (
     ItemNamespace,
     OwnerIdentity,
@@ -142,15 +143,28 @@ class ResourceDeclaration:
         return self.width * self.height * 4
 
 
-# Pillow's decoder for each file format the hosted terminal takes.
-_FILE_DECODERS = {
-    ResourceFormat.QOI: "QOI",
+# Pillow's decoder for each file format it decodes for the hosted terminal.
+# QOI has the terminal's own decoder (qoi.py), which Pillow's would take
+# seconds to match on a photograph.
+_PILLOW_DECODERS = {
     ResourceFormat.PNG: "PNG",
     ResourceFormat.JPEG: "JPEG",
 }
 
 
-def _decode_picture(declaration: ResourceDeclaration, data) -> bytes:
+def _decode_with_pillow(declaration: ResourceDeclaration, data: bytes) -> bytes:
+    from PIL import Image
+
+    with Image.open(
+        io.BytesIO(data), formats=[_PILLOW_DECODERS[declaration.format]]
+    ) as image:
+        if image.size != (declaration.width, declaration.height):
+            raise ValueError("the file's picture is not its declared size")
+        image.seek(0)
+        return image.convert("RGBA").tobytes()
+
+
+def _decode_picture(declaration: ResourceDeclaration, data: bytes) -> bytes:
     """The RGBA8 pixels of an uploaded file.
 
     The file's own header must give the declared size before any pixel is
@@ -160,20 +174,14 @@ def _decode_picture(declaration: ResourceDeclaration, data) -> bytes:
     decode to exactly the declared picture raises ValueError.
     """
 
-    from PIL import Image
-
     try:
-        with Image.open(
-            io.BytesIO(data), formats=[_FILE_DECODERS[declaration.format]]
-        ) as image:
-            if image.size != (declaration.width, declaration.height):
-                raise ValueError("the file's picture is not its declared size")
-            image.seek(0)
-            pixels = image.convert("RGBA").tobytes()
+        if declaration.format is ResourceFormat.QOI:
+            pixels = decode_qoi(data, declaration.width, declaration.height)
+        else:
+            pixels = _decode_with_pillow(declaration, data)
     except Exception as exc:
-        # A decoder fed a client's bytes may fail in any way; Pillow's QOI
-        # decoder raises IndexError on a truncated file.  Every failure means
-        # the file is not its declared picture.
+        # A decoder fed a client's bytes may fail in any way.  Every failure
+        # means the file is not its declared picture.
         raise ValueError(
             f"the file does not decode as {declaration.format.name}: {exc}"
         ) from exc
