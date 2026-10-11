@@ -3955,8 +3955,10 @@ VARIABLE _PT-B-TAILS-BIG?
             PT-S-SESSION-LOST EXIT
         THEN
     THEN
+    \ An open upload does not hold the transaction slot: transactions run
+    \ between its frames, and the busy result holds one back while a chunk
+    \ awaits its covering CREDIT.
     _PT-B-S @ _PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN
-    _PT-B-S @ _PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN
     _PT-B-S @ _PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN
     _PT-BEGIN-ARGS? 0= IF PT-S-INVALID EXIT THEN
     _PT-B-SNAPSHOT @ IF _PT-SNAPSHOT-COUNTS? 0= IF PT-S-INVALID EXIT THEN THEN
@@ -4155,8 +4157,8 @@ VARIABLE _PT-PB-RET-MIN
     _PT-PB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-PB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
     _PT-PB-S @ _PT-RETAINED-WRITE-STATE? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    \ As for a CELL transaction, an open upload does not hold the slot.
     _PT-PB-S @ _PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN
-    _PT-PB-S @ _PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN
     _PT-PB-S @ _PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN
     _PT-PB-S @ _PT.S.REVISION @ 0xFFFFFFFFFFFFFFFF = IF
         PT-ST-LOST _PT-PB-S @ _PT.S.STATE !

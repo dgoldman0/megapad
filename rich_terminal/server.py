@@ -2663,7 +2663,8 @@ class RichTerminalCore:
             self._fatal("new PRESENT_BEGIN crossed a pending soft reset")
         if self._outstanding_lifecycle_result is not None:
             self._fatal("PRESENT_BEGIN crossed an outstanding lifecycle completion")
-        self._require_no_resource_upload("PRESENT_BEGIN")
+        # An open upload does not hold the transaction slot: transactions run
+        # between its frames, and resource frames stay outside transactions.
         if len(frame.payload) != _PRESENT_BEGIN.size:
             self._fatal(
                 f"PRESENT_BEGIN payload length is {len(frame.payload)}, "
@@ -3175,8 +3176,6 @@ class RichTerminalCore:
             self._fatal("new transaction begin crossed a pending soft reset")
         if self._outstanding_lifecycle_result is not None:
             self._fatal("transaction begin crossed an outstanding lifecycle completion")
-        if self._retained_enabled:
-            self._require_no_resource_upload("transaction begin")
         try:
             begin = decode_transaction_begin(frame.payload)
         except CellModelError as exc:

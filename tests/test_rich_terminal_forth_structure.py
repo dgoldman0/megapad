@@ -1956,6 +1956,33 @@ def test_object_mutations_use_exact_prefixes_and_shared_present_accounting() -> 
     assert queued < present_send.index("_PT.S.TX-RET-BYTES-DONE !")
 
 
+def test_transactions_begin_between_an_upload_s_frames() -> None:
+    """APT-1-RETAINED-1 section 8: an open upload does not hold the
+    transaction slot.  A begin waits only for an unpolled result, which a
+    chunk is until its covering CREDIT; resource frames stay outside
+    transactions."""
+
+    source = SOURCE.read_text(encoding="utf-8")
+    for word in ("_PT-BEGIN-TX", "PT-PRESENT-BEGIN"):
+        begin = _definition(source, word)
+        assert "_PT.S.UPLOAD?" not in begin, word
+        assert "_PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN" in begin, word
+        assert "_PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN" in begin, word
+    for word in ("_PT-RESOURCE-CHUNK-BODY", "_PT-RESOURCE-ITEM-WRITE",
+                 "PT-RESOURCE-ABORT"):
+        body = _definition(source, word)
+        assert "_PT.S.TX-OPEN? @ IF PT-S-INVALID EXIT THEN" in body, word
+        assert "_PT-RESULT-BUSY? IF PT-S-WOULD-BLOCK EXIT THEN" in body, word
+    # A reset aborts an open transaction before it is latched, and aborts
+    # the upload only once no transaction or result remains.
+    soft_reset = _definition(source, "_PT-DISPATCH-SOFT-RESET")
+    assert soft_reset.index("_PT-ABORT-OPEN-RAW") < soft_reset.index(
+        "TRUE OVER _PT.S.RESET-PENDING? !")
+    apply_reset = _definition(source, "_PT-APPLY-PENDING-RESET")
+    waits = apply_reset.index("_PT.S.TX-OPEN? @ OVER _PT.S.AWAIT? @ OR")
+    assert waits < apply_reset.index("_PT.S.UPLOAD? @ IF")
+
+
 def test_soft_reset_aborts_the_old_epoch_upload_before_reset_ack() -> None:
     source = SOURCE.read_text(encoding="utf-8")
     apply_reset = _definition(source, "_PT-APPLY-PENDING-RESET")

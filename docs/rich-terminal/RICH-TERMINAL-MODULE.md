@@ -519,13 +519,19 @@ invalid or blocked calls emit no bytes and make no local lifecycle progress.
 Only one exact upload tuple is tracked session-wide. Its declared length and
 covering-CREDIT-confirmed offset are protocol state inside the caller-sized
 session record, not a retained image allocation or fixed image-capacity policy.
+An open upload does not hold the transaction slot. `PT-TX-BEGIN` and
+`PT-PRESENT-BEGIN` may run between its frames and wait only for an unpolled
+result, which a chunk is until its covering CREDIT, while CHUNK, COMMIT, DROP,
+and ABORT are refused inside a transaction. Frames therefore keep reaching
+the screen during an upload, each waiting behind at most one chunk.
 
 `PT-RESOURCE-ABORT-CALLER-CANCEL`,
 `PT-RESOURCE-ABORT-RESET-REBUILD`, and
 `PT-RESOURCE-ABORT-LOCAL-SHUTDOWN` are the three wire reasons. If a soft reset
-crosses an open upload, PT first settles an in-flight chunk, then emits the
-exact old-epoch RESET_REBUILD abort from the tracked tuple and waits for its
-RET_RESULT and exposed completion to be polled. Only then may it publish the
+crosses an open upload, PT first aborts an open transaction or waits for the
+result of one already committed, and settles an in-flight chunk, then emits
+the exact old-epoch RESET_REBUILD abort from the tracked tuple and waits for
+its RET_RESULT and exposed completion to be polled. Only then may it publish the
 new-epoch RESET_ACK. The upper engine therefore does not acquire a second
 transport-cleanup state machine.
 
