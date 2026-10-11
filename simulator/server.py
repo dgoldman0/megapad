@@ -12,6 +12,7 @@ from pathlib import Path
 from shared.session_options import (
     configured_production_executor, link_pace, retained_policy, rich_terminal_policy,
 )
+from shared.screen_profile import ScreenChangeProfile
 from shared_session import DEFAULT_SOCKET, SessionServer
 from simulator.image_bootstrap import (
     ImageBootstrapPreparation,
@@ -125,6 +126,16 @@ def build_argument_parser(
             "time; requires --rich-terminal-policy"
         ),
     )
+    parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "for diagnosis, write each PRESENT the guest sends and the guest "
+            "steps spent under each word into DIR (presents.jsonl, "
+            "guest-words.jsonl); changes nothing the guest or terminal does"
+        ),
+    )
     parser.add_argument("--paused", action="store_true")
     return parser
 
@@ -189,6 +200,11 @@ def prepare_server(args: argparse.Namespace) -> PreparedSimulatorServer:
         ),
         semantic_quantum_steps=quantum_steps,
         rich_terminal=rich_terminal,
+        screen_profile=(
+            None
+            if args.profile_dir is None
+            else ScreenChangeProfile(args.profile_dir)
+        ),
     )
     machine = SimulatorSharedMachine(session)
     machine.paused = args.paused

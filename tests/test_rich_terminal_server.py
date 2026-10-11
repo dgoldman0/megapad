@@ -1272,6 +1272,53 @@ def test_synchronized_close_retires_settled_owner_authority():
     assert core.owner_state is None
 
 
+def test_a_present_observer_sees_each_begin_as_declared_and_changes_nothing():
+    core, encoder, decoder = _open_retained_core()
+    opened = core.feed_machine(
+        encoder.encode(RetainedMessageType.OWNER_OPEN, encode_owner_open(_owner_open()))
+    )
+    for outbound in opened.outbound:
+        decoder.feed(outbound.payload)
+    _settle_lifecycle(core, opened)
+    with pytest.raises(TypeError, match="callable"):
+        core.observe_presents(42)
+    seen = []
+    core.observe_presents(seen.append)
+    region = RegionWireDefinition(7, 1, 1, 0, 0, 2, 2, 0, 0, 2, 2, 0, 0x3)
+    started = core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=2,
+            base_revision=1,
+            retained_mode=PresentRetainedMode.REPLACE_START,
+            disposition=PresentDisposition.COMMIT,
+            operations=((RetainedMessageType.REGION_DEFINE, encode_region_definition(region)),),
+        )
+    )
+    frames = []
+    for outbound in started.outbound:
+        frames.extend(decoder.feed(outbound.payload))
+    # The transaction commits exactly as it does unobserved.
+    assert TX_RESULT.unpack(frames[0].payload) == (2, 0, 0, 2)
+    assert [
+        (begin.transaction_id, begin.base_revision, begin.cell_mode,
+         begin.cell_count, begin.retained_mode, begin.retained_operation_count)
+        for begin in seen
+    ] == [(2, 1, CellMode.NONE, 0, PresentRetainedMode.REPLACE_START, 1)]
+    core.settle_result_delivery(2)
+    core.observe_presents(None)
+    core.feed_machine(
+        _present_frames(
+            encoder,
+            transaction_id=3,
+            base_revision=2,
+            retained_mode=PresentRetainedMode.REPLACE_CONTINUE,
+            disposition=PresentDisposition.COMMIT_AND_REVEAL,
+        )
+    )
+    assert len(seen) == 1
+
+
 def test_present_region_hidden_replace_commits_then_reveals_atomically():
     core, encoder, decoder = _open_retained_core()
     owner = _owner_open()

@@ -8,6 +8,7 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import Callable
 
 from display import ATTR_CONTINUATION, ATTR_WIDE, VirtualTerminal
 from rich_terminal import (
@@ -33,7 +34,7 @@ from rich_terminal.retained_view import (
 )
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_model import RetainedPolicy
-from rich_terminal.retained_wire import ControlEventKind
+from rich_terminal.retained_wire import ControlEventKind, PresentBegin
 
 
 @dataclass(frozen=True)
@@ -617,6 +618,7 @@ class TerminalSession(ABC):
             )
         self._rich_terminal_config = rich_terminal
         self._rich_terminal_driver: RichTerminalDriver | None = None
+        self._present_observer: Callable[[PresentBegin], None] | None = None
         self._output_view: TerminalView | None = None
         self._output_view_selected = False
         self._output_snapshot_rows = OutputSnapshotRows()
@@ -668,6 +670,21 @@ class TerminalSession(ABC):
     @property
     def rich_terminal_driver(self) -> RichTerminalDriver | None:
         return self._rich_terminal_driver
+
+
+    def observe_presents(
+        self,
+        observer: Callable[[PresentBegin], None] | None,
+    ) -> None:
+        """For diagnosis, give OBSERVER every PRESENT_BEGIN the guest sends,
+        through this and every later rich-terminal attachment."""
+
+        if observer is not None and not callable(observer):
+            raise TypeError("observer must be callable or None")
+        self._present_observer = observer
+        driver = self._rich_terminal_driver
+        if driver is not None:
+            driver.core.observe_presents(observer)
 
 
     @property
@@ -851,6 +868,7 @@ class TerminalSession(ABC):
         self._rich_terminal_driver.core.select_sink_cell_pixels(
             self._display_cell_pixels
         )
+        self._rich_terminal_driver.core.observe_presents(self._present_observer)
         self._rich_terminal_failure_reason = None
         self._rich_terminal_lost = False
 

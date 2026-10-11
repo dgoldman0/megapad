@@ -77,6 +77,23 @@ def test_ordinary_loop_yields_without_idle_and_preserves_bound_calls() -> None:
     assert (runtime.rtc.uptime_ms, runtime.rtc.epoch_ms) == initial_time
 
 
+def test_a_suspended_dispatch_names_its_word_and_callers() -> None:
+    runtime = MegaForthRuntime()
+    runtime.evaluate(b": INNER BEGIN 1 DROP AGAIN ; : MIDDLE INNER ; : OUTER MIDDLE ;")
+    assert runtime.suspended_call_chain() == ()
+    first = runtime.run_until_blocked("OUTER", quantum_steps=50)
+    assert isinstance(first, YieldedExecution)
+    chain = runtime.suspended_call_chain()
+    assert [runtime.dictionary.resolve(xt).name for xt in chain] == [
+        b"INNER", b"MIDDLE", b"OUTER"]
+    # Reading it leaves the dispatch exactly as it was.
+    second = runtime.resume_yielded(first.suspension)
+    assert isinstance(second, YieldedExecution)
+    assert runtime.suspended_call_chain() == chain
+    runtime.cancel_suspension(second.suspension)
+    assert runtime.suspended_call_chain() == ()
+
+
 def test_real_nested_catch_and_throw_keep_handler_and_pointer_captures() -> None:
     runtime = _load_exceptions()
     runtime.evaluate(

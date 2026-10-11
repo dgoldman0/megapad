@@ -593,6 +593,7 @@ class RichTerminalCore:
         self._wire_transaction_snapshot = False
         self._wire_transaction_bytes = 0
         self._discard_transaction_status: int | None = None
+        self._present_observer: Callable[[PresentBegin], None] | None = None
         self._present_wire_state: _PresentWireState | None = None
         self._most_recent_wire_aborted_id = 0
         self._machine_publications_received = 0
@@ -612,6 +613,18 @@ class RichTerminalCore:
         self._frame_bytes_received = 0
         self._frames_received_by_type: dict[int, int] = {}
         self._frame_bytes_received_by_type: dict[int, int] = {}
+
+    def observe_presents(
+        self,
+        observer: Callable[[PresentBegin], None] | None,
+    ) -> None:
+        """For diagnosis, give OBSERVER every PRESENT_BEGIN the client sends,
+        as it declares it, once it decodes.  It changes nothing the core does;
+        None stops it."""
+
+        if observer is not None and not callable(observer):
+            raise TypeError("observer must be callable or None")
+        self._present_observer = observer
 
     @staticmethod
     def _random_session_id() -> int:
@@ -2730,6 +2743,8 @@ class RichTerminalCore:
             self._discard_transaction_status = 2
             return ()
         wire.begin = begin
+        if self._present_observer is not None:
+            self._present_observer(begin)
 
         if (
             self._state is TerminalState.RESYNCING
