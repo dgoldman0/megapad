@@ -36,7 +36,7 @@ from simulator.ir import (
     Return,
     UartReadAttempt,
 )
-from simulator.memory import MMIO_BASE, SparseAddressSpace
+from simulator.memory import MMIO_BASE, MemoryAccessError, SparseAddressSpace
 from simulator.mp64fs import validate_attached_mp64fs
 from simulator.platform import (
     SYSINFO_CRYPTO_CAPS,
@@ -927,6 +927,18 @@ def _emit(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
 def _type(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     length = context.data.pop()
     address = context.data.pop()
+    if not length:
+        return
+    try:
+        # A span of ordinary memory goes out whole, in one write.
+        payload = runtime.memory.read_bytes(address, length)
+    except MemoryAccessError:
+        # The span starts in a device register, leaves its region, or
+        # wraps: each byte is then its own access, as on the machine.
+        payload = None
+    if payload is not None:
+        runtime.write_uart_bytes(payload)
+        return
     for _ in range(length):
         runtime.write_uart_bytes(bytes((runtime.memory.read8(address),)))
         address = u64(address + 1)
