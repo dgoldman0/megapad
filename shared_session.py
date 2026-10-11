@@ -221,23 +221,6 @@ def _wire_text(value, name: str) -> str:
     return value
 
 
-def _wire_sha3_256(value, name: str) -> bytes:
-    """Decode one canonical lowercase SHA3-256 hex identity."""
-
-    encoded = _wire_text(value, name)
-    if len(encoded) != 64 or encoded != encoded.lower():
-        raise ValueError(f"{name} must be 64 lowercase hexadecimal characters")
-    try:
-        digest = bytes.fromhex(encoded)
-    except ValueError as exc:
-        raise ValueError(
-            f"{name} must be 64 lowercase hexadecimal characters"
-        ) from exc
-    if len(digest) != 32 or digest.hex() != encoded:
-        raise ValueError(f"{name} must be canonical lowercase SHA3-256 hex")
-    return digest
-
-
 def _wire_integer_array(
     value,
     name: str,
@@ -754,7 +737,6 @@ _IMAGE_RESOURCE_WIRE_FIELDS = (
     "width",
     "height",
     "byte_length",
-    "sha3_256",
 )
 _MENU_BAR_WIRE_FIELDS = (
     "kind",
@@ -959,7 +941,6 @@ def _image_resource_to_wire(resource: ImageResourceManifest) -> dict:
         "width": resource.width,
         "height": resource.height,
         "byte_length": resource.byte_length,
-        "sha3_256": resource.sha3_256.hex(),
     }
 
 
@@ -996,7 +977,6 @@ def _image_resource_from_wire(data, name: str) -> ImageResourceManifest:
             minimum=1,
             maximum=UINT64_MAX,
         ),
-        sha3_256=_wire_sha3_256(wire["sha3_256"], f"{name} sha3_256"),
     )
 
 
@@ -3325,7 +3305,6 @@ class SharedSessionOwner(ABC):
         owner_id: int,
         owner_generation: int,
         resource_id: int,
-        sha3_256: bytes,
         offset: int,
         max_bytes: int,
         *,
@@ -3355,11 +3334,6 @@ class SharedSessionOwner(ABC):
         normalized_resource = _wire_integer(
             resource_id, "resource_id", minimum=1, maximum=UINT64_MAX
         )
-        if not isinstance(sha3_256, (bytes, bytearray, memoryview)):
-            raise TypeError("sha3_256 must be bytes-like")
-        normalized_digest = bytes(sha3_256)
-        if len(normalized_digest) != 32:
-            raise ValueError("sha3_256 must be exactly 32 bytes")
         normalized_offset = _wire_integer(
             offset, "resource offset", minimum=0, maximum=UINT64_MAX
         )
@@ -3430,8 +3404,6 @@ class SharedSessionOwner(ABC):
             if (
                 manifest is None
                 or resource is None
-                or manifest.sha3_256 != normalized_digest
-                or resource.digest != normalized_digest
                 or resource.owner.session_id != scope.session_id
                 or resource.owner.presentation_epoch != scope.presentation_epoch
                 or resource.format != manifest.format
@@ -3454,7 +3426,6 @@ class SharedSessionOwner(ABC):
                 "owner_id": normalized_owner,
                 "owner_generation": normalized_owner_generation,
                 "resource_id": normalized_resource,
-                "sha3_256": normalized_digest.hex(),
                 "offset": normalized_offset,
                 "next_offset": next_offset,
                 "byte_length": resource.byte_length,
@@ -3937,7 +3908,6 @@ class SessionServer:
                 "owner_id",
                 "owner_generation",
                 "resource_id",
-                "sha3_256",
                 "offset",
                 "max_bytes",
             ),
@@ -3962,7 +3932,6 @@ class SessionServer:
             minimum=1,
             maximum=UINT64_MAX,
         )
-        digest = _wire_sha3_256(params["sha3_256"], "resource sha3_256")
         offset = _wire_integer(
             params["offset"],
             "resource offset",
@@ -3987,7 +3956,6 @@ class SessionServer:
                 owner_id,
                 owner_generation,
                 resource_id,
-                digest,
                 offset,
                 max_bytes,
                 generation=generation,

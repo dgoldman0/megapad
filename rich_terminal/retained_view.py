@@ -483,7 +483,11 @@ class StatusFieldDraw:
 
 @dataclass(frozen=True, slots=True)
 class ImageResourceManifest:
-    """Immutable IMAGE metadata; pixel bytes remain in the exact pinned resource."""
+    """Immutable IMAGE metadata; pixel bytes remain in the exact pinned resource.
+
+    A resource always holds RGBA8 pixels, whatever format its upload used,
+    and is known by its owner, generation and ID alone.
+    """
 
     owner_id: int
     owner_generation: int
@@ -492,7 +496,6 @@ class ImageResourceManifest:
     width: int
     height: int
     byte_length: int
-    sha3_256: bytes
 
     def __post_init__(self) -> None:
         for name in ("owner_id", "owner_generation", "resource_id"):
@@ -534,14 +537,10 @@ class ImageResourceManifest:
                 maximum=UINT64_MAX,
             ),
         )
+        if resource_format is not ResourceFormat.RGBA8:
+            raise ValueError("an IMAGE resource holds RGBA8 pixels")
         if self.byte_length != self.width * self.height * 4:
             raise ValueError("IMAGE resource length is not width * height * 4")
-        if not isinstance(self.sha3_256, (bytes, bytearray, memoryview)):
-            raise TypeError("sha3_256 must be bytes-like")
-        digest = bytes(self.sha3_256)
-        if len(digest) != 32:
-            raise ValueError("sha3_256 must be exactly 32 bytes")
-        object.__setattr__(self, "sha3_256", digest)
 
     @property
     def resource_key(self) -> tuple[int, int, int]:
@@ -550,7 +549,7 @@ class ImageResourceManifest:
     @property
     def key(
         self,
-    ) -> tuple[int, int, int, ResourceFormat, int, int, int, bytes]:
+    ) -> tuple[int, int, int, ResourceFormat, int, int, int]:
         return (
             self.owner_id,
             self.owner_generation,
@@ -559,7 +558,6 @@ class ImageResourceManifest:
             self.width,
             self.height,
             self.byte_length,
-            self.sha3_256,
         )
 
 
@@ -2272,7 +2270,6 @@ def _image_resource_manifest(resource: RGBAResource) -> ImageResourceManifest:
         width=resource.width,
         height=resource.height,
         byte_length=resource.byte_length,
-        sha3_256=resource.digest,
     )
 
 

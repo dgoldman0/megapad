@@ -37,7 +37,28 @@ class RetainedFeature(IntFlag):
 
 
 class ResourceFormat(IntEnum):
+    """The formats a picture resource is uploaded in (RETAINED-1 section 8).
+
+    The terminal decodes a file into RGBA8 pixels, which are the resource it
+    holds whatever format the upload used.  Format ``n`` is advertised by bit
+    ``n - 1`` of ``image_formats``.
+    """
+
     RGBA8 = 1
+    QOI = 2
+    PNG = 3
+    JPEG = 4
+
+    @property
+    def bit(self) -> int:
+        return 1 << (int(self) - 1)
+
+
+# Every picture format RETAINED-1 defines, as an ``image_formats`` set.
+IMAGE_FORMATS = 0
+for _format in ResourceFormat:
+    IMAGE_FORMATS |= _format.bit
+del _format
 
 
 _ALL_FEATURES = (
@@ -131,7 +152,7 @@ class RetainedPolicy:
     max_resource_chunk_bytes: int
     max_retained_transaction_bytes: int
     total_resource_bytes: int
-    image_format: int
+    image_formats: int
     max_image_width: int
     max_image_height: int
     max_path_points: int
@@ -166,7 +187,7 @@ class RetainedPolicy:
             "max_series",
             "max_operations_per_transaction",
             "max_resource_chunk_bytes",
-            "image_format",
+            "image_formats",
             "max_image_width",
             "max_image_height",
             "max_path_points",
@@ -247,8 +268,13 @@ class RetainedPolicy:
             "max_image_height",
         ):
             self._require_positive_exact(name, image)
-        if self.image_format != (1 if image else 0):
-            raise ValueError("image_format is inconsistent with RGBA_IMAGE")
+        if image:
+            if not self.image_formats & ResourceFormat.RGBA8.bit:
+                raise ValueError("RGBA_IMAGE requires raw RGBA8 among image_formats")
+            if self.image_formats & ~IMAGE_FORMATS:
+                raise ValueError("image_formats names a format RETAINED-1 does not define")
+        elif self.image_formats:
+            raise ValueError("image_formats must be zero without RGBA_IMAGE")
 
         vector = bool(features & RetainedFeature.VECTOR)
         self._require_positive_exact("max_path_points", vector)
@@ -1006,6 +1032,7 @@ class OwnerLedger:
 
 
 __all__ = [
+    "IMAGE_FORMATS",
     "ItemHighWater",
     "ItemNamespace",
     "OwnerDropDisposition",

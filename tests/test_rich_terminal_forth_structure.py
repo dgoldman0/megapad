@@ -891,7 +891,7 @@ def test_resource_lifecycle_exposes_one_generic_typed_abi() -> None:
 
     assert (
         "\\ Stack: owner generation resource format width height flags byte-length\n"
-        "\\        sha3-a sha3-u session -- status\n"
+        "\\        session -- status\n"
         ": PT-RESOURCE-BEGIN"
     ) in source
     assert (
@@ -921,13 +921,14 @@ def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
     begin_body = _definition(source, "_PT-RESOURCE-BEGIN-BODY")
     begin = _definition(source, "PT-RESOURCE-BEGIN")
     begin_scrub = _definition(source, "_PT-RESOURCE-BEGIN-SCRUB")
+    format_taken = _definition(source, "PT-RESOURCE-FORMAT?")
     chunk_fields = _definition(source, "_PT-RESOURCE-CHUNK-FIELDS?")
     chunk_body = _definition(source, "_PT-RESOURCE-CHUNK-BODY")
     chunk = _definition(source, "PT-RESOURCE-CHUNK")
     chunk_scrub = _definition(source, "_PT-RESOURCE-CHUNK-SCRUB")
 
-    # Borrowed digest and chunk bytes must be valid and disjoint from both
-    # storage regions that PT can overwrite while constructing the frame.
+    # Borrowed chunk bytes must be valid and disjoint from both storage
+    # regions that PT can overwrite while constructing the frame.
     assert "_PT-RANGE-VALID?" in source_safe
     assert source_safe.count("_PT-RANGES-OVERLAP?") == 2
     assert "/PT-SESSION" in source_safe
@@ -935,10 +936,14 @@ def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
     assert "_PT.S.TX-U @" in source_safe
     assert "_PT-F-TOTAL @ 0 FILL" in frame_begin
 
-    # RESOURCE_BEGIN has exact RGBA8 dimensions/length/hash semantics and
-    # consumes ordinary cumulative credit only after every bound is proven.
+    # RESOURCE_BEGIN declares a picture in a format the terminal advertises,
+    # bounds its decoded size, sends raw pixels at exactly that size or a
+    # file at its own positive length, and consumes ordinary cumulative
+    # credit only after every bound is proven.  It borrows no bytes.
+    assert "OVER 1- 4 U< 0= IF 2DROP FALSE EXIT THEN" in format_taken
+    assert "_PT.S.RET-FORMATS 8 + L@ SWAP 1- RSHIFT 1 AND 0<>" in format_taken
     for invariant in (
-        "_PT-RBG-FORMAT @ PT-RESOURCE-RGBA8 <>",
+        "_PT-RBG-FORMAT @ _PT-RBG-S @ PT-RESOURCE-FORMAT? 0=",
         "_PT-RBG-FLAGS @ 0<>",
         "_PT-RBG-WIDTH @ DUP 0= SWAP _PT-U32? 0= OR",
         "_PT-RBG-HEIGHT @ DUP 0= SWAP _PT-U32? 0= OR",
@@ -946,18 +951,19 @@ def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
         "_PT.S.RET-FORMATS 16 + L@ U>",
         "_PT-RBG-WIDTH @ _PT-RBG-HEIGHT @ _PT-UMUL?",
         "4 _PT-UMUL?",
-        "_PT-RBG-LENGTH @ <>",
         "_PT.S.RET-CAPS 56 + _PT-U64@ U>",
-        "_PT-RBG-DIGEST-U @ 32 <>",
-        "_PT-RESOURCE-SOURCE?",
+        "_PT-RBG-FORMAT @ PT-RESOURCE-RGBA8 = IF",
+        "_PT-RBG-LENGTH @ = EXIT",
+        "DROP _PT-RBG-LENGTH @ 0<>",
     ):
         assert invariant in begin_fields
+    assert "_PT-RESOURCE-SOURCE?" not in begin_fields
     assert "_PT.S.RET-CAPS 8 + _PT-U64@ 0x04 AND 0=" in begin_body
     assert "_PT-RETAINED-LIFECYCLE-STATE?" in begin_body
     assert "_PT-RESULT-BUSY?" in begin_body
     assert "_PT.S.UPLOAD? @ IF PT-S-WOULD-BLOCK EXIT THEN" in begin_body
-    assert "120 _PT-RBG-S @ _PT-RESOURCE-ORDINARY-ADMIT" in begin_body
-    assert "_PT-M-RESOURCE-BEGIN 80" in begin_body
+    assert "88 _PT-RBG-S @ _PT-RESOURCE-ORDINARY-ADMIT" in begin_body
+    assert "_PT-M-RESOURCE-BEGIN 48" in begin_body
     for store in (
         "_PT-RBG-OWNER @ _PT-FRAME-PAYLOAD _PT-U64!",
         "_PT-RBG-GENERATION @ _PT-FRAME-PAYLOAD 8 + _PT-U64!",
@@ -967,16 +973,16 @@ def test_resource_begin_and_chunk_are_bounded_exact_wire_writers() -> None:
         "_PT-RBG-HEIGHT @ _PT-FRAME-PAYLOAD 32 + L!",
         "_PT-RBG-FLAGS @ _PT-FRAME-PAYLOAD 36 + L!",
         "_PT-RBG-LENGTH @ _PT-FRAME-PAYLOAD 40 + _PT-U64!",
-        "_PT-RBG-DIGEST-A @ 32 _PT-FRAME-PAYLOAD 48 + SWAP MOVE",
     ):
         assert store in begin_body
+    assert "MOVE" not in begin_body
     sent = begin_body.index("TRUE _PT-RBG-S @ _PT-FRAME-SEND")
     assert sent < begin_body.index("TRUE _PT-RBG-S @ _PT.S.UPLOAD? !")
     assert sent < begin_body.index("_PT-RESOURCE-LIFE!")
     assert "CATCH" in begin
     assert "_PT-RESOURCE-BEGIN-SCRUB" in begin
-    for pointer in ("_PT-RBG-DIGEST-A", "_PT-RBG-DIGEST-U", "_PT-RSA"):
-        assert f"0 {pointer} !" in begin_scrub
+    for argument in ("_PT-RBG-S", "_PT-RBG-OWNER", "_PT-RBG-LENGTH"):
+        assert f"0 {argument} !" in begin_scrub
 
     # RESOURCE_CHUNK is sequential and non-empty.  Its covering watermark is
     # initial credit plus the post-send cumulative byte count, not a per-frame
@@ -1649,7 +1655,7 @@ def test_image_and_readout_have_typed_bodies_and_checked_sources() -> None:
 
     assert "3 _PT-OBJECT-COMMON!" in image
     assert "_PT-RET-RGBA-IMAGE? 0=" in image
-    assert "_PT.S.RET-FORMATS 8 + L@ PT-RESOURCE-RGBA8 <>" in image
+    assert "PT-RESOURCE-FORMAT?" not in image
     assert "_PT-IM-RESOURCE @ 0=" in image
     assert "PT-IMAGE-FIT-STRETCH U<" in image
     assert "PT-IMAGE-FIT-COVER U>" in image

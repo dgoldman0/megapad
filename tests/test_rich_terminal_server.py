@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import struct
 
 import pytest
@@ -143,7 +142,7 @@ def _retained_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -177,7 +176,7 @@ def _complete_retained_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=8,
@@ -206,7 +205,7 @@ def _image_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=16,
         max_retained_transaction_bytes=512,
         total_resource_bytes=64,
-        image_format=1,
+        image_formats=1,
         max_image_width=2,
         max_image_height=2,
         max_path_points=0,
@@ -1917,12 +1916,11 @@ def test_resource_upload_chunk_commit_and_drop_publish_exact_bounded_state():
     _settle_lifecycle(core, opened)
 
     pixels = bytes((12, 34, 56, 255))
-    digest = hashlib.sha3_256(pixels).digest()
     begun = core.feed_machine(
         encoder.encode(
             RetainedMessageType.RESOURCE_BEGIN,
             encode_resource_begin(
-                ResourceBegin(7, 1, 1, 1, 1, 1, 0, len(pixels), digest)
+                ResourceBegin(7, 1, 1, 1, 1, 1, 0, len(pixels))
             ),
         )
     )
@@ -2026,7 +2024,6 @@ def test_image_scene_blocks_drop_and_owner_retirement_preserves_old_view_backing
                     1,
                     0,
                     len(pixels),
-                    hashlib.sha3_256(pixels).digest(),
                 )
             ),
         )
@@ -2169,7 +2166,6 @@ def test_resource_wrong_tuple_preserves_upload_but_exact_invalid_commit_aborts_i
                     1,
                     0,
                     len(pixels),
-                    hashlib.sha3_256(pixels).digest(),
                 )
             ),
         )
@@ -2237,7 +2233,6 @@ def test_soft_reset_accepts_exact_old_epoch_resource_abort_before_ack():
                     1,
                     0,
                     len(pixels),
-                    hashlib.sha3_256(pixels).digest(),
                 )
             ),
         )
@@ -2330,10 +2325,7 @@ def _open_owner_uploading(pixels: bytes):
         encoder.encode(
             RetainedMessageType.RESOURCE_BEGIN,
             encode_resource_begin(
-                ResourceBegin(
-                    7, 1, 1, 1, len(pixels) // 4, 1, 0, len(pixels),
-                    hashlib.sha3_256(pixels).digest(),
-                )
+                ResourceBegin(7, 1, 1, 1, len(pixels) // 4, 1, 0, len(pixels))
             ),
         )
     )

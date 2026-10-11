@@ -145,6 +145,55 @@ def glyph_extent(cache: dict) -> tuple[int, int]:
     return cache.get(_GLYPH_EXTENT_KEY, (0, 0))
 
 
+# Block elements U+2580..U+259F are drawn as exact rectangles, so cells that
+# build a picture from them meet with no gap a font's glyph would leave.  Each
+# entry lists the parts the foreground fills, as eighths of the cell: (left,
+# top, right, bottom).  The shades blend the foreground over the background.
+_QUADRANTS = {
+    "ul": (0, 0, 4, 4), "ur": (4, 0, 8, 4), "ll": (0, 4, 4, 8), "lr": (4, 4, 8, 8),
+}
+_BLOCK_ELEMENTS = {
+    "\u2580": ((0, 0, 8, 4),),
+    **{chr(0x2580 + n): ((0, 8 - n, 8, 8),) for n in range(1, 9)},
+    **{chr(0x2588 + n): ((0, 0, 8 - n, 8),) for n in range(1, 8)},
+    "\u2590": ((4, 0, 8, 8),),
+    "\u2594": ((0, 0, 8, 1),),
+    "\u2595": ((7, 0, 8, 8),),
+    **{
+        chr(code): tuple(_QUADRANTS[part] for part in parts)
+        for code, parts in (
+            (0x2596, ("ll",)), (0x2597, ("lr",)), (0x2598, ("ul",)),
+            (0x2599, ("ul", "ll", "lr")), (0x259A, ("ul", "lr")),
+            (0x259B, ("ul", "ur", "ll")), (0x259C, ("ul", "ur", "lr")),
+            (0x259D, ("ur",)), (0x259E, ("ur", "ll")), (0x259F, ("ur", "ll", "lr")),
+        )
+    },
+}
+_BLOCK_SHADES = {"\u2591": 64, "\u2592": 128, "\u2593": 192}
+
+
+def _paint_block_element(pygame_module, surface, ch, px, py, width, height,
+                         fg_rgb, bg_rgb) -> bool:
+    """Paint block element CH exactly into its cell; False for any other
+    character."""
+
+    shade = _BLOCK_SHADES.get(ch)
+    if shade is not None:
+        blend = tuple((f * shade + b * (255 - shade)) // 255
+                      for f, b in zip(fg_rgb, bg_rgb))
+        pygame_module.draw.rect(surface, blend, (px, py, width, height))
+        return True
+    parts = _BLOCK_ELEMENTS.get(ch)
+    if parts is None:
+        return False
+    for left, top, right, bottom in parts:
+        x0, x1 = px + width * left // 8, px + width * right // 8
+        y0, y1 = py + height * top // 8, py + height * bottom // 8
+        if x1 > x0 and y1 > y0:
+            pygame_module.draw.rect(surface, fg_rgb, (x0, y0, x1 - x0, y1 - y0))
+    return True
+
+
 class VirtualTerminal:
     """VT100-compatible text terminal backed by a character grid.
 
@@ -1078,9 +1127,13 @@ class VirtualTerminal:
                     pygame_module.draw.rect(
                         surface, bg_rgb, (px, py, width, cell_h))
 
-            for px, width, ch, fg_rgb, _bg, attrs in items:
-                # Draw character (skip if hidden, space, or empty)
-                if ch and ch != ' ' and not (attrs & 64):
+            for px, width, ch, fg_rgb, bg_rgb, attrs in items:
+                # Draw character (skip if hidden, space, or empty); a block
+                # element is painted as rectangles rather than a glyph.
+                if (ch and ch != ' ' and not (attrs & 64)
+                        and not _paint_block_element(
+                            pygame_module, surface, ch, px, py, width, cell_h,
+                            fg_rgb, bg_rgb)):
                     key = (ch, fg_rgb)
                     glyph = cache.get(key)
                     if glyph is None:

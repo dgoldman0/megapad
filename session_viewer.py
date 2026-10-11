@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-import hashlib
 import operator
 import sys
 import time
@@ -139,7 +138,6 @@ class _DisplayResourceKey:
     width: int
     height: int
     byte_length: int
-    sha3_256: bytes
 
     @classmethod
     def from_manifest(
@@ -162,7 +160,6 @@ class _DisplayResourceKey:
             manifest.width,
             manifest.height,
             manifest.byte_length,
-            manifest.sha3_256,
         )
 
     @property
@@ -175,7 +172,6 @@ class _DisplayResourceKey:
             self.width,
             self.height,
             self.byte_length,
-            self.sha3_256,
         )
 
 
@@ -183,7 +179,6 @@ class _DisplayResourceKey:
 class _DisplayResourceDownload:
     manifest: ImageResourceManifest
     data: bytearray = field(default_factory=bytearray)
-    digest: object = field(default_factory=hashlib.sha3_256)
 
     @property
     def offset(self) -> int:
@@ -203,7 +198,7 @@ class _DisplayResourceCache:
 
     Fetching is deliberately incremental: the main viewer asks for one exact
     chunk between event-pump passes and does not draw or flip the pending frame
-    until every dependency has passed its length and SHA3 checks.
+    until every dependency has arrived at exactly its declared length.
     """
 
     _REJECTION_STATUSES = {
@@ -345,7 +340,6 @@ class _DisplayResourceCache:
             "owner_id",
             "owner_generation",
             "resource_id",
-            "sha3_256",
             "offset",
             "next_offset",
             "byte_length",
@@ -369,12 +363,6 @@ class _DisplayResourceCache:
                 raise RuntimeError(
                     f"resource chunk {field_name} does not match its manifest"
                 )
-        digest_text = response.get("sha3_256")
-        if (
-            not isinstance(digest_text, str)
-            or digest_text != manifest.sha3_256.hex()
-        ):
-            raise RuntimeError("resource chunk digest does not match its manifest")
         offset = _nonnegative_wire_integer(
             response.get("offset"), "resource chunk offset"
         )
@@ -436,7 +424,6 @@ class _DisplayResourceCache:
             owner_id=manifest.owner_id,
             owner_generation=manifest.owner_generation,
             resource_id=manifest.resource_id,
-            sha3_256=manifest.sha3_256.hex(),
             offset=download.offset,
             max_bytes=remaining,
         )
@@ -452,11 +439,8 @@ class _DisplayResourceCache:
 
         chunk = self._decoded_chunk(response, download)
         download.data.extend(chunk)
-        download.digest.update(chunk)
         if download.offset < manifest.byte_length:
             return "progress"
-        if download.digest.digest() != manifest.sha3_256:
-            raise RuntimeError("completed display resource failed SHA3 verification")
         try:
             surface = pygame_module.image.frombuffer(
                 download.data,

@@ -82,7 +82,7 @@ def _core_retained_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -107,7 +107,7 @@ def _image_retained_policy() -> RetainedPolicy:
         max_objects=2,
         max_resource_chunk_bytes=16,
         total_resource_bytes=64,
-        image_format=1,
+        image_formats=1,
         max_image_width=2,
         max_image_height=2,
     )
@@ -594,7 +594,6 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "CREATE PT-RES-EVENT PT-EVENT-SIZE ALLOT",
                 "CREATE PT-RES-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
                 ": PT-RES-SESSION PT-RES-SESSION-STORAGE 7 + -8 AND ;",
-                "CREATE PT-RES-SHA3 32 ALLOT",
                 "CREATE PT-RES-PIXEL 4 ALLOT",
                 "CREATE PT-RES-RESULT 48 ALLOT",
                 "CREATE PT-RES-CREDIT 8 ALLOT",
@@ -625,12 +624,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 ": PT-RES-MARK  ( u -- )",
                 "  PT-RES-MARK-BUFFER _PT-U64!",
                 "  PT-RES-MARK-BUFFER 8 TYPE TX-FLUSH ;",
-                ": PT-RES-SHA3!",
-                "  0x0706050403020100 PT-RES-SHA3 _PT-U64!",
-                "  0x1716151413121110 PT-RES-SHA3 8 + _PT-U64!",
-                "  0x2726252423222120 PT-RES-SHA3 16 + _PT-U64!",
-                "  0x3736353433323130 PT-RES-SHA3 24 + _PT-U64!",
-                "  0xDDCCBBAA PT-RES-PIXEL L! ;",
+                ": PT-RES-PIXEL!  0xDDCCBBAA PT-RES-PIXEL L! ;",
                 ": PT-RES-PRIME",
                 "  PT-RES-COMPLETIONS PT-COMPLETION-SIZE 10 * 0 FILL",
                 "  PT-RES-SCRATCH PT-COMPLETION-SIZE 0 FILL",
@@ -639,7 +633,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-RES-COMP-I OFF PT-RES-POLL-FAIL OFF",
                 "  PT-RES-STATUS-I OFF PT-RES-FACT-I OFF",
                 "  PT-RES-NONE-S OFF PT-RES-NONE-HAS OFF",
-                "  PT-RES-SHA3!",
+                "  PT-RES-PIXEL!",
                 "  PT-RES-RX 8192 PT-RES-TX 8192",
                 "    PT-RES-EVENT PT-EVENT-SIZE PT-RES-SESSION",
                 "    PT-INIT PT-RES-STATUS!",
@@ -668,8 +662,10 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  0x0102030405060708 0x1112131415161718 ROT",
                 "  PT-RESOURCE-RGBA8 1 1 0 4 ;",
                 ": PT-RES-BEGIN  ( resource -- status )",
-                "  PT-RES-BEGIN-ARGS PT-RES-SHA3 32 PT-RES-SESSION",
-                "  PT-RESOURCE-BEGIN ;",
+                "  PT-RES-BEGIN-ARGS PT-RES-SESSION PT-RESOURCE-BEGIN ;",
+                ": PT-RES-FILE-BEGIN  ( resource -- status )",
+                "  0x0102030405060708 0x1112131415161718 ROT",
+                "  PT-RESOURCE-QOI 1 1 0 22 PT-RES-SESSION PT-RESOURCE-BEGIN ;",
                 ": PT-RES-ITEM-ARGS  ( resource -- owner generation resource )",
                 "  0x0102030405060708 0x1112131415161718 ROT ;",
                 ": PT-RES-SAVE-COMPLETION",
@@ -711,14 +707,14 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  48 _PT-RX-LEN ! 0 _PT-RX-SEQNO !",
                 "  PT-RES-SESSION _PT-DISPATCH-RET-RESULT ;",
                 ": PT-RES-CREDIT-ONE-SHORT",
-                "  2243 PT-RES-CREDIT _PT-U64!",
+                "  2211 PT-RES-CREDIT _PT-U64!",
                 "  PT-RES-SESSION _PT-RX-S !",
                 "  PT-RES-CREDIT _PT-RX-P !",
                 "  _PT-M-CREDIT _PT-RX-TYPE !",
                 "  8 _PT-RX-LEN ! 0 _PT-RX-SEQNO !",
                 "  PT-RES-SESSION _PT-DISPATCH-CREDIT ;",
                 ": PT-RES-CREDIT-COVER",
-                "  2244 PT-RES-CREDIT _PT-U64!",
+                "  2212 PT-RES-CREDIT _PT-U64!",
                 "  PT-RES-SESSION _PT-RX-S !",
                 "  PT-RES-CREDIT _PT-RX-P !",
                 "  _PT-M-CREDIT _PT-RX-TYPE !",
@@ -736,12 +732,9 @@ class TestRichTerminalForth(_KDOSTestBase):
                 ": PT-RES-RUN",
                 "  PT-RES-PRIME",
                 "  0x3130303047454252 PT-RES-MARK",
-                "  0x2122232425262728 PT-RES-BEGIN-ARGS",
-                "    PT-RES-SHA3 31 PT-RES-SESSION PT-RESOURCE-BEGIN",
-                "    PT-RES-STATUS!",
-                "  0x2122232425262728 PT-RES-BEGIN-ARGS",
-                "    PT-RES-SESSION _PT.S.TX-A @ 32 PT-RES-SESSION",
-                "    PT-RESOURCE-BEGIN PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-FILE-BEGIN PT-RES-STATUS!",
+                "  0x2122232425262728 PT-RES-BEGIN-ARGS 1+",
+                "    PT-RES-SESSION PT-RESOURCE-BEGIN PT-RES-STATUS!",
                 "  0x1 PT-RES-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
                 "  0x2122232425262728 PT-RES-BEGIN PT-RES-STATUS!",
                 "  0x5 PT-RES-SESSION _PT.S.RET-CAPS 8 + _PT-U64!",
@@ -802,9 +795,11 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "    PT-RES-STATUS!",
                 "  PT-REQUEST-RESOURCE-CHUNK PT-RET-INVALID",
                 "    0x3132333435363738 0 PT-RES-RET-RESULT PT-RES-STATUS!",
-                "  0x393A3B3C3D3E3F40 PT-RES-BEGIN PT-RES-STATUS!",
+                "  PT-RESOURCE-RGBA8 PT-RESOURCE-QOI OR",
+                "    PT-RES-SESSION _PT.S.RET-FORMATS 8 + L!",
+                "  0x393A3B3C3D3E3F40 PT-RES-FILE-BEGIN PT-RES-STATUS!",
                 "  PT-RES-SAVE-COMPLETION",
-                "  0x393A3B3C3D3E3F40 PT-RES-BEGIN PT-RES-STATUS!",
+                "  0x393A3B3C3D3E3F40 PT-RES-FILE-BEGIN PT-RES-STATUS!",
                 "  PT-REQUEST-RESOURCE-BEGIN PT-RET-OK",
                 "    0x393A3B3C3D3E3F40 0 PT-RES-RET-RESULT PT-RES-STATUS!",
                 "  PT-RES-SAVE-COMPLETION",
@@ -892,26 +887,17 @@ class TestRichTerminalForth(_KDOSTestBase):
         resource2 = 0x292A2B2C2D2E2F30
         resource3 = 0x3132333435363738
         resource4 = 0x393A3B3C3D3E3F40
-        digest = struct.pack(
-            "<QQQQ",
-            0x0706050403020100,
-            0x1716151413121110,
-            0x2726252423222120,
-            0x3736353433323130,
-        )
-
-        def resource_begin(resource: int) -> bytes:
+        def resource_begin(resource: int, format=1, length=4) -> bytes:
             return struct.pack(
-                "<QQQIIIIQ32s",
+                "<QQQIIIIQ",
                 owner,
                 generation,
                 resource,
-                1,
+                format,
                 1,
                 1,
                 0,
-                4,
-                digest,
+                length,
             )
 
         def resource_item(resource: int) -> bytes:
@@ -940,7 +926,11 @@ class TestRichTerminalForth(_KDOSTestBase):
                 + bytes.fromhex("aabbccdd"),
                 9,
             ),
-            (RetainedMessageType.RESOURCE_BEGIN, resource_begin(resource4), 9),
+            (
+                RetainedMessageType.RESOURCE_BEGIN,
+                resource_begin(resource4, format=2, length=22),
+                9,
+            ),
             (
                 RetainedMessageType.RESOURCE_ABORT,
                 struct.pack("<QQQH6x", owner, generation, resource4, 1),
@@ -1590,11 +1580,6 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  0x1B PT-OBJ-FEATURES!",
                 "  0x3132333435363738 PT-OBJ-IMAGE",
                 "    PT-IMAGE-DEFINE PT-OBJ-STATUS!",
-                "  0x1F PT-OBJ-FEATURES!",
-                "  0 PT-OBJ-IMAGE-FORMAT!",
-                "  0x3132333435363738 PT-OBJ-IMAGE",
-                "    PT-IMAGE-DEFINE PT-OBJ-STATUS!",
-                "  PT-RESOURCE-RGBA8 PT-OBJ-IMAGE-FORMAT!",
                 "  0x17 PT-OBJ-FEATURES!",
                 "  PT-OBJ-OWNER 0x393A3B3C3D3E3F40 -456 PT-OBJ-SESSION",
                 "    PT-OBJECT-SET-VALUE PT-OBJ-STATUS!",
@@ -1940,7 +1925,7 @@ class TestRichTerminalForth(_KDOSTestBase):
         self.assertEqual(raw[begin:end_at], expected)
 
         expected_statuses = (
-            (0,) + (4,) * 5 + (3,) * 7 + (0,) * 19 + (3, 0)
+            (0,) + (4,) * 4 + (3,) * 7 + (0,) * 19 + (3, 0)
         )
         status_begin = raw.index(status_marker, end) + len(status_marker)
         status_end = raw.index(status_end_marker, status_begin)
@@ -1949,7 +1934,7 @@ class TestRichTerminalForth(_KDOSTestBase):
             struct.pack(f"<{len(expected_statuses)}q", *expected_statuses),
         )
 
-        expected_facts = (0, 0, 0, 0, 19, 2390, 19, 2390, 34)
+        expected_facts = (0, 0, 0, 0, 19, 2390, 19, 2390, 33)
         facts_begin = raw.index(facts_marker, status_end) + len(facts_marker)
         facts_end = raw.index(facts_end_marker, facts_begin)
         self.assertEqual(

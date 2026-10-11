@@ -645,7 +645,7 @@ class RichTerminalCore:
         return RetainedFormats(
             bounds_format=2,
             color_format=1,
-            image_format=policy.image_format,
+            image_formats=policy.image_formats,
             max_image_width=policy.max_image_width,
             max_image_height=policy.max_image_height,
             max_path_points=policy.max_path_points,
@@ -2218,7 +2218,6 @@ class RichTerminalCore:
                         height=request.height,
                         flags=request.flags,
                         byte_length=request.byte_length,
-                        digest=request.digest,
                     )
                 elif request_type is RetainedMessageType.RESOURCE_CHUNK:
                     prepared = store.prepare_append(

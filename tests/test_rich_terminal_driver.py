@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import struct
 
 import pytest
@@ -101,7 +100,7 @@ def _retained_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -130,7 +129,7 @@ def _image_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=16,
         max_retained_transaction_bytes=512,
         total_resource_bytes=16,
-        image_format=1,
+        image_formats=1,
         max_image_width=2,
         max_image_height=2,
         max_path_points=0,
@@ -785,7 +784,6 @@ def test_driver_settles_resource_chunk_only_when_covering_credit_is_admitted():
                     1,
                     0,
                     len(pixels),
-                    hashlib.sha3_256(pixels).digest(),
                 )
             ),
         ),

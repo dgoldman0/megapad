@@ -68,7 +68,7 @@ The module owns:
   and lifecycle-bounded access to the accepted records;
 * the shared CELL/PRESENT transaction-ID, revision, sequence, byte, credit, and
   completion gate;
-* core OWNER_OPEN/OWNER_RESIZE/OWNER_DROP and immutable RGBA8 resource lifecycle
+* core OWNER_OPEN/OWNER_RESIZE/OWNER_DROP and immutable picture resource lifecycle
   publication, exact RET_RESULT reconciliation, and covering-CREDIT chunk
   settlement;
 * PRESENT construction for CELL_NONE/DELTA/REPLACE, fixed retained region
@@ -157,8 +157,9 @@ PT-OWNER-RESIZE     ( owner generation region-q resource-q object-q series-q
                       resource-byte-q utf8-byte-q sample-slot-q session
                       -- status )
 PT-OWNER-DROP       ( owner generation session -- status )
+PT-RESOURCE-FORMAT? ( format session -- flag )
 PT-RESOURCE-BEGIN   ( owner generation resource format width height flags
-                      byte-length sha3-a sha3-u session -- status )
+                      byte-length session -- status )
 PT-RESOURCE-CHUNK   ( owner generation resource offset data-a data-u session
                       -- status )
 PT-RESOURCE-COMMIT  ( owner generation resource session -- status )
@@ -509,13 +510,17 @@ negotiated. A crossed soft reset similarly holds result completion and its
 new-epoch acknowledgement in order; cumulative CREDIT and caller-requested
 close wait until that bounded settlement is complete.
 
-The resource API exposes only format `PT-RESOURCE-RGBA8`. BEGIN requires the
-exact 32-byte SHA3-256 span, positive negotiated dimensions, flags zero, and
-checked `width * height * 4 == byte-length`. CHUNK requires a nonempty,
-contiguous exact-offset span no larger than the advertised resource-chunk
-maximum or negotiated payload ceiling. Borrowed digest and chunk spans remain
-valid only for the call and must be disjoint from the session and TX scratch;
-invalid or blocked calls emit no bytes and make no local lifecycle progress.
+The resource API takes the picture formats `PT-RESOURCE-RGBA8`,
+`PT-RESOURCE-QOI`, `PT-RESOURCE-PNG` and `PT-RESOURCE-JPEG`, as the terminal
+advertises them; `PT-RESOURCE-FORMAT?` says whether it takes one. BEGIN
+requires an advertised format, positive negotiated dimensions, flags zero, a
+decoded size `width * height * 4` within the advertised resource bytes, and a
+byte length that is exactly that size for raw pixels and positive for a file.
+CHUNK requires a nonempty, contiguous exact-offset span no larger than the
+advertised resource-chunk maximum or negotiated payload ceiling. Borrowed chunk
+spans remain valid only for the call and must be disjoint from the session and
+TX scratch; invalid or blocked calls emit no bytes and make no local lifecycle
+progress.
 Only one exact upload tuple is tracked session-wide. Its declared length and
 covering-CREDIT-confirmed offset are protocol state inside the caller-sized
 session record, not a retained image allocation or fixed image-capacity policy.

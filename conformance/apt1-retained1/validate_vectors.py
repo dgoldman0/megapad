@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import struct
 import sys
@@ -134,6 +133,13 @@ OBJECT_TYPES = {
     "WAVEFORM": 9,
 }
 
+RESOURCE_FORMATS = {
+    "RGBA8": 1,
+    "QOI": 2,
+    "PNG": 3,
+    "JPEG": 4,
+}
+
 TAG = 0x31544552
 OWNER_ID = 0x534F554E444C4142
 OWNER_GENERATION = 7
@@ -173,7 +179,7 @@ CAPS_VALUES = {
 FORMAT_VALUES = {
     "bounds_format": 2,
     "color_format": 1,
-    "image_format": 1,
+    "image_formats": 0b0011,
     "max_image_width": 256,
     "max_image_height": 256,
     "max_path_points": 256,
@@ -221,7 +227,7 @@ OBJECT_SET_VALUE = struct.Struct("<QQQq")
 OBJECT_SET_VISIBILITY = struct.Struct("<QQQB7x")
 SERIES_DEFINE = struct.Struct("<QQQIIQ")
 SERIES_SAMPLES = struct.Struct("<QQQIIQ")
-RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ32s")
+RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ")
 RESOURCE_CHUNK = struct.Struct("<QQQQ")
 RESOURCE_COMMIT = struct.Struct("<QQQ")
 RESOURCE_ABORT = struct.Struct("<QQQH6x")
@@ -308,6 +314,13 @@ def credit_payload(value: int) -> bytes:
     return CREDIT.pack(value)
 
 
+def qoi_file(width: int, height: int, pixels: Sequence[tuple[int, int, int, int]]) -> bytes:
+    """Assemble a QOI file by hand, one QOI_OP_RGBA chunk per pixel."""
+
+    chunks = b"".join(bytes((0xFF, *pixel)) for pixel in pixels)
+    return b"qoif" + struct.pack(">IIBB", width, height, 4, 0) + chunks + bytes(7) + b"\x01"
+
+
 def caps_payload() -> bytes:
     return RET_CAPS.pack(
         TAG,
@@ -331,7 +344,7 @@ def formats_payload() -> bytes:
     return RET_FORMATS.pack(
         FORMAT_VALUES["bounds_format"],
         FORMAT_VALUES["color_format"],
-        FORMAT_VALUES["image_format"],
+        FORMAT_VALUES["image_formats"],
         FORMAT_VALUES["max_image_width"],
         FORMAT_VALUES["max_image_height"],
         FORMAT_VALUES["max_path_points"],
@@ -1344,7 +1357,7 @@ def control_reserve_boundary() -> Scenario:
             "client_to_terminal_sent_data_bytes": grant_before,
             "ordinary_credit_available": 0,
             "control_reserve_available": 4096,
-            "pending_resource_begin_complete_bytes": 120,
+            "pending_resource_begin_complete_bytes": 88,
         },
         frames,
         {
@@ -1379,12 +1392,11 @@ def resource_lifecycle() -> Scenario:
             OWNER_ID,
             OWNER_GENERATION,
             2,
-            1,
+            RESOURCE_FORMATS["RGBA8"],
             1,
             1,
             0,
             len(rgba),
-            hashlib.sha3_256(rgba).digest(),
         ),
         "open a second bounded upload for abort qualification",
     )
@@ -1996,12 +2008,11 @@ def reset_wrong_tuple_upload_abort() -> Scenario:
             OWNER_ID,
             OWNER_GENERATION,
             resource_id,
-            1,
+            RESOURCE_FORMATS["RGBA8"],
             1,
             1,
             0,
             len(rgba),
-            hashlib.sha3_256(rgba).digest(),
         ),
         "open the real session-wide upload before reset",
     )
@@ -2081,7 +2092,6 @@ def soft_reset_replay() -> Scenario:
     epoch = 1
     credit = 85_518
     rgba = b"\x18\x70\xd8\xff\xa8\x78\xff\xff"
-    digest = hashlib.sha3_256(rgba).digest()
 
     reset_request = fs(
         TERMINAL,
@@ -2144,12 +2154,11 @@ def soft_reset_replay() -> Scenario:
         OWNER_ID,
         OWNER_GENERATION,
         RESOURCE_ID,
-        1,
+        RESOURCE_FORMATS["RGBA8"],
         2,
         1,
         0,
         len(rgba),
-        digest,
     )
     resource_begin = fs(CLIENT, "RESOURCE_BEGIN", next_client_sequence + 2, epoch, resource_begin_payload, "reserve and begin replay of one RGBA resource")
     begin_credit = owner_credit + len(resource_begin.encoded)
@@ -2177,7 +2186,7 @@ def soft_reset_replay() -> Scenario:
         next_client_sequence + 5,
         epoch,
         RESOURCE_COMMIT.pack(OWNER_ID, OWNER_GENERATION, RESOURCE_ID),
-        "validate SHA3-256 and publish the immutable resource",
+        "publish the complete immutable resource",
     )
     commit_credit = chunk_credit_2 + len(resource_commit.encoded)
 
@@ -2229,7 +2238,7 @@ def soft_reset_replay() -> Scenario:
         resource_chunk_2,
         fs(TERMINAL, "CREDIT", 26, epoch, credit_payload(chunk_credit_2), "cover the second ordered chunk before commit"),
         resource_commit,
-        fs(TERMINAL, "RET_RESULT", 27, epoch, ret_result_payload("RESOURCE_COMMIT", STATUS["RET_OK"], 1, item_id=RESOURCE_ID, accepted_bytes=len(rgba)), "publish digest-verified resource"),
+        fs(TERMINAL, "RET_RESULT", 27, epoch, ret_result_payload("RESOURCE_COMMIT", STATUS["RET_OK"], 1, item_id=RESOURCE_ID, accepted_bytes=len(rgba)), "publish the complete raw resource"),
         fs(TERMINAL, "CREDIT", 28, epoch, credit_payload(commit_credit), "release RESOURCE_COMMIT bytes"),
         *start_transaction,
         fs(TERMINAL, "TX_RESULT", 29, epoch, TX_RESULT.pack(2, 0, 0, 2), "commit the graph-valid hidden reset replacement at revision 2"),
@@ -2262,7 +2271,6 @@ def soft_reset_replay() -> Scenario:
             "resource": {
                 "id": RESOURCE_ID,
                 "byte_length": len(rgba),
-                "sha3_256": digest.hex(),
             },
             "visible_scene": {"regions": [REGION_ID], "objects": [IMAGE_ID]},
             "replace_start_transaction_bytes": start_declared,
@@ -2420,13 +2428,12 @@ def aggregate_quota_exhaustion() -> Scenario:
 def resource_chunk_overrun() -> Scenario:
     credit_before = 110_000
     rgba = b"\x10\x20\x30\xff"
-    digest = hashlib.sha3_256(rgba).digest()
     begin = fs(
         CLIENT,
         "RESOURCE_BEGIN",
         70,
         0,
-        RESOURCE_BEGIN.pack(OWNER_ID, OWNER_GENERATION, RESOURCE_ID, 1, 1, 1, 0, len(rgba), digest),
+        RESOURCE_BEGIN.pack(OWNER_ID, OWNER_GENERATION, RESOURCE_ID, RESOURCE_FORMATS["RGBA8"], 1, 1, 0, len(rgba)),
         "reserve a four-byte RGBA resource upload",
     )
     begin_credit = credit_before + len(begin.encoded)
@@ -2476,52 +2483,72 @@ def resource_chunk_overrun() -> Scenario:
     )
 
 
-def resource_digest_failure() -> Scenario:
+def resource_file_decoding() -> Scenario:
     credit_before = 120_000
-    rgba = b"\x10\x20\x30\xff"
-    correct_digest = hashlib.sha3_256(rgba).digest()
-    wrong_digest = bytes([correct_digest[0] ^ 0x01]) + correct_digest[1:]
-    begin = fs(
-        CLIENT,
-        "RESOURCE_BEGIN",
-        80,
-        0,
-        RESOURCE_BEGIN.pack(OWNER_ID, OWNER_GENERATION, RESOURCE_ID, 1, 1, 1, 0, len(rgba), wrong_digest),
-        "begin an upload with a structurally valid but incorrect declared digest",
+    picture = qoi_file(2, 1, ((0x10, 0x20, 0x30, 0xFF), (0xC0, 0x80, 0x40, 0x80)))
+    uploads = (
+        (1, 1, b"not a picture", "RET_BAD_CONTENT", "a QOI upload whose bytes do not decode"),
+        (2, 1, picture, "RET_BAD_CONTENT", "a 2x1 QOI file declared as 1x1"),
+        (3, 2, picture, "RET_OK", "the same QOI file declared at its own size"),
     )
-    begin_credit = credit_before + len(begin.encoded)
-    chunk = fs(
-        CLIENT,
-        "RESOURCE_CHUNK",
-        81,
-        0,
-        RESOURCE_CHUNK.pack(OWNER_ID, OWNER_GENERATION, RESOURCE_ID, 0) + rgba,
-        "accept exactly the declared four data bytes",
-    )
-    chunk_credit = begin_credit + len(chunk.encoded)
-    commit = fs(
-        CLIENT,
-        "RESOURCE_COMMIT",
-        82,
-        0,
-        RESOURCE_COMMIT.pack(OWNER_ID, OWNER_GENERATION, RESOURCE_ID),
-        "request digest validation and immutable publication",
-    )
-    commit_credit = chunk_credit + len(commit.encoded)
-    frames = (
-        begin,
-        fs(TERMINAL, "RET_RESULT", 80, 0, ret_result_payload("RESOURCE_BEGIN", STATUS["RET_OK"], 3, item_id=RESOURCE_ID), "open the upload before content validation"),
-        fs(TERMINAL, "CREDIT", 81, 0, credit_payload(begin_credit), "release RESOURCE_BEGIN bytes"),
-        chunk,
-        fs(TERMINAL, "CREDIT", 82, 0, credit_payload(chunk_credit), "acknowledge valid chunk only through covering credit"),
-        commit,
-        fs(TERMINAL, "RET_RESULT", 83, 0, ret_result_payload("RESOURCE_COMMIT", STATUS["RET_BAD_CONTENT"], 3, item_id=RESOURCE_ID), "reject digest mismatch and destroy upload"),
-        fs(TERMINAL, "CREDIT", 84, 0, credit_payload(commit_credit), "release failed RESOURCE_COMMIT bytes"),
-    )
+    frames: list[FrameSpec] = []
+    credits: list[int] = []
+    credit = credit_before
+    for index, (resource_id, width, data, status, upload) in enumerate(uploads):
+        client = 80 + 3 * index
+        terminal = 80 + 5 * index
+        begin = fs(
+            CLIENT,
+            "RESOURCE_BEGIN",
+            client,
+            0,
+            RESOURCE_BEGIN.pack(
+                OWNER_ID,
+                OWNER_GENERATION,
+                resource_id,
+                RESOURCE_FORMATS["QOI"],
+                width,
+                1,
+                0,
+                len(data),
+            ),
+            f"begin {upload}",
+        )
+        chunk = fs(
+            CLIENT,
+            "RESOURCE_CHUNK",
+            client + 1,
+            0,
+            RESOURCE_CHUNK.pack(OWNER_ID, OWNER_GENERATION, resource_id, 0) + data,
+            "send the whole file in one ordered chunk",
+        )
+        commit = fs(
+            CLIENT,
+            "RESOURCE_COMMIT",
+            client + 2,
+            0,
+            RESOURCE_COMMIT.pack(OWNER_ID, OWNER_GENERATION, resource_id),
+            "decode the file and publish it only at its declared size",
+        )
+        begin_credit = credit + len(begin.encoded)
+        chunk_credit = begin_credit + len(chunk.encoded)
+        credit = chunk_credit + len(commit.encoded)
+        accepted = len(data) if status == "RET_OK" else 0
+        frames += (
+            begin,
+            fs(TERMINAL, "RET_RESULT", terminal, 0, ret_result_payload("RESOURCE_BEGIN", STATUS["RET_OK"], 3, item_id=resource_id), "open the upload, charging the decoded size"),
+            fs(TERMINAL, "CREDIT", terminal + 1, 0, credit_payload(begin_credit), "release RESOURCE_BEGIN bytes"),
+            chunk,
+            fs(TERMINAL, "CREDIT", terminal + 2, 0, credit_payload(chunk_credit), "acknowledge the valid chunk only through covering credit"),
+            commit,
+            fs(TERMINAL, "RET_RESULT", terminal + 3, 0, ret_result_payload("RESOURCE_COMMIT", STATUS[status], 3, item_id=resource_id, accepted_bytes=accepted), f"settle {upload}"),
+            fs(TERMINAL, "CREDIT", terminal + 4, 0, credit_payload(credit), "release RESOURCE_COMMIT bytes"),
+        )
+        credits += [begin_credit, chunk_credit, credit]
     return Scenario(
-        "resource_digest_failure",
-        "resource_digest_failure.hex",
-        "resource_upload_rejection",
+        "resource_file_decoding",
+        "resource_file_decoding.hex",
+        "resource_file_decoding",
         {
             "state": "ACTIVE",
             "presentation_epoch": 0,
@@ -2530,19 +2557,16 @@ def resource_digest_failure() -> Scenario:
             "next_terminal_sequence": 80,
             "client_to_terminal_credit_before": credit_before,
             "live_owner": {"id": OWNER_ID, "generation": OWNER_GENERATION},
+            "owner_resource_bytes": 8,
             "no_upload_open": True,
         },
-        frames,
+        tuple(frames),
         {
-            "ret_status": "RET_BAD_CONTENT",
-            "declared_sha3_256": wrong_digest.hex(),
-            "actual_sha3_256": correct_digest.hex(),
-            "accepted_bytes": 0,
-            "upload_open": False,
-            "resource_published": False,
-            "reservation_released": True,
+            "file_bytes": len(picture),
+            "decoded_bytes": 2 * 1 * 4,
+            "published_resource": 3,
             "global_revision": 3,
-            "covering_credits": [begin_credit, chunk_credit, commit_credit],
+            "covering_credits": credits,
         },
     )
 
@@ -2587,7 +2611,7 @@ def scenarios() -> tuple[Scenario, ...]:
         aggregate_quota_exhaustion(),
         resource_lifecycle(),
         resource_chunk_overrun(),
-        resource_digest_failure(),
+        resource_file_decoding(),
     )
 
 
@@ -2611,7 +2635,7 @@ def expected_manifest() -> dict[str, Any]:
         "aggregate_quota_exhaustion": "an individually valid second OWNER_OPEN returns RET_NO_CAPACITY because immutable aggregate reservations would overflow",
         "resource_lifecycle": "wrong-resource COMMIT noninterference, in-use drop, bad and good abort, reference removal, and successful resource drop retain exact lifecycle boundaries",
         "resource_chunk_overrun": "a whole overrun chunk returns RET_INVALID, destroys upload state, and releases its reservation",
-        "resource_digest_failure": "digest mismatch returns RET_BAD_CONTENT with zero accepted bytes and no resource publication",
+        "resource_file_decoding": "a QOI file that does not decode, or decodes to another size, returns RET_BAD_CONTENT; declared at its own size it publishes and charges its decoded size, which fits an owner quota its file length would exceed",
     }
 
     def summary(scenario: Scenario) -> dict[str, Any]:
@@ -2800,7 +2824,7 @@ def validate_discovery(supported: Scenario, unsupported: Scenario) -> None:
         (
             FORMAT_VALUES["bounds_format"],
             FORMAT_VALUES["color_format"],
-            FORMAT_VALUES["image_format"],
+            FORMAT_VALUES["image_formats"],
             FORMAT_VALUES["max_image_width"],
             FORMAT_VALUES["max_image_height"],
             FORMAT_VALUES["max_path_points"],
@@ -3154,7 +3178,7 @@ def validate_owner_tombstone(scenario: Scenario) -> None:
 
 def validate_control_reserve_boundary(scenario: Scenario) -> None:
     check_equal("reserve boundary starts at zero ordinary credit", scenario.precondition["ordinary_credit_available"], 0)
-    check_equal("reserve boundary pending bulk frame", scenario.precondition["pending_resource_begin_complete_bytes"], 120)
+    check_equal("reserve boundary pending bulk frame", scenario.precondition["pending_resource_begin_complete_bytes"], HEADER_BYTES + RESOURCE_BEGIN.size)
     if find_frames(scenario, "RESOURCE_BEGIN"):
         fail("reserve boundary emitted bulk RESOURCE_BEGIN with zero ordinary credit")
     owner_drop = find_frames(scenario, "OWNER_DROP")[0]
@@ -3434,13 +3458,13 @@ def validate_reset_replay(scenario: Scenario) -> None:
         fail("reset rediscovery violates CAPS/FORMATS/covering-CREDIT order")
     resource_begin = find_frames(scenario, "RESOURCE_BEGIN")[0]
     resource_values = RESOURCE_BEGIN.unpack(resource_begin.payload)
-    declared_digest = resource_values[-1]
+    check_equal("reset replay resource format", resource_values[3], RESOURCE_FORMATS["RGBA8"])
     chunks = find_frames(scenario, "RESOURCE_CHUNK")
     check_equal("reset replay ordered chunk count", len(chunks), 2)
     check_equal("reset replay chunk offsets", [RESOURCE_CHUNK.unpack_from(chunk.payload)[3] for chunk in chunks], [0, 4])
     data = b"".join(chunk.payload[RESOURCE_CHUNK.size :] for chunk in chunks)
     check_equal("reset replay resource byte length", resource_values[7], len(data))
-    check_equal("reset replay SHA3-256", declared_digest, hashlib.sha3_256(data).digest())
+    check_equal("reset replay raw size", resource_values[4] * resource_values[5] * 4, len(data))
     first_chunk_index = frames.index(chunks[0])
     second_chunk_index = frames.index(chunks[1])
     if not any(frame.message == "CREDIT" for frame in frames[first_chunk_index + 1 : second_chunk_index]):
@@ -3480,7 +3504,7 @@ def validate_stale_generation(scenario: Scenario) -> None:
     )
 
 
-def validate_resource_failures(overrun: Scenario, digest_failure: Scenario) -> None:
+def validate_resource_failures(overrun: Scenario, file_decoding: Scenario) -> None:
     overrun_begin = RESOURCE_BEGIN.unpack(find_frames(overrun, "RESOURCE_BEGIN")[0].payload)
     overrun_chunk = find_frames(overrun, "RESOURCE_CHUNK")[0]
     offset = RESOURCE_CHUNK.unpack_from(overrun_chunk.payload)[3]
@@ -3493,24 +3517,43 @@ def validate_resource_failures(overrun: Scenario, digest_failure: Scenario) -> N
     check_equal("overrun status", overrun_result[1], STATUS["RET_INVALID"])
     check_equal("overrun accepted bytes", overrun_result[7], 0)
 
-    digest_begin = RESOURCE_BEGIN.unpack(find_frames(digest_failure, "RESOURCE_BEGIN")[0].payload)
-    digest_chunk = find_frames(digest_failure, "RESOURCE_CHUNK")[0]
-    digest_data = digest_chunk.payload[RESOURCE_CHUNK.size :]
-    actual_digest = hashlib.sha3_256(digest_data).digest()
-    if digest_begin[-1] == actual_digest:
-        fail("digest-failure sentinel unexpectedly declares the correct digest")
-    digest_result = RET_RESULT.unpack(find_frames(digest_failure, "RET_RESULT")[-1].payload)
-    check_equal("digest failure request type", digest_result[0], MESSAGE_TYPES["RESOURCE_COMMIT"])
-    check_equal("digest failure status", digest_result[1], STATUS["RET_BAD_CONTENT"])
-    check_equal("digest failure accepted bytes", digest_result[7], 0)
-    valid_chunk_credit_index = next(
-        index
-        for index, frame in enumerate(digest_failure.frames)
-        if frame.message == "CREDIT" and index > digest_failure.frames.index(digest_chunk)
+    begins = [RESOURCE_BEGIN.unpack(frame.payload) for frame in find_frames(file_decoding, "RESOURCE_BEGIN")]
+    chunks = find_frames(file_decoding, "RESOURCE_CHUNK")
+    files = [chunk.payload[RESOURCE_CHUNK.size :] for chunk in chunks]
+    check_equal("file decoding formats", [begin[3] for begin in begins], [RESOURCE_FORMATS["QOI"]] * 3)
+    check_equal("file decoding declared sizes", [begin[4:6] for begin in begins], [(1, 1), (1, 1), (2, 1)])
+    check_equal("file decoding byte lengths", [begin[7] for begin in begins], [len(data) for data in files])
+    if files[0].startswith(b"qoif"):
+        fail("file-decoding sentinel unexpectedly carries the QOI magic")
+    check_equal("file decoding picture reuse", files[1], files[2])
+    check_equal("file decoding QOI header", struct.unpack(">4sIIBB", files[2][:14]), (b"qoif", 2, 1, 4, 0))
+    commits = [
+        RET_RESULT.unpack(frame.payload)
+        for frame in find_frames(file_decoding, "RET_RESULT")
+        if RET_RESULT.unpack(frame.payload)[0] == MESSAGE_TYPES["RESOURCE_COMMIT"]
+    ]
+    check_equal(
+        "file decoding commit statuses",
+        [(result[1], result[7]) for result in commits],
+        [(STATUS["RET_BAD_CONTENT"], 0), (STATUS["RET_BAD_CONTENT"], 0), (STATUS["RET_OK"], len(files[2]))],
     )
-    commit_index = digest_failure.frames.index(find_frames(digest_failure, "RESOURCE_COMMIT")[0])
-    if valid_chunk_credit_index >= commit_index:
-        fail("digest fixture sends RESOURCE_COMMIT before covering valid chunk credit")
+    quota = file_decoding.precondition["owner_resource_bytes"]
+    if not 2 * 1 * 4 <= quota < len(files[2]):
+        fail("file-decoding quota does not separate the decoded size from the file length")
+    for chunk in chunks:
+        chunk_index = file_decoding.frames.index(chunk)
+        credit_index = next(
+            index
+            for index, frame in enumerate(file_decoding.frames)
+            if frame.message == "CREDIT" and index > chunk_index
+        )
+        commit_index = next(
+            index
+            for index, frame in enumerate(file_decoding.frames)
+            if frame.message == "RESOURCE_COMMIT" and index > chunk_index
+        )
+        if credit_index >= commit_index:
+            fail("file-decoding fixture sends RESOURCE_COMMIT before covering chunk credit")
 
 
 def validate_struct_sizes() -> None:
@@ -3540,7 +3583,7 @@ def validate_struct_sizes() -> None:
         "OBJECT_SET_VISIBILITY": (OBJECT_SET_VISIBILITY.size, 32),
         "SERIES_DEFINE": (SERIES_DEFINE.size, 40),
         "SERIES_SAMPLES": (SERIES_SAMPLES.size, 40),
-        "RESOURCE_BEGIN": (RESOURCE_BEGIN.size, 80),
+        "RESOURCE_BEGIN": (RESOURCE_BEGIN.size, 48),
         "RESOURCE_CHUNK": (RESOURCE_CHUNK.size, 32),
         "RESOURCE_COMMIT": (RESOURCE_COMMIT.size, 24),
         "RESOURCE_ABORT": (RESOURCE_ABORT.size, 32),
@@ -3614,7 +3657,7 @@ def validate(root: Path) -> None:
     validate_stale_generation(by_name["stale_generation"])
     validate_aggregate_quota(by_name["aggregate_quota_exhaustion"])
     validate_resource_lifecycle(by_name["resource_lifecycle"])
-    validate_resource_failures(by_name["resource_chunk_overrun"], by_name["resource_digest_failure"])
+    validate_resource_failures(by_name["resource_chunk_overrun"], by_name["resource_file_decoding"])
 
     print(
         f"validated {len(canonical)} RETAINED-1 transcript files, "

@@ -320,7 +320,6 @@ def test_owner_lifecycle_scalars_and_result_semantics_are_exact():
 
 
 def test_resource_wire_values_match_the_exact_normative_payloads():
-    digest = bytes(range(32))
     begin = ResourceBegin(
         0x0102030405060708,
         0x1112131415161718,
@@ -330,10 +329,9 @@ def test_resource_wire_values_match_the_exact_normative_payloads():
         1,
         0,
         8,
-        digest,
     )
     begin_payload = struct.pack(
-        "<QQQIIIIQ32s",
+        "<QQQIIIIQ",
         begin.owner_id,
         begin.owner_generation,
         begin.resource_id,
@@ -342,11 +340,9 @@ def test_resource_wire_values_match_the_exact_normative_payloads():
         1,
         0,
         8,
-        digest,
     )
     assert encode_resource_begin(begin) == begin_payload
     assert decode_resource_begin(begin_payload) == begin
-    assert begin.digest == digest
 
     source = bytearray(b"\x01\x02\x03\x04")
     chunk = ResourceChunk(begin.owner_id, begin.owner_generation, begin.resource_id, 4, source)
@@ -420,7 +416,7 @@ def test_resource_abort_oracles_preserve_reasons_for_lifecycle_status_selection(
 
 
 def test_resource_codecs_reject_noncanonical_lengths_padding_and_scalars():
-    begin = ResourceBegin(1, 1, 1, ResourceFormat.RGBA8, 1, 1, 0, 4, bytes(32))
+    begin = ResourceBegin(1, 1, 1, ResourceFormat.RGBA8, 1, 1, 0, 4)
     begin_payload = bytearray(encode_resource_begin(begin))
 
     for malformed in (begin_payload[:-1], begin_payload + b"\0"):
@@ -433,7 +429,10 @@ def test_resource_codecs_reject_noncanonical_lengths_padding_and_scalars():
 
     begin_payload[36:40] = bytes(4)
     begin_payload[24:28] = (2).to_bytes(4, "little")
-    assert decode_resource_begin(begin_payload).format == 2
+    assert decode_resource_begin(begin_payload).format is ResourceFormat.QOI
+    # An undefined format stays a number, for status selection to refuse.
+    begin_payload[24:28] = (99).to_bytes(4, "little")
+    assert decode_resource_begin(begin_payload).format == 99
 
     empty_chunk = struct.pack("<QQQQ", 1, 1, 1, 0)
     assert decode_resource_chunk(empty_chunk).data == b""
@@ -475,7 +474,6 @@ def test_resource_codecs_preserve_semantic_errors_for_authority_precedence():
         0,
         UINT32_MAX,
         0,
-        bytes(32),
     )
     assert decode_resource_begin(encode_resource_begin(begin)) == begin
 

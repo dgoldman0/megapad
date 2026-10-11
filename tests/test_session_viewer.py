@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import sys
 from contextlib import nullcontext
 from dataclasses import replace
@@ -164,7 +163,6 @@ def _image_offer(
         width=2,
         height=1,
         byte_length=len(data),
-        sha3_256=hashlib.sha3_256(data).digest(),
     )
     draw = ImageDraw(
         object_id=5,
@@ -214,7 +212,6 @@ def _resource_chunk_response(
         "owner_id": manifest.owner_id,
         "owner_generation": manifest.owner_generation,
         "resource_id": manifest.resource_id,
-        "sha3_256": hashlib.sha3_256(data).hexdigest(),
         "offset": offset,
         "next_offset": next_offset,
         "byte_length": len(data),

@@ -3952,7 +3952,7 @@ def _preflight_image_surfaces(
     The public mapping is offer-scoped and keyed by the full immutable
     :attr:`ImageResourceManifest.key`.  The returned authority-keyed dictionary
     is a private convenience for region-local draw lookup; callers cannot use
-    that shorter key to bypass manifest metadata or digest authorization.
+    that shorter key to bypass manifest metadata.
     """
 
     if resource_surfaces is None:
@@ -4132,6 +4132,45 @@ def _paint_image(
         sampled_width, sampled_height = source_width, source_height
     else:
         source_x, source_y, sampled_width, sampled_height = source_crop
+
+    surface_width, surface_height = surface.get_size()
+    if target.width <= 2 * surface_width and target.height <= 2 * surface_height:
+        # A picture on screen is scaled smoothly, averaging as it shrinks
+        # and interpolating as it grows, and drawn one pixel per pixel when
+        # its size already fits.
+        sampled = source.subsurface(
+            pygame_module.Rect(source_x, source_y, sampled_width, sampled_height)
+        )
+        blend = 0
+        if (target.width, target.height) == (sampled_width, sampled_height):
+            image = sampled
+        else:
+            if sampled.get_flags() & pygame_module.SRCALPHA:
+                # Scale premultiplied, so a transparent pixel lends no colour
+                # to the edge it is averaged into.
+                sampled = sampled.premul_alpha()
+                blend = pygame_module.BLEND_PREMULTIPLIED
+            image = pygame_module.transform.smoothscale(
+                sampled, (target.width, target.height)
+            )
+        part = image.subsurface(
+            pygame_module.Rect(
+                visible.left - target.left,
+                visible.top - target.top,
+                visible.width,
+                visible.height,
+            )
+        )
+        if draw.opacity != 0xFF:
+            # Premultiplied colour fades with its alpha.
+            colour = draw.opacity if blend else 0xFF
+            part = part.copy()
+            part.fill(
+                (colour, colour, colour, draw.opacity),
+                special_flags=pygame_module.BLEND_RGBA_MULT,
+            )
+        surface.blit(part, visible, special_flags=blend)
+        return
 
     # Sample only physically visible pixels.  A legal offscreen CELL_RECT32
     # may have a multi-billion-cell extent; scaling an intermediate to that

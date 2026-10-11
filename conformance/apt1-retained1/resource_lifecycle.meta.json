@@ -223,8 +223,7 @@
         "width": 1,
         "height": 1,
         "flags": 0,
-        "byte_length": 4,
-        "sha3_256": "af2a3c69c685db3180e1b36ed08a8569f4438e3c72ac283411376f296fca9f30"
+        "byte_length": 4
       }
     },
     "upload": null,

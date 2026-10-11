@@ -127,11 +127,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26584,
-          "released_complete_bytes": 26584,
+          "sent_complete_bytes": 26552,
+          "released_complete_bytes": 26552,
           "last_advertised_grant": 92000,
           "advertised_released_bytes": 26464,
-          "pending_release_bytes": 120
+          "pending_release_bytes": 88
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -241,7 +241,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 4,
-        "sha3_256": "230f97596c358e8038cbff9e2c1f9d090e9a41597d56d1a3dad717d2189f30a7",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -267,11 +266,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26584,
-          "released_complete_bytes": 26584,
+          "sent_complete_bytes": 26552,
+          "released_complete_bytes": 26552,
           "last_advertised_grant": 92000,
           "advertised_released_bytes": 26464,
-          "pending_release_bytes": 120
+          "pending_release_bytes": 88
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -381,7 +380,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 4,
-        "sha3_256": "230f97596c358e8038cbff9e2c1f9d090e9a41597d56d1a3dad717d2189f30a7",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -411,10 +409,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26584,
-          "released_complete_bytes": 26584,
-          "last_advertised_grant": 92120,
-          "advertised_released_bytes": 26584,
+          "sent_complete_bytes": 26552,
+          "released_complete_bytes": 26552,
+          "last_advertised_grant": 92088,
+          "advertised_released_bytes": 26552,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -525,7 +523,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 4,
-        "sha3_256": "230f97596c358e8038cbff9e2c1f9d090e9a41597d56d1a3dad717d2189f30a7",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -545,10 +542,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26584,
-          "released_complete_bytes": 26584,
-          "last_advertised_grant": 92120,
-          "advertised_released_bytes": 26584,
+          "sent_complete_bytes": 26552,
+          "released_complete_bytes": 26552,
+          "last_advertised_grant": 92088,
+          "advertised_released_bytes": 26552,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -659,7 +656,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 4,
-        "sha3_256": "230f97596c358e8038cbff9e2c1f9d090e9a41597d56d1a3dad717d2189f30a7",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -682,10 +678,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26660,
-          "released_complete_bytes": 26660,
-          "last_advertised_grant": 92120,
-          "advertised_released_bytes": 26584,
+          "sent_complete_bytes": 26628,
+          "released_complete_bytes": 26628,
+          "last_advertised_grant": 92088,
+          "advertised_released_bytes": 26552,
           "pending_release_bytes": 76
         },
         "terminal_to_client": {
@@ -796,7 +792,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 4,
-        "sha3_256": "230f97596c358e8038cbff9e2c1f9d090e9a41597d56d1a3dad717d2189f30a7",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -825,10 +820,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26660,
-          "released_complete_bytes": 26660,
-          "last_advertised_grant": 92120,
-          "advertised_released_bytes": 26584,
+          "sent_complete_bytes": 26628,
+          "released_complete_bytes": 26628,
+          "last_advertised_grant": 92088,
+          "advertised_released_bytes": 26552,
           "pending_release_bytes": 76
         },
         "terminal_to_client": {
@@ -939,7 +934,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 4,
-        "sha3_256": "230f97596c358e8038cbff9e2c1f9d090e9a41597d56d1a3dad717d2189f30a7",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -972,10 +966,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26660,
-          "released_complete_bytes": 26660,
-          "last_advertised_grant": 92196,
-          "advertised_released_bytes": 26660,
+          "sent_complete_bytes": 26628,
+          "released_complete_bytes": 26628,
+          "last_advertised_grant": 92164,
+          "advertised_released_bytes": 26628,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -1086,7 +1080,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 4,
-        "sha3_256": "230f97596c358e8038cbff9e2c1f9d090e9a41597d56d1a3dad717d2189f30a7",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -1109,10 +1102,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26660,
-          "released_complete_bytes": 26660,
-          "last_advertised_grant": 92196,
-          "advertised_released_bytes": 26660,
+          "sent_complete_bytes": 26628,
+          "released_complete_bytes": 26628,
+          "last_advertised_grant": 92164,
+          "advertised_released_bytes": 26628,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -1231,10 +1224,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26660,
-          "released_complete_bytes": 26660,
-          "last_advertised_grant": 92196,
-          "advertised_released_bytes": 26660,
+          "sent_complete_bytes": 26628,
+          "released_complete_bytes": 26628,
+          "last_advertised_grant": 92164,
+          "advertised_released_bytes": 26628,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -1357,10 +1350,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 26660,
-          "released_complete_bytes": 26660,
-          "last_advertised_grant": 92196,
-          "advertised_released_bytes": 26660,
+          "sent_complete_bytes": 26628,
+          "released_complete_bytes": 26628,
+          "last_advertised_grant": 92164,
+          "advertised_released_bytes": 26628,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {

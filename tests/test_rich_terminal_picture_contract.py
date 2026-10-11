@@ -10,7 +10,6 @@ tests.
 
 from __future__ import annotations
 
-import hashlib
 import struct
 from dataclasses import replace
 
@@ -330,12 +329,11 @@ def test_a_soft_reset_cancels_an_owed_answer():
 
 
 def _upload_resource(core, encoder, decoder, resource_id, pixels, width, height):
-    digest = hashlib.sha3_256(pixels).digest()
     requests = (
         (
             RetainedMessageType.RESOURCE_BEGIN,
             encode_resource_begin(
-                ResourceBegin(7, 1, resource_id, 1, width, height, 0, len(pixels), digest)
+                ResourceBegin(7, 1, resource_id, 1, width, height, 0, len(pixels))
             ),
         ),
         (
@@ -423,10 +421,11 @@ def test_backdrop_paints_the_renderer_background_under_bars_and_transparency():
     pygame = pytest.importorskip("pygame")
     from rich_terminal.pygame_view import composite_draw_plane
 
-    source = pygame.Surface((2, 1), flags=pygame.SRCALPHA)
-    source.set_at((0, 0), (220, 30, 40, 255))
-    source.set_at((1, 0), (0, 0, 0, 0))
-    manifest = _image_manifest(1, 2, 1)
+    # Drawn at its own size, so every pixel is the picture's own.
+    source = pygame.Surface((6, 3), flags=pygame.SRCALPHA)
+    source.fill((0, 0, 0, 0))
+    source.fill((220, 30, 40, 255), pygame.Rect(0, 0, 3, 3))
+    manifest = _image_manifest(1, 6, 3)
     surface = REFERENCE_APPEARANCE.surface
 
     for backdrop, bar, clear in (

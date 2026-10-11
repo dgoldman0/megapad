@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import replace
 from types import MappingProxyType
 
@@ -103,7 +102,6 @@ def _resource(
             width=width,
             height=height,
             byte_length=len(pixels),
-            digest=hashlib.sha3_256(pixels).digest(),
         ),
         pixels,
     )
@@ -467,14 +465,12 @@ def test_projection_copies_images_and_deduplicates_sorted_resource_manifests():
         1,
         1,
         4,
-        hashlib.sha3_256(bytes((3, 4, 5, 255))).digest(),
     )
     assert (
         manifest_9.width,
         manifest_9.height,
         manifest_9.byte_length,
-        manifest_9.sha3_256,
-    ) == (2, 1, 8, resource_9.digest)
+    ) == (2, 1, 8)
     assert not hasattr(manifest_9, "data")
 
     with pytest.raises(ValueError, match="no exact resource manifest"):
@@ -541,7 +537,6 @@ def test_hidden_retained_plane_exposes_no_image_draws_or_manifests():
         resource.width,
         resource.height,
         resource.byte_length,
-        resource.digest,
     )
     with pytest.raises(ValueError, match="hidden retained plane"):
         RetainedDrawPlane(True, False, (), (), (manifest,))

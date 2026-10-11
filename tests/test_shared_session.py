@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import re
 import threading
 import time
@@ -125,7 +124,7 @@ def _retained_policy() -> RetainedPolicy:
         max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=512,
         total_resource_bytes=0,
-        image_format=0,
+        image_formats=0,
         max_image_width=0,
         max_image_height=0,
         max_path_points=0,
@@ -154,7 +153,7 @@ def _image_policy(*, max_resource_chunk_bytes: int = 3) -> RetainedPolicy:
         max_resource_chunk_bytes=max_resource_chunk_bytes,
         max_retained_transaction_bytes=512,
         total_resource_bytes=8,
-        image_format=int(ResourceFormat.RGBA8),
+        image_formats=int(ResourceFormat.RGBA8),
         max_image_width=2,
         max_image_height=1,
         max_path_points=0,
@@ -241,7 +240,6 @@ def _bind_image_resource_offer(
         owner_id=19,
         owner_generation=23,
     )
-    digest = hashlib.sha3_256(pixels).digest()
     resource = RGBAResource(
         owner,
         ResourceDeclaration(
@@ -250,7 +248,6 @@ def _bind_image_resource_offer(
             width=2,
             height=1,
             byte_length=len(pixels),
-            digest=digest,
         ),
         pixels,
     )
@@ -262,7 +259,6 @@ def _bind_image_resource_offer(
         width=resource.width,
         height=resource.height,
         byte_length=resource.byte_length,
-        sha3_256=resource.digest,
     )
     image = ImageDraw(
         object_id=31,
@@ -826,7 +822,6 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         attributes=0x40,
         text="visible",
     )
-    image_digest = hashlib.sha3_256(b"pixel-wire-metadata").digest()
     image = ImageDraw(
         object_id=31,
         z_order=-1,
@@ -844,7 +839,6 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
         width=2,
         height=1,
         byte_length=8,
-        sha3_256=image_digest,
     )
     plane = RetainedDrawPlane(
         retained_initialized=True,
@@ -924,7 +918,6 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
             "width": 2,
             "height": 1,
             "byte_length": 8,
-            "sha3_256": image_digest.hex(),
         }
     ]
     assert "data" not in repr(wire["retained"])
@@ -934,11 +927,6 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
     unsupported["regions"][0]["draws"][0]["attributes"] = 0x10
     with pytest.raises(ValueError, match="unsupported GLYPH_RUN bits"):
         retained_draw_plane_from_wire(unsupported)
-
-    noncanonical_digest = retained_draw_plane_to_wire(plane)
-    noncanonical_digest["resources"][0]["sha3_256"] = image_digest.hex().upper()
-    with pytest.raises(ValueError, match="lowercase hexadecimal"):
-        retained_draw_plane_from_wire(noncanonical_digest)
 
     leaked_pixels = retained_draw_plane_to_wire(plane)
     leaked_pixels["resources"][0]["data_base64"] = "AA=="
@@ -1118,7 +1106,6 @@ def test_display_resource_chunk_is_exact_offer_bounded_and_data_free_on_refusal(
             "owner_id": resource.owner.owner_id,
             "owner_generation": resource.owner.owner_generation,
             "resource_id": resource.resource_id,
-            "sha3_256": resource.digest.hex(),
             "offset": 2,
             "max_bytes": 99,
         }
@@ -1159,7 +1146,6 @@ def test_display_resource_chunk_is_exact_offer_bounded_and_data_free_on_refusal(
             "owner_id": resource.owner.owner_id,
             "owner_generation": resource.owner.owner_generation,
             "resource_id": resource.resource_id,
-            "sha3_256": resource.digest.hex(),
             "offset": 2,
             "next_offset": 5,
             "byte_length": len(pixels),
@@ -1179,7 +1165,6 @@ def test_display_resource_chunk_is_exact_offer_bounded_and_data_free_on_refusal(
         for wrong in (
             {"owner_generation": resource.owner.owner_generation + 1},
             {"resource_id": resource.resource_id + 1},
-            {"sha3_256": "00" * 32},
             {"offset": len(pixels) + 1},
         ):
             assert server.dispatch(
@@ -1241,7 +1226,6 @@ def test_display_resource_chunk_encodes_base64_outside_machine_lock(monkeypatch)
                         resource.owner.owner_id,
                         resource.owner.owner_generation,
                         resource.resource_id,
-                        resource.digest,
                         0,
                         3,
                         generation=0,

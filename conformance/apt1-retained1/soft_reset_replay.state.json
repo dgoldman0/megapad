@@ -4583,11 +4583,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37730,
-          "released_complete_bytes": 37730,
+          "sent_complete_bytes": 37698,
+          "released_complete_bytes": 37698,
           "last_advertised_grant": 103146,
           "advertised_released_bytes": 37610,
-          "pending_release_bytes": 120
+          "pending_release_bytes": 88
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -4697,7 +4697,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 8,
-        "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -4723,11 +4722,11 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37730,
-          "released_complete_bytes": 37730,
+          "sent_complete_bytes": 37698,
+          "released_complete_bytes": 37698,
           "last_advertised_grant": 103146,
           "advertised_released_bytes": 37610,
-          "pending_release_bytes": 120
+          "pending_release_bytes": 88
         },
         "terminal_to_client": {
           "initial_grant": 4096,
@@ -4837,7 +4836,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 8,
-        "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -4867,10 +4865,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37730,
-          "released_complete_bytes": 37730,
-          "last_advertised_grant": 103266,
-          "advertised_released_bytes": 37730,
+          "sent_complete_bytes": 37698,
+          "released_complete_bytes": 37698,
+          "last_advertised_grant": 103234,
+          "advertised_released_bytes": 37698,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -4981,7 +4979,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 8,
-        "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40",
         "accepted_bytes": 0
       },
       "open_transaction": null,
@@ -5001,10 +4998,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37806,
-          "released_complete_bytes": 37806,
-          "last_advertised_grant": 103266,
-          "advertised_released_bytes": 37730,
+          "sent_complete_bytes": 37774,
+          "released_complete_bytes": 37774,
+          "last_advertised_grant": 103234,
+          "advertised_released_bytes": 37698,
           "pending_release_bytes": 76
         },
         "terminal_to_client": {
@@ -5115,7 +5112,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 8,
-        "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40",
         "accepted_bytes": 4
       },
       "open_transaction": null,
@@ -5141,10 +5137,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37806,
-          "released_complete_bytes": 37806,
-          "last_advertised_grant": 103342,
-          "advertised_released_bytes": 37806,
+          "sent_complete_bytes": 37774,
+          "released_complete_bytes": 37774,
+          "last_advertised_grant": 103310,
+          "advertised_released_bytes": 37774,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -5255,7 +5251,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 8,
-        "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40",
         "accepted_bytes": 4
       },
       "open_transaction": null,
@@ -5275,10 +5270,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37882,
-          "released_complete_bytes": 37882,
-          "last_advertised_grant": 103342,
-          "advertised_released_bytes": 37806,
+          "sent_complete_bytes": 37850,
+          "released_complete_bytes": 37850,
+          "last_advertised_grant": 103310,
+          "advertised_released_bytes": 37774,
           "pending_release_bytes": 76
         },
         "terminal_to_client": {
@@ -5389,7 +5384,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 8,
-        "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40",
         "accepted_bytes": 8
       },
       "open_transaction": null,
@@ -5415,10 +5409,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37882,
-          "released_complete_bytes": 37882,
-          "last_advertised_grant": 103418,
-          "advertised_released_bytes": 37882,
+          "sent_complete_bytes": 37850,
+          "released_complete_bytes": 37850,
+          "last_advertised_grant": 103386,
+          "advertised_released_bytes": 37850,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -5529,7 +5523,6 @@
         "height": 1,
         "flags": 0,
         "declared_bytes": 8,
-        "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40",
         "accepted_bytes": 8
       },
       "open_transaction": null,
@@ -5549,10 +5542,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37946,
-          "released_complete_bytes": 37946,
-          "last_advertised_grant": 103418,
-          "advertised_released_bytes": 37882,
+          "sent_complete_bytes": 37914,
+          "released_complete_bytes": 37914,
+          "last_advertised_grant": 103386,
+          "advertised_released_bytes": 37850,
           "pending_release_bytes": 64
         },
         "terminal_to_client": {
@@ -5651,8 +5644,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -5690,10 +5682,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37946,
-          "released_complete_bytes": 37946,
-          "last_advertised_grant": 103418,
-          "advertised_released_bytes": 37882,
+          "sent_complete_bytes": 37914,
+          "released_complete_bytes": 37914,
+          "last_advertised_grant": 103386,
+          "advertised_released_bytes": 37850,
           "pending_release_bytes": 64
         },
         "terminal_to_client": {
@@ -5792,8 +5784,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -5835,10 +5826,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 37946,
-          "released_complete_bytes": 37946,
-          "last_advertised_grant": 103482,
-          "advertised_released_bytes": 37946,
+          "sent_complete_bytes": 37914,
+          "released_complete_bytes": 37914,
+          "last_advertised_grant": 103450,
+          "advertised_released_bytes": 37914,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -5937,8 +5928,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -5970,10 +5960,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38050,
-          "released_complete_bytes": 37946,
-          "last_advertised_grant": 103482,
-          "advertised_released_bytes": 37946,
+          "sent_complete_bytes": 38018,
+          "released_complete_bytes": 37914,
+          "last_advertised_grant": 103450,
+          "advertised_released_bytes": 37914,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6072,8 +6062,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -6113,10 +6102,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38154,
-          "released_complete_bytes": 37946,
-          "last_advertised_grant": 103482,
-          "advertised_released_bytes": 37946,
+          "sent_complete_bytes": 38122,
+          "released_complete_bytes": 37914,
+          "last_advertised_grant": 103450,
+          "advertised_released_bytes": 37914,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6215,8 +6204,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -6256,10 +6244,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38210,
-          "released_complete_bytes": 38210,
-          "last_advertised_grant": 103482,
-          "advertised_released_bytes": 37946,
+          "sent_complete_bytes": 38178,
+          "released_complete_bytes": 38178,
+          "last_advertised_grant": 103450,
+          "advertised_released_bytes": 37914,
           "pending_release_bytes": 264
         },
         "terminal_to_client": {
@@ -6392,8 +6380,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -6433,10 +6420,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38210,
-          "released_complete_bytes": 38210,
-          "last_advertised_grant": 103482,
-          "advertised_released_bytes": 37946,
+          "sent_complete_bytes": 38178,
+          "released_complete_bytes": 38178,
+          "last_advertised_grant": 103450,
+          "advertised_released_bytes": 37914,
           "pending_release_bytes": 264
         },
         "terminal_to_client": {
@@ -6569,8 +6556,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -6608,10 +6594,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38210,
-          "released_complete_bytes": 38210,
-          "last_advertised_grant": 103746,
-          "advertised_released_bytes": 38210,
+          "sent_complete_bytes": 38178,
+          "released_complete_bytes": 38178,
+          "last_advertised_grant": 103714,
+          "advertised_released_bytes": 38178,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6744,8 +6730,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -6777,10 +6762,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38314,
-          "released_complete_bytes": 38210,
-          "last_advertised_grant": 103746,
-          "advertised_released_bytes": 38210,
+          "sent_complete_bytes": 38282,
+          "released_complete_bytes": 38178,
+          "last_advertised_grant": 103714,
+          "advertised_released_bytes": 38178,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -6913,8 +6898,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -6954,10 +6938,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38434,
-          "released_complete_bytes": 38210,
-          "last_advertised_grant": 103746,
-          "advertised_released_bytes": 38210,
+          "sent_complete_bytes": 38402,
+          "released_complete_bytes": 38178,
+          "last_advertised_grant": 103714,
+          "advertised_released_bytes": 38178,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -7090,8 +7074,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -7131,10 +7114,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38490,
-          "released_complete_bytes": 38490,
-          "last_advertised_grant": 103746,
-          "advertised_released_bytes": 38210,
+          "sent_complete_bytes": 38458,
+          "released_complete_bytes": 38458,
+          "last_advertised_grant": 103714,
+          "advertised_released_bytes": 38178,
           "pending_release_bytes": 280
         },
         "terminal_to_client": {
@@ -7280,8 +7263,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -7321,10 +7303,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38490,
-          "released_complete_bytes": 38490,
-          "last_advertised_grant": 103746,
-          "advertised_released_bytes": 38210,
+          "sent_complete_bytes": 38458,
+          "released_complete_bytes": 38458,
+          "last_advertised_grant": 103714,
+          "advertised_released_bytes": 38178,
           "pending_release_bytes": 280
         },
         "terminal_to_client": {
@@ -7470,8 +7452,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [
@@ -7509,10 +7490,10 @@
       "credit_ledgers": {
         "client_to_terminal": {
           "initial_grant": 65536,
-          "sent_complete_bytes": 38490,
-          "released_complete_bytes": 38490,
-          "last_advertised_grant": 104026,
-          "advertised_released_bytes": 38490,
+          "sent_complete_bytes": 38458,
+          "released_complete_bytes": 38458,
+          "last_advertised_grant": 103994,
+          "advertised_released_bytes": 38458,
           "pending_release_bytes": 0
         },
         "terminal_to_client": {
@@ -7658,8 +7639,7 @@
           "width": 2,
           "height": 1,
           "flags": 0,
-          "byte_length": 8,
-          "sha3_256": "2c32110f19fe66aebb4d28fee9392c8a55808d19a2daf5cc7164b4c1eee82f40"
+          "byte_length": 8
         }
       ],
       "owner_wide_resource_usage": [

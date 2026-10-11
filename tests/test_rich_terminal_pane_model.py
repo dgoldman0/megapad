@@ -28,7 +28,7 @@ def policy(**changes):
         max_resources=0, max_objects=8, max_series=0,
         max_operations_per_transaction=16, max_resource_chunk_bytes=0,
         max_retained_transaction_bytes=4096, total_resource_bytes=0,
-        image_format=0, max_image_width=0, max_image_height=0,
+        image_formats=0, max_image_width=0, max_image_height=0,
         max_path_points=0, max_glyph_run_bytes=0, max_samples_per_append=0,
         max_history_per_series=0, minimum_presentation_interval_us=0,
         total_sample_slots=0, total_utf8_bytes=256,

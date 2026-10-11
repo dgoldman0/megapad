@@ -305,8 +305,7 @@ VARIABLE DBX-ABORT-S
   -1 _PT-RSA ! -1 _PT-RSU ! -1 _PT-RSS !
   -1 _PT-RA ! -1 _PT-RU ! -1 _PT-RB ! -1 _PT-RV ! ;
 : DBX-BEGIN
-  -1 _PT-RBG-PIXELS ! DBX-POISON-RANGES
-  1 2 3 4 5 6 7 8 9 10 11 PT-RESOURCE-BEGIN DBX-BEGIN-S ! ;
+  1 2 3 4 5 6 7 8 9 PT-RESOURCE-BEGIN DBX-BEGIN-S ! ;
 : DBX-CHUNK
   -1 _PT-RCH-PAYLOAD-U ! -1 _PT-RCH-FRAME-U ! -1 _PT-RCH-END !
   -1 _PT-RCH-SENT ! -1 _PT-RCH-WATERMARK ! DBX-POISON-RANGES
@@ -949,16 +948,6 @@ def test_simulator_real_kdos_catch_loads_resource_wrappers_before_transactions(
             "_PT-RBG-HEIGHT",
             "_PT-RBG-FLAGS",
             "_PT-RBG-LENGTH",
-            "_PT-RBG-DIGEST-A",
-            "_PT-RBG-DIGEST-U",
-            "_PT-RBG-PIXELS",
-            "_PT-RSA",
-            "_PT-RSU",
-            "_PT-RSS",
-            "_PT-RA",
-            "_PT-RU",
-            "_PT-RB",
-            "_PT-RV",
         )
     )
 

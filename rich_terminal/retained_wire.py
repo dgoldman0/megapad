@@ -14,6 +14,7 @@ from enum import Enum, IntEnum
 
 from .apt1 import UINT16_MAX, UINT32_MAX, UINT64_MAX
 from .retained_model import (
+    IMAGE_FORMATS,
     OwnerQuotas,
     ResourceFormat,
     RetainedFeature,
@@ -73,7 +74,7 @@ _RET_FORMATS = struct.Struct("<IIIIIIIIIIQQQ")
 _OWNER_OPEN = struct.Struct("<QQIIIIQQQQ")
 _RET_RESULT = struct.Struct("<HHIQQQQQ")
 _OWNER_DROP = struct.Struct("<QQQQ")
-_RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ32s")
+_RESOURCE_BEGIN = struct.Struct("<QQQIIIIQ")
 _RESOURCE_CHUNK = struct.Struct("<QQQQ")
 _RESOURCE_ITEM = struct.Struct("<QQQ")
 # ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
@@ -534,7 +535,7 @@ class RetainedCaps:
             max_resource_chunk_bytes=self.max_resource_chunk_bytes,
             max_retained_transaction_bytes=self.max_retained_transaction_bytes,
             total_resource_bytes=self.total_resource_bytes,
-            image_format=formats.image_format,
+            image_formats=formats.image_formats,
             max_image_width=formats.max_image_width,
             max_image_height=formats.max_image_height,
             max_path_points=formats.max_path_points,
@@ -554,7 +555,7 @@ class RetainedCaps:
 class RetainedFormats:
     bounds_format: int
     color_format: int
-    image_format: int
+    image_formats: int
     max_image_width: int
     max_image_height: int
     max_path_points: int
@@ -569,7 +570,7 @@ class RetainedFormats:
         for name in (
             "bounds_format",
             "color_format",
-            "image_format",
+            "image_formats",
             "max_image_width",
             "max_image_height",
             "max_path_points",
@@ -591,8 +592,10 @@ class RetainedFormats:
             )
         if self.bounds_format != 2 or self.color_format != 1:
             raise ValueError("RETAINED-1 requires CELL_RECT32 bounds and RGBA8 colors")
-        if self.image_format not in (0, 1):
-            raise ValueError("image_format must be zero or raw RGBA8")
+        if self.image_formats & ~IMAGE_FORMATS:
+            raise ValueError("image_formats names a format RETAINED-1 does not define")
+        if self.image_formats and not self.image_formats & ResourceFormat.RGBA8.bit:
+            raise ValueError("image_formats must include raw RGBA8")
 
 
 @dataclass(frozen=True, slots=True)
@@ -754,7 +757,6 @@ class ResourceBegin:
     height: int
     flags: int
     byte_length: int
-    sha3_256: bytes
 
     def __post_init__(self) -> None:
         for name in ("owner_id", "owner_generation", "resource_id"):
@@ -764,10 +766,14 @@ class ResourceBegin:
                 _integer(name, getattr(self, name), minimum=0, maximum=UINT64_MAX),
             )
         format_id = _integer("format", self.format, minimum=0, maximum=UINT32_MAX)
+        # An undefined format is kept as its number, so status selection can
+        # refuse it rather than the decoder.
         object.__setattr__(
             self,
             "format",
-            ResourceFormat(format_id) if format_id == int(ResourceFormat.RGBA8) else format_id,
+            ResourceFormat(format_id)
+            if format_id in ResourceFormat._value2member_map_
+            else format_id,
         )
         for name in ("width", "height"):
             object.__setattr__(
@@ -784,15 +790,6 @@ class ResourceBegin:
                 "byte_length", self.byte_length, minimum=0, maximum=UINT64_MAX
             ),
         )
-        object.__setattr__(
-            self,
-            "sha3_256",
-            _byte_string(self.sha3_256, "sha3_256", exact_size=32),
-        )
-
-    @property
-    def digest(self) -> bytes:
-        return self.sha3_256
 
 
 @dataclass(frozen=True, slots=True)
@@ -1535,7 +1532,7 @@ def encode_ret_formats(formats: RetainedFormats) -> bytes:
     if not isinstance(formats, RetainedFormats):
         raise TypeError("formats must be RetainedFormats")
     return _RET_FORMATS.pack(
-        formats.bounds_format, formats.color_format, formats.image_format,
+        formats.bounds_format, formats.color_format, formats.image_formats,
         formats.max_image_width, formats.max_image_height, formats.max_path_points,
         formats.max_glyph_run_bytes, formats.max_samples_per_append,
         formats.max_history_per_series, formats.minimum_presentation_interval_us,
@@ -1640,7 +1637,6 @@ def encode_resource_begin(begin: ResourceBegin) -> bytes:
         begin.height,
         begin.flags,
         begin.byte_length,
-        begin.sha3_256,
     )
 
 
@@ -1648,11 +1644,7 @@ def decode_resource_begin(payload) -> ResourceBegin:
     raw = _payload(payload, _RESOURCE_BEGIN.size, "RESOURCE_BEGIN")
     values = _RESOURCE_BEGIN.unpack(raw)
     try:
-        return ResourceBegin(
-            *values[:7],
-            values[7],
-            values[8],
-        )
+        return ResourceBegin(*values)
     except (TypeError, ValueError) as exc:
         raise RetainedWireError(RetainedWireErrorCode.CONSISTENCY, str(exc)) from exc
 
