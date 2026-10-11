@@ -23,8 +23,8 @@ RETAINED-1 has three deliberately different ownership layers:
    the revalidated live local-attachment set. That aggregate alone materializes
    on the wire as a nonzero `(owner_id, owner_generation)`, and every owner-bound
    frame repeats that tuple. The terminal never infers authority from current
-   focus, region, UIDL identity, local attachment token, object, resource
-   digest, or an unscoped item ID.
+   focus, region, UIDL identity, local attachment token, object, picture
+   content, or an unscoped item ID.
 
 The backend never collapses wire authority into implicit session ownership. The
 selected aggregate deliberately combines several local UCTX attachments under
@@ -192,8 +192,8 @@ The terminal performs checks in this order before owner-scoped mutation:
 7. quota/reference/content validation for the whole atomic operation.
 
 A tombstone is evidence only for rejecting stale generation and admitting a
-strictly newer generation. It is not a live authority record. A digest is not a
-resource authority. A globally unique application key is not a wire authority.
+strictly newer generation. It is not a live authority record. A globally
+unique application key is not a wire authority.
 An object reference is valid only when its target has the same exact owner
 generation unless the wire contract explicitly says otherwise; RETAINED-1
 defines no cross-owner references.
@@ -332,8 +332,10 @@ may exist only as bounded raw intent rather than normalized semantic input.
 
 A backend-neutral UIDL resource snapshot exposes a bounded pull source. It is
 not an APT provider API and application code cannot issue retained operations
-through it. The backend copies the immutable snapshot metadata and SHA3-256
-digest before RESOURCE_BEGIN. For each requested offset it obtains no more than
+through it. The backend copies the immutable snapshot metadata, the picture's
+format, size and byte length, before RESOURCE_BEGIN. For a format the terminal
+decodes the source yields the picture's file as it is; otherwise it yields raw
+pixels. For each requested offset it obtains no more than
 the negotiated chunk maximum into backend-owned staging, copies or synchronously
 emits exactly those bytes, and retains no returned source pointer. A source may
 not write directly into the PT transmit ring or call the backend.
@@ -344,7 +346,7 @@ it may run complete transactions, so frames keep reaching the screen during an
 upload. It sends no resource frame while a transaction is open or its TX_RESULT
 is outstanding, and begins no transaction while a chunk awaits its covering
 CREDIT. It retains enough
-snapshot/digest/source state to abort exactly the active owner/generation/
+snapshot/source state to abort exactly the active owner/generation/
 resource. On source error it emits RESOURCE_ABORT if reserve and stream state
 permit. It does not publish an object reference until successful resource
 commit.

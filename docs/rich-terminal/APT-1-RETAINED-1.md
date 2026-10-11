@@ -94,7 +94,7 @@ use the APT-1 control reserve under Section 17.
 | `000b` | `OWNER_DROP` | C -> T | reserve | 32 bytes |
 | `000c` | `RESOURCE_ABORT` | C -> T | reserve | 32 bytes |
 | `0205` | `CONTROL_EVENT` | T -> C | ordinary | 40, 48, 56, or 64 bytes by kind |
-| `1000` | `RESOURCE_BEGIN` | C -> T | ordinary | 80 bytes |
+| `1000` | `RESOURCE_BEGIN` | C -> T | ordinary | 48 bytes |
 | `1001` | `RESOURCE_CHUNK` | C -> T | ordinary | 32-byte prefix + bytes |
 | `1002` | `RESOURCE_COMMIT` | C -> T | ordinary | 24 bytes |
 | `1003` | `RESOURCE_DROP` | C -> T | ordinary | 24 bytes |
@@ -225,7 +225,7 @@ Feature bits are:
 |---:|---|---|
 | 0 | `RET_CORE` | owners, regions, `GLYPH_RUN`, global transactions, hidden rebuild/reveal |
 | 1 | `RET_VECTOR` | `GROUP` and `POLYLINE` objects |
-| 2 | `RET_RGBA_IMAGE` | immutable raw RGBA8 resources and `IMAGE` objects |
+| 2 | `RET_RGBA_IMAGE` | immutable picture resources and `IMAGE` objects |
 | 3 | `RET_INSTRUMENT` | `READOUT`, `METER`, and `STATUS` objects |
 | 4 | `RET_SERIES` | bounded i64 series, `PLOT`, and `WAVEFORM` objects |
 | 5 | `RET_CADENCE` | bounded display cadence and physical coalescing |
@@ -334,7 +334,7 @@ now-forbidden legacy snapshot path.
 |---:|---|---|
 | 0 | `bounds_format` = 2 (`CELL_RECT32`) | u32 |
 | 4 | `color_format` = 1 (`RGBA8`) | u32 |
-| 8 | `image_format` | u32 |
+| 8 | `image_formats` | u32 |
 | 12 | `max_image_width` | u32 |
 | 16 | `max_image_height` | u32 |
 | 20 | `max_path_points` | u32 |
@@ -346,9 +346,13 @@ now-forbidden legacy snapshot path.
 | 48 | `total_utf8_bytes` | u64 |
 | 56 | `reserved` = 0 | u64 |
 
-`image_format` is 1 for raw row-major sRGB straight-alpha RGBA8 and zero when
-`RET_RGBA_IMAGE` is absent. Image width and height are positive exactly when
-that feature is set. `max_path_points` is positive exactly when VECTOR is set.
+`image_formats` is the set of picture formats the terminal takes, one bit
+each: bit 0 raw row-major sRGB straight-alpha RGBA8, bit 1 QOI, bit 2 PNG and
+bit 3 JPEG files (Section 8); other bits are zero. It is zero when
+`RET_RGBA_IMAGE` is absent. When that feature is set, bit 0 is set, since every
+terminal that shows pictures takes raw pixels. Image width and height are
+positive exactly when that feature is set, and they bound the decoded picture
+in every format. `max_path_points` is positive exactly when VECTOR is set.
 `max_glyph_run_bytes` is positive exactly when glyph-run objects are enabled;
 that requires positive `max_objects` and sufficient aggregate UTF-8 capacity.
 INSTRUMENT also requires that text capacity because READOUT formatting shares
@@ -766,7 +770,7 @@ Status values are:
 | 3 | `RET_NO_CAPACITY` | declared quota/storage cannot be reserved |
 | 4 | `RET_DUPLICATE_ID` | ID violates monotonic/duplicate definition rule |
 | 5 | `RET_IN_USE` | resource/owner lifecycle conflicts with live references |
-| 6 | `RET_BAD_CONTENT` | uploaded resource bytes fail digest/content validation |
+| 6 | `RET_BAD_CONTENT` | an uploaded file does not decode to its declared picture |
 | 7 | `RET_ABORTED` | upload was explicitly or semantically aborted |
 
 Exactly one RET_RESULT is sent for OWNER_OPEN, OWNER_RESIZE, RESOURCE_BEGIN, RESOURCE_COMMIT,
@@ -801,7 +805,7 @@ Lifecycle status selection is deterministic:
 | RESOURCE_COMMIT owner ID/generation differs from the open upload tuple | RET_STALE_OWNER | actual upload and usage unchanged |
 | RESOURCE_COMMIT exact live owner but absent/wrong resource tuple | RET_INVALID | actual upload and usage unchanged |
 | RESOURCE_COMMIT exact-upload incomplete data | RET_INVALID | exact upload destroyed; usage/staging released |
-| RESOURCE_COMMIT exact-upload digest mismatch | RET_BAD_CONTENT | exact upload destroyed; usage/staging released |
+| RESOURCE_COMMIT exact-upload file that does not decode to its declared size | RET_BAD_CONTENT | exact upload destroyed; usage/staging released |
 | RESOURCE_DROP absent/wrong tuple | RET_INVALID or RET_STALE_OWNER | unchanged |
 | RESOURCE_DROP referenced by active or hidden model | RET_IN_USE | unchanged |
 | RESOURCE_ABORT exact upload and valid reason | RET_ABORTED | upload destroyed |
@@ -813,11 +817,27 @@ selects status from local exception text.
 
 ## 8. Immutable RGBA resources
 
-Resources are immutable content-address-verified byte objects. RETAINED-1
-defines one resource format: raw row-major sRGB straight-alpha RGBA8, with no
-row padding. Resource IDs are owner-local, nonzero, and strictly increasing
-within an owner generation. The content digest is SHA3-256 over the exact raw
-bytes. Equal digests do not merge authority or identifiers.
+Resources are immutable pictures. A client uploads each in one of the formats
+the terminal advertises in `RET_FORMATS`:
+
+| Format | Bytes sent |
+|---:|---|
+| 1 | raw row-major sRGB straight-alpha RGBA8, with no row padding |
+| 2 | a QOI file |
+| 3 | a PNG file |
+| 4 | a JPEG file |
+
+Format `n` is advertised by bit `n - 1` of `image_formats`. The terminal
+decodes a file into sRGB straight-alpha RGBA8 pixels, and those pixels are the
+resource it holds and draws, whatever format they came in. It takes a file's
+colour values as sRGB, ignoring any embedded colour profile or gamma. A JPEG
+decodes opaque. An animated file is its default image. The client sends a
+file's bytes as they are, so it need not decode or scale a picture the
+terminal decodes.
+
+Resource IDs are owner-local, nonzero, and strictly increasing within an owner
+generation. The terminal knows a resource only by owner, generation and ID; it
+compares no content.
 
 Only one resource upload may exist session-wide. No owner lifecycle request,
 RESOURCE_DROP, PIXELS_QUERY, or second upload may overlap it. Transactions
@@ -837,8 +857,8 @@ aggregate live-owner reservation sums.
 
 The open upload is identified by the exact tuple `(owner_id, owner_generation,
 resource_id)`. After base framing/state validation, RESOURCE_CHUNK and
-RESOURCE_COMMIT compare that tuple before offset, length, completeness, digest,
-or other destructive validation. If an upload is open and owner ID or generation
+RESOURCE_COMMIT compare that tuple before offset, length, completeness,
+decoding, or other destructive validation. If an upload is open and owner ID or generation
 differs—even when the frame names another independently live owner—the result is
 RET_STALE_OWNER. If the owner tuple matches but the resource differs, the result
 is RET_INVALID. With no open upload, a stale owner tuple is RET_STALE_OWNER and
@@ -853,18 +873,20 @@ staging unchanged. It cannot destroy or abort another owner's upload.
 u64 owner_id
 u64 owner_generation
 u64 resource_id
-u32 format              = 1 (raw RGBA8)
+u32 format              (1 raw RGBA8, 2 QOI, 3 PNG, 4 JPEG)
 u32 width
 u32 height
 u32 flags               = 0
 u64 byte_length
-u8  sha3_256[32]
 ```
 
-Width and height are positive and within RET_FORMATS. `byte_length` must equal
-checked `width * height * 4`; one resource-count slot and `byte_length` bytes
-must fit the opening owner's remaining reserved usage and be representable by
-the implementation's negotiated physical staging policy. A successful
+The format is one the terminal advertises. Width and height are the decoded
+picture's, positive and within RET_FORMATS. `byte_length` counts the bytes
+sent: for raw pixels it must equal checked `width * height * 4`, and for a file
+it is the file's length, which is positive. One resource-count slot and the
+decoded size, checked `width * height * 4`, must fit the opening owner's
+remaining reserved usage, whatever the format, and `byte_length` must be
+representable by the implementation's negotiated physical staging policy. A successful
 RET_RESULT opens the upload; chunks sent before it are state errors. Another
 owner's idle usage does not admit this resource and an upload does not alter
 aggregate owner reservations.
@@ -903,9 +925,10 @@ for the exact open upload tuple and after exactly `byte_length` bytes. A wrong
 owner/generation returns RET_STALE_OWNER and a same-owner absent/wrong resource
 returns RET_INVALID; neither changes the actual upload. For an exact tuple,
 incomplete data returns RET_INVALID and destroys the upload. Otherwise the
-terminal validates SHA3-256 before publishing the immutable resource and
-returning RET_OK. A digest mismatch returns RET_BAD_CONTENT and destroys the
-exact upload without creating the ID. Each exact-upload rejection releases its
+terminal decodes a file before publishing the immutable resource and returning
+RET_OK; raw pixels need no decoding. A file that does not decode, or decodes
+to another width or height than declared, returns RET_BAD_CONTENT and
+destroys the exact upload without creating the ID. Each exact-upload rejection releases its
 uncommitted owner-wide resource-usage charge and physical staging but no owner
 quota reservation. No exact-upload COMMIT error leaves a commit-uncertain
 upload open. The acknowledged resource ID high-water remains consumed.
@@ -1498,8 +1521,9 @@ closed path adds the last-to-first segment; it does not imply fill.
 
 The body is exact `<QIBB2x>` (16 bytes): resource ID, fit mode, opacity, and
 flags. Fit 0 stretches, 1 contains, and 2 covers. Opacity is 0..255 and
-multiplies resource alpha. The resource must be the same owner generation and
-format 1.
+multiplies resource alpha. The resource must be the same owner generation, in
+any format. The renderer resamples the picture to its fitted size with a
+filter of its choosing.
 
 Flags bit 0 is `BACKDROP`. With it set, the renderer first paints its own
 opaque background over the object's whole rectangle, within its clip, and
@@ -2118,7 +2142,7 @@ The journey must exercise ordinary-credit backpressure, the 4096-byte control
 reserve, a rejected over-quota lifecycle request, transaction bytes retained
 through commit/abort processing plus the separate post-COMMIT TX_RESULT gate,
 and one hidden multi-transaction rebuild.
-Image upload and digest, PIXELS answers, BACKDROP painting, and giving
+Image upload in each advertised format, PIXELS answers, BACKDROP painting, and giving
 resource space back with OWNER_RESIZE must be qualified before advertising
 RGBA_IMAGE; none is a prerequisite when that optional bit is clear.
 
@@ -2158,8 +2182,10 @@ Implementations must share byte-exact vectors for:
   RET_LAYOUT_START/RET_LAYOUT_CONTINUE journeys using numeric modes 2/3 and 4/5;
 - owner quota reservation, an aggregate RET_NO_CAPACITY from individually valid
   requests, tombstone, stale generation, and idempotent drop;
-- good and bad SHA3-256 upload, ordered chunks, exact-upload abort/destruction,
-  wrong-tuple CHUNK/COMMIT preservation, and in-use drop;
+- an upload in each advertised format, a file that does not decode and one
+  that decodes to another size, the decoded-size charge, ordered chunks,
+  exact-upload abort/destruction, wrong-tuple CHUNK/COMMIT preservation, and
+  in-use drop;
 - CELL and PRESENT transactions between an upload's chunks, a chunk refused
   inside a transaction, and a soft reset that settles an open transaction
   before aborting the open upload;
