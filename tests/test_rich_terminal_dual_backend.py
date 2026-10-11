@@ -13,6 +13,7 @@ closure.
 from __future__ import annotations
 
 import hashlib
+import re
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -316,16 +317,26 @@ VARIABLE DBX-ABORT-S
   1 2 3 0 5 PT-RESOURCE-ABORT DBX-ABORT-S ! ;
 """
 
-# The production encoder correctly takes KDOS's global UART lock.  This
-# focused fixture intentionally does not load KDOS, so both backends receive
-# the same narrow definitions over BIOS SPIN@/SPIN!.  This retains the real
-# uncontended lock boundary without importing KDOS's scheduler-aware LOCK
-# wrappers.  The shims are not part of the extracted production prefix and
-# make no multicore or full-module claim.
-ONE_CORE_UART_LOCK_SHIMS = b"""
+def _kdos_definition(name: str) -> bytes:
+    """KDOS's own colon definition of NAME, as kdos.f writes it."""
+
+    kdos = (REPOSITORY_ROOT / "kdos.f").read_text(encoding="utf-8")
+    match = re.search(rf"(?ms)^: {re.escape(name)}\s.*?^;[ \t]*$", kdos)
+    assert match is not None, name
+    return match[0].encode("utf-8") + b"\n"
+
+
+# The production module uses two things from KDOS: its global UART lock and
+# its checked CRC buffer feed.  These focused fixtures intentionally do not
+# load KDOS, so both backends receive the same narrow definitions.  The lock
+# is taken over BIOS SPIN@/SPIN!, which retains the real uncontended lock
+# boundary without importing KDOS's scheduler-aware LOCK wrappers; the feed
+# is KDOS's own definition, read from kdos.f.  The shims are not part of the
+# extracted production prefix and make no multicore or full-module claim.
+KDOS_SHIMS = b"""
 : UART-ACQUIRE  BEGIN 1 SPIN@ 0= UNTIL ;
 : UART-RELEASE  1 SPIN! ;
-"""
+""" + _kdos_definition("_CRC-BUF-CHECKED")
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,7 +480,7 @@ def _offer_for_probe(probe_record: bytes) -> bytes:
 def _run_simulator(prefix: bytes, case: SourceCase) -> SourceRun:
     runtime = MegaForthRuntime()
     source_result = runtime.evaluate(
-        ONE_CORE_UART_LOCK_SHIMS + prefix,
+        KDOS_SHIMS + prefix,
         source_name="rich-terminal.f:PT-S-OK.._PT-SEND-CREDIT",
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,
     )
@@ -495,7 +506,7 @@ def _run_simulator(prefix: bytes, case: SourceCase) -> SourceRun:
 def _run_uart_offer_simulator(prefix: bytes) -> OpeningObservation:
     runtime = MegaForthRuntime()
     runtime.evaluate(
-        ONE_CORE_UART_LOCK_SHIMS + prefix,
+        KDOS_SHIMS + prefix,
         source_name="rich-terminal.f:PT-S-OK.._PT-READ-BYTE",
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,
     )
@@ -657,7 +668,7 @@ def _halt_emulator(system) -> None:
 def _run_emulator(prefix: bytes, case: SourceCase) -> SourceRun:
     system, output = _boot_emulator()
     payload = (
-        ONE_CORE_UART_LOCK_SHIMS
+        KDOS_SHIMS
         + prefix
         + b"\n"
         + case.harness
@@ -708,7 +719,7 @@ def _run_uart_offer_emulator(prefix: bytes) -> OpeningObservation:
     system, output = _boot_emulator()
     _feed_emulator_lines(
         system,
-        ONE_CORE_UART_LOCK_SHIMS
+        KDOS_SHIMS
         + prefix
         + b"\n"
         + UART_OFFER_SCENARIO_SOURCE,
@@ -902,9 +913,9 @@ def test_simulator_real_kdos_catch_loads_resource_wrappers_before_transactions(
     catch_word = runtime.find("CATCH")
     assert catch_word is not None
     result = runtime.evaluate(
-        ONE_CORE_UART_LOCK_SHIMS + prefix,
+        KDOS_SHIMS + prefix,
         source_name=(
-            "one-core-uart-lock-shims+"
+            "kdos-shims+"
             f"rich-terminal.f:{prefix_digest}:PT-S-OK..pre-transaction"
         ),
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,
@@ -997,9 +1008,9 @@ def test_simulator_real_driver_snapshot_and_close_use_public_transaction_path(
     source_digest = hashlib.sha256(module_source).hexdigest()
     runtime = _load_exceptions()
     source_result = runtime.evaluate(
-        ONE_CORE_UART_LOCK_SHIMS + module_source,
+        KDOS_SHIMS + module_source,
         source_name=(
-            "one-core-uart-lock-shims+"
+            "kdos-shims+"
             f"rich-terminal.f:{source_digest}:complete"
         ),
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,

@@ -22,7 +22,7 @@ from rich_terminal.retained_wire import (
 )
 from tests.simulator.test_kdos_exceptions import _load_exceptions
 from tests.test_rich_terminal_dual_backend import (
-    ONE_CORE_UART_LOCK_SHIMS,
+    KDOS_SHIMS,
     SIMULATOR_SOURCE_MAX_STEPS,
     _rich_terminal_module_source,
 )
@@ -114,8 +114,8 @@ def runtime():
     digest = hashlib.sha256(module_source).hexdigest()
     loaded = _load_exceptions()
     loaded.evaluate(
-        ONE_CORE_UART_LOCK_SHIMS + module_source,
-        source_name=f"one-core-uart-lock-shims+rich-terminal.f:{digest}:complete",
+        KDOS_SHIMS + module_source,
+        source_name=f"kdos-shims+rich-terminal.f:{digest}:complete",
         step_budget=SIMULATOR_SOURCE_MAX_STEPS,
     )
     loaded.evaluate(HARNESS_SOURCE, source_name="control-event-input.f")

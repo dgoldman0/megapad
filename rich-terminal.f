@@ -12,6 +12,8 @@
 \  Normative wire text: docs/rich-terminal/APT-1-WIRE.md
 \  Cell text follows APT-1-TEXT-1-2026-09-26 (docs/rich-terminal/APT-1-TEXT.md):
 \  the caller lays text out; this module encodes and checks the cells.
+\  KDOS supplies the UART lock (UART-ACQUIRE, UART-RELEASE) and the checked
+\  CRC buffer feed (_CRC-BUF-CHECKED).
 
 PROVIDED rich-terminal.f
 
@@ -889,31 +891,18 @@ VARIABLE _PT-CI
 VARIABLE _PT-CRC-A
 VARIABLE _PT-CRC-U
 
-: _PT-CRC-FEED?  ( a u -- status )
-    BEGIN DUP 8 >= WHILE
-        OVER @ CRC-FEED ?DUP IF
-            >R 2DROP R> EXIT
-        THEN
-        SWAP 8 + SWAP 8 -
-    REPEAT
-    BEGIN DUP WHILE
-        OVER C@ CRC-FEED-BYTE ?DUP IF
-            >R 2DROP R> EXIT
-        THEN
-        SWAP 1+ SWAP 1-
-    REPEAT
-    2DROP 0 ;
-
+\ KDOS's checked buffer feed gives the unit the frame a cell at a time and
+\ returns another owner's status rather than taking its transaction.
 : _PT-FRAME-CRC-HARDWARE?  ( frame payload-u -- crc status )
     _PT-CRC-U ! _PT-CRC-A !
     5 CRC-MODE! ?DUP IF 0 SWAP EXIT THEN
     0xFFFFFFFF CRC-INIT! ?DUP IF
         >R CRC-FINAL@ DROP 0 R> EXIT
     THEN
-    _PT-CRC-A @ 36 _PT-CRC-FEED? ?DUP IF
+    _PT-CRC-A @ 36 _CRC-BUF-CHECKED ?DUP IF
         >R CRC-FINAL@ DROP 0 R> EXIT
     THEN
-    _PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-FEED? ?DUP IF
+    _PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _CRC-BUF-CHECKED ?DUP IF
         >R CRC-FINAL@ DROP 0 R> EXIT
     THEN
     CRC-FINAL@ 0 ;

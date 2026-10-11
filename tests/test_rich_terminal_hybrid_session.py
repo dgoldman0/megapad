@@ -32,7 +32,7 @@ from shared_session import (
 from simulator.runtime import _MachineCursor
 from tests.simulator.test_kdos_exceptions import _load_exceptions
 from tests.test_rich_terminal_dual_backend import (
-    LIVE_HANDSHAKE_SCENARIO_SOURCE, ONE_CORE_UART_LOCK_SHIMS,
+    LIVE_HANDSHAKE_SCENARIO_SOURCE, KDOS_SHIMS,
     SIMULATOR_SOURCE_MAX_STEPS, _rich_terminal_module_source, _stored_cell,
 )
 from tests.test_rich_terminal_semantic_server import _config, _policy
@@ -187,7 +187,7 @@ def test_hybrid_retained_publication_ack_and_guest_control_events(
     try:
         _load_exceptions(runtime)
         runtime.evaluate(
-            ONE_CORE_UART_LOCK_SHIMS + _rich_terminal_module_source(),
+            KDOS_SHIMS + _rich_terminal_module_source(),
             source_name="hybrid-retained:complete-rich-terminal.f",
             step_budget=SIMULATOR_SOURCE_MAX_STEPS,
         )

@@ -58,16 +58,17 @@ def test_header_ready_and_caps_reserved_fields_are_zero() -> None:
 
 def test_frame_crc_prefers_checked_hardware_crc32c_without_stealing_owner() -> None:
     source = SOURCE.read_text(encoding="utf-8")
-    feed = _definition(source, "_PT-CRC-FEED?")
     hardware = _definition(source, "_PT-FRAME-CRC-HARDWARE?")
     frame_crc = _definition(source, "_PT-FRAME-CRC")
 
-    assert "OVER @ CRC-FEED ?DUP IF" in feed
-    assert "OVER C@ CRC-FEED-BYTE ?DUP IF" in feed
+    # KDOS's checked buffer feed returns another owner's status rather than
+    # taking its transaction; the module keeps no copy of it.
+    assert ": _CRC-BUF-CHECKED" not in source
+    assert "CRC-FEED " not in source and "CRC-FEED-BYTE" not in source
     assert "5 CRC-MODE! ?DUP IF 0 SWAP EXIT THEN" in hardware
     assert "0xFFFFFFFF CRC-INIT! ?DUP IF" in hardware
-    assert "_PT-CRC-A @ 36 _PT-CRC-FEED?" in hardware
-    assert "_PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _PT-CRC-FEED?" in hardware
+    assert "_PT-CRC-A @ 36 _CRC-BUF-CHECKED" in hardware
+    assert "_PT-CRC-A @ _PT-HDR + _PT-CRC-U @ _CRC-BUF-CHECKED" in hardware
     assert hardware.count("CRC-FINAL@ DROP 0 R> EXIT") == 3
     assert "CRC-FINAL@ 0" in hardware
 
