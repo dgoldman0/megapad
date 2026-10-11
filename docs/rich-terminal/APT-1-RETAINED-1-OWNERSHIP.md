@@ -339,7 +339,11 @@ emits exactly those bytes, and retains no returned source pointer. A source may
 not write directly into the PT transmit ring or call the backend.
 
 The backend allows one upload session-wide. It waits for successful BEGIN result,
-then for CREDIT covering each chunk, then for COMMIT result. It retains enough
+then for CREDIT covering each chunk, then for COMMIT result. Between those steps
+it may run complete transactions, so frames keep reaching the screen during an
+upload. It sends no resource frame while a transaction is open or its TX_RESULT
+is outstanding, and begins no transaction while a chunk awaits its covering
+CREDIT. It retains enough
 snapshot/digest/source state to abort exactly the active owner/generation/
 resource. On source error it emits RESOURCE_ABORT if reserve and stream state
 permit. It does not publish an object reference until successful resource
@@ -435,8 +439,8 @@ wire model and quotas remain quarantined and cannot accept or authorize work.
 Only coordinated hard reset/detach or a valid close boundary retires them.
 
 Close does not bypass authority cleanup. The backend stops new projection,
-quiesces every semantic source, finishes or aborts the one upload/transaction
-where the base protocol permits, services outstanding results, and then performs
+quiesces every semantic source, finishes or aborts any open transaction and
+then the one upload where the base protocol permits, services outstanding results, and then performs
 synchronized close. A timeout after binary ownership was acquired remains LOST
 until external reset.
 

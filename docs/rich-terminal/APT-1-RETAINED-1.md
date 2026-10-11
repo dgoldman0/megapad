@@ -408,7 +408,9 @@ model revision within the `presentation_epoch`.
 
 A transaction ID used by either family must be greater than every previously
 started transaction ID in that epoch. A sender must not begin either family
-while the other is open or while the preceding `TX_RESULT` is outstanding.
+while the other is open or while the preceding `TX_RESULT` is outstanding. An
+open resource upload does not hold this slot: complete transactions may run
+between the upload's frames (Section 8).
 Every successful CELL `TX_COMMIT`, `SNAPSHOT_COMMIT`, or `PRESENT_COMMIT`
 increments the same revision by exactly one. An abort or rejected transaction
 does not increment it. Existing `TX_RESULT` reports the resulting global
@@ -817,9 +819,17 @@ row padding. Resource IDs are owner-local, nonzero, and strictly increasing
 within an owner generation. The content digest is SHA3-256 over the exact raw
 bytes. Equal digests do not merge authority or identifiers.
 
-Only one resource upload may exist session-wide. No transaction, owner
-lifecycle request, or second upload may overlap it. OWNER_OPEN has already
-reserved the owner's count and byte quota. Before acknowledging BEGIN, the
+Only one resource upload may exist session-wide. No owner lifecycle request,
+RESOURCE_DROP, PIXELS_QUERY, or second upload may overlap it. Transactions
+may: between the upload's frames, that is after BEGIN's successful RET_RESULT,
+after the CREDIT covering each chunk, and before COMMIT or ABORT, the client
+may run complete CELL and PRESENT transactions, so an upload never holds up the
+screen. RESOURCE_CHUNK, RESOURCE_COMMIT, and RESOURCE_ABORT go only outside a
+transaction and while no TX_RESULT is outstanding, and no transaction begins
+while a chunk awaits its covering CREDIT, so an upload's frames never
+interleave with a transaction's. A transaction can reference only committed
+resources, so it never names the resource being uploaded. OWNER_OPEN has
+already reserved the owner's count and byte quota. Before acknowledging BEGIN, the
 terminal must atomically charge the declared resource count and bytes to that
 owner's remaining owner-wide resource usage and acquire its bounded physical
 upload staging. Neither action changes any owner's quota reservation or the
@@ -873,7 +883,11 @@ Data is nonempty and no longer than `max_resource_chunk_bytes`. Offset must
 equal the number of bytes already accepted; chunks are contiguous, ordered,
 and non-overlapping. The client must observe CREDIT covering one complete chunk
 before sending the next, so bounded receiver storage never depends on an
-unbounded run of chunks. A well-framed chunk with stale authority returns
+unbounded run of chunks. Because transactions run between chunks, a
+transaction waits behind at most one chunk. The terminal, which knows its own
+link, therefore advertises a `max_resource_chunk_bytes` that the link carries
+in about one frame's time, and the client sends chunks of that size, the last
+carrying what remains. A well-framed chunk with stale authority returns
 RET_STALE_OWNER and a same-owner wrong resource returns RET_INVALID without
 touching the actual upload, as specified above. Only after the full upload tuple
 matches do bad offset, empty data, excessive chunk length, checked end-offset
@@ -1892,7 +1906,8 @@ until ACK retires the old epoch. The broker consumes status 1 and proceeds to
 ACK without retrying that drop in the old epoch.
 
 The same hold applies when an emitted RESOURCE_CHUNK has no definitive outcome
-yet. The terminal consumes that complete old-epoch chunk and resolves it in
+yet; no transaction can then be open, because none begins while a chunk awaits
+its covering CREDIT. The terminal consumes that complete old-epoch chunk and resolves it in
 exactly one of two ways before reset may advance: an accepted chunk is followed
 by a CREDIT whose cumulative watermark covers all client ordinary bytes through
 that complete chunk, while a rejected chunk is followed by its RESOURCE_CHUNK
@@ -1913,10 +1928,13 @@ after the applicable path completes; no chunk outcome, required abort, or
 RET_RESULT may cross the ACK.
 
 Apart from the pending-chunk case above, if a resource upload is open when
-SOFT_RESET_REQUEST arrives, the client first sends RESOURCE_ABORT in the old
-epoch and waits for its old-epoch RET_RESULT. It then follows the base
-transaction-abort rule, if applicable, and sends SOFT_RESET_ACK in the new
-epoch. No upload byte or result crosses the ACK.
+SOFT_RESET_REQUEST arrives, the client first settles any transaction under the
+base rule: it sends TX_ABORT for one genuinely open, or waits for the
+outstanding TX_RESULT of one whose COMMIT it already emitted. Resource frames
+never go inside a transaction or past an outstanding TX_RESULT, so only then
+does the client send RESOURCE_ABORT in the old epoch and wait for its old-epoch
+RET_RESULT. It then sends SOFT_RESET_ACK in the new epoch. No upload byte or
+result crosses the ACK.
 
 The first client data message after reset remains the mandatory CELL-1
 `SNAPSHOT_BEGIN`; its successful commit establishes revision one. Only after
@@ -2142,6 +2160,9 @@ Implementations must share byte-exact vectors for:
   requests, tombstone, stale generation, and idempotent drop;
 - good and bad SHA3-256 upload, ordered chunks, exact-upload abort/destruction,
   wrong-tuple CHUNK/COMMIT preservation, and in-use drop;
+- CELL and PRESENT transactions between an upload's chunks, a chunk refused
+  inside a transaction, and a soft reset that settles an open transaction
+  before aborting the open upload;
 - object graph/reference validation and exact typed-body lengths;
 - byte-exact CONTROL DEFINE/REPLACE/DROP and EVENT payloads, canonical menu
   hierarchy/kind/state/bounds/string rejection, independent CONTROL high-water,
