@@ -24,8 +24,9 @@ semantics. `RET_CONTROLS` therefore carries renderer-neutral control identity,
 hierarchy, state, ordering, optional bounds, labels, shortcuts, and
 revision-bound activation while leaving representation to the selected
 renderer. `RET_CONTROL_COLLECTIONS` adds text-area, logical-grid, and tab
-semantics, and `RET_CONTROL_ITEMS` adds item views, through that same
-namespace rather than an applet or renderer API.
+semantics, `RET_CONTROL_ITEMS` adds item views, and `RET_CONTROL_DOCUMENTS`
+adds documents, through that same namespace rather than an applet or
+renderer API.
 Another trusted system renderer may use the same engine without creating
 another protocol or session. No applet is a direct protocol consumer or
 determines this profile's semantics or limits.
@@ -239,8 +240,9 @@ Feature bits are:
 | 13 | `RET_TASKBARS` | fixed-slot taskbar, task, and launcher CONTROL kinds |
 | 14 | `RET_FIELDS` | typed FIELD controls with explicit label/value slots |
 | 15 | `RET_GRID_CELLS` | typed NUMBER, FORMULA, and ERROR roles in TEXT_GRID |
+| 16 | `RET_CONTROL_DOCUMENTS` | the document CONTROL kind and its input |
 
-Bits 16 through 63 are zero. `RET_CORE` is mandatory for every supporting
+Bits 17 through 63 are zero. `RET_CORE` is mandatory for every supporting
 terminal. Every other advertised feature depends on `RET_CORE`. `RET_SERIES`
 also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 `WAVEFORM`. `RET_CADENCE` may be advertised independently of SERIES.
@@ -249,7 +251,7 @@ also requires `RET_INSTRUMENT`, because its visible consumers are `PLOT` and
 in Sections 5, 6, and 9.1. `RET_CONTROL_COLLECTIONS` requires `RET_CONTROLS` and
 uses the same limits; it adds no item-count or content-byte policy maximum.
 `RET_CONTROL_ITEMS` requires `RET_CONTROL_COLLECTIONS` and likewise adds no
-maximum of its own.
+maximum of its own, and so does `RET_CONTROL_DOCUMENTS`.
 `RET_TASKBARS` requires `RET_CONTROLS`, independently of the collection and
 item-view features. It adds no capacity field: roots and entries consume the
 existing object and UTF-8 reservations. Its minimum inbound payload is the
@@ -290,14 +292,15 @@ maximum. The general checked floor is
 `200 + maximum_retained_operation_payload`. Exact family floors are 264 for
 CORE with no objects, `280 + max_glyph_run_bytes` when glyph runs are enabled,
 `280 + 8 * max_path_points` for VECTOR,
-`max(304 + max_glyph_run_bytes, 312)` for INSTRUMENT, 280 for RGBA_IMAGE, and
+`max(304 + max_glyph_run_bytes, 312)` for INSTRUMENT, 296 for RGBA_IMAGE, and
 `max(240 + 16 * max_samples_per_append, 312)` for SERIES. CONTROLS adds no
 item-size maximum; it instead requires the negotiated inbound payload and
 retained transaction maxima to admit at least one canonical MENU_BAR root,
 whose minimum complete transaction is 280 bytes. `RET_CONTROL_COLLECTIONS`
 raises that floor to 352 bytes for one CONTROL prefix plus the 72-byte
 zero-item STX1 body, which also covers the 56-byte smallest ITM1 body of
-`RET_CONTROL_ITEMS`. These are complete frame bytes, not payload bytes.
+`RET_CONTROL_ITEMS` and the 32-byte smallest DOC1 body of
+`RET_CONTROL_DOCUMENTS`. These are complete frame bytes, not payload bytes.
 `RET_PANES` depends only on CORE and requires positive object and aggregate
 UTF-8 capacity and at least two regions for distinct chrome and content. Its
 operation-count minimum remains one: those regions can be staged in earlier
@@ -381,8 +384,8 @@ assumption that some unrelated owner will use less.
 
 Capabilities must also be consistent with both negotiated base payload maxima.
 RET_CORE requires a client-to-terminal payload maximum of at least 64 and a
-terminal-to-client maximum of at least 64. IMAGE requires at least 80 inbound
-bytes and `32 + max_resource_chunk_bytes` must fit. VECTOR requires
+terminal-to-client maximum of at least 64. IMAGE requires at least 96 inbound
+bytes, for an IMAGE with `CLIP`, and `32 + max_resource_chunk_bytes` must fit. VECTOR requires
 `80 + 8 * max_path_points` to fit. `80 + max_glyph_run_bytes` must fit when
 glyph runs are enabled. INSTRUMENT also requires
 `104 + max_glyph_run_bytes` to fit and at least 112 bytes
@@ -395,7 +398,9 @@ the fixed prefix, at least 40 terminal-to-client payload bytes for
 CONTROL prefix and the smallest STX1 body fit, at least 64 terminal-to-client
 payload bytes for a positioned `CONTROL_EVENT`, and a retained transaction
 maximum of at least 352 bytes. `RET_CONTROL_ITEMS` needs no more: its
-smallest body and its 64-byte item events fit those minima. `RET_FIELDS`
+smallest body and its 64-byte item events fit those minima. Nor does
+`RET_CONTROL_DOCUMENTS`, whose smallest body is 32 bytes and whose events are
+`SCROLL` and `FOLLOW`. `RET_FIELDS`
 requires at least 176 inbound payload bytes for CONTROL plus FDC1, 376 complete
 transaction bytes, and 56 outbound payload bytes for ADJUST. The existing CORE
 outbound minimum of 64 remains in force and already covers that event. A client must
@@ -635,7 +640,8 @@ individual count quota must not exceed its corresponding advertised maximum,
 and the sum of region, resource, object, and series count quotas respectively
 across all live owners must not exceed `max_regions`, `max_resources`,
 `max_objects`, and `max_series`. `object_quota` is one shared reservation for
-the target's combined OBJECT records, CONTROL records, and STX1 and ITM1 items;
+the target's combined OBJECT records, CONTROL records, STX1 and ITM1 items,
+and DOC1 blocks;
 it is not multiplied when CONTROLS is advertised. Resource-byte, UTF-8-byte, and
 sample-slot reservations across all live owners likewise must not exceed their
 advertised totals. Checked addition precedes mutation. An individually valid
@@ -1076,11 +1082,12 @@ renderer-neutral semantic extension rather than pixel inference.
 A region barrier point that no control surface covers shows CELL or residual
 content, so a pointer gesture may start there and reach the client as raw
 `POINTER` at that cell (APT-1 Section 12). The visible root bounds of every
-`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `TASKBAR`, and `FIELD`, and every
-open menu popup, are control surfaces laid out by the renderer: a point on
-one never starts a raw gesture. It resolves to an activatable target, to a
-`TEXT_AREA`/`TEXT_GRID` position or an `ITEM_VIEW` item under
-SEMANTIC-CONTENT-1, or to nothing.
+`MENU_BAR`, `TABSET`, `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT`,
+`TASKBAR`, and `FIELD`, and every open menu popup, are control surfaces laid
+out by the renderer: a point on one never starts a raw gesture. It resolves
+to an activatable target, to a `TEXT_AREA`/`TEXT_GRID` position, an
+`ITEM_VIEW` item, or a `DOCUMENT` link under SEMANTIC-CONTENT-1, or to
+nothing.
 
 Regions are stamped with PRESENT_BEGIN `geometry_generation`. A resize makes
 the active retained plane hidden and layout-rebuild-required. A layout reveal
@@ -1089,9 +1096,9 @@ is invalid until every surviving region is stamped with the new generation.
 ### 9.1 Semantic controls
 
 `RET_CONTROLS` defines the independent CONTROL identity namespace and its menu
-kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds, and
+kinds; `RET_CONTROL_COLLECTIONS` adds text, grid, and tab kinds,
 `RET_CONTROL_ITEMS` the item view, `RET_TASKBARS` taskbar roots and entries,
-and `RET_FIELDS` typed fields,
+`RET_FIELDS` typed fields, and `RET_CONTROL_DOCUMENTS` the document,
 in that same namespace. `CONTROL_DEFINE` and `CONTROL_REPLACE` have the exact
 80-byte prefix `<QQQHHiQQIiiIIIII>`, followed immediately by `label_bytes`
 bytes, `shortcut_bytes` bytes, and `content_bytes` bytes with no padding:
@@ -1141,11 +1148,13 @@ Control kinds are:
 | 11 | `TASK` (requires `RET_TASKBARS`) |
 | 12 | `LAUNCHER` (requires `RET_TASKBARS`) |
 | 13 | `FIELD` (requires `RET_FIELDS`) |
+| 14 | `DOCUMENT` (requires `RET_CONTROL_DOCUMENTS`) |
 
 Menu controls, `TABSET`, `TAB`, `TASKBAR`, `TASK`, and `LAUNCHER` require
 `content_bytes = 0`. `TEXT_AREA`
-and `TEXT_GRID` require one canonical STX1 text collection, and `ITEM_VIEW`
-one canonical ITM1 item collection. Their exact header, item, graph, state,
+and `TEXT_GRID` require one canonical STX1 text collection, `ITEM_VIEW`
+one canonical ITM1 item collection, and `DOCUMENT` one canonical DOC1
+document. Their exact header, item, block, graph, state,
 replacement, and quota rules are specified in the MegaPad-owned
 `docs/rich-terminal/SEMANTIC-CONTENT-1.md` contract. Menu and collection
 roots use the same CELL_RECT32 geometry contract. TEXT_GRID content carrying NUMBER, FORMULA,
@@ -1242,7 +1251,7 @@ equal numeric IDs in the two namespaces are distinct. `CONTROL_REPLACE`
 requires an existing exact-target control and resends its complete wire record.
 Menu, TABSET, and TASKBAR records remain state-only replacements; TAB, TASK,
 and LAUNCHER may replace state, label, and shortcut; TEXT_AREA, TEXT_GRID,
-ITEM_VIEW, and FIELD may replace state and their complete content. Changed
+ITEM_VIEW, DOCUMENT, and FIELD may replace state and their complete content. Changed
 content requires a strictly newer content revision; state-only changes preserve
 the current content revision. FIELD labels remain fixed for their identity. Every identity, kind,
 authority, hierarchy, order, bounds, and geometry field remains exact. The
@@ -1258,7 +1267,8 @@ generation.
 
 Each committed control consumes one slot from the target's existing
 `object_quota`. Each STX1 or ITM1 item carried by a text, grid, or item-view
-control consumes one additional slot because it is a separately retained,
+control, and each DOC1 block carried by a document, consumes one additional
+slot because it is a separately retained,
 stable-keyed value that a selected renderer may need to
 materialize. Each FDC1 choice consumes one additional slot, including choices
 that are not the current value. OBJECTs, controls, and semantic items are summed before the
@@ -1296,8 +1306,8 @@ resulting authoritative state in a later transaction.
 | 1 | `ACTIVATE` | 40 bytes | `MENU`, `MENU_ITEM`, `TAB`, `TASK`, `LAUNCHER`, `FIELD` | 8; `TAB` also 9; task entries also 13; FIELD also 14 |
 | 2 | `PLACE` | 64 bytes | `TEXT_AREA`, `TEXT_GRID` | 8 and 9 |
 | 3 | `EXTEND` | 64 bytes | `TEXT_AREA` | 8 and 9 |
-| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW` | 8 and 9; `ITEM_VIEW` also 10 |
-| 5 | `FOLLOW` | 64 bytes | `TEXT_AREA` | 8 and 9 |
+| 4 | `SCROLL` | 48 bytes | `TEXT_AREA`, `TEXT_GRID`, `ITEM_VIEW`, `DOCUMENT` | 8 and 9; `ITEM_VIEW` also 10; `DOCUMENT` also 16 |
+| 5 | `FOLLOW` | 64 bytes | `TEXT_AREA`, `DOCUMENT` | 8 and 9; `DOCUMENT` also 16 |
 | 6 | `SELECT` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
 | 7 | `OPEN` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
 | 8 | `EXPAND` | 64 bytes | `ITEM_VIEW` | 8, 9, and 10 |
@@ -1319,8 +1329,8 @@ boundary behavior and publishes the resulting value; the host never changes
 the retained field value in response to this intent. All other kind values,
 lengths, and nonzero reserved fields are
 invalid. Modifier bits are the APT-1 KEY modifier bits and all other bits are
-zero. SEMANTIC-CONTENT-1 defines how a position names STX1 content and an
-item names ITM1 content.
+zero. SEMANTIC-CONTENT-1 defines how a position names STX1 or DOC1 content
+and an item names ITM1 content.
 
 The terminal may emit an event only for the exact active owner generation and
 control ID of a target kind listed for it, when the complete current control
@@ -1488,8 +1498,10 @@ the generic OBJECT pointer behavior. The APT-1 base
 contract reserves `4000` through `4FFF` for semantic controls; this profile now
 defines `CONTROL_DEFINE`, `CONTROL_REPLACE`, and `CONTROL_DROP` at `4000`
 through `4002` under `RET_CONTROLS`; feature bit 9 adds text, grid, and tab
-kinds, and feature bit 10 the item view, to those same messages. Controls remain outside the OBJECT namespace
-even though OBJECTs, CONTROL records, and STX1 and ITM1 items share the owner
+kinds, feature bit 10 the item view, and feature bit 16 the document, to
+those same messages. Controls remain outside the OBJECT namespace
+even though OBJECTs, CONTROL records, STX1 and ITM1 items, and DOC1 blocks
+share the owner
 object-count and aggregate UTF-8 quotas. A complete GLYPH_RUN screen still cannot, by
 itself, satisfy the semantic-control vertical.
 
@@ -1519,11 +1531,11 @@ closed path adds the last-to-first segment; it does not imply fill.
 
 ### 11.3 IMAGE
 
-The body is exact `<QIBB2x>` (16 bytes): resource ID, fit mode, opacity, and
-flags. Fit 0 stretches, 1 contains, and 2 covers. Opacity is 0..255 and
-multiplies resource alpha. The resource must be the same owner generation, in
-any format. The renderer resamples the picture to its fitted size with a
-filter of its choosing.
+The body begins with exact `<QIBB2x>` (16 bytes): resource ID, fit mode,
+opacity, and flags. Fit 0 stretches, 1 contains, and 2 covers. Opacity is
+0..255 and multiplies resource alpha. The resource must be the same owner
+generation, in any format. The renderer resamples the picture to its fitted
+size with a filter of its choosing.
 
 Flags bit 0 is `BACKDROP`. With it set, the renderer first paints its own
 opaque background over the object's whole rectangle, within its clip, and
@@ -1531,7 +1543,17 @@ then the picture. Letterbox bars, transparent pixels, and pixels faded by
 opacity then show that background, never the CELL plane or any other content
 beneath the object. Opacity does not apply to the backdrop, and its colour is
 the renderer's choice. BACKDROP changes only paint; pointer behavior stays
-the generic OBJECT rule. Other flag bits are zero.
+the generic OBJECT rule.
+
+Flags bit 1 is `CLIP`. With it set, the body continues with exact `<IIII>`
+(16 bytes): x, y, cols, and rows of a clip rectangle in cells, relative to
+the object's origin. Both extents are positive and the rectangle lies within
+the object's. The renderer fits and places the picture against the object's
+whole rectangle, as without `CLIP`, and paints the picture and any backdrop
+only inside the clip rectangle. A client uses it to show the part of a
+picture that a scrolled view shows, such as a figure partly scrolled out of
+a `DOCUMENT`. Without `CLIP` the body is exactly 16 bytes, and with it
+exactly 32. Other flag bits are zero.
 
 ### 11.4 GLYPH_RUN
 
