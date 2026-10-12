@@ -462,3 +462,57 @@ def test_opaque_cell_coverage_counts_backdrop_images_only():
             (replace(plain, backdrop=backdrop),), (manifest,), cell_cols=2
         )
         assert opaque_cell_coverage(pygame, plane, 2, 1, 4, 8) == bytearray(expected)
+
+
+# --- Pictures clipped to part of their rectangle ---------------------------
+
+
+def test_projection_and_viewer_wire_carry_the_clip():
+    from rich_terminal.retained_scene import ImageClip
+
+    owner = _owner(5, 7)
+    clip = ImageClip(0, 1, 1, 1)
+    image = _object(owner, 1, 1, ImageBody(4, ImageFit.CONTAIN, 255, clip=clip))
+    _, plane = project_composite_draw_plane(
+        _composite(
+            [_owner_scene(owner, [_region(owner, 1)], [image])],
+            resources=(_resource(owner, 4, bytes((1, 2, 3, 255))),),
+        )
+    )
+    (draw,) = plane.regions[0].draws
+    assert draw.clip == clip
+    wire = _retained_draw_to_wire(draw)
+    assert wire["clip"] == [0, 1, 1, 1]
+    assert _retained_draw_from_wire(wire, "draw") == draw
+    assert _retained_draw_to_wire(replace(draw, clip=None))["clip"] is None
+
+
+def test_a_clipped_picture_keeps_its_rectangle_and_paints_only_the_clip():
+    pygame = pytest.importorskip("pygame")
+    from rich_terminal.pygame_view import composite_draw_plane, opaque_cell_coverage
+    from rich_terminal.retained_scene import ImageClip
+
+    # A 2 by 4 picture over two cells, one a cell: the top cell holds its
+    # red half, the bottom cell its green half.  Clipped to the bottom cell,
+    # only the green half shows, at the place it has unclipped.
+    source = pygame.Surface((2, 4), flags=pygame.SRCALPHA)
+    source.fill((220, 30, 40, 255), pygame.Rect(0, 0, 2, 2))
+    source.fill((30, 200, 60, 255), pygame.Rect(0, 2, 2, 2))
+    manifest = _image_manifest(1, 2, 4)
+    whole = _image_draw(1, ImageFit.STRETCH, bounds=ObjectBounds(0, 0, 1, 2))
+    clipped = replace(whole, backdrop=True, clip=ImageClip(0, 1, 1, 1))
+    plane = _image_plane((clipped,), (manifest,), cell_cols=1, cell_rows=2)
+    destination = pygame.Surface((2, 4))
+    destination.fill((2, 4, 6))
+    composite_draw_plane(
+        pygame, destination, plane, _PixelFont(pygame), 2, 2,
+        resource_surfaces={manifest.key: source},
+    )
+    assert tuple(destination.get_at((0, 0)))[:3] == (2, 4, 6)
+    assert tuple(destination.get_at((1, 1)))[:3] == (2, 4, 6)
+    assert tuple(destination.get_at((0, 2)))[:3] == (30, 200, 60)
+    assert tuple(destination.get_at((1, 3)))[:3] == (30, 200, 60)
+    # Only the clipped cell's backdrop counts as opaque.
+    assert opaque_cell_coverage(pygame, plane, 1, 2, 2, 2) == bytearray(b"\x00\x01")
+    with pytest.raises(ValueError, match="outside the object"):
+        replace(whole, clip=ImageClip(0, 1, 1, 2))

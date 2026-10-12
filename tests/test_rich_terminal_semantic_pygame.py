@@ -1655,3 +1655,85 @@ def test_cards_take_exact_rows_wrap_their_fields_and_scroll_by_rows():
     # "Summarise the" fills cells 3 to 15; the wrapped "notes" stops at 7.
     assert _ink(surface, 15, 0, plain) and not _ink(surface, 16, 0, plain)
     assert _ink(surface, 7, 1, plain) and not _ink(surface, 8, 1, plain)
+
+
+# --- Documents ----------------------------------------------------------------
+
+from rich_terminal.pygame_view import DocumentHitTarget  # noqa: E402
+from rich_terminal.retained_view import DocumentDraw  # noqa: E402
+from rich_terminal.semantic_documents import (  # noqa: E402
+    BlockContainer,
+    BlockKind,
+    ContainerKind,
+    DocumentBlock,
+    DocumentContent,
+    DocumentFlag,
+)
+
+
+def _document(*, state=VISIBLE | ENABLED):
+    """A document in a root 20 cells wide and 12 rows tall, ten pixels to a
+    cell: a heading on row 0, a link on row 2, a bullet item in a quote on
+    row 4, code on row 6, a rule on row 8, and a figure whose picture takes
+    rows 10 and 11."""
+
+    content = DocumentContent(
+        6,
+        DocumentFlag(0),
+        (
+            DocumentBlock(1, BlockKind.HEADING, "Title", level=1),
+            DocumentBlock(2, BlockKind.PARAGRAPH, "See notes.", rows_before=1,
+                          runs=(StyleRun(4, 5, TextStyle.LINK),)),
+            DocumentBlock(3, BlockKind.PARAGRAPH, "quoted", rows_before=1, containers=(
+                BlockContainer(ContainerKind.BULLET_ITEM, 2, item_start=True),
+                BlockContainer(ContainerKind.QUOTE, 2),
+            )),
+            DocumentBlock(4, BlockKind.CODE, "x = 1", rows_before=1),
+            DocumentBlock(5, BlockKind.RULE, rows_before=1),
+            DocumentBlock(6, BlockKind.FIGURE, "Cap", rows_before=1, picture_rows=2),
+        ),
+    )
+    return DocumentDraw(60, state, 0, 0, ObjectBounds(0, 0, 20, 12), content)
+
+
+def test_document_paints_its_blocks_on_their_rows_and_maps_its_links():
+    pygame = pytest.importorskip("pygame")
+    surface, result = _render(pygame, _plane(_region(_document())))
+    (target,) = [e for e in result.hit_entries if isinstance(e, DocumentHitTarget)]
+    assert target.identity == ControlIdentity(11, 7, 60)
+    assert target.content_revision == 6
+    assert target.rect == PixelRect(0, 0, 200, 120)
+    # "notes" covers cells 4 to 8 of row 2; a press elsewhere names nothing.
+    assert target.link_at(45, 25) == TextPosition(2, 4)
+    assert target.link_at(85, 25) == TextPosition(2, 8)
+    assert target.link_at(15, 25) is None
+    assert target.link_at(45, 5) is None
+    assert _resolve(result, 45, 25) is target
+    assert result.hit_targets == ()
+    # The document's background, except where the figure's picture goes:
+    # rows 10 and 11 keep what lay beneath.
+    assert tuple(surface.get_at((150, 5)))[:3] == (18, 23, 31)
+    assert tuple(surface.get_at((150, 105)))[:3] == (184, 190, 201)
+    assert tuple(surface.get_at((150, 115)))[:3] == (184, 190, 201)
+    # Code has its background across the text area, and a rule its line.
+    assert tuple(surface.get_at((150, 65)))[:3] == (26, 32, 42)
+    assert tuple(surface.get_at((150, 85)))[:3] == (94, 107, 126)
+    # The heading's look and underline, and the link's.
+    heading = REFERENCE_TEXT_THEME[TextStyle.HEADING].color
+    link = REFERENCE_TEXT_THEME[TextStyle.LINK].color
+    assert tuple(surface.get_at((10, 5)))[:3] == heading
+    assert tuple(surface.get_at((15, 8)))[:3] == heading
+    assert tuple(surface.get_at((40, 25)))[:3] == link
+    assert tuple(surface.get_at((45, 28)))[:3] == link
+    # The quote's bar sits in its cell after the bullet's, and the text two
+    # cells further.
+    assert tuple(surface.get_at((20, 45)))[:3] == (157, 168, 184)
+    assert tuple(surface.get_at((40, 45)))[:3] == (239, 243, 249)
+
+
+def test_a_disabled_document_is_a_surface_without_links():
+    pygame = pytest.importorskip("pygame")
+    _surface, result = _render(pygame, _plane(_region(_document(state=VISIBLE))))
+    assert not any(isinstance(e, DocumentHitTarget) for e in result.hit_entries)
+    assert [e.control_id for e in result.hit_entries if isinstance(e, ControlSurface)] == [60]
+    assert _resolve(result, 45, 25) is None

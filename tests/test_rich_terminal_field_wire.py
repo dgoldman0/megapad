@@ -53,7 +53,7 @@ def test_fields_require_controls_without_enabling_collection_families():
     with pytest.raises(ValueError, match="transaction maximum"):
         replace(policy, max_retained_transaction_bytes=375)
     with pytest.raises(ValueError, match="reserved"):
-        replace(caps, features=FEATURES | (1 << 16))
+        replace(caps, features=FEATURES | (1 << 17))
 
 
 @pytest.mark.parametrize("field_content", [content(), choices(), text_content()])

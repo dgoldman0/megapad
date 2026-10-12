@@ -37,6 +37,12 @@ from rich_terminal.semantic_content import (
     SemanticTextRole,
     SemanticTextState,
 )
+from rich_terminal.semantic_documents import (
+    BlockKind,
+    DocumentBlock,
+    DocumentContent,
+    DocumentFlag,
+)
 from rich_terminal.update_authority import (
     TerminalGeometry,
     TerminalUpdateAuthority,
@@ -54,10 +60,13 @@ def _policy(
     *,
     object_capacity: int = 16,
     control_collections: bool = False,
+    documents: bool = False,
 ) -> RetainedPolicy:
     features = RetainedFeature.CORE | RetainedFeature.CONTROLS
     if control_collections:
         features |= RetainedFeature.CONTROL_COLLECTIONS
+    if documents:
+        features |= RetainedFeature.CONTROL_DOCUMENTS
     return RetainedPolicy(
         features=features,
         max_owner_records=2,
@@ -91,6 +100,7 @@ def _domain(
     object_quota: int = 12,
     object_capacity: int = 16,
     control_collections: bool = False,
+    documents: bool = False,
 ):
     clock = TerminalUpdateAuthority(
         presentation_epoch=EPOCH,
@@ -104,6 +114,7 @@ def _domain(
         policy=_policy(
             object_capacity=object_capacity,
             control_collections=control_collections,
+            documents=documents,
         ),
     )
     ledger.open(
@@ -649,3 +660,81 @@ def test_control_values_enforce_renderer_owned_child_geometry_and_clean_text():
             label="wrong",
             state=ControlState.VISIBLE,
         )
+
+
+def _document(owner, content, *, control_id: int = 1) -> ControlDefinition:
+    return ControlDefinition(
+        owner=owner,
+        control_id=control_id,
+        kind=ControlKind.DOCUMENT,
+        state=ControlState.VISIBLE | ControlState.ENABLED,
+        z_order=0,
+        region_id=1,
+        parent_control_id=0,
+        order=0,
+        bounds=ObjectBounds(0, 0, 24, 6),
+        label="",
+        shortcut="",
+        content=content,
+    )
+
+
+def _document_content(revision: int, *texts: str) -> DocumentContent:
+    return DocumentContent(
+        revision,
+        DocumentFlag(0),
+        tuple(
+            DocumentBlock(index + 1, BlockKind.PARAGRAPH, text, rows_before=1 if index else 0)
+            for index, text in enumerate(texts)
+        ),
+    )
+
+
+def test_a_document_needs_the_documents_feature() -> None:
+    clock, _, owner, scene = _domain(control_collections=True)
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    with pytest.raises(SceneModelError) as refused:
+        scene.define_control(_document(owner, _document_content(1, "one")))
+    assert refused.value.code is SceneErrorCode.FEATURE
+
+
+def test_a_document_and_each_carried_block_take_an_object_slot() -> None:
+    clock, ledger, owner, scene = _domain(
+        object_quota=3, object_capacity=4, control_collections=True, documents=True
+    )
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    with pytest.raises(SceneModelError) as exhausted:
+        scene.define_control(_document(owner, _document_content(1, "one", "two", "three")))
+    assert exhausted.value.code is SceneErrorCode.QUOTA
+    rejected = scene.reject()
+    clock.settle_result(rejected.transaction_id)
+    _begin(clock, scene, 3, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    scene.define_control(_document(owner, _document_content(1, "one", "two")))
+    _install(clock, scene, CommitDisposition.COMMIT)
+    usage = scene.state.hidden.owners[owner.owner_id].usage
+    assert usage.objects == 3
+    assert usage.utf8_bytes == len("onetwo")
+
+
+def test_document_content_replacement_requires_a_newer_content_revision() -> None:
+    clock, _, owner, scene = _domain(control_collections=True, documents=True)
+    _begin(clock, scene, 2, RetainedMode.REPLACE_START)
+    scene.define_region(_region(owner))
+    scene.define_control(_document(owner, _document_content(4, "one", "two")))
+    _install(clock, scene, CommitDisposition.COMMIT)
+
+    _begin(clock, scene, 3, RetainedMode.REPLACE_CONTINUE)
+    with pytest.raises(SceneModelError, match="newer content revision"):
+        scene.replace_control(_document(owner, _document_content(4, "one", "later")))
+    rejected = scene.reject()
+    clock.settle_result(rejected.transaction_id)
+
+    newer = _document_content(5, "one", "later")
+    _begin(clock, scene, 4, RetainedMode.REPLACE_CONTINUE)
+    scene.replace_control(_document(owner, newer))
+    _install(clock, scene, CommitDisposition.COMMIT)
+    assert scene.state.hidden.owners[owner.owner_id].controls[1].content == newer
+

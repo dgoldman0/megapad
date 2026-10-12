@@ -88,6 +88,7 @@ PROVIDED rich-terminal.f
 11 CONSTANT PT-CONTROL-TASK
 12 CONSTANT PT-CONTROL-LAUNCHER
 13 CONSTANT PT-CONTROL-FIELD
+14 CONSTANT PT-CONTROL-DOCUMENT
 1 CONSTANT PT-FIELD-INTEGER
 2 CONSTANT PT-FIELD-CHOICE
 3 CONSTANT PT-FIELD-TEXT
@@ -153,8 +154,10 @@ PROVIDED rich-terminal.f
 1 CONSTANT PT-IMAGE-FIT-CONTAIN
 2 CONSTANT PT-IMAGE-FIT-COVER
 \ IMAGE flags: BACKDROP asks the renderer to paint its own opaque background
-\ over the object's whole rectangle before the picture.
+\ over the object's whole rectangle before the picture.  CLIP paints the
+\ picture, fitted to the whole rectangle, only inside a clip rectangle.
 0x01 CONSTANT PT-IMAGE-BACKDROP
+0x02 CONSTANT PT-IMAGE-CLIP
 
 \ The one PIXELS_QUERY a session may have unanswered: none asked, asked and
 \ waiting, or answered.  PT-PIXELS-ANSWER@ holds an answer.
@@ -293,7 +296,8 @@ PROVIDED rich-terminal.f
 0x2000   CONSTANT _PT-RET-TASKBARS
 0x4000   CONSTANT _PT-RET-FIELDS
 0x8000   CONSTANT _PT-RET-GRID-CELLS
-0xFF3F   CONSTANT _PT-RET-FEATURE-MASK
+0x10000  CONSTANT _PT-RET-CONTROL-DOCUMENTS
+0x1FF3F  CONSTANT _PT-RET-FEATURE-MASK
 250      CONSTANT _PT-TIMEOUT-MS
 3        CONSTANT _PT-PROBE-LIMIT
 256      CONSTANT _PT-SERVICE-BYTES
@@ -740,6 +744,10 @@ VARIABLE _PT-U64-A
 : _PT-RET-CONTROL-ITEMS?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
     _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CONTROL-ITEMS AND 0<> ;
+
+: _PT-RET-CONTROL-DOCUMENTS?  ( s -- flag )
+    DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
+    _PT.S.RET-CAPS 8 + _PT-U64@ _PT-RET-CONTROL-DOCUMENTS AND 0<> ;
 
 : _PT-RET-CORE?  ( s -- flag )
     DUP PT-RETAINED-AVAILABLE? 0= IF DROP FALSE EXIT THEN
@@ -2253,8 +2261,10 @@ VARIABLE _PT-RV-TOTAL
     DUP 0x10 AND SWAP 0x08 AND 0= AND IF FALSE EXIT THEN
     _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND
     _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND IF FALSE EXIT THEN
-    \ Item views need collections, whose minima also cover them.
+    \ Item views and documents need collections, whose minima also cover them.
     _PT-RV-FEATURES @ _PT-RET-CONTROL-ITEMS AND
+    _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND IF FALSE EXIT THEN
+    _PT-RV-FEATURES @ _PT-RET-CONTROL-DOCUMENTS AND
     _PT-RV-FEATURES @ _PT-RET-CONTROL-COLLECTIONS AND 0= AND IF FALSE EXIT THEN
     _PT-RV-FEATURES @ _PT-RET-TASKBARS AND
     _PT-RV-FEATURES @ _PT-RET-CONTROLS AND 0= AND IF FALSE EXIT THEN
@@ -2298,8 +2308,11 @@ VARIABLE _PT-RV-TOTAL
     _PT-RV-P @ 56 + _PT-U64@
     _PT-RV-FEATURES @ 0x04 AND 0<> _PT-POSITIVE-EXACT? 0= IF FALSE EXIT THEN
 
+    \ An IMAGE with CLIP has a 96-byte payload.
     _PT-RV-FEATURES @ 0x04 AND IF
-        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 80 U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.PEER-MAX-PAY @ 96 U< IF FALSE EXIT THEN
+        _PT-RV-S @ _PT.S.TX-U @ 136 U< IF FALSE EXIT THEN
+        _PT-RV-RETMAX @ 296 U< IF FALSE EXIT THEN
         _PT-RV-P @ 44 + L@ 32 +
         _PT-RV-S @ _PT.S.PEER-MAX-PAY @ U> IF FALSE EXIT THEN
     THEN
@@ -5226,11 +5239,31 @@ VARIABLE _PT-IM-RESOURCE
 VARIABLE _PT-IM-FIT
 VARIABLE _PT-IM-OPACITY
 VARIABLE _PT-IM-FLAGS
+VARIABLE _PT-IM-CLIP-X
+VARIABLE _PT-IM-CLIP-Y
+VARIABLE _PT-IM-CLIP-COLS
+VARIABLE _PT-IM-CLIP-ROWS
 
-\ Stack: common-prefix resource fit opacity session message-type -- status
+\ With CLIP, a clip rectangle of positive extents within the object's; with
+\ none, every clip field zero.
+: _PT-IMAGE-CLIP?  ( -- flag )
+    _PT-IM-FLAGS @ PT-IMAGE-CLIP AND 0= IF
+        _PT-IM-CLIP-X @ _PT-IM-CLIP-Y @ OR
+        _PT-IM-CLIP-COLS @ OR _PT-IM-CLIP-ROWS @ OR 0= EXIT
+    THEN
+    _PT-IM-CLIP-X @ _PT-U32? 0= _PT-IM-CLIP-Y @ _PT-U32? 0= OR
+    _PT-IM-CLIP-COLS @ _PT-U32? 0= OR _PT-IM-CLIP-ROWS @ _PT-U32? 0= OR
+    IF FALSE EXIT THEN
+    _PT-IM-CLIP-COLS @ 0= _PT-IM-CLIP-ROWS @ 0= OR IF FALSE EXIT THEN
+    _PT-IM-CLIP-X @ _PT-IM-CLIP-COLS @ + _PT-OB-COLS @ _PT-U<=
+    _PT-IM-CLIP-Y @ _PT-IM-CLIP-ROWS @ + _PT-OB-ROWS @ _PT-U<= AND ;
+
+\ Stack: common-prefix resource fit opacity flags clip-x clip-y clip-cols
+\        clip-rows session message-type -- status
 : _PT-IMAGE-WRITE
-    _PT-IM-TYPE ! _PT-IM-S ! _PT-IM-FLAGS ! _PT-IM-OPACITY ! _PT-IM-FIT !
-    _PT-IM-RESOURCE !
+    _PT-IM-TYPE ! _PT-IM-S !
+    _PT-IM-CLIP-ROWS ! _PT-IM-CLIP-COLS ! _PT-IM-CLIP-Y ! _PT-IM-CLIP-X !
+    _PT-IM-FLAGS ! _PT-IM-OPACITY ! _PT-IM-FIT ! _PT-IM-RESOURCE !
     _PT-IM-S @ _PT-IM-TYPE @ 3 _PT-OBJECT-COMMON!
     _PT-OB-S @ _PT-VALID-S? 0= IF PT-S-INVALID EXIT THEN
     _PT-OB-S @ _PT-OP-LOST? IF PT-S-SESSION-LOST EXIT THEN
@@ -5239,22 +5272,35 @@ VARIABLE _PT-IM-FLAGS
     _PT-IM-FIT @ DUP PT-IMAGE-FIT-STRETCH U<
     SWAP PT-IMAGE-FIT-COVER U> OR IF PT-S-INVALID EXIT THEN
     _PT-IM-OPACITY @ _PT-U8? 0= IF PT-S-INVALID EXIT THEN
-    _PT-IM-FLAGS @ PT-IMAGE-BACKDROP U> IF PT-S-INVALID EXIT THEN
-    80 _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
+    _PT-IM-FLAGS @ PT-IMAGE-BACKDROP PT-IMAGE-CLIP OR INVERT AND IF
+        PT-S-INVALID EXIT
+    THEN
+    _PT-IMAGE-CLIP? 0= IF PT-S-INVALID EXIT THEN
+    _PT-IM-FLAGS @ PT-IMAGE-CLIP AND IF 96 ELSE 80 THEN
+    _PT-OBJECT-ADMIT ?DUP IF EXIT THEN
     _PT-OBJECT-COMMON-PAYLOAD!
     _PT-IM-RESOURCE @ _PT-FRAME-PAYLOAD 64 + _PT-U64!
     _PT-IM-FIT @ _PT-FRAME-PAYLOAD 72 + L!
     _PT-IM-OPACITY @ _PT-FRAME-PAYLOAD 76 + C!
     _PT-IM-FLAGS @ _PT-FRAME-PAYLOAD 77 + C!
+    0 _PT-FRAME-PAYLOAD 78 + W!
+    _PT-IM-FLAGS @ PT-IMAGE-CLIP AND IF
+        _PT-IM-CLIP-X @ _PT-FRAME-PAYLOAD 80 + L!
+        _PT-IM-CLIP-Y @ _PT-FRAME-PAYLOAD 84 + L!
+        _PT-IM-CLIP-COLS @ _PT-FRAME-PAYLOAD 88 + L!
+        _PT-IM-CLIP-ROWS @ _PT-FRAME-PAYLOAD 92 + L!
+    THEN
     _PT-PO-SEND ;
 
 \ Stack: owner generation object region parent x y cols rows z visible
-\        resource fit opacity flags session -- status
+\        resource fit opacity flags clip-x clip-y clip-cols clip-rows
+\        session -- status
 : PT-IMAGE-DEFINE
     _PT-M-OBJECT-DEFINE _PT-IMAGE-WRITE ;
 
 \ Stack: owner generation object region parent x y cols rows z visible
-\        resource fit opacity flags session -- status
+\        resource fit opacity flags clip-x clip-y clip-cols clip-rows
+\        session -- status
 : PT-IMAGE-REPLACE
     _PT-M-OBJECT-REPLACE _PT-IMAGE-WRITE ;
 
@@ -6231,6 +6277,14 @@ VARIABLE _PT-FD-RECT
         _PT-CT-CONTENT-U @ IF FALSE EXIT THEN
         _PT-CT-STATE @ 0x0B INVERT AND 0= EXIT
     THEN
+    \ A document carries at least the 32-byte smallest DOC1 body.
+    _PT-CT-KIND @ PT-CONTROL-DOCUMENT = IF
+        _PT-CT-PARENT @ _PT-CT-ORDER @ OR IF FALSE EXIT THEN
+        _PT-CT-LABEL-U @ _PT-CT-SHORTCUT-U @ OR IF FALSE EXIT THEN
+        _PT-CT-CONTENT-U @ 32 U< IF FALSE EXIT THEN
+        _PT-CT-STATE @ 0x0B INVERT AND IF FALSE EXIT THEN
+        _PT-CT-ROOT-BOUNDS? EXIT
+    THEN
     \ An item view carries at least the 56-byte smallest ITM1 body.
     _PT-CT-KIND @ PT-CONTROL-ITEM-VIEW = IF
         _PT-CT-PARENT @ _PT-CT-ORDER @ OR IF FALSE EXIT THEN
@@ -6382,6 +6436,9 @@ VARIABLE _PT-GC-TYPED?
     THEN
     _PT-CT-KIND @ PT-CONTROL-ITEM-VIEW = IF
         _PT-CT-S @ _PT-RET-CONTROL-ITEMS? 0= IF PT-S-UNSUPPORTED EXIT THEN
+    THEN
+    _PT-CT-KIND @ PT-CONTROL-DOCUMENT = IF
+        _PT-CT-S @ _PT-RET-CONTROL-DOCUMENTS? 0= IF PT-S-UNSUPPORTED EXIT THEN
     THEN
     _PT-CT-KIND @ _PT-CT-TASKBAR-KIND? IF
         _PT-CT-S @ _PT-RET-TASKBARS? 0= IF PT-S-UNSUPPORTED EXIT THEN

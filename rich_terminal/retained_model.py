@@ -34,6 +34,7 @@ class RetainedFeature(IntFlag):
     TASKBARS = 1 << 13
     FIELDS = 1 << 14
     GRID_CELLS = 1 << 15
+    CONTROL_DOCUMENTS = 1 << 16
 
 
 class ResourceFormat(IntEnum):
@@ -76,6 +77,7 @@ _ALL_FEATURES = (
     | RetainedFeature.TASKBARS
     | RetainedFeature.FIELDS
     | RetainedFeature.GRID_CELLS
+    | RetainedFeature.CONTROL_DOCUMENTS
 )
 
 
@@ -299,6 +301,10 @@ class RetainedPolicy:
         # 64-byte item events fit CONTROL_COLLECTIONS's minima.
         if features & RetainedFeature.CONTROL_ITEMS and not control_collections:
             raise ValueError("CONTROL_ITEMS requires CONTROL_COLLECTIONS")
+        # Documents likewise: the smallest DOC1 body is 32 bytes, and SCROLL
+        # and FOLLOW fit CONTROL_COLLECTIONS's minima.
+        if features & RetainedFeature.CONTROL_DOCUMENTS and not control_collections:
+            raise ValueError("CONTROL_DOCUMENTS requires CONTROL_COLLECTIONS")
         glyph_runs = self.max_glyph_run_bytes > 0
         if glyph_runs and self.max_objects == 0:
             raise ValueError("glyph-run capacity requires object capacity")
@@ -352,13 +358,14 @@ class RetainedPolicy:
                 raise ValueError("maximum VECTOR object exceeds inbound payload")
             operation_payloads.append(vector_payload)
         if image:
-            if inbound < 80:
-                raise ValueError("RGBA_IMAGE requires an 80-byte inbound payload")
+            # An IMAGE with CLIP: the 64-byte object prefix and a 32-byte body.
+            if inbound < 96:
+                raise ValueError("RGBA_IMAGE requires a 96-byte inbound payload")
             if _checked_add(
                 "maximum resource chunk payload", 32, self.max_resource_chunk_bytes
             ) > inbound:
                 raise ValueError("maximum resource chunk exceeds inbound payload")
-            operation_payloads.append(80)
+            operation_payloads.append(96)
         if glyph_runs:
             glyph_run_payload = _checked_add(
                 "maximum GLYPH_RUN payload", 80, self.max_glyph_run_bytes

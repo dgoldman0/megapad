@@ -17,6 +17,7 @@ from .retained_model import ResourceFormat
 from .retained_scene import ControlKind, ControlState, ImageFit, StatusSeverity
 from .retained_view import (
     FieldDraw,
+    DocumentDraw,
     GlyphRunDraw,
     ImageDraw,
     ImageResourceManifest,
@@ -57,6 +58,7 @@ from .semantic_items import (
     card_row_count,
 )
 from .semantic_fields import FieldKind
+from .semantic_documents import BlockKind, ContainerKind, placed_blocks
 
 ATTR_BOLD = 0x01
 ATTR_DIM = 0x02
@@ -596,6 +598,55 @@ class ItemHitTarget:
 
 
 @dataclass(frozen=True, slots=True)
+class DocumentLink:
+    """One link character a document's paint pass drew: where, and the
+    position that names it."""
+
+    area: PixelRect
+    block_key: int
+    scalar_offset: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.area, PixelRect):
+            raise TypeError("area must be PixelRect")
+        _integer("block_key", self.block_key, minimum=1, maximum=UINT64_MAX)
+        _integer("scalar_offset", self.scalar_offset, minimum=0, maximum=UINT32_MAX)
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentHitTarget:
+    """One enabled DOCUMENT root and the link characters its paint pass
+    drew, so a press on one follows it (SEMANTIC-CONTENT-1)."""
+
+    identity: ControlIdentity
+    rect: PixelRect
+    content_revision: int
+    links: tuple[DocumentLink, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, ControlIdentity):
+            raise TypeError("identity must be ControlIdentity")
+        if not isinstance(self.rect, PixelRect):
+            raise TypeError("rect must be PixelRect")
+        _integer("content_revision", self.content_revision, minimum=1, maximum=UINT64_MAX)
+        links = tuple(self.links)
+        if any(not isinstance(link, DocumentLink) for link in links):
+            raise TypeError("links must contain only DocumentLink values")
+        object.__setattr__(self, "links", links)
+
+    def link_at(self, x: int, y: int) -> TextPosition | None:
+        """The position of the link character painted at one point, or
+        None."""
+
+        if not self.rect.contains(x, y):
+            return None
+        for link in self.links:
+            if link.area.contains(x, y):
+                return TextPosition(link.block_key, link.scalar_offset)
+        return None
+
+
+@dataclass(frozen=True, slots=True)
 class ResidualPoint:
     """A point showing CELL or residual content, named by its cell."""
 
@@ -605,14 +656,18 @@ class ResidualPoint:
 
 HitMapEntry = (
     ControlHitTarget | RegionOcclusion | ControlSurface | TextHitTarget | ItemHitTarget
+    | DocumentHitTarget
 )
-PointerTarget = ControlHitTarget | TextHitTarget | ItemHitTarget | ResidualPoint
+PointerTarget = (
+    ControlHitTarget | TextHitTarget | ItemHitTarget | DocumentHitTarget | ResidualPoint
+)
 HIT_MAP_ENTRY_TYPES = (
     ControlHitTarget,
     RegionOcclusion,
     ControlSurface,
     TextHitTarget,
     ItemHitTarget,
+    DocumentHitTarget,
 )
 
 
@@ -621,7 +676,7 @@ def _validated_hit_entries(hit_entries) -> tuple[HitMapEntry, ...]:
     if any(not isinstance(entry, HIT_MAP_ENTRY_TYPES) for entry in entries):
         raise TypeError(
             "hit_entries must contain only ControlHitTarget, RegionOcclusion, "
-            "ControlSurface, TextHitTarget, or ItemHitTarget values"
+            "ControlSurface, TextHitTarget, ItemHitTarget, or DocumentHitTarget values"
         )
     return entries
 
@@ -663,7 +718,9 @@ def resolve_pointer(
     for entry in reversed(hit_entries):
         if not entry.rect.contains(x, y):
             continue
-        if isinstance(entry, (ControlHitTarget, TextHitTarget, ItemHitTarget)):
+        if isinstance(
+            entry, (ControlHitTarget, TextHitTarget, ItemHitTarget, DocumentHitTarget)
+        ):
             return entry
         if isinstance(entry, ControlSurface):
             return None
@@ -873,7 +930,9 @@ _OBJECT_DRAWS = (
     PlotDraw,
     WaveformDraw,
 )
-_ROOT_CONTROLS = (TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw, TaskBarDraw, FieldDraw)
+_ROOT_CONTROLS = (
+    TextAreaDraw, TextGridDraw, ItemViewDraw, TabSetDraw, TaskBarDraw, FieldDraw, DocumentDraw,
+)
 
 
 def _draw_extent(
@@ -894,7 +953,9 @@ def _draw_extent(
     menus is open, popups anywhere in the viewport.
     """
 
-    if isinstance(draw, _OBJECT_DRAWS):
+    if isinstance(draw, ImageDraw):
+        painted = _image_painted_rect(pygame_module, region, region_rect, draw)
+    elif isinstance(draw, _OBJECT_DRAWS):
         painted = _object_rect(pygame_module, region, region_rect, draw)
     elif isinstance(draw, _ROOT_CONTROLS):
         painted = _bounds_rect(
@@ -2761,6 +2822,214 @@ def _paint_item_view(
     ]
 
 
+_DOCUMENT_BULLETS = ("\u2022", "\u25e6", "\u25aa")
+_DOCUMENT_QUOTE_BAR = "\u2502"
+_DOCUMENT_CODE = (26, 32, 42)
+_DOCUMENT_RULE = (94, 107, 126)
+
+
+def _paint_document(
+    pygame_module,
+    surface,
+    font,
+    region,
+    region_rect,
+    draw: DocumentDraw,
+    *,
+    appearance: Appearance = REFERENCE_APPEARANCE,
+) -> list[HitMapEntry]:
+    """Paint one document's blocks on the exact rows SEMANTIC-CONTENT-1
+    gives, in the monospace font on the root's cell slots.
+
+    The look is this renderer's: a quote is a bar in its first cell, a
+    bullet item a bullet in its first cell (another at each deeper list), a
+    numbered item its number and a full stop right-aligned before its last
+    cell, clipped to its cells.  Headings take the theme's HEADING look,
+    levels 1 and 2 underlined; code has a background across its text area;
+    a rule is a line across it; and a figure's picture rows are not painted
+    at all, so the CELL plane, or the figure's IMAGE above, shows there.
+    """
+
+    anchor, visible_anchor = _semantic_root_rects(
+        pygame_module, surface, region, region_rect, draw.bounds
+    )
+    if visible_anchor.width <= 0 or visible_anchor.height <= 0:
+        return []
+    content = draw.content
+    slots = draw.bounds.cell_cols
+    rows = draw.bounds.cell_rows
+    enabled = bool(draw.state & ControlState.ENABLED)
+    text_color = _TEXT if enabled else _DISABLED_TEXT
+    heading = REFERENCE_TEXT_THEME[TextStyle.HEADING]
+    placed = placed_blocks(content, slots)
+
+    def slot_edge(slot: int) -> int:
+        return _partition_edge(anchor.left, anchor.width, min(max(slot, 0), slots), slots)
+
+    def row_edge(row: int) -> int:
+        return _partition_edge(anchor.top, anchor.height, min(max(row, 0), rows), rows)
+
+    def area(first: int, last: int, row: int):
+        return _clipped_python_rect(
+            pygame_module, slot_edge(first), row_edge(row), slot_edge(last),
+            row_edge(row + 1), visible_anchor,
+        )
+
+    # The rows a figure's picture takes, with the slots of its text area.
+    pictures: dict[int, tuple[int, int]] = {}
+    for item in placed:
+        if item.block.kind is BlockKind.FIGURE:
+            indent = item.block.indent
+            for row in range(item.content_top, item.text_top):
+                if 0 <= row < rows:
+                    pictures[row] = (indent, min(slots, indent + max(slots - indent, 1)))
+
+    links: list[DocumentLink] = []
+
+    def paint_line(block, line, row: int, first: int, last: int, base_look) -> None:
+        """Paint one line of a block between slots FIRST and LAST, from its
+        start edge; a character the text area's edge cuts is not drawn."""
+
+        if not 0 <= row < rows:
+            return
+        top, bottom = row_edge(row), row_edge(row + 1)
+        start = last - line.width if line.rtl else first
+        for character in line.characters:
+            left_slot = start + character.column
+            right_slot = left_slot + character.width
+            if left_slot < first or right_slot > last:
+                continue
+            left, right = slot_edge(left_slot), slot_edge(right_slot)
+            clip = _clipped_python_rect(pygame_module, left, top, right, bottom, visible_anchor)
+            if clip is None:
+                continue
+            look = base_look
+            meaning = block.meaning_at(character.start)
+            if meaning is not None:
+                look = REFERENCE_TEXT_THEME.get(meaning, look)
+            color = text_color
+            if look is not None and look.color is not None and enabled:
+                color = look.color
+            _paint_cluster(
+                pygame_module, surface, font, character.text, color, clip,
+                left=left, top=top, bottom=bottom,
+                bold=look is not None and look.bold,
+                italic=look is not None and look.italic,
+            )
+            if look is not None and look.underline is not None:
+                underline = _clipped_python_rect(
+                    pygame_module, left, bottom - 2, right, bottom - 1, clip
+                )
+                if underline is not None:
+                    surface.fill(look.underline if enabled else _DISABLED_TEXT, underline)
+            if meaning is TextStyle.LINK and character.text.strip():
+                links.append(DocumentLink(_pixel_rect(clip), block.block_key, character.start))
+
+    def paint_mark(text: str, first: int, last: int, row: int, *, end: bool) -> None:
+        """Paint a container's mark in its cells, at their end when END."""
+
+        if not 0 <= row < rows or last <= first:
+            return
+        layout = text_rules.cached_row(text, text_rules.DIRECTION_LTR, True)
+        start = (last - layout.width) if end else first
+        top, bottom = row_edge(row), row_edge(row + 1)
+        for character in layout.characters:
+            left_slot = start + character.column
+            if left_slot < first or left_slot + character.width > last:
+                continue
+            left, right = slot_edge(left_slot), slot_edge(left_slot + character.width)
+            clip = _clipped_python_rect(pygame_module, left, top, right, bottom, visible_anchor)
+            if clip is not None:
+                _paint_cluster(pygame_module, surface, font, character.text, _MUTED_TEXT,
+                               clip, left=left, top=top, bottom=bottom)
+
+    prior_clip = surface.get_clip()
+    try:
+        surface.set_clip(visible_anchor)
+        for row in range(rows):
+            picture = pictures.get(row)
+            spans = ((0, slots),) if picture is None else ((0, picture[0]), (picture[1], slots))
+            for first, last in spans:
+                if last > first:
+                    rect = area(first, last, row)
+                    if rect is not None:
+                        surface.fill(_COLLECTION_SURFACE, rect)
+        for item in placed:
+            block = item.block
+            if item.top >= rows:
+                break
+            indent = block.indent
+            width = max(slots - indent, 1)
+            text_last = indent + width
+            # Container marks: a quote's bar on every row of the block, and
+            # on its rows before when they lie inside it; a list item's mark
+            # on the first content row of the block that starts it.
+            left = 0
+            depth = 0
+            for index, container in enumerate(block.containers):
+                first, last = left, left + container.width
+                left = last
+                if container.kind is ContainerKind.QUOTE:
+                    begin = item.top if index < block.rows_before_inside else item.content_top
+                    for row in range(max(begin, 0), min(item.top + item.rows, rows)):
+                        paint_mark(_DOCUMENT_QUOTE_BAR, first, last, row, end=False)
+                    continue
+                if not container.item_start:
+                    if container.kind is ContainerKind.BULLET_ITEM:
+                        depth += 1
+                    continue
+                if container.kind is ContainerKind.BULLET_ITEM:
+                    mark = _DOCUMENT_BULLETS[depth % len(_DOCUMENT_BULLETS)]
+                    depth += 1
+                    paint_mark(mark, first, last, item.content_top, end=False)
+                else:
+                    paint_mark(f"{container.number}.", first, last - 1, item.content_top,
+                               end=True)
+            if block.kind is BlockKind.RULE:
+                row = item.content_top
+                if 0 <= row < rows:
+                    middle = (row_edge(row) + row_edge(row + 1)) // 2
+                    line = _clipped_python_rect(
+                        pygame_module, slot_edge(indent), middle, slot_edge(text_last),
+                        middle + 1, visible_anchor,
+                    )
+                    if line is not None:
+                        surface.fill(_DOCUMENT_RULE, line)
+                continue
+            base_look = None
+            if block.kind is BlockKind.HEADING:
+                base_look = heading
+                if block.level <= 2:
+                    base_look = TextLook(heading.color, bold=True, underline=heading.color)
+            elif block.kind is BlockKind.FIGURE:
+                base_look = TextLook(_MUTED_TEXT, italic=True)
+            if block.kind is BlockKind.CODE:
+                for row in range(max(item.content_top, 0),
+                                 min(item.content_top + len(item.lines), rows)):
+                    rect = area(indent, text_last, row)
+                    if rect is not None:
+                        surface.fill(_DOCUMENT_CODE, rect)
+            for index, line in enumerate(item.lines):
+                paint_line(block, line, item.text_top + index, indent, text_last, base_look)
+        if not appearance.flowing:
+            _paint_clipped_border(
+                pygame_module, surface,
+                _ACCENT[:3] if draw.state & ControlState.SELECTED else _COLLECTION_BORDER,
+                left=anchor.left, top=anchor.top, right=anchor.right, bottom=anchor.bottom,
+                width=1, clip=visible_anchor,
+            )
+    finally:
+        surface.set_clip(prior_clip)
+    rect = _pixel_rect(visible_anchor)
+    if not enabled:
+        return [ControlSurface(region.owner_id, region.owner_generation, draw.control_id, rect)]
+    return [
+        DocumentHitTarget(
+            _identity(region, draw.control_id), rect, content.content_revision, tuple(links)
+        )
+    ]
+
+
 def _paint_field(
     pygame_module, surface, font, region, region_rect, draw: FieldDraw,
     cell_width: int, cell_height: int, *, hovered, pressed,
@@ -3223,6 +3492,23 @@ def _object_clip(pygame_module, surface, region, region_rect, draw):
         _region_viewport(pygame_module, surface, region, region_rect),
     )
     return object_rect, clip
+
+
+def _image_painted_rect(pygame_module, region, region_rect, draw):
+    """The rectangle an IMAGE paints before the viewport clips it: its
+    object rectangle, or with ``CLIP`` only the clip's part of it."""
+
+    object_rect = _object_rect(pygame_module, region, region_rect, draw)
+    if draw.clip is None:
+        return object_rect
+    cell_width = region_rect.width // region.logical_cols
+    cell_height = region_rect.height // region.logical_rows
+    return _WideRect(
+        object_rect.left + draw.clip.x * cell_width,
+        object_rect.top + draw.clip.y * cell_height,
+        draw.clip.cols * cell_width,
+        draw.clip.rows * cell_height,
+    )
 
 
 def _pane_chrome_rects(outer, content):
@@ -4102,7 +4388,9 @@ def _paint_image(
 
     A BACKDROP image first fills its whole clipped rectangle with the
     appearance's surface colour, so letterbox bars and transparent pixels
-    never show the CELL plane beneath.  Opacity does not apply to it.
+    never show the CELL plane beneath.  Opacity does not apply to it.  With
+    a CLIP, the picture is fitted to the whole object rectangle, and it and
+    the backdrop are painted only inside the clip.
     """
 
     object_rect, clip = _object_clip(
@@ -4112,6 +4400,10 @@ def _paint_image(
         region_rect,
         draw,
     )
+    if draw.clip is not None:
+        clip = _bounded_pygame_rect(
+            pygame_module, _image_painted_rect(pygame_module, region, region_rect, draw), clip
+        )
     if clip.width <= 0 or clip.height <= 0:
         return
     if draw.backdrop:
@@ -4265,11 +4557,12 @@ def opaque_cell_coverage(
                         pygame_module, cols * cell_w, rows * cell_h
                     )
                 viewport = _region_viewport(pygame_module, bounds, region, region_rect)
-            fill = _bounded_pygame_rect(
-                pygame_module,
-                _object_rect(pygame_module, region, region_rect, draw),
-                viewport,
+            painted = (
+                _image_painted_rect(pygame_module, region, region_rect, draw)
+                if isinstance(draw, ImageDraw)
+                else _object_rect(pygame_module, region, region_rect, draw)
             )
+            fill = _bounded_pygame_rect(pygame_module, painted, viewport)
             first_col = -(-fill.left // cell_w)
             end_col = min(cols, fill.right // cell_w)
             first_row = -(-fill.top // cell_h)
@@ -4444,6 +4737,18 @@ def _paint_draw(
     elif isinstance(draw, ItemViewDraw):
         hit_entries.extend(
             _paint_item_view(
+                pygame_module,
+                surface,
+                font,
+                region,
+                region_rect,
+                draw,
+                appearance=appearance,
+            )
+        )
+    elif isinstance(draw, DocumentDraw):
+        hit_entries.extend(
+            _paint_document(
                 pygame_module,
                 surface,
                 font,

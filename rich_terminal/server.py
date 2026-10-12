@@ -73,6 +73,7 @@ from .retained_model import (
 from .retained_scene import (
     CommitDisposition,
     ControlDefinition,
+    ControlKind,
     ObjectDefinition,
     RegionDefinition,
     RetainedMode,
@@ -1237,6 +1238,7 @@ class RichTerminalCore:
         items_active = bool(policy.features & RetainedFeature.CONTROL_ITEMS)
         if event.names_item and not items_active:
             raise TerminalSessionError("item input requires active RET_CONTROL_ITEMS")
+        documents_active = bool(policy.features & RetainedFeature.CONTROL_DOCUMENTS)
         owner = OwnerIdentity(
             session_id=session_id,
             presentation_epoch=clock.presentation_epoch,
@@ -1258,6 +1260,7 @@ class RichTerminalCore:
                     event.control_id,
                     grid_allowed=True,
                     item_view_allowed=items_active,
+                    document_allowed=documents_active,
                 )
             elif event.names_item:
                 item = scene.require_item(
@@ -1267,6 +1270,18 @@ class RichTerminalCore:
                     item_key=event.item_key,
                 )
                 _require_item_event_state(event.event_kind, item.state)
+            elif (
+                event.event_kind is ControlEventKind.FOLLOW
+                and documents_active
+                and scene.active_control_kind(owner, event.control_id) is ControlKind.DOCUMENT
+            ):
+                scene.require_document_link(
+                    owner,
+                    event.control_id,
+                    content_revision=event.content_revision,
+                    item_key=event.item_key,
+                    scalar_offset=event.scalar_offset,
+                )
             else:
                 item = scene.require_text_position(
                     owner,

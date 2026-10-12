@@ -55,6 +55,12 @@ from rich_terminal.semantic_items import (
     ItemViewRole,
     ViewItem,
 )
+from rich_terminal.semantic_documents import (
+    BlockKind,
+    DocumentBlock,
+    DocumentContent,
+    DocumentFlag,
+)
 from rich_terminal.retained_wire import (
     ControlEvent,
     ControlEventKind,
@@ -94,7 +100,8 @@ def _config() -> TerminalConfig:
 
 
 def _policy(
-    *, controls: bool, collections: bool = False, items: bool = False
+    *, controls: bool, collections: bool = False, items: bool = False,
+    documents: bool = False,
 ) -> RetainedPolicy:
     features = RetainedFeature.CORE
     if controls:
@@ -103,6 +110,8 @@ def _policy(
         features |= RetainedFeature.CONTROL_COLLECTIONS
     if items:
         features |= RetainedFeature.CONTROL_ITEMS
+    if documents:
+        features |= RetainedFeature.CONTROL_DOCUMENTS
     return RetainedPolicy(
         features=features,
         max_owner_records=2,
@@ -847,3 +856,119 @@ def test_item_events_require_the_items_feature() -> None:
         _send_text(driver, ITEM_VIEW_ID, ControlEventKind.SCROLL, wheel_y=1)
         is DriverStatus.INVALID
     )
+
+
+# --- Documents ---------------------------------------------------------------
+
+DOCUMENT_ID = 70
+DOCUMENT_REVISION = 9
+
+
+def _document_core(*, documents: bool = True) -> RichTerminalCore:
+    """A two-row document: a link on its first row, and one on a row the
+    root does not show."""
+
+    core = _text_core()
+    owner = OwnerIdentity(SESSION_ID, 0, OWNER_ID, OWNER_GENERATION)
+    content = DocumentContent(
+        DOCUMENT_REVISION,
+        DocumentFlag(0),
+        (
+            DocumentBlock(1, BlockKind.PARAGRAPH, "See notes now.",
+                          runs=(StyleRun(4, 5, TextStyle.LINK),)),
+            DocumentBlock(2, BlockKind.PARAGRAPH, "Later link.", rows_before=1,
+                          runs=(StyleRun(6, 4, TextStyle.LINK),)),
+        ),
+    )
+    state = core._retained_model._state
+    owner_scene = state.active.owners[OWNER_ID]
+    controls = dict(owner_scene.controls)
+    controls[DOCUMENT_ID] = ControlDefinition(
+        owner, DOCUMENT_ID, ControlKind.DOCUMENT,
+        ControlState.VISIBLE | ControlState.ENABLED, 0, 1, 0, 0,
+        ObjectBounds(0, 0, 20, 2), "", "", content,
+    )
+    patched = OwnerScene(
+        owner=owner_scene.owner,
+        regions=owner_scene.regions,
+        objects=owner_scene.objects,
+        series=owner_scene.series,
+        usage=owner_scene.usage,
+        controls=MappingProxyType(controls),
+    )
+    core._retained_model._state = SceneModelState(
+        revision=state.revision,
+        geometry=state.geometry,
+        active=RetainedScene(MappingProxyType({OWNER_ID: patched})),
+        hidden=None,
+        hidden_kind=None,
+        requirement=None,
+        retained_visible=True,
+        retained_initialized=True,
+    )
+    core._session_retained_policy = _policy(
+        controls=True, collections=True, documents=documents
+    )
+    return core
+
+
+def test_driver_follows_a_link_the_document_shows() -> None:
+    core = _document_core()
+    before = core.retained_state
+    driver = _driver(core)
+    assert (
+        _send_text(driver, DOCUMENT_ID, ControlEventKind.FOLLOW,
+                   content_revision=DOCUMENT_REVISION, item_key=1, scalar_offset=6)
+        is DriverStatus.PROGRESS
+    )
+    (event,) = _sent_events(driver)
+    assert event == ControlEvent(
+        OWNER_ID, OWNER_GENERATION, DOCUMENT_ID, ControlEventKind.FOLLOW, 0,
+        MODEL_REVISION, content_revision=DOCUMENT_REVISION, item_key=1, scalar_offset=6,
+    )
+    assert core.retained_state is before
+    driver = _driver(_document_core())
+    assert (
+        _send_text(driver, DOCUMENT_ID, ControlEventKind.SCROLL, wheel_y=3)
+        is DriverStatus.PROGRESS
+    )
+    assert driver.pending_outbound_bytes == 40 + 48
+
+
+@pytest.mark.parametrize(
+    ("revision", "key", "offset"),
+    (
+        (DOCUMENT_REVISION, 1, 0),        # plain text
+        (DOCUMENT_REVISION, 2, 6),        # a link on a row the root does not show
+        (DOCUMENT_REVISION, 9, 0),        # not carried
+        (DOCUMENT_REVISION - 1, 1, 6),    # a superseded revision
+    ),
+)
+def test_driver_refuses_follows_the_document_does_not_show(revision, key, offset):
+    driver = _driver(_document_core())
+    assert (
+        _send_text(driver, DOCUMENT_ID, ControlEventKind.FOLLOW,
+                   content_revision=revision, item_key=key, scalar_offset=offset)
+        is DriverStatus.INVALID
+    )
+    # A document takes no PLACE.
+    assert (
+        _send_text(driver, DOCUMENT_ID, ControlEventKind.PLACE,
+                   content_revision=DOCUMENT_REVISION, item_key=1, scalar_offset=6)
+        is DriverStatus.INVALID
+    )
+    assert driver.pending_outbound_events == 0
+
+
+def test_document_events_require_the_documents_feature() -> None:
+    driver = _driver(_document_core(documents=False))
+    assert (
+        _send_text(driver, DOCUMENT_ID, ControlEventKind.FOLLOW,
+                   content_revision=DOCUMENT_REVISION, item_key=1, scalar_offset=6)
+        is DriverStatus.INVALID
+    )
+    assert (
+        _send_text(driver, DOCUMENT_ID, ControlEventKind.SCROLL, wheel_y=1)
+        is DriverStatus.INVALID
+    )
+

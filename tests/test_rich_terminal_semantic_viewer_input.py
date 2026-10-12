@@ -892,3 +892,56 @@ def test_item_presses_select_open_expand_collapse_and_check(monkeypatch):
         _item_request(offer, 6, 2),
         ("send_text_event", scroll),
     ]
+
+
+# --- Documents -------------------------------------------------------------------
+
+from rich_terminal.pygame_view import DocumentHitTarget, DocumentLink  # noqa: E402
+
+
+def _document_target():
+    # One link character painted in cell 2 of row 1.
+    return DocumentHitTarget(
+        ControlIdentity(7, 2, 50),
+        PixelRect(0, 0, 100, 30),
+        6,
+        (DocumentLink(PixelRect(20, 10, 30, 20), 3, 4),),
+    )
+
+
+def test_a_press_on_a_document_link_follows_it_and_the_wheel_scrolls():
+    client = _RecordingClient()
+    keyboard, state, pointer = _router(client)
+    offer = _offer(3)
+    _promote(state, keyboard, offer, (_occlusion(rect=(0, 0, 100, 80)), _document_target()))
+
+    # A plain press follows the link, and Ctrl does not stop it.
+    assert pointer.button_down(1, (25, 15), (100, 80))
+    assert not pointer.button_up(1, (25, 15), (100, 80))
+    assert pointer.button_down(1, (25, 15), (100, 80), modifiers=2)
+    assert not pointer.button_up(1, (25, 15), (100, 80), modifiers=2)
+    # Shift, another button, and a press off the link send nothing, and the
+    # point never becomes a raw gesture.
+    assert not pointer.button_down(1, (25, 15), (100, 80), modifiers=1)
+    assert not pointer.button_down(3, (25, 15), (100, 80))
+    assert not pointer.button_down(1, (60, 5), (100, 80))
+    assert pointer.wheel(0, -2, (60, 5), (100, 80))
+
+    def follow(modifiers):
+        return (
+            "send_text_event",
+            {
+                "owner_id": 7, "owner_generation": 2, "control_id": 50, "event_kind": 5,
+                "modifiers": modifiers, "content_revision": 6, "item_key": 3,
+                "scalar_offset": 4, "generation": 5, "display_offer_id": offer.offer_id,
+                "display_scope": display_scope_to_wire(offer.scope),
+            },
+        )
+
+    scroll = {
+        "owner_id": 7, "owner_generation": 2, "control_id": 50, "event_kind": 4,
+        "modifiers": 0, "wheel_x": 0, "wheel_y": 2, "generation": 5,
+        "display_offer_id": offer.offer_id,
+        "display_scope": display_scope_to_wire(offer.scope),
+    }
+    assert client.requests == [follow(0), follow(2), ("send_text_event", scroll)]

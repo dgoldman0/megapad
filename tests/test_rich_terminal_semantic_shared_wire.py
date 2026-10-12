@@ -923,3 +923,52 @@ def test_offer_changes_need_a_base_with_the_same_cell_geometry() -> None:
     assert "base_offer_id" not in wire
     assert display_offer_from_wire(wire) == wider
 
+
+
+def _document_plane() -> RetainedDrawPlane:
+    from rich_terminal.retained_view import DocumentDraw
+    from rich_terminal.semantic_documents import (
+        BlockKind,
+        DocumentBlock,
+        DocumentContent,
+        DocumentFlag,
+    )
+
+    content = DocumentContent(
+        3,
+        DocumentFlag(0),
+        (
+            DocumentBlock(1, BlockKind.HEADING, "Notes", level=2),
+            DocumentBlock(2, BlockKind.PARAGRAPH, "Some text.", rows_before=1),
+        ),
+    )
+    document = DocumentDraw(60, VISIBLE | ENABLED, 0, 4, ObjectBounds(0, 0, 40, 10), content)
+    region = RetainedRegionDraw(9, 1, 1, 0, 0, 80, 25, 0, 0, 80, 25, 0, True, (document,))
+    return RetainedDrawPlane(True, True, (region,))
+
+
+def test_document_draws_round_trip_with_their_canonical_doc1() -> None:
+    from rich_terminal.semantic_documents import encode_document_content
+
+    plane = _document_plane()
+    wire = retained_draw_plane_to_wire(plane)
+    assert retained_draw_plane_from_wire(wire) == plane
+    (draw,) = wire["regions"][0]["draws"]
+    assert set(draw) == {
+        "kind", "control_id", "state", "order", "z_order", "bounds", "content_doc1_base64",
+    }
+    assert draw["kind"] == "document"
+    assert draw["content_doc1_base64"] == base64.b64encode(
+        encode_document_content(plane.regions[0].draws[0].content)
+    ).decode("ascii")
+
+    bad = deepcopy(wire)
+    bad["regions"][0]["draws"][0]["content_doc1_base64"] = base64.b64encode(
+        b"DOC1"
+    ).decode("ascii")
+    with pytest.raises(ValueError, match="canonical DOC1"):
+        retained_draw_plane_from_wire(bad)
+    bad = deepcopy(wire)
+    bad["regions"][0]["draws"][0]["items"] = []
+    with pytest.raises(ValueError, match="fields are not exact"):
+        retained_draw_plane_from_wire(bad)

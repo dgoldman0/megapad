@@ -157,7 +157,7 @@ def test_control_discovery_uses_shared_object_and_utf8_capacity() -> None:
     assert "0x100    CONSTANT _PT-RET-CONTROLS" in source
     assert "0x200    CONSTANT _PT-RET-CONTROL-COLLECTIONS" in source
     assert "0x400    CONSTANT _PT-RET-CONTROL-ITEMS" in source
-    assert "0xFF3F   CONSTANT _PT-RET-FEATURE-MASK" in source
+    assert "0x1FF3F  CONSTANT _PT-RET-FEATURE-MASK" in source
     assert "0x8000   CONSTANT _PT-RET-GRID-CELLS" in source
     assert (
         "_PT-RV-FEATURES @ _PT-RET-GRID-CELLS AND\n"
@@ -1456,7 +1456,10 @@ def test_remaining_object_family_exposes_only_typed_semantic_apis() -> None:
             f"{common} stroke-width red green blue alpha path-flags "
             "points-a points-u session -- status"
         ),
-        "IMAGE": f"{common} resource fit opacity flags session -- status",
+        "IMAGE": (
+            f"{common} resource fit opacity flags clip-x clip-y clip-cols "
+            "clip-rows session -- status"
+        ),
         "READOUT": (
             f"{common} fg-red fg-green fg-blue fg-alpha bg-red bg-green "
             "bg-blue bg-alpha format decimal-places initial-value scale "
@@ -1661,7 +1664,8 @@ def test_image_and_readout_have_typed_bodies_and_checked_sources() -> None:
     assert "PT-IMAGE-FIT-STRETCH U<" in image
     assert "PT-IMAGE-FIT-COVER U>" in image
     assert "_PT-IM-OPACITY @ _PT-U8? 0=" in image
-    assert "80 _PT-OBJECT-ADMIT" in image
+    # A clipped IMAGE carries its 16-byte clip after the 16-byte body.
+    assert "_PT-IM-FLAGS @ PT-IMAGE-CLIP AND IF 96 ELSE 80 THEN" in image
     for store in (
         "_PT-IM-RESOURCE @ _PT-FRAME-PAYLOAD 64 + _PT-U64!",
         "_PT-IM-FIT @ _PT-FRAME-PAYLOAD 72 + L!",
@@ -2097,5 +2101,6 @@ def test_pixels_query_tracks_one_exact_question_in_the_session() -> None:
     assert router.index("_PT-M-PIXELS = IF") < router.index("0x8000 AND IF")
     assert "_PT-PIXELS-CLEAR" in records_clear
 
-    assert "_PT-IM-FLAGS @ PT-IMAGE-BACKDROP U> IF PT-S-INVALID EXIT THEN" in image
+    assert "_PT-IM-FLAGS @ PT-IMAGE-BACKDROP PT-IMAGE-CLIP OR INVERT AND IF" in image
+    assert "_PT-IMAGE-CLIP? 0= IF PT-S-INVALID EXIT THEN" in image
     assert "_PT-IM-FLAGS @ _PT-FRAME-PAYLOAD 77 + C!" in image

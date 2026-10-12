@@ -573,6 +573,206 @@ class TestRichTerminalForth(_KDOSTestBase):
         self.assertEqual(status.group(1), b"0 4 3 0 3 0 ")
         self.assertEqual(raw[begin:end], expected)
 
+    def test_document_and_clipped_image_writers_emit_exact_target_forth_bytes(
+        self,
+    ) -> None:
+        """Pack one minimum DOC1 document, which needs RET_CONTROL_DOCUMENTS and
+        at least the 32-byte body, and one IMAGE with a CLIP rectangle, which
+        must lie inside the object and carries 16 more bytes."""
+        memory, ext_memory, cpu_state = self._snapshot_data()
+        system = make_system(
+            ram_kib=1024,
+            ext_mem_mib=KDOS_TEST_EXT_MEM_MIB,
+        )
+        uart = capture_uart(system)
+        system.cpu.mem[: len(memory)] = memory
+        system._ext_mem[: len(ext_memory)] = ext_memory
+        self._restore_cpu_state(system.cpu, cpu_state)
+        system.uart._tx_ring_base = system.cpu.regs[19]
+
+        lines = ["ENTER-USERLAND", *_source_lines(MODULE_PATH)]
+        lines.extend(
+            [
+                "CREATE PT-DOC-RX 8192 ALLOT",
+                "CREATE PT-DOC-TX 8192 ALLOT",
+                "CREATE PT-DOC-EVENT PT-EVENT-SIZE ALLOT",
+                "CREATE PT-DOC-SESSION-STORAGE PT-SESSION-SIZE 7 + ALLOT",
+                ": PT-DOC-SESSION PT-DOC-SESSION-STORAGE 7 + -8 AND ;",
+                "CREATE PT-DOC-CONTENT 32 ALLOT",
+                "CREATE PT-DOC-STATUSES 16 8 * ALLOT",
+                "VARIABLE PT-DOC-I",
+                ": PT-DOC-STATUS!  ( status -- )",
+                "  PT-DOC-STATUSES PT-DOC-I @ 8 * + ! 1 PT-DOC-I +! ;",
+                ": PT-DOC-CONTENT!",
+                "  PT-DOC-CONTENT 32 0 FILL",
+                "  0x31434F44 PT-DOC-CONTENT L!",
+                "  1 PT-DOC-CONTENT 4 + W!",
+                "  1 PT-DOC-CONTENT 8 + _PT-U64! ;",
+                ": PT-DOC-FEATURES!  ( features -- )",
+                "  PT-DOC-SESSION _PT.S.RET-CAPS 8 + _PT-U64! ;",
+                ": PT-DOC-PRIME",
+                "  PT-DOC-CONTENT!  PT-DOC-I OFF",
+                "  PT-DOC-RX 8192 PT-DOC-TX 8192",
+                "    PT-DOC-EVENT PT-EVENT-SIZE PT-DOC-SESSION",
+                "    PT-INIT PT-DOC-STATUS!",
+                "  PT-ST-ACTIVE PT-DOC-SESSION _PT.S.STATE !",
+                "  152 PT-DOC-SESSION _PT.S.PEER-MAX-PAY !",
+                "  4096 PT-DOC-SESSION _PT.S.PEER-MAX-TX !",
+                "  8192 PT-DOC-SESSION _PT.S.PEER-GRANT !",
+                "  8192 PT-DOC-SESSION _PT.S.PEER-INITIAL !",
+                "  0 PT-DOC-SESSION _PT.S.PEER-SENT !",
+                "  0 PT-DOC-SESSION _PT.S.TX-SEQ !",
+                "  0x4142434445464748 PT-DOC-SESSION _PT.S.SESSION-ID !",
+                "  9 PT-DOC-SESSION _PT.S.EPOCH !",
+                "  -1 PT-DOC-SESSION _PT.S.RET-ENABLED? !",
+                "  _PT-RD-AVAILABLE PT-DOC-SESSION _PT.S.RET-STATE !",
+                "  0x10305 PT-DOC-FEATURES!",
+                "  -1 PT-DOC-SESSION _PT.S.TX-OPEN? !",
+                "  _PT-TX-PRESENT PT-DOC-SESSION _PT.S.TX-KIND !",
+                "  PT-CELL-NONE PT-DOC-SESSION _PT.S.TX-CELL-MODE !",
+                "  PT-RET-DELTA PT-DOC-SESSION _PT.S.TX-RET-MODE !",
+                "  2 PT-DOC-SESSION _PT.S.TX-RET-OPS !",
+                "  288 PT-DOC-SESSION _PT.S.TX-RET-BYTES ! ;",
+                ": PT-DOC-WRITE  ( content-a content-u -- status )",
+                "  >R >R",
+                "  0x0102030405060708 0x1112131415161718",
+                "  0x2122232425262728 PT-CONTROL-DOCUMENT",
+                "  PT-CONTROL-F-VISIBLE PT-CONTROL-F-ENABLED OR",
+                "  -7 0x3132333435363738 0 0",
+                "  0x01020304 0x11121314 0xA1A2A3A4 0xB1B2B3B4",
+                "  0 0 0 0 R> R> PT-DOC-SESSION",
+                "  PT-CONTROL-DEFINE ;",
+                ": PT-DOC-IMAGE  ( flags clip-x clip-y clip-cols clip-rows -- status )",
+                "  >R >R >R >R >R",
+                "  0x0102030405060708 0x1112131415161718",
+                "  0x5152535455565758 0x3132333435363738 0",
+                "  2 3 10 4 5 PT-OBJECT-VISIBLE",
+                "  0x696A6B6C6D6E6F70 PT-IMAGE-FIT-CONTAIN 255",
+                "  R> R> R> R> R> PT-DOC-SESSION PT-IMAGE-DEFINE ;",
+                ": PT-DOC-MARK  ( c -- )  80 EMIT 68 EMIT EMIT 33 EMIT ;",
+                ": PT-DOC-RUN",
+                "  PT-DOC-PRIME",
+                "  0x305 PT-DOC-FEATURES!",
+                "  PT-DOC-CONTENT 32 PT-DOC-WRITE PT-DOC-STATUS!",
+                "  0x10305 PT-DOC-FEATURES!",
+                "  PT-DOC-CONTENT 31 PT-DOC-WRITE PT-DOC-STATUS!",
+                "  PT-IMAGE-CLIP 0 3 10 2 PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  PT-IMAGE-CLIP 0 0 0 4 PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  PT-IMAGE-BACKDROP 0 1 10 3 PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  4 0 0 0 0 PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  66 PT-DOC-MARK TX-FLUSH",
+                "  PT-DOC-CONTENT 32 PT-DOC-WRITE PT-DOC-STATUS!",
+                "  PT-IMAGE-BACKDROP PT-IMAGE-CLIP OR 0 1 10 3",
+                "    PT-DOC-IMAGE PT-DOC-STATUS!",
+                "  TX-FLUSH 69 PT-DOC-MARK TX-FLUSH",
+                "  DEPTH PT-DOC-STATUS!",
+                "  83 PT-DOC-MARK PT-DOC-STATUSES PT-DOC-I @ 8 * TYPE",
+                "  70 PT-DOC-MARK TX-FLUSH ;",
+                "PT-DOC-RUN BYE",
+            ]
+        )
+        program = ("\n".join(lines) + "\n").encode()
+        position = 0
+        steps = 0
+
+        while steps < SOURCE_LOAD_MAX_STEPS:
+            if system.cpu.halted:
+                break
+            if system.cpu.idle and not system.uart.has_rx_data:
+                if position >= len(program):
+                    break
+                chunk = _next_line_chunk(program, position)
+                system.uart.inject_input(chunk)
+                position += len(chunk)
+                continue
+            executed = system.run_batch(
+                min(RUN_BATCH_STEPS, SOURCE_LOAD_MAX_STEPS - steps)
+            )
+            steps += max(executed, 1)
+
+        raw = bytes(uart)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertEqual(position, len(program), "test source was not fully fed")
+        self.assertTrue(
+            system.cpu.halted,
+            "document and clipped image byte oracle exceeded its "
+            f"{SOURCE_LOAD_MAX_STEPS:,}-step watchdog",
+        )
+        self.assertNotIn(" ? (not found)", text)
+        for diagnostic in (
+            "Dictionary full",
+            "dictionary overflow",
+            "Stack underflow",
+            "Stack overflow",
+            "Return stack overflow",
+            "*** BUS FAULT",
+            "*** PRIVILEGE FAULT",
+        ):
+            self.assertNotIn(diagnostic, text)
+
+        content = struct.pack("<IHHQHHIII", 0x31434F44, 1, 0, 1, 0, 0, 0, 0, 0)
+        control = struct.pack(
+            "<QQQHHiQQIiiIIIII",
+            0x0102030405060708,
+            0x1112131415161718,
+            0x2122232425262728,
+            14,
+            0x03,
+            -7,
+            0x3132333435363738,
+            0,
+            0,
+            0x01020304,
+            0x11121314,
+            0xA1A2A3A4,
+            0xB1B2B3B4,
+            0,
+            0,
+            len(content),
+        ) + content
+        image = struct.pack(
+            "<QQQHHiQQiiII",
+            0x0102030405060708,
+            0x1112131415161718,
+            0x5152535455565758,
+            3,
+            1,
+            5,
+            0x3132333435363738,
+            0,
+            2,
+            3,
+            10,
+            4,
+        ) + struct.pack("<QIBB2xIIII", 0x696A6B6C6D6E6F70, 1, 255, 3, 0, 1, 10, 3)
+        self.assertEqual(len(image), 96)
+        expected = b"".join(
+            encode_frame(
+                Frame(message_type, 0x4142434445464748, sequence, 9, payload),
+                max_payload=152,
+            )
+            for sequence, (message_type, payload) in enumerate(
+                (
+                    (RetainedMessageType.CONTROL_DEFINE, control),
+                    (RetainedMessageType.OBJECT_DEFINE, image),
+                )
+            )
+        )
+        self.assertEqual(len(expected), 288)
+        begin = raw.index(b"PDB!") + len(b"PDB!")
+        end = raw.index(b"PDE!", begin)
+        self.assertEqual(raw[begin:end], expected)
+        statuses_begin = raw.index(b"PDS!", end) + len(b"PDS!")
+        statuses_end = raw.index(b"PDF!", statuses_begin)
+        # PT-INIT; no documents; a short body; a clip below the object; empty
+        # clip extents; clip fields without CLIP; a reserved flag; the two
+        # writes; and an empty stack.
+        expected_statuses = (0, 4, 3, 3, 3, 3, 3, 0, 0, 0)
+        self.assertEqual(
+            raw[statuses_begin:statuses_end],
+            struct.pack(f"<{len(expected_statuses)}q", *expected_statuses),
+        )
+
     def test_resource_lifecycle_bytes_completions_credit_and_reset_gate(self) -> None:
         """Exercise the complete immutable-resource guest lifecycle boundary."""
         memory, ext_memory, cpu_state = self._snapshot_data()
@@ -1494,7 +1694,7 @@ class TestRichTerminalForth(_KDOSTestBase):
                 "  PT-POLYLINE-CLOSED PT-OBJ-POINTS 32 PT-OBJ-SESSION ;",
                 ": PT-OBJ-IMAGE  ( object -- image-args )",
                 "  PT-OBJ-COMMON 0x696A6B6C6D6E6F70",
-                "  PT-IMAGE-FIT-COVER 200 PT-IMAGE-BACKDROP PT-OBJ-SESSION ;",
+                "  PT-IMAGE-FIT-COVER 200 PT-IMAGE-BACKDROP 0 0 0 0 PT-OBJ-SESSION ;",
                 ": PT-OBJ-READOUT  ( object -- readout-args )",
                 "  PT-OBJ-COMMON 1 2 3 4 5 6 7 8",
                 "  PT-READOUT-FIXED 2 -123 100",

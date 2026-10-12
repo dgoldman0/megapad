@@ -28,12 +28,15 @@ lines for its CELL fallback; the Agent's transcript uses them.
 The `DOCUMENT` kind and its `DOC1` body serve part 12 of Akashic's rich
 experience plan: a document's blocks, with their structure, broken into
 lines by the renderer on rows the client also finds. They are specified
-below, with `SCROLL` and `FOLLOW` on documents.
+below, with `SCROLL` and `FOLLOW` on documents. MegaPad implements them in
+the codec, the terminal's viewport and link checks, the reference renderer
+and its hit map, viewer routing, the shared-viewer transport, and the guest
+module.
 
 ## Decision
 
-Text areas, logical text grids, tabsets, tabs, and item views extend the
-existing retained `CONTROL` namespace. They do not create message families of
+Text areas, logical text grids, tabsets, tabs, item views, and documents
+extend the existing retained `CONTROL` namespace. They do not create message families of
 their own, an applet scene API, or terminal-buffer reservations.
 
 The wire does not equate one CONTROL root with one UIDL source element. One
@@ -856,9 +859,9 @@ Headings take the theme's `HEADING` look, in the bold face, with level 1 and
 2 also underlined; code blocks get a background across their text area;
 rules are a line across it; and a figure's picture rows are left as the CELL
 plane shows them. Text takes its style runs' looks from the theme. An
-enabled document enters the hit map as a document target that keeps each
-shown row's block and laid-out line, and the reference viewer routes a left
-press on a `LINK` character there, without Shift, as `FOLLOW`, and wheel
+enabled document enters the hit map as a document target that keeps the
+rectangle of each link character its paint pass drew, and the reference
+viewer routes a left press on one, without Shift, as `FOLLOW`, and wheel
 input as `SCROLL`.
 
 The reference viewer routes a left press on a text target as `PLACE` (as

@@ -21,12 +21,14 @@ from .retained_resources import RGBAResource
 from .retained_scene import (
     CONTROL_STATE_MASK,
     GLYPH_RUN_ATTRIBUTE_MASK,
+    ROOT_CONTROL_KINDS,
     ControlDefinition,
     ControlKind,
     ControlState,
     GroupBody,
     GlyphRunBody,
     ImageBody,
+    ImageClip,
     ImageFit,
     MeterBody,
     ObjectBounds,
@@ -54,6 +56,7 @@ from .retained_scene import (
 from .semantic_content import SemanticTextContent
 from .semantic_fields import FieldContent
 from .semantic_items import ItemViewContent
+from .semantic_documents import DocumentContent
 from .update_authority import TerminalGeometry
 
 
@@ -120,6 +123,9 @@ _CONTROL_ALLOWED_STATES = {
         ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
     ),
     ControlKind.ITEM_VIEW: (
+        ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
+    ),
+    ControlKind.DOCUMENT: (
         ControlState.VISIBLE | ControlState.ENABLED | ControlState.SELECTED
     ),
 }
@@ -360,6 +366,7 @@ class ImageDraw:
     opacity: int
     backdrop: bool = False
     parent_bounds: tuple[ObjectBounds, ...] = ()
+    clip: ImageClip | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -402,6 +409,14 @@ class ImageDraw:
             "parent_bounds",
             _object_bounds_path("parent_bounds", self.parent_bounds),
         )
+        if self.clip is not None:
+            if not isinstance(self.clip, ImageClip):
+                raise TypeError("clip must be ImageClip or None")
+            if (
+                self.clip.x + self.clip.cols > self.bounds.cell_cols
+                or self.clip.y + self.clip.rows > self.bounds.cell_rows
+            ):
+                raise ValueError("an IMAGE clip lies outside the object's rectangle")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1078,9 +1093,9 @@ def _root_draw_fields(
     order,
     z_order,
     bounds,
-    content: SemanticTextContent | ItemViewContent | FieldContent | None,
+    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None,
 ) -> tuple[
-    int, ControlState, int, int, ObjectBounds, SemanticTextContent | ItemViewContent | FieldContent | None
+    int, ControlState, int, int, ObjectBounds, SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None
 ]:
     control_id = _integer(
         "control_id", control_id, minimum=1, maximum=UINT64_MAX
@@ -1109,6 +1124,9 @@ def _root_draw_fields(
     elif kind is ControlKind.FIELD:
         if not isinstance(content, FieldContent):
             raise TypeError("FIELD draw requires FieldContent")
+    elif kind is ControlKind.DOCUMENT:
+        if not isinstance(content, DocumentContent):
+            raise TypeError("DOCUMENT draw requires DocumentContent")
     elif content is not None:
         raise ValueError(f"{kind.name} draw carries no semantic text content")
     return control_id, state, order, z_order, bounds, content
@@ -1188,6 +1206,36 @@ class ItemViewDraw:
     def __post_init__(self) -> None:
         control_id, state, order, z_order, bounds, content = _root_draw_fields(
             ControlKind.ITEM_VIEW,
+            self.control_id,
+            self.state,
+            self.order,
+            self.z_order,
+            self.bounds,
+            self.content,
+        )
+        assert content is not None
+        object.__setattr__(self, "control_id", control_id)
+        object.__setattr__(self, "state", state)
+        object.__setattr__(self, "order", order)
+        object.__setattr__(self, "z_order", z_order)
+        object.__setattr__(self, "bounds", bounds)
+        object.__setattr__(self, "content", content)
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentDraw:
+    """One visible document anchored in region-relative geometry."""
+
+    control_id: int
+    state: ControlState
+    order: int
+    z_order: int
+    bounds: ObjectBounds
+    content: DocumentContent
+
+    def __post_init__(self) -> None:
+        control_id, state, order, z_order, bounds, content = _root_draw_fields(
+            ControlKind.DOCUMENT,
             self.control_id,
             self.state,
             self.order,
@@ -1421,7 +1469,7 @@ ObjectDraw = (
 )
 SemanticRootDraw = (
     MenuBarDraw | TextAreaDraw | TextGridDraw | TabSetDraw
-    | ItemViewDraw | TaskBarDraw | FieldDraw
+    | ItemViewDraw | TaskBarDraw | FieldDraw | DocumentDraw
 )
 RetainedDraw = ObjectDraw | SemanticRootDraw
 
@@ -1560,6 +1608,7 @@ class RetainedRegionDraw:
                     TaskBarDraw,
                     FieldDraw,
                     ItemViewDraw,
+                    DocumentDraw,
                 ),
             )
             for draw in draws
@@ -1813,14 +1862,14 @@ _ValidatedControl = tuple[
     ControlDefinition,
     ControlKind,
     ControlState,
-    SemanticTextContent | ItemViewContent | FieldContent | None,
+    SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None,
 ]
 _ValidatedControlMap = dict[int, _ValidatedControl]
 
 
 def _validate_control_value(
     definition: ControlDefinition,
-) -> tuple[ControlKind, ControlState, SemanticTextContent | ItemViewContent | FieldContent | None]:
+) -> tuple[ControlKind, ControlState, SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None]:
     if isinstance(definition.kind, bool):
         raise TypeError("control kind must not be bool")
     try:
@@ -1920,15 +1969,7 @@ def _validate_control_graph(
     selected_tab_by_tabset: set[int] = set()
     selected_task_by_bar: set[int] = set()
     roots_by_region: dict[int, list[int]] = {}
-    root_kinds = {
-        ControlKind.MENU_BAR,
-        ControlKind.TEXT_AREA,
-        ControlKind.TEXT_GRID,
-        ControlKind.TABSET,
-        ControlKind.ITEM_VIEW,
-        ControlKind.TASKBAR,
-        ControlKind.FIELD,
-    }
+    root_kinds = ROOT_CONTROL_KINDS
     expected_parent = {
         ControlKind.MENU: ControlKind.MENU_BAR,
         ControlKind.MENU_ITEM: ControlKind.MENU,
@@ -2122,6 +2163,23 @@ def _project_item_view(
     )
 
 
+def _project_document(
+    root_id: int,
+    controls: _ValidatedControlMap,
+) -> DocumentDraw:
+    root, kind, state, content = controls[root_id]
+    if kind is not ControlKind.DOCUMENT or root.bounds is None or content is None:
+        raise RetainedViewError("semantic root is not a bounded DOCUMENT")
+    return DocumentDraw(
+        control_id=root.control_id,
+        state=state,
+        order=root.order,
+        z_order=root.z_order,
+        bounds=root.bounds,
+        content=content,
+    )
+
+
 def _project_tabset(
     root_id: int,
     controls: _ValidatedControlMap,
@@ -2208,6 +2266,8 @@ def _project_semantic_root(
         return _project_taskbar(root_id, controls, children)
     if kind is ControlKind.FIELD:
         return _project_field(root_id, controls)
+    if kind is ControlKind.DOCUMENT:
+        return _project_document(root_id, controls)
     raise RetainedViewError(f"semantic root has unsupported kind {kind.name}")
 
 
@@ -2535,6 +2595,7 @@ def project_composite_draw_plane(
                             opacity=body.opacity,
                             backdrop=body.backdrop,
                             parent_bounds=parent_bounds,
+                            clip=body.clip,
                         )
                     )
                     continue
@@ -2705,6 +2766,7 @@ __all__ = [
     "ImageDraw",
     "ImageResourceManifest",
     "ItemViewDraw",
+    "DocumentDraw",
     "MenuBarDraw",
     "MenuDraw",
     "MenuEntryDraw",

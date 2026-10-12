@@ -29,6 +29,7 @@ from .retained_scene import (
     GroupBody,
     GlyphRunBody,
     ImageBody,
+    ImageClip,
     ImageFit,
     MeterBody,
     ObjectBounds,
@@ -48,6 +49,7 @@ from .retained_scene import (
     UniformSamples,
     validate_control_shape,
     WaveformBody,
+    validate_image_shape,
     validate_pane_shape,
     validate_status_field_shape,
 )
@@ -64,9 +66,14 @@ from .semantic_items import (
 )
 
 from .semantic_fields import FieldContent, encode_field_content, decode_field_content
+from .semantic_documents import (
+    DocumentContent,
+    decode_document_content,
+    encode_document_content,
+)
 
 RET1_TAG = 0x31544552
-_RETAINED_FEATURE_MASK = 0xFF3F
+_RETAINED_FEATURE_MASK = 0x1FF3F
 
 _RET_QUERY = struct.Struct("<II")
 _RET_CAPS = struct.Struct("<IHHQIIIIIIIIQQ")
@@ -88,7 +95,9 @@ _POLYLINE_BODY = struct.Struct("<II4BI")
 _POINT = struct.Struct("<II")
 # ``s`` rather than ``x`` keeps canonical padding observable to the decoder.
 _IMAGE_BODY = struct.Struct("<QIBB2s")
+_IMAGE_CLIP = struct.Struct("<IIII")
 IMAGE_FLAG_BACKDROP = 0x01
+IMAGE_FLAG_CLIP = 0x02
 _PIXELS_QUERY = struct.Struct("<QiiII")
 _PIXELS = struct.Struct("<QQiiIIII")
 _GLYPH_RUN_BODY = struct.Struct("<4B4BHHI")
@@ -472,6 +481,11 @@ class RetainedCaps:
             raise ValueError("GRID_CELLS requires CONTROL_COLLECTIONS")
         if features & RetainedFeature.FIELDS and not features & RetainedFeature.CONTROLS:
             raise ValueError("FIELDS requires CONTROLS")
+        if (
+            features & RetainedFeature.CONTROL_DOCUMENTS
+            and not features & RetainedFeature.CONTROL_COLLECTIONS
+        ):
+            raise ValueError("CONTROL_DOCUMENTS requires CONTROL_COLLECTIONS")
         object.__setattr__(self, "features", features)
         for name in (
             "max_owner_records",
@@ -1106,7 +1120,7 @@ class ControlWireDefinition:
     bounds: ObjectBounds | None
     label: str
     shortcut: str
-    content: SemanticTextContent | ItemViewContent | FieldContent | None = None
+    content: SemanticTextContent | ItemViewContent | FieldContent | DocumentContent | None = None
 
     def __post_init__(self) -> None:
         for name, minimum in (
@@ -1312,6 +1326,8 @@ class ObjectWireDefinition:
             raise TypeError("body is not a supported RETAINED-1 wire body")
         if isinstance(self.body, StatusFieldBody):
             validate_status_field_shape(self.body, bounds=self.bounds)
+        if isinstance(self.body, ImageBody):
+            validate_image_shape(self.body, bounds=self.bounds)
         if isinstance(self.body, PaneBody):
             validate_pane_shape(
                 self.body, bounds=self.bounds, region_id=self.region_id,
@@ -1926,13 +1942,20 @@ def _encode_object_body(body: ObjectWireBody) -> bytes:
             offset += _POINT.size
         return bytes(result)
     if isinstance(body, ImageBody):
-        return _IMAGE_BODY.pack(
+        flags = (IMAGE_FLAG_BACKDROP if body.backdrop else 0) | (
+            IMAGE_FLAG_CLIP if body.clip is not None else 0
+        )
+        prefix = _IMAGE_BODY.pack(
             body.resource_id,
             int(body.fit),
             body.opacity,
-            IMAGE_FLAG_BACKDROP if body.backdrop else 0,
+            flags,
             bytes(2),
         )
+        if body.clip is None:
+            return prefix
+        clip = body.clip
+        return prefix + _IMAGE_CLIP.pack(clip.x, clip.y, clip.cols, clip.rows)
     if isinstance(body, GlyphRunBody):
         text = body.text.encode("utf-8", "strict")
         text_bytes = _integer(
@@ -2081,13 +2104,20 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
                 bool(path_flags),
             )
         if kind is ObjectKind.IMAGE:
-            _body_size(raw, _IMAGE_BODY.size, "IMAGE")
-            resource_id, fit, opacity, flags, reserved = _IMAGE_BODY.unpack(raw)
-            if flags & ~IMAGE_FLAG_BACKDROP:
+            if len(raw) < _IMAGE_BODY.size:
+                _body_size(raw, _IMAGE_BODY.size, "IMAGE")
+            resource_id, fit, opacity, flags, reserved = _IMAGE_BODY.unpack_from(raw)
+            if flags & ~(IMAGE_FLAG_BACKDROP | IMAGE_FLAG_CLIP):
                 raise RetainedWireError(
                     RetainedWireErrorCode.RESERVED,
                     "IMAGE flags contain reserved bits",
                 )
+            clip_flagged = bool(flags & IMAGE_FLAG_CLIP)
+            _body_size(
+                raw,
+                _IMAGE_BODY.size + (_IMAGE_CLIP.size if clip_flagged else 0),
+                "IMAGE",
+            )
             if reserved != bytes(2):
                 raise RetainedWireError(
                     RetainedWireErrorCode.RESERVED,
@@ -2103,11 +2133,23 @@ def _decode_object_body(kind: ObjectKind | int, raw: bytes) -> ObjectWireBody:
                     RetainedWireErrorCode.SCALAR,
                     "IMAGE resource ID must be nonzero",
                 )
+            clip = None
+            if clip_flagged:
+                clip_x, clip_y, clip_cols, clip_rows = _IMAGE_CLIP.unpack_from(
+                    raw, _IMAGE_BODY.size
+                )
+                if not clip_cols or not clip_rows:
+                    raise RetainedWireError(
+                        RetainedWireErrorCode.SCALAR,
+                        "IMAGE clip extents must be positive",
+                    )
+                clip = ImageClip(clip_x, clip_y, clip_cols, clip_rows)
             return ImageBody(
                 resource_id,
                 ImageFit(fit),
                 opacity,
                 backdrop=bool(flags & IMAGE_FLAG_BACKDROP),
+                clip=clip,
             )
         if kind is ObjectKind.GLYPH_RUN:
             if len(raw) < _GLYPH_RUN_BODY.size:
@@ -2364,6 +2406,8 @@ def encode_control_definition(definition: ControlWireDefinition) -> bytes:
         content = encode_field_content(definition.content)
     elif isinstance(definition.content, ItemViewContent):
         content = encode_item_view_content(definition.content)
+    elif isinstance(definition.content, DocumentContent):
+        content = encode_document_content(definition.content)
     else:
         content = encode_semantic_text_content(definition.content)
     content_bytes = _integer(
@@ -2446,6 +2490,8 @@ def decode_control_definition(payload) -> ControlWireDefinition:
             content = decode_field_content(body)
         elif kind is ControlKind.ITEM_VIEW:
             content = decode_item_view_content(body)
+        elif kind is ControlKind.DOCUMENT:
+            content = decode_document_content(body)
         else:
             content = decode_semantic_text_content(body)
     except SemanticContentError as exc:
@@ -2746,7 +2792,7 @@ def decode_series_drop(payload) -> RetainedItemReference:
 __all__ = [
     "CONTROL_EVENT_MAX_PAYLOAD", "CellMode", "ControlEvent", "ControlEventKind",
     "ControlKind", "ControlState", "control_event_payload_size",
-    "ControlWireDefinition", "IMAGE_FLAG_BACKDROP", "ImageBody", "ImageFit", "ObjectSetValue",
+    "ControlWireDefinition", "IMAGE_FLAG_BACKDROP", "IMAGE_FLAG_CLIP", "ImageBody", "ImageFit", "ObjectSetValue",
     "ObjectSetVisibility", "ObjectWireBody",
     "ObjectWireDefinition", "OwnerDrop", "OwnerOpen", "PresentBegin", "PresentDisposition",
     "PaneBody", "PANE_BODY_TAG",

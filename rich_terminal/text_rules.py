@@ -4,7 +4,8 @@ This module is the terminal's implementation of the contract: characters
 (extended grapheme clusters, UAX #29), widths, invalid-input replacement,
 the Unicode Bidirectional Algorithm (UAX #9) at the character level, Arabic
 joining on the cell grid, the layout of one row of logical text into visual
-cells, and Section 12's breaking of a paragraph into lines.  All data comes from :mod:`rich_terminal.text_data`, which is
+cells, and Section 12's breaking of a paragraph into lines, or into hard
+lines.  All data comes from :mod:`rich_terminal.text_data`, which is
 generated from the pinned Unicode 15.1.0 files.
 
 The client (Akashic) implements the same rules independently.  Both are
@@ -824,7 +825,8 @@ class LineLayout:
     """One line of a paragraph broken by Section 12, laid out left to right
     from visual column zero.  Its characters' offsets, and ``start`` and
     ``end``, count scalars from the start of the text the paragraph is in.
-    The spaces at the line's end are part of it but take no cell."""
+    The spaces at the line's end are part of it but take no cell, except on
+    a hard line, where every character takes its cells."""
 
     characters: tuple[PlacedCharacter, ...]   # visual order, width > 0
     width: int
@@ -882,15 +884,44 @@ def break_lines(widths: list[int], spaces: list[bool], limit: int) -> list[tuple
     return lines
 
 
+def break_hard_lines(widths: list[int], limit: int) -> list[tuple[int, int]]:
+    """Section 12's hard lines over one paragraph's characters in logical
+    order, given each one's width: the half-open character ranges of its
+    lines, each ending only where the text reaches ``limit`` cells, spaces
+    included."""
+
+    if limit < 1:
+        raise ValueError("a line is at least one cell wide")
+    count = len(widths)
+    if count == 0:
+        return [(0, 0)]
+    lines: list[tuple[int, int]] = []
+    first = 0
+    while first < count:
+        total = 0
+        index = first
+        while index < count and total + widths[index] <= limit:
+            total += widths[index]
+            index += 1
+        end = index if index > first else first + 1
+        lines.append((first, end))
+        first = end
+    return lines
+
+
 def _paragraph_lines(
-    paragraph: str, direction: int, limit: int, base: int
+    paragraph: str, direction: int, limit: int, base: int, hard: bool = False
 ) -> list[LineLayout]:
     scalars = display_scalars(paragraph)
     if all(0x20 <= cp < 0x7F for cp in scalars) and direction != DIRECTION_RTL:
         lines = []
-        for first, end in break_lines([1] * len(scalars), [cp == 0x20 for cp in scalars], limit):
+        if hard:
+            breaks = break_hard_lines([1] * len(scalars), limit)
+        else:
+            breaks = break_lines([1] * len(scalars), [cp == 0x20 for cp in scalars], limit)
+        for first, end in breaks:
             last = end
-            while last > first and scalars[last - 1] == 0x20:
+            while not hard and last > first and scalars[last - 1] == 0x20:
                 last -= 1
             placed = tuple(
                 PlacedCharacter(base + i, 1, chr(scalars[i]), 1, 0, i - first)
@@ -901,7 +932,7 @@ def _paragraph_lines(
     spans = segment(scalars)
     widths = [char_width(scalars[start:start + length]) for start, length in spans]
     spaces = [length == 1 and scalars[start] == 0x20 for start, length in spans]
-    breaks = break_lines(widths, spaces, limit)
+    breaks = break_hard_lines(widths, limit) if hard else break_lines(widths, spaces, limit)
 
     def scalar_at(character: int) -> int:
         return spans[character][0] if character < len(spans) else len(scalars)
@@ -914,7 +945,7 @@ def _paragraph_lines(
     lines = []
     for first, end in breaks:
         last = end
-        while last > first and spaces[last - 1]:
+        while not hard and last > first and spaces[last - 1]:
             last -= 1
         items = []
         for character in range(first, last):
@@ -951,18 +982,23 @@ def _paragraph_lines(
     return lines
 
 
-def layout_lines(text: str, direction: int, limit: int) -> tuple[LineLayout, ...]:
+def layout_lines(
+    text: str, direction: int, limit: int, hard: bool = False
+) -> tuple[LineLayout, ...]:
     """Every line of TEXT, whose paragraphs line feeds separate, broken at
-    ``limit`` cells by Section 12 and laid out by Sections 3 to 8."""
+    ``limit`` cells by Section 12, into hard lines when ``hard``, and laid
+    out by Sections 3 to 8."""
 
     lines: list[LineLayout] = []
     base = 0
     for paragraph in text.split("\n"):
-        lines.extend(_paragraph_lines(paragraph, direction, limit, base))
+        lines.extend(_paragraph_lines(paragraph, direction, limit, base, hard))
         base += len(paragraph) + 1
     return tuple(lines)
 
 
 @lru_cache(maxsize=1024)
-def cached_lines(text: str, direction: int, limit: int) -> tuple[LineLayout, ...]:
-    return layout_lines(text, direction, limit)
+def cached_lines(
+    text: str, direction: int, limit: int, hard: bool = False
+) -> tuple[LineLayout, ...]:
+    return layout_lines(text, direction, limit, hard)

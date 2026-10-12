@@ -90,7 +90,8 @@ revision-bound `CONTROL_EVENT ACTIVATE`. With bit 9 `RET_CONTROL_COLLECTIONS`
 it also decodes the positioned `PLACE`, `EXTEND`, and `FOLLOW` kinds and
 `SCROLL`, and with bit 10 `RET_CONTROL_ITEMS` the item kinds `SELECT`,
 `OPEN`, `EXPAND`, `COLLAPSE`, and `CHECK`, whose tail has the position
-tail's shape with a zero offset, each at its one exact length. Their tails stay in the session event buffer, like
+tail's shape with a zero offset, each at its one exact length. `SCROLL` and
+`FOLLOW` on a bit-16 `DOCUMENT` decode as on a text area. Their tails stay in the session event buffer, like
 TEXT data, until the next `PT-SERVICE`; the typed readers above return zero on
 an event without that tail. This completes only the MegaPad guest
 transport boundary. Independent CONTROL high-water validation, shared
@@ -199,10 +200,12 @@ PT-POLYLINE-REPLACE ( owner generation object region parent
                       session -- status )
 PT-IMAGE-DEFINE     ( owner generation object region parent
                       x y cols rows z visible resource fit opacity
-                      flags session -- status )
+                      flags clip-x clip-y clip-cols clip-rows
+                      session -- status )
 PT-IMAGE-REPLACE    ( owner generation object region parent
                       x y cols rows z visible resource fit opacity
-                      flags session -- status )
+                      flags clip-x clip-y clip-cols clip-rows
+                      session -- status )
 PT-GLYPH-RUN-DEFINE ( owner generation object region parent
                       x y cols rows z visible
                       fg-red fg-green fg-blue fg-alpha
@@ -737,7 +740,9 @@ target-dependent checks.
 
 Object booleans use `PT-OBJECT-HIDDEN` and `PT-OBJECT-VISIBLE`. Public typed
 constants also cover `PT-POLYLINE-CLOSED`, the three `PT-IMAGE-FIT-*` modes,
-the `PT-IMAGE-BACKDROP` image flag,
+the `PT-IMAGE-BACKDROP` and `PT-IMAGE-CLIP` image flags (with `PT-IMAGE-CLIP`
+the four clip values name a rectangle of positive extents within the object,
+and without it they are zero),
 the three `PT-READOUT-*` formats, horizontal/vertical and show-value meter
 options, the three `PT-STATUS-*` shapes, the two `PT-PLOT-*` flags, and
 `PT-WAVEFORM-DRAW-ZERO-LINE`; callers do not pass reserved wire fields.
@@ -945,10 +950,12 @@ and physical renderer carry that complete advertised family. Series, vector,
 and image remain separate optional families and are not implied by this pass.
 
 The guest CONTROL writer is now extended in place rather than split into a
-second encoder. It accepts retained mask `0x73f`, requires bit 8 whenever bit 9
-is present and bit 9 whenever bit 10 is, admits kinds 5 through 8 only for a
-negotiated bit-9 session, and admits kind 9, `ITEM_VIEW`, only for a bit-10
-session and with at least the 48-byte smallest ITM1 body.
+second encoder. It accepts retained mask `0x1FF3F`, requires bit 8 whenever
+bit 9 is present and bit 9 whenever bit 10 or bit 16 is, admits kinds 5
+through 8 only for a negotiated bit-9 session, admits kind 9, `ITEM_VIEW`,
+only for a bit-10 session and with at least the 56-byte smallest ITM1 body,
+and admits kind 14, `DOCUMENT`, only for a bit-16 session and with at least
+the 32-byte smallest DOC1 body.
 TEXT_AREA and TEXT_GRID require at least the fixed 72-byte STX1 header; the
 caller supplies the complete canonical STX1 body as one bounded span, while the
 terminal remains the authority for its item and graph validation. All three

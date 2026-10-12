@@ -35,7 +35,7 @@ def test_grid_cells_capability_preserves_existing_collection_capacity_floors():
         with pytest.raises(ValueError, match="GRID_CELLS requires CONTROL_COLLECTIONS"):
             replace(policy, features=features)
     with pytest.raises(ValueError, match="reserved"):
-        replace(caps, features=FEATURES | (1 << 16))
+        replace(caps, features=FEATURES | (1 << 17))
     legacy = replace(caps, features=BASE_FEATURES)
     assert decode_ret_caps(encode_ret_caps(legacy)) == legacy
 

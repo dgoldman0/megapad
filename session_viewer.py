@@ -23,6 +23,7 @@ from rich_terminal.pygame_view import (
     ControlHitTarget,
     ControlIdentity,
     ControlSurface,
+    DocumentHitTarget,
     FieldHitTarget,
     HIT_MAP_ENTRY_TYPES,
     HitMapEntry,
@@ -47,6 +48,7 @@ from rich_terminal.retained_scene import ControlKind
 from rich_terminal.retained_wire import ControlEventKind
 from rich_terminal.retained_view import (
     DisplayScope,
+    DocumentDraw,
     ImageResourceManifest,
     ItemViewDraw,
     MenuBarDraw,
@@ -557,8 +559,8 @@ class _RetainedDisplayState:
         if any(not isinstance(entry, HIT_MAP_ENTRY_TYPES) for entry in entries):
             raise TypeError(
                 "hit_entries must contain only ControlHitTarget, "
-                "RegionOcclusion, ControlSurface, TextHitTarget, or "
-                "ItemHitTarget values"
+                "RegionOcclusion, ControlSurface, TextHitTarget, "
+                "ItemHitTarget, or DocumentHitTarget values"
             )
         return entries
 
@@ -1044,6 +1046,40 @@ class _GuestKeyboardForwarder:
             params.update(content_revision=target.content_revision, item_key=item_key)
         return self._request_now("send_text_event", **params)
 
+    def send_document_event(
+        self,
+        target: DocumentHitTarget,
+        kind: ControlEventKind,
+        *,
+        modifiers: int,
+        position: TextPosition | None = None,
+        wheel_x: int = 0,
+        wheel_y: int = 0,
+    ) -> bool:
+        """Send one FOLLOW, or SCROLL, for an acknowledged document."""
+
+        if not isinstance(target, DocumentHitTarget):
+            raise TypeError("target must be DocumentHitTarget")
+        identity = target.identity
+        params = {
+            "owner_id": identity.owner_id,
+            "owner_generation": identity.owner_generation,
+            "control_id": identity.control_id,
+            "event_kind": int(kind),
+            "modifiers": modifiers,
+        }
+        if kind is ControlEventKind.SCROLL:
+            params.update(wheel_x=wheel_x, wheel_y=wheel_y)
+        else:
+            if not isinstance(position, TextPosition):
+                raise TypeError("FOLLOW requires a TextPosition")
+            params.update(
+                content_revision=target.content_revision,
+                item_key=position.item_key,
+                scalar_offset=position.scalar_offset,
+            )
+        return self._request_now("send_text_event", **params)
+
     def send_field_event(
         self,
         target: FieldHitTarget,
@@ -1503,6 +1539,19 @@ class _PointerRouter:
                 self._text_identity = target.identity
                 self._text_position = text_position
             return True
+        if isinstance(target, DocumentHitTarget):
+            # SEMANTIC-CONTENT-1: a document is read-only, so a press on a
+            # link without Shift follows it; nothing else a press does there
+            # reaches the client.
+            if bit != _LEFT_BUTTON or modifiers & _APT_SHIFT:
+                return False
+            x, y, _width, _height = self._point_and_extent(position, terminal_size)
+            link = target.link_at(x, y)
+            if link is None:
+                return False
+            return self.keyboard.send_document_event(
+                target, ControlEventKind.FOLLOW, modifiers=modifiers, position=link
+            )
         if isinstance(target, ItemHitTarget):
             if bit != _LEFT_BUTTON:
                 return False
@@ -1620,6 +1669,14 @@ class _PointerRouter:
             )
         if isinstance(target, ItemHitTarget):
             return self.keyboard.send_item_event(
+                target,
+                ControlEventKind.SCROLL,
+                modifiers=modifiers,
+                wheel_x=wheel_x,
+                wheel_y=wheel_y,
+            )
+        if isinstance(target, DocumentHitTarget):
+            return self.keyboard.send_document_event(
                 target,
                 ControlEventKind.SCROLL,
                 modifiers=modifiers,
@@ -2044,7 +2101,7 @@ def _revision_only(previous, draw) -> bool:
 
     return (
         type(draw) is type(previous)
-        and isinstance(draw, (TextAreaDraw, TextGridDraw, ItemViewDraw))
+        and isinstance(draw, (TextAreaDraw, TextGridDraw, ItemViewDraw, DocumentDraw))
         and replace(
             draw,
             content=replace(
@@ -2058,7 +2115,7 @@ def _revision_only(previous, draw) -> bool:
 def _with_revision(entries, revision: int) -> tuple[HitMapEntry, ...]:
     return tuple(
         replace(entry, content_revision=revision)
-        if isinstance(entry, (TextHitTarget, ItemHitTarget))
+        if isinstance(entry, (TextHitTarget, ItemHitTarget, DocumentHitTarget))
         else entry
         for entry in entries
     )

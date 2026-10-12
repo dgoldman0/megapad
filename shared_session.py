@@ -26,6 +26,7 @@ from rich_terminal.retained_view import (
     INT64_MAX,
     INT64_MIN,
     DisplayScope,
+    DocumentDraw,
     FieldDraw,
     GlyphRunDraw,
     ImageDraw,
@@ -58,6 +59,7 @@ from rich_terminal.retained_view import (
 from rich_terminal.retained_scene import (
     ControlKind,
     ControlState,
+    ImageClip,
     ImageFit,
     ObjectBounds,
     Point,
@@ -79,6 +81,11 @@ from rich_terminal.semantic_items import (
 )
 from rich_terminal.semantic_fields import (
     FieldContent, decode_field_content, encode_field_content,
+)
+from rich_terminal.semantic_documents import (
+    DocumentContent,
+    decode_document_content,
+    encode_document_content,
 )
 from rich_terminal.update_authority import TerminalUpdateError
 from rich_terminal.retained_wire import ControlEventKind
@@ -636,6 +643,7 @@ _IMAGE_WIRE_FIELDS = (
     "fit",
     "opacity",
     "backdrop",
+    "clip",
 )
 _PANE_WIRE_FIELDS = (
     "kind",
@@ -787,6 +795,15 @@ _ITEM_VIEW_WIRE_FIELDS = (
     "bounds",
     "content_itm1_base64",
 )
+_DOCUMENT_WIRE_FIELDS = (
+    "kind",
+    "control_id",
+    "state",
+    "order",
+    "z_order",
+    "bounds",
+    "content_doc1_base64",
+)
 _FIELD_WIRE_FIELDS = (
     "kind", "control_id", "state", "order", "z_order", "bounds", "label",
     "content_fdc1_base64",
@@ -845,6 +862,12 @@ def _item_content_to_wire(content: ItemViewContent) -> str:
     """Carry the one canonical ITM1 schema through JSON without restating it."""
 
     return base64.b64encode(encode_item_view_content(content)).decode("ascii")
+
+
+def _document_content_to_wire(content: DocumentContent) -> str:
+    """Carry the one canonical DOC1 schema through JSON without restating it."""
+
+    return base64.b64encode(encode_document_content(content)).decode("ascii")
 
 
 def _field_content_to_wire(content: FieldContent) -> str:
@@ -995,6 +1018,14 @@ def _canonical_base64(value, name: str) -> bytes:
     return payload
 
 
+def _document_content_from_wire(value, name: str) -> DocumentContent:
+    payload = _canonical_base64(value, name)
+    try:
+        return decode_document_content(payload)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} is not canonical DOC1: {exc}") from exc
+
+
 def _item_content_from_wire(value, name: str) -> ItemViewContent:
     payload = _canonical_base64(value, name)
     try:
@@ -1035,7 +1066,7 @@ def _validate_collection_draw_shape(
     order: int,
     z_order: int,
     bounds: ObjectBounds,
-    content: SemanticTextContent | ItemViewContent,
+    content: SemanticTextContent | ItemViewContent | DocumentContent,
 ) -> None:
     """Reassert family rules from immutable O(1) content summaries."""
 
@@ -1182,6 +1213,9 @@ def _retained_draw_to_wire(
             "fit": int(draw.fit),
             "opacity": draw.opacity,
             "backdrop": draw.backdrop,
+            "clip": None
+            if draw.clip is None
+            else [draw.clip.x, draw.clip.y, draw.clip.cols, draw.clip.rows],
         }
     if isinstance(draw, PaneDraw):
         return {
@@ -1366,6 +1400,24 @@ def _retained_draw_to_wire(
             "z_order": draw.z_order,
             "bounds": _bounds_to_wire(draw.bounds),
             "content_itm1_base64": _item_content_to_wire(draw.content),
+        }
+    if isinstance(draw, DocumentDraw):
+        _validate_collection_draw_shape(
+            ControlKind.DOCUMENT,
+            draw.state,
+            draw.order,
+            draw.z_order,
+            draw.bounds,
+            draw.content,
+        )
+        return {
+            "kind": "document",
+            "control_id": draw.control_id,
+            "state": int(draw.state),
+            "order": draw.order,
+            "z_order": draw.z_order,
+            "bounds": _bounds_to_wire(draw.bounds),
+            "content_doc1_base64": _document_content_to_wire(draw.content),
         }
     if isinstance(draw, FieldDraw):
         validate_control_shape(
@@ -1647,6 +1699,45 @@ def _text_collection_from_wire(
     )
 
 
+def _document_from_wire(data, name: str) -> DocumentDraw:
+    wire = _wire_object(data, name, _DOCUMENT_WIRE_FIELDS)
+    if wire["kind"] != "document":
+        raise ValueError(f"{name} kind must be document")
+    state = _control_state_from_wire(wire["state"], f"{name} state")
+    order = _wire_integer(
+        wire["order"], f"{name} order", minimum=0, maximum=UINT32_MAX
+    )
+    z_order = _wire_integer(
+        wire["z_order"],
+        f"{name} z_order",
+        minimum=INT32_MIN,
+        maximum=INT32_MAX,
+    )
+    bounds = ObjectBounds(
+        *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+    )
+    content = _document_content_from_wire(
+        wire["content_doc1_base64"],
+        f"{name} content_doc1_base64",
+    )
+    _validate_collection_draw_shape(
+        ControlKind.DOCUMENT, state, order, z_order, bounds, content
+    )
+    return DocumentDraw(
+        control_id=_wire_integer(
+            wire["control_id"],
+            f"{name} control_id",
+            minimum=1,
+            maximum=UINT64_MAX,
+        ),
+        state=state,
+        order=order,
+        z_order=z_order,
+        bounds=bounds,
+        content=content,
+    )
+
+
 def _item_view_from_wire(data, name: str) -> ItemViewDraw:
     wire = _wire_object(data, name, _ITEM_VIEW_WIRE_FIELDS)
     if wire["kind"] != "item_view":
@@ -1830,6 +1921,7 @@ def _retained_draw_from_wire(
     | TaskBarDraw
     | ItemViewDraw
     | FieldDraw
+    | DocumentDraw
 ):
     if not isinstance(data, Mapping):
         raise TypeError(f"{name} must be an object")
@@ -1949,6 +2041,9 @@ def _retained_draw_from_wire(
             parent_bounds=_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
+            clip=None
+            if wire["clip"] is None
+            else ImageClip(*_wire_integer_array(wire["clip"], f"{name} clip", 4)),
         )
     if kind == "pane":
         wire = _wire_object(data, name, _PANE_WIRE_FIELDS)
@@ -2234,6 +2329,8 @@ def _retained_draw_from_wire(
         return _taskbar_from_wire(data, name)
     if kind == "item_view":
         return _item_view_from_wire(data, name)
+    if kind == "document":
+        return _document_from_wire(data, name)
     if kind == "field":
         return _field_from_wire(data, name)
     raise ValueError(f"{name} kind is not a retained draw kind")
