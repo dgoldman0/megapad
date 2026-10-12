@@ -77,6 +77,7 @@ def _guide(viewport_row: int = 0) -> DocumentContent:
             DocumentBlock(8, BlockKind.CODE, "x = 1\n\nprint(x)   # shown", rows_before=1),
             DocumentBlock(9, BlockKind.RULE, rows_before=1),
             DocumentBlock(10, BlockKind.FIGURE, "A sunset", rows_before=1, picture_rows=5),
+            DocumentBlock(11, BlockKind.PAGE, "iv", rows_before=1),
         ),
         viewport_row=viewport_row,
     )
@@ -86,12 +87,12 @@ def test_doc1_has_exact_headers_and_round_trips() -> None:
     content = _guide()
     raw = encode_document_content(content)
     assert len(raw) == content.wire_bytes
-    assert struct.unpack_from("<IHHQHHIII", raw) == (DOCUMENT_TAG, 1, 0, 5, 0, 0, 10, 0, 0)
+    assert struct.unpack_from("<IHHQHHIII", raw) == (DOCUMENT_TAG, 1, 0, 5, 0, 0, 11, 0, 0)
     # The first block: key, kind, level, rows before, inside, picture rows,
     # container count, reserved, text bytes, run count.
     assert struct.unpack_from("<QHHHHIHHII", raw, 32) == (1, 2, 1, 0, 0, 0, 0, 0, 15, 0)
     assert decode_document_content(raw) == content
-    assert content.object_slots == 11
+    assert content.object_slots == 12
     assert content.utf8_bytes == sum(len(block.text.encode()) for block in content.blocks)
     assert content.style_run_count == 2
     assert content.block(7).containers[0].number == 10
@@ -121,6 +122,8 @@ def test_containers_and_runs_have_exact_records() -> None:
         (lambda: DocumentBlock(1, BlockKind.FIGURE, "f"), "picture rows"),
         (lambda: DocumentBlock(1, BlockKind.CODE, "c", picture_rows=2), "picture rows"),
         (lambda: DocumentBlock(1, BlockKind.RULE, "r"), "no text"),
+        (lambda: DocumentBlock(1, BlockKind.PAGE, "3", containers=(QUOTE,)), "no container"),
+        (lambda: DocumentBlock(1, BlockKind.PAGE, "3", level=1), "only a heading"),
         (lambda: DocumentBlock(1, BlockKind.PARAGRAPH, "tab\there"), "control character"),
         (lambda: DocumentBlock(1, BlockKind.PARAGRAPH, "p", rows_before_inside=1),
          "more containers"),
@@ -180,6 +183,7 @@ def test_decoder_rejects_every_noncanonical_byte() -> None:
     assert code_of(bad) is SemanticContentErrorCode.PAYLOAD
     # The first block's kind, reserved field and heading level.
     for offset, size, value, code in (
+        (40, "<H", 7, SemanticContentErrorCode.ENUM),
         (40, "<H", 9, SemanticContentErrorCode.ENUM),
         (54, "<H", 1, SemanticContentErrorCode.RESERVED),
         (42, "<H", 0, SemanticContentErrorCode.CONSISTENCY),
@@ -256,6 +260,14 @@ def test_rows_follow_the_shared_line_rules() -> None:
     assert rows(9) == 2
     # A figure's picture rows, then its caption's one line.
     assert rows(10) == 1 + 5 + 1
+    # A page's label is laid out as a paragraph is: one line here, and one
+    # empty line when the label is empty.
+    assert lines(11) == [(0, 2, 2)] and rows(11) == 2
+    empty = DocumentBlock(12, BlockKind.PAGE)
+    assert block_row_count(DocumentContent(1, DocumentFlag(0), (empty,)), empty, 20) == 1
+    long = DocumentBlock(13, BlockKind.PAGE, "Appendix the second")
+    assert [(line.start, line.end) for line in block_lines(
+        DocumentContent(1, DocumentFlag(0), (long,)), long, 10)] == [(0, 9), (9, 19)]
     # A container wider than the root leaves one cell for text.
     wide = DocumentBlock(1, BlockKind.PARAGRAPH, "ab", containers=(BlockContainer(
         ContainerKind.QUOTE, 30),))
@@ -268,12 +280,12 @@ def test_rows_follow_the_shared_line_rules() -> None:
 def test_blocks_are_placed_one_after_another_from_the_viewport_row() -> None:
     content = _guide()
     placed = placed_blocks(content, 20)
-    assert [item.block.block_key for item in placed] == list(range(1, 11))
+    assert [item.block.block_key for item in placed] == list(range(1, 12))
     assert placed[0].top == 0 and placed[0].content_top == 0
     assert placed[1].top == 1 and placed[1].content_top == 2
     for before, after in zip(placed, placed[1:]):
         assert after.top == before.top + before.rows
-    figure = placed[-1]
+    figure = placed[-2]
     assert figure.text_top == figure.content_top + 5
     assert document_viewport_problem(content, 20, 60) is None
     # Scrolled two rows into the paragraph, which starts the carried blocks.

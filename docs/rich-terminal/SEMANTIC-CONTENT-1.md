@@ -27,7 +27,9 @@ lines for its CELL fallback; the Agent's transcript uses them.
 
 The `DOCUMENT` kind and its `DOC1` body serve part 12 of Akashic's rich
 experience plan: a document's blocks, with their structure, broken into
-lines by the renderer on rows the client also finds. They are specified
+lines by the renderer on rows the client also finds. Part 14 adds the
+`PAGE` block, which marks where a page of a paged document, such as a PDF,
+starts. They are specified
 below, with `SCROLL` and `FOLLOW` on documents. MegaPad implements them in
 the codec, the terminal's viewport and link checks, the reference renderer
 and its hit map, viewer routing, the shared-viewer transport, and the guest
@@ -55,7 +57,8 @@ Feature bit 9, `RET_CONTROL_COLLECTIONS`, gates the text, grid, tabset, and
 tab kinds and depends on bit 8 `RET_CONTROLS`. Feature bit 10,
 `RET_CONTROL_ITEMS`, gates `ITEM_VIEW` and the item input below and depends
 on bits 8 and 9. Feature bit 16, `RET_CONTROL_DOCUMENTS`, gates `DOCUMENT`
-and the document input below and depends on bits 8 and 9. The same
+and the document input below, every `DOC1` block kind with it, and depends
+on bits 8 and 9. The same
 `CONTROL_DEFINE`, `CONTROL_REPLACE`,
 `CONTROL_DROP`, owner authority, independent control-ID high-water, object
 quota, UTF-8 quota, transaction, and exact-revision publication rules apply.
@@ -434,7 +437,8 @@ within their widths. A card box or other mark lies within the card's rows.
 ## DOC1 body
 
 A document is text read from top to bottom, with its structure: paragraphs,
-headings, code, rules and figures, inside quotes and lists. The client
+headings, code, rules, figures and the starts of pages, inside quotes and
+lists. The client
 carries the blocks the root shows, in order, and says how far the first is
 scrolled. The renderer breaks their lines and draws them, and the client
 finds the same rows for its CELL fallback, so both agree on every row and
@@ -487,10 +491,13 @@ Block kinds are:
 | 3 | `CODE` | preformatted text, such as code, whose spaces and lines matter |
 | 4 | `RULE` | a break between parts of the text; it has no text |
 | 5 | `FIGURE` | a picture, then its caption as text |
+| 6 | `PAGE` | the start of a page; its text is the page's label |
 
 `level` is zero for every kind but `HEADING`. `picture rows` is positive for
 a `FIGURE` and zero for every other kind. A `RULE` has no text and no style
-runs.
+runs. A `PAGE` sits in no container, so its container count is zero; its
+text is the label the document gives the page, such as `iv` or `12`, and may
+be empty.
 
 A block's containers are the quotes and list items it sits in, outermost
 first:
@@ -532,8 +539,8 @@ indent `I` is the sum of its containers' widths, and its text width is
 
 1. its rows before, which hold no text;
 2. its content rows:
-   - for a `PARAGRAPH` or `HEADING`, its text broken into lines of width `T`,
-     paragraph by paragraph, by `APT-1-TEXT.md` Section 12;
+   - for a `PARAGRAPH`, `HEADING` or `PAGE`, its text broken into lines of
+     width `T`, paragraph by paragraph, by `APT-1-TEXT.md` Section 12;
    - for a `CODE` block, its text broken into hard lines of width `T`,
      paragraph by paragraph, by Section 12;
    - for a `RULE`, one row;
@@ -573,6 +580,8 @@ cells, and never moves a character from the cells the text rules give it:
   cells: it is not set in larger text;
 - a `CODE` block may have a background across its text area;
 - a `RULE` shows a line across its text area;
+- a `PAGE` marks the break in the cells its label's lines leave in its text
+  area, such as with a line across them;
 - a `FIGURE`'s picture rows are left unpainted across its text area.
 
 Text takes the looks of its style runs' meanings, as in STX1, and `LINK`
@@ -857,8 +866,10 @@ bullet in its first cell, and a numbered item its number and a full stop,
 right-aligned before its last cell, clipped to its cells when longer.
 Headings take the theme's `HEADING` look, in the bold face, with level 1 and
 2 also underlined; code blocks get a background across their text area;
-rules are a line across it; and a figure's picture rows are left as the CELL
-plane shows them. Text takes its style runs' looks from the theme. An
+rules are a line across it; a page's label is muted, with a rule's line
+through the middle of the cells each of its lines leaves, one cell clear of
+the label; and a figure's picture rows are left as the CELL plane shows
+them. Text takes its style runs' looks from the theme. An
 enabled document enters the hit map as a document target that keeps the
 rectangle of each link character its paint pass drew, and the reference
 viewer routes a left press on one, without Shift, as `FOLLOW`, and wheel

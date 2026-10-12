@@ -2,7 +2,7 @@
 
 A document is text read from top to bottom, with its structure
 (SEMANTIC-CONTENT-1, DOC1 body): paragraphs, headings, code, rules, and
-figures, inside quotes and list items.  The client carries the blocks the
+figures, inside quotes and list items, and the starts of its pages.  The client carries the blocks the
 root shows and says how far the first is scrolled; the renderer breaks their
 lines and draws them, and both find the same rows.
 
@@ -64,6 +64,7 @@ class BlockKind(IntEnum):
     CODE = 3
     RULE = 4
     FIGURE = 5
+    PAGE = 6
 
 
 class ContainerKind(IntEnum):
@@ -183,6 +184,8 @@ class DocumentBlock:
             raise ValueError("container count exceeds u16")
         if self.rows_before_inside > len(containers):
             raise ValueError("the rows before lie inside more containers than the block has")
+        if kind is BlockKind.PAGE and containers:
+            raise ValueError("a page's start sits in no container")
         object.__setattr__(self, "containers", containers)
         object.__setattr__(self, "_indent", sum(container.width for container in containers))
         if not isinstance(self.text, str):

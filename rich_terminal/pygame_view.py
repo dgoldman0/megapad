@@ -2846,8 +2846,10 @@ def _paint_document(
     numbered item its number and a full stop right-aligned before its last
     cell, clipped to its cells.  Headings take the theme's HEADING look,
     levels 1 and 2 underlined; code has a background across its text area;
-    a rule is a line across it; and a figure's picture rows are not painted
-    at all, so the CELL plane, or the figure's IMAGE above, shows there.
+    a rule is a line across it; a page's label is muted, with a line across
+    the cells its lines leave, one cell clear of the label; and a figure's
+    picture rows are not painted at all, so the CELL plane, or the figure's
+    IMAGE above, shows there.
     """
 
     anchor, visible_anchor = _semantic_root_rects(
@@ -2924,6 +2926,26 @@ def _paint_document(
                     surface.fill(look.underline if enabled else _DISABLED_TEXT, underline)
             if meaning is TextStyle.LINK and character.text.strip():
                 links.append(DocumentLink(_pixel_rect(clip), block.block_key, character.start))
+
+    def paint_break(line, row: int, first: int, last: int) -> None:
+        """A page's break: a line across the cells its label's line leaves
+        between slots FIRST and LAST, one cell clear of the label."""
+
+        if not 0 <= row < rows:
+            return
+        gap = 1 if line.width else 0
+        if line.rtl:
+            begin, end = first, last - line.width - gap
+        else:
+            begin, end = first + line.width + gap, last
+        if end <= begin:
+            return
+        middle = (row_edge(row) + row_edge(row + 1)) // 2
+        rect = _clipped_python_rect(
+            pygame_module, slot_edge(begin), middle, slot_edge(end), middle + 1, visible_anchor
+        )
+        if rect is not None:
+            surface.fill(_DOCUMENT_RULE, rect)
 
     def paint_mark(text: str, first: int, last: int, row: int, *, end: bool) -> None:
         """Paint a container's mark in its cells, at their end when END."""
@@ -3003,6 +3025,8 @@ def _paint_document(
                     base_look = TextLook(heading.color, bold=True, underline=heading.color)
             elif block.kind is BlockKind.FIGURE:
                 base_look = TextLook(_MUTED_TEXT, italic=True)
+            elif block.kind is BlockKind.PAGE:
+                base_look = TextLook(_MUTED_TEXT)
             if block.kind is BlockKind.CODE:
                 for row in range(max(item.content_top, 0),
                                  min(item.content_top + len(item.lines), rows)):
@@ -3011,6 +3035,8 @@ def _paint_document(
                         surface.fill(_DOCUMENT_CODE, rect)
             for index, line in enumerate(item.lines):
                 paint_line(block, line, item.text_top + index, indent, text_last, base_look)
+                if block.kind is BlockKind.PAGE:
+                    paint_break(line, item.text_top + index, indent, text_last)
         if not appearance.flowing:
             _paint_clipped_border(
                 pygame_module, surface,

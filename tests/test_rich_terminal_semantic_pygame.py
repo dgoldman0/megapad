@@ -1731,6 +1731,39 @@ def test_document_paints_its_blocks_on_their_rows_and_maps_its_links():
     assert tuple(surface.get_at((40, 45)))[:3] == (239, 243, 249)
 
 
+def test_a_page_marks_its_break_beside_its_label():
+    pygame = pytest.importorskip("pygame")
+    content = DocumentContent(
+        7,
+        DocumentFlag(0),
+        (
+            DocumentBlock(1, BlockKind.PAGE, "iv"),
+            DocumentBlock(2, BlockKind.PARAGRAPH, "text", rows_before=1),
+            DocumentBlock(3, BlockKind.PAGE, rows_before=1),
+        ),
+    )
+    draw = DocumentDraw(60, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 20, 12), content)
+    surface, _result = _render(pygame, _plane(_region(draw)))
+    rule = (94, 107, 126)
+    # "iv" takes cells 0 and 1 of row 0, muted; cell 2 is left clear, and a
+    # line runs from cell 3 to the root's edge through the row's middle.
+    assert tuple(surface.get_at((25, 5)))[:3] == (18, 23, 31)
+    assert tuple(surface.get_at((35, 5)))[:3] == rule
+    assert tuple(surface.get_at((195, 5)))[:3] == rule
+    assert tuple(surface.get_at((35, 2)))[:3] == (18, 23, 31)
+    # A page with no label is a line across the whole row (row 4).
+    assert tuple(surface.get_at((5, 45)))[:3] == rule
+    assert tuple(surface.get_at((195, 45)))[:3] == rule
+    # Right to left, the label sits at the right and the line runs to its
+    # left, one cell clear of it.
+    rtl = DocumentContent(8, DocumentFlag.DIRECTION_RTL, (DocumentBlock(1, BlockKind.PAGE, "iv"),))
+    draw = DocumentDraw(60, VISIBLE | ENABLED, 0, 0, ObjectBounds(0, 0, 20, 12), rtl)
+    surface, _result = _render(pygame, _plane(_region(draw)))
+    assert tuple(surface.get_at((5, 5)))[:3] == rule
+    assert tuple(surface.get_at((165, 5)))[:3] == rule
+    assert tuple(surface.get_at((175, 5)))[:3] == (18, 23, 31)
+
+
 def test_a_disabled_document_is_a_surface_without_links():
     pygame = pytest.importorskip("pygame")
     _surface, result = _render(pygame, _plane(_region(_document(state=VISIBLE))))
