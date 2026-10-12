@@ -32,6 +32,7 @@ from rich_terminal.retained_model import (
 )
 from rich_terminal.retained_resources import RGBAResource, ResourceDeclaration
 from rich_terminal.retained_scene import (
+    ImageClip,
     ImageFit,
     ObjectBounds,
     RGBA,
@@ -933,6 +934,74 @@ def test_display_offer_wire_round_trip_is_lossless_and_bounded():
     leaked_pixels["resources"][0]["data_base64"] = "AA=="
     with pytest.raises(ValueError, match="fields are not exact"):
         retained_draw_plane_from_wire(leaked_pixels)
+
+
+def test_display_wire_carries_signed_object_offsets():
+    """CELL_RECT32 offsets are signed: a picture scrolled partly above and
+    left of its region, through a parent placed the same way, and a glyph
+    run starting left of its region cross the wire as they are, and only a
+    dimension must be positive."""
+
+    glyphs = GlyphRunDraw(
+        object_id=17,
+        z_order=0,
+        bounds=ObjectBounds(-2, 0, 4, 1),
+        foreground=RGBA(5, 6, 7, 255),
+        background=RGBA(9, 10, 11, 255),
+        attributes=0,
+        text="edge",
+    )
+    image = ImageDraw(
+        object_id=31,
+        z_order=0,
+        bounds=ObjectBounds(-1, -3, 6, 5),
+        resource_id=37,
+        fit=ImageFit.CONTAIN,
+        opacity=255,
+        backdrop=True,
+        parent_bounds=(ObjectBounds(0, -1, 9, 9),),
+        clip=ImageClip(1, 4, 5, 1),
+    )
+    plane = RetainedDrawPlane(
+        retained_initialized=True,
+        retained_visible=True,
+        regions=(
+            RetainedRegionDraw(
+                owner_id=19,
+                owner_generation=23,
+                region_id=29,
+                logical_x=0,
+                logical_y=0,
+                logical_cols=8,
+                logical_rows=4,
+                clip_x=0,
+                clip_y=0,
+                clip_cols=0,
+                clip_rows=0,
+                z_order=0,
+                clipped=True,
+                draws=(glyphs, image),
+            ),
+        ),
+        resources=(
+            ImageResourceManifest(
+                owner_id=19,
+                owner_generation=23,
+                resource_id=37,
+                format=ResourceFormat.RGBA8,
+                width=2,
+                height=1,
+                byte_length=8,
+            ),
+        ),
+    )
+    wire = retained_draw_plane_to_wire(plane)
+    assert wire["regions"][0]["draws"][1]["bounds"] == [-1, -3, 6, 5]
+    assert retained_draw_plane_from_wire(wire) == plane
+    empty = retained_draw_plane_to_wire(plane)
+    empty["regions"][0]["draws"][1]["bounds"][3] = 0
+    with pytest.raises(ValueError, match=r"bounds\[3\] must be between 1"):
+        retained_draw_plane_from_wire(empty)
 
 
 def test_display_wire_rejects_bool_in_integer_fields():

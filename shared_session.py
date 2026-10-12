@@ -891,17 +891,6 @@ def _bounds_path_to_wire(bounds_path: tuple[ObjectBounds, ...]) -> list[list[int
     return [_bounds_to_wire(bounds) for bounds in bounds_path]
 
 
-def _bounds_path_from_wire(value, name: str) -> tuple[ObjectBounds, ...]:
-    if not isinstance(value, (list, tuple)):
-        raise TypeError(f"{name} must be an array")
-    return tuple(
-        ObjectBounds(
-            *_wire_integer_array(item, f"{name}[{index}]", 4)
-        )
-        for index, item in enumerate(value)
-    )
-
-
 def _series_history_to_wire(history: SeriesHistoryDraw) -> dict:
     if not isinstance(history, SeriesHistoryDraw):
         raise TypeError("history must be SeriesHistoryDraw")
@@ -1668,9 +1657,7 @@ def _text_collection_from_wire(
         minimum=INT32_MIN,
         maximum=INT32_MAX,
     )
-    bounds = ObjectBounds(
-        *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-    )
+    bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
     content = _semantic_content_from_wire(
         wire["content_stx1_base64"],
         f"{name} content_stx1_base64",
@@ -1713,9 +1700,7 @@ def _document_from_wire(data, name: str) -> DocumentDraw:
         minimum=INT32_MIN,
         maximum=INT32_MAX,
     )
-    bounds = ObjectBounds(
-        *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-    )
+    bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
     content = _document_content_from_wire(
         wire["content_doc1_base64"],
         f"{name} content_doc1_base64",
@@ -1752,9 +1737,7 @@ def _item_view_from_wire(data, name: str) -> ItemViewDraw:
         minimum=INT32_MIN,
         maximum=INT32_MAX,
     )
-    bounds = ObjectBounds(
-        *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-    )
+    bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
     content = _item_content_from_wire(
         wire["content_itm1_base64"],
         f"{name} content_itm1_base64",
@@ -1823,9 +1806,7 @@ def _tabset_from_wire(data, name: str) -> TabSetDraw:
             minimum=INT32_MIN,
             maximum=INT32_MAX,
         ),
-        bounds=ObjectBounds(
-            *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-        ),
+        bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
         tabs=tuple(
             _tab_from_wire(tab, f"{name} tab {tab_index}")
             for tab_index, tab in enumerate(tabs_wire)
@@ -1928,7 +1909,7 @@ def _retained_draw_from_wire(
     kind = data.get("kind")
     if kind == "glyph_run":
         wire = _wire_object(data, name, _GLYPH_RUN_WIRE_FIELDS)
-        bounds = _wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+        bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
         foreground = _wire_integer_array(
             wire["foreground"], f"{name} foreground", 4, maximum=0xFF
         )
@@ -1948,7 +1929,7 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(*bounds),
+            bounds=bounds,
             foreground=RGBA(*foreground),
             background=RGBA(*background),
             attributes=_wire_integer(
@@ -1958,7 +1939,7 @@ def _retained_draw_from_wire(
                 maximum=0x7F,
             ),
             text=_wire_text(wire["text"], f"{name} text"),
-            parent_bounds=_bounds_path_from_wire(
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
         )
@@ -1980,10 +1961,8 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             points=tuple(
@@ -2020,9 +1999,7 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
             resource_id=_wire_integer(
                 wire["resource_id"],
                 f"{name} resource_id",
@@ -2038,7 +2015,7 @@ def _retained_draw_from_wire(
                 wire["opacity"], f"{name} opacity", minimum=0, maximum=0xFF
             ),
             backdrop=_wire_boolean(wire["backdrop"], f"{name} backdrop"),
-            parent_bounds=_bounds_path_from_wire(
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             clip=None
@@ -2065,7 +2042,7 @@ def _retained_draw_from_wire(
             ),
             title=_wire_text(wire["title"], f"{name} title"),
             focused=_wire_boolean(wire["focused"], f"{name} focused"),
-            parent_bounds=_bounds_path_from_wire(
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
         )
@@ -2105,10 +2082,8 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             foreground=RGBA(
@@ -2135,10 +2110,8 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             foreground=RGBA(
@@ -2184,10 +2157,8 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             inactive=RGBA(
@@ -2219,10 +2190,8 @@ def _retained_draw_from_wire(
             z_order=_wire_integer(
                 wire["z_order"], f"{name} z_order", minimum=INT32_MIN, maximum=INT32_MAX
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             series_id=_wire_integer(
@@ -2254,10 +2223,8 @@ def _retained_draw_from_wire(
             z_order=_wire_integer(
                 wire["z_order"], f"{name} z_order", minimum=INT32_MIN, maximum=INT32_MAX
             ),
-            bounds=ObjectBounds(
-                *_wire_integer_array(wire["bounds"], f"{name} bounds", 4)
-            ),
-            parent_bounds=_bounds_path_from_wire(
+            bounds=_cell_bounds_from_wire(wire["bounds"], f"{name} bounds"),
+            parent_bounds=_cell_bounds_path_from_wire(
                 wire["parent_bounds"], f"{name} parent_bounds"
             ),
             series_id=_wire_integer(
@@ -2289,7 +2256,7 @@ def _retained_draw_from_wire(
         )
     if kind == "menu_bar":
         wire = _wire_object(data, name, _MENU_BAR_WIRE_FIELDS)
-        bounds = _wire_integer_array(wire["bounds"], f"{name} bounds", 4)
+        bounds = _cell_bounds_from_wire(wire["bounds"], f"{name} bounds")
         menus_wire = wire["menus"]
         if not isinstance(menus_wire, (list, tuple)):
             raise TypeError(f"{name} menus must be an array")
@@ -2313,7 +2280,7 @@ def _retained_draw_from_wire(
                 minimum=INT32_MIN,
                 maximum=INT32_MAX,
             ),
-            bounds=ObjectBounds(*bounds),
+            bounds=bounds,
             menus=tuple(
                 _menu_from_wire(menu, f"{name} menu {menu_index}")
                 for menu_index, menu in enumerate(menus_wire)

@@ -377,7 +377,7 @@ def test_object_draws_round_trip_with_exact_group_paths_and_vector_geometry():
         (
             lambda draw: draw["parent_bounds"].append([0, 0, 1]),
             TypeError,
-            "array of 4 integers",
+            "array of four integers",
         ),
         (
             lambda draw: draw.update({"closed": 1}),
