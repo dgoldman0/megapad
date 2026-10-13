@@ -19,6 +19,7 @@ from dataclasses import dataclass, fields
 from shared.cells import MASK64, s64, u64
 from simulator.dictionary import Word
 from simulator.ir import Call, Literal, Operation
+from simulator.memory import GuestCell
 from simulator.runtime import (
     ColonDefinition,
     ConstantDefinition,
@@ -34,6 +35,7 @@ from simulator.source import SourceCursor
 
 
 _SCAN_CHUNK_BYTES = 4096
+_FIRST_SCAN_CHUNK_BYTES = 256
 _SEC_MEASURE_DIGEST = (
     "8baea05066c381040309e896a87a46325be8435e62345b982cafe782c6b9375f"
 )
@@ -287,6 +289,7 @@ def _build_checked_line_accelerator(
     if not isinstance(evaluate.implementation, PrimitiveDefinition):
         raise ValueError("KDOS EVALUATE-CHECKED does not bind primitive EVALUATE")
     eval_status = _require_call(runtime, word, 22, b"EVAL-STATUS").body_address
+    eval_status_cell = GuestCell(runtime.memory, eval_status)
     compiler_state = runtime._require_bios_evaluator().compiler_state
     interpret_primitives = frozenset(
         primitive
@@ -329,7 +332,7 @@ def _build_checked_line_accelerator(
         # Dispatch the exact primitive XT captured by that wrapper so the
         # nested evaluator contributes its ordinary semantic step as well.
         runtime.execute(evaluate.xt, context=context)
-        context.data.push(runtime.memory.read64(eval_status))
+        context.data.push(eval_status_cell.read())
 
     return applicable, callback
 
@@ -401,6 +404,12 @@ def _build_checked_source_accelerator(
     eval_len = _require_call(runtime, measure, 27, b"_SEC-EVAL-LEN").body_address
     line = _require_call(runtime, word, 5, b"_SEC-LINE").body_address
     eval_line = _require_call(runtime, word, 16, b"EVAL-LINE").body_address
+    cur_cell = GuestCell(runtime.memory, cur)
+    rem_cell = GuestCell(runtime.memory, rem)
+    raw_len_cell = GuestCell(runtime.memory, raw_len)
+    eval_len_cell = GuestCell(runtime.memory, eval_len)
+    line_cell = GuestCell(runtime.memory, line)
+    eval_line_cell = GuestCell(runtime.memory, eval_line)
 
     def applicable(context: ExecutionContext) -> bool:
         if context.data.depth() < 2:
@@ -411,27 +420,27 @@ def _build_checked_source_accelerator(
 
     def callback(context: ExecutionContext) -> None:
         length = context.data.pop()
-        runtime.memory.write64(rem, length)
+        rem_cell.write(length)
         address = context.data.pop()
-        runtime.memory.write64(cur, address)
-        runtime.memory.write64(line, 0)
+        cur_cell.write(address)
+        line_cell.write(0)
 
-        while s64(runtime.memory.read64(rem)) > 0:
-            line_number = u64(runtime.memory.read64(line) + 1)
-            runtime.memory.write64(line, line_number)
-            runtime.memory.write64(eval_line, line_number)
+        while s64(rem_cell.read()) > 0:
+            line_number = u64(line_cell.read() + 1)
+            line_cell.write(line_number)
+            eval_line_cell.write(line_number)
 
-            current = runtime.memory.read64(cur)
-            remaining = runtime.memory.read64(rem)
+            current = cur_cell.read()
+            remaining = rem_cell.read()
             measured = _line_length(runtime, current, remaining)
-            runtime.memory.write64(raw_len, measured)
-            runtime.memory.write64(eval_len, measured)
+            raw_len_cell.write(measured)
+            eval_len_cell.write(measured)
             evaluated = measured
             if s64(evaluated) > 0 and runtime.memory.read8(
                 u64(current + evaluated - 1)
             ) == 13:
                 evaluated = u64(evaluated - 1)
-                runtime.memory.write64(eval_len, evaluated)
+                eval_len_cell.write(evaluated)
 
             if s64(evaluated) > 0:
                 context.data.push(current)
@@ -448,20 +457,14 @@ def _build_checked_source_accelerator(
             # Re-read every cell after evaluation.  Nested source evaluation
             # and even ordinary source writes therefore perturb these global
             # walker variables exactly as they do in the KDOS definition.
-            measured = runtime.memory.read64(raw_len)
-            runtime.memory.write64(
-                cur,
-                u64(runtime.memory.read64(cur) + measured),
-            )
-            runtime.memory.write64(
-                rem,
-                u64(runtime.memory.read64(rem) - measured),
-            )
-            if s64(runtime.memory.read64(rem)) > 0:
-                runtime.memory.write64(cur, u64(runtime.memory.read64(cur) + 1))
-                runtime.memory.write64(rem, u64(runtime.memory.read64(rem) - 1))
+            measured = raw_len_cell.read()
+            cur_cell.write(u64(cur_cell.read() + measured))
+            rem_cell.write(u64(rem_cell.read() - measured))
+            if s64(rem_cell.read()) > 0:
+                cur_cell.write(u64(cur_cell.read() + 1))
+                rem_cell.write(u64(rem_cell.read() - 1))
 
-        runtime.memory.write64(eval_line, runtime.memory.read64(line))
+        eval_line_cell.write(line_cell.read())
         runtime.execute(finish.xt, context=context)
 
     return applicable, callback
@@ -483,10 +486,16 @@ def _build_loader_walk_accelerator(
     line_len = _require_call(runtime, word, 42, b"LD-LEN").body_address
     line = _require_call(runtime, word, 5, b"LD-LINE").body_address
     eval_line = _require_call(runtime, word, 16, b"EVAL-LINE").body_address
+    buffer_cell = GuestCell(runtime.memory, buffer)
+    size_cell = GuestCell(runtime.memory, size)
+    cur_cell = GuestCell(runtime.memory, cur)
+    line_len_cell = GuestCell(runtime.memory, line_len)
+    line_cell = GuestCell(runtime.memory, line)
+    eval_line_cell = GuestCell(runtime.memory, eval_line)
 
     def applicable(_context: ExecutionContext) -> bool:
-        remaining = runtime.memory.read64(size)
-        address = runtime.memory.read64(buffer)
+        remaining = size_cell.read()
+        address = buffer_cell.read()
         return s64(remaining) <= 0 or _ordinary_span(
             runtime,
             address,
@@ -494,18 +503,18 @@ def _build_loader_walk_accelerator(
         )
 
     def callback(context: ExecutionContext) -> None:
-        runtime.memory.write64(cur, runtime.memory.read64(buffer))
-        runtime.memory.write64(line, 0)
+        cur_cell.write(buffer_cell.read())
+        line_cell.write(0)
 
-        while s64(runtime.memory.read64(size)) > 0:
-            line_number = u64(runtime.memory.read64(line) + 1)
-            runtime.memory.write64(line, line_number)
-            runtime.memory.write64(eval_line, line_number)
+        while s64(size_cell.read()) > 0:
+            line_number = u64(line_cell.read() + 1)
+            line_cell.write(line_number)
+            eval_line_cell.write(line_number)
 
-            current = runtime.memory.read64(cur)
-            remaining = runtime.memory.read64(size)
+            current = cur_cell.read()
+            remaining = size_cell.read()
             measured = _line_length(runtime, current, remaining)
-            runtime.memory.write64(line_len, measured)
+            line_len_cell.write(measured)
             evaluated = measured
             if s64(evaluated) > 0 and runtime.memory.read8(
                 u64(current + evaluated - 1)
@@ -518,18 +527,12 @@ def _build_loader_walk_accelerator(
                 runtime.execute(evaluator.xt, context=context)
                 runtime.execute(status_throw.xt, context=context)
 
-            measured = runtime.memory.read64(line_len)
-            runtime.memory.write64(
-                cur,
-                u64(runtime.memory.read64(cur) + measured),
-            )
-            runtime.memory.write64(
-                size,
-                u64(runtime.memory.read64(size) - measured),
-            )
-            if s64(runtime.memory.read64(size)) > 0:
-                runtime.memory.write64(cur, u64(runtime.memory.read64(cur) + 1))
-                runtime.memory.write64(size, u64(runtime.memory.read64(size) - 1))
+            measured = line_len_cell.read()
+            cur_cell.write(u64(cur_cell.read() + measured))
+            size_cell.write(u64(size_cell.read() - measured))
+            if s64(size_cell.read()) > 0:
+                cur_cell.write(u64(cur_cell.read() + 1))
+                size_cell.write(u64(size_cell.read() - 1))
 
         runtime.execute(finish.xt, context=context)
         runtime.execute(status_throw.xt, context=context)
@@ -566,14 +569,19 @@ def _line_length(
 
     if s64(remaining) <= 0:
         return 0
+    # Source lines are short, so read a small first chunk and double it up
+    # to the scan bound rather than copying the full bound for every line.
+    # The first LF found is the same either way.
     offset = 0
+    chunk = _FIRST_SCAN_CHUNK_BYTES
     while offset < remaining:
-        count = min(_SCAN_CHUNK_BYTES, remaining - offset)
+        count = min(chunk, remaining - offset)
         payload = runtime.memory.read_bytes(address + offset, count)
         newline = payload.find(b"\n")
         if newline >= 0:
             return offset + newline
         offset += count
+        chunk = min(chunk * 2, _SCAN_CHUNK_BYTES)
     return remaining
 
 
