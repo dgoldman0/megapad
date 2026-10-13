@@ -825,6 +825,7 @@ def test_known_python_boundaries_do_not_make_empty_native_round_trips(monkeypatc
     class ObservedProgram:
         install = program.install
         clear = program.clear
+        snapshot_stack = program.snapshot_stack
 
         @staticmethod
         def run(xt, ip, *args):

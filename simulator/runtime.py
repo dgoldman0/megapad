@@ -3507,7 +3507,7 @@ class MegaForthRuntime:
         """Execute atomically with respect to internal return-stack state."""
 
         context._require_reusable()
-        return_snapshot = context.returns.snapshot()
+        return_snapshot = self._stack_snapshot(context.returns)
         capture_checkpoint = context.returns.pointer_capture_checkpoint()
         root_id = self._allocate_dispatch_root_id()
         frame = _DispatchFrame(context, meter, root_id)
