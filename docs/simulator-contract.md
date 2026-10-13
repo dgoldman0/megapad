@@ -859,7 +859,10 @@ SHA-512 context with active marker 2, as the BIOS's do; it is not an MMIO servic
 length and SHA-512 a checked 128-bit bit length. Active marker, high-word where
 applicable, partial-offset bound, byte alignment, and length/offset agreement
 are validated before an empty update may succeed. Every nonzero continuation
-result aborts and logically wipes the selected context.
+result aborts and logically wipes the selected context. `SHA384-INIT` and
+`SHA384-FINAL` are appended at the end of the hosted core vocabulary, and the
+BIOS's `2ROT` after them, since Akashic's checked SHA-2 one-shots of three
+spans use it; a hosted `2ROT` refuses an underflow without moving a cell.
 
 SHA-2 physical-span qualification is deliberately broader than
 `CALLER-SPAN-STATUS`. Empty spans ignore their address. A nonempty span may

@@ -152,6 +152,16 @@ def _two_swap(context: ExecutionContext) -> None:
     context.data.push(second)
 
 
+def _two_rot(context: ExecutionContext) -> None:
+    """2ROT ( a b c d e f -- c d e f a b ), refusing an underflow whole."""
+
+    context.data.peek(5)
+    cells = [context.data.pop() for _ in range(6)]
+    f, e, d, c, b, a = cells
+    for value in (c, d, e, f, a, b):
+        context.data.push(value)
+
+
 def _question_dup(context: ExecutionContext) -> None:
     value = context.data.peek()
     if value != 0:
@@ -3012,6 +3022,9 @@ def install_core(runtime: MegaForthRuntime) -> None:
         b"SHA384-FINAL",
         lambda context: _sha384_final(runtime, context),
     )
+
+    # 2ROT follows: the checked SHA-2 one-shots of three spans use it.
+    runtime.define_primitive(b"2ROT", _two_rot)
 
 
 def _scalar_float_word(service, shape: str, op: int | None):
