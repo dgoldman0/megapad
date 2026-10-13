@@ -1,7 +1,7 @@
 # Simulator speed plan: boot compile, typing host work, guest work
 
 Status: agreed 2026-10-13 (see Decisions). Step 1a is done (see Step 1a
-results); 1b is next.
+results). Step 1b is designed and in progress.
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -104,39 +104,29 @@ work it removes is redundant, and keep guest-visible behavior identical.
 The expected saving is 9 to 10 of the 40 seconds. 1a is measured on its own,
 before 1b starts.
 
-**1b. A native evaluator that owns the dictionary.** This is a C++ loop in
-`_megaforth_native` that evaluates a run of source lines straight from guest
-memory. It tokenizes, looks names up, compiles calls, literals and the
-compile-time control structures, and publishes each definition itself. The
-dictionary's host-side metadata moves into native code: the bindings, the
-words and their compiled bodies. Python reads and changes them through the
-native interface. This is a step toward native construction of the
-dictionary generally, not only a faster loader. The evaluator hands back to
-Python, with its exact position, at the first token it does not admit:
+**1b. A native evaluator that owns the dictionary.** The design is in
+[simulator-native-evaluator.md](simulator-native-evaluator.md). The
+dictionary's host-side metadata moves into `_megaforth_native`: the bindings,
+the words, their compiled IR and the side index. Python reads and changes
+them through a facade with the existing `Dictionary` interface. This is a
+step toward native construction of the dictionary generally, not only a
+faster loader.
 
-- a word that would run guest code;
-- a directive outside the admitted set;
-- an undefined token;
-- the end of the buffer.
-
-The loader overlays pass it whole runs of lines, not one line per call, so
-the per-line protocol mostly disappears.
+The two loader overlays pass whole runs of lines to a native line walker. It
+evaluates each line the checked-line rule admits, and hands any other line
+back to Python whole, because that rule chooses the per-line protocol for the
+whole line. The work lands in four slices: the dictionary, the walker, plans
+built from native IR, and a wider checked-line rule.
 
 The rules:
 
-- **Exactness.** The dictionary bytes, IR, HERE, statuses, diagnostics and
-  step counts must be the same as the Python evaluator's. Compiling a token
-  counts no guest steps, and guest code still runs through the existing
-  dispatcher and executor, so step accounting is unchanged.
-- **Reference.** The Python evaluator stays as the reference for a
-  differential gate. The gate evaluates KDOS, the system modules and all 50
-  Akashic chunks both ways and compares the results byte for byte. Tokens
-  the native evaluator hands back still run through Python, which then
-  publishes through the native interface.
-- **Design first.** The interface between the native dictionary and the
-  Python runtime is designed after 1a has landed and been measured. Every
-  Python user of the dictionary needs a native path: lookup, the dispatcher's
-  resolution, the executor's plans, rollback and the side index.
+- **Exactness.** Guest memory, both stack pointers, the continuation cookie
+  counter, semantic steps, `HERE`, `LATEST`, every definition and its IR, the
+  side index, the evaluator cells and UART output must match the Python
+  evaluator's. Only host-side counters may differ.
+- **Reference.** The Python backend stays as the reference for a differential
+  gate. The gate compares complete boots of KDOS, the system modules and all
+  50 Akashic chunks.
 - **Contracts.** The evaluator keeps every rule in `simulator-contract.md` §4:
   - at most 255 bytes per `EVALUATE`;
   - sticky first failure;
@@ -146,8 +136,10 @@ The rules:
 
   It is not a compiled-Forth cache: source is evaluated every boot.
 
-The expected result is a boot compile of a few seconds instead of the 30 or
-so left after 1a. That has to be measured; it is not a promise.
+The walker should remove most of the per-line and per-token bookkeeping,
+about 18 of the 27 s left after 1a. The wider rule moves most of the
+remaining Python lines to the walker too. Both have to be measured; neither
+is a promise.
 
 **1c. Native tile-engine words.** Admit `FP16-MODE`, `TSRC0!`, `TSRC1!`,
 `TDST!`, `TMUL`, `TADD` and `TSUB` in the native executor.
