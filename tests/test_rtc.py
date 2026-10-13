@@ -110,6 +110,8 @@ def test_cpp_realtime_rtc_sync_and_reanchor_paths_remain_callable():
     rtc.read8(0x08)
     rtc.read8(0x10)
     rtc.write8(0x08, rtc.epoch_ms & 0xFF)
+    rtc.write8(0x0F, (rtc.epoch_ms >> 56) & 0xFF)
+    rtc.seed_epoch_ms(rtc.epoch_ms)
 
     rtc.write8(0x18, 0)
     paused = rtc.snapshot()
@@ -197,6 +199,7 @@ def _observable_state(device):
         "uptime_ms", "epoch_ms", "sec", "min", "hour", "day", "mon",
         "year", "dow", "ctrl", "status", "alarm_sec", "alarm_min",
         "alarm_hour", "irq_pending", "_ms_prescaler", "_sec_prescaler",
+        "epoch_valid", "_epoch_stage",
     ))
 
 
@@ -245,6 +248,70 @@ def test_cpp_rtc_matches_reference_latches_writes_and_pause():
         device.tick(RTC.MS_DIVISOR // 2)
 
     assert _observable_state(native) == _observable_state(reference)
+
+
+def test_epoch_bytes_stage_until_byte_seven_commits():
+    reference, native = _rtc_pair()
+    value = 0x0123_4567_89AB_CDEF
+    for device in (reference, native):
+        device.ctrl = 0
+        start = device.epoch_ms
+        assert not device.epoch_valid
+        assert device.read8(0x1D) == 0
+        for index in range(7):
+            device.write8(0x08 + index, (value >> (8 * index)) & 0xFF)
+        assert device.epoch_ms == start
+        assert device._epoch_stage == value & ((1 << 56) - 1)
+        assert device.read8(0x1D) == 0
+        device.write8(0x0F, value >> 56)
+        assert device.epoch_ms == value
+        assert device.read8(0x1D) == 1
+        device.write8(0x1D, 0)          # read-only
+        assert device.epoch_valid
+    assert _observable_state(native) == _observable_state(reference)
+
+
+def test_epoch_valid_follows_host_seeding():
+    cpu = Megapad64(mem_size=64 * 1024)
+    assert not RTC().epoch_valid
+    assert not CppRTCProxy(cpu._cs).epoch_valid
+    assert RTC(initial_epoch_ms=0).epoch_valid
+    assert CppRTCProxy(cpu._cs, initial_epoch_ms=0).epoch_valid
+    with patch("devices._time.time", return_value=1_000.0), patch(
+        "devices._time.monotonic",
+        return_value=5.0,
+    ):
+        assert RTC(realtime=True).epoch_valid
+    for device in (RTC(), CppRTCProxy(cpu._cs)):
+        device.seed_epoch_ms(1_760_000_000_000)
+        assert device.epoch_valid
+        assert device.epoch_ms == 1_760_000_000_000
+    assert not MegapadSystem(ram_size=64 * 1024).rtc.epoch_valid
+    assert MegapadSystem(
+        ram_size=64 * 1024,
+        rtc_epoch_ms=1_760_000_000_000,
+    ).rtc.epoch_valid
+
+
+def test_full_width_epoch_store_commits_once():
+    system = MegapadSystem(ram_size=64 * 1024)
+    system.rtc.ctrl = 0
+    value = 0x0000_0199_A1B2_C3D4
+    code = assemble(f"""
+        ldi64 r11, {MMIO_BASE + RTC_BASE + 0x08}
+        ldi64 r9, {value}
+        str r11, r9
+        ldi64 r10, {MMIO_BASE + RTC_BASE + 0x1D}
+        ld.b r1, r10
+        halt
+    """)
+    system.load_binary(0, code)
+    system.boot()
+    system.run_batch(100)
+
+    assert system.rtc.epoch_ms == value
+    assert system.rtc.epoch_valid
+    assert system.cpu.regs[1] == 1
 
 
 def test_system_rtc_access_widths_stay_in_native_batch_loop():

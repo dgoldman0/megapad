@@ -10142,6 +10142,59 @@ w_epoch_fetch:
     str r14, r1
     ret.l
 
+; EPOCH! ( epoch-ms -- )
+;   Set the wall clock (ms since the Unix epoch).  The RTC stages EPOCH
+;   bytes 0-6; the byte-7 write commits all eight at once and marks the
+;   wall clock valid, so a concurrent EPOCH@ never sees a torn value.
+;   One setter at a time: two cores storing at once would mix staged bytes.
+;   Intervals belong on MS@, which setting the wall clock never moves.
+;   Uses ONLY scratch registers: R1 (value), R11 (addr).
+w_epoch_store:
+    ldn r1, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_0B08   ; RTC EPOCH (+8)
+    st.b r11, r1                        ; byte 0 (staged)
+    addi r11, 1
+    lsri r1, 8
+    st.b r11, r1                        ; byte 1 (staged)
+    addi r11, 1
+    lsri r1, 8
+    st.b r11, r1                        ; byte 2 (staged)
+    addi r11, 1
+    lsri r1, 8
+    st.b r11, r1                        ; byte 3 (staged)
+    addi r11, 1
+    lsri r1, 8
+    st.b r11, r1                        ; byte 4 (staged)
+    addi r11, 1
+    lsri r1, 8
+    st.b r11, r1                        ; byte 5 (staged)
+    addi r11, 1
+    lsri r1, 8
+    st.b r11, r1                        ; byte 6 (staged)
+    addi r11, 1
+    lsri r1, 8
+    st.b r11, r1                        ; byte 7 commits all eight
+    ret.l
+
+; EPOCH-VALID? ( -- flag )
+;   True once the wall clock has been set since reset: by EPOCH!, by any
+;   commit of EPOCH byte 7, or by the host seeding the clock.  Until then
+;   EPOCH@ counts from zero and names no calendar instant.
+;   Uses ONLY scratch registers: R0 (flag), R1 (status), R11 (addr).
+w_epoch_valid:
+    ldi64 r11, 0xFFFF_FF00_0000_0B1D   ; RTC EPOCH_STAT (+1D)
+    ld.b r1, r11
+    andi r1, 1                          ; bit 0 = VALID
+    ldi r0, 0
+    cmpi r1, 1
+    brne .epoch_valid_return
+    ldi64 r0, 0xFFFFFFFFFFFFFFFF
+.epoch_valid_return:
+    subi r14, 8
+    str r14, r0
+    ret.l
+
 ; RTC@ ( -- sec min hour day mon year dow )
 ;   Read all seven RTC calendar fields onto the data stack.
 ;   Uses ONLY scratch registers: R0, R1, R11 (addr).
@@ -20670,9 +20723,27 @@ d_epoch_fetch:
     call.l r11
     ret.l
 
+; === EPOCH! ===
+d_epoch_store:
+    .dq d_epoch_fetch
+    .db 6
+    .ascii "EPOCH!"
+    ldi64 r11, w_epoch_store
+    call.l r11
+    ret.l
+
+; === EPOCH-VALID? ===
+d_epoch_valid:
+    .dq d_epoch_store
+    .db 12
+    .ascii "EPOCH-VALID?"
+    ldi64 r11, w_epoch_valid
+    call.l r11
+    ret.l
+
 ; === RTC! ===
 d_rtc_store:
-    .dq d_epoch_fetch
+    .dq d_epoch_valid
     .db 4
     .ascii "RTC!"
     ldi64 r11, w_rtc_store

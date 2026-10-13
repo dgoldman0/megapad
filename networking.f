@@ -2278,7 +2278,7 @@ VARIABLE _DNR-ULEN
 \  +64   RCV-WND     1 cell    our receive window
 \  +72   ISS         1 cell    initial send seq
 \  +80   IRS         1 cell    initial recv seq (peer's ISN)
-\  +88   RTO-TIMER   1 cell    monotonic ms at last retained-data attempt
+\  +88   RTO-TIMER   1 cell    MS@ at last retained-data attempt or TIME_WAIT entry
 \  +96   RTO-VALUE   1 cell    current data RTO in milliseconds
 \ +104   RETRIES     1 cell    retransmit attempt count
 \ +112   TX-BUF      1460B     outgoing data (1 MSS)
@@ -2526,10 +2526,12 @@ VARIABLE _AQPOP-GEN
 60000 CONSTANT TCP-2MSL
 
 \ -- TCB-REAP-TW: reclaim expired TIME_WAIT TCBs --
-\   Uses RTO-TIMER field to store the EPOCH@ timestamp when the
-\   TCB entered TIME_WAIT.  If (now − stamp) ≥ TCP-2MSL, reclaim.
+\   Uses RTO-TIMER field to store the MS@ uptime when the TCB entered
+\   TIME_WAIT.  If (now − stamp) ≥ TCP-2MSL, reclaim.  2MSL is an
+\   interval, so it is measured on uptime: setting the wall clock must
+\   neither reclaim a protected four-tuple early nor pin it forever.
 : TCB-REAP-TW  ( -- )
-    EPOCH@                             ( now )
+    MS@                                ( now )
     /TCP-MAX-CONN 0 DO
         I TCB-N DUP TCB.STATE @ TCPS-TIME-WAIT = IF
             DUP TCB.RTO-TIMER @        ( now tcb stamp )
@@ -3544,7 +3546,7 @@ VARIABLE _TAPROC-TCB
         R@ TCB.SND-NXT @ R@ TCB.SND-UNA @ = AND IF
             R@ TCP-CONTROL-STALL-CLEAR
             TCPS-TIME-WAIT R@ TCB.STATE !
-            EPOCH@ R@ TCB.RTO-TIMER !
+            MS@ R@ TCB.RTO-TIMER !
         THEN
         \ Handle LAST-ACK → CLOSED
         R@ TCB.STATE @ TCPS-LAST-ACK = IF
@@ -3597,7 +3599,7 @@ VARIABLE _TAPROC-TCB
                     ENDOF
                     TCPS-FIN-WAIT-2 OF
                         TCPS-TIME-WAIT R@ TCB.STATE !
-                        EPOCH@ R@ TCB.RTO-TIMER !
+                        MS@ R@ TCB.RTO-TIMER !
                         R@ (TCP-ACK-TRY) DROP
                     ENDOF
                 ENDCASE
@@ -3610,7 +3612,7 @@ VARIABLE _TAPROC-TCB
             _TI-SEQ @ _TI-DATALEN @ SEQ+ 1 SEQ+
             R@ TCB.RCV-NXT @ = IF
                 R@ TCB.STATE @ TCPS-TIME-WAIT = IF
-                    EPOCH@ R@ TCB.RTO-TIMER !
+                    MS@ R@ TCB.RTO-TIMER !
                 THEN
                 R@ (TCP-ACK-TRY) DROP
             THEN

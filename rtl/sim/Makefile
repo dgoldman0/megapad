@@ -64,7 +64,7 @@ SOC_ELAB_SRC = $(wildcard $(SOC)/*.v $(BUS)/*.v $(MEM)/*.v $(CORE)/*.v \
         sram_sp sram_dp rom clkgate rst_sync platform_sim mul \
         bus_arbiter memory extmem \
         alu bitfield icache cpu_smoke cluster crc_isa sha2_isa field_alu_isa \
-        peripherals disk_controller disk_bus_dma disk_lint crypto sha3_keccak wots aes ntt kem nic \
+        peripherals rtc disk_controller disk_bus_dma disk_lint crypto sha3_keccak wots aes ntt kem nic \
         nic_lint nic_bus mailbox trng tile tile_ext fp_exact fma_unit fpu cpu_fp tacc tacc_cycles \
         tamac_integer_vectors_check tamac_fp_vectors_check tacc_vectors \
         opcodes qos cpu_micro multicore_smoke core_bus_mux tile_port_arbiter \
@@ -329,7 +329,7 @@ tb_dict.vvp: tb_dict.v $(CORE)/mp64_cpu.v $(FPU_SRC) $(CORE)/mp64_dict.v \
 # Phase 4: Peripherals, Crypto & GPU
 # ==========================================================================
 
-phase4: peripherals disk_controller disk_bus_dma crypto ntt kem nic mailbox \
+phase4: peripherals rtc disk_controller disk_bus_dma crypto ntt kem nic mailbox \
         trng tile tacc tacc_vectors
 	@echo ""
 	@echo "--- Phase 4 complete ---"
@@ -341,6 +341,13 @@ peripherals: tb_peripherals.vvp
 tb_peripherals.vvp: tb_peripherals.v $(PERIPH)/mp64_timer.v \
                     $(PERIPH)/mp64_uart.v $(PERIPH)/mp64_disk.v
 	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $^
+
+# --- RTC: wall-clock set, validity, and one effect per bus access ---
+rtc: tb_rtc.vvp
+	$(VVP) $<
+
+tb_rtc.vvp: tb_rtc.v $(PERIPH)/mp64_rtc.v ../pkg/mp64_pkg.vh
+	$(IVERILOG) $(IVFLAGS) $(INC) -o $@ $(filter %.v,$^)
 
 # --- Checked storage controller with behavioral SDHC and byte DMA ---
 disk_controller: tb_disk_controller.vvp

@@ -4458,7 +4458,7 @@ TIME-WAIT re-ACKs an exact duplicate FIN and restarts its 2MSL quarantine.
 | `TCP-ABORT` | `( unowned-tcb -- status )` | Compatibility abort for an unattached connection; make one cache-only RST attempt when synchronized. |
 | `TCP-OWNER-ABORT` | `( tcb generation owner -- status ior )` | Validate exact attached authority, optionally attempt one cached-route RST, and reclaim synchronously. |
 | `TCB-USAGE` | `( -- used total )` | Count active (non-CLOSED) TCBs and pool size. |
-| `TCB-REAP-TW` | `( -- )` | Reclaim TCBs stuck in TIME_WAIT past 2×MSL (60 s). |
+| `TCB-REAP-TW` | `( -- )` | Reclaim TCBs stuck in TIME_WAIT past 2×MSL (60 s of `MS@` uptime, independent of the wall clock). |
 | `TCB-FLUSH-TIMEWAIT` | `( -- )` | Force-reclaim all TIME_WAIT TCBs (test/debug). |
 | `TCP-2MSL` | `( -- ms )` | TIME_WAIT duration constant (60 000 ms). |
 | `/AQ-CAP` | `( -- n )` | Accept-queue capacity per listener (8). |

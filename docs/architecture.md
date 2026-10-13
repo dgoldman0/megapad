@@ -325,17 +325,30 @@ does not synthesize the missing interrupt-to-flag or task-switch path.
 A combined system clock peripheral providing:
 - **64-bit monotonic uptime** counter in milliseconds since boot (read-only, free-running)
 - **64-bit epoch** counter in milliseconds since the Unix epoch (read/write, settable)
+- **Wall-clock valid** bit, clear at reset and set when the epoch is set
 - **Calendar** registers (second, minute, hour, day, month, year, day-of-week)
 - **Alarm** interrupt on hour:minute:second match
+
+Intervals and timeouts belong on uptime, which nothing can set. The epoch is
+wall time: it means a calendar instant only once `EPOCH_STAT` reports it
+valid, and it can jump whenever software sets it.
 
 Both 64-bit counters increment every millisecond (prescaled from the 100 MHz system clock).
 Reading byte 0 of UPTIME (+0x00) or byte 0 of EPOCH (+0x08) **latches** the full 64-bit
 value so that software can safely read the remaining bytes without tearing.
+Setting the epoch cannot tear either: writes to EPOCH bytes 0–6 only stage
+them, and the write to byte 7 commits all eight at once. A commit that lands
+on a millisecond tick still counts that tick.
+
+Each bus access has exactly one effect. The system bus holds a request until
+it sees the RTC's registered acknowledge, so a request spans two clock edges;
+the RTC latches, stages, commits, and clears status bits on the first edge
+only. The counters run from reset (CTRL resets to `0x01`).
 
 | Register | Offset | R/W | Description |
 |----------|--------|-----|-------------|
 | UPTIME | `+0x00`–`+0x07` | R | 64-bit ms since boot.  Read +0x00 to latch. |
-| EPOCH | `+0x08`–`+0x0F` | RW | 64-bit ms since Unix epoch.  Read +0x08 to latch; write byte-by-byte to set. |
+| EPOCH | `+0x08`–`+0x0F` | RW | 64-bit ms since Unix epoch.  Read +0x08 to latch.  Writes to +0x08–+0x0E stage; the write to +0x0F commits all eight bytes and sets VALID. |
 | SEC | `+0x10` | RW | Seconds (0–59) |
 | MIN | `+0x11` | RW | Minutes (0–59) |
 | HOUR | `+0x12` | RW | Hours (0–23) |
@@ -349,8 +362,11 @@ value so that software can safely read the remaining bytes without tearing.
 | ALARM_S | `+0x1A` | RW | Alarm seconds |
 | ALARM_M | `+0x1B` | RW | Alarm minutes |
 | ALARM_H | `+0x1C` | RW | Alarm hours |
+| EPOCH_STAT | `+0x1D` | R | **bit 0:** wall clock VALID.  Clear at reset; set by an epoch commit or a host seed.  Writes are ignored. |
 
-**BIOS words:** `MS@` (uptime ms), `EPOCH@` (epoch ms), `RTC@` (read calendar),
+**BIOS words:** `MS@` (uptime ms), `EPOCH@` (epoch ms), `EPOCH!` (set the
+epoch, committing all eight bytes at once), `EPOCH-VALID?` (wall clock set
+since reset), `RTC@` (read calendar),
 `RTC!` (set calendar), `RTC-CTRL!`, `RTC-ALARM!`, `RTC-ACK` (clear alarm flag).
 
 IRQ vector: `IVEC_RTC` (16).

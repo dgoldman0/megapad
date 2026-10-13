@@ -491,6 +491,7 @@ localparam [4:0] RTC_STATUS  = 5'h19;
 localparam [4:0] RTC_ALARM_S = 5'h1A;
 localparam [4:0] RTC_ALARM_M = 5'h1B;
 localparam [4:0] RTC_ALARM_H = 5'h1C;
+localparam [4:0] RTC_EPOCH_STAT = 5'h1D;
 
 // --- Disk registers (6-bit offsets include guarded generation submission) ---
 localparam [5:0] DISK_CMD      = 6'h00;

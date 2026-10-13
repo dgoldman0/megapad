@@ -3556,6 +3556,33 @@ class TestBIOS(unittest.TestCase):
         text = self._run_forth(sys, buf, ["EPOCH@ ."])
         self.assertIn(f"{expected} ", text)
 
+    def test_epoch_store_sets_the_wall_clock_and_marks_it_valid(self):
+        """EPOCH! commits all eight bytes; EPOCH-VALID? reports the set clock."""
+        sys, buf = self._boot_bios()
+        sys.rtc.ctrl = 0
+        self.assertFalse(sys.rtc.epoch_valid)
+        expected = 0x0123456789ABCDEF
+        text = self._run_forth(sys, buf, [
+            'EPOCH-VALID? ." before=" .',
+            f"7 {expected} EPOCH!",
+            'EPOCH-VALID? ." after=" .',
+            'EPOCH@ ." epoch=" .',
+            '." below=" .',
+        ])
+        self.assertIn("before=0 ", text)
+        self.assertIn("after=-1 ", text)
+        self.assertIn(f"epoch={expected} ", text)
+        self.assertIn("below=7 ", text)
+        self.assertEqual(sys.rtc.epoch_ms, expected)
+        self.assertTrue(sys.rtc.epoch_valid)
+
+    def test_epoch_valid_reports_a_host_seeded_clock(self):
+        """A host-seeded clock is valid before any guest store."""
+        sys, buf = self._boot_bios()
+        sys.rtc.seed_epoch_ms(1_760_000_000_000)
+        text = self._run_forth(sys, buf, ['EPOCH-VALID? ." seeded=" .'])
+        self.assertIn("seeded=-1 ", text)
+
     def test_ei_di(self):
         """EI! and DI! toggle the global interrupt flag.
 
@@ -5770,7 +5797,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 544)
+        self.assertEqual(len(seen), 546)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -15997,7 +16024,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 544)
+        self.assertEqual(len(seen), 546)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -39857,7 +39884,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             # advanced 60 seconds merely because the interpreter booted.
             ": fill-tw /TCP-MAX-CONN 0 DO"
             "  TCPS-TIME-WAIT I TCB-N TCB.STATE !"
-            "  EPOCH@ TCP-2MSL - I TCB-N TCB.RTO-TIMER !"
+            "  MS@ TCP-2MSL - I TCB-N TCB.RTO-TIMER !"
             " LOOP ;",
             "fill-tw",
             "TCB-ALLOC .\" a=\" .",
@@ -41322,7 +41349,7 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
             "100 tw-tcb @ TCB.SND-UNA ! 100 tw-tcb @ TCB.SND-NXT !",
             "201 tw-tcb @ TCB.RCV-NXT ! 4096 tw-tcb @ TCB.RCV-WND !",
             "VARIABLE tw-old",
-            "EPOCH@ TCP-2MSL - DUP tw-old ! tw-tcb @ TCB.RTO-TIMER !",
+            "MS@ TCP-2MSL - DUP tw-old ! tw-tcb @ TCB.RTO-TIMER !",
             "1 TCP-POLL-WAIT",
             'tw-tcb @ TCB.RTO-TIMER @ tw-old @ > ."  restarted=" .',
             "TCB-REAP-TW",
@@ -41338,6 +41365,51 @@ class TestKDOSNetStack(_KDOSNetworkTestBase):
         self.assertEqual(len(tcp), 1)
         self.assertEqual(tcp[0]['flags'], self.TCP_ACK)
         self.assertEqual(tcp[0]['ack'], 201)
+
+    def test_tcp_time_wait_ignores_wall_clock_jumps(self):
+        """2MSL is measured on uptime, so setting the wall clock cannot move it.
+
+        The wall clock is seeded far from uptime before the TIME_WAIT stamp
+        restarts, then jumped forward past 2MSL and back before reaping.
+        """
+        nic_mac = [0x02, 0x4D, 0x50, 0x36, 0x34, 0x00]
+        peer_mac = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]
+        peer_ip, my_ip = [10, 0, 0, 77], [10, 0, 0, 2]
+        duplicate_fin = self._build_tcp_frame(
+            nic_mac, peer_mac, peer_ip, my_ip,
+            443, 40000, 200, 100, self.TCP_FIN | self.TCP_ACK, 4096)
+        text = self._run_kdos([
+            # Write the epoch through the RTC's byte registers, low byte
+            # first, as any software clock setter does.
+            ": epoch-jump ( ms -- ) 8 0 DO"
+            "  DUP 255 AND 0xFFFFFF0000000B08 I + C! 8 RSHIFT"
+            " LOOP DROP ;",
+            "TCP-INIT-ALL ARP-CLEAR",
+            "10 0 0 2 IP-SET 255 255 255 0 NET-MASK IP!",
+            "0 0 0 0 GW-IP IP!",
+            "CREATE tw-ip 4 ALLOT 10 0 0 77 tw-ip IP!",
+            "CREATE tw-mac 6 ALLOT tw-mac 6 170 FILL tw-ip tw-mac ARP-INSERT",
+            "TCB-ALLOC DROP VARIABLE tw-tcb 0 TCB-N tw-tcb !",
+            "TCPS-TIME-WAIT tw-tcb @ TCB.STATE !",
+            "40000 tw-tcb @ TCB.LOCAL-PORT ! 443 tw-tcb @ TCB.REMOTE-PORT !",
+            "tw-ip tw-tcb @ TCB.REMOTE-IP 4 CMOVE",
+            "100 tw-tcb @ TCB.SND-UNA ! 100 tw-tcb @ TCB.SND-NXT !",
+            "201 tw-tcb @ TCB.RCV-NXT ! 4096 tw-tcb @ TCB.RCV-WND !",
+            "MS@ TCP-2MSL - tw-tcb @ TCB.RTO-TIMER !",
+            "1700000000000 epoch-jump",
+            "1 TCP-POLL-WAIT",
+            'MS@ tw-tcb @ TCB.RTO-TIMER @ - 0 1000 WITHIN ."  uptime-stamp=" .',
+            "1700000600000 epoch-jump",
+            "TCB-REAP-TW",
+            'tw-tcb @ TCB.STATE @ ."  after-forward=" .',
+            "1000 epoch-jump",
+            "MS@ TCP-2MSL - tw-tcb @ TCB.RTO-TIMER !",
+            "TCB-REAP-TW",
+            'tw-tcb @ TCB.STATE @ ."  after-backward=" .',
+        ], nic_frames=[duplicate_fin])
+        self.assertIn("uptime-stamp=-1 ", text)
+        self.assertIn("after-forward=10 ", text)   # still TIME_WAIT
+        self.assertIn("after-backward=0 ", text)   # 2MSL of uptime: reaped
 
     def test_tcp_close_listen(self):
         """TCP-CLOSE on a LISTEN TCB should reset it to CLOSED."""

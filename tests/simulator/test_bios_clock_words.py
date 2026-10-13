@@ -10,6 +10,7 @@ from simulator.platform import create_one_core_address_space
 from simulator.rtc import (
     RTC_EPOCH,
     RTC_EPOCH_LIMIT,
+    RTC_EPOCH_STAT,
     RTC_UPTIME,
     RTC_UPTIME_LIMIT,
     RTC_UPTIME_SIZE,
@@ -45,14 +46,78 @@ def test_epoch_writes_and_host_advance_mutate_only_the_current_value() -> None:
     latched = rtc.epoch_latch
     uptime_before = (rtc.uptime_ms, rtc.uptime_latch)
 
-    rtc.write8(RTC_EPOCH + 3, 0xAA)
-    assert rtc.epoch_ms == 0x1122_3344_AA66_7788
+    # Bytes 0-6 only stage; the byte-7 write commits all eight at once.
+    replacement = 0xA1A2_A3A4_A5A6_A7A8
+    for index in range(7):
+        rtc.write8(RTC_EPOCH + index, (replacement >> (8 * index)) & 0xFF)
+    assert rtc.epoch_ms == 0x1122_3344_5566_7788
+    assert rtc.epoch_stage == replacement & ((1 << 56) - 1)
+    rtc.write8(RTC_EPOCH + 7, replacement >> 56)
+    assert rtc.epoch_ms == replacement
     assert rtc.epoch_latch == latched
     rtc.set_epoch_ms(MASK64 - 1)
     rtc.advance_ms(3)
     assert rtc.epoch_ms == 1
     assert rtc.epoch_latch == latched
     assert (rtc.uptime_ms, rtc.uptime_latch) == uptime_before
+
+
+def test_wall_clock_valid_bit_follows_commits_and_host_seeds() -> None:
+    unset = HostedRTCService()
+    assert not unset.epoch_valid
+    assert unset.read8(RTC_EPOCH_STAT) == 0
+    unset.advance_ms(5)
+    for index in range(7):
+        unset.write8(RTC_EPOCH + index, 0)
+    assert not unset.epoch_valid
+    unset.write8(RTC_EPOCH + 7, 0)
+    assert unset.epoch_valid
+    assert unset.read8(RTC_EPOCH_STAT) == 1
+
+    # An explicit initial epoch, even zero, and a later host seed both set it.
+    assert HostedRTCService(0).epoch_valid
+    seeded = HostedRTCService()
+    seeded.set_epoch_ms(1_760_000_000_000)
+    assert seeded.epoch_valid
+    assert seeded.read8(RTC_EPOCH_STAT) == 1
+
+
+def test_wall_clock_valid_bit_is_read_only() -> None:
+    rtc = HostedRTCService()
+    rtc.preflight(RTC_EPOCH_STAT, 1, write=False)
+    with pytest.raises(RTCAccessError):
+        rtc.preflight(RTC_EPOCH_STAT, 1, write=True)
+    with pytest.raises(RTCAccessError):
+        rtc.preflight(RTC_EPOCH_STAT, 2, write=False)
+    with pytest.raises(RTCAccessError):
+        rtc.write8(RTC_EPOCH_STAT, 1)
+    assert not rtc.epoch_valid
+
+
+def test_platform_routes_the_wall_clock_valid_bit() -> None:
+    unset = create_one_core_address_space()
+    assert unset.read8(MMIO_BASE + RTC_EPOCH_STAT) == 0
+    unset.write64(MMIO_BASE + RTC_EPOCH, 1_760_000_000_000)
+    assert unset.read8(MMIO_BASE + RTC_EPOCH_STAT) == 1
+    assert unset.read64(MMIO_BASE + RTC_EPOCH) == 1_760_000_000_000
+    seeded = create_one_core_address_space(initial_epoch_ms=0)
+    assert seeded.read8(MMIO_BASE + RTC_EPOCH_STAT) == 1
+
+
+def test_interrupted_wide_epoch_write_commits_nothing() -> None:
+    class FaultingRTC(HostedRTCService):
+        def write8(self, offset: int, value: int) -> None:
+            if offset == RTC_EPOCH + 4:
+                raise RuntimeError("injected epoch byte fault")
+            super().write8(offset, value)
+
+    memory = create_one_core_address_space()
+    assert memory.mmio is not None
+    faulting = FaultingRTC(1000)
+    memory.mmio.rtc = faulting
+    with pytest.raises(MMIOAccessError):
+        memory.write64(MMIO_BASE + RTC_EPOCH, 1_760_000_000_000)
+    assert faulting.epoch_ms == 1000
 
 
 def test_uptime_low_byte_latches_independently_from_epoch() -> None:
@@ -263,3 +328,56 @@ def test_runtimes_own_independent_explicit_clock_state() -> None:
     assert second.rtc.epoch_ms == 2000
     assert first.rtc.uptime_ms == 105
     assert second.rtc.uptime_ms == 200
+
+
+def test_epoch_store_sets_the_wall_clock_and_its_valid_bit() -> None:
+    runtime = MegaForthRuntime()
+    context = runtime.new_context()
+
+    runtime.execute("EPOCH-VALID?", context=context)
+    assert context.data.snapshot() == (0,)
+    context.data.pop()
+
+    context.data.push(0xA55A)
+    context.data.push(1_760_000_000_123)
+    runtime.execute("EPOCH!", context=context)
+    assert context.data.snapshot() == (0xA55A,)
+    assert runtime.rtc.epoch_ms == 1_760_000_000_123
+    assert runtime.rtc.epoch_valid
+
+    runtime.execute("EPOCH-VALID?", context=context)
+    runtime.execute("EPOCH@", context=context)
+    assert context.data.snapshot() == (0xA55A, MASK64, 1_760_000_000_123)
+    assert context.returns.snapshot() == ()
+
+
+def test_seeded_runtime_reports_a_valid_wall_clock() -> None:
+    runtime = MegaForthRuntime(
+        memory=create_one_core_address_space(initial_epoch_ms=1_000),
+    )
+    context = runtime.new_context()
+    runtime.execute("EPOCH-VALID?", context=context)
+    assert context.data.snapshot() == (MASK64,)
+
+
+def test_epoch_store_fault_before_the_commit_changes_nothing() -> None:
+    class FaultingRTC(HostedRTCService):
+        def write8(self, offset: int, value: int) -> None:
+            if offset == RTC_EPOCH + 4:
+                raise RuntimeError("injected epoch byte fault")
+            super().write8(offset, value)
+
+    runtime = MegaForthRuntime()
+    assert runtime.memory.mmio is not None
+    faulting = FaultingRTC()
+    runtime.memory.mmio.rtc = faulting
+    context = runtime.new_context()
+    context.data.push(0xA55A)
+    context.data.push(1_760_000_000_000)
+
+    with pytest.raises(MMIOAccessError):
+        runtime.execute("EPOCH!", context=context)
+
+    assert context.data.snapshot() == (0xA55A, 1_760_000_000_000)
+    assert faulting.epoch_ms == 0
+    assert not faulting.epoch_valid

@@ -71,11 +71,15 @@ def test_bound_clock_retains_fractional_time_epoch_writes_and_latches() -> None:
     assert (rtc.uptime_latch, rtc.epoch_latch) == latches
     assert rtc.read8(RTC_EPOCH + 1) == (epoch >> 8) & 0xFF
 
-    # Time elapsed while no guest ran still belongs to the live clock.  A
-    # guest byte write replaces only its byte after that elapsed time settles.
+    # Time elapsed while no guest ran still belongs to the live clock.  Staged
+    # guest bytes change nothing; the byte-7 commit replaces the whole epoch
+    # after that elapsed time settles, and the clock counts on from it.
     now_ns[0] += 125_000_000
-    rtc.write8(RTC_EPOCH, 0x42)
-    written_epoch = ((epoch + 126) & ~0xFF) | 0x42
+    written_epoch = 1_800_000_000_042
+    for index in range(7):
+        rtc.write8(RTC_EPOCH + index, (written_epoch >> (8 * index)) & 0xFF)
+    assert (rtc.uptime_ms, rtc.epoch_ms) == (249, epoch + 126)
+    rtc.write8(RTC_EPOCH + 7, written_epoch >> 56)
     assert (rtc.uptime_ms, rtc.epoch_ms) == (249, written_epoch)
     now_ns[0] += 50_000_000
     assert (rtc.uptime_ms, rtc.epoch_ms) == (299, written_epoch + 50)

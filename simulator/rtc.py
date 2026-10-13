@@ -6,6 +6,11 @@ requests it.  A live server may explicitly bind a monotonic nanosecond source;
 elapsed host time then advances both current values without replacing guest
 epoch writes or changing the independent register latches.  Calendar, alarm,
 and control registers remain outside this service.
+
+Guest writes to epoch bytes 0-6 only stage them; the byte-7 write commits all
+eight at once and sets the wall-clock VALID bit, read at the one-byte
+EPOCH_STAT register.  VALID starts clear unless the host seeds the epoch, and
+the guest can never clear it.
 """
 
 from __future__ import annotations
@@ -21,6 +26,9 @@ RTC_UPTIME_LIMIT = RTC_UPTIME + RTC_UPTIME_SIZE
 RTC_EPOCH = 0xB08
 RTC_EPOCH_SIZE = 8
 RTC_EPOCH_LIMIT = RTC_EPOCH + RTC_EPOCH_SIZE
+RTC_EPOCH_COMMIT = RTC_EPOCH_LIMIT - 1
+RTC_EPOCH_STAT = 0xB1D
+RTC_EPOCH_VALID = 0x01
 
 _INTEGER_WIDTHS = frozenset((1, 2, 4, 8))
 
@@ -48,6 +56,8 @@ class HostedRTCService:
     __slots__ = (
         "_epoch_latch",
         "_epoch_ms",
+        "_epoch_stage",
+        "_epoch_valid",
         "_uptime_latch",
         "_uptime_ms",
         "_monotonic_ns",
@@ -57,14 +67,17 @@ class HostedRTCService:
 
     def __init__(
         self,
-        initial_epoch_ms: int = 0,
+        initial_epoch_ms: int | None = None,
         *,
         initial_uptime_ms: int = 0,
     ) -> None:
+        # An explicit initial epoch is a host seed, so it sets the clock.
+        self._epoch_valid = initial_epoch_ms is not None
         self._epoch_ms = self._require_u64(
-            initial_epoch_ms,
+            0 if initial_epoch_ms is None else initial_epoch_ms,
             label="initial epoch milliseconds",
         )
+        self._epoch_stage = 0
         self._uptime_ms = self._require_u64(
             initial_uptime_ms,
             label="initial uptime milliseconds",
@@ -147,8 +160,23 @@ class HostedRTCService:
 
         return self._epoch_latch
 
+    @property
+    def epoch_valid(self) -> bool:
+        """Report whether a commit or host seed has set the wall clock."""
+
+        return self._epoch_valid
+
+    @property
+    def epoch_stage(self) -> int:
+        """Return epoch bytes 0-6 staged for the next byte-7 commit."""
+
+        return self._epoch_stage
+
     def set_epoch_ms(self, value: int) -> None:
-        """Replace the current deterministic epoch without changing the latch."""
+        """Seed the epoch from the host and mark the wall clock valid.
+
+        The latch and any staged guest bytes are unchanged.
+        """
 
         value = self._require_u64(
             value,
@@ -156,6 +184,7 @@ class HostedRTCService:
         )
         self._sync_clock()
         self._epoch_ms = value
+        self._epoch_valid = True
 
     def set_uptime_ms(self, value: int) -> None:
         """Replace deterministic uptime without changing either clock latch."""
@@ -204,7 +233,8 @@ class HostedRTCService:
         limit = offset + width
         in_uptime = RTC_UPTIME <= offset and limit <= RTC_UPTIME_LIMIT
         in_epoch = RTC_EPOCH <= offset and limit <= RTC_EPOCH_LIMIT
-        if not in_uptime and not in_epoch:
+        in_stat = offset == RTC_EPOCH_STAT and width == 1
+        if not in_uptime and not in_epoch and not in_stat:
             self._reject(
                 "access is outside one admitted RTC clock register",
                 offset=offset,
@@ -218,11 +248,20 @@ class HostedRTCService:
                 width=width,
                 write=True,
             )
+        if in_stat and write:
+            self._reject(
+                "the RTC epoch status register is read-only",
+                offset=offset,
+                width=width,
+                write=True,
+            )
 
     def read8(self, offset: int) -> int:
         """Read one byte, latching its complete clock at the low byte."""
 
         self._require_byte_offset(offset, write=False)
+        if offset == RTC_EPOCH_STAT:
+            return RTC_EPOCH_VALID if self._epoch_valid else 0
         if offset in (RTC_UPTIME, RTC_EPOCH):
             self._sync_clock()
         if offset == RTC_UPTIME:
@@ -236,7 +275,7 @@ class HostedRTCService:
         return (self._epoch_latch >> shift) & 0xFF
 
     def write8(self, offset: int, value: int) -> None:
-        """Replace one little-endian byte of the current epoch register."""
+        """Stage one epoch byte; the byte-7 write commits all eight."""
 
         self._require_byte_offset(offset, write=True)
         if offset < RTC_UPTIME_LIMIT:
@@ -246,19 +285,30 @@ class HostedRTCService:
                 width=1,
                 write=True,
             )
+        if offset == RTC_EPOCH_STAT:
+            self._reject(
+                "the RTC epoch status register is read-only",
+                offset=offset,
+                width=1,
+                write=True,
+            )
         if isinstance(value, bool) or not isinstance(value, int):
             raise TypeError("RTC byte value must be an integer")
         if not 0 <= value <= 0xFF:
             raise ValueError("RTC byte value must be in range 0..255")
+        if offset < RTC_EPOCH_COMMIT:
+            shift = (offset - RTC_EPOCH) * 8
+            mask = 0xFF << shift
+            self._epoch_stage = (self._epoch_stage & ~mask) | (value << shift)
+            return
         self._sync_clock()
-        shift = (offset - RTC_EPOCH) * 8
-        mask = 0xFF << shift
-        self._epoch_ms = (self._epoch_ms & ~mask) | (value << shift)
+        self._epoch_ms = (value << 56) | self._epoch_stage
+        self._epoch_valid = True
 
     def _require_byte_offset(self, offset: int, *, write: bool) -> None:
         if isinstance(offset, bool) or not isinstance(offset, int):
             raise TypeError("RTC offset must be an integer")
-        if not RTC_UPTIME <= offset < RTC_EPOCH_LIMIT:
+        if offset != RTC_EPOCH_STAT and not RTC_UPTIME <= offset < RTC_EPOCH_LIMIT:
             self._reject(
                 "byte access is outside the admitted RTC clock subwindow",
                 offset=offset,
@@ -292,8 +342,11 @@ class HostedRTCService:
 
 __all__ = [
     "RTC_EPOCH",
+    "RTC_EPOCH_COMMIT",
     "RTC_EPOCH_LIMIT",
     "RTC_EPOCH_SIZE",
+    "RTC_EPOCH_STAT",
+    "RTC_EPOCH_VALID",
     "RTC_UPTIME",
     "RTC_UPTIME_LIMIT",
     "RTC_UPTIME_SIZE",

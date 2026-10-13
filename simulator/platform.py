@@ -35,6 +35,7 @@ from simulator.memory import (
 )
 from simulator.rtc import (
     RTC_EPOCH_LIMIT,
+    RTC_EPOCH_STAT,
     RTC_UPTIME,
     HostedRTCService,
 )
@@ -334,7 +335,7 @@ class OneCorePlatformMMIO:
                 return self.sha3
             if TRNG_OFFSET <= offset < TRNG_LIMIT:
                 return self.entropy
-            if RTC_UPTIME <= offset < RTC_EPOCH_LIMIT:
+            if RTC_UPTIME <= offset < RTC_EPOCH_LIMIT or offset == RTC_EPOCH_STAT:
                 return self.rtc
             if AUDIO_OFFSET <= offset < AUDIO_LIMIT:
                 return self.audio
@@ -362,7 +363,7 @@ def create_one_core_address_space(
     crypto_capabilities: int = HOSTED_CRYPTO_CAPABILITIES,
     entropy_seed: bytes = DEFAULT_TRNG_SEED,
     entropy_usable: bool = True,
-    initial_epoch_ms: int = 0,
+    initial_epoch_ms: int | None = None,
     initial_uptime_ms: int = 0,
 ) -> SparseAddressSpace:
     """Return guest memory with the one-core router; sparse unless explicit."""

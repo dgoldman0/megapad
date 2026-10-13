@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **543** entries.  The numbered
+The `bios.asm` dictionary link chain contains **546** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -617,12 +617,14 @@ the nonzero path emits the parsed message and resets through `ABORT`.
 | 543 | `IDLE-MS` | `( ms -- )` | | `IDLE-UNTIL` at `MS@` + ms, saturating; 0 returns at once |
 | 541 | `FAULT-XT!` | `( xt -- )` | | Install the instruction-fault callback; it receives the throw code (-21 illegal instruction, -23 alignment, -10 divide by zero) before the BIOS reports; 0 removes it |
 
-### RTC / System Clock (7 words)
+### RTC / System Clock (9 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 351 | `MS@` | `( -- ms )` | | Read 64-bit monotonic uptime in ms (reads UPTIME +0x0B00, byte 0 latches) |
 | 352 | `EPOCH@` | `( -- ms )` | | Read 64-bit epoch ms since Unix epoch (reads EPOCH +0x0B08, byte 0 latches) |
+| 545 | `EPOCH!` | `( epoch-ms -- )` | | Set the wall clock: writes EPOCH +0x0B08–+0x0B0F in ascending order; bytes 0–6 stage and byte 7 commits all eight and sets VALID |
+| 546 | `EPOCH-VALID?` | `( -- flag )` | | True once the wall clock has been set since reset (EPOCH_STAT +0x0B1D bit 0) |
 | 353 | `RTC@` | `( -- sec min hour day mon year dow )` | | Read all seven calendar fields onto the stack |
 | 354 | `RTC!` | `( sec min hour day mon year -- )` | | Set calendar (writes SEC–YEAR_HI at +0x10–+0x16) |
 | 355 | `RTC-CTRL!` | `( ctrl -- )` | | Write RTC CTRL byte (bit0=run, bit1=alarm IRQ enable) at +0x18 |
@@ -1136,7 +1138,7 @@ machine reset.
 | NIC | 4 |
 | Disk / Storage | 17 |
 | Timer & Interrupts | 9 |
-| RTC / System Clock | 7 |
+| RTC / System Clock | 9 |
 | Multicore | 11 |
 | Performance Counters | 5 |
 | CRC Engine and Capability Discovery | 9 |
@@ -1160,7 +1162,7 @@ machine reset.
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **394** |
+| **Catalogued subtotal** | **396** |
 
 ### All Immediate Words (34)
 

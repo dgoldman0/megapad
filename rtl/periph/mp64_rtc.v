@@ -11,9 +11,15 @@
 // Reading byte 0 of UPTIME or EPOCH latches the full 64-bit value so
 // that software can read bytes 1–7 without tearing.
 //
+// Setting the epoch never tears either: writes to EPOCH bytes 0–6 only
+// stage them, and the write to byte 7 commits all eight bytes at once and
+// marks the wall clock valid.  Reset leaves it invalid, so software can
+// tell a set clock from one that has counted up from zero since power-on.
+//
 // Register map (byte offsets from RTC_BASE, 32 bytes total):
 //   0x00–0x07  UPTIME   (R)   64-bit ms since boot (latch on read +0)
-//   0x08–0x0F  EPOCH    (RW)  64-bit ms since Unix epoch (latch on read +8)
+//   0x08–0x0F  EPOCH    (RW)  64-bit ms since Unix epoch (latch on read +8;
+//                             writes stage bytes 0–6, byte 7 commits)
 //   0x10       SEC      (RW)  seconds  (0–59)
 //   0x11       MIN      (RW)  minutes  (0–59)
 //   0x12       HOUR     (RW)  hours    (0–23)
@@ -27,7 +33,8 @@
 //   0x1A       ALARM_S  (RW)  alarm seconds
 //   0x1B       ALARM_M  (RW)  alarm minutes
 //   0x1C       ALARM_H  (RW)  alarm hours
-//   0x1D–0x1F  reserved
+//   0x1D       EPOCH_STAT (R) bit0=wall clock valid (set by a commit)
+//   0x1E–0x1F  reserved
 //
 
 `include "mp64_pkg.vh"
@@ -59,6 +66,8 @@ module mp64_rtc #(
     reg [63:0] uptime_ms;      // monotonic ms since boot
     assign uptime = uptime_ms;
     reg [63:0] epoch_ms;       // ms since Unix epoch (settable)
+    reg [55:0] epoch_stage;    // EPOCH bytes 0–6 awaiting the byte-7 commit
+    reg        epoch_valid;    // a commit has set the wall clock since reset
 
     // Latch registers (snapshot on read of byte 0)
     reg [63:0] uptime_latch;
@@ -86,6 +95,13 @@ module mp64_rtc #(
 
     wire running   = ctrl[0];
     wire alarm_ie  = ctrl[1];
+
+    // The system bus holds REQ until it observes this peripheral's
+    // registered ACK, so REQ spans two edges.  Every side effect (latch,
+    // stage, commit, W1C, register write) happens on the first edge only.
+    wire accept = req && !ack;
+    wire wr     = accept && wen;
+    wire rd     = accept && !wen;
 
     // ========================================================================
     // 1 ms prescaler — divides system clock by CLOCK_HZ/1000
@@ -150,24 +166,37 @@ module mp64_rtc #(
     // ========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            uptime_ms <= 64'd0;
-            epoch_ms  <= 64'd0;
-        end else if (one_ms_tick) begin
-            uptime_ms <= uptime_ms + 1;
-            epoch_ms  <= epoch_ms  + 1;
-        end else if (req && wen) begin
-            // Software can set epoch_ms byte-by-byte
-            case (addr)
-                5'h08: epoch_ms[ 7: 0] <= wdata;
-                5'h09: epoch_ms[15: 8] <= wdata;
-                5'h0A: epoch_ms[23:16] <= wdata;
-                5'h0B: epoch_ms[31:24] <= wdata;
-                5'h0C: epoch_ms[39:32] <= wdata;
-                5'h0D: epoch_ms[47:40] <= wdata;
-                5'h0E: epoch_ms[55:48] <= wdata;
-                5'h0F: epoch_ms[63:56] <= wdata;
-                default: ;
-            endcase
+            uptime_ms   <= 64'd0;
+            epoch_ms    <= 64'd0;
+            epoch_stage <= 56'd0;
+            epoch_valid <= 1'b0;
+        end else begin
+            // Uptime never yields to a register write.
+            if (one_ms_tick)
+                uptime_ms <= uptime_ms + 1;
+
+            if (wr && addr == 5'h0F) begin
+                // The byte-7 write publishes all eight bytes at once.  A tick
+                // in the same cycle still counts, exactly as if the write had
+                // landed first.
+                epoch_ms    <= {wdata, epoch_stage} + {63'd0, one_ms_tick};
+                epoch_valid <= 1'b1;
+            end else if (one_ms_tick) begin
+                epoch_ms <= epoch_ms + 1;
+            end
+
+            if (wr) begin
+                case (addr)
+                    5'h08: epoch_stage[ 7: 0] <= wdata;
+                    5'h09: epoch_stage[15: 8] <= wdata;
+                    5'h0A: epoch_stage[23:16] <= wdata;
+                    5'h0B: epoch_stage[31:24] <= wdata;
+                    5'h0C: epoch_stage[39:32] <= wdata;
+                    5'h0D: epoch_stage[47:40] <= wdata;
+                    5'h0E: epoch_stage[55:48] <= wdata;
+                    default: ;
+                endcase
+            end
         end
     end
 
@@ -178,7 +207,7 @@ module mp64_rtc #(
         if (!rst_n) begin
             uptime_latch <= 64'd0;
             epoch_latch  <= 64'd0;
-        end else if (req && !wen) begin
+        end else if (rd) begin
             if (addr == 5'h00) uptime_latch <= uptime_ms;
             if (addr == 5'h08) epoch_latch  <= epoch_ms;
         end
@@ -242,14 +271,14 @@ module mp64_rtc #(
             end
 
             // W1C: clear status flags on write to STATUS
-            if (req && wen && addr == RTC_STATUS) begin
+            if (wr && addr == RTC_STATUS) begin
                 if (wdata[0]) alarm_flag    <= 1'b0;
                 if (wdata[1]) tick_1hz_flag <= 1'b0;
                 if (wdata[2]) tick_1ms_flag <= 1'b0;
             end
 
             // Calendar register writes (set time)
-            if (req && wen) begin
+            if (wr) begin
                 case (addr)
                     RTC_SEC:     sec       <= wdata[5:0];
                     RTC_MIN:     min       <= wdata[5:0];
@@ -273,8 +302,8 @@ module mp64_rtc #(
     // ========================================================================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
-            ctrl <= 8'd0;
-        else if (req && wen && addr == RTC_CTRL)
+            ctrl <= 8'h01;     // the clock runs from reset
+        else if (wr && addr == RTC_CTRL)
             ctrl <= wdata;
     end
 
@@ -329,6 +358,7 @@ module mp64_rtc #(
                 RTC_ALARM_S: rdata <= {2'd0, alarm_sec};
                 RTC_ALARM_M: rdata <= {2'd0, alarm_min};
                 RTC_ALARM_H: rdata <= {3'd0, alarm_hour};
+                RTC_EPOCH_STAT: rdata <= {7'd0, epoch_valid};
                 default:     rdata <= 8'd0;
             endcase
         end
