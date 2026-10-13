@@ -575,9 +575,10 @@ modulo-128 position that disagrees with the saved offset.
 **NIC**
 `NET-STATUS` `NET-SEND` `NET-RECV` `NET-MAC@`
 
-**AES-256-GCM**
+**AES-256/128, GCM and CBC**
 `AES-KEY!` `AES-IV!` `AES-AAD-LEN!` `AES-DATA-LEN!` `AES-CMD!`
-`AES-STATUS@` `AES-DIN!` `AES-DOUT@` `AES-TAG@` `AES-TAG!`
+`AES-STATUS@` `AES-KEY-MODE!` `AES-DIN!` `AES-DOUT@` `AES-TAG@` `AES-TAG!`
+`AES-MODE!` `AES-CBC-IV!`
 
 **SHA-3 / SHAKE**
 `SHA3-BEGIN` `SHA3-UPDATE` `SHA3-FINAL` `SHA3-STATUS@`

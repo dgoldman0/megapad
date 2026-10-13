@@ -16,6 +16,7 @@ from simulator.aes import (
     AES_IV,
     AES_KEY,
     AES_KEY_MODE,
+    AES_MODE,
     AES_STATUS,
     AES_TAG,
 )
@@ -2967,6 +2968,26 @@ def install_core(runtime: MegaForthRuntime) -> None:
 
     # LITERAL follows: it compiles the top cell into the open definition.
     runtime.define_directive(b"LITERAL", DirectiveKind.LITERAL)
+
+    # AES's block mode and CBC's 16-byte IV follow.
+    runtime.define_primitive(
+        b"AES-MODE!",
+        lambda context: _aes_scalar_store(
+            runtime,
+            context,
+            mmio_offset=AES_MODE,
+            width=1,
+        ),
+    )
+    runtime.define_primitive(
+        b"AES-CBC-IV!",
+        lambda context: _aes_to_device(
+            runtime,
+            context,
+            mmio_offset=AES_IV,
+            length=16,
+        ),
+    )
 
 
 def _scalar_float_word(service, shape: str, op: int | None):

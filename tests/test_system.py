@@ -5726,9 +5726,12 @@ class TestBIOSTACC(unittest.TestCase):
         return tuple(base + offset for offset in (0, 64, 128, 192, 512))
 
     def test_tacc_dictionary_tail_chain(self):
-        """WOTS appends after the unchanged full-TACC dictionary tail."""
+        """WOTS and AES's block-mode words append after the unchanged
+        full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_aes_cbc_iv_store", "d_aes_mode_store"),
+            ("d_aes_mode_store", "d_wots_chain"),
             ("d_wots_chain", "d_latest_store"),
             ("d_latest_store", "d_dict_rollback"),
             ("d_dict_rollback", "d_dict_index_notify_store"),
@@ -5753,7 +5756,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_tamac", "d_caller_span_status"),
             ("d_caller_span_status", "d_entropy_ready"),
         )
-        self.assertEqual(labels["latest_entry"], labels["d_wots_chain"])
+        self.assertEqual(labels["latest_entry"], labels["d_aes_cbc_iv_store"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5770,7 +5773,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 544)
+        self.assertEqual(len(seen), 546)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -14422,6 +14425,64 @@ class TestKDOSAES(_KDOSTestBase):
         self.assertIn("BLK0=6 ", text)
         self.assertIn("BLK1=193 ", text)
 
+    @staticmethod
+    def _forth_bytes(name, data):
+        """CREATE name holding data, eight bytes a line."""
+        lines = [f"CREATE {name}"]
+        for offset in range(0, len(data), 8):
+            lines.append(" ".join(f"{b} C," for b in data[offset:offset + 8]))
+        return lines
+
+    def test_aes_cbc_mode_words(self):
+        """AES-MODE! and AES-CBC-IV! run CBC through the assembled BIOS:
+        NIST SP 800-38A F.2.5's first two blocks encrypt and decrypt back,
+        and the next transaction, choosing no mode, is GCM."""
+        key = bytes.fromhex("603deb1015ca71be2b73aef0857d7781"
+                            "1f352c073b6108d72d9810a30914dff4")
+        plaintext = bytes.fromhex("6bc1bee22e409f96e93d7e117393172a"
+                                  "ae2d8a571e03ac9c9eb76fac45af8e51")
+        ciphertext = bytes.fromhex("f58c4c04d6e5f1ba779eabfb5f7bfbd6"
+                                   "9cfc4e967edb808d679f777bc6702c7d")
+        text = self._run_kdos(
+            self._forth_bytes("cbc-key", key)
+            + self._forth_bytes("cbc-pt", plaintext)
+            + [
+                "CREATE cbc-iv 16 ALLOT",
+                ": init-cbc-iv 16 0 DO I cbc-iv I + C! LOOP ;",
+                "init-cbc-iv",
+                "CREATE cbc-ct 32 ALLOT",
+                "CREATE cbc-rt 32 ALLOT",
+                ": cbc-run 1 AES-MODE! cbc-key AES-KEY! cbc-iv AES-CBC-IV!"
+                " 32 AES-DATA-LEN! AES-CMD! 2 0 DO OVER I 16 * + AES-DIN!"
+                " DUP I 16 * + AES-DOUT@ LOOP 2DROP ;",
+                ": .bytes 0 DO DUP I + C@ . LOOP DROP ;",
+                "cbc-pt cbc-ct 0 cbc-run",
+                '."  ENCST=" AES-STATUS@ .',
+                '."  CT=" cbc-ct 32 .bytes',
+                "cbc-ct cbc-rt 1 cbc-run",
+                '."  DECST=" AES-STATUS@ .',
+                '."  RT=" cbc-rt 32 .bytes',
+            ]
+            + self._AES_SETUP_KEY_IV
+            + [
+                "CREATE pt-buf 16 ALLOT",
+                "pt-buf 16 65 FILL",
+                "CREATE ct-buf 16 ALLOT",
+                "test-key test-iv pt-buf ct-buf 16 AES-ENCRYPT DROP",
+                '."  GCM0=" ct-buf C@ .',
+            ])
+
+        def published(marker):
+            match = re.search(marker + r"=((?:\d+ ){32})", text)
+            self.assertIsNotNone(match, f"no {marker} in {text!r}")
+            return bytes(int(n) for n in match.group(1).split())
+
+        self.assertIn("ENCST=2 ", text)
+        self.assertEqual(published("CT"), ciphertext)
+        self.assertIn("DECST=2 ", text)
+        self.assertEqual(published("RT"), plaintext)
+        self.assertIn("GCM0=6 ", text)
+
 
 class TestBIOSSHA3Checkpoint2(unittest.TestCase):
     """Checked BIOS SHA-3/SHAKE/raw-Keccak checkpoint-2 contract."""
@@ -15997,7 +16058,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 544)
+        self.assertEqual(len(seen), 546)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -17530,12 +17591,26 @@ class TestBIOSEntropyFill(unittest.TestCase):
         return bytes(sys_obj.cpu.mem[start:start + length])
 
     def test_dictionary_append_preserves_every_older_link(self):
-        """WOTS appends without changing any older dictionary link."""
+        """WOTS, then AES's block-mode words, append without changing any
+        older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
             labels["latest_entry"],
-            labels["d_wots_chain"],
+            labels["d_aes_cbc_iv_store"],
         )
+        for current, previous in (
+            ("d_aes_cbc_iv_store", "d_aes_mode_store"),
+            ("d_aes_mode_store", "d_wots_chain"),
+        ):
+            self.assertEqual(
+                int.from_bytes(
+                    self._bios_harness.bios_code[
+                        labels[current]:labels[current] + 8
+                    ],
+                    "little",
+                ),
+                labels[previous],
+            )
         wots_previous = int.from_bytes(
             self._bios_harness.bios_code[
                 labels["d_wots_chain"]:labels["d_wots_chain"] + 8

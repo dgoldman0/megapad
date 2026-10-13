@@ -15045,15 +15045,17 @@ w_crc_final_fetch:
     ret.l
 
 ; =====================================================================
-;  AES-256-GCM Engine — MMIO at 0xFFFF_FF00_0000_0700
+;  AES-256/128 Engine, GCM and CBC — MMIO at 0xFFFF_FF00_0000_0700
 ; =====================================================================
 ; AES base   = 0xFFFF_FF00_0000_0700
 ;   KEY    +0x00 (W)  256-bit key (32 bytes LE)
-;   IV     +0x20 (W)  96-bit IV/nonce (12 bytes LE)
-;   AAD-LEN+0x30 (W)  AAD length in bytes (32-bit LE)
-;   DAT-LEN+0x34 (W)  Data length in bytes (32-bit LE)
+;   IV     +0x20 (W)  GCM's 96-bit IV/nonce (12 bytes), or CBC's 16 bytes
+;   AAD-LEN+0x30 (W)  AAD length in bytes (32-bit LE); 0 for CBC
+;   DAT-LEN+0x34 (W)  Data length in bytes (32-bit LE); whole blocks for CBC
 ;   CMD    +0x38 (W)  0=encrypt, 1=decrypt
 ;   STATUS +0x39 (R)  0=idle, 1=busy, 2=done, 3=auth-fail
+;   KEYMODE+0x3A (RW) 0=AES-256, 1=AES-128
+;   MODE   +0x3B (RW) 0=GCM, 1=CBC
 ;   DIN    +0x40 (W)  128-bit data input (16 bytes LE)
 ;   DOUT   +0x50 (R)  128-bit data output (16 bytes LE)
 ;   TAG    +0x60 (R/W) 128-bit GCM authentication tag
@@ -15095,6 +15097,24 @@ w_aes_iv_store:
     brcc .aes_iv_loop
     ret.l
 
+; AES-CBC-IV! ( addr -- )  Write CBC's 16-byte IV from memory address.
+w_aes_cbc_iv_store:
+    ldn r9, r14
+    addi r14, 8
+    ldi64 r7, 0xFFFF_FF00_0000_0720    ; AES_IV base
+    ldi r12, 0
+.aes_cbc_iv_loop:
+    mov r13, r9
+    add r13, r12
+    ld.b r0, r13
+    mov r11, r7
+    add r11, r12
+    st.b r11, r0
+    addi r12, 1
+    cmpi r12, 16
+    brcc .aes_cbc_iv_loop
+    ret.l
+
 ; AES-AAD-LEN! ( n -- )  Set AAD length (32-bit).
 w_aes_aad_len_store:
     ldn r0, r14
@@ -15132,6 +15152,14 @@ w_aes_key_mode_store:
     ldn r0, r14
     addi r14, 8
     ldi64 r11, 0xFFFF_FF00_0000_073A   ; AES_KEY_MODE
+    st.b r11, r0
+    ret.l
+
+; AES-MODE! ( n -- )  Select the block mode: 0=GCM, 1=CBC.
+w_aes_mode_store:
+    ldn r0, r14
+    addi r14, 8
+    ldi64 r11, 0xFFFF_FF00_0000_073B   ; AES_MODE
     st.b r11, r0
     ret.l
 
@@ -24129,12 +24157,30 @@ d_latest_store:
     ret.l
 
 ; === WOTS-CHAIN ===
-latest_entry:
 d_wots_chain:
     .dq d_latest_store
     .db 10
     .ascii "WOTS-CHAIN"
     ldi64 r11, w_wots_chain
+    call.l r11
+    ret.l
+
+; === AES-MODE! ===
+d_aes_mode_store:
+    .dq d_wots_chain
+    .db 9
+    .ascii "AES-MODE!"
+    ldi64 r11, w_aes_mode_store
+    call.l r11
+    ret.l
+
+; === AES-CBC-IV! ===
+latest_entry:
+d_aes_cbc_iv_store:
+    .dq d_aes_mode_store
+    .db 11
+    .ascii "AES-CBC-IV!"
+    ldi64 r11, w_aes_cbc_iv_store
     call.l r11
     ret.l
 

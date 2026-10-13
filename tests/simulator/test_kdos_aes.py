@@ -1,4 +1,5 @@
-"""Contiguous unchanged-source acceptance for KDOS AES-256-GCM."""
+"""Contiguous unchanged-source acceptance for KDOS AES-256-GCM, and the
+hosted engine's GCM and CBC through the BIOS words."""
 
 from __future__ import annotations
 
@@ -21,6 +22,9 @@ from simulator.aes import (
     AES_KEY,
     AES_KEY_MODE,
     AES_LIMIT,
+    AES_MODE,
+    AES_MODE_CBC,
+    AES_MODE_GCM,
     AES_OFFSET,
     AES_STATUS,
     AES_STATUS_ACTIVE,
@@ -79,6 +83,8 @@ BIOS_WORDS = (
     "AES-DOUT@",
     "AES-TAG@",
     "AES-TAG!",
+    "AES-MODE!",
+    "AES-CBC-IV!",
 )
 
 KEY = bytes(range(32))
@@ -92,6 +98,32 @@ TWO_BLOCK_CIPHERTEXT = bytes.fromhex(
     "c194c576b2391d3e7a25a7c75f2b42f0"
 )
 TWO_BLOCK_TAG = bytes.fromhex("61f3ad860a90ca7ede2074f793b887c1")
+
+# NIST SP 800-38A F.2.1 and F.2.5: CBC-AES128 and CBC-AES256.
+CBC_IV = bytes(range(16))
+CBC_PLAINTEXT = bytes.fromhex(
+    "6bc1bee22e409f96e93d7e117393172a"
+    "ae2d8a571e03ac9c9eb76fac45af8e51"
+    "30c81c46a35ce411e5fbc1191a0a52ef"
+    "f69f2445df4f9b17ad2b417be66c3710"
+)
+CBC_AES128_KEY = bytes.fromhex("2b7e151628aed2a6abf7158809cf4f3c")
+CBC_AES128_CIPHERTEXT = bytes.fromhex(
+    "7649abac8119b246cee98e9b12e9197d"
+    "5086cb9b507219ee95db113a917678b2"
+    "73bed6b8e3c1743b7116e69e22229516"
+    "3ff1caa1681fac09120eca307586e1a7"
+)
+CBC_AES256_KEY = bytes.fromhex(
+    "603deb1015ca71be2b73aef0857d7781"
+    "1f352c073b6108d72d9810a30914dff4"
+)
+CBC_AES256_CIPHERTEXT = bytes.fromhex(
+    "f58c4c04d6e5f1ba779eabfb5f7bfbd6"
+    "9cfc4e967edb808d679f777bc6702c7d"
+    "39f23369a9d9bacfa530e26304231461"
+    "b2eb05e2c39be9fcda6c19078c6a9d1b"
+)
 
 KEY_ADDRESS = 0x20_000
 IV_ADDRESS = 0x20_100
@@ -244,6 +276,138 @@ def test_shared_aes_and_ghash_match_independent_known_answers() -> None:
         AESBlockCipher(bytes(24))
     with pytest.raises(TypeError, match="must be bytes"):
         AESBlockCipher(bytes(16)).encrypt(bytearray(16))  # type: ignore[arg-type]
+
+
+def test_shared_aes_inverse_cipher_matches_fips_197_and_inverts() -> None:
+    plaintext = bytes.fromhex("00112233445566778899aabbccddeeff")
+    for key, ciphertext in (
+        (bytes(range(16)), "69c4e0d86a7b0430d8cdb78070b4c55a"),
+        (bytes(range(32)), "8ea2b7ca516745bfeafc49904b496089"),
+    ):
+        cipher = AESBlockCipher(key)
+        assert cipher.decrypt(bytes.fromhex(ciphertext)) == plaintext
+        for block in (bytes(16), bytes((0xFF,)) * 16, CBC_PLAINTEXT[:16]):
+            assert cipher.decrypt(cipher.encrypt(block)) == block
+
+    with pytest.raises(ValueError, match="exactly 16 bytes"):
+        AESBlockCipher(bytes(16)).decrypt(bytes(15))
+
+
+def _run_cbc_words(
+    runtime: MegaForthRuntime,
+    *,
+    key: bytes,
+    key_mode: int,
+    command: int,
+    source: bytes,
+) -> bytes:
+    runtime.memory.write_bytes(KEY_ADDRESS, key.ljust(32, b"\0"))
+    runtime.memory.write_bytes(IV_ADDRESS, CBC_IV)
+    _execute(runtime, "AES-MODE!", AES_MODE_CBC)
+    _execute(runtime, "AES-KEY-MODE!", key_mode)
+    _execute(runtime, "AES-KEY!", KEY_ADDRESS)
+    _execute(runtime, "AES-CBC-IV!", IV_ADDRESS)
+    _execute(runtime, "AES-DATA-LEN!", len(source))
+    _execute(runtime, "AES-CMD!", command)
+    output = bytearray()
+    for offset in range(0, len(source), 16):
+        runtime.memory.write_bytes(SOURCE_ADDRESS, source[offset : offset + 16])
+        _execute(runtime, "AES-DIN!", SOURCE_ADDRESS)
+        _execute(runtime, "AES-DOUT@", DESTINATION_ADDRESS)
+        output += runtime.memory.read_bytes(DESTINATION_ADDRESS, 16)
+    return bytes(output)
+
+
+@pytest.mark.parametrize(
+    ("key", "key_mode", "ciphertext"),
+    (
+        (CBC_AES128_KEY, 1, CBC_AES128_CIPHERTEXT),
+        (CBC_AES256_KEY, 0, CBC_AES256_CIPHERTEXT),
+    ),
+)
+def test_bios_cbc_words_match_nist_vectors_and_return_to_gcm(
+    key: bytes,
+    key_mode: int,
+    ciphertext: bytes,
+) -> None:
+    runtime = MegaForthRuntime()
+    assert _run_cbc_words(
+        runtime,
+        key=key,
+        key_mode=key_mode,
+        command=0,
+        source=CBC_PLAINTEXT,
+    ) == ciphertext
+    assert runtime.aes.status == AES_STATUS_DONE
+    # Completion clears the transaction, CBC's mode with it, and publishes
+    # no tag.
+    assert _read_mmio(runtime, AES_MODE, 1) == bytes((AES_MODE_GCM,))
+    assert _read_mmio(runtime, AES_TAG, 16) == bytes(16)
+
+    assert _run_cbc_words(
+        runtime,
+        key=key,
+        key_mode=key_mode,
+        command=1,
+        source=ciphertext,
+    ) == CBC_PLAINTEXT
+    assert runtime.aes.status == AES_STATUS_DONE
+
+    # The next transaction that does not choose a mode is GCM.
+    _configure_direct(runtime)
+    _write_mmio(runtime, AES_DATA_INPUT, ONE_BLOCK)
+    assert _read_mmio(runtime, AES_DATA_OUTPUT, 16) == ONE_BLOCK_CIPHERTEXT
+    assert _read_mmio(runtime, AES_TAG, 16) == ONE_BLOCK_TAG
+
+
+def test_each_mode_fails_closed_on_a_configuration_that_is_not_its_own() -> None:
+    def start_cbc(
+        *,
+        iv: bytes = CBC_IV,
+        aad_length: int = 0,
+        data_length: int | None = 32,
+        key: bytes = KEY,
+    ) -> MegaForthRuntime:
+        runtime = MegaForthRuntime()
+        runtime.memory.write8(MMIO_BASE + AES_MODE, AES_MODE_CBC)
+        _write_mmio(runtime, AES_KEY, key)
+        _write_mmio(runtime, AES_IV, iv)
+        runtime.memory.write32(MMIO_BASE + AES_AAD_LENGTH, aad_length)
+        if data_length is not None:
+            runtime.memory.write32(MMIO_BASE + AES_DATA_LENGTH, data_length)
+        runtime.memory.write8(MMIO_BASE + AES_COMMAND, 0)
+        return runtime
+
+    assert start_cbc().aes.status == AES_STATUS_ACTIVE
+    assert start_cbc(data_length=0).aes.status == AES_STATUS_DONE
+    for failed in (
+        start_cbc(iv=CBC_IV[:12]),
+        start_cbc(aad_length=16),
+        start_cbc(data_length=24),
+        start_cbc(data_length=None),
+        start_cbc(key=KEY[:16]),
+    ):
+        assert failed.aes.status == AES_STATUS_FAILED
+        assert failed.aes.mode == AES_MODE_GCM
+        assert _read_mmio(failed, AES_DATA_OUTPUT, 16) == bytes(16)
+
+    beyond = start_cbc(data_length=16)
+    _write_mmio(beyond, AES_DATA_INPUT, CBC_PLAINTEXT[:16])
+    assert beyond.aes.status == AES_STATUS_DONE
+    _write_mmio(beyond, AES_DATA_INPUT, CBC_PLAINTEXT[16:32])
+    assert beyond.aes.status == AES_STATUS_FAILED
+    assert _read_mmio(beyond, AES_DATA_OUTPUT, 16) == bytes(16)
+
+    # GCM's IV is exactly 12 bytes, so a 16-byte IV left in GCM fails.
+    gcm = MegaForthRuntime()
+    _configure_direct(gcm, iv=CBC_IV)
+    assert gcm.aes.status == AES_STATUS_FAILED
+
+    masked = MegaForthRuntime()
+    masked.memory.write8(MMIO_BASE + AES_MODE, 3)
+    assert masked.aes.mode == AES_MODE_CBC
+    masked.memory.write8(MMIO_BASE + AES_MODE, 2)
+    assert masked.aes.mode == AES_MODE_GCM
 
 
 def test_bios_and_direct_mmio_share_one_aes_transaction_both_directions() -> None:

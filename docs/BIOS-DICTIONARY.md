@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **543** entries.  The numbered
+The `bios.asm` dictionary link chain contains **546** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -784,12 +784,12 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 250 | `ICACHE-HITS` | `( -- n )` | | Push I-cache hit counter |
 | 251 | `ICACHE-MISSES` | `( -- n )` | | Push I-cache miss counter |
 
-### AES-256/128-GCM Engine (11 words)
+### AES-256/128 Engine, GCM and CBC (13 words)
 
 | # | Word | Stack Effect | Imm | Description |
 |---|------|-------------|-----|-------------|
 | 252 | `AES-KEY!` | `( addr -- )` | | Load 256-bit key (32 bytes at addr) into AES engine |
-| 253 | `AES-IV!` | `( addr -- )` | | Load 96-bit IV (12 bytes at addr) into AES engine |
+| 253 | `AES-IV!` | `( addr -- )` | | Load GCM's 96-bit IV (12 bytes at addr) into AES engine |
 | 254 | `AES-AAD-LEN!` | `( n -- )` | | Set additional authenticated data length (bytes) |
 | 255 | `AES-DATA-LEN!` | `( n -- )` | | Set plaintext/ciphertext data length (bytes) |
 | 256 | `AES-CMD!` | `( cmd -- )` | | Start operation: low bit 0 = encrypt, 1 = decrypt |
@@ -799,13 +799,19 @@ saved and restored. Status values used here are 0 OK, 1 UNSUPPORTED,
 | 260 | `AES-DOUT@` | `( addr -- )` | | Read output data block (16 bytes) from engine |
 | 261 | `AES-TAG@` | `( addr -- )` | | Read 128-bit authentication tag (16 bytes) from engine |
 | 262 | `AES-TAG!` | `( addr -- )` | | Write expected tag (16 bytes) for decryption verification |
+| 545 | `AES-MODE!` | `( n -- )` | | Select the block mode: low bit 0 = GCM (the default), 1 = CBC |
+| 546 | `AES-CBC-IV!` | `( addr -- )` | | Load CBC's 16-byte IV (16 bytes at addr) into AES engine |
 
-The executable BIOS/native ABI places key mode at AES offset `+0x3A` inside
-the `+0x700..+0x76F` byte aperture. The native configuration check requires
-all 32 key bytes in either mode, although AES-128 uses the first 16. Integrated
-RTL currently differs in aperture, access shape, byte protocol, status,
-authentication, and qualified timing/interrupt behavior; see
-`docs/bios-forth.md` for the discrepancy record.
+The executable BIOS/native ABI places key mode at AES offset `+0x3A` and
+block mode at `+0x3B` inside the `+0x700..+0x76F` byte aperture. The native
+configuration check requires all 32 key bytes in either key mode, although
+AES-128 uses the first 16. A CBC transaction takes CBC's 16 IV bytes and a
+data length of whole 16-byte blocks, with no AAD and no tag; each block fed
+to `AES-DIN!` gives its block to `AES-DOUT@`. Completion or failure returns
+the engine to GCM. Integrated RTL currently differs in aperture, access
+shape, byte protocol, status, authentication, block modes, and qualified
+timing/interrupt behavior; see `docs/bios-forth.md` for the discrepancy
+record.
 
 ### Checked SHA-3 / SHAKE / raw Keccak (9 words)
 
@@ -1145,7 +1151,7 @@ machine reset.
 | Stride / 2D Addressing | 6 |
 | FP16 / BF16 Modes | 2 |
 | Instruction Cache | 5 |
-| AES-256/128-GCM Engine | 11 |
+| AES-256/128 Engine, GCM and CBC | 13 |
 | Checked SHA-3 / SHAKE / raw Keccak | 9 |
 | SHA-256 Streaming | 4 |
 | SHA-512 Streaming | 4 |
@@ -1160,7 +1166,7 @@ machine reset.
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **394** |
+| **Catalogued subtotal** | **396** |
 
 ### All Immediate Words (34)
 
@@ -1169,10 +1175,11 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-The checked WOTS word closes the newest appended segment:
+AES's block-mode words close the newest appended segment:
 
 ```
-WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX-NOTIFY! → DICT-INDEX@
+AES-CBC-IV! → AES-MODE!
+→ WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX-NOTIFY! → DICT-INDEX@
 → DICT-INDEX!
 → IDLE-MS → IDLE-UNTIL → FAULT-XT! → DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!
 → TACC-CLAIM? → TACC-STATUS@ → TACC-RELEASE → TACC-STORE → TACC-LOAD

@@ -1214,15 +1214,16 @@ Exceptions only set the sticky flags in `FPCSR`.
 
 ---
 
-## AES-256/128-GCM Engine (11 words)
+## AES-256/128 Engine, GCM and CBC (13 words)
 
-Authenticated encryption via the executable/native MMIO AES ABI at
+Encryption and decryption in GCM, which authenticates, and in CBC for the
+formats that use it, via the executable/native MMIO AES ABI at
 `0xFFFF_FF00_0000_0700`.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
 | `AES-KEY!` | `( addr -- )` | Load 256-bit key (32 bytes at addr) into AES engine. |
-| `AES-IV!` | `( addr -- )` | Load 96-bit IV (12 bytes at addr) into AES engine. |
+| `AES-IV!` | `( addr -- )` | Load GCM's 96-bit IV (12 bytes at addr) into AES engine. |
 | `AES-AAD-LEN!` | `( n -- )` | Set additional authenticated data length (bytes). |
 | `AES-DATA-LEN!` | `( n -- )` | Set plaintext/ciphertext data length (bytes). |
 | `AES-CMD!` | `( cmd -- )` | Start operation: low bit 0 = encrypt, 1 = decrypt. |
@@ -1232,12 +1233,23 @@ Authenticated encryption via the executable/native MMIO AES ABI at
 | `AES-DOUT@` | `( addr -- )` | Read output data block (16 bytes) from engine. |
 | `AES-TAG@` | `( addr -- )` | Read 128-bit authentication tag (16 bytes) from engine. |
 | `AES-TAG!` | `( addr -- )` | Write expected tag (16 bytes) for decryption verification. |
+| `AES-MODE!` | `( n -- )` | Select the block mode: low bit 0 = GCM (the default), 1 = CBC. Completion or failure returns it to GCM. |
+| `AES-CBC-IV!` | `( addr -- )` | Load CBC's 16-byte IV (16 bytes at addr) into AES engine. |
+
+A CBC transaction is `AES-MODE!` 1, the key, `AES-CBC-IV!`, and
+`AES-DATA-LEN!` with whole 16-byte blocks, then `AES-CMD!`. It has no AAD and
+no tag: each block fed to `AES-DIN!` gives its block to `AES-DOUT@`, chained
+from the IV, and the status is 2 after the last. A GCM transaction takes
+exactly the 12 bytes `AES-IV!` writes and a CBC one exactly the 16 of
+`AES-CBC-IV!`; other IV bytes, a CBC length of part of a block, or a CBC AAD
+length fail closed with status 3.
 
 > **AES ABI discrepancy record.** The table above follows unchanged KDOS,
 > `bios.asm`, and the native architectural device: the byte aperture is
-> `+0x700..+0x76F`, key mode is at `+0x3A`, commands are 0/1, and statuses are
-> 0/1/2/3. Naturally aligned 1-, 2-, 4-, and 8-byte native accesses are
-> preflighted as complete spans and decomposed little-endian; the BIOS uses
+> `+0x700..+0x76F`, key mode is at `+0x3A`, block mode is at `+0x3B`, commands
+> are 0/1, and statuses are 0/1/2/3. Naturally aligned 1-, 2-, 4-, and 8-byte
+> native accesses are preflighted as complete spans and decomposed
+> little-endian; the BIOS uses
 > byte loops for key, IV, data, and tag transfers and 32-bit stores for the two
 > lengths. Older tables published commands 1/2, statuses 0/1/2, a 64-byte
 > aperture, or key mode at `+0x70`.
@@ -1249,10 +1261,12 @@ Authenticated encryption via the executable/native MMIO AES ABI at
 > the BIOS byte loops therefore do not configure or transfer the same register
 > image. RTL also exposes a busy/done/auth-fail bitfield rather than statuses
 > 0/1/2/3 and does not implement the executable AAD/length-finalization/tag-
-> comparison and fail-closed transaction protocol. Published throughput and
-> interrupt behavior remain unqualified RTL design targets, not current
-> executable/native ABI guarantees. This records the mismatch without choosing
-> which implementation must ultimately change.
+> comparison and fail-closed transaction protocol. It has no CBC mode, and its
+> GCM encryption runs inverse-cipher rounds on the counter block, which GCM
+> never uses. Published throughput and interrupt behavior remain unqualified
+> RTL design targets, not current executable/native ABI guarantees. The RTL
+> block is to be rebuilt to the table above; `ROADMAP-v1.0.md` item 50 tracks
+> it.
 
 ---
 

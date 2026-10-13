@@ -26,6 +26,8 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"DICT-INDEX-NOTIFY!",
         b"IPI-SEND",
         b"LITERAL",
+        b"AES-MODE!",
+        b"AES-CBC-IV!",
     )
     assert len(runtime.dictionary.words) == 380 + len(frontier)
     words = runtime.dictionary.words[:-len(frontier)]

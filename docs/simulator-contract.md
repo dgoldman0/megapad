@@ -809,9 +809,12 @@ fail closed in integer formats. `FAULT-XT!` follows at the frontier.
 The admitted AES service is one per-runtime transaction engine behind the
 virtual-MMIO router at `+0x700..+0x76F`; hosted BIOS words perform their normal
 byte/word accesses against that same object. It implements AES-128/256 block
-values, GHASH, partial final data, commands 0/1, statuses 0/1/2/3, uint32
-length registers, native configuration/fault transitions, and incremental
-BIOS buffer-transfer mutation. Guest contexts share it and guest control
+values, GCM with GHASH and partial final data, CBC with its 16-byte IV and the
+inverse cipher, the block mode at `+0x73B`, commands 0/1, statuses 0/1/2/3,
+uint32 length registers, native configuration/fault transitions, and
+incremental BIOS buffer-transfer mutation. `AES-MODE!` and `AES-CBC-IV!` are
+appended at the end of the hosted core vocabulary, as the BIOS appends them
+at the end of its chain. Guest contexts share it and guest control
 unwinding does not reset it. A separate focused vector compares its public
 windows directly with the native architectural device. The portable value
 model is not constant-time host cryptography, and synchronous completion makes
