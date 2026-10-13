@@ -17411,17 +17411,22 @@ w_sha256_clear:
     lbr _sha256_return_status
 
 ; =====================================================================
-;  SHA-512 streaming — scoped EXT.CRYPTO mode-2 transactions
+;  SHA-512 and SHA-384 streaming — scoped EXT.CRYPTO mode-2 transactions
 ; =====================================================================
 ; SHA-512 needs all eight 64-bit digest words.  H0..H3 occupy ACC0..ACC3
 ; and H4..H7 occupy R16..R19, which are live BIOS runtime registers.
 ; Consequently no mode-2 state is allowed to survive a BIOS return.
 ;
+; SHA-384 is SHA-512 from its own initial value, truncated to six words
+; (FIPS 180-4 section 6.5).  SHA384-INIT takes that value from mode 1;
+; every later step restores the saved words into mode 2, so one context,
+; SHA512-UPDATE and SHA512-CLEAR serve both, and only FINAL differs.
+;
 ; Each architectural core owns a 512-byte RAM context:
 ;   +0x000  H0..H7                    (8 qwords)
 ;   +0x040  message length, low/high  (2 qwords, bits)
 ;   +0x050  partial-block offset      (qword, 0..127)
-;   +0x058  active marker             (qword, 0 or 1)
+;   +0x058  active marker             (qword: 0, 1 SHA-512, 2 SHA-384)
 ;   +0x080  partial/data block        (128 bytes)
 ;   +0x100  reserved/scrubbed         (128 bytes)
 ;   +0x180  staged digest             (64 bytes)
@@ -17476,7 +17481,8 @@ _sha512_wipe_context:
 
 ; Run one bounded SHA-512 engine transaction.
 ;   R10 = per-core context
-;   R13 = 0 INIT, 1 COMPRESS full data block, 2 FINAL into stage, 3 CLEAR
+;   R13 = 0 INIT, 1 COMPRESS full data block, 2 FINAL into stage, 3 CLEAR,
+;         4 INIT for SHA-384
 ; Clobbers low scratch registers.  Preserves exact R16..R19, caller
 ; ACC0..ACC3, TSRC0, and interrupt-enable state.
 _sha512_engine:
@@ -17514,6 +17520,8 @@ _sha512_engine:
 
     cmpi r13, 0
     lbreq .sha512_engine_init
+    cmpi r13, 4
+    lbreq .sha512_engine_init384
     cmpi r13, 3
     lbreq .sha512_engine_clear
 
@@ -17616,9 +17624,16 @@ _sha512_engine:
     str r7, r0                        ; partial offset = 0
     lbr .sha512_engine_cleanup
 
+.sha512_engine_init384:
+    sha.init 1
+    ldi r1, 2                         ; active marker: SHA-384
+    br .sha512_engine_snapshot
+
 .sha512_engine_init:
     sha.init 2
+    ldi r1, 1                         ; active marker: SHA-512
 
+.sha512_engine_snapshot:
     ; Snapshot the complete IV state.  The context was zeroed by INIT's
     ; caller, so its 128-byte data block and length begin canonical.
     mov r7, r10
@@ -17651,8 +17666,7 @@ _sha512_engine:
     ldi r0, 0
     str r7, r0                        ; partial offset
     addi r7, 8
-    ldi r0, 1
-    str r7, r0                        ; active marker
+    str r7, r1                        ; active marker
     lbr .sha512_engine_cleanup
 
 .sha512_engine_clear:
@@ -17747,11 +17761,19 @@ _sha512_abort:
 
 ; SHA512-INIT ( -- status )
 w_sha512_init:
+    ldi r13, 0
+    lbr _sha512_init_variant
+
+; SHA384-INIT ( -- status )
+w_sha384_init:
+    ldi r13, 4
+
+; Start a fresh transaction with engine command R13: 0 SHA-512, 4 SHA-384.
+_sha512_init_variant:
     ldi64 r11, _sha512_context
     call.l r11
     ldi64 r11, _sha512_wipe_context
     call.l r11
-    ldi r13, 0
     ldi64 r11, _sha512_engine
     call.l r11
     ldi r0, 0
@@ -17766,14 +17788,18 @@ w_sha512_update:
     ldn r9, r14                        ; caller source
     addi r14, 8
 
-    ; INIT is required even for a zero-length update.
+    ; INIT is required even for a zero-length update.  Either digest's
+    ; transaction is updated alike.
     ldi64 r11, _sha512_context
     call.l r11
     mov r7, r10
     addi r7, 88
     ldn r0, r7
     cmpi r0, 1
+    breq .sha512_update_active
+    cmpi r0, 2
     lbrne .sha512_update_state_fail
+.sha512_update_active:
 
     ; The partial offset is bounded and must agree exactly with the
     ; byte-aligned low bit length before even an empty update can succeed.
@@ -17951,6 +17977,18 @@ w_sha512_update:
 ; SHA512-FINAL ( dst -- status )
 ; Failure never writes a non-context destination and always aborts/wipes.
 w_sha512_final:
+    ldi r13, 1
+    lbr _sha512_final_variant
+
+; SHA384-FINAL ( dst -- status )
+; As SHA512-FINAL, for a SHA384-INIT transaction, publishing 48 bytes.
+w_sha384_final:
+    ldi r13, 2
+
+; Finish the transaction whose active marker must be R13: 1 publishes the
+; 64-byte SHA-512 digest, 2 the 48-byte SHA-384 digest.  Either FINAL on
+; the other's transaction is a STATE failure.
+_sha512_final_variant:
     ldn r9, r14
     addi r14, 8
     ldi64 r11, _sha512_context
@@ -17958,8 +17996,13 @@ w_sha512_final:
     mov r7, r10
     addi r7, 88
     ldn r0, r7
-    cmpi r0, 1
+    cmp r0, r13
     lbrne .sha512_final_state_fail
+    ldi r12, 64                        ; digest bytes
+    cmpi r13, 1
+    breq .sha512_final_digest_bytes
+    ldi r12, 48
+.sha512_final_digest_bytes:
 
     ; Reject forged or internally inconsistent private state before any
     ; destination qualification or mode-2 engine work.
@@ -17983,9 +18026,8 @@ w_sha512_final:
     cmp r0, r1
     lbrne .sha512_final_state_fail
 
-    ; Validate the complete 64-byte output and reject both SHA-2 arenas
+    ; Validate the complete digest output and reject both SHA-2 arenas
     ; before mode 2.
-    ldi r12, 64
     ldi64 r11, _sha2_span_status
     call.l r11
     cmpi r0, 2
@@ -17995,20 +18037,25 @@ w_sha512_final:
 
     subi r15, 8
     str r15, r9
+    subi r15, 8
+    str r15, r12
     ldi r13, 2
     ldi64 r11, _sha512_engine
     call.l r11
-    ldn r9, r15
+    ldn r12, r15
     ldi r0, 0
     str r15, r0
     addi r15, 8
+    ldn r9, r15
+    str r15, r0
+    addi r15, 8
 
-    ; Publish only after runtime state is restored and SHA ownership released.
+    ; Publish only after runtime state is restored and SHA ownership
+    ; released: the stage's first 64 bytes, or SHA-384's first 48.
     mov r7, r10
     ldi r1, 3
     lsli r1, 7
     add r7, r1
-    ldi r12, 64
 .sha512_final_publish_loop:
     ld.b r0, r7
     st.b r9, r0
@@ -24175,12 +24222,30 @@ d_aes_mode_store:
     ret.l
 
 ; === AES-CBC-IV! ===
-latest_entry:
 d_aes_cbc_iv_store:
     .dq d_aes_mode_store
     .db 11
     .ascii "AES-CBC-IV!"
     ldi64 r11, w_aes_cbc_iv_store
+    call.l r11
+    ret.l
+
+; === SHA384-INIT ===
+d_sha384_init:
+    .dq d_aes_cbc_iv_store
+    .db 11
+    .ascii "SHA384-INIT"
+    ldi64 r11, w_sha384_init
+    call.l r11
+    ret.l
+
+; === SHA384-FINAL ===
+latest_entry:
+d_sha384_final:
+    .dq d_sha384_init
+    .db 12
+    .ascii "SHA384-FINAL"
+    ldi64 r11, w_sha384_final
     call.l r11
     ret.l
 

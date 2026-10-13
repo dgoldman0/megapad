@@ -930,8 +930,9 @@ micro-cluster, `sha.final` retains ownership through digest extraction and
 scrubbing; bare `sha.release` is the sole handoff.
 
 **BIOS words:** `SHA256-INIT`, `SHA256-UPDATE`, `SHA256-FINAL`,
-`SHA256-CLEAR`; and `SHA512-INIT`, `SHA512-UPDATE`, `SHA512-FINAL`,
-`SHA512-CLEAR`. `SHA2-SPAN-STATUS` provides a pure pre-`INIT` physical-span
+`SHA256-CLEAR`; `SHA512-INIT`, `SHA512-UPDATE`, `SHA512-FINAL`,
+`SHA512-CLEAR`; and `SHA384-INIT` and `SHA384-FINAL`, which share the
+SHA-512 context, UPDATE and CLEAR. `SHA2-SPAN-STATUS` provides a pure pre-`INIT` physical-span
 and shared context-arena check. Both streaming layers use private per-core
 contexts, validate complete caller spans against the union of both SHA-2 arenas,
 stage output until after engine release, wipe on every terminal path, and

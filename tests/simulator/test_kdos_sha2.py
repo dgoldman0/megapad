@@ -25,6 +25,7 @@ from simulator.sha2 import (
     SHA2_STATUS_RANGE,
     SHA2_STATUS_STATE,
     SHA256_ALGORITHM,
+    SHA384_ALGORITHM,
     SHA512_ALGORITHM,
 )
 from tests.simulator.test_kdos_aes import (
@@ -68,6 +69,8 @@ BIOS_WORDS = (
     "SHA512-UPDATE",
     "SHA512-FINAL",
     "SHA512-CLEAR",
+    "SHA384-INIT",
+    "SHA384-FINAL",
 )
 
 SOURCE_ADDRESS = 0x24_000
@@ -92,6 +95,16 @@ SHA512_ABC = bytes.fromhex(
     "12e6fa4e89a97ea20a9eeee64b55d39a"
     "2192992a274fc1a836ba3c23a3feebbd"
     "454d4423643ce80e2a9ac94fa54ca49f"
+)
+SHA384_EMPTY = bytes.fromhex(
+    "38b060a751ac96384cd9327eb1b1e36a"
+    "21fdb71114be07434c0cc7bf63f6e1da"
+    "274edebfe76f65fbd51ad2f14898b95b"
+)
+SHA384_ABC = bytes.fromhex(
+    "cb00753f45a35e8bb5a03d699ac65007"
+    "272c32ab0eded1631a8b605a43ff5bed"
+    "8086072ba1e7cc2358baeca134c825a7"
 )
 SHA3_256_ABC = bytes.fromhex(
     "3a985da74fe225b2045c172d6bd390bd"
@@ -463,8 +476,10 @@ def test_inactive_and_forged_metadata_fail_before_span_validation(
     assert final(0, MASK64, memory) == SHA2_STATUS_STATE
     assert service.private_zeroized(algorithm)
 
+    # Marker 2 is SHA-384's transaction in the SHA-512 context, so 3 is
+    # forged for both families.
     corruptions = (
-        {"active_marker": 2},
+        {"active_marker": 3},
         {"partial_offset": block_bytes},
         {"bit_length_low": 1},
         {"bit_length_low": 8, "partial_offset": 0},
@@ -676,3 +691,72 @@ def test_clear_is_idempotent_and_reinit_logically_zeroizes_prior_state(
         [0xA5] * digest_bytes
     )
     assert service.private_zeroized(algorithm)
+
+
+def test_sha384_shares_the_sha512_context_and_each_final_refuses_the_other() -> None:
+    memory = _RecordingAddressSpace(bank0_size=0x1000)
+    service = HostedSHA2Service(core_count=1)
+    memory.write_bytes(0x100, b"abc")
+    memory.fill(0x200, 64, 0xA5)
+
+    assert service.sha384_init(0) == SHA2_STATUS_OK
+    assert service.sha512_update(0, 0x100, 3, memory) == SHA2_STATUS_OK
+    assert not service.private_zeroized(SHA512_ALGORITHM)
+    memory.publications.clear()
+    assert service.sha384_final(0, 0x200, memory) == SHA2_STATUS_OK
+    assert memory.publications == [(0x200, SHA384_ABC)]
+    assert memory.read_bytes(0x200, 64) == SHA384_ABC + bytes([0xA5] * 16)
+    assert service.private_zeroized(SHA384_ALGORITHM)
+
+    for init, other_final in (
+        (service.sha384_init, service.sha512_final),
+        (service.sha512_init, service.sha384_final),
+    ):
+        assert init(0) == SHA2_STATUS_OK
+        assert service.sha512_update(0, 0x100, 3, memory) == SHA2_STATUS_OK
+        memory.publications.clear()
+        assert other_final(0, 0x300, memory) == SHA2_STATUS_STATE
+        assert memory.publications == []
+        assert service.private_zeroized(SHA512_ALGORITHM)
+
+    assert service.sha384_init(0) == SHA2_STATUS_OK
+    assert service.sha512_clear(0) == SHA2_STATUS_OK
+    assert service.private_zeroized(SHA384_ALGORITHM)
+    assert service.sha384_final(0, 0x300, memory) == SHA2_STATUS_STATE
+
+    # INIT of either digest starts a fresh transaction in the shared context.
+    assert service.sha512_init(0) == SHA2_STATUS_OK
+    assert service.sha512_update(0, 0x100, 3, memory) == SHA2_STATUS_OK
+    assert service.sha384_init(0) == SHA2_STATUS_OK
+    assert service.sha384_final(0, 0x300, memory) == SHA2_STATUS_OK
+    assert memory.read_bytes(0x300, 48) == SHA384_EMPTY
+
+
+def test_sha384_words_hash_through_the_hosted_bios() -> None:
+    runtime = MegaForthRuntime()
+    runtime.memory.write_bytes(SOURCE_ADDRESS, b"abc")
+    runtime.memory.fill(OUTPUT_ADDRESS, 64, 0xA5)
+
+    assert _execute(runtime, "SHA384-INIT") == (SHA2_STATUS_OK,)
+    assert _execute(runtime, "SHA512-UPDATE", SOURCE_ADDRESS, 1) == (
+        SHA2_STATUS_OK,
+    )
+    assert _execute(runtime, "SHA512-UPDATE", SOURCE_ADDRESS + 1, 2) == (
+        SHA2_STATUS_OK,
+    )
+    assert _execute(runtime, "SHA384-FINAL", OUTPUT_ADDRESS) == (
+        SHA2_STATUS_OK,
+    )
+    assert runtime.memory.read_bytes(OUTPUT_ADDRESS, 64) == (
+        SHA384_ABC + bytes([0xA5] * 16)
+    )
+
+    assert _execute(runtime, "SHA384-INIT") == (SHA2_STATUS_OK,)
+    assert _execute(runtime, "SHA512-FINAL", OUTPUT_ADDRESS) == (
+        SHA2_STATUS_STATE,
+    )
+    assert _execute(runtime, "SHA384-INIT") == (SHA2_STATUS_OK,)
+    assert _execute(runtime, "SHA384-FINAL", OUTPUT_ADDRESS) == (
+        SHA2_STATUS_OK,
+    )
+    assert runtime.memory.read_bytes(OUTPUT_ADDRESS, 48) == SHA384_EMPTY

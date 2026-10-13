@@ -103,6 +103,8 @@ def _native_digest(
     digest = b"".join(
         word.to_bytes(word_bytes, "big") for word in output_words
     )
+    # SHA-384 is the first six of the eight words.
+    digest = digest[: hashlib.new(algorithm).digest_size]
     return digest, packed_words, tuple(output_words)
 
 
@@ -111,7 +113,12 @@ def _hosted_digest(algorithm: str, message: bytes) -> bytes:
     memory.write_bytes(HOSTED_SOURCE, message)
     service = HostedSHA2Service(core_count=1)
     initialize = getattr(service, f"{algorithm}_init")
-    update = getattr(service, f"{algorithm}_update")
+    # SHA-384 transactions run in the SHA-512 context and its UPDATE.
+    update = (
+        service.sha512_update
+        if algorithm == "sha384"
+        else getattr(service, f"{algorithm}_update")
+    )
     finalize = getattr(service, f"{algorithm}_final")
 
     assert initialize(0) == SHA2_STATUS_OK
@@ -142,6 +149,14 @@ def _hosted_digest(algorithm: str, message: bytes) -> bytes:
         ("sha512", 2, 127),
         ("sha512", 2, 128),
         ("sha512", 2, 129),
+        # SHA-384 shares SHA-512's padding and blocks from its own initial
+        # value.
+        ("sha384", 1, 0),
+        ("sha384", 1, 111),
+        ("sha384", 1, 112),
+        ("sha384", 1, 127),
+        ("sha384", 1, 128),
+        ("sha384", 1, 129),
     ),
 )
 def test_hosted_sha2_matches_native_at_padding_and_block_boundaries(

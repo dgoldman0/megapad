@@ -28,6 +28,8 @@ def test_rich_terminal_and_geometry_words_extend_the_core_append_only() -> None:
         b"LITERAL",
         b"AES-MODE!",
         b"AES-CBC-IV!",
+        b"SHA384-INIT",
+        b"SHA384-FINAL",
     )
     assert len(runtime.dictionary.words) == 380 + len(frontier)
     words = runtime.dictionary.words[:-len(frontier)]

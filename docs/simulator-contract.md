@@ -850,8 +850,9 @@ lock-MMIO/SHA interference, and multicore guard interoperation remain outside
 the current claim and must be unified before those paths are admitted.
 
 The admitted SHA-2 service is runtime-local and keyed by architectural core,
-not task. It implements the checked `SHA256-*` and `SHA512-*` BIOS words plus
-pure `SHA2-SPAN-STATUS`; it is not an MMIO service and does not consume a
+not task. It implements the checked `SHA256-*`, `SHA512-*` and `SHA384-*`
+BIOS words plus pure `SHA2-SPAN-STATUS`; SHA-384 transactions run in the
+SHA-512 context with active marker 2, as the BIOS's do; it is not an MMIO service and does not consume a
 `CRYPTO_CAPS` bit. `INIT` always replaces that core's selected context,
 `CLEAR` is idempotent, and continuations use statuses 0 OK, 1 STATE, 2 RANGE,
 3 CONTEXT-ALIAS, and 4 LENGTH-OVERFLOW. SHA-256 tracks a checked 64-bit bit
@@ -895,7 +896,7 @@ Current RTL instruction glue is not equivalent:
 | `SHA.DOUT Rd,Rs` | Selects 32-bit `H[R[Rs] & 7]`, allowing the BIOS value-indexed loop | Selects a 64-bit accumulator qword from the encoded register field |
 | `SHA.DIN` | Feeds one byte through the documented block-buffer path | Writes a whole qword into an accumulator slot |
 | ROUND memory load | Reconstructs addressed bytes and parses big-endian SHA words | Splits little-endian memory qwords into W words without the required byte swap |
-| SHA-512 | Native mode 2 backs the checked BIOS stream | The RTL SHA leaf identifies SHA-384/512 as future work |
+| SHA-512, SHA-384 | Native mode 2 backs the checked BIOS stream; SHA-384 takes its initial value from mode 1 | The RTL SHA leaf identifies SHA-384/512 as future work |
 
 Native checked tests cover standard digests and padding/split boundaries; the
 present RTL tests exercise an already padded/endian-correct compression leaf

@@ -357,6 +357,8 @@ and the caller's prior register/TSRC0 transaction is restored afterward.
 | `SHA512-UPDATE` | `( addr len -- status )` | Preflight and absorb a physical-memory span; arbitrary splits and 128-byte boundaries are supported. |
 | `SHA512-FINAL` | `( out -- status )` | On success publish 64 digest bytes; erase the complete context on every path. |
 | `SHA512-CLEAR` | `( -- status )` | Idempotently abort, release, zeroize saved/staged/buffered/visible state, and return 0. |
+| `SHA384-INIT` | `( -- status )` | Initialize this core's SHA-512 context for SHA-384, which `SHA512-UPDATE` and `SHA512-CLEAR` then serve. |
+| `SHA384-FINAL` | `( out -- status )` | As `SHA512-FINAL` for a `SHA384-INIT` transaction, publishing 48 digest bytes. |
 | `SHA512` | `( addr len out -- status )` | One-shot wrapper; stops at the first failure without losing its status. |
 
 Streaming state is core-local. `INIT` and `FINAL`/`CLEAR` must execute on the

@@ -1659,6 +1659,19 @@ def _sha512_clear(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     context.data.push(runtime.sha2.sha512_clear(core_id))
 
 
+def _sha384_init(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(runtime.sha2.sha384_init(core_id))
+
+
+def _sha384_final(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
+    destination = context.data.pop()
+    core_id, _task_id = runtime.guest_identity(context)
+    context.data.push(
+        runtime.sha2.sha384_final(core_id, destination, runtime.memory)
+    )
+
+
 def _sha3_begin(runtime: MegaForthRuntime, context: ExecutionContext) -> None:
     status = runtime.sha3.begin(
         runtime.guest_identity(context),
@@ -2987,6 +3000,17 @@ def install_core(runtime: MegaForthRuntime) -> None:
             mmio_offset=AES_IV,
             length=16,
         ),
+    )
+
+    # SHA384-INIT and SHA384-FINAL follow.  SHA-384 shares the SHA-512
+    # context, whose UPDATE and CLEAR serve it.
+    runtime.define_primitive(
+        b"SHA384-INIT",
+        lambda context: _sha384_init(runtime, context),
+    )
+    runtime.define_primitive(
+        b"SHA384-FINAL",
+        lambda context: _sha384_final(runtime, context),
     )
 
 

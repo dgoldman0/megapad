@@ -545,11 +545,15 @@ both algorithms' all-core BIOS context arenas. An empty span returns zero.
 
 **SHA-512 streaming (ISA-native, EXT.CRYPTO mode 2)**
 `SHA512-INIT` `SHA512-UPDATE` `SHA512-FINAL` `SHA512-CLEAR`
+`SHA384-INIT` `SHA384-FINAL`
 
 All four words return a checked status (`0` OK, `1` STATE, `2` RANGE,
 `3` CONTEXT-ALIAS, `4` LENGTH-OVERFLOW). KDOS also provides
 `SHA512 ( addr len out -- status )` and symbolic constants for those values.
-UPDATE and FINAL reject an active marker other than exactly one, an offset
+SHA-384 shares the SHA-512 context, UPDATE and CLEAR, from its own initial
+value; its FINAL publishes 48 bytes. UPDATE takes active marker 1 (SHA-512) or
+2 (SHA-384) and each FINAL only its own. UPDATE and FINAL reject any other
+active marker, an offset
 outside 0..127, a non-byte-aligned low bit length, or a low-length
 modulo-128 position that disagrees with the saved offset.
 

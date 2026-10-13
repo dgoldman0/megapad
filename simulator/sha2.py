@@ -1,4 +1,4 @@
-"""Checked hosted SHA-256/SHA-512 streaming BIOS service.
+"""Checked hosted SHA-256/SHA-512/SHA-384 streaming BIOS service.
 
 MegaPad exposes SHA-2 through scoped EXT.CRYPTO instructions rather than an
 MMIO aperture.  The hosted backend therefore models the public, per-core BIOS
@@ -6,6 +6,10 @@ transactions directly: complete physical-span qualification, context state,
 length accounting, staged publication, and terminal cleanup.  It does not
 model accumulator registers, interrupt masking, instruction latency, or the
 shared micro-cluster engine.
+
+SHA-384 shares each core's SHA-512 context, as in the BIOS: SHA384-INIT
+leaves the context's active marker at 2 instead of 1, SHA512-UPDATE and
+SHA512-CLEAR serve either transaction, and each FINAL accepts only its own.
 
 Hash computation delegates to :mod:`hashlib`.  Dropping a hash object and
 overwriting the hosted metadata establishes logical simulator cleanup, but
@@ -33,6 +37,7 @@ SHA512_CONTEXT_BYTES = 512
 
 SHA256_ALGORITHM = "sha256"
 SHA512_ALGORITHM = "sha512"
+SHA384_ALGORITHM = "sha384"
 
 
 class _HashObject(Protocol):
@@ -49,6 +54,10 @@ class _Variant:
     block_bytes: int
     digest_bytes: int
     length_bits: int
+    # The variants sharing one per-core context tell their transactions
+    # apart by the active marker INIT leaves.
+    context_name: str
+    marker: int
 
 
 @dataclass(slots=True)
@@ -61,12 +70,14 @@ class _Context:
     stage: bytearray
 
 
-_SHA256 = _Variant(SHA256_ALGORITHM, 64, 32, 64)
-_SHA512 = _Variant(SHA512_ALGORITHM, 128, 64, 128)
+_SHA256 = _Variant(SHA256_ALGORITHM, 64, 32, 64, SHA256_ALGORITHM, 1)
+_SHA512 = _Variant(SHA512_ALGORITHM, 128, 64, 128, SHA512_ALGORITHM, 1)
+_SHA384 = _Variant(SHA384_ALGORITHM, 128, 48, 128, SHA512_ALGORITHM, 2)
 _VARIANTS = {
-    SHA256_ALGORITHM: _SHA256,
-    SHA512_ALGORITHM: _SHA512,
+    variant.name: variant for variant in (_SHA256, _SHA512, _SHA384)
 }
+# The context of each family, which holds its largest digest.
+_CONTEXT_FAMILIES = (_SHA256, _SHA512)
 
 
 class HostedSHA2Service:
@@ -99,7 +110,7 @@ class HostedSHA2Service:
             variant.name: [
                 self._new_context(variant) for _ in range(core_count)
             ]
-            for variant in _VARIANTS.values()
+            for variant in _CONTEXT_FAMILIES
         }
 
     @property
@@ -188,13 +199,26 @@ class HostedSHA2Service:
     def sha512_clear(self, core_id: int) -> int:
         return self._clear(_SHA512, core_id)
 
+    def sha384_init(self, core_id: int) -> int:
+        return self._init(_SHA384, core_id)
+
+    def sha384_final(
+        self,
+        core_id: int,
+        destination: int,
+        memory: SparseAddressSpace,
+    ) -> int:
+        return self._final(_SHA384, core_id, destination, memory)
+
     def private_zeroized(
         self,
         algorithm: str,
         *,
         core_id: int = 0,
     ) -> bool:
-        """Report whether one hosted logical context contains no live state."""
+        """Report whether one hosted logical context contains no live state.
+
+        SHA-384 names the SHA-512 context it shares."""
 
         variant = self._variant(algorithm)
         context = self._context(variant, core_id)
@@ -248,7 +272,7 @@ class HostedSHA2Service:
         context = self._context(variant, core_id)
         self._wipe(context)
         context.hasher = hashlib.new(variant.name)
-        context.active_marker = 1
+        context.active_marker = variant.marker
         return SHA2_STATUS_OK
 
     def _update(
@@ -260,6 +284,16 @@ class HostedSHA2Service:
         memory: SparseAddressSpace,
     ) -> int:
         context = self._context(variant, core_id)
+        # UPDATE serves every transaction its context's family holds.
+        variant = next(
+            (
+                member
+                for member in _VARIANTS.values()
+                if member.context_name == variant.context_name
+                and member.marker == context.active_marker
+            ),
+            variant,
+        )
         state_status = self._state_status(variant, context)
         if state_status != SHA2_STATUS_OK:
             self._wipe(context)
@@ -327,13 +361,14 @@ class HostedSHA2Service:
 
         hasher = context.hasher
         assert hasher is not None
-        context.stage[:] = hasher.digest()
+        digest = hasher.digest()
+        context.stage[: len(digest)] = digest
         destination = self._cell(
             destination,
             label="SHA-2 final destination",
         )
         try:
-            memory.write_bytes(destination, context.stage)
+            memory.write_bytes(destination, digest)
         except Exception:
             self._wipe(context)
             raise
@@ -368,7 +403,7 @@ class HostedSHA2Service:
 
     @staticmethod
     def _state_status(variant: _Variant, context: _Context) -> int:
-        if context.active_marker != 1 or context.hasher is None:
+        if context.active_marker != variant.marker or context.hasher is None:
             return SHA2_STATUS_STATE
         if variant.length_bits == 64 and context.bit_length_high != 0:
             return SHA2_STATUS_LENGTH_OVERFLOW
@@ -388,7 +423,7 @@ class HostedSHA2Service:
             raise TypeError("SHA-2 core ID must be an integer")
         if not 0 <= core_id < self._core_count:
             raise ValueError("SHA-2 core ID is outside the hosted profile")
-        return self._contexts[variant.name][core_id]
+        return self._contexts[variant.context_name][core_id]
 
     @staticmethod
     def _new_context(variant: _Variant) -> _Context:
@@ -410,7 +445,9 @@ class HostedSHA2Service:
         try:
             return _VARIANTS[algorithm]
         except KeyError as exc:
-            raise ValueError("SHA-2 algorithm must be sha256 or sha512") from exc
+            raise ValueError(
+                "SHA-2 algorithm must be sha256, sha512 or sha384"
+            ) from exc
 
     @staticmethod
     def _cell(value: int, *, label: str) -> int:
@@ -460,6 +497,7 @@ __all__ = [
     "SHA2_STATUS_STATE",
     "SHA256_ALGORITHM",
     "SHA256_CONTEXT_BYTES",
+    "SHA384_ALGORITHM",
     "SHA512_ALGORITHM",
     "SHA512_CONTEXT_BYTES",
 ]

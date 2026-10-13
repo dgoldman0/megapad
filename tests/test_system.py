@@ -5726,10 +5726,12 @@ class TestBIOSTACC(unittest.TestCase):
         return tuple(base + offset for offset in (0, 64, 128, 192, 512))
 
     def test_tacc_dictionary_tail_chain(self):
-        """WOTS and AES's block-mode words append after the unchanged
-        full-TACC dictionary tail."""
+        """WOTS, AES's block-mode words and SHA-384 append after the
+        unchanged full-TACC dictionary tail."""
         labels = self._labels
         chain = (
+            ("d_sha384_final", "d_sha384_init"),
+            ("d_sha384_init", "d_aes_cbc_iv_store"),
             ("d_aes_cbc_iv_store", "d_aes_mode_store"),
             ("d_aes_mode_store", "d_wots_chain"),
             ("d_wots_chain", "d_latest_store"),
@@ -5756,7 +5758,7 @@ class TestBIOSTACC(unittest.TestCase):
             ("d_tamac", "d_caller_span_status"),
             ("d_caller_span_status", "d_entropy_ready"),
         )
-        self.assertEqual(labels["latest_entry"], labels["d_aes_cbc_iv_store"])
+        self.assertEqual(labels["latest_entry"], labels["d_sha384_final"])
         for current, previous in chain:
             link = int.from_bytes(
                 self._code[labels[current]:labels[current] + 8],
@@ -5773,7 +5775,7 @@ class TestBIOSTACC(unittest.TestCase):
                 self._code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 546)
+        self.assertEqual(len(seen), 548)
 
     def test_tacc_wrapper_encodings(self):
         """Thin words begin with the locked architectural instruction bytes."""
@@ -16058,7 +16060,7 @@ class TestBIOSSHA2(unittest.TestCase):
                 self._bios_harness.bios_code[address:address + 8],
                 "little",
             )
-        self.assertEqual(len(seen), 546)
+        self.assertEqual(len(seen), 548)
         self.assertNotIn("d_sha256_status_fetch", labels)
         self.assertNotIn("d_sha256_dout_fetch", labels)
         self.assertNotIn("sha_blk_buf", labels)
@@ -16564,6 +16566,94 @@ class TestBIOSSHA2(unittest.TestCase):
             bytes(512),
         )
 
+    def test_sha384_padding_boundaries_and_splits_match_hashlib(self):
+        """SHA384-INIT, SHA512-UPDATE and SHA384-FINAL give SHA-384 around
+        the 112/128-byte boundaries, whole and split, publishing exactly 48
+        bytes and leaving the context wiped."""
+        message_addr = 0x1B000
+        output_base = 0x1B100
+        lengths = (0, 3, 111, 112, 127, 128, 129, 200)
+        split_output = output_base + len(lengths) * 64
+        sys_obj, buf = self._bios_harness._boot_bios()
+        lines = [
+            f": fill-seq 200 0 DO I {message_addr} I + C! LOOP ;",
+            "fill-seq",
+            f"{output_base} {len(lengths) * 64 + 64} 165 FILL",
+        ]
+        for index, length in enumerate(lengths):
+            output = output_base + index * 64
+            lines.extend([
+                f'."  I{index}=" SHA384-INIT .',
+                f'."  U{index}=" {message_addr} {length} SHA512-UPDATE .',
+                f'."  F{index}=" {output} SHA384-FINAL .',
+            ])
+        lines.extend([
+            "SHA384-INIT DROP",
+            f"{message_addr} 17 SHA512-UPDATE DROP",
+            f"{message_addr + 17} 111 SHA512-UPDATE DROP",
+            f"{message_addr + 128} 72 SHA512-UPDATE DROP",
+            f'."  FS=" {split_output} SHA384-FINAL .',
+        ])
+        text = self._bios_harness._run_forth(sys_obj, buf, lines)
+
+        message = bytes(range(200))
+        memory = sys_obj.cpu.mem
+        for index, length in enumerate(lengths):
+            for marker in ("I", "U", "F"):
+                self.assertIn(f"{marker}{index}=0 ", text)
+            output = output_base + index * 64
+            self.assertEqual(
+                bytes(memory[output:output + 48]),
+                hashlib.sha384(message[:length]).digest(),
+            )
+            self.assertEqual(
+                bytes(memory[output + 48:output + 64]),
+                bytes([165] * 16),
+            )
+        self.assertIn("FS=0 ", text)
+        self.assertEqual(
+            bytes(memory[split_output:split_output + 48]),
+            hashlib.sha384(message).digest(),
+        )
+        context = self._bios_labels["sha512_contexts"]
+        self.assertEqual(bytes(memory[context:context + 512]), bytes(512))
+
+    def test_sha384_and_sha512_finals_refuse_each_others_transactions(self):
+        """Each FINAL takes only its own INIT's transaction; the other's is a
+        STATE failure that wipes the context and publishes nothing, and
+        SHA512-CLEAR clears either."""
+        marker = self._bios_labels["sha512_contexts"] + 88
+        text = self._run_sha2([
+            "CREATE msg 3 ALLOT",
+            "97 msg C!  98 msg 1 + C!  99 msg 2 + C!",
+            "CREATE h-buf 64 ALLOT  h-buf 64 165 FILL",
+            "SHA384-INIT DROP  msg 3 SHA512-UPDATE DROP",
+            f'."  M384=" {marker} @ .',
+            '."  F512=" h-buf SHA512-FINAL .',
+            f'."  W1=" {marker} @ .',
+            "SHA512-INIT DROP  msg 3 SHA512-UPDATE DROP",
+            f'."  M512=" {marker} @ .',
+            '."  F384=" h-buf SHA384-FINAL .',
+            f'."  W2=" {marker} @ .',
+            '."  B0=" h-buf C@ .',
+            '."  B63=" h-buf 63 + C@ .',
+            "SHA384-INIT DROP  msg 3 SHA512-UPDATE DROP",
+            '."  OK=" h-buf SHA384-FINAL .',
+            '."  H0=" h-buf C@ .',
+            '."  H47=" h-buf 47 + C@ .',
+            '."  H48=" h-buf 48 + C@ .',
+            "SHA384-INIT DROP  msg 3 SHA512-UPDATE DROP  SHA512-CLEAR DROP",
+            f'."  CLR=" {marker} @ .',
+        ])
+        for name, value in (
+            ("M384", 2), ("F512", 1), ("W1", 0),
+            ("M512", 1), ("F384", 1), ("W2", 0),
+            ("B0", 165), ("B63", 165),
+            ("OK", 0), ("H0", 0xCB), ("H47", 0xA7), ("H48", 165),
+            ("CLR", 0),
+        ):
+            self.assertIn(f"{name}={value} ", text)
+
     def test_sha512_clear_reuse_and_acc_transparency(self):
         """CLEAR permits reuse, and FINAL restores an outer ACC value."""
         text = self._run_sha2([
@@ -16603,14 +16693,15 @@ class TestBIOSSHA2(unittest.TestCase):
         self.assertIn("C1=0 ", text)
 
     def test_sha512_rejects_forged_private_state_before_empty_or_final(self):
-        """Marker, offset, alignment, and modulo position are exact."""
+        """Marker, offset, alignment, and modulo position are exact.  Marker
+        2 is SHA-384's transaction, so 3 is forged."""
         context = self._bios_labels["sha512_contexts"]
         text = self._run_sha2([
             "CREATE msg 1 ALLOT  65 msg C!",
             "CREATE h-buf 64 ALLOT  h-buf 64 165 FILL",
 
             "SHA512-INIT DROP",
-            f"2 {context + 88} !",
+            f"3 {context + 88} !",
             '."  UM=" msg 0 SHA512-UPDATE .',
             "SHA512-INIT DROP",
             f"128 {context + 80} !",
@@ -16624,7 +16715,7 @@ class TestBIOSSHA2(unittest.TestCase):
             '."  UX=" msg 0 SHA512-UPDATE .',
 
             "SHA512-INIT DROP",
-            f"2 {context + 88} !",
+            f"3 {context + 88} !",
             '."  FM=" h-buf SHA512-FINAL .',
             "SHA512-INIT DROP",
             f"128 {context + 80} !",
@@ -17591,14 +17682,16 @@ class TestBIOSEntropyFill(unittest.TestCase):
         return bytes(sys_obj.cpu.mem[start:start + length])
 
     def test_dictionary_append_preserves_every_older_link(self):
-        """WOTS, then AES's block-mode words, append without changing any
-        older dictionary link."""
+        """WOTS, then AES's block-mode words, then SHA-384 append without
+        changing any older dictionary link."""
         labels = self._bios_labels
         self.assertEqual(
             labels["latest_entry"],
-            labels["d_aes_cbc_iv_store"],
+            labels["d_sha384_final"],
         )
         for current, previous in (
+            ("d_sha384_final", "d_sha384_init"),
+            ("d_sha384_init", "d_aes_cbc_iv_store"),
             ("d_aes_cbc_iv_store", "d_aes_mode_store"),
             ("d_aes_mode_store", "d_wots_chain"),
         ):

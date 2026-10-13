@@ -1,6 +1,6 @@
 # Megapad-64 BIOS v1.0 — Forth Dictionary Reference
 
-The `bios.asm` dictionary link chain contains **546** entries.  The numbered
+The `bios.asm` dictionary link chain contains **548** entries.  The numbered
 subsystem tables below are a historical catalog and do not yet enumerate every
 later-added BIOS entry.
 
@@ -866,9 +866,12 @@ saved length, or overflowing 64-bit bit-length addition.
 Every failure aborts and wipes. `FINAL` does not modify a non-context
 destination unless all checks and digest extraction succeed.
 
-### SHA-512 Streaming (4 append-only words) — ISA-native (EXT.CRYPTO `FB`)
+### SHA-512 and SHA-384 Streaming (6 append-only words) — ISA-native (EXT.CRYPTO `FB`)
 
-These words retain their append-only dictionary positions.
+These words retain their append-only dictionary positions. SHA-384 is
+SHA-512 from its own initial value, truncated to 48 bytes, so it shares the
+calling core's SHA-512 context, and `SHA512-UPDATE` and `SHA512-CLEAR` serve
+its transactions.
 
 | Word | Stack Effect | Description |
 |------|-------------|-------------|
@@ -876,14 +879,18 @@ These words retain their append-only dictionary positions.
 | `SHA512-UPDATE` | `( addr len -- status )` | Preflight and absorb a physical-memory span using a dedicated 128-byte block |
 | `SHA512-FINAL` | `( dst -- status )` | On success publish 64 big-endian digest bytes; erase context and stage on every path |
 | `SHA512-CLEAR` | `( -- status )` | Idempotently abort, release the SHA transaction, zeroize saved/visible state, and return 0 |
+| `SHA384-INIT` | `( -- status )` | Initialize the calling core's private SHA-512 context for SHA-384 |
+| `SHA384-FINAL` | `( dst -- status )` | As `SHA512-FINAL` for a `SHA384-INIT` transaction, publishing 48 big-endian digest bytes |
 
 Statuses are `0` OK, `1` STATE, `2` RANGE, `3` CONTEXT-ALIAS, and
 `4` LENGTH-OVERFLOW. Every failure aborts and wipes; failed `FINAL` does not
 publish to a non-context destination. SHA-512 input and output checks reject
 both the SHA-256 and SHA-512 context arenas. Before an empty UPDATE can
-succeed or FINAL can inspect its destination, the active marker must be
-exactly one, the partial offset must be below 128, the low bit length must be
-byte-aligned, and its modulo-128 byte position must equal that offset.
+succeed or FINAL can inspect its destination, the active marker must be 1
+(SHA-512) or 2 (SHA-384), the partial offset must be below 128, the low bit
+length must be byte-aligned, and its modulo-128 byte position must equal that
+offset. UPDATE takes either marker; each FINAL takes only its own, and the
+other's transaction is a STATE failure.
 
 ### Shared SHA-2 span qualification (1 append-only word)
 
@@ -1154,7 +1161,7 @@ machine reset.
 | AES-256/128 Engine, GCM and CBC | 13 |
 | Checked SHA-3 / SHAKE / raw Keccak | 9 |
 | SHA-256 Streaming | 4 |
-| SHA-512 Streaming | 4 |
+| SHA-512 and SHA-384 Streaming | 6 |
 | TRNG | 3 |
 | Checked Entropy Boundaries | 2 |
 | Caller Span Boundary | 1 |
@@ -1166,7 +1173,7 @@ machine reset.
 | Dictionary Bounds and Fault Control | 5 |
 | Dictionary Acceleration Control | 4 |
 | Checked WOTS Chain | 1 |
-| **Catalogued subtotal** | **396** |
+| **Catalogued subtotal** | **398** |
 
 ### All Immediate Words (34)
 
@@ -1175,10 +1182,10 @@ machine reset.
 ### Newest Dictionary Chain Segment (last → earlier)
 
 The complete authoritative link chain is the `.dq` chain in `bios.asm`.
-AES's block-mode words close the newest appended segment:
+The SHA-384 words close the newest appended segment:
 
 ```
-AES-CBC-IV! → AES-MODE!
+SHA384-FINAL → SHA384-INIT → AES-CBC-IV! → AES-MODE!
 → WOTS-CHAIN → LATEST! → DICT-ROLLBACK → DICT-INDEX-NOTIFY! → DICT-INDEX@
 → DICT-INDEX!
 → IDLE-MS → IDLE-UNTIL → FAULT-XT! → DICT-FAULT-XT! → DICT-LIMIT@ → DICT-BASE@ → DICT-BOUNDS-OFF → DICT-BOUNDS!
