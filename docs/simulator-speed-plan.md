@@ -1,6 +1,6 @@
 # Simulator speed plan: boot compile, typing host work, guest work
 
-Status: proposed for review, 2026-10-13. Nothing here is built yet.
+Status: agreed 2026-10-13 (see Decisions). Step 1a is in progress.
 
 The hosted simulator with the native executor already runs guest Forth in
 C++, at about 80 million semantic steps per second. These measurements ask
@@ -103,10 +103,14 @@ work it removes is redundant, and keep guest-visible behavior identical.
 The expected saving is 9 to 10 of the 40 seconds. 1a is measured on its own,
 before 1b starts.
 
-**1b. A native line evaluator.** This is a C++ loop in `_megaforth_native`
-that evaluates a run of source lines straight from guest memory. It
-tokenizes, looks names up in a native mirror of the bindings, and compiles
-calls, literals and the compile-time control structures. It hands back to
+**1b. A native evaluator that owns the dictionary.** This is a C++ loop in
+`_megaforth_native` that evaluates a run of source lines straight from guest
+memory. It tokenizes, looks names up, compiles calls, literals and the
+compile-time control structures, and publishes each definition itself. The
+dictionary's host-side metadata moves into native code: the bindings, the
+words and their compiled bodies. Python reads and changes them through the
+native interface. This is a step toward native construction of the
+dictionary generally, not only a faster loader. The evaluator hands back to
 Python, with its exact position, at the first token it does not admit:
 
 - a word that would run guest code;
@@ -123,9 +127,15 @@ The rules:
   step counts must be the same as the Python evaluator's. Compiling a token
   counts no guest steps, and guest code still runs through the existing
   dispatcher and executor, so step accounting is unchanged.
-- **Reference.** The Python evaluator stays the reference and the fallback.
-  A differential gate evaluates KDOS, the system modules and all 50 Akashic
-  chunks both ways and compares the results byte for byte.
+- **Reference.** The Python evaluator stays as the reference for a
+  differential gate. The gate evaluates KDOS, the system modules and all 50
+  Akashic chunks both ways and compares the results byte for byte. Tokens
+  the native evaluator hands back still run through Python, which then
+  publishes through the native interface.
+- **Design first.** The interface between the native dictionary and the
+  Python runtime is designed after 1a has landed and been measured. Every
+  Python user of the dictionary needs a native path: lookup, the dispatcher's
+  resolution, the executor's plans, rollback and the side index.
 - **Contracts.** The evaluator keeps every rule in `simulator-contract.md` §4:
   - at most 255 bytes per `EVALUATE`;
   - sticky first failure;
@@ -173,13 +183,12 @@ A keystroke costs about 29 million semantic steps. The guest phase profiler
 work then is in Akashic. This is the only step that also makes the device
 faster.
 
-## Decisions for review
+## Decisions
 
-1. **Order.** Do 1a before 1b, measured on its own. Recommended: yes.
-2. **Shape of 1b.** Either a native evaluator that hands IR and dictionary
-   effects to Python, which stays the owner of the dictionary; or a native
-   compiler that owns publication. Recommended: the first. It keeps the
-   Python dictionary authoritative and the differential gate simple.
-3. **Revised step 2.** Host snapshot and rich-terminal work, plus native pair
-   operations, in place of tile and CRC admission for typing. Recommended:
-   yes.
+Reviewed 2026-10-13:
+
+1. **Order.** 1a lands and is measured before 1b starts.
+2. **Dictionary authority.** The native evaluator owns publication, and the
+   dictionary's host-side state moves into native code, as described in 1b.
+3. **Step 2.** Host snapshot and rich-terminal work plus native pair
+   operations, as described above.
