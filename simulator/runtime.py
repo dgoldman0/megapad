@@ -2863,10 +2863,13 @@ class MegaForthRuntime:
                     return
                 state.token_count += 1
                 if state.conditional_skip is None:
-                    self._evaluate_token(token, state)
+                    may_run_guest = self._evaluate_token(token, state)
                 else:
                     self._skip_conditional_token(token, state)
-                if state.bios_evaluator:
+                    may_run_guest = True
+                # A nonzero status ends the line.  Only guest code can set it
+                # without raising, so a token that ran none leaves it zero.
+                if state.bios_evaluator and may_run_guest:
                     evaluator = self._require_bios_evaluator()
                     if self.memory.read64(evaluator.status_address) != 0:
                         return
@@ -2902,10 +2905,12 @@ class MegaForthRuntime:
         if skip.depth == 0:
             state.conditional_skip = None
 
-    def _evaluate_token(self, token: bytes, state: _EvaluationState) -> None:
+    def _evaluate_token(self, token: bytes, state: _EvaluationState) -> bool:
+        """Evaluate one token; true when it may have run guest code."""
+
         if token.startswith(b"\\"):
             state.cursor.skip_backslash_comment()
-            return
+            return False
 
         try:
             word = self.dictionary.find(token)
@@ -2934,7 +2939,7 @@ class MegaForthRuntime:
                 )
             else:
                 self._apply_directive(word.implementation.kind, state)
-            return
+            return True
 
         if word is not None:
             if (
@@ -2943,9 +2948,9 @@ class MegaForthRuntime:
                 and not word.immediate
             ):
                 state.compiler.operations.append(Call(word.xt))
-            else:
-                self._execute_guarded(word, state.context, state.meter)
-            return
+                return False
+            self._execute_guarded(word, state.context, state.meter)
+            return True
 
         number = self._parse_number(token)
         if number is not None:
@@ -2953,7 +2958,7 @@ class MegaForthRuntime:
                 state.compiler.operations.append(Literal(number))
             else:
                 state.context.data.push(number)
-            return
+            return False
 
         location = self._token_location(state)
         if state.bios_evaluator:
