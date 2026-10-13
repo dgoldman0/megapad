@@ -12,6 +12,9 @@ from simulator.memory import EXTERNAL_BASE, SparseAddressSpace
 from simulator.runtime import MegaForthRuntime
 
 
+pytestmark = pytest.mark.usefixtures("dictionary_backend")
+
+
 def _dictionary() -> tuple[Dictionary, SparseAddressSpace]:
     memory = SparseAddressSpace(bank0_size=0x8000, external_size=0x2000)
     return Dictionary(start_address=0x1000, memory=memory), memory
@@ -346,6 +349,7 @@ def test_failed_guest_link_validation_does_not_revoke_body(removal: str) -> None
     assert dictionary.resolve(removed.xt) is removed
 
 
+@pytest.mark.python_dictionary_only
 @pytest.mark.parametrize("emission", ("define", "comma", "c_comma", "transient"))
 def test_allocator_emission_revokes_before_writing_even_identical_bytes(
     emission: str, monkeypatch: pytest.MonkeyPatch,
@@ -399,6 +403,7 @@ def test_allocator_emission_revokes_before_writing_even_identical_bytes(
     assert memory.read_bytes(word.body_address, len(payload)) == payload
 
 
+@pytest.mark.python_dictionary_only
 @pytest.mark.parametrize("emission", ("define", "comma", "c_comma", "transient"))
 def test_failed_overlapping_emission_preflight_preserves_body_identity(
     emission: str, monkeypatch: pytest.MonkeyPatch,
@@ -426,6 +431,7 @@ def test_failed_overlapping_emission_preflight_preserves_body_identity(
     assert memory.read_bytes(word.body_address, 32) == bytes(32)
 
 
+@pytest.mark.python_dictionary_only
 def test_memory_span_preflight_failure_precedes_overlapping_emission_revocation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -792,15 +792,40 @@ class MegaForthRuntime:
         self._next_suspension_sequence = 1
         self._next_wake_sequence = 1
         self._suspended_execution: _SuspendedExecution | None = None
-        self.dictionary = Dictionary(
-            start_address=dictionary_start,
-            memory=self.memory,
-            mutation_guard=self._require_no_suspension,
-        )
-        self.dictionary_index = HostedDictionaryIndex(
-            self.memory,
-            self.dictionary,
-        )
+        native_extension = None
+        if selected_backend != "python":
+            from simulator.native_execution import load_native_extension
+
+            native_extension = load_native_extension(
+                required=selected_backend == "native",
+            )
+        if native_extension is not None and type(self.memory) is SparseAddressSpace:
+            # The native backend's dictionary metadata lives in native code;
+            # the Python Dictionary remains the reference implementation.
+            from simulator.native_dictionary import (
+                NativeDictionary,
+                NativeDictionaryIndex,
+            )
+
+            self.dictionary = NativeDictionary(
+                start_address=dictionary_start,
+                memory=self.memory,
+                mutation_guard=self._require_no_suspension,
+            )
+            self.dictionary_index = NativeDictionaryIndex(
+                self.memory,
+                self.dictionary,
+            )
+        else:
+            self.dictionary = Dictionary(
+                start_address=dictionary_start,
+                memory=self.memory,
+                mutation_guard=self._require_no_suspension,
+            )
+            self.dictionary_index = HostedDictionaryIndex(
+                self.memory,
+                self.dictionary,
+            )
         bank0 = next(
             (
                 region
@@ -891,12 +916,11 @@ class MegaForthRuntime:
             0,
         )
         self.dictionary.protect_current_prefix_from_numeric_rollback()
-        if selected_backend != "python":
+        if native_extension is not None:
             from simulator.native_execution import NativeExecutor
 
-            self._native_execution = NativeExecutor.create(
-                self, required=selected_backend == "native",
-                admit_core=install_core_words,
+            self._native_execution = NativeExecutor(
+                self, native_extension, admit_core=install_core_words,
             )
             if self._native_execution is not None:
                 self.scalar_float._native_execute = (

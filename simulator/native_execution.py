@@ -22,34 +22,44 @@ from simulator.timer import HostedTimerService
 # Without a host quantum, native work still returns to the same dispatcher at
 # this interval. It bounds one native entry, not a guest-visible boundary.
 UNQUANTIZED_NATIVE_INTERVAL_STEPS = 8192
-SEMANTIC_API_VERSION = 4
+SEMANTIC_API_VERSION = 5
+
+
+def load_native_extension(*, required: bool):
+    """Return the matching ``_megaforth_native`` build, or None when optional."""
+
+    try:
+        import _megaforth_native as extension
+    except ImportError:
+        if required:
+            raise RuntimeError(
+                "native semantic execution requires _megaforth_native; "
+                "run python setup_simulator_accel.py build_ext --inplace"
+            ) from None
+        return None
+    if (getattr(extension, "SEMANTIC_API_VERSION", None) != SEMANTIC_API_VERSION
+            or not hasattr(extension, "scalar_fp_execute")
+            or not hasattr(extension, "keccak_f1600")
+            or getattr(extension, "TILE_VALUES_API_VERSION", None) != 1
+            or not callable(getattr(extension, "tile_execute_values", None))
+            or not callable(getattr(extension, "tile_values_supported", None))
+            or getattr(extension, "TILE_GUARD_API_VERSION", None) != 1
+            or not callable(getattr(extension, "TileIdentityGuard", None))
+            or not callable(getattr(extension, "NativeDictionary", None))):
+        if required:
+            raise RuntimeError(
+                "native semantic execution requires a matching "
+                "_megaforth_native build; run make build"
+            )
+        return None
+    return extension
 
 
 class NativeExecutor:
     @classmethod
     def create(cls, runtime, *, required: bool, admit_core: bool):
-        try:
-            import _megaforth_native as extension
-        except ImportError:
-            if required:
-                raise RuntimeError(
-                    "native semantic execution requires _megaforth_native; "
-                    "run python setup_simulator_accel.py build_ext --inplace"
-                ) from None
-            return None
-        if (getattr(extension, "SEMANTIC_API_VERSION", None) != SEMANTIC_API_VERSION
-                or not hasattr(extension, "scalar_fp_execute")
-                or not hasattr(extension, "keccak_f1600")
-                or getattr(extension, "TILE_VALUES_API_VERSION", None) != 1
-                or not callable(getattr(extension, "tile_execute_values", None))
-                or not callable(getattr(extension, "tile_values_supported", None))
-                or getattr(extension, "TILE_GUARD_API_VERSION", None) != 1
-                or not callable(getattr(extension, "TileIdentityGuard", None))):
-            if required:
-                raise RuntimeError(
-                    "native semantic execution requires a matching "
-                    "_megaforth_native build; run make build"
-                )
+        extension = load_native_extension(required=required)
+        if extension is None:
             return None
         return cls(runtime, extension, admit_core=admit_core)
 
@@ -227,7 +237,7 @@ class NativeExecutor:
                 instruction = operations[ip]
                 reason = type(instruction).__name__
                 if isinstance(instruction, ir.Call):
-                    target = self.runtime.dictionary._by_xt.get(instruction.xt)
+                    target = self.runtime.dictionary.live_word(instruction.xt)
                     if target is not None:
                         reason += ":" + target.name.decode("ascii", errors="replace")
         prefix = "skipped:" if skipped else "progress:" if steps else "empty:"
@@ -294,7 +304,7 @@ class NativeExecutor:
             word = pending.pop()
             if word.xt in self.plans:
                 continue
-            if runtime.dictionary._by_xt.get(word.xt) is not word:
+            if runtime.dictionary.live_word(word.xt) is not word:
                 continue
             if not isinstance(word.implementation, rt.ColonDefinition):
                 continue
@@ -310,7 +320,7 @@ class NativeExecutor:
                     item = (op.OP_LITERAL, instruction.value, 0)
                 elif isinstance(instruction, (ir.Call, ir.CallSelf)):
                     target = word if isinstance(instruction, ir.CallSelf) else (
-                        runtime.dictionary._by_xt.get(instruction.xt)
+                        runtime.dictionary.live_word(instruction.xt)
                     )
                     if target is not None:
                         item = self._call(target, pending)

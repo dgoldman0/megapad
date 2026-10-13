@@ -29,6 +29,7 @@ from simulator.runtime import (
     ExecutionContext,
     MegaForthRuntime,
     PrimitiveDefinition,
+    RoutineDefinition,
     ValueDefinition,
 )
 from simulator.source import SourceCursor
@@ -213,7 +214,7 @@ def normalized_colon_digest(runtime: MegaForthRuntime, word: Word) -> str:
             target = runtime.dictionary.resolve(operation.xt)
             add(target.name)
             target_implementation = target.implementation
-            add(type(target_implementation).__name__.encode("ascii"))
+            add(_implementation_kind(target_implementation).encode("ascii"))
             if isinstance(target_implementation, ConstantDefinition):
                 add(str(target_implementation.value).encode("ascii"))
             elif isinstance(target_implementation, DirectiveDefinition):
@@ -224,6 +225,30 @@ def normalized_colon_digest(runtime: MegaForthRuntime, word: Word) -> str:
             add(descriptor.name.encode("ascii"))
             add(_field_bytes(getattr(operation, descriptor.name)))
     return digest.hexdigest()
+
+
+_IMPLEMENTATION_KINDS = (
+    ColonDefinition,
+    ConstantDefinition,
+    CreatedDefinition,
+    DirectiveDefinition,
+    PrimitiveDefinition,
+    RoutineDefinition,
+    ValueDefinition,
+)
+
+
+def _implementation_kind(implementation: object) -> str:
+    """Name an implementation's kind, independent of its dictionary.
+
+    The native dictionary presents a created word through a subclass that
+    keeps its action in native state; it is still a created word.
+    """
+
+    for kind in _IMPLEMENTATION_KINDS:
+        if isinstance(implementation, kind):
+            return kind.__name__
+    return type(implementation).__name__
 
 
 def install_kdos_source_accelerators(

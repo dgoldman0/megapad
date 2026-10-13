@@ -445,6 +445,13 @@ class Dictionary:
         bindings = self._bindings.get(_binding_key(name))
         return bindings[-1] if bindings else None
 
+    def live_word(self, xt: int) -> Word | None:
+        """Return the live word for an execution token, or ``None``."""
+
+        if type(xt) is not int:
+            return None
+        return self._by_xt.get(xt)
+
     def resolve(self, xt: int) -> Word:
         """Resolve a live execution token or raise ``KeyError``."""
 

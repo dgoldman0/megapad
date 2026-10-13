@@ -1,8 +1,8 @@
 # Native dictionary and source evaluator
 
-Status: design for step 1b of the [simulator speed plan](simulator-speed-plan.md),
-2026-10-13. Nothing here is implemented yet; each slice below updates this
-document when it lands.
+Status: step 1b of the [simulator speed plan](simulator-speed-plan.md),
+2026-10-13. Slice 1, the native dictionary and side index, is implemented;
+slices 2 to 4 are designed. Each slice updates this document when it lands.
 
 The hosted simulator compiles about 210,000 lines of KDOS and Akashic source
 at every boot. After step 1a this takes about 27 s, and almost all of it is
@@ -66,7 +66,8 @@ machine-code stages in
 Each record holds a word's exact name, header address, XT, immediacy and kind:
 
 - primitive: the Python `PrimitiveDefinition`, kept as a Python reference;
-- colon: its IR in native form, plus the literal pool length;
+- colon: its IR in native form when the walker compiled it (slice 2), or
+  the Python `ColonDefinition` when Python did;
 - constant: its value;
 - value: nothing beyond the body cell;
 - created: its `DOES>` action, as a source XT and entry IP;
@@ -89,16 +90,23 @@ overlays, hybrid runtime and tests use either implementation unchanged:
   record and is cached with it, so one live definition always has one `Word`
   object. A record removed by rollback drops its view; a later record at the
   same XT gets a new one. Identity-bound overlays and leases keep working.
-- **Lazy IR.** A colon view's `implementation` is a `ColonDefinition` whose
-  `operations` tuple is built from the native IR on first access. Type checks
-  do not build it.
-- **Created actions.** `DOES>` installs an action through a new
-  `Dictionary.set_created_action`, implemented by both dictionaries, instead of
-  assigning to the implementation object.
+- **Lazy IR (slice 2).** A natively compiled colon view's `implementation`
+  is a `ColonDefinition` whose `operations` tuple is built from the native IR
+  on first access. Type checks do not build it.
+- **Created actions.** A created word's view carries a
+  `NativeCreatedDefinition`, a `CreatedDefinition` whose `action` setter also
+  updates the native record, so `DOES>` keeps assigning the action as before.
+- **Kinds, not classes.** The loader overlays pin exact KDOS bodies by a
+  digest that names each called word's implementation. It names the kind,
+  such as `CreatedDefinition`, rather than the class, so the same bodies
+  match under either dictionary.
+- **Fast resolution.** The facade keeps a dictionary of live views by XT.
+  Every removal goes through the facade, which drops the removed XTs, so
+  `resolve` stays a Python dictionary lookup for the dispatcher.
 - **Leases.** `BodyAllocationLease` objects are created on demand and checked
   against the native allocation serial.
-- **Private access.** `native_execution.py` and `hybrid/runtime.py` stop
-  reading `Dictionary._by_xt` and use a public `live_word(xt)`.
+- **Private access.** `native_execution.py` and `hybrid/runtime.py` no
+  longer read `Dictionary._by_xt`; both dictionaries provide `live_word(xt)`.
 
 The side index moves into the same native object: `DICT-INDEX!`,
 `DICT-INDEX@`, notification, publish and rebuild keep the BIOS slot layout,
@@ -219,10 +227,13 @@ optimization property of admitted overlays.
 
 Each slice keeps both backends green and is committed on its own.
 
-1. **Native dictionary and index.** The native backend uses them. The
-   existing dictionary, lease, rollback and index tests run against both
-   implementations. The boot fingerprint matches the Python dictionary's
-   exactly. Expected speed: about the same.
+1. **Native dictionary and index.** Done. The native backend uses them.
+   The dictionary, lease and numeric rollback tests run against both
+   implementations; nine white-box tests that rewind the Python class's
+   private `HERE` or hook its memory calls stay Python-only. The
+   `desktop-apt1` boot fingerprint matches 1a's exactly, including the side
+   index's bytes, and three alternating boots each gave medians of 26.5 s
+   against 26.1 s for 1a, which is within the host's noise.
 2. **Native line walker** for both overlays, with lazy Python IR views and
    compiler hand-over. Differential tests evaluate source both ways and
    compare complete fingerprints. The boot fingerprint matches slice 1's.

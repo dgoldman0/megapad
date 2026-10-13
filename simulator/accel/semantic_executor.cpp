@@ -5,6 +5,8 @@
 #include "../../shared/accel/keccak_bindings.h"
 #include "../../shared/accel/tile_values_bindings.h"
 #include "../../shared/accel/routine_call.h"
+#include "guest_memory.h"
+#include "dictionary.h"
 
 #include <algorithm>
 #include <array>
@@ -66,15 +68,7 @@ struct Instruction {
     };
 };
 
-struct Region {
-    Cell base;
-    Cell size;
-    py::dict pages;
-    // A dense descriptor owns a buffer export for the program's full
-    // lifetime. The pointer cannot be invalidated by exporter resizing.
-    std::unique_ptr<py::buffer_info> dense_lease;
-    uint8_t* dense = nullptr;
-};
+using megapad::guest::Region;
 
 struct ByteChunk {
     uint8_t* bytes;
@@ -623,65 +617,8 @@ class NativeProgram {
 public:
     NativeProgram(const py::iterable& regions, Cell page_size,
                   py::object continuation_type, const py::iterable& dense_regions)
-        : page_size_(page_size), continuation_type_(std::move(continuation_type)) {
-        if (page_size == 0 || (page_size & (page_size - 1)) != 0)
-            throw py::value_error("page size must be a positive power of two");
-        auto validate_region = [&](Cell base, Cell size) {
-            if (size == 0 || base > MASK - (size - 1))
-                throw py::value_error("region has an invalid ordinary span");
-            for (const Region& previous : regions_) {
-                if (base <= previous.base + previous.size - 1 &&
-                    previous.base <= base + size - 1)
-                    throw py::value_error("ordinary regions must not overlap");
-            }
-        };
-        for (py::handle item : regions) {
-            auto entry = py::cast<py::tuple>(item);
-            if (entry.size() != 3)
-                throw py::value_error("region must be (base, size, pages)");
-            const Cell base = entry[0].cast<Cell>();
-            const Cell size = entry[1].cast<Cell>();
-            validate_region(base, size);
-            regions_.push_back(Region{base, size, entry[2].cast<py::dict>(), nullptr});
-        }
-        for (py::handle item : dense_regions) {
-            auto entry = py::cast<py::tuple>(item);
-            if (entry.size() != 3)
-                throw py::value_error("dense region must be (base, size, buffer)");
-            const Cell base = entry[0].cast<Cell>();
-            const Cell size = entry[1].cast<Cell>();
-            validate_region(base, size);
-            auto buffer = entry[2].cast<py::buffer>();
-            // Export from an independent view, not a caller-owned memoryview:
-            // releasing the caller's view must not detach or invalidate us.
-            PyObject* raw_view = PyMemoryView_FromObject(buffer.ptr());
-            if (raw_view == nullptr) throw py::error_already_set();
-            auto owned_view = py::reinterpret_steal<py::buffer>(raw_view);
-            auto lease = std::make_unique<py::buffer_info>(owned_view.request(true));
-            if (lease->readonly)
-                throw py::buffer_error("dense region requires a writable buffer");
-            if (lease->ndim != 1 || lease->itemsize != 1 ||
-                lease->shape.size() != 1 || lease->shape[0] < 0)
-                throw py::value_error("dense region requires a one-dimensional byte buffer");
-            if (lease->strides.size() != 1 || lease->strides[0] != 1 ||
-                !lease->view() || !PyBuffer_IsContiguous(lease->view(), 'C'))
-                throw py::value_error("dense region requires a C-contiguous buffer");
-            if (static_cast<Cell>(lease->shape[0]) != size)
-                throw py::value_error("dense region size must equal buffer capacity");
-            if (lease->ptr == nullptr)
-                throw py::value_error("dense region exposes a null data pointer");
-            auto* pointer = static_cast<uint8_t*>(lease->ptr);
-            const auto address = reinterpret_cast<std::uintptr_t>(pointer);
-            for (const Region& previous : regions_) {
-                if (previous.dense == nullptr) continue;
-                const auto prior = reinterpret_cast<std::uintptr_t>(previous.dense);
-                if (address <= prior ? prior - address < size
-                                     : address - prior < previous.size)
-                    throw py::value_error("dense region buffers must not alias");
-            }
-            regions_.push_back(Region{base, size, py::dict(), std::move(lease), pointer});
-        }
-    }
+        : page_size_(page_size), continuation_type_(std::move(continuation_type)),
+          regions_(megapad::guest::build_regions(regions, page_size, dense_regions)) {}
 
     void install(Cell xt, const py::iterable& operations) {
         if (xt == 0)
@@ -1750,7 +1687,8 @@ PYBIND11_MODULE(_megaforth_native, module) {
     megapad::scalar_fp::register_bindings(module);
     megapad::keccak::register_bindings(module);
     megapad::tile_values::register_bindings(module);
-    module.attr("SEMANTIC_API_VERSION") = 4;
+    megapad::dictionary::register_bindings(module);
+    module.attr("SEMANTIC_API_VERSION") = 5;
     module.attr("MACHINE_STOPPED_CALL") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_CALL));
     module.attr("MACHINE_STOPPED_RESUME") = py::int_(static_cast<uint32_t>(MACHINE_STOPPED_RESUME));
     module.attr("MACHINE_CALLBACK") = py::int_(static_cast<uint32_t>(MACHINE_CALLBACK));
